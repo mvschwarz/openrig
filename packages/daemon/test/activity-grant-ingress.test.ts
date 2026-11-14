@@ -1,3 +1,4 @@
+import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { piUsageEntriesSchema } from "../src/db/migrations/107_pi_usage_entries.js";
 import { piUsageChargesSchema } from "../src/db/migrations/108_pi_usage_charges.js";
@@ -38,7 +39,8 @@ function fixture(options: { guest?: boolean } = {}) {
   };
   occupy(guest.id, GUEST);
   occupy(other.id, OTHER);
-  const store = new AgentActivityStore({ db, eventBus: new EventBus(db), now: () => new Date(clock.now),
+  const eventBus = new EventBus(db);
+  const store = new AgentActivityStore({ db, eventBus, now: () => new Date(clock.now),
     resolveOccupantGeneration: id => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
   const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3,
@@ -48,7 +50,7 @@ function fixture(options: { guest?: boolean } = {}) {
     c.set("agentActivityStore" as never, store as never);
     if (!options.guest) c.set("activityHookToken" as never, INSTALL_TOKEN as never);
     c.set("sessionRegistry" as never, sessions as never);
-    c.set("eventBus" as never, new EventBus(db) as never);
+    c.set("eventBus" as never, eventBus as never);
     c.set("seatActivityService" as never, oracle as never);
     await next();
   });
@@ -94,7 +96,7 @@ function fixture(options: { guest?: boolean } = {}) {
   const recorded = () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.activity'").get() as { n: number }).n;
   const activity = (nodeId: string) => oracle.getSeatState(nodeId)?.activity ?? "unknown";
   const replace = (reserved?: string) => occupy(guest.id, GUEST, "handover", reserved);
-  return { db, app, guest, other, sessions, grants, generation, issue, post, heldPost, raw, event, recorded, activity, replace };
+  return { clock, store, eventBus, db, app, guest, other, sessions, grants, generation, issue, post, heldPost, raw, event, recorded, activity, replace };
 }
 
 describe("a seat activity grant on the hook ingress", () => {
@@ -374,5 +376,418 @@ describe("the guest router: only the hook post, and only for a grant", () => {
     expect(await f.post(grant.token, f.event("Stop", "end_turn"))).toMatchObject({ status: 401, body: { code: "activity_grant_revoked" } });
     expect(f.recorded()).toBe(0);
     expect(f.activity(f.guest.id)).toBe("unknown");
+  });
+});
+
+describe("credential-bound observation-only reports", () => {
+  function runner() {
+    const f = fixture();
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('observed',?,?,'%1')").run(f.guest.id, GUEST);
+    f.db.prepare("UPDATE occupant_tenures SET boot_at = ? WHERE node_id = ?").run(new Date(f.clock.now - 1000).toISOString(), f.guest.id);
+    const row = f.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(f.guest.id) as { id: string };
+    const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.generation(f.guest.id), issuedBy: "Core launch", run: { runId: "actual-observation-run",
+      sessionId: row.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    const report = (sequence: number, observations: unknown) => ({ runId: grant.runId, sequence,
+      occurredAt: new Date(f.clock.now + 1000).toISOString(), observations });
+    const reports = () => f.db.prepare("SELECT payload FROM events WHERE type = 'agent.runner_observation'").all() as Array<{ payload: string }>;
+    return { ...f, grant, row, report, reports };
+  }
+
+  it.each(["binding", "report read"])("keeps an unreadable %s unknown without claiming replacement or consuming a receipt", async kind => {
+    const f = runner();
+    const body = f.report(1, { model: { id: "reported-model" }, context: { usedTokens: 10, windowTokens: 100 } });
+    const accepted = await f.post(f.grant.token, body);
+    expect(accepted.status).toBe(200);
+    const prepare = f.db.prepare.bind(f.db);
+    const fault = kind === "binding"
+      ? vi.spyOn(SeatIdentityStore.prototype, "getForNode").mockImplementation(() => { throw new Error("binding unavailable"); })
+      : vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+        if (sql.includes("SELECT payload FROM events")) throw new Error("report read unavailable");
+        return prepare(sql);
+      }) as typeof f.db.prepare);
+    try {
+      for (const component of ["model", "context"] as const) {
+        expect(f.store.getRunnerObservation(f.guest.id, component, { freshnessMs: 600_000 }))
+          .toEqual({ report: null, reason: "binding_unverified" });
+      }
+      if (kind === "binding") {
+        expect(await f.post(f.grant.token, body))
+          .toMatchObject({ status: 409, body: { code: "activity_grant_unverified", retryable: true } });
+      }
+      expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+      expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.runner_observation'").get()).toEqual({ n: 1 });
+    } finally { fault.mockRestore(); }
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 }))
+      .toMatchObject({ report: { sequence: 1, observations: { model: { id: "reported-model" } } }, reason: null });
+    expect(await f.post(f.grant.token, body)).toEqual(accepted);
+    expect(f.reports()).toHaveLength(1);
+  });
+
+  it.each(["unverified", "failed read"])("returns retryable domain uncertainty for an %s standing after route admission", async kind => {
+    const f = runner(), body = f.report(1, { model: { id: "model" }, context: { inputTokens: 11 } });
+    const record = f.store.recordRunnerObservation.bind(f.store);
+    const fault = vi.spyOn(f.store, "recordRunnerObservation").mockImplementation((grant, input) => {
+      const prepare = f.db.prepare.bind(f.db);
+      const read = kind === "unverified"
+        ? vi.spyOn(SeatIdentityStore.prototype, "getForNode").mockImplementation(() => { throw new Error("binding read unavailable"); })
+        : vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+          if (sql === "PRAGMA table_info(activity_grants)") throw new Error("standing read unavailable");
+          return prepare(sql);
+        }) as typeof f.db.prepare);
+      try { return record(grant, input); } finally { read.mockRestore(); }
+    });
+    try {
+      expect(await f.post(f.grant.token, body)).toMatchObject({ status: 409, body: { code: "runner_observation_unverified", retryable: true } });
+      expect(f.reports()).toHaveLength(0);
+      expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+    } finally { fault.mockRestore(); }
+    const accepted = await f.post(f.grant.token, body);
+    expect(accepted.status).toBe(200);
+    expect(await f.post(f.grant.token, body)).toEqual(accepted);
+    expect(f.reports()).toHaveLength(1);
+  });
+
+  it.each(["pending", "stale", "revoked"])("distinguishes a %s run when recording an observation", kind => {
+    const f = runner(), body = f.report(1, { model: { id: "model" } });
+    if (kind === "pending") f.db.prepare("UPDATE activity_grants SET activated_at=NULL WHERE grant_id=?").run(f.grant.grantId);
+    if (kind === "stale") f.db.prepare("UPDATE bindings SET tmux_pane='%2' WHERE node_id=?").run(f.guest.id);
+    if (kind === "revoked") f.grants.revoke({ grantId: f.grant.grantId }, "positive stop");
+    expect(f.store.recordRunnerObservation(f.grant, body)).toMatchObject(kind === "pending"
+      ? { ok: false, code: "runner_observation_unverified", retryable: true }
+      : { ok: false, code: "runner_observation_unavailable" });
+    expect(f.reports()).toHaveLength(0);
+    expect(f.grants.get(f.grant.grantId)?.revokedAt !== null).toBe(kind === "revoked");
+  });
+
+  it("retains one authenticated report with a stable receipt and no fabricated activity or identity", async () => {
+    const f = runner();
+    const body = f.report(1, { model: { id: "provider/model" }, context: { usedTokens: 10 } });
+    const accepted = await f.post(f.grant.token, body);
+    expect(accepted).toMatchObject({ status: 200, body: { ok: true, observation: { runId: f.grant.runId, family: "observation", sequence: 1 } } });
+    expect(await f.post(f.grant.token, body)).toEqual(accepted);
+    expect(f.reports()).toHaveLength(1);
+    const payload = JSON.parse(f.reports()[0]!.payload);
+    expect(payload).toMatchObject({ type: "agent.runner_observation", nodeId: f.guest.id, sessionRowId: f.row.id,
+      generation: f.grant.generation, runId: f.grant.runId, grantId: f.grant.grantId, observations: body.observations });
+    expect(JSON.stringify(payload)).not.toContain(f.grant.token);
+    expect(f.recorded()).toBe(0);
+    expect(f.activity(f.guest.id)).toBe("unknown");
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(f.row.id)).toEqual({ resume_token: null });
+  });
+
+  it("conflicts on sequence reuse, while a lower sequence may retain an omitted component", async () => {
+    const f = runner();
+    expect((await f.post(f.grant.token, f.report(3, { model: { id: "new-model" } }))).status).toBe(200);
+    expect(await f.post(f.grant.token, f.report(3, { model: { id: "conflicting" } }))).toMatchObject({ status: 409, body: { code: "runner_observation_conflict" } });
+    expect((await f.post(f.grant.token, f.report(2, { context: { usedTokens: 5, windowTokens: 100 } }))).status).toBe(200);
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 })).toMatchObject({ report: { sequence: 3, observations: { model: { id: "new-model" } } } });
+    expect(f.store.getRunnerObservation(f.guest.id, "context", { freshnessMs: 600_000 })).toMatchObject({ report: { sequence: 2 } });
+    expect(f.reports()).toHaveLength(2);
+  });
+
+  it.each([
+    { context: { usedTokens: -1 } }, { context: { windowTokens: 0 } }, { context: { usedPercentage: 101 } },
+    { context: { usedTokens: 5, windowTokens: 10, usedPercentage: 70 } },
+    { context: { usedTokens: 5, windowTokens: 10, usedPercentage: 50.001 } }, { model: { id: "" } },
+    { session: { nativeRef: "with spaces" } }, { model: { id: "model", source: "verified" } },
+    { context: {} }, {}, [], null,
+  ])("refuses an invalid whole observation object without effects: %j", async observations => {
+    const f = runner();
+    expect(await f.post(f.grant.token, f.report(1, observations))).toMatchObject({ status: 400, body: { code: "invalid_runner_observation" } });
+    expect(f.reports()).toHaveLength(0); expect(f.recorded()).toBe(0);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.session_identity'").get()).toEqual({ n: 0 });
+  });
+
+  it.each(["\u202E", "\u200D", "\u200C", "\u2066"])("retains format characters in observations without losing valid counts: %j", async format => {
+    const f = runner();
+    const observations = { model: { id: `model${format}spelling` }, session: { nativeRef: `session${format}reference` }, context: { inputTokens: 11 } };
+    const body = f.report(1, observations), first = await f.post(f.grant.token, body);
+    expect(first.status).toBe(200);
+    expect(await f.post(f.grant.token, body)).toEqual(first);
+    expect(JSON.parse(f.reports()[0]!.payload).observations).toEqual(observations);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: observations.session.nativeRef });
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 }).report?.observations.model?.id).toBe(observations.model.id);
+  });
+
+  it.each(["pi", "senpi"])("accepts a %s session reference but only promotes a resume-format-compatible path", async runtime => {
+    const f = runner();
+    f.db.prepare("UPDATE nodes SET runtime=? WHERE id=?").run(runtime, f.guest.id);
+    if (runtime === "pi") f.db.prepare("UPDATE sessions SET agent_app=NULL,agent_runner=NULL WHERE id=?").run(f.row.id);
+    else f.sessions.recordCommunityHarnessSelection(f.row.id, runtime, "pi-rpc");
+    const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "Core launch",
+      run: { runId: "pi-observation", sessionId: f.row.id, binding: { ...f.grant.binding!, runtime, runner: runtime === "pi" ? 0 : 2 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    const observations = { session: { nativeRef: "/tmp/pi-\u200Djoiner.jsonl" }, model: { id: "reported-model" }, context: { inputTokens: 11 } };
+    const body = { ...f.report(1, observations), runId: grant.runId }, first = await f.post(grant.token, body);
+    expect(first.status).toBe(200);
+    expect(await f.post(grant.token, body)).toEqual(first);
+    expect(JSON.parse(f.reports()[0]!.payload).observations).toEqual(observations);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.session_identity'").get()).toEqual({ n: 0 });
+    for (const component of ["model", "context"] as const) {
+      expect(f.store.getRunnerObservation(f.guest.id, component, { freshnessMs: 600_000 }).report?.observations).toEqual(observations);
+    }
+    const compatible = { session: { nativeRef: "/tmp/pi-session.jsonl" } };
+    expect((await f.post(grant.token, { ...f.report(2, compatible), runId: grant.runId })).status).toBe(200);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: compatible.session.nativeRef });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.session_identity'").get()).toEqual({ n: 1 });
+  });
+
+  it("requires actual bound authority, run ID, sequence and time; preserves legacy hook behavior", async () => {
+    const f = runner();
+    const valid = f.report(1, { model: { id: "model" } });
+    expect((await f.post(INSTALL_TOKEN, valid)).status).toBe(403);
+    for (const patch of [{ runId: undefined }, { runId: "other" }, { sequence: 0 }, { sequence: 1.5 }, { occurredAt: "yesterday" }, { occurredAt: "2026-02-30T00:00:00Z" }]) {
+      expect((await f.post(f.grant.token, { ...valid, ...patch })).status).toBeGreaterThanOrEqual(400);
+    }
+    expect(f.reports()).toHaveLength(0);
+    expect((await f.post(f.grant.token, f.event("Stop", "end_turn", { sequence: 100 }))).status).toBe(200);
+    expect((await f.post(f.grant.token, valid)).status).toBe(200); // activity order is a separate family
+  });
+
+  it("stamps the bound node's concrete row despite a newer foreign historical spelling", async () => {
+    const f = runner();
+    f.db.prepare("INSERT INTO sessions (id,node_id,session_name,status) VALUES ('zz-foreign-history',?,?,'superseded')").run(f.other.id, GUEST);
+    expect((await f.post(f.grant.token, f.report(1, { model: { id: "model" } }))).status).toBe(200);
+    expect(JSON.parse(f.reports()[0]!.payload)).toMatchObject({ nodeId: f.guest.id, sessionRowId: f.row.id });
+  });
+
+  it("rejects mixed activity/identity envelopes without partial side effects", async () => {
+    const f = runner();
+    for (const extra of [{ hookEvent: "Stop" }, { runtime: "synth", eventFamily: "session_identity", sessionId: "reported" }]) {
+      expect((await f.post(f.grant.token, { ...f.report(1, { model: { id: "model" } }), ...extra })).status).toBe(400);
+    }
+    expect(f.reports()).toHaveLength(0); expect(f.recorded()).toBe(0);
+  });
+
+  it("publishes only after the receipt commits and emits nothing for retries or rejected inserts", async () => {
+    const f = runner(); const notifications: boolean[] = [];
+    f.app.onError((error, c) => {
+      if (error.message !== "fixture rejects report") throw error;
+      return c.json({ ok: false, code: "fixture_insert_rejected" }, 500);
+    });
+    f.eventBus.subscribe(event => { if (event.type === "agent.runner_observation") notifications.push(f.db.inTransaction); });
+    const body = f.report(1, { model: { id: "model" } });
+    f.db.exec("CREATE TEMP TRIGGER reject_observation BEFORE INSERT ON events WHEN NEW.type='agent.runner_observation' BEGIN SELECT RAISE(ABORT,'fixture rejects report'); END;");
+    expect((await f.post(f.grant.token, body)).status).toBe(500);
+    expect(f.reports()).toHaveLength(0); expect(notifications).toEqual([]);
+    f.db.exec("DROP TRIGGER reject_observation");
+    expect((await f.post(f.grant.token, body)).status).toBe(200);
+    expect((await f.post(f.grant.token, body)).status).toBe(200);
+    expect(notifications).toEqual([false]);
+  });
+
+  it("keeps the original run/generation and its facts through explicit same-process adoption", async () => {
+    const f = runner();
+    await f.post(f.grant.token, f.report(1, { model: { id: "retained" } }));
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.guest.id, verdict: "unconfirmed", evidenceSource: "pane_process", reason: null,
+      sessionName: GUEST, observedAt: new Date(f.clock.now).toISOString(), evidence: { registeredPane: "%1", observedPid: 101,
+        observedPanePid: 101, observedCommand: "node", matchedLayer: null } });
+    const adopted = f.sessions.registerClaimedSession(f.guest.id, GUEST, "adopt");
+    expect(adopted.id).not.toBe(f.row.id);
+    expect(f.grants.get(f.grant.grantId)?.sessionId).toBe(f.row.id);
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 })).toMatchObject({ report: { sequence: 1, generation: f.grant.generation } });
+    expect((await f.post(f.grant.token, f.report(2, { model: { id: "after-adoption" } }))).status).toBe(200);
+    expect(JSON.parse(f.reports()[1]!.payload)).toMatchObject({ sessionRowId: adopted.id, generation: f.grant.generation, runId: f.grant.runId });
+  });
+
+  it("retains a conflicting native reference only as history, without changing Core identity", async () => {
+    const f = runner();
+    f.db.prepare("UPDATE sessions SET resume_type='community:synth', resume_token='original-ref' WHERE id=?").run(f.row.id);
+    expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: "different-ref" }, model: { id: "model" } }))).status).toBe(200);
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 })).toMatchObject({ report: null, reason: "session_mismatch" });
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: "original-ref" });
+  });
+
+  it.each(["model", "context"] as const)("checks both original and latest session references for %s currency", async component => {
+    for (const [original, latest, current] of [["core-A", "runner-B", false], ["core-A", "core-A", true], ["runner-B", "core-A", false]] as const) {
+      const f = runner();
+      f.db.prepare("UPDATE sessions SET resume_type='community:synth', resume_token='core-A' WHERE id=?").run(f.row.id);
+      expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: original }, model: { id: "model-A" }, context: { usedTokens: 10 } }))).status).toBe(200);
+      expect((await f.post(f.grant.token, f.report(2, { session: { nativeRef: latest } }))).status).toBe(200);
+      const read = f.store.getRunnerObservation(f.guest.id, component, { freshnessMs: 600_000 });
+      expect(read).toMatchObject(current ? { report: { sequence: 1 }, reason: null } : { report: null, reason: "session_mismatch" });
+      expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: "core-A" });
+    }
+  });
+
+  it("projects runner context through existing single and batch reads without trusting a cache", async () => {
+    const f = runner();
+    const context = new ContextUsageStore(f.db, { stateDir: "/unused", runnerObservations: f.store });
+    expect((await f.post(f.grant.token, f.report(1, { context: { usedTokens: 25, windowTokens: 100, inputTokens: 1000, outputTokens: 50 } }))).status).toBe(200);
+    const usage = context.getForNode(f.guest.id, GUEST);
+    expect(usage).toMatchObject({ availability: "known", reason: null, source: "runner_reported", usedPercentage: 25,
+      remainingPercentage: 75, contextWindowSize: 100, totalInputTokens: 1000, totalOutputTokens: 50, fresh: true, transcriptPath: null });
+    expect(context.getForNodes([{ nodeId: f.guest.id, currentSessionName: GUEST }]).get(f.guest.id)).toEqual(usage);
+    context.persist(f.guest.id, usage);
+    const replacement = f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "relaunch",
+      run: { runId: "new-run", sessionId: f.row.id, binding: f.grant.binding! } });
+    expect(f.grants.activate(replacement.grantId)).toBe(true);
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", reason: "no_data", usedPercentage: null });
+    expect(context.getForNodes([{ nodeId: f.guest.id, currentSessionName: GUEST }]).get(f.guest.id)?.availability).toBe("unknown");
+  });
+
+  it.each([
+    { raw: { usedTokens: 10 }, reason: "window_capacity_unknown" },
+    { raw: { inputTokens: 1000, outputTokens: 100 }, reason: "window_capacity_unknown" },
+    { raw: { windowTokens: 100 }, reason: "no_data" },
+    { raw: { inputTokens: 1000, outputTokens: 100, windowTokens: 100 }, reason: "no_data" },
+  ])("retains raw context with unknown occupancy: $raw", async ({ raw, reason }) => {
+    const f = runner(); const context = new ContextUsageStore(f.db, { stateDir: "/unused", runnerObservations: f.store });
+    expect((await f.post(f.grant.token, f.report(1, { context: raw }))).status).toBe(200);
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", reason, source: "runner_reported",
+      usedPercentage: null, remainingPercentage: null, totalInputTokens: "inputTokens" in raw ? raw.inputTokens : null });
+  });
+
+  it("keeps explicit percentages runner-reported and expires omitted context independently", async () => {
+    const f = runner(); const context = new ContextUsageStore(f.db, { stateDir: "/unused", runnerObservations: f.store });
+    expect((await f.post(f.grant.token, f.report(1, { context: { usedPercentage: 80 } }))).status).toBe(200);
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "known", source: "runner_reported", usedPercentage: 80, contextWindowSize: null });
+    f.clock.now += 600_000;
+    expect((await f.post(f.grant.token, f.report(2, { model: { id: "new-model" } }))).status).toBe(200);
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", reason: "stale", usedPercentage: null });
+  });
+
+  it("persists a current native reference as launcher origin without verification or duplicate identity effects", async () => {
+    const f = runner();
+    const body = f.report(1, { session: { nativeRef: "provider:会話/abc?x=1" } });
+    const accepted = await f.post(f.grant.token, body);
+    expect(accepted.status).toBe(200);
+    expect(f.db.prepare("SELECT resume_type,resume_token,resume_provenance,resume_last_verified,resume_last_probe_status FROM sessions WHERE id=?").get(f.row.id))
+      .toEqual({ resume_type: "community:synth", resume_token: "provider:会話/abc?x=1", resume_provenance: "launcher", resume_last_verified: null, resume_last_probe_status: null });
+    const identities = () => f.db.prepare("SELECT payload FROM events WHERE type='agent.session_identity'").all();
+    expect(identities()).toHaveLength(1);
+    expect(JSON.parse((identities()[0] as { payload: string }).payload)).toMatchObject({ provenance: "launcher", sessionId: "provider:会話/abc?x=1" });
+    expect(await f.post(f.grant.token, body)).toEqual(accepted);
+    expect(identities()).toHaveLength(1);
+    expect(new SeatIdentityStore(f.db).getForNode(f.guest.id)?.verdict).not.toBe("verified");
+    expect((await f.post(f.grant.token, f.report(2, { session: { nativeRef: "conflicting" } }))).status).toBe(200);
+    expect((f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id) as { resume_token: string }).resume_token).toBe("provider:会話/abc?x=1");
+    expect(identities()).toHaveLength(1);
+  });
+
+  it.each(["scrape", "adoption"] as const)("lets Core %s evidence supersede a runner-reported reference", async provenance => {
+    const f = runner();
+    expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: "runner-claim" } }))).status).toBe(200);
+    expect(f.sessions.updateResumeToken(f.row.id, "community:synth", "core-evidence", provenance)).toBe(true);
+    expect(f.db.prepare("SELECT resume_token,resume_provenance FROM sessions WHERE id=?").get(f.row.id))
+      .toEqual({ resume_token: "core-evidence", resume_provenance: provenance });
+  });
+
+  it("rolls back the report and native reference together if the identity event cannot commit", async () => {
+    const f = runner(); const published: string[] = [];
+    f.eventBus.subscribe(event => { published.push(event.type); });
+    f.app.onError((error, c) => {
+      if (error.message !== "fixture rejects identity") throw error;
+      return c.json({ ok: false }, 500);
+    });
+    f.db.exec("CREATE TEMP TRIGGER reject_identity BEFORE INSERT ON events WHEN NEW.type='agent.session_identity' BEGIN SELECT RAISE(ABORT,'fixture rejects identity'); END;");
+    expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: "uncommitted" } }))).status).toBe(500);
+    expect(f.reports()).toHaveLength(0);
+    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null });
+    expect(published).toEqual([]);
+  });
+
+  it.each(["future", "stale", "lower-sequence"])("does not persist an unusable %s session claim", async kind => {
+    const f = runner();
+    if (kind === "lower-sequence") {
+      expect((await f.post(f.grant.token, { ...f.report(2, { session: { nativeRef: "future-session" } }), occurredAt: new Date(f.clock.now + 60_000).toISOString() })).status).toBe(200);
+    }
+    const occurredAt = new Date(f.clock.now + (kind === "future" ? 60_000 : kind === "stale" ? -600_000 : 1000)).toISOString();
+    expect((await f.post(f.grant.token, { ...f.report(1, { session: { nativeRef: "unusable" } }), occurredAt })).status).toBe(200);
+    expect(f.db.prepare("SELECT resume_token,resume_last_verified FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: null, resume_last_verified: null });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.session_identity'").get()).toEqual({ n: 0 });
+  });
+
+  it("preserves independent verification on an already known matching reference", async () => {
+    const f = runner();
+    f.db.prepare("UPDATE sessions SET resume_type='community:synth',resume_token='known',resume_provenance='operator',resume_last_verified='2026-10-30 02:59:00',resume_last_probe_status='resumable' WHERE id=?").run(f.row.id);
+    expect((await f.post(f.grant.token, f.report(1, { session: { nativeRef: "known" } }))).status).toBe(200);
+    expect(f.db.prepare("SELECT resume_provenance,resume_last_verified,resume_last_probe_status FROM sessions WHERE id=?").get(f.row.id))
+      .toEqual({ resume_provenance: "operator", resume_last_verified: "2026-10-30 02:59:00", resume_last_probe_status: "resumable" });
+  });
+
+  it("projects retained context after same-process adoption and reconstruction, then refuses revoked history", async () => {
+    const f = runner();
+    expect((await f.post(f.grant.token, f.report(1, { context: { usedTokens: 30, windowTokens: 100 } }))).status).toBe(200);
+    new SeatIdentityStore(f.db).upsert({ nodeId: f.guest.id, verdict: "unconfirmed", evidenceSource: "pane_process", reason: "process_identity_unconfirmed",
+      evidence: { registeredPane: "%1", observedPid: 101, observedPanePid: 101, observedCommand: "node", matchedLayer: null }, sessionName: GUEST, observedAt: new Date(f.clock.now).toISOString() });
+    f.sessions.registerClaimedSession(f.guest.id, GUEST, "adopt");
+    const reconstructed = new AgentActivityStore({ db: f.db, eventBus: f.eventBus, now: () => new Date(f.clock.now) });
+    const context = new ContextUsageStore(f.db, { stateDir: "/unused", runnerObservations: reconstructed });
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ source: "runner_reported", usedPercentage: 30, fresh: true });
+    f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
+    expect(context.getForNode(f.guest.id, GUEST)).toMatchObject({ availability: "unknown", usedPercentage: null });
+  });
+
+  it.each(["revoked", "replaced"])("refuses a body that arrives after its run was %s", async change => {
+    const f = runner(); const held = f.heldPost(f.grant.token, f.report(1, { model: { id: "delayed" } }));
+    await held.reading;
+    if (change === "revoked") f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
+    else {
+      const next = f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "Core relaunch",
+        run: { runId: "replacement", sessionId: f.row.id, binding: f.grant.binding! } });
+      f.grants.activate(next.grantId);
+    }
+    held.release(); expect((await held.response).status).toBe(401);
+    expect(f.reports()).toHaveLength(0); expect(f.recorded()).toBe(0);
+  });
+
+  it("uses launch-recorded Pi-RPC session-file grammar rather than the community reference grammar", async () => {
+    const f = runner();
+    f.db.prepare("UPDATE sessions SET agent_runner=2 WHERE id=?").run(f.row.id);
+    const piRpc = f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "Core Pi-RPC launch", run: {
+      runId: "pi-rpc-run", sessionId: f.row.id, binding: { ...f.grant.binding!, runner: 2 } } });
+    expect(f.grants.activate(piRpc.grantId)).toBe(true);
+    expect((await f.post(piRpc.token, { ...f.report(1, { session: { nativeRef: "provider:conversation-id" } }), runId: piRpc.runId })).status).toBe(400);
+    expect((await f.post(piRpc.token, { ...f.report(1, { session: { nativeRef: "/state/dev@rig/history.jsonl" } }), runId: piRpc.runId })).status).toBe(200);
+  });
+
+  it("retains pre-issuance and pre-boot samples as unusable rather than current facts", async () => {
+    const f = runner(); const body = f.report(1, { model: { id: "old" } });
+    body.occurredAt = new Date(Date.parse(f.grant.issuedAt) - 1000).toISOString();
+    expect((await f.post(f.grant.token, body)).status).toBe(200);
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 })).toMatchObject({ report: null, reason: "sample_time_invalid" });
+    const next = f.report(2, { model: { id: "newer" } });
+    await f.post(f.grant.token, next);
+    f.db.prepare("UPDATE occupant_tenures SET boot_at=? WHERE node_id=?").run(new Date(f.clock.now + 1000).toISOString(), f.guest.id);
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 })).toMatchObject({ report: null, reason: "sample_time_invalid" });
+  });
+
+  it("normalizes object key order for identical retries and rejects numeric overflow", async () => {
+    const f = runner(); const body = f.report(1, { context: { outputTokens: 2, inputTokens: 1 }, model: { id: "model" } });
+    const first = await f.post(f.grant.token, body);
+    expect(await f.post(f.grant.token, { ...body, observations: { model: { id: "model" }, context: { inputTokens: 1, outputTokens: 2 } } })).toEqual(first);
+    const overflow = JSON.stringify(f.report(2, { context: { usedTokens: 1 } })).replace('"usedTokens":1', '"usedTokens":1e999');
+    expect((await f.post(f.grant.token, overflow)).status).toBe(400);
+    expect(f.reports()).toHaveLength(1);
+  });
+
+  it("keeps component ages separate and never falls back past an invalid latest sample", async () => {
+    const f = runner();
+    await f.post(f.grant.token, f.report(1, { model: { id: "older" }, context: { inputTokens: 8 } }));
+    f.clock.now += 600_001;
+    await f.post(f.grant.token, f.report(2, { model: { id: "current" } }));
+    expect(f.store.getRunnerObservation(f.guest.id, "context", { freshnessMs: 600_000 })).toMatchObject({ report: null, reason: "stale" });
+    const future = f.report(3, { model: { id: "future" } }); future.occurredAt = new Date(f.clock.now + 60_000).toISOString();
+    expect((await f.post(f.grant.token, future)).status).toBe(200);
+    expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 })).toMatchObject({ report: null, reason: "sample_time_invalid" });
+  });
+
+  it("retains same-run facts across rotation/reconstruction and refuses prior-run facts after relaunch", async () => {
+    const f = runner();
+    const body = f.report(1, { session: { nativeRef: "provider:会話/abc?x=1" }, model: { id: "model" } });
+    await f.post(f.grant.token, body);
+    const rotate = (runId: string) => f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "Core rotation",
+      run: { runId, sessionId: f.row.id, binding: { panePid: f.grant.binding!.panePid, pane: f.grant.binding!.pane,
+        runner: f.grant.binding!.runner, runtime: f.grant.binding!.runtime } } });
+    f.clock.now += 1000;
+    const rotated = rotate(f.grant.runId!); f.grants.activate(rotated.grantId);
+    const reconstructed = new AgentActivityStore({ db: f.db, eventBus: new EventBus(f.db), now: () => new Date(f.clock.now) });
+    expect(reconstructed.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 })).toMatchObject({ report: { runId: f.grant.runId } });
+    const next = rotate("new-actual-run"); f.grants.activate(next.grantId);
+    expect(reconstructed.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 })).toMatchObject({ report: null, reason: "no_data" });
   });
 });

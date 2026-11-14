@@ -3,7 +3,7 @@
 // in an error message (credential-class redaction).
 
 import { describe, it, expect } from "vitest";
-import { validateResumeToken, resumeTypeForRuntime } from "../src/domain/resume-token-validation.js";
+import { validateResumeToken, validateSessionFileFormat, resumeTypeForRuntime } from "../src/domain/resume-token-validation.js";
 
 describe("resumeTypeForRuntime", () => {
   it("maps runtimes to their resume-id type", () => {
@@ -82,6 +82,17 @@ describe("validateResumeToken", () => {
 // tests above must keep passing unchanged).
 describe("validateResumeToken — pi_session_file (path-shaped, per-type)", () => {
   const validPath = "/Users/someone/.openrig/state/pi/seat-a/sessions/2026-07-06T10-00-00_0197a2f0-1234-7abc-8def-0123456789ab.jsonl";
+
+  it("opts only observation paths into format characters while preserving the existing path floor", () => {
+    const token = "/state/pi-\u200Djoiner\u200Cnonjoiner\u202Eformat.jsonl";
+    expect(validateSessionFileFormat(token).ok).toBe(false);
+    expect(validateResumeToken("pi", token).ok).toBe(false);
+    expect(validateResumeToken("omp", token).ok).toBe(false);
+    expect(validateSessionFileFormat(token, "Pi", { allowFormatCharacters: true })).toEqual({ ok: true, token });
+    for (const invalid of ["relative-\u200D.jsonl", "/state/../pi-\u200D.jsonl", "/state/pi-\u200D.txt", "/state/pi space\u200D.jsonl", "/state/pi;cmd\u200D.jsonl", `/${"\u200D".repeat(1024)}.jsonl`]) {
+      expect(validateSessionFileFormat(invalid, "Pi", { allowFormatCharacters: true }).ok).toBe(false);
+    }
+  });
 
   it("accepts a valid absolute .jsonl session-file path and returns pi_session_file", () => {
     const r = validateResumeToken("pi", validPath);

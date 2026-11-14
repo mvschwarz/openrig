@@ -128,6 +128,25 @@ export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unkno
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
 
+/** Facts a runner reports about its own process; launch authentication is not independent native verification. */
+export interface RunnerObservations {
+  session?: { nativeRef: string };
+  model?: { id: string };
+  context?: { usedTokens?: number; windowTokens?: number; usedPercentage?: number; inputTokens?: number; outputTokens?: number };
+}
+export interface RunnerObservation {
+  nodeId: string;
+  sessionRowId: string;
+  generation: string;
+  runId: string;
+  grantId: string;
+  family: "observation";
+  sequence: number;
+  occurredAt: string;
+  receivedAt: string;
+  observations: RunnerObservations;
+}
+
 export type RigEvent =
   | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
@@ -186,6 +205,7 @@ export type RigEvent =
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
    *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
@@ -211,7 +231,7 @@ export type RigEvent =
   | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null; input?: { classification: string; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false } }
   // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
   // from the pi-runner's RPC get_state / typed events, never pane scraping.
-  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" }
+  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" | "launcher" }
   // OPR.0.4.0.22 — append-only audit of a managed resume-token write. Emitted
   // on an operator set (`operator_set`) and on reconcile capture-on-adopt
   // (`reconcile_capture`). NEVER carries the raw token (credential-class);
@@ -1659,6 +1679,7 @@ export type ContextAvailability = "known" | "unknown";
 
 export type ContextUnknownReason =
   | "unsupported_runtime"
+  | "window_capacity_unknown"
   | "not_managed"
   | "missing_sidecar"
   | "parse_error"
@@ -1670,7 +1691,7 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | null;
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;

@@ -119,6 +119,7 @@ export interface NodeEntry {
   // /api/rigs/:id/nodes route (already populated). Optional because
   // older daemons may not emit it.
   contextUsage?: {
+    source?: string | null;
     availability: "known" | "unknown";
     usedPercentage: number | null;
     fresh: boolean;
@@ -1483,6 +1484,11 @@ async function handleNodes(
     }
   }
   for (const line of modelLines(humanList as NodeEntry[])) console.log(line);
+  for (const n of humanList as NodeEntry[]) {
+    if (n.contextUsage?.source === "runner_reported") {
+      console.log(`Context (${n.canonicalSessionName ?? n.logicalId}): ${formatContextUsage(n.contextUsage)} (runner-reported); sample ${n.contextUsage.sampledAt ?? "unknown"}`);
+    }
+  }
   // Keep an actionable startup continuation outside the table's clipped cells.
   for (const n of humanList as NodeEntry[]) {
     if (n.startupStatus === "attention_required" && n.latestError?.includes("rig seat continue ")) {

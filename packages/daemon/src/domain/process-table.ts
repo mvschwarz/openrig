@@ -19,7 +19,14 @@ export interface ProcessTableRow {
   argv?: string[] | null;
 }
 
+/** Permission-hidden Linux processes make absence unprovable, without changing the rows a listing exposes. */
+export interface ProcessTableCensus {
+  rows: ProcessTableRow[];
+  permissionHiddenPids: number[];
+}
+
 let inFlight: Promise<ProcessTableRow[]> | null = null;
+let censusInFlight: Promise<ProcessTableCensus> | null = null;
 let procRoot = "/proc";
 
 /**
@@ -29,8 +36,18 @@ let procRoot = "/proc";
  * read.
  */
 export function readProcessTable(): Promise<ProcessTableRow[]> {
-  inFlight ??= (process.platform === "linux" ? readProcTable(procRoot) : readPsTable()).finally(() => { inFlight = null; });
+  inFlight ??= readProcessTableCensus().then(census => census.rows);
   return inFlight;
+}
+
+/** The same shared read, with the omissions relevant to a caller using absence as evidence. */
+export function readProcessTableCensus(): Promise<ProcessTableCensus> {
+  censusInFlight ??= (process.platform === "linux" ? readProcCensus(procRoot)
+    : readPsTable().then(rows => ({ rows, permissionHiddenPids: [] }))).finally(() => {
+      censusInFlight = null;
+      inFlight = null;
+    });
+  return censusInFlight;
 }
 
 /** Points the Linux read at a /proc of a test's own, so a scenario's processes reach the observers through it; no
@@ -132,18 +149,23 @@ const READER_SOURCE = String.raw`
 
 let reader: Worker | null = null;
 let lastAsk = 0;
-const asked = new Map<number, { worker: Worker; rows: ProcessTableRow[]; resolve: (rows: ProcessTableRow[]) => void; reject: (error: Error) => void }>();
+const asked = new Map<number, { worker: Worker; census: ProcessTableCensus; resolve: (census: ProcessTableCensus) => void; reject: (error: Error) => void }>();
 
 /** The process table read from /proc (`root` for tests): the rows ps would print, without a process of its own. The
  *  files are read on the reader's thread: a read that waits (a cmdline waits on its process's memory lock) holds that
  *  thread, never the daemon's event loop, which only parses what it is sent. */
 export function readProcTable(root = "/proc"): Promise<ProcessTableRow[]> {
+  return readProcCensus(root).then(census => census.rows);
+}
+
+/** A /proc read whose permission omissions stay distinct from processes that have exited. */
+export function readProcCensus(root = "/proc"): Promise<ProcessTableCensus> {
   const worker = reader ??= startReader();
   const id = ++lastAsk;
   // Idle, the reader keeps no process up; while an answer is owed it does.
   worker.ref();
   return new Promise((resolve, reject) => {
-    asked.set(id, { worker, rows: [], resolve, reject });
+    asked.set(id, { worker, census: { rows: [], permissionHiddenPids: [] }, resolve, reject });
     worker.postMessage({ id, root });
   });
 }
@@ -157,13 +179,16 @@ function startReader(): Worker {
     if ("files" in part) {
       for (const [pid, stat, cmdline] of part.files) {
         const row = procRow(pid, stat, cmdline, part.bootTime);
-        if (row) ask.rows.push(row);
+        if (row) ask.census.rows.push(row);
+        if (typeof stat !== "string" && (stat.code === "EPERM" || stat.code === "EACCES")) {
+          ask.census.permissionHiddenPids.push(Number(pid));
+        }
       }
       if (!part.done) return;
     }
     asked.delete(part.id);
     if (asked.size === 0) worker.unref();
-    if ("files" in part) ask.resolve(ask.rows);
+    if ("files" in part) ask.resolve(ask.census);
     else ask.reject(new Error(part.error));
   });
   // A reader lost fails what it owed, and only that: its `error` then its `exit` may come after the next read has
