@@ -30,9 +30,12 @@ export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined =
   const tmpdir = env["TMUX_TMPDIR"]?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
   if (!socket?.trim()) {
-    return customTmpdir && uid !== undefined
-      ? ["-S", path.join(realpath(path.resolve(tmpdir)), `tmux-${uid}`, "default")]
-      : [];
+    if (!customTmpdir || uid === undefined) return [];
+    try {
+      return ["-S", path.join(fs.realpathSync(path.resolve(tmpdir)), `tmux-${uid}`, "default")];
+    } catch {
+      return [];
+    }
   }
   if (!customTmpdir && uid !== undefined) {
     const standardDirs = [path.join("/tmp", `tmux-${uid}`), path.join(realpath("/tmp"), `tmux-${uid}`)];

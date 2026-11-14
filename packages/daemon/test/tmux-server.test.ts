@@ -27,6 +27,7 @@ describe("the daemon's tmux server", () => {
     expect(tmuxServerArgs({ TMUX: " ,1,0" }, 501)).toEqual([]);
     // A new terminal need not inherit the daemon's custom temporary directory.
     expect(tmuxServerArgs({ TMUX_TMPDIR: base }, 501)).toEqual(["-S", join(base, "tmux-501", "default")]);
+    expect(tmuxServerArgs({ TMUX_TMPDIR: join(base, "missing") }, 501)).toEqual([]);
     expect(tmuxServerArgs({ TMUX: `${standard}/default,123,0` }, 501)).toEqual([]);
     expect(tmuxServerArgs({ TMUX: `${standard}/default,123,0`, TMUX_TMPDIR: "/tmp" }, 501)).toEqual([]);
   });
