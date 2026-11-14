@@ -954,6 +954,7 @@ Examples:
           fromSession?: string;
           toSession?: string;
           instanceStatus?: string;
+          adoptedHandoff?: { successorState?: string };
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/route`, {
           toSession: opts.to,
           packetId: opts.packet,
@@ -962,6 +963,18 @@ Examples:
         });
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
+        if (body.adoptedHandoff) {
+          // The packet was already handed off by the queue; its successor took its place and nothing was closed or created.
+          const state = body.adoptedHandoff.successorState ?? "?";
+          printOutcomeSummary(opts.json ?? false, res.status, {
+            what: `Adopted the queue handoff of step ${body.stepId ?? "?"} to ${body.toSession ?? opts.to}: packet ${body.closedPacketId ?? "?"} was already handed off, and its successor ${body.newPacketId ?? "?"} (${state}) now holds the step`,
+            state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step; no queue row closed or created; no step advanced`,
+            next: state === "done" || state === "handed-off"
+              ? `The successor is already ${state}; its outcome is on rig queue show ${body.newPacketId ?? "<packet>"}, and the step's exit is the workflow owner's to project`
+              : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+          });
+          return;
+        }
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Re-routed step ${body.stepId ?? "?"} from ${body.fromSession ?? "?"} to ${body.toSession ?? opts.to} (packet ${body.closedPacketId ?? "?"} → ${body.newPacketId ?? "?"})`,
           state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step, new owner; no step advanced`,
