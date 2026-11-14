@@ -2277,6 +2277,7 @@ export class PodRigInstantiator {
       })),
       // OpenRig's own packaged plugin skills follow the packaged source by default, so an upgrade's copy comes back.
       packaged: packagedSeatSkills(config.config.skillLoadout?.entries ?? [], selected),
+      warnings: config.config.skillWarnings ?? [],
     } };
   }
 

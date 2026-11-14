@@ -2,14 +2,16 @@
 // `rig up --existing`, a seat that held OpenRig's unedited copies gets the current packaged bytes back, under the
 // loadout's own record, instead of having the changed skills named missing. An edit, an unrecorded file, a skill the
 // profile selects itself and another plugin's skill stay exactly as before.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   cleanSeatSkills, ensureSeatSkillPlugin, followSeatSkills, packagedSeatSkills, rehydrateSeatSkills, seatSkillLocation, seatSkillPaths,
 } from "../src/domain/seat-skill-storage.js";
 import { reconcileSkillLoadout, resolvePluginSkills, type SkillLoadout } from "../src/domain/skill-catalog.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 const runtimes = ["claude-code", "codex"] as const;
 
@@ -31,7 +33,7 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     entries: resolvePluginSkills({ pluginId, pluginRoot: root, runtime }).entries,
   });
 
-  function seatWithLaunch() {
+  function seatWithLaunch(opts: { otherSkills?: Record<string, Record<string, string>>; launchFrom?: (core: SkillLoadout["entries"], other: SkillLoadout["entries"]) => SkillLoadout["entries"] } = {}) {
     const pluginsDir = join(home, "plugins");
     const core = join(pluginsDir, "openrig-core");
     const other = join(home, "shared", "other-plugin");
@@ -40,11 +42,13 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
       "seat-continuity-and-handover": { "SKILL.md": "handover v1" },
       "queue-handoff": { "SKILL.md": "queue v1" },
     });
-    plugin(other, { "third-party": { "SKILL.md": "third v1" } });
+    plugin(other, opts.otherSkills ?? { "third-party": { "SKILL.md": "third v1" } });
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime }, home);
     if (runtime === "claude-code") ensureSeatSkillPlugin(paths);
     // The launch: one loadout of both plugins' skills, written into the seat's storage and recorded.
-    const launch = { ...loadoutOf("openrig-core", core), entries: [...loadoutOf("openrig-core", core).entries, ...loadoutOf("other-plugin", other).entries] };
+    const coreEntries = loadoutOf("openrig-core", core).entries;
+    const otherEntries = loadoutOf("other-plugin", other).entries;
+    const launch = { ...loadoutOf("openrig-core", core), entries: opts.launchFrom ? opts.launchFrom(coreEntries, otherEntries) : [...coreEntries, ...otherEntries] };
     const applied = reconcileSkillLoadout({ loadout: launch, runtime, cwd: home, apply: true, location: seatSkillLocation(paths, runtime) });
     expect(applied.ok).toBe(true);
     const copy = (id: string, rel = "SKILL.md") => readFileSync(join(paths.skillsRoot, id, rel), "utf8");
@@ -60,7 +64,7 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
       const followed = followSeatSkills(paths, { selected: ownIds, following: [], packaged: packagedSeatSkills(today, ownIds, pluginsDir) });
       return { followed, rehydrated: rehydrateSeatSkills(paths) };
     };
-    return { paths, core, copy, upgrade, restore, pluginsDir, loadout: () => loadoutOf("openrig-core", core) };
+    return { paths, core, other, copy, upgrade, restore, pluginsDir, loadout: () => loadoutOf("openrig-core", core) };
   }
 
   it("brings both changed recovery skills back with today's packaged bytes, and leaves the unchanged ones byte-identical", () => {
@@ -140,5 +144,114 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     expect(followed.warnings.join("\n")).toContain("claude-compaction-restore follows OpenRig's packaged source, but");
     expect(rehydrateSeatSkills(s.paths).missing).toContain(join(s.paths.skillsRoot, "claude-compaction-restore", "SKILL.md"));
     expect(s.copy("seat-continuity-and-handover")).toContain("handover v2");
+  });
+  it("keeps a same-name copy the loadout recorded from another source, and names where it came from", () => {
+    const s = seatWithLaunch({ otherSkills: { "queue-handoff": { "SKILL.md": "someone else's queue" } },
+      launchFrom: (core, other) => [...core.filter((e) => e.id !== "queue-handoff"), ...other] });
+    cleanSeatSkills(s.paths);
+    s.upgrade();
+    const { followed } = s.restore();
+    expect(followed.warnings).toContain(`Restore: kept ${join(s.paths.skillsRoot, "queue-handoff")} as it is: it was recorded from ${s.other}, not OpenRig's packaged source`);
+    expect(s.copy("queue-handoff")).toContain("someone else's queue");
+    // The loadout's record is still one the reconciler reads: nothing rewrote it under the wrong source.
+    const record = JSON.parse(readFileSync(s.paths.manifestPath, "utf8")).skills.find((e: Record<string, unknown>) => e.id === "queue-handoff");
+    expect([record.sourceRoot, record.sourceDir]).toEqual([s.other, join(s.other, "skills", "queue-handoff")]);
+    expect(() => reconcileSkillLoadout({ loadout: s.loadout(), runtime, cwd: home, apply: false, location: seatSkillLocation(s.paths, runtime) })).not.toThrow();
+    expect(s.copy("claude-compaction-restore")).toContain("restore v2");
+  });
+
+  it("keeps a copy the seat's projection record also names, and names that record", () => {
+    const s = seatWithLaunch();
+    const file = join(s.paths.skillsRoot, "claude-compaction-restore", "SKILL.md");
+    put(s.paths.projectionsPath, JSON.stringify({ files: { [file]: { sha256: createHash("sha256").update(readFileSync(file)).digest("hex"), source: join(s.core, "skills", "claude-compaction-restore", "SKILL.md") } } }));
+    cleanSeatSkills(s.paths);
+    s.upgrade();
+    const { followed } = s.restore();
+    expect(followed.warnings).toContain(`Restore: kept ${join(s.paths.skillsRoot, "claude-compaction-restore")} as it is: it's also recorded as a projection in ${s.paths.projectionsPath}`);
+    expect(existsSync(file)).toBe(false);
+    expect(s.copy("seat-continuity-and-handover")).toContain("handover v2");
+  });
+
+  it("keeps the record true when a write fails part way, says what happened, and finishes on the next restore", () => {
+    const s = seatWithLaunch();
+    cleanSeatSkills(s.paths);
+    s.upgrade();
+    const write = fs.writeFileSync;
+    const failing = vi.spyOn(fs, "writeFileSync").mockImplementation(((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+      if (String(file).includes(join("seat-continuity-and-handover", "SKILL.md"))) throw new Error("ENOSPC: no space left on device");
+      return (write as (...args: unknown[]) => void)(file, ...rest);
+    }) as typeof fs.writeFileSync);
+    let first: ReturnType<typeof s.restore>;
+    try { first = s.restore(); } finally { failing.mockRestore(); }
+    expect(first.followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: claude-compaction-restore");
+    expect(first.followed.warnings).toContain("Restore: seat-continuity-and-handover stopped part way to OpenRig's packaged source (ENOSPC: no space left on device): 0 of 1 files written and recorded; a later restore finishes it");
+    expect(first.followed.warnings.join("\n")).not.toContain("kept as saved");
+    // The finished skill is OpenRig's under its new record, so nothing reads it as a person's edit.
+    expect(s.copy("claude-compaction-restore")).toContain("restore v2");
+    expect(first.rehydrated.kept).toEqual([]);
+    const record = JSON.parse(readFileSync(s.paths.manifestPath, "utf8")).skills;
+    expect(record.find((e: Record<string, unknown>) => e.id === "seat-continuity-and-handover").files).toEqual({});
+    const second = s.restore();
+    expect(second.followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: seat-continuity-and-handover");
+    expect(s.copy("seat-continuity-and-handover")).toContain("handover v2");
+    const later = reconcileSkillLoadout({ loadout: s.loadout(), runtime, cwd: home, apply: false, location: seatSkillLocation(s.paths, runtime) });
+    expect(later.receipts.filter((r) => r.id !== "third-party").map((r) => r.status)).toEqual(["current", "current", "current"]);
+  });
+
+  it.skipIf(process.platform === "win32")("keeps a copy whose file mode the seat changed, and names it", () => {
+    const s = seatWithLaunch();
+    chmodSync(join(s.paths.skillsRoot, "claude-compaction-restore", "SKILL.md"), 0o755); // part of a copy rig down leaves in part
+    chmodSync(join(s.paths.skillsRoot, "seat-continuity-and-handover", "SKILL.md"), 0o755); // a copy rig down leaves whole
+    s.upgrade();
+    cleanSeatSkills(s.paths); // the sources moved on, so both changed SKILL.md files stay
+    const { followed } = s.restore();
+    expect(followed.warnings).toContain(`Restore: kept ${join(s.paths.skillsRoot, "claude-compaction-restore")} as it is: ${join(s.paths.skillsRoot, "claude-compaction-restore", "SKILL.md")} has a file mode OpenRig didn't write`);
+    expect(followed.warnings).toContain(`Restore: kept ${join(s.paths.skillsRoot, "seat-continuity-and-handover")} as it is: ${join(s.paths.skillsRoot, "seat-continuity-and-handover")} has file modes OpenRig didn't write`);
+    expect(statSync(join(s.paths.skillsRoot, "seat-continuity-and-handover", "SKILL.md")).mode & 0o777).toBe(0o755);
+    expect(s.copy("seat-continuity-and-handover")).toContain("handover v1");
+  });
+
+  it.skipIf(process.platform === "win32")("follows a packaged change to a file's mode alone", () => {
+    const s = seatWithLaunch();
+    chmodSync(join(s.core, "skills", "claude-compaction-restore", "scripts", "precompact-hook.mjs"), 0o755);
+    const { followed } = s.restore(); // the copy is whole: no rig down came first
+    expect(followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: claude-compaction-restore");
+    expect(statSync(join(s.paths.skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs")).mode & 0o777).toBe(0o755);
+    const later = reconcileSkillLoadout({ loadout: s.loadout(), runtime, cwd: home, apply: false, location: seatSkillLocation(s.paths, runtime) });
+    expect(later.receipts.find((r) => r.id === "claude-compaction-restore")?.status).toBe("current");
+  });
+});
+
+describe("a restore says what resolving the seat's skills today left out", () => {
+  let home: string;
+  beforeEach(() => { home = mkdtempSync(join(tmpdir(), "seat-packaged-select-")); });
+  afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+
+  it.skipIf(process.platform === "win32")("carries the resolver's skill warnings from the seat's selection into the restore's warnings", async () => {
+    const put = (file: string, text: string) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text); };
+    const pluginRoot = join(home, "plugins", "openrig-core");
+    for (const dir of [".claude-plugin", ".codex-plugin"]) put(join(pluginRoot, dir, "plugin.json"), JSON.stringify({ name: "openrig-core", version: "1.0.0" }));
+    for (const id of ["claude-compaction-restore", "queue-handoff"]) put(join(pluginRoot, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: ${id}\n---\n${id}`);
+    // A link inside a packaged skill: today's resolution leaves that skill out, with a warning.
+    symlinkSync(join(pluginRoot, "skills", "queue-handoff", "SKILL.md"), join(pluginRoot, "skills", "claude-compaction-restore", "linked.md"));
+    const rigRoot = mkdtempSync(join(home, "rig-"));
+    put(join(rigRoot, "agents", "impl", "agent.yaml"), `name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: openrig-core\n      source: { kind: local, path: ${pluginRoot} }\nprofiles:\n  default:\n    uses:\n      plugins: [openrig-core]\n`);
+    const db = createFullTestDb();
+    try {
+      const setup = createTestApp(db, { podInstantiatorFsOps: { exists: (p) => existsSync(p), readFile: (p) => readFileSync(p, "utf8") } });
+      const rig = setup.rigRepo.createRig("packaged-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-packaged", rig.id, "dev", "Development");
+      const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-packaged", cwd: rigRoot,
+        launchRecipe: { version: 1 as const, rigRoot, rigSpec: { version: "0.2", name: "packaged-rig",
+          pods: [{ id: "dev", label: "Development", members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: "." }], edges: [] }],
+          edges: [] } } });
+      const out = await setup.podInstantiator.seatSkillSelection(rig.id, node.id);
+      expect(out.ok, JSON.stringify(out)).toBe(true);
+      if (!out.ok) return;
+      const skipped = (out.selection.warnings ?? []).find((w) => w.startsWith(`plugin_skill_skipped: plugin openrig-core skill at ${join(pluginRoot, "skills", "claude-compaction-restore")}`));
+      expect(skipped, JSON.stringify(out.selection.warnings)).toBeDefined();
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "codex" }, home);
+      expect(followSeatSkills(paths, out.selection).warnings).toContain(`Restore: ${skipped}`);
+    } finally { db.close(); }
   });
 });
