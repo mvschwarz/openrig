@@ -207,10 +207,42 @@ export interface ProjectStepResult {
   advisories?: string[];
 }
 
-/** Trail evidence for a projection whose frontier packet the queue had already closed (an ordinary queue handoff moved
- *  the work on): the exit and next hop were recorded on the workflow, and the queue row wasn't written. */
+/** The projector's own trail record for a projection whose frontier packet the queue had already closed (an ordinary
+ *  queue handoff moved the work on): the caller's whole intent, the queue state found and the next packets. The exit and
+ *  next hop were recorded on the workflow, and the queue row wasn't written. project() never stores a caller's value
+ *  for this key, so only the projector writes it. */
 const QUEUE_ROW_ALREADY_CLOSED = "queue_row_already_closed";
-type QueueRowAlreadyClosed = { state: string; exit: WorkflowExitKind; next_qitem_ids: string[]; next_step_ids: string[] };
+type QueueRowAlreadyClosed = {
+  state: string; exit: WorkflowExitKind; actor: string; result_note: string | null; blocked_on: string | null;
+  next_owner: string | null; evidence: Record<string, unknown> | null; next_qitem_ids: string[]; next_step_ids: string[];
+};
+
+function alreadyClosedRecord(input: ProjectStepInput, state: string, nextQitemIds: string[], nextStepIds: string[]): QueueRowAlreadyClosed {
+  return { state, exit: input.exit, actor: input.actorSession, result_note: input.resultNote ?? null,
+    blocked_on: input.blockedOn ?? null, next_owner: input.nextOwnerSession ?? null, evidence: input.closureEvidence ?? null,
+    next_qitem_ids: nextQitemIds, next_step_ids: nextStepIds };
+}
+
+/** The record, when the trail evidence holds a well-formed one; anything else reads as none. */
+function readAlreadyClosedRecord(evidence: Record<string, unknown> | null | undefined): QueueRowAlreadyClosed | null {
+  const value = evidence?.[QUEUE_ROW_ALREADY_CLOSED];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const r = value as Record<string, unknown>;
+  const text = (v: unknown): v is string => typeof v === "string";
+  const textOrNull = (v: unknown) => v === null || text(v);
+  const ids = (v: unknown) => Array.isArray(v) && v.every(text);
+  const objectOrNull = (v: unknown) => v === null || (typeof v === "object" && !Array.isArray(v));
+  return text(r.state) && isTerminalState(r.state) && text(r.exit) && text(r.actor) && textOrNull(r.result_note)
+    && textOrNull(r.blocked_on) && textOrNull(r.next_owner) && objectOrNull(r.evidence) && ids(r.next_qitem_ids)
+    && ids(r.next_step_ids) ? r as unknown as QueueRowAlreadyClosed : null;
+}
+
+/** The caller repeats the recorded projection exactly: the same exit, actor, result note, blocker, next owner and evidence. */
+function sameIntent(record: QueueRowAlreadyClosed, input: ProjectStepInput): boolean {
+  return record.exit === input.exit && record.actor === input.actorSession && record.result_note === (input.resultNote ?? null)
+    && record.blocked_on === (input.blockedOn ?? null) && record.next_owner === (input.nextOwnerSession ?? null)
+    && isDeepEqual(record.evidence, input.closureEvidence ?? null);
+}
 
 function alreadyClosedNotice(packetId: string, state: string, exit: WorkflowExitKind): string {
   return `packet ${packetId} was already ${state} in the queue, so the ${exit} exit was recorded on the workflow without writing its queue row`;
@@ -249,12 +281,20 @@ export class WorkflowProjector {
    * call site.
    */
   async project(input: ProjectStepInput): Promise<ProjectStepResult> {
+    // The already-closed record's key is the projector's own: a value a caller supplies for it isn't stored or trusted.
+    const evidence = input.closureEvidence;
+    if (!evidence || !(QUEUE_ROW_ALREADY_CLOSED in evidence)) return this.projectStep(input);
+    const { [QUEUE_ROW_ALREADY_CLOSED]: _reserved, ...callerEvidence } = evidence;
+    const result = await this.projectStep({ ...input, closureEvidence: callerEvidence });
+    return { ...result, advisories: [...(result.advisories ?? []),
+      `closure evidence key ${QUEUE_ROW_ALREADY_CLOSED} is the projector's own, so the value supplied for it wasn't stored`] };
+  }
+
+  private async projectStep(input: ProjectStepInput): Promise<ProjectStepResult> {
     const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
-    // The same exit again on a packet that was already closed when it was projected: report that projection, no writes.
-    if (!instance.currentFrontier.includes(input.currentPacketId)) {
-      const replay = this.alreadyClosedReplay(instance, input);
-      if (replay) return replay;
-    }
+    // The same whole intent again on a packet that was already closed when it was projected: report that projection.
+    const replay = this.alreadyClosedReplay(instance, input);
+    if (replay) return replay;
     if (instance.status !== "active" && instance.status !== "waiting") {
       throw new WorkflowProjectorError(
         "instance_not_active",
@@ -717,9 +757,8 @@ export class WorkflowProjector {
 
       // 4. Append step trail entry (prior + next ids).
       if (alreadyClosed) {
-        const record: QueueRowAlreadyClosed = { state: alreadyClosed, exit: input.exit,
-          next_qitem_ids: nextQitemId ? [nextQitemId] : [], next_step_ids: nextStepId ? [nextStepId] : [] };
-        effectiveClosureEvidence = { ...(effectiveClosureEvidence ?? {}), [QUEUE_ROW_ALREADY_CLOSED]: record };
+        effectiveClosureEvidence = { ...(effectiveClosureEvidence ?? {}), [QUEUE_ROW_ALREADY_CLOSED]:
+          alreadyClosedRecord(input, alreadyClosed, nextQitemId ? [nextQitemId] : [], nextStepId ? [nextStepId] : []) };
       }
       this.trailLog.record({
         instanceId: instance.instanceId,
@@ -951,13 +990,15 @@ export class WorkflowProjector {
     };
   }
 
-  /** A repeat of the projection that recorded `input.exit` on a packet the queue had already closed: the same result,
-   *  read from that projection's trail record, with nothing written. Any other off-frontier packet returns null. */
+  /** A repeat, with the same whole intent, of the latest projection recorded on a packet the queue had already closed
+   *  (and still has): the same result, read from that projection's trail record, with nothing written. Otherwise null. */
   private alreadyClosedReplay(instance: WorkflowInstance, input: ProjectStepInput): ProjectStepResult | null {
+    const packet = this.queueRepo.getById(input.currentPacketId);
+    if (!packet || !isTerminalState(packet.state)) return null;
     const entry = this.trailLog.listForInstanceInAppendOrder(instance.instanceId)
       .filter((candidate) => candidate.priorQitemId === input.currentPacketId).at(-1);
-    const recorded = entry?.closureEvidence?.[QUEUE_ROW_ALREADY_CLOSED] as QueueRowAlreadyClosed | undefined;
-    if (!entry || !recorded || recorded.exit !== input.exit) return null;
+    const recorded = readAlreadyClosedRecord(entry?.closureEvidence);
+    if (!entry || !recorded || !sameIntent(recorded, input)) return null;
     const nextQitemId = recorded.next_qitem_ids[0] ?? null;
     return {
       instance,
@@ -1333,9 +1374,8 @@ export class WorkflowProjector {
         closureEvidence: {
           ...(effectiveClosureEvidence ?? {}),
           next_qitem_ids: createdPackets.map((packet) => packet.qitemId),
-          ...(alreadyClosed ? { [QUEUE_ROW_ALREADY_CLOSED]: { state: alreadyClosed, exit: input.exit,
-            next_qitem_ids: createdPackets.map((packet) => packet.qitemId),
-            next_step_ids: createdPackets.map((packet) => packet.step.id) } satisfies QueueRowAlreadyClosed } : {}),
+          ...(alreadyClosed ? { [QUEUE_ROW_ALREADY_CLOSED]: alreadyClosedRecord(input, alreadyClosed,
+            createdPackets.map((packet) => packet.qitemId), createdPackets.map((packet) => packet.step.id)) } : {}),
         },
         actorSession: input.actorSession,
         nextQitemId: createdPackets[0]?.qitemId ?? null,
@@ -1413,10 +1453,7 @@ function matchesStoredWaitingDecision(
     (t) => t.priorQitemId === input.currentPacketId && t.closureReason === "waiting",
   );
   if (!storedRow) return false;
-  // The already-closed record is the projector's own note, not the caller's evidence.
-  const { [QUEUE_ROW_ALREADY_CLOSED]: marker, ...callerEvidence } = storedRow.closureEvidence ?? {};
-  const storedEvidence = marker === undefined ? storedRow.closureEvidence ?? null : Object.keys(callerEvidence).length ? callerEvidence : null;
-  return isDeepEqual(storedEvidence, input.closureEvidence ?? null);
+  return isDeepEqual(storedRow.closureEvidence ?? null, input.closureEvidence ?? null);
 }
 
 function withAdvisories(notices: Array<string | undefined>): { advisories?: string[] } {

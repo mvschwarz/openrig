@@ -110,8 +110,24 @@ describe("dependency failure ownership and occurrence-local recovery", () => {
     expect(exceptions()).toHaveLength(1);
     expect(runtime.inspect(b.id).failures).toMatchObject([{ occurrenceId: b.left, stepId: "left", status: "unresolved" }]);
     expect(runtime.inspect(b.id).instance.currentFrontier).toEqual([b.right]);
+    // The caller's result note is kept in the projector's record, since no queue row or next packet carries it.
+    expect(runtime.trailLog.listForInstance(b.id).find(t => t.priorQitemId === b.left)?.closureEvidence?.queue_row_already_closed)
+      .toMatchObject({ state: "handed-off", exit: "failed", result_note: "controlled handout mismatch", next_qitem_ids: [] });
     const before = snapshot(); const sends = sent.length;
     expect(await project(b.id, b.left, "failed")).toMatchObject({ closureReason: "failed", nextQitemIds: [], absorbedReplay: true, emittedEventTypes: [] });
+    expect(snapshot()).toEqual(before); expect(sent).toHaveLength(sends);
+  });
+
+  // A sole frontier packet the queue already closed stays active on a waiting exit (its unchanged row isn't blocked), so
+  // the waiting replay rule can't absorb the repeat; the projector's record does.
+  it("absorbs a repeated waiting exit on a sole graph packet the queue already closed", async () => {
+    const i = await start(GRAPH.replace("allowed_exits: [done, failed]", "allowed_exits: [done, failed, waiting]"));
+    await queue.handoff({ qitemId: i.entryQitemId, fromSession: "owner@rig", toSession: "reviewer2@rig" });
+    const waiting = { instanceId: i.instance.instanceId, currentPacketId: i.entryQitemId, actorSession: "owner@rig", exit: "waiting" as const,
+      resultNote: "waiting on the reviewer", closureEvidence: {} };
+    expect((await runtime.project(waiting)).instance).toMatchObject({ status: "active", currentFrontier: [i.entryQitemId] });
+    const before = snapshot(); const sends = sent.length;
+    expect(await runtime.project(waiting)).toMatchObject({ absorbedReplay: true, emittedEventTypes: [] });
     expect(snapshot()).toEqual(before); expect(sent).toHaveLength(sends);
   });
 
