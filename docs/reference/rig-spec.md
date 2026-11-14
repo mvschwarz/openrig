@@ -453,8 +453,12 @@ the Codex version and configuration being used.
 
 A non-kernel Claude or Codex seat with no authored permission policy, explicit
 seat permission selection, or named Codex profile receives the team launch
-default. An explicit policy, including `none` or `builtin:locked`, keeps its
-existing meaning. The default is derived again for fresh launch, resume, fork
+default. So does one whose policy is `builtin:standard` or `builtin:open`, with
+no seat permission selection, Claude rules of its own, or named Codex profile:
+those policies default to allow, and their rules aren't applied at launch, so
+recording one doesn't leave the seat stricter than recording none. The member's
+own policy decides over the rig's. Any other explicit policy, including `none`
+or `builtin:locked`, keeps its existing meaning. The default is derived again for fresh launch, resume, fork
 and handover; it is not saved as a user choice. Kernel, Pi and terminal behavior
 is unchanged.
 
@@ -556,7 +560,8 @@ launches with `-s danger-full-access -a never`, plus per-launch `-c` overrides t
 full-access and GPT-5.1 migration notices, whatever the rig's non-interruptive choice.
 
 **Config-surface policies are recorded, not applied at launch.** The seat still starts at
-the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the
+the floor: with the [team launch default](#team-launch-defaults) for `standard` and `open`,
+and without it for any other. The plan's line for that seat says which. The `allow`, `ask` and `deny` rules take effect once they are translated into the
 runtime's native settings. The `applying-a-permission-policy` skill in `openrig-core` does
 that translation, with per-runtime limits. For example, Claude's prefix rules can't
 reliably tell `git push --force` from `git push`. An `ask` waits for a person, so it pauses
