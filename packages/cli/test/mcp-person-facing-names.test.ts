@@ -32,10 +32,14 @@ function rosters(name: string | null, members: unknown[] = []) {
 async function connect(folder: string, opts: { external?: boolean; seat?: string; queueRows?: unknown[] } = {}) {
   const get = vi.fn(async (p: string): Promise<DaemonResponse> => {
     if (p.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "team" }] };
-    if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "team" }, nodes: [{ id: "n1", logicalId: "dev.review" }, { id: "n2", logicalId: "dev.impl" }], edges: [], representative: null } };
+    if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "team" }, nodes: [{ id: "n1", logicalId: "dev.review" },
+      { id: "n2", logicalId: "dev.impl" }, { id: "n3", logicalId: "dev.lead" }, { id: "n4", logicalId: "dev.idle" }], edges: [], representative: null } };
+    // dev.lead's session isn't named after its logical address, and dev.idle has no session yet.
     if (p === "/api/rigs/rig-1/nodes") return { status: 200, data: [
       { logicalId: "dev.review", canonicalSessionName: "dev-review@team", hostSelfId: "host-a", agentActivity: { state: "idle" } },
       { logicalId: "dev.impl", canonicalSessionName: "dev-impl@team", hostSelfId: "host-a", agentActivity: { state: "idle" } },
+      { logicalId: "dev.lead", canonicalSessionName: "dev-lead-2@team", hostSelfId: "host-a", agentActivity: { state: "idle" } },
+      { logicalId: "dev.idle", canonicalSessionName: null, hostSelfId: "host-a" },
     ] };
     if (p === "/api/queue/hosted-members") return { status: 200, data: { members: [] } };
     if (p.startsWith("/api/queue/list?")) return { status: 200, data: opts.queueRows ?? [] };
@@ -167,6 +171,29 @@ describe("rig_team for a person's assistant", () => {
       // An internal caller sees every member's presence, as before.
       expect((await internal.team()).hostedMembers.find((m: { session: string }) => m.session === CALLER)).toHaveProperty("presence");
     } finally { await external.close(); await internal.close(); }
+  });
+
+  // The caller is its seat under either name the roster match uses: its session's name or its logical address.
+  it.each([
+    ["by its logical address, with a roster entry under its session's name", "dev-lead@team", "dev-lead-2@team"],
+    ["by its session's name, with a roster entry under its logical address", "dev-lead-2@team", "dev-lead@team"],
+  ])("keeps a node caller's own seat %s, with no line about its activity", async (_label, callerName, rosterSeat) => {
+    const s = await connect(rosters("Sam's team", [member(rosterSeat, { label: "claude (Sam's lead)" })]), { external: true, seat: callerName });
+    try {
+      const own = (await s.team()).seats.find((seat: { logicalId: string }) => seat.logicalId === "dev.lead");
+      expect(own).toMatchObject({ session: "dev-lead-2@team", label: "claude (Sam's lead)" });
+      for (const key of ["activity", "sessionStatus", "presence"]) expect(own).not.toHaveProperty(key);
+      expect(s.get.mock.calls.some(([p]) => /destinationSession=dev-lead/.test(decodeURIComponent(p)))).toBe(false);
+    } finally { await s.close(); }
+  });
+
+  it("keeps a no-session node caller's own seat by its logical address, its session still null", async () => {
+    const s = await connect(rosters("Sam's team"), { external: true, seat: "dev-idle@team" });
+    try {
+      const own = (await s.team()).seats.find((seat: { logicalId: string }) => seat.logicalId === "dev.idle");
+      expect(own).toMatchObject({ logicalId: "dev.idle", session: null });
+      for (const key of ["activity", "sessionStatus", "presence"]) expect(own).not.toHaveProperty(key);
+    } finally { await s.close(); }
   });
 
   it("keeps a node caller's own seat, with its identity and label, and no line about its activity", async () => {

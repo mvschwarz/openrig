@@ -1900,8 +1900,15 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const rigName = ((detail.data ?? {}) as RigDetail).rig?.name ?? "";
         const inventory = Array.isArray(nodes.data) ? nodes.data as Array<{ logicalId?: string; canonicalSessionName?: string | null; hostSelfId?: string | null }> : [];
         // A node is a seat whether or not it has a session yet: its address derives from its logical id (pod.member).
-        const nodeSeats = new Set(inventory.flatMap((seat) => [seat.canonicalSessionName,
-          typeof seat.logicalId === "string" ? `${seat.logicalId.replace(".", "-")}@${rigName}` : null]).filter((name): name is string => typeof name === "string"));
+        const logicalAddress = (logicalId: unknown) => typeof logicalId === "string" ? `${logicalId.replace(".", "-")}@${rigName}` : null;
+        const nodeSeats = new Set(inventory.flatMap((seat) => [seat.canonicalSessionName, logicalAddress(seat.logicalId)])
+          .filter((name): name is string => typeof name === "string"));
+        // An external caller's own seat, under any name it's matched by: its session's name or its logical address, the
+        // same mapping the roster match uses. Its node's other name is its too.
+        const caller = access?.external ? seatOf() : undefined;
+        const callerNode = caller ? inventory.find((seat) => seat.canonicalSessionName === caller || logicalAddress(seat.logicalId) === caller) : undefined;
+        const ownNames = new Set([caller, callerNode?.canonicalSessionName, logicalAddress(callerNode?.logicalId)]
+          .filter((name): name is string => typeof name === "string"));
         // One read of the daemon's check-ins serves every member in this answer.
         let checkIns: Promise<Array<Record<string, unknown>> | null> | undefined;
         const checkInOf = async (seat: string): Promise<HostedCheckIn> => {
@@ -1922,7 +1929,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null),
           async (seat) => {
             // An external caller's own seat is listed so it can see its address, without a line about its own activity.
-            if (access?.external && seat === seatOf()) return null;
+            if (ownNames.has(seat)) return null;
             const rows = await client.get(`/api/queue/list?${new URLSearchParams({ destinationSession: seat, compact: "1", limit: String(PRESENCE_ROWS) }).toString()}`)
               .then((res) => (res.status < 400 ? res.data : null), () => null);
             // An external caller sees a ring only on an item it may read, so another pair's item isn't named.
@@ -1935,17 +1942,17 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // answer is as it was.
         if (!access?.external) return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...note } }, undefined, { structured: true });
         // The caller's own entry keeps its address and identity, with no line about its own activity.
-        const own = seatOf();
         // A node seat on a roster carries its authored entry and presence; a seat on none is as the daemon reports it.
         const seats = (view.seats as Array<Record<string, unknown>>).map((seat) => {
-          const entry = hosted.seats.get(seat.session as string) ?? hosted.seats.get(`${String(seat.logicalId).replace(".", "-")}@${rigName}`);
+          const address = logicalAddress(seat.logicalId);
+          const entry = hosted.seats.get(seat.session as string) ?? (address ? hosted.seats.get(address) : undefined);
           const merged = entry ? { ...seat, ...entry } : seat;
-          if (!own || merged.session !== own) return merged;
+          if (!ownNames.has(merged.session as string) && !(address && ownNames.has(address))) return merged;
           const { activity: _activity, sessionStatus: _status, ...identity } = merged;
           return identity;
         });
         const hostedMembers = hosted.members.map((member) => {
-          if (member.session !== own) return member;
+          if (!ownNames.has(member.session)) return member;
           const { activity: _activity, ...identity } = member;
           return identity;
         });
