@@ -270,16 +270,21 @@ describe("compositor status region", () => {
   });
 
   it("bounds the kept tail by its wrapped layout, ellipsis included, at an odd width", () => {
-    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 21, rows: 4 });
+    // The case the cell-count bound got wrong: 21 columns by 43 lines, one status row,
+    // no draft - a budget of 40 rows. A cell-count bound keeps 419 two-cell glyphs
+    // (839 cells), which wrap to 42 rows and overflow the pane; the wrapped-layout
+    // bound keeps 400 (the ellipsis shares the first row with ten glyphs, then 39 more
+    // rows of ten), so the assertion below fails without the fix.
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 21, rows: 43 });
     let buf = "";
     output.on("data", (chunk: Buffer) => { buf += chunk.toString(); });
     const pane = createPaneCompositor(output as unknown as NodeJS.WriteStream);
-    pane.status("seat-lead · working"); // one status row; the tail's budget is 4 - 2 - 1 = 1 row
-    pane.transcript("\u6f22".repeat(50)); // two-cell glyphs: 10 fit after the one-cell ellipsis
-    expect(buf).toContain(`\u2026${"\u6f22".repeat(10)}\n`);
-    expect(buf).not.toContain(`\u2026${"\u6f22".repeat(11)}`);
+    pane.status("seat-lead · working"); // one status row; the tail's budget is 43 - 2 - 1 = 40 rows
+    pane.transcript("\u6f22".repeat(500));
+    expect(buf).toContain(`\u2026${"\u6f22".repeat(400)}`);
+    expect(buf).not.toContain(`\u2026${"\u6f22".repeat(401)}`);
     pane.transcript("\n");
-    expect(buf.match(/\u6f22{50}/g)).toHaveLength(1); // committed once, whole
+    expect(buf.match(/\u6f22{500}/g)).toHaveLength(1); // committed once, whole
   });
 
   it("drains a multiline chunk in one batch, without repainting the remainder between lines", () => {
