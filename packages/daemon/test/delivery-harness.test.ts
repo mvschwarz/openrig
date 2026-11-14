@@ -16,6 +16,8 @@ import { composerText } from "../../test-system/delivery/harness/screen.mjs";
 import { ownsEnviron, parseStat, reapByIdentity } from "../../test-system/delivery/harness/world.mjs";
 import { caseContext } from "../../test-system/delivery/harness/case-context.mjs";
 import { isRefusal } from "../../test-system/delivery/cases/s3.mjs";
+import { attempt, enterState, expectFor, idsCorrelate, judge, modeChangeControl, occurrenceResult } from "../../test-system/delivery/cases/d18.mjs";
+import { runArm } from "../../test-system/delivery/cases/d04.mjs";
 import { recordScreen } from "../../test-system/delivery/harness/screen.mjs";
 import { bankCell } from "../../test-system/delivery/harness/evidence.mjs";
 
@@ -161,6 +163,257 @@ describe("delivery harness: the receiver-side oracle", () => {
     expect(v.toJSON()).toMatchObject({ result: "FAIL", failed: ["b"] });
     const n = new Verdict(); n.skip("no program");
     expect(n.toJSON()).toMatchObject({ result: "NOT RUN", reason: "no program" });
+  });
+});
+
+describe("delivery harness: the typing-guard matrix (D18)", () => {
+  it("holds every sender a mode doesn't let type, in every state", () => {
+    expect(expectFor("hold", "idle", "automatic")).toEqual({ type: "held", reasons: ["typing_guard_enabled"] });
+    expect(expectFor("urgent-only", "idle", "deliberate")).toEqual({ type: "held", reasons: ["typing_guard_enabled"] });
+    expect(expectFor("openrig-urgent", "draft", "deliberate").type).toBe("held");
+    expect(expectFor("sends-only", "idle", "automatic").type).toBe("held");
+    expect(expectFor("hold", "dialog", "deliberate_urgent").reasons).toEqual(["typing_guard_enabled", "target_needs_input"]);
+  });
+
+  it("types where the mode allows it, as the expected matrix says per state", () => {
+    expect(expectFor("off", "draft", "automatic")).toEqual({ type: "merge" });
+    expect(expectFor("sends-only", "copy_mode", "deliberate")).toEqual({ type: "copy-then-deliver" });
+    expect(expectFor("off", "dialog", "deliberate")).toEqual({ type: "refuse", reasons: ["target_needs_input"] });
+    // The guarded modes are stated only as "refused, no write" at a dialog: any no-input reason, recorded.
+    expect(expectFor("draft-aware", "dialog", "deliberate")).toEqual({ type: "refuse", reasons: null });
+    expect(expectFor("draft-aware", "draft", "deliberate")).toEqual({ type: "held", reasons: ["draft_input_busy"] });
+    expect(expectFor("draft-aware", "busy", "automatic").type).toBe("deliver-or-held");
+    expect(expectFor("openrig-urgent", "idle", "automatic")).toEqual({ type: "deliver" });
+    expect(expectFor("urgent-only", "draft", "deliberate_urgent").type).toBe("held");
+    // Not stated by the matrix: recorded, never judged.
+    expect(expectFor("openrig-urgent", "copy_mode", "automatic")).toEqual({ type: "record" });
+  });
+
+  it("resolves draft-aware's busy row by the input box observed at the attempt", () => {
+    expect(expectFor("draft-aware", "busy", "deliberate", { composer: "empty" })).toEqual({ type: "deliver", joins: true });
+    expect(expectFor("draft-aware", "busy", "automatic", { composer: "unreadable" })).toEqual({ type: "held", reasons: ["draft_input_unknown"] });
+    expect(expectFor("off", "busy", "deliberate", { composer: "unreadable" })).toEqual({ type: "deliver", joins: true });
+  });
+});
+
+/** A case context with nothing behind it: each control below sets only what its counterexample needs. */
+function fakeCtx(over: Record<string, unknown> = {}) {
+  const verdict = new Verdict();
+  const turns: Record<string, unknown[]> = {};
+  const ctx = {
+    kind: "claude", version: "x", verdict, nowNs: () => 0, sleep: async () => {}, paneWrites: () => [],
+    heldMessages: async () => ({ items: [] }), readComposer: async () => "", inMode: async () => false,
+    deliveries: (m: string) => ({ thread: "t", identified: true, turns: turns[m] ?? [] }),
+    waitDelivered: async (m: string) => ({ thread: "t", identified: true, turns: turns[m] ?? [] }),
+    writtenSince: () => [], evidenceFor: () => ({ deliveryEvidence: [], promptObservation: [] }),
+    ...over,
+  };
+  return { ctx, verdict, turns };
+}
+const userTurn = (index: number, text: string) => ({ index, seq: index, kind: "user", carriedBy: 1, at: new Date().toISOString(),
+  parts: [{ text, source: "text", bytes: Buffer.byteLength(text), sha256: sha256(text) }] });
+const sendBody = (m: string) => `Delivery check ${m}: deliberate message.`;
+
+describe("delivery harness: D18's attempt evidence (X-F1)", () => {
+  it("makes an automatic attempt with no evaluated occurrence NOT RUN, never a refusal, when nothing was observed", async () => {
+    const { ctx, verdict } = fakeCtx({ registerReminder: async () => "job", watchdogStatus: async () => ({ recentHistory: [] }), stopWatchdog: async () => {} });
+    const at = await attempt(ctx, "automatic", "DLV-a-1", { occurrenceTimeoutMs: 30, pollMs: 1 });
+    expect(at).toMatchObject({ json: null, missing: expect.stringMatching(/no occurrence/) });
+    const judged = await judge(ctx, { mode: "off", state: "dialog", sender: "automatic", marker: "DLV-a-1", attempt: at, expect: { type: "refuse", reasons: ["target_needs_input"] } });
+    expect(judged.notRun).toMatch(/no occurrence/);
+    expect(verdict.result).toBe("PASS"); // the cell then reads NOT RUN: see run()
+  });
+
+  it("fails a send with no JSON result when a forbidden effect was observed anyway (Q1)", async () => {
+    const paste = { timeNs: 5, argv: ["paste-buffer", "-t", "%0", "-b", "openrig_1", "-d", "-r", "-p"] };
+    const { ctx, verdict } = fakeCtx({ send: async () => ({ exit: 1, json: null, stderr: "daemon unreachable" }), paneWrites: () => [paste] });
+    const at = await attempt(ctx, "deliberate", "DLV-a-2");
+    expect(at).toMatchObject({ json: null, missing: expect.stringMatching(/no JSON result \(exit 1\): daemon unreachable/) });
+    const judged = await judge(ctx, { mode: "off", state: "dialog", sender: "deliberate", marker: "DLV-a-2", attempt: at, expect: { type: "refuse", reasons: ["target_needs_input"] } });
+    expect(judged.notRun).toBeNull();
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/no forbidden effect without a record/);
+  });
+
+  it("reads an occurrence's own evaluation as its result: sent, retained with its held ids, or refused before input", () => {
+    expect(occurrenceResult({ deliveryStatus: "ok" })).toEqual({ ok: true, sent: true });
+    expect(occurrenceResult({ deliveryStatus: "retained", evaluationNotes: { outboxIds: ["g1"] } })).toMatchObject({ outcome: "retained", sent: false, outboxIds: ["g1"] });
+    expect(occurrenceResult({ deliveryStatus: "failed", evaluationNotes: { deliveryInputPhase: "not_reached", deliveryCode: "target_needs_input" } }))
+      .toMatchObject({ ok: false, sent: false, reason: "target_needs_input" });
+  });
+
+  it("fails an automatic hold whose recorded reason isn't the expected one, and confirms nothing when no reason is recorded", async () => {
+    const held = (reason: string | null) => fakeCtx({ heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: "retained", body: "Reminder DLV-h-1: an automatic notice.",
+      ...(reason ? { delivery: { reason } } : {}) }] }) });
+    const at = { since: 0, source: "watchdog", json: occurrenceResult({ deliveryStatus: "retained", evaluationNotes: { outboxIds: ["g1"] } }) };
+    const args = { mode: "hold", state: "idle", sender: "automatic", marker: "DLV-h-1", attempt: at, expect: { type: "held", reasons: ["typing_guard_enabled"] } };
+    const wrong = held("draft_input_busy");
+    await judge(wrong.ctx, args);
+    expect(wrong.verdict.result).toBe("FAIL");
+    const right = held("typing_guard_enabled");
+    expect((await judge(right.ctx, args)).notRun).toBeNull();
+    expect(right.verdict.result).toBe("PASS");
+    const unknown = held(null);
+    expect((await judge(unknown.ctx, args)).notRun).toMatch(/reason isn't recorded/);
+    expect(unknown.verdict.result).toBe("PASS"); // the cell then reads NOT RUN, never PASS: see run()
+  });
+
+  it("retires only the held messages held-messages lists, never the occurrence that held them", async () => {
+    const { ctx } = fakeCtx({ heldMessages: async () => ({ items: [{ outboxId: "guard-send-1", deliveryState: "retained", body: "Reminder DLV-h-2: an automatic notice." }] }) });
+    const at = { since: 0, source: "watchdog", json: occurrenceResult({ deliveryStatus: "retained", evaluationNotes: { outboxIds: ["watchdog-occurrence-1", "guard-send-1"] } }) };
+    const judged = await judge(ctx, { mode: "hold", state: "idle", sender: "automatic", marker: "DLV-h-2", attempt: at, expect: { type: "held", reasons: null } });
+    expect(judged.heldIds).toEqual(["guard-send-1"]);
+  });
+});
+
+describe("delivery harness: D18's round-2 controls (Q2 to Q5)", () => {
+  const paste = (timeNs: number) => ({ timeNs, argv: ["paste-buffer", "-t", "%0", "-b", "openrig_1", "-d", "-r", "-p"] });
+  const enter = (timeNs: number) => ({ timeNs, argv: ["send-keys", "-t", "%0", "Enter"] });
+
+  it("doesn't type a fixture over an input box that wasn't verified clean (Q2)", async () => {
+    let typed = 0;
+    const residue = fakeCtx({ observe: async () => ({ screen: "x" }), composerOf: () => "From: a\nleft over", typeDraft: async () => { typed++; } });
+    await expect(enterState(residue.ctx, "draft", "x1", "")).rejects.toMatchObject({ notRun: true, message: expect.stringMatching(/wasn't verified clean before the draft fixture/) });
+    const unreadable = fakeCtx({ observe: async () => ({ screen: "x" }), composerOf: () => null, enterCopyMode: async () => { typed++; } });
+    await expect(enterState(unreadable.ctx, "copy_mode", "x2", "")).rejects.toMatchObject({ notRun: true });
+    expect(typed).toBe(0);
+  });
+
+  it("fails a held result whose returned outboxIds miss or misname its held messages (Q3)", async () => {
+    expect(idsCorrelate({ outboxIds: ["g1"] }, ["g1"], "send")).toBe(true);
+    expect(idsCorrelate({ outboxIds: ["watchdog-occurrence-1", "g1"] }, ["g1"], "watchdog")).toBe(true);
+    expect(idsCorrelate({ outboxIds: [] }, ["g1"], "send")).toBe(false);
+    expect(idsCorrelate({ outboxIds: ["g2"] }, ["g1"], "send")).toBe(false);
+    expect(idsCorrelate({ outboxIds: ["watchdog-occurrence-1", "g1"] }, ["g1"], "send")).toBe(false);
+    const { ctx, verdict } = fakeCtx({ heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: "retained", body: "Delivery check DLV-q3-1: deliberate message." }] }) });
+    const at = { since: 0, source: "send", json: { ok: true, outcome: "retained", sent: false, reason: "typing_guard_enabled", outboxIds: ["g2"] } };
+    await judge(ctx, { mode: "hold", state: "idle", sender: "deliberate", marker: "DLV-q3-1", attempt: at, expect: { type: "held", reasons: ["typing_guard_enabled"] } });
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/outboxIds name its held messages/);
+  });
+
+  it("fails a busy join whose paste and Enter came only after the busy answer was released (Q4)", async () => {
+    const m = "DLV-q4-1";
+    const join = (writes: unknown[]) => {
+      const f = fakeCtx({ paneWrites: () => writes });
+      f.turns[m] = [userTurn(1, sendBody(m))];
+      return f;
+    };
+    const args = { mode: "off", state: "busy", sender: "deliberate", marker: m, attempt: { since: 0, source: "send", json: { ok: true, sessionName: "s" } },
+      expect: { type: "deliver", joins: true }, entered: { releasedNs: 100 } };
+    const late = join([paste(150), enter(160)]);
+    await judge(late.ctx, args);
+    expect(late.verdict.toJSON().failed.join(" ")).toMatch(/written into the running turn/);
+    const during = join([paste(50), enter(60)]);
+    await judge(during.ctx, args);
+    expect(during.verdict.result).toBe("PASS");
+  });
+
+  it("sees a paste made during the no-arrival observation, and fails the refusal (Q5)", async () => {
+    let waited = false;
+    const { ctx, verdict } = fakeCtx({ sleep: async () => { waited = true; }, paneWrites: () => waited ? [paste(5)] : [] });
+    const at = { since: 0, source: "send", json: { ok: false, sent: false, reason: "target_needs_input", inputPhase: "not_reached" } };
+    await judge(ctx, { mode: "off", state: "dialog", sender: "deliberate", marker: "DLV-q5-1", attempt: at, expect: { type: "refuse", reasons: ["target_needs_input"] } });
+    expect(verdict.result).toBe("FAIL");
+  });
+});
+
+describe("delivery harness: D18's merge, body and count (X-F2)", () => {
+  const deliver = (expectType: string, entered = {}) => ({ mode: "off", state: "idle", sender: "deliberate", attempt: { since: 0, source: "send", json: { ok: true, sessionName: "s" } },
+    expect: { type: expectType }, entered });
+
+  it("fails a merge whose draft stayed unsubmitted in the input box while the message went alone", async () => {
+    const m = "DLV-m-1";
+    const { ctx, verdict, turns } = fakeCtx({ readComposer: async () => "PERSONDRAFTx" });
+    turns[m] = [userTurn(1, sendBody(m))];
+    await judge(ctx, { ...deliver("merge", { draft: "PERSONDRAFTx" }), marker: m });
+    expect(verdict.result).toBe("FAIL");
+    const merged = fakeCtx();
+    merged.turns[m] = [userTurn(1, `PERSONDRAFTx${sendBody(m)}`)];
+    await judge(merged.ctx, { ...deliver("merge", { draft: "PERSONDRAFTx" }), marker: m });
+    expect(merged.verdict.result).toBe("PASS");
+  });
+
+  it("fails a delivery whose marker arrived without the rest of its body", async () => {
+    const m = "DLV-m-2";
+    const { ctx, verdict, turns } = fakeCtx();
+    turns[m] = [userTurn(1, `Delivery check ${m}: delib`)];
+    await judge(ctx, { ...deliver("deliver"), marker: m });
+    expect(verdict.result).toBe("FAIL");
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/byte for byte/);
+  });
+
+  it("fails a delivery that arrives a second time after the first was seen", async () => {
+    const m = "DLV-m-3";
+    const { ctx, verdict } = fakeCtx({
+      waitDelivered: async () => ({ thread: "t", identified: true, turns: [userTurn(1, sendBody(m))] }),
+      deliveries: () => ({ thread: "t", identified: true, turns: [userTurn(1, sendBody(m)), userTurn(2, sendBody(m))] }),
+    });
+    await judge(ctx, { ...deliver("deliver"), marker: m });
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/delivered exactly once/);
+  });
+});
+
+describe("delivery harness: D18's held message kept through the change to off (X-F3)", () => {
+  const offResult = { pending: false, desiredMode: "off", effectiveMode: "off", desiredLevel: null, effectiveLevel: null };
+  const kept = { id: "g1", marker: "DLV-k-1", name: "draft · deliberate" };
+
+  it("fails when the change to off flushes only the active held message", async () => {
+    let flushed = false;
+    const { ctx, verdict } = fakeCtx({
+      settle: async () => true, retireHeld: async () => ({ exit: 1, state: null }),
+      setGuard: async () => { flushed = true; return offResult; },
+      heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: flushed ? "delivered" : "retained" }] }),
+      deliveries: (m: string) => ({ thread: "t", identified: true, turns: flushed && m === kept.marker ? [userTurn(1, sendBody(m))] : [] }),
+    });
+    expect(await modeChangeControl(ctx, { mode: "draft-aware", kept, watched: [kept.marker] })).toBeNull();
+    expect(verdict.result).toBe("FAIL");
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/still held, not flushed/);
+  });
+
+  it("is NOT RUN, judging nothing, when the change to off is still pending", async () => {
+    const { ctx, verdict } = fakeCtx({ settle: async () => true, setGuard: async () => ({ ...offResult, pending: true, effectiveMode: "draft-aware" }),
+      heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: "retained" }] }) });
+    expect(await modeChangeControl(ctx, { mode: "draft-aware", kept, watched: [kept.marker] })).toMatch(/wasn't observed effective/);
+    expect(verdict.checks).toEqual([]);
+  });
+
+  it("passes when the kept message stays held through an effective change and then retires", async () => {
+    const { ctx, verdict } = fakeCtx({ settle: async () => true, setGuard: async () => offResult, retireHeld: async () => ({ exit: 0, state: "retired" }),
+      heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: "retained" }] }) });
+    expect(await modeChangeControl(ctx, { mode: "draft-aware", kept, watched: [kept.marker] })).toBeNull();
+    expect(verdict.result).toBe("PASS");
+  });
+});
+
+describe("delivery harness: D04's state at each arm's attempt (X-F4)", () => {
+  const screenWith = (footer: string) => `● got it\n────────\n❯ \n────────\n  ⏵⏵ accept edits on\n  ${footer}`;
+  const armCtx = (screen: string, over: Record<string, unknown> = {}) => fakeCtx({
+    resize: async (w: number, h: number) => `${w}x${h}`, settle: async () => true, observe: async () => ({ screen }),
+    composerOf: (text: string) => text.includes("❯") ? text.split("\n").find((r) => r.startsWith("❯"))!.slice(1).trim() : null,
+    send: async () => { throw new Error("an arm whose state isn't established must not send"); }, ...over });
+  const clipped = { label: "80x24, clipped footer", size: [80, 24], footer: (rows: string[]) => rows.some((r) => r.endsWith("…")), footerText: "the width-clipped form" };
+
+  it("makes an arm NOT RUN, without sending or judging, when its footer isn't there at the attempt", async () => {
+    const { ctx, verdict } = armCtx(screenWith("? for shortcuts"));
+    verdict.check("an earlier arm failed", false, null);
+    expect(await runArm(ctx, clipped, "")).toMatch(/isn't the width-clipped form/);
+    expect(verdict.result).toBe("FAIL"); // the earlier failure stands
+    expect(verdict.checks.filter((c) => c.ok !== null)).toHaveLength(1);
+  });
+
+  it("fails an arm whose send left no record but whose paste was observed with nothing delivered (Q1)", async () => {
+    const paste = { timeNs: 5, argv: ["paste-buffer", "-t", "%0", "-b", "openrig_1", "-d", "-r", "-p"] };
+    const { ctx, verdict } = armCtx(screenWith("✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…"), {
+      mark: () => "DLV-d04-1", send: async () => ({ exit: 1, json: null, stderr: "lost" }), paneWrites: () => [paste], eraseDraft: async () => {} });
+    expect(await runArm(ctx, clipped, "")).toBeNull();
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/no forbidden effect without a record of the send/);
+  });
+
+  it("clears an earlier arm's residue first, and is NOT RUN if the input box still isn't empty", async () => {
+    let erased = 0;
+    const residue = `${screenWith("✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…")}`.replace("❯ ", "❯ [Pasted text #1 +6 lines]");
+    const { ctx } = armCtx(residue, { readComposer: async () => "[Pasted text #1 +6 lines]", eraseDraft: async () => { erased++; } });
+    expect(await runArm(ctx, clipped, "")).toMatch(/input box wasn't empty/);
+    expect(erased).toBe(1);
   });
 });
 

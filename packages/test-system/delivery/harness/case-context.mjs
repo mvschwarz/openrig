@@ -161,6 +161,12 @@ export function caseContext(cell, { caseId, kind, version }) {
       writeFileSync(join(cell.env.DELIVERY_INJECT_DIR, "arm.json"), JSON.stringify(spec));
       cell.record({ step: "arm-injection", caseId, ...spec });
     },
+    /** Resize the seat's window, as a person resizing their terminal would; returns the size tmux then reports. */
+    async resize(width, height) {
+      cell.record({ step: "person-resizes", caseId, width, height });
+      await cell.tmux(["resize-window", "-t", cell.session, "-x", String(width), "-y", String(height)]);
+      return (await cell.tmux(["display-message", "-p", "-t", cell.session, "#{window_width}x#{window_height}"])).trim();
+    },
     /** What the injection did, or null if no paste came to fire it. */
     injection() {
       const path = join(cell.env.DELIVERY_INJECT_DIR, "fired.json");
@@ -183,11 +189,27 @@ export function caseContext(cell, { caseId, kind, version }) {
       verdict.info("watchdog reminder registered", { jobId, intervalSeconds });
       return jobId;
     },
+    /** The job and its recent evaluations (`recentHistory`): what each occurrence did, with its delivery status, code
+     *  and reason. Null when it can't be read. */
+    async watchdogStatus(jobId) {
+      const out = await cell.rig(["watchdog", "status", jobId, "--json"], { allowFail: true });
+      try { return JSON.parse(out.stdout); } catch { return null; }
+    },
+    /** Let the stand-in answer turns held on `gate`. */
+    releaseGate(gate) { cell.record({ step: "release-gate", caseId, gate }); cell.standIn.release(gate); },
     async stopWatchdog(jobId) { await cell.rig(["watchdog", "stop", jobId, "--json"], { allowFail: true }); },
 
     async setGuard(mode) {
       const out = await cell.rig(["seat", "set-typing-guard", cell.session, "--mode", mode, "--reason", `delivery suite ${caseId}`, "--json"]);
       verdict.info(`typing guard set to ${mode}`, out.stdout.trim().slice(0, 400));
+      try { return JSON.parse(out.stdout); } catch { return null; }
+    },
+    /** Release one held message's quota; it delivers nothing. The route requires a sender, so the suite names itself. */
+    async retireHeld(outboxId) {
+      const out = await cell.rig(["seat", "retire-held-message", cell.session, outboxId, "--reason", `delivery suite ${caseId}`, "--json"], { allowFail: true, as: "delivery-suite@dlv" });
+      let state = null;
+      try { state = JSON.parse(out.stdout)?.entry?.deliveryState ?? null; } catch { state = null; }
+      return { exit: out.exit, state, stdout: out.stdout.trim().slice(0, 600) };
     },
     async setDraftDelivery(value) {
       await cell.rig(["config", "set", "transport.draft_delivery", value]);

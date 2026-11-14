@@ -114,6 +114,19 @@ describe("delivery suite stand-ins: the Claude Code Messages API", () => {
     expect(standIn.requests().map((r) => [r.path, r.served])).toEqual([["/v1/messages/count_tokens", "other"], ["/api/hello", "not-found"]]);
   });
 
+  it("answers a registry GET for a scripted package with a newer version whose tarball it doesn't serve", async () => {
+    const standIn = await start("messages", { script: { rules: [], registry: { "@anthropic-ai/claude-code": "2.1.999" } } });
+    const meta = await (await fetch(`${standIn.url}/@anthropic-ai%2fclaude-code`)).json();
+    expect(meta["dist-tags"]).toMatchObject({ latest: "2.1.999", stable: "2.1.999" });
+    const tarball = meta.versions["2.1.999"].dist.tarball;
+    expect(tarball).toBe(`${standIn.url}/@anthropic-ai/claude-code/-/claude-code-2.1.999.tgz`);
+    expect((await fetch(tarball)).status).toBe(404);
+    expect((await fetch(`${standIn.url}/left-pad`)).status).toBe(404);
+    expect(standIn.requests().map((r) => [r.path, r.served])).toEqual([
+      ["/@anthropic-ai%2fclaude-code", "registry"], ["/@anthropic-ai/claude-code/-/claude-code-2.1.999.tgz", "not-found"], ["/left-pad", "not-found"]]);
+    expect(() => loadScript({ registry: { "@anthropic-ai/claude-code": "latest" } })).toThrow(/registry/);
+  });
+
   it("reads the typed text and tool results out of the request's last turn", () => {
     expect(messagesTurnOf({ messages: [{ role: "user", content: "plain" }] })).toEqual({ kind: "user", text: "plain", parts: [{ text: "plain", source: "text" }] });
     expect(messagesTurnOf({ messages: [{ role: "assistant", content: "hi" }] })).toEqual({ kind: "other", text: "", parts: [] });
@@ -307,6 +320,21 @@ describe("delivery suite stand-ins: the script and the harness controls", () => 
     expect((await (await fetch(`${standIn.url}/_stand-in/requests`)).json())).toHaveLength(1);
     expect((await fetch(`${standIn.url}/_stand-in/release/turn-1`, { method: "POST" })).status).toBe(204);
     expect(events((await pending).text).at(-1)!.event).toBe("response.completed");
+  });
+
+  it("names a gate after the turn's marker, so releasing one turn leaves another held", async () => {
+    const standIn = await start("messages", { script: { rules: [{ gate: "{{marker}}", say: "late" }] } });
+    const done: string[] = [];
+    const first = post(`${standIn.url}/v1/messages`, userTurn("Busy turn DLV-D18-busy-a1")).then((r) => { done.push("a1"); return r; });
+    const second = post(`${standIn.url}/v1/messages`, userTurn("Busy turn DLV-D18-busy-b2")).then((r) => { done.push("b2"); return r; });
+    await new Promise((r) => setTimeout(r, 150));
+    standIn.release("DLV-D18-busy-a1");
+    await first;
+    await new Promise((r) => setTimeout(r, 150));
+    expect(done).toEqual(["a1"]);
+    standIn.release("DLV-D18-busy-b2");
+    await second;
+    expect(done).toEqual(["a1", "b2"]);
   });
 
   it("uses a rule only as many times as it says, then falls through", async () => {

@@ -25,7 +25,8 @@ export const DEFAULT_MARKER = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
  *       "on"?: "user" | "tool_result" | "any", // what the request's last turn must be (default "user")
  *       "when"?: "<regex source>",            // matched against that turn's text; absent matches any
  *       "times"?: <n>,                        // how many requests this rule answers; absent is unlimited
- *       "gate"?: "<name>",                    // hold the answer until the case releases this gate
+ *       "gate"?: "<name>",                    // hold the answer until the case releases this gate; {{marker}}
+ *                                             //   in the name becomes the turn's first marker, a gate per turn
  *       "delayMs"?: <n>,                      // wait before the first byte
  *       // then exactly one action:
  *       "say"?: "<text>",                     // a streamed text reply; {{marker}} is the turn's first marker
@@ -33,9 +34,13 @@ export const DEFAULT_MARKER = "DLV-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*";
  *       "tool"?: { "name": "<tool>", "input": { ... } },  // a tool call, in this program's own tool shape
  *       "error"?: { "status": <n>, "headers"?: { ... }, "body"?: <json> },  // an HTTP error answer
  *       "failInStream"?: { "type"?: "<type>", "code"?: "<code>", "message": "<text>" }  // fail after streaming starts
- *     } ] }
+ *     } ],
+ *     "registry"?: { "<package>": "<version>" } } // answer an npm registry's GET for each package's metadata
  *
  * The first rule that fits answers. With none, a user turn gets "ok {{marker}}" and a tool result gets "done".
+ *
+ * `registry` lets a program's own updater, pointed at the stand-in, see a newer version it can't install: the metadata
+ * names `<version>` as every dist-tag, and its tarball isn't served (a 404), so an install of it fails before it lands.
  */
 export function loadScript(source) {
   const script = typeof source === "string" ? JSON.parse(readFileSync(source, "utf8")) : (source ?? {});
@@ -51,9 +56,19 @@ export function loadScript(source) {
     if (rule.when === undefined) return null;
     try { return new RegExp(rule.when); } catch (error) { throw new Error(`stand-in script rule ${index}: when isn't a valid pattern (${error.message})`); }
   });
+  const registry = script.registry ?? {};
+  if (typeof registry !== "object" || Array.isArray(registry) || Object.values(registry).some((v) => typeof v !== "string" || !/^\d+\.\d+\.\d+/.test(v))) {
+    throw new Error("stand-in script: registry must map each package name to a version");
+  }
   let marker;
   try { marker = new RegExp(script.marker ?? DEFAULT_MARKER); } catch (error) { throw new Error(`stand-in script: marker isn't a valid pattern (${error.message})`); }
-  return { marker, rules, when };
+  return { marker, rules, when, registry };
+}
+
+/** An npm registry's metadata for `name` whose only version, `version`, has a tarball the stand-in doesn't serve. */
+function packument(name, version, origin) {
+  const tarball = `${origin}/${name}/-/${name.split("/").pop()}-${version}.tgz`;
+  return { name, "dist-tags": { latest: version, stable: version, next: version }, versions: { [version]: { name, version, dist: { tarball } } } };
 }
 
 /** The rule that answers a turn, consuming one of its `times`; null when none fits. */
@@ -187,6 +202,12 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     let body = null;
     let malformed = false;
     try { body = raw ? JSON.parse(raw) : null; } catch { malformed = true; }
+    const pkg = (req.method === "GET" || req.method === "HEAD") ? decodeURIComponent(url.pathname.slice(1)) : null;
+    if (pkg && Object.hasOwn(loaded.registry, pkg)) {
+      log({ ...entry, body: null, served: "registry" });
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(packument(pkg, loaded.registry[pkg], `http://${req.headers.host}`)));
+      return;
+    }
     if (req.method !== "POST" || url.pathname !== protocol.path) {
       const served = protocol.other?.(req, res, body, url) ?? false;
       log({ ...entry, body: body ?? (raw || null), served: served ? "other" : "not-found" });
@@ -207,7 +228,7 @@ export async function startStandIn(protocol, { script, logPath, port = 0, host =
     const marker = turn.text.match(loaded.marker)?.[0] ?? null;
     log({ ...entry, body, request: protocol.describe?.(body) ?? null, turn: describeTurn(turn, loaded.marker), userTurns: protocol.userTurns(body), marker, rule: picked.index,
       action: Object.keys(picked.rule).find((k) => ["say", "tool", "error", "failInStream"].includes(k)) });
-    if (picked.rule.gate) await waitGate(picked.rule.gate);
+    if (picked.rule.gate) await waitGate(picked.rule.gate.replaceAll("{{marker}}", marker ?? ""));
     if (picked.rule.delayMs) await sleep(picked.rule.delayMs);
     if (picked.rule.error) {
       res.writeHead(picked.rule.error.status, { "content-type": "application/json", ...(picked.rule.error.headers ?? {}) })

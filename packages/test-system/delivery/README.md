@@ -70,6 +70,48 @@ There are two cells, each with its own verdict: an ordinary `rig send` (the send
 
 This is the real TUI with timing injected at the wrapper boundary, after the guard's final check and before `paste-buffer`. Broker input on either side of the guard's final check, text already present before the read, and a real plain `tmux attach` client are separate controls, not covered here.
 
+### D18: every typing-guard mode
+
+`cases/d18.mjs` walks each mode through idle, draft, copy mode, busy and the model picker, each with a deliberate send, an urgent one and a watchdog reminder. It judges every attempt from OpenRig's own record of it, never from silence:
+
+- **A `rig send`** is judged by its JSON result.
+- **A reminder** is judged by its occurrence's entry in the watchdog's history (`rig watchdog status <job> --json`): sent, retained with its held ids, or refused with its input phase.
+- **No record** (a send with no JSON result, or no occurrence within 40 seconds) is NOT RUN, unless an effect the matrix forbids was observed anyway: a write to the pane or a delivery where nothing may arrive, or a paste that never arrived. That's FAIL.
+- **Pane writes** are read after the 3-second no-arrival observation, so a late paste is seen.
+- **A held result's** returned outboxIds must name exactly its held messages; a reminder's may also name its own occurrence.
+- **Each fixture** (draft, copy mode, busy, the picker) starts from an input box positively read as clean. Otherwise that combination is NOT RUN.
+
+**Reasons.** Where the matrix names a reason, the recorded one must match. Where the version records none, the combination is NOT RUN. OpenRig 0.7.12 records none for a reminder held by its mode or refused at a dialog.
+
+**Deliveries** are judged as the first cases' are: the complete body, exactly once after a final re-read. A merge must carry the draft in the very turn that carried the message.
+
+**Busy.** A busy turn's answer is held on a stand-in gate named after its marker until the attempt is over. So the attempt meets a running turn by construction, not by a longer wait. The input box read at that moment picks the matrix's row: empty (deliver) or unreadable (held, `draft_input_unknown`). A join must show OpenRig's paste and Enter before the gate opened: OpenRig wrote into the running turn instead of waiting for idle. That doesn't pin how the program then places the text in its conversation, whether in the same request or a following item.
+
+**Never replayed.** One held message stays active through an observed effective change to off (pending:false), and the cell watches 15 seconds for a replay before retiring it. Every other held message is retired after its combination, and a retire that fails is a failed check, since the later combinations rely on the freed quota.
+
+A refused reminder's occurrence stays owed and can retry after the cell ends. That retry is outside what a cell observes.
+
+### Claude's updater in D04-footer
+
+`cases/d04.mjs` needs Claude Code's own auto-update failure footer, so its Claude cell turns the updater on:
+- `DISABLE_AUTOUPDATER` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` are removed.
+- `NPM_CONFIG_REGISTRY` points at the stand-in, which serves a newer version whose tarball is a 404 (`registry` in the script).
+- `NPM_CONFIG_PREFIX` is inside the cell's home.
+
+**The boundary.** The containment is a loopback-only network namespace plus a directed HOME, config, cache and npm prefix. **It is not filesystem confinement.** The cell's `claude` is a link to the shared pinned install, which the same uid can write. A post-run hash of that install is an integrity check, not confinement.
+
+**The evidence is scoped to the exercised pin.** For Claude Code 2.1.322:
+- Its npm-global updater runs `npm install -g` with the cell's environment. npm's own log in the cell (`home/.npm/_logs`) shows it loading its global config from the cell's prefix, then the tarball's 404.
+- The shared install's package-tree digest was unchanged after the runs.
+
+**The limit.** Another version's updater could write elsewhere on the local filesystem. The network namespace stops only its fetches.
+
+### What a result is bound to
+
+A run's `RESULT.json` pins the programs, OpenRig, `expected.yaml` and the containment. From this version it also pins the suite itself: its git commit, whether the tree was clean, and a digest of `cases/`, `harness/` and `stand-ins/`. Those digests are in-band hashes of the suite code that ran. `clean` is `git status` of the delivery folder, so it covers that subtree only. A run made before that binds to a suite revision only by the worktree it ran from: that's testimony, not a record.
+
+The unit tests' result is evidence only when its JSON report is kept with the run (`vitest --reporter=json --outputFile=…`), named with the commit it ran on. The report carries no hash of the sources, so its binding to that commit is run-order testimony, unless the sources' hashes are recorded beside it.
+
 
 ## Stand-in model servers
 
@@ -114,11 +156,13 @@ This script is not the stub runtime's script (`packages/test-system/scenarios/sc
 
 Optional fields on any rule:
 
-- **`gate`** holds the answer until the case calls `POST /_stand-in/release/<gate>`, so a case controls exactly when a turn ends.
+- **`gate`** holds the answer until the case calls `POST /_stand-in/release/<gate>`, so a case controls exactly when a turn ends. `{{marker}}` in the name becomes the turn's first marker, so each turn can have a gate of its own.
 - **`delayMs`** waits before the answer starts.
 - **`times`** limits how many requests the rule answers.
 - **`on`** says which kind of turn the rule answers.
 - **`when`** matches the turn's text.
+
+At the script's top level, **`registry`** (`{ "<package>": "<version>" }`) answers an npm registry's metadata request for each package, with that version as every dist-tag and a tarball the stand-in doesn't serve: a program's updater sees a newer version it can't install.
 
 A script is checked when it loads: `rules` must be a list (an absent one means the fallback answers everything), every rule needs exactly one action, and every `when` and `marker` pattern must compile.
 
