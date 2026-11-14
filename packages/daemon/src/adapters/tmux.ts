@@ -852,6 +852,19 @@ export class TmuxAdapter {
     }
   }
 
+  /** When the tmux server holding a session started (`#{start_time}`, seconds since the epoch), or null when it can't
+   *  be read. Pane ids are unique for the life of a server and repeat only after it restarts. */
+  async serverStartTime(session: string): Promise<number | null> {
+    const target = exactTarget(session, "session");
+    try {
+      const out = (await this.run(["tmux", "display-message", "-p", "-t", target, "#{start_time}"],
+        `tmux display-message -p -t ${shellQuote(target)} '#{start_time}'`)).trim();
+      return /^\d+$/.test(out) ? Number(out) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Classified session probe (OPR.0.5.4.2): the three error classes tmux
    * produces are distinct answers, and the adapter must not decide for its
