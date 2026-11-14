@@ -9,6 +9,7 @@ import {
 } from "../domain/watchdog-jobs-repository.js";
 import { parseWatchdogSpec } from "../domain/watchdog-policy-engine.js";
 import { updateWatchdogJob } from "../domain/watchdog-job-update.js";
+import { requireSenderIdentity } from "./require-sender-identity.js";
 
 /**
  * Watchdog HTTP routes (PL-004 Phase C). Backs `rig watchdog` CLI verb.
@@ -97,6 +98,10 @@ export function watchdogRoutes(): Hono {
       return c.json({ error: "intervalSeconds is required" }, 400);
     }
     if (!body.registeredBySession) return c.json({ error: "registeredBySession is required" }, 400);
+    // P18 supersede: a wire identity (X-OpenRig-Session) decides the recorded sender; the body's
+    // registeredBySession is the claimed-era fallback for callers the header cannot name (shell CLI).
+    const sender = requireSenderIdentity(c, { verb: "watchdog register", bodyClaim: body.registeredBySession });
+    if (!sender.ok) return sender.response;
     try {
       const jobsRepo = getJobsRepo(c);
       const context = parseWatchdogSpec(body.specYaml).context;
@@ -146,7 +151,7 @@ export function watchdogRoutes(): Hono {
         intervalSeconds: body.intervalSeconds,
         activeWakeIntervalSeconds: body.activeWakeIntervalSeconds,
         scanIntervalSeconds: body.scanIntervalSeconds,
-        registeredBySession: body.registeredBySession,
+        registeredBySession: sender.session,
         watchedFilePath,
         thresholdBytes: isContextUsageThreshold
           ? (body.thresholdBytes ?? specThresholdBytes)

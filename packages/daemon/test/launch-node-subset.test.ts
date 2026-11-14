@@ -977,8 +977,30 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const freshLaunch = vi.fn(launchFresh);
       (orchestrator as any).freshLaunch = freshLaunch;
       const launch = () => orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId, adapters: { "claude-code": readyAdapter("claude-code") } as any });
-      return { rigId, nodeIds, freshLaunch, launchFresh, launch };
+      return { rigId, nodeIds, freshLaunch, launchFresh, launch, guard };
     }
+
+    it("a paused non-target doesn't refuse the launch: the target starts, and the paused seat keeps its mode", async () => {
+      const { nodeIds, launch, guard } = guarded();
+      await guard.set(nodeIds[1]!, true, "person", "typing a draft");
+      const result = await launch();
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(guard.preference(nodeIds[1]!)).toMatchObject({ desired: true, effective: true });
+    });
+
+    it("a draft-aware non-target with a draft doesn't refuse the launch: the target starts, and the draft and mode stay", async () => {
+      const { nodeIds, launch, guard } = guarded();
+      sessionRegistry.updateBinding(nodeIds[1]!, { tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
+      await guard.set(nodeIds[1]!, { mode: "draft-aware" }, "person", "keep my draft");
+      // Someone is typing in the non-target's pane: its input isn't absent.
+      guard.attachInputInspection(async () => null, async () => false);
+      const result = await launch();
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(guard.preference(nodeIds[1]!)).toMatchObject({ desiredMode: "draft-aware", effectiveMode: "draft-aware" });
+      expect(sessionRegistry.getBindingForNode(nodeIds[1]!)).toMatchObject({ tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
+      const touched = [...(tmux.sendKeys as any).mock.calls, ...(tmux.killSession as any).mock.calls].flat().map(String);
+      expect(touched.filter((arg) => arg.includes("dev-guard") || arg === "%9")).toEqual([]);
+    });
 
     it("starts: retiring the provisional shell rebinds the lease, so the persisted fresh launch owns the seat", async () => {
       const { rigId, nodeIds, freshLaunch, launch } = guarded();
