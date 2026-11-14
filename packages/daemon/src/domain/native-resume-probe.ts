@@ -110,9 +110,12 @@ export function buildCodexResumeDisplay(
   const profile = input.codexConfigProfile ?? null;
   const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
   const effectivePosture = input.resolvedPosture ?? "floor";
-  const envelope = input.codexPermissions ? codexMemberEnvelope(input.codexPermissions) : undefined;
+  const permissions = input.codexPermissions;
+  const hasFilesystemPolicy = permissions !== undefined && "filesystem" in permissions;
+  const envelope = permissions && !("filesystem" in permissions) ? codexMemberEnvelope(permissions) : undefined;
   // Derive displayed flags from the same three inputs adapters/codex-resume.ts uses (member permission envelope,
   // resolved posture with an empty env so ambient OPENRIG_YOLO never leaks, and operationalLaunchArg).
+  // A filesystem choice currently uses the posture fallback here; label that omission below.
   const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, {}, effectivePosture);
   const postureArg = posture + operationalLaunchArg(
     "codex",
@@ -162,6 +165,17 @@ export function buildCodexResumeDisplay(
     && recorded.axis === "sandbox"
     && recorded.state === "observed"
     && recorded.value !== null;
+
+  if (hasFilesystemPolicy) {
+    return {
+      command,
+      status: hasObservedRecord ? "recorded_uncertain" : "no_recorded_launch",
+      label: composeCodexResumeLabel(
+        `shown command uses posture fallback ${postureArg.trim()}; does not carry the agent's filesystem policy (managed resume carries it)`,
+        hasLaunchWrapper,
+      ),
+    };
+  }
 
   if (!envelope && input.emptySavedPosture) {
     const fallbackClause = `saved posture empty, showing fallback ${currentFlags} (managed resume posture unknown)`;

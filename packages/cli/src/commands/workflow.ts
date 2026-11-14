@@ -516,8 +516,15 @@ Examples:
 
   cmd
     .command("list")
-    .description("List workflow instances; optionally filter by status")
+    .description("List workflow instances with optional exact filters")
     .option("--status <s>", "Filter by status (active | waiting | completed | failed | aborted)")
+    .option("--project <id>", "Match the instance project")
+    .option("--mission <id>", "Match the instance mission")
+    .option("--slice <id>", "Match the instance slice")
+    .option("--rig <name>", "Match the bound rig")
+    .option("--name <workflow>", "Match the workflow name")
+    .option("--tag <tag>", "Match a scope tag; repeat to require all tags", (tag: string, previous: string[]) => [...previous, tag], [])
+    .option("--limit <n>", "Maximum matching instances (1-10000)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -525,10 +532,12 @@ Examples:
   $ rig workflow list --status active --json
   $ rig workflow list --status waiting | jq -r '.instances[].instanceId'
 `)
-    .action(async (opts: { status?: string; json?: boolean }) => {
+    .action(async (opts: { status?: string; project?: string; mission?: string; slice?: string; rig?: string; name?: string; tag: string[]; limit?: string; json?: boolean }) => {
       const deps = getDeps();
       const params = new URLSearchParams();
       if (opts.status) params.set("status", opts.status);
+      for (const field of ["project", "mission", "slice", "rig", "name", "limit"] as const) if (opts[field] !== undefined) params.set(field, opts[field]!);
+      for (const tag of opts.tag) params.append("tag", tag);
       const qs = params.toString();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/workflow/list${qs ? `?${qs}` : ""}`);

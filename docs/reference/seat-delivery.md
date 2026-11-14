@@ -24,8 +24,14 @@ a shell prompt holds them. Keep the default for a seat that may fall back to a s
 
 Runtime permissions are separate. Recipient and interactive-prompt checks still
 apply. `--raw` and `--force` do not bypass the typing guard. A deliberate
-`--dangerously-interact --reason` remains available at every interruption level
+`--dangerously-interact --reason` remains available in every mode, `hold` included,
 and uses the existing-input check below. Direct human input remains available.
+
+An ordinary `rig send` types the message inside its From/To envelope, whose first
+line is `From:`, so a message that starts with `/` stays literal text rather than
+running as the agent's slash command. `--raw` and `--dangerously-interact` type the
+exact text, with no envelope. Claude Code (2.1.322) turns a pasted tab into four
+spaces, so tabs reach a Claude Code seat as spaces.
 
 A message sent to a busy Codex seat joins its running turn and may redirect it.
 For separate work, create a queue row instead:

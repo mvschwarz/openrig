@@ -717,10 +717,14 @@ export class RestoreOrchestrator {
       ? allNodes.filter((node) => !targetNodes.some((target) => target.id === node.id))
       : [];
 
+    // Targets are written to, so they take lifecycle leases. A non-target is only recorded (a dead session marked
+    // detached, node.held), so it takes a custody lease in the same sorted pass: a paused or draft-aware seat isn't
+    // refused, and its pane, draft, mode and binding stay as they are.
     const guard = this.tmuxAdapter.deliveryGuard;
-    const guardedIds = [...targetNodes, ...nonTargetNodes].map(node => node.id);
-    if (guard && guardedIds.some(id => !guard.ownsLifecycle(id))) {
-      return guard.lifecycle(guardedIds, () => this.launchNodeTargets(rigId, logicalIds, opts));
+    const targetIds = targetNodes.map(node => node.id);
+    const recordedIds = nonTargetNodes.map(node => node.id);
+    if (guard && (targetIds.some(id => !guard.ownsLifecycle(id)) || recordedIds.some(id => !guard.ownsCustody(id)))) {
+      return guard.lifecycle(targetIds, () => this.launchNodeTargets(rigId, logicalIds, opts), recordedIds);
     }
 
     // Per-target tmux-liveness classification (runtime truth, fail-closed)

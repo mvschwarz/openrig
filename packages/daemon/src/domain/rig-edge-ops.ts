@@ -131,7 +131,7 @@ export function addRigEdge(
     if (LAUNCH_DEPENDENCY_KINDS.has(input.kind) && createsLaunchCycle(rig.edges, candidate)) {
       return {
         ok: false, code: "edge_cycle",
-        message: `a ${input.kind} edge from ${input.from} to ${input.to} would make launch order cycle, and launch and restore refuse a cycle`,
+        message: `a ${input.kind} edge from ${input.from} to ${input.to} would make launch order cycle; launch and restore require an acyclic order`,
       };
     }
     if (input.plan) return { ok: true, rigId: input.rigId, outcome: "would_add", edge };

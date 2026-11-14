@@ -525,6 +525,8 @@ export class WorkflowProjector {
         }
       }
 
+      if (resolvedNextOwner) assertBoundWorkflowTarget(resolvedNextOwner, this.queueRepo);
+
       // 2. R1 fix (guard blocker 1): close the current packet via Phase A's
       // QueueRepository.updateWithinTransaction. This validates closure
       // (Phase A hot-potato strict-rejection invariants), persists closure
@@ -964,8 +966,9 @@ export class WorkflowProjector {
       `evidence: ${evidenceRef}\n` +
       `resolve: diagnose via the trace above, then \`rig workflow resume ${instance.instanceId}${occurrenceId ? ` --occurrence ${occurrenceId}` : ""} [--decision <text>]\` re-drives from this step (completed steps never re-run).`;
     // Routed to the person, a failed workflow step is an approval whose wait costs now: alert them.
-    const createExceptionItem = (destination: string, tier: string, toPerson: boolean) =>
-      this.queueRepo.createWithinTransaction({
+    const createExceptionItem = (destination: string, tier: string, toPerson: boolean) => {
+      assertBoundWorkflowTarget(destination, this.queueRepo);
+      return this.queueRepo.createWithinTransaction({
         sourceSession: input.actorSession,
         identityProvenance: input.identityProvenance ?? null,
         destinationSession: destination,
@@ -978,19 +981,24 @@ export class WorkflowProjector {
         chainOfRecord: [input.currentPacketId],
         ...(toPerson ? { humanAlert: true } : {}),
       });
+    };
     let createdException;
-    try {
-      createdException = createExceptionItem(route.destinationSession, route.tier, route.humanRouted === true);
-    } catch (error) {
-      if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
-      // Only an unavailable agent rig invokes human selection. Other
-      // admission/storage failures propagate unchanged and roll back the
-      // close, retaining the failure+attention-item atomic contract.
-      createdException = createExceptionItem(
-        workflowHumanDestination(this.exceptionDial?.humanFallbackSeat),
-        "human-gate",
-        true,
-      );
+    if (!route.humanRouted && !this.queueRepo.acceptsDestination(route.destinationSession)) {
+      createdException = createExceptionItem(workflowHumanDestination(this.exceptionDial?.humanFallbackSeat), "human-gate", true);
+    } else {
+      try {
+        createdException = createExceptionItem(route.destinationSession, route.tier, route.humanRouted === true);
+      } catch (error) {
+        if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
+        // Only an unavailable agent rig invokes human selection. Other
+        // admission/storage failures propagate unchanged and roll back the
+        // close, retaining the failure+attention-item atomic contract.
+        createdException = createExceptionItem(
+          workflowHumanDestination(this.exceptionDial?.humanFallbackSeat),
+          "human-gate",
+          true,
+        );
+      }
     }
     registerEvent(createdException.persistedEvent);
     this.queueRepo.stageHandoffWake(createdException.qitemId, input.actorSession,
@@ -1106,6 +1114,7 @@ export class WorkflowProjector {
         if (!owner) {
           throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve next owner for dependency step "${step.id}"`, { instanceId: instance.instanceId, stepId: step.id });
         }
+        assertBoundWorkflowTarget(owner, this.queueRepo);
         return { step, gate, owner, packetId: newQitemId() };
       });
 
@@ -1485,6 +1494,17 @@ function resolveRoleOnBoundRig(
       candidates: result.disqualified,
     },
   );
+}
+
+/** Preserve the old topology gate for template-looking rig names. Registered
+ * literal names, including archived rigs, remain recordable as on main. */
+export function assertBoundWorkflowTarget(target: string, queue: Pick<QueueRepository, "acceptsDestination">): void {
+  const at = target.indexOf("@");
+  if (at >= 0 && target.slice(at + 1).includes("{rig}") && !queue.acceptsDestination(target)) {
+    throw new QueueRepositoryError("unknown_destination_rig",
+      `Workflow target ${target} has an unregistered rig name containing {rig}. Bind a rig with --rig <name>, or use a concrete registered destination.`,
+      { destinationSession: target });
+  }
 }
 
 /**

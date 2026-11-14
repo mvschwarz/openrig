@@ -1477,9 +1477,11 @@ function currentMenuKeyHint(lines: string[]): boolean {
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
 // of at most two rows: the `<model> · <~ or /path>` status line, optionally followed by one known hint row.
+// While a turn runs and the box holds text, Codex 0.167 draws its queue hint on that row instead ("tab to queue
+// message", or "tab to queue" when narrow, optionally followed by a mode label or the right-side context).
 const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
 const CODEX_NATIVE_STATUS_LINE = /^ {2}[^\s·][^·]* · [A-Za-z]:[\\/]/;
-const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$/;
+const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$|^\s*tab to queue(?: message)?(?:\s*$|\s{2,}| · )/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
@@ -3930,12 +3932,13 @@ export class SessionTransport {
 
   /** Wait on the existing classifier without occupying the input/lifecycle lease. With `singleObservation`, one
    *  observation within `timeoutMs` and no wait after it: a busy reading returns at once. */
-  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal, opts?: { singleObservation?: boolean; allowDraft?: true }) {
+  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal, opts?: { singleObservation?: boolean; allowDraft?: true; onObservation?: (activity: AgentActivity) => void }) {
     const meta = this.getSessionMeta(sessionName);
     return this.waitForIdle({ sessionName, runtime: meta.runtime, attachmentType: meta.attachmentType, timeoutMs, signal,
       binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
       ...(opts?.allowDraft ? { allowDraft: true } : {}),
-      ...(opts?.singleObservation ? { singleObservation: true } : {}) });
+      ...(opts?.singleObservation ? { singleObservation: true } : {}),
+      ...(opts?.onObservation ? { onObservation: opts.onObservation } : {}) });
   }
 
   private async waitForIdle(input: {
@@ -3954,6 +3957,8 @@ export class SessionTransport {
     allowUnknown?: boolean;
     /** One observation only: a reading that isn't idle ends the wait at once. */
     singleObservation?: boolean;
+    /** Called with each observation that completes in time, so a caller can report the seat's state while it waits. */
+    onObservation?: (activity: AgentActivity) => void;
     // Optional display value for timeout messages. The deadline always comes
     // from timeoutMs; when set, expiry reports this value instead, so a
     // re-wait running on a leftover budget still names the configured wait.
@@ -4024,6 +4029,7 @@ export class SessionTransport {
         return expire();
       }
       last = activity;
+      input.onObservation?.(activity);
       const waitedMs = input.timeoutMs - (deadline - Date.now());
 
       if (activity.state === "idle" || (input.allowUnknown && activity.state === "unknown") || (input.allowDraft && this.deliversOverDraft(activity))) {

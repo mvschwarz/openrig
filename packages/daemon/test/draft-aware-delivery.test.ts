@@ -321,6 +321,35 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect(f.writes).toEqual([]);
     expect(f.bodies.a).toBe("my real draft");
   });
+
+  // D18 (Codex 0.167.1 and 0.167.2, as banked): while a turn runs, an empty box keeps the shortcuts hint, and once the
+  // box holds text (our paste, or a person's draft) Codex draws its queue hint on that row instead.
+  const codexBusyViewport = (body: string): ComposerSnapshot => {
+    const rows = body.split("\n");
+    return { screen: ["› Busy turn", "", "• Working (0s • esc to interrupt)", "",
+      body ? `› ${rows[0]}` : "› \x1b[2mAsk Codex to do anything\x1b[0m", ...rows.slice(1).map(row => `  ${row}`), "",
+      "  GPT-6.1-Sol low · ~/project", body ? "  tab to queue message" : "  ← for agents · ? for shortcuts", ""].join("\n"),
+      cursor: { x: body ? 2 + stringWidth(rows.at(-1)!) : 2, y: 3 + rows.length, width: 80, height: 24 }, inMode: false };
+  };
+
+  it("delivers once to an empty input box of a busy Codex seat, under the queue hint its paste brings (D18)", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 24 });
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => codexBusyViewport(f.bodies.a ?? ""));
+    expect(await f.send("busy", "next work", f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["next work"]);
+    expect(f.writes).toHaveLength(2);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it("holds a person's draft under the busy queue hint before any write (D18)", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 24 });
+    f.bodies.a = "a person's draft";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => codexBusyViewport(f.bodies.a ?? ""));
+    expect(await f.send("busy-draft", "next work", f.options)).toMatchObject({ outcome: "retained", sent: false,
+      inputPhase: "not_reached", reason: "draft_input_busy" });
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("a person's draft");
+  });
 });
 
 describe("current draft-aware delivery through the real transport", () => {
@@ -1313,5 +1342,32 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
     f.advance();
     const sent = await f.send("attach-quiet", "Wake timer fired again.", { openrigNotice: true, verify: false });
     expect(sent).toMatchObject({ ok: true });
+  });
+
+  it("re-reads the input after the Enter's own waiting checks, so a draft typed while they wait is not submitted with the notice", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const typed = " PERSONDRAFT-k7";
+    const result = await f.guard.operation("worker@test", async () => {
+      expect(await f.tmux.sendText("worker@test", notice)).toMatchObject({ ok: true });
+      // A conditional Enter awaits its own checks (a conversation lookup); the person types after the pasted notice.
+      return f.tmux.sendKeys("worker@test", ["Enter"], undefined, { beforeKeys: async () => { f.bodies.a += typed; } });
+    });
+    expect(result).toMatchObject({ ok: false, code: "draft_input_changed" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(w => w.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(notice + typed);
+  });
+
+  it("still presses the Enter when the input stays as pasted while the Enter's checks wait", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const result = await f.guard.operation("worker@test", async () => {
+      expect(await f.tmux.sendText("worker@test", notice)).toMatchObject({ ok: true });
+      return f.tmux.sendKeys("worker@test", ["Enter"], undefined, { beforeKeys: async () => {} });
+    });
+    expect(result).toEqual({ ok: true });
+    expect(f.submissions).toEqual([notice]);
+    expect(f.bodies.a).toBe("");
   });
 });

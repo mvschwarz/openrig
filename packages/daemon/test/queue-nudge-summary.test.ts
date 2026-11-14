@@ -118,7 +118,20 @@ describe("queue wake nudge carries the stored summary", () => {
     } finally { await settle(); h.db.close(); }
   });
 
-  it.each(["human@kernel", "human@host"])("a wake from %s offers a reply accepted by the real queue writer", async (sender) => {
+  it("a wake from human@host says that address names no person, and offers no reply command", async () => {
+    const h = makeHarness();
+    try {
+      const row = await h.repo.create({ sourceSession: "human@host", destinationSession: "dev@rig", body: "Please check the build." });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      const envelope = h.calls[0]!.text;
+      expect(envelope).toContain("From: human@host\nTo: dev@rig\n");
+      expect(envelopeBody(envelope)).toEqual([`Queue handoff: ${row.qitemId} - check your queue.`]);
+      expect(envelope.split("\n").at(-1)).toBe("↩ human@host names no person: a reply there asks no one. It waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To ask the person back, use their registered address (rig gateway human list lists who's registered).");
+      expect(envelope).not.toContain("rig queue create");
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it.each(["human@kernel"])("a wake from %s offers a reply accepted by the real queue writer", async (sender) => {
     const h = makeHarness();
     try {
       const row = await h.repo.create({ sourceSession: sender, destinationSession: "dev@rig", body: "Please check the build." });
