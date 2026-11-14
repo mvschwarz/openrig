@@ -446,16 +446,45 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
 
     expect(canonical.destinationSession).toBe("human-operator@kernel");
     expect(generic.destinationSession).toBe("human@host");
-    await expect(
-      deps.queueRepo.create({
-        sourceSession: "dev-qa@implementation-pair",
-        destinationSession: "driver@phantom-rig",
-        body: "must still reject phantom rigs",
-        nudge: false,
-      }),
-    ).rejects.toThrow(/unknown rig/);
+    const missing = await deps.queueRepo.create({
+      sourceSession: "dev-qa@implementation-pair",
+      destinationSession: "driver@phantom-rig",
+      body: "keep work addressed to a missing rig",
+      nudge: false,
+    });
+    expect(deps.queueRepo.getById(missing.qitemId)?.destinationSession).toBe("driver@phantom-rig");
+    expect(deps.queueRepo.destinationAdvisory(missing.destinationSession)?.status).toBe("missing");
 
     db.close();
+  });
+
+  it("queue status checks pinned recorded/current addresses before absent or archived suffix rigs without registry reads", async () => {
+    const daemon = await createDaemon({ cmuxFactory: async () => { throw Object.assign(new Error("no socket"), { code: "ENOENT" }); }, tmuxExec: async () => "" });
+    const { db, deps } = daemon;
+    try {
+      const owner = deps.rigRepo.createRig("pinned-owner");
+      const archived = deps.rigRepo.createRig("archived-suffix");
+      db.prepare("UPDATE rigs SET archived_at = ? WHERE id = ?").run("2026-01-01T00:00:00Z", archived.id);
+      const node = deps.rigRepo.addNode(owner.id, "worker.pinned", { runtime: null });
+      deps.sessionRegistry.registerSession(node.id, "pinned@missing-suffix");
+      deps.sessionRegistry.updateBinding(node.id, { tmuxSession: "pinned@archived-suffix" });
+      const hosted = vi.spyOn(deps.queueRepo, "isHostedMember");
+      const fileReads = vi.spyOn(fs, "readFileSync");
+      for (const destination of ["pinned@missing-suffix", "pinned@archived-suffix", "worker-pinned@pinned-owner"]) {
+        expect(deps.queueRepo.destinationAdvisory(destination), destination).toBeNull();
+      }
+      expect(hosted).not.toHaveBeenCalled();
+      expect(fileReads).not.toHaveBeenCalled();
+      fileReads.mockRestore(); hosted.mockRestore();
+      expect(deps.queueRepo.destinationAdvisory("absent@missing-suffix")?.status).toBe("missing");
+      expect(deps.queueRepo.destinationAdvisory("absent@archived-suffix")?.status).toBe("archived");
+      const other = deps.rigRepo.addNode(owner.id, "worker.other", { runtime: null });
+      deps.sessionRegistry.registerSession(other.id, "pinned@missing-suffix");
+      expect(deps.queueRepo.destinationAdvisory("pinned@missing-suffix")?.status).toBe("unknown");
+    } finally {
+      vi.restoreAllMocks(); daemon.eventLoopMonitor.stop(); daemon.contextMonitor.stop();
+      deps.seatActivityService?.stop(); db.close();
+    }
   });
 
   it("queue admission advises on missing local seats while preserving destinations", async () => {
@@ -490,7 +519,7 @@ console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
         transitions: (db.prepare("SELECT COUNT(*) count FROM queue_transitions").get() as { count: number }).count,
       });
 
-      for (const destination of ["product-ba@unknown", "bare-seat"]) {
+      for (const destination of ["bare-seat"]) {
         const before = counts();
         const response = await create(destination);
         expect(response.status).toBe(400);

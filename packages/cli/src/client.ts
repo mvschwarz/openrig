@@ -52,15 +52,18 @@ export function senderIdentityHeaders(originSelfHostId?: string, sessionName?: s
   };
 }
 
-/** Construct registered remote clients with the origin derived from this instance's durable store. */
+/** Construct registered remote clients with the origin derived from this instance's durable store, and the seat that made
+ *  the call when it isn't the process env's (the MCP host router builds one per caller). */
 export function remoteDaemonClient(
   clientFactory: (baseUrl: string) => DaemonClient,
   url: string,
   originSelfHostId?: string,
+  sessionName?: string,
 ): DaemonClient {
   const client = clientFactory(url);
   client.originSelfHostId = originSelfHostId;
   client.remoteTarget = true;
+  if (sessionName) client.bindSender(sessionName);
   return client;
 }
 
@@ -193,7 +196,7 @@ export class DaemonClient {
   remoteTarget = false;
   private identity?: Promise<Record<string, string>>;
   private originUnknown = false;
-  private readonly sessionName?: string;
+  private sessionName?: string;
   private readonly principal?: DaemonClientOptions["principal"];
 
   /** Isolated terminal tools require this home's durable identity, even on loopback. */
@@ -281,6 +284,13 @@ export class DaemonClient {
     this.identity ??= this.identityHeaders();
     const headers = await this.identity;
     return { session: headers[SENDER_IDENTITY_HEADER], originUnknown: headers["X-OpenRig-Origin-Unknown"] === "true" };
+  }
+
+  /** Bind this client to the seat that made the call, for one built before that seat was known (the MCP host router builds a
+   *  registered remote host's client from its URL, then binds the caller). Before the first request, so no identity is cached. */
+  bindSender(sessionName: string): void {
+    this.sessionName = sessionName;
+    this.identity = undefined;
   }
 
   constructor(baseUrl?: string, options?: DaemonClientOptions) {

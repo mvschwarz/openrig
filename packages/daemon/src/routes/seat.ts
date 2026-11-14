@@ -349,6 +349,25 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
   return c.json(result, 404);
 });
 
+// #2985 / #2861: adopt the running successor of a handover that failed after launching it, keeping its conversation.
+seatRoutes.post("/handover/:seatRef/recover", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const service = new SeatHandoverService(handoverDeps(c));
+  const result = await service.recover({
+    seatRef: c.req.param("seatRef")!,
+    reason: typeof body["reason"] === "string" ? body["reason"] : null,
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  if (result.ok) return c.json("plan" in result ? result.plan : result.result);
+  if (result.code === "missing_reason" || result.code === "seat_ref_required") return c.json(result, 400);
+  if (result.code === "no_handover_to_recover" || result.code === "discovered_not_found") return c.json(result, 404);
+  if (result.code === "recover_runtime_unsupported") return c.json(result, 501);
+  if (result.code === "tmux_probe_failed") return c.json(result, 502);
+  if (result.code === "handover_commit_failed") return c.json(result, 500);
+  if (result.code === "seat_not_found") return c.json(result, 404);
+  return c.json(result, 409);
+});
+
 // S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model / stop / clean.
 // One service, one resolution path, one status mapping shared by all three verbs.
 export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifecycleService {

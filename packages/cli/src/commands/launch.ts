@@ -26,6 +26,8 @@ type LaunchResponse = {
   snapshotSelection?: { snapshotId: string; kind: string; createdAt: string; ageMs: number; mode: "explicit" | "automatic"; rationale: string; newerUsableAlternative: unknown };
   nonTargetEffects?: { mode: "unchanged" | "detach_and_hold"; reason: string | null; affected: unknown[] };
   planOnly?: boolean;
+  // A `--seats` name more than one seat answers to: not launched, with the seats it could mean.
+  ambiguousSeats?: Array<{ seat: string; candidates: Array<{ logicalId: string; sessionName: string | null }>; message: string }>;
   // OPR.0.4.3.28 correction — non-blocking launch warnings (e.g. liveness_probe_unknown: launched
   // despite a failed tmux liveness probe). Surfaced as human output WITHOUT a non-zero exit.
   warnings?: string[];
@@ -314,6 +316,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
           console.error(JSON.stringify(res.data, null, 2));
           return;
         }
+        const printAmbiguous = () => { for (const seat of res.data.ambiguousSeats ?? []) console.error(seat.message); };
         if (opts.plan && res.data.planOnly) {
           console.log("Plan only; no changes made.");
           printSnapshotSelection(res.data.snapshotSelection);
@@ -322,11 +325,13 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
             const affected = node as { logicalId?: string; reason?: string };
             console.log(`  ${affected.logicalId ?? "unknown"}: ${affected.reason ?? "unspecified"}`);
           }
+          printAmbiguous();
           return;
         }
         // Hard failure (no per-seat result to render — e.g. rig_not_found): error + exit.
         if (!res.data.launched && !res.data.held && !res.data.alreadyRunning) {
           console.error(res.data.error ?? res.data.message ?? `Launch failed (HTTP ${res.status})`);
+          printAmbiguous();
           process.exitCode = 1;
           return;
         }
@@ -354,6 +359,10 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         }
         if ((res.data as Record<string, unknown>).unmatchedIds && ((res.data as Record<string, unknown>).unmatchedIds as string[]).length > 0) {
           console.error(`Unmatched seats (not found): ${((res.data as Record<string, unknown>).unmatchedIds as string[]).join(", ")}`);
+          process.exitCode = 1;
+        }
+        if (res.data.ambiguousSeats?.length) {
+          printAmbiguous();
           process.exitCode = 1;
         }
         return;

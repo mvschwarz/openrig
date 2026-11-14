@@ -5,6 +5,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { openHandoverAttempt } from "../src/domain/seat-handover-attempts.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
@@ -699,6 +700,22 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
     expect(liveSessionId(node.id)).toBe(sessionId);
     expect(discoveryRepo.getDiscoveredSession(row.id)?.claimedNodeId).toBe(other.id);
+  });
+
+  it("a Codex seat's finalization refusal records no attempt and offers no --recover, which adopts Claude only (#2861 item 2)", async () => {
+    const { rig, node } = seedSeat();
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex" });
+    const exited = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+    sessionRegistry.updateStatus(exited.id, "exited");
+    const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    discoveryRepo.markClaimed(row.id, other.id);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.guidance).not.toContain("--recover");
+    expect(openHandoverAttempt(db, node.id)).toBeNull();
   });
 
   it("discovered-source adoption does not reclaim an archived owner's pane (#2861)", async () => {
