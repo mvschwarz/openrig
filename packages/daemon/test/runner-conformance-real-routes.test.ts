@@ -2,7 +2,7 @@
 // routes, served over HTTP, instead of the check's stand-in: so the wire the check accepts is the wire OpenRig speaks.
 // A person's click reaches the agent, OpenRig's permit is delivered, the seat's opt-in refusal is held, and an earlier
 // occupant's request is cancelled, never asked. No model, tmux or Slack is involved.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -397,8 +397,9 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
   }, 40000);
 
   it.each([
-    ["pi", "ack"], ["pi", "result"], ["dsh", "ack"], ["dsh", "result"],
-  ] as const)("%s retains custody while binding is unverified at %s and recovers without replay", async (kind, phase) => {
+    ["pi", "ack", "binding"], ["pi", "result", "binding"], ["dsh", "ack", "binding"], ["dsh", "result", "binding"],
+    ["pi", "result", "failed read"], ["dsh", "result", "failed read"],
+  ] as const)("%s retains custody through %s %s uncertainty and recovers without replay", async (kind, phase, cause) => {
     const h = await nativeProcess(kind);
     const { SeatIdentityStore } = await import("../src/domain/seat-identity-store.js");
     const identities = new SeatIdentityStore(h.f.db);
@@ -407,15 +408,33 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
         observedPanePid: 101, observedCommand: "node", matchedLayer: null } };
     identities.upsert(evidence);
     new SessionRegistry(h.f.db).registerClaimedSession(h.f.node.id, "dev@channel", "adopt");
-    const loseEvidence = () => h.f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id=?").run(h.f.node.id);
+    let restoreStanding: (() => void) | undefined;
+    cleanups.push(() => restoreStanding?.());
+    const loseEvidence = () => {
+      if (cause === "binding") h.f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id=?").run(h.f.node.id);
+      else {
+        const standing = h.f.grants.standing.bind(h.f.grants);
+        const fault = vi.spyOn(h.f.grants, "standing").mockImplementation(id => {
+          const prepare = h.f.db.prepare.bind(h.f.db);
+          const read = vi.spyOn(h.f.db, "prepare").mockImplementation(((sql: string) => {
+            if (sql === "PRAGMA table_info(activity_grants)") throw new Error("standing read unavailable");
+            return prepare(sql);
+          }) as typeof h.f.db.prepare);
+          try { return standing(id); } finally { read.mockRestore(); }
+        });
+        restoreStanding = () => fault.mockRestore();
+      }
+    };
+    const recoverEvidence = () => { restoreStanding?.(); restoreStanding = undefined; identities.upsert(evidence); };
     // Before an offer, unavailable binding evidence cannot authenticate hello or consume custody.
     loseEvidence(); h.start();
     expect(await waitFor(() => h.hellos >= 2), h.output).toBe(true);
-    expect(h.f.grants.standing(h.f.grant.grantId)).toBe("unverified");
+    if (cause === "binding") expect(h.f.grants.standing(h.f.grant.grantId)).toBe("unverified");
+    else expect(() => h.f.grants.standing(h.f.grant.grantId)).toThrow("standing read unavailable");
     expect(h.f.grants.get(h.f.grant.grantId)?.revokedAt).toBeNull();
     expect(h.f.outbox.runnerReceipts(h.f.node.id, h.f.grant.runId!)).toEqual([]);
     expect(h.prompts()).toEqual([]);
-    identities.upsert(evidence); await h.ready();
+    recoverEvidence(); await h.ready();
     h.fault = { type: phase, commit: false, hits: 0 };
     const id = `unverified-${phase}`;
     await h.f.transport.sendNativeWake("dev@channel", id, id, "sender");
@@ -435,7 +454,7 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
     expect(h.f.outbox.runnerReceipt(id)).toEqual(saved);
     expect(h.f.grants.get(h.f.grant.grantId)?.revokedAt).toBeNull();
     expect(h.prompts().filter(text => text === id)).toHaveLength(phase === "ack" ? 0 : 1);
-    identities.upsert(evidence); await h.ready();
+    recoverEvidence(); await h.ready();
     expect(await waitFor(() => h.f.outbox.runnerReceipt(id)?.stage === "completed"), h.output).toBe(true);
     expect(h.f.outbox.runnerReceipt(id)?.result).toMatchObject({ completion: "completed", answer: `answer ${id}` });
     await h.f.transport.sendNativeWake("dev@channel", id, id, "sender");
@@ -540,7 +559,7 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
     console.log(JSON.stringify({ nativeProgram: kind, version, executable, provider: "local fake Anthropic messages; no external network", prompts: requests.map(request => request.text) }));
   }, 45000);
 
-  it("refuses an unverified channel binding retryably without changing custody, then recovers", async () => {
+  it.each(["binding", "failed read"])("refuses %s channel uncertainty retryably without changing custody, then recovers", async cause => {
     const f = await fixture();
     const { SeatIdentityStore } = await import("../src/domain/seat-identity-store.js");
     const identities = new SeatIdentityStore(f.db);
@@ -551,17 +570,30 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
     f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
     f.admit("unverified"); f.channel.frames(f.grant.token, 0);
     const saved = f.outbox.runnerReceipt("unverified");
-    f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id=?").run(f.node.id);
+    const standing = f.grants.standing.bind(f.grants);
+    const fault = cause === "failed read" ? vi.spyOn(f.grants, "standing").mockImplementation(id => {
+      const prepare = f.db.prepare.bind(f.db);
+      const read = vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+        if (sql === "PRAGMA table_info(activity_grants)") throw new Error("standing read unavailable");
+        return prepare(sql);
+      }) as typeof f.db.prepare);
+      try { return standing(id); } finally { read.mockRestore(); }
+    }) : null;
+    if (!fault) f.db.prepare("DELETE FROM seat_identity_verdicts WHERE node_id=?").run(f.node.id);
     const headers = { authorization: `Bearer ${f.grant.token}`, "content-type": "application/json" };
     const ack = { type: "ack", runId: f.grant.runId, requestId: "unverified", sequence: 1, state: "accepted" };
-    for (const body of [f.hello, ack, undefined]) {
-      const response = await f.app.request("/api/activity/runner-channel", body ? { method: "POST", headers, body: JSON.stringify(body) } : { headers });
-      expect(response.status).toBe(409);
-      expect(await response.json()).toMatchObject({ code: "runner_grant_unverified", retryable: true });
-      expect(f.outbox.runnerReceipt("unverified")).toEqual(saved);
-      expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
-    }
+    try {
+      expect(f.channel.capable(f.node.id, "wake")).toBe(false);
+      for (const body of [f.hello, ack, undefined]) {
+        const response = await f.app.request("/api/activity/runner-channel", body ? { method: "POST", headers, body: JSON.stringify(body) } : { headers });
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "runner_grant_unverified", retryable: true });
+        expect(f.outbox.runnerReceipt("unverified")).toEqual(saved);
+        expect(f.grants.get(f.grant.grantId)?.revokedAt).toBeNull();
+      }
+    } finally { fault?.mockRestore(); }
     identities.upsert(evidence);
+    expect(f.channel.capable(f.node.id, "wake")).toBe(true);
     expect(f.grants.standing(f.grant.grantId)).toBe("current");
     expect((await f.app.request("/api/activity/runner-channel", { method: "POST", headers, body: JSON.stringify(ack) })).status).toBe(200);
     expect(f.outbox.runnerReceipt("unverified")?.stage).toBe("accepted");

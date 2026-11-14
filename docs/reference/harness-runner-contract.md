@@ -333,6 +333,11 @@ Every seat still defaults to `typed`. When a capable runner is connected, `rig s
 
 A request frame contains `{version:1, runId, requestId, sequence, kind, payload}`. Input payload is `{text}`; wake payload is `{question}`. The request ID is its existing outbox operation ID. A combined send retains one primary ID plus its ordered source-member links. Sequence is run-local and ordered; an SSE cursor is not acceptance. The live receiver retains every immutable ID/payload and result for its process lifetime, acknowledges custody by POST, and waits for Core's durable acceptance response before writing the native prompt. It retries saved HTTP receipts after lost replies; it never repeats a native write to repair HTTP delivery. Restarting a runner creates a new run, not a persistent receiver command journal.
 
+An unreadable binding, including a failed grant-standing read, returns retryable `409 runner_grant_unverified`.
+It does not revoke authority, clear the live receiver map or discard retained receipts. The existing consumers retry
+those saved HTTP posts after verification recovers; they do not repeat native work. Positive stale/revoked authority
+keeps its existing refusal. A new native request still requires a currently capable runner.
+
 After native protocol submission/acceptance the runner posts `submitted`; native delivery is not model-work completion. A terminal result whose submission could not be established may instead carry `{completion:"unknown", submissionUnknown:true}` from accepted custody. Core retains that terminal uncertainty as outbox `indeterminate`, never `delivered`; it cannot include a successful wake answer or an acceptance claim. Known pre-effect native rejection is separate. Erased native content remains an unavailable opaque custody tombstone, not an executable request.
 
 `POST /api/seat/command/:seatRef` accepts `{requestId,type:"wake",question}` and returns its saved custody stage. `GET` at the same resource with `?requestId=...` reads its result. `rig ask <rig> <question> --wake <seat>` uses this live path only when the seat explicitly selects `native`; unavailable native capability is a refusal. Historical Claude/Codex one-shot wakes and raw session tokens retain their existing semantics.

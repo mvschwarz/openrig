@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { migrationsForFullTestDb, migrationsForFullTestDbExclusions } from "./helpers/test-app.js";
 import { assertExplicitSubsetOfAllMigrations } from "./helpers/migration-subset-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { nodeInputRouteSchema } from "../src/db/migrations/171_node_input_route.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { readSeatLaunchWrapper } from "../src/domain/launch-wrapper.js";
@@ -113,7 +114,8 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
 it("upgrades existing nodes to typed input and constrains explicit native selection", () => {
   const db = new Database(":memory:");
   try {
-    migrate(db, ALL_MIGRATIONS.filter(m => !m.name.startsWith("164_")));
+    migrate(db, ALL_MIGRATIONS.filter(m => m.name !== nodeInputRouteSchema.name));
+    expect((db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string }>).some(column => column.name === "input_route")).toBe(false);
     const repo = new RigRepository(db), rig = repo.createRig("input-route");
     const node = repo.addNode(rig.id, "dev", { runtime: "pi" });
     migrate(db, ALL_MIGRATIONS);

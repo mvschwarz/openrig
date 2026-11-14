@@ -23,17 +23,22 @@ export class RunnerChannel {
   constructor(private readonly grants: ActivityGrantStore, readonly outbox: OutboxHandler,
     private readonly implementedKinds: ReadonlySet<string> = new Set(["managed-pi", "preset"])) {}
 
+  /** A failed standing read cannot establish replacement or revoke retained custody. */
+  private standing(grantId: string): ReturnType<ActivityGrantStore["standing"]> {
+    try { return this.grants.standing(grantId); } catch { return "unverified"; }
+  }
+
   authenticate(token: string | undefined): ActivityGrant & { runId: string } {
     const grant = this.grants.authenticate(token);
     if (!grant?.runId) throw new RunnerChannelError("runner_grant_required", "A bound runner grant is required.", 401);
-    const standing = this.grants.standing(grant.grantId);
+    const standing = this.standing(grant.grantId);
     if (standing !== "current") throw new RunnerChannelError(`runner_grant_${standing}`, `Runner grant is ${standing}.`, standing === "revoked" ? 401 : 409);
     return grant as ActivityGrant & { runId: string };
   }
 
   capable(nodeId: string, kind: "input" | "wake"): boolean {
     const grant = this.grants.activeForNode(nodeId);
-    return !!grant?.runId && this.grants.standing(grant.grantId) === "current" && (this.connections.get(grant.grantId) ?? 0) > 0 && this.live.get(grant.grantId)?.[kind] === true
+    return !!grant?.runId && this.standing(grant.grantId) === "current" && (this.connections.get(grant.grantId) ?? 0) > 0 && this.live.get(grant.grantId)?.[kind] === true
       && !this.outbox.runnerReceipts(nodeId, grant.runId).some(receipt => receipt.reconciliation);
   }
 
