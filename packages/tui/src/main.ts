@@ -389,8 +389,8 @@ async function run(): Promise<void> {
         } else {
           void refreshCrashCart();
           void live?.refresh();
-          // Daemon only: no seat was started. Start and return lists the rigs, the kernel first, to bring one back.
-          if (startup) view.dispatch({ type: "notice", message: "Daemon started; this start didn't start any seats. Press S to choose seats to bring back, the kernel's first." });
+          // Daemon only: no seat was started. Start and return lists the rigs, with a kernel first if there is one, to bring one back.
+          if (startup) view.dispatch({ type: "notice", message: "Daemon started; this start didn't start any seats. Press S to choose seats to bring back; a kernel, if you have one, is listed first." });
         }
       });
       return;
