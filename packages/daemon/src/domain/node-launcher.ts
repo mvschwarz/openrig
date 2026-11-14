@@ -94,6 +94,13 @@ export const NOTHING_STOPPED_LAUNCH_CODES: ReadonlySet<string> = new Set([
   "pane_not_found",
 ]);
 
+/** For a new terminal: the failures that leave none, the refusals before its creation and tmux reporting that none was
+ *  created. An unconfirmed creation, a failed write and every later failure stay unknown. */
+export const NO_TERMINAL_LAUNCH_CODES: ReadonlySet<string> = new Set([
+  "node_not_found", "selection_changed", "already_bound", "invalid_session_name", "address_conflict",
+  "session_not_created",
+]);
+
 export class NodeLauncher {
   readonly db: Database.Database;
   private rigRepo: RigRepository;

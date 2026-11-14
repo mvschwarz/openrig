@@ -97,8 +97,9 @@ function sourceFile(file: string): { state: State; bytes: string | null } {
   catch (error) { return { state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unavailable", bytes: null }; }
 }
 /** The keys whose guidance below says a daemon restart or startup applies them. The browser test ties this to that text. */
-const DAEMON_RESTART_KEYS = new Set(["terminal.tmux_server", "retention.enabled"]);
+const DAEMON_RESTART_KEYS = new Set(["terminal.tmux_server", "retention.enabled", "daemon.seat_poll_interval_ms"]);
 function application(key: string): string {
+  if (key === "daemon.seat_poll_interval_ms") return "Read once at daemon startup; restart the daemon to apply.";
   if (key === "terminal.tmux_server") return "Selected at daemon restart; surviving sessions keep their previous server until deliberately stopped. See terminal status for the effective choice.";
   if (key === "ui.terminal.max_live_terminals") return "Legacy web client; unset resolver value, consumer fallback 2. No TUI limit implied.";
   if (key === "workflow.exception_routing") return "Unset leaves routing to workflow/class/host precedence; running route unverified.";

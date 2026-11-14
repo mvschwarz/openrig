@@ -3,8 +3,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { claudePostureFlag, codexPostureArg } from "../adapters/yolo-mode.js";
 import { operationalLaunchArg } from "../adapters/kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "./claude-mcp.js";
-import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
-import { codexMemberEnvelope, type CodexMemberPermissions } from "./codex-member-permissions.js";
+import { codexMemberLaunch, type CodexMemberPermissions } from "./codex-member-permissions.js";
 import {
   observeCodexSandbox,
   type AppliedLaunchObservation,
@@ -79,11 +78,20 @@ const CODEX_RENDERED_SUFFIX = "(?: [A-Z][A-Za-z0-9]*)? (?:default|none|minimal|l
 const CODEX_RENDERED_GPT_FIELD = new RegExp(`^[Gg][Pp][Tt]-\\d[\\w.-]*${CODEX_RENDERED_SUFFIX}$`);
 const CODEX_RENDERED_MODEL_FIELD = new RegExp(`^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\\d[A-Za-z0-9._:/@-]*${CODEX_RENDERED_SUFFIX}(?:\\s+⚠ \\d+ warnings?)?$`);
 
+const CODEX_PERMISSION_PROFILE_VALUE = "permissions:";
+
+// A filesystem choice records its permission profile as the sandbox value; show the flag that selects it.
+function codexSandboxFlag(sandbox: string): string {
+  return sandbox.startsWith(CODEX_PERMISSION_PROFILE_VALUE)
+    ? `-c default_permissions=${JSON.stringify(sandbox.slice(CODEX_PERMISSION_PROFILE_VALUE.length))}`
+    : `-s ${sandbox}`;
+}
+
 function formatCurrentCodexFlags(
   sandbox: string,
   approval: CodexObservedApprovalPolicy | null | undefined,
 ): string {
-  return approval ? `-s ${sandbox} -a ${approval}` : `-s ${sandbox}`;
+  return approval ? `${codexSandboxFlag(sandbox)} -a ${approval}` : codexSandboxFlag(sandbox);
 }
 
 function formatRecordedCodexFlags(
@@ -92,7 +100,7 @@ function formatRecordedCodexFlags(
 ): string {
   // Historical launch observations (and floor launches without an explicit -a flag) store approval_policy as NULL;
   // never infer an approval value from current settings or claim NULL proves no -a flag was emitted.
-  return approval ? `-s ${sandbox} -a ${approval}` : `-s ${sandbox} (approval unrecorded)`;
+  return approval ? `${codexSandboxFlag(sandbox)} -a ${approval}` : `${codexSandboxFlag(sandbox)} (approval unrecorded)`;
 }
 
 const CODEX_LAUNCH_WRAPPER_OMISSION_LABEL = "omits launch_wrapper (managed resume uses the wrapper)";
@@ -110,13 +118,14 @@ export function buildCodexResumeDisplay(
   const profile = input.codexConfigProfile ?? null;
   const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
   const effectivePosture = input.resolvedPosture ?? "floor";
-  const envelope = input.codexPermissions ? codexMemberEnvelope(input.codexPermissions) : undefined;
-  // Derive displayed flags from the same three inputs adapters/codex-resume.ts uses (member permission envelope,
-  // resolved posture with an empty env so ambient OPENRIG_YOLO never leaks, and operationalLaunchArg).
-  const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, {}, effectivePosture);
+  const permissions = input.codexPermissions;
+  const choice = permissions ? codexMemberLaunch(permissions) : undefined;
+  // Derive displayed flags from the same three inputs adapters/codex-resume.ts uses (the member's permission choice,
+  // envelope or filesystem; resolved posture with an empty env so ambient OPENRIG_YOLO never leaks; and operationalLaunchArg).
+  const posture = choice ? profileArg + choice.args : codexPostureArg(profileArg, {}, effectivePosture);
   const postureArg = posture + operationalLaunchArg(
     "codex",
-    envelope
+    choice
       ? { nonInterruptive: input.nonInterruptive }
       : {
           kernelAuthority: input.kernelAuthority,
@@ -141,10 +150,11 @@ export function buildCodexResumeDisplay(
   let currentSandbox: string | null = null;
   let currentApproval: CodexObservedApprovalPolicy | null | undefined = null;
   let currentFlags: string;
-  if (envelope) {
-    currentSandbox = envelope.sandboxPolicy.type;
-    currentApproval = envelope.approvalPolicy;
-    currentFlags = formatCurrentCodexFlags(currentSandbox, currentApproval);
+  if (choice && permissions) {
+    currentSandbox = choice.observation.value;
+    // A filesystem on-request launch records no approval, so it can't prove a match; the flags still show it.
+    currentApproval = choice.observation.approvalPolicy ?? null;
+    currentFlags = formatCurrentCodexFlags(currentSandbox!, permissions.approval);
   } else {
     const obs = observeCodexSandbox(posture);
     if (obs.state === "observed" && obs.value) {
@@ -163,7 +173,7 @@ export function buildCodexResumeDisplay(
     && recorded.state === "observed"
     && recorded.value !== null;
 
-  if (!envelope && input.emptySavedPosture) {
+  if (!choice && input.emptySavedPosture) {
     const fallbackClause = `saved posture empty, showing fallback ${currentFlags} (managed resume posture unknown)`;
     if (!hasObservedRecord) {
       return {
@@ -189,6 +199,19 @@ export function buildCodexResumeDisplay(
   }
 
   const recordedApproval = recorded.approvalPolicy ?? null;
+  const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
+  // A filesystem launch records only the profile name, never its entries, so the same name can't prove the same policy.
+  if (permissions && "filesystem" in permissions && recorded.value === currentSandbox && recordedApproval === currentApproval) {
+    return {
+      command,
+      status: "recorded_uncertain",
+      label: composeCodexResumeLabel(
+        `launched with ${recordedFlags}; the launch record doesn't keep the filesystem entries; a resume now uses ${currentFlags}`,
+        hasLaunchWrapper,
+      ),
+    };
+  }
+
   // A NULL approval_policy cannot distinguish a plain floor launch without -a from a pre-upgrade envelope whose
   // on-request/untrusted approval was not recorded, so only a non-null recorded approval can prove recorded_match.
   if (
@@ -204,7 +227,6 @@ export function buildCodexResumeDisplay(
     };
   }
 
-  const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
   const isSameSandboxUnrecordedApproval = currentSandbox !== null
     && recorded.value === currentSandbox
     && recorded.value !== "read-only"

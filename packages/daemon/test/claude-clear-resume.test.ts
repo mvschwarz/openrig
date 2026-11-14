@@ -12,6 +12,8 @@ import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
+import { ContextUsageStore } from "../src/domain/context-usage-store.js";
+import { deriveResumeToken } from "../src/domain/resume-token-capture.js";
 import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -45,7 +47,7 @@ describe("Claude current conversation at shutdown", () => {
   });
 
   function fixture(provenance: "scrape" | "operator" | "hook" = "scrape", configDir = path.join(root, ".claude"),
-    opts: { daemonConfigDir?: string; memberEnv?: Record<string, string> } = {}) {
+    opts: { daemonConfigDir?: string; memberEnv?: Record<string, string>; emptyToken?: boolean; nativeTitle?: string | null } = {}) {
     const rig = rigRepo.createRig("clear-test");
     const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: root });
     if (opts.memberEnv) db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify(opts.memberEnv), node.id);
@@ -53,7 +55,7 @@ describe("Claude current conversation at shutdown", () => {
     const session = registry.registerSession(node.id, name);
     registry.updateStatus(session.id, "running");
     registry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
-    registry.updateResumeToken(session.id, "claude_id", oldId, provenance);
+    if (!opts.emptyToken) registry.updateResumeToken(session.id, "claude_id", oldId, provenance);
     const rows = [
       { pid: 900, ppid: 1, pgid: 900, tpgid: 901, executableName: "bash", command: "bash", startedAt },
       { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "claude", command: `claude --session-id ${oldId} --name ${name}`, startedAt },
@@ -61,12 +63,15 @@ describe("Claude current conversation at shutdown", () => {
     const listClaudeProcesses = vi.fn(async () => rows);
     const probe = vi.fn(async () => "resumable" as const); // Old history still exists after /clear.
     const tmux = {
+      listPanes: vi.fn(async () => [{ id: "%1" }] as never),
       getPanePid: vi.fn(async () => 900),
       killSession: vi.fn(async () => ({ ok: true })),
     } as unknown as TmuxAdapter;
+    const contextUsageStore = new ContextUsageStore(db, { stateDir: root });
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry: registry, tmuxAdapter: tmux, homeDir: root,
       claudeConfigDir: opts.daemonConfigDir ?? configDir, listClaudeProcesses, probeClaudeResume: probe,
+      ...(opts.emptyToken || opts.nativeTitle !== undefined ? { contextUsageStore } : {}),
       // The seat's own home as its stored env declares it (the production resolver is seat-runtime-home.ts).
       seatHome: (nodeId: string) => {
         const row = db.prepare("SELECT env_json FROM nodes WHERE id = ?").get(nodeId) as { env_json: string | null } | undefined;
@@ -75,12 +80,77 @@ describe("Claude current conversation at shutdown", () => {
     });
     const file = path.join(configDir, "sessions", "901.json");
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({ name, sessionId: newId }));
+    fs.writeFileSync(file, JSON.stringify({ ...(opts.nativeTitle === null ? {} : { name: opts.nativeTitle ?? name }), sessionId: newId }));
     // Deterministic current-process timestamp, independent of the test machine's date.
     fs.utimesSync(file, new Date("2020-01-01T02:00:00Z"), new Date("2020-01-01T02:00:00Z"));
     const teardown = new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry: registry, eventBus, snapshotCapture: capture, tmuxAdapter: tmux, resumeMetadataRefresher: refresher });
-    return { rig, session, name, rows, file, tmux, probe, listClaudeProcesses, refresher, teardown };
+    return { rig, node, session, name, rows, file, tmux, probe, listClaudeProcesses, refresher, teardown, contextUsageStore };
   }
+
+  function multiplePaneFixture() {
+    const f = fixture("scrape", path.join(root, ".claude"), { emptyToken: true, nativeTitle: "Seat A" });
+    const otherId = "33333333-3333-4333-8333-333333333333";
+    f.rows.push(
+      { pid: 910, ppid: 1, pgid: 910, tpgid: 911, executableName: "bash", command: "bash", startedAt },
+      { pid: 911, ppid: 910, pgid: 911, tpgid: 911, executableName: "claude", command: "claude", startedAt },
+    );
+    fs.writeFileSync(path.join(path.dirname(f.file), "911.json"), JSON.stringify({ name: "Seat B", sessionId: otherId }));
+    f.tmux.getPanePid = vi.fn(async target => target === "%1" ? 900 : 910);
+    f.tmux.listPanes = vi.fn(async (_target, allWindows) => (allWindows ? [{ id: "%1" }, { id: "%2" }] : [{ id: "%2" }]) as never);
+    return f;
+  }
+
+  it.each(["derive", "snapshot", "shutdown"])("%s selects the bound pane while another Claude pane is active", async mode => {
+    const f = multiplePaneFixture();
+    if (mode === "derive") {
+      const r = await deriveResumeToken({ runtime: "claude-code", sessionName: f.name, nodeId: f.node.id },
+        { contextUsageStore: f.contextUsageStore, resumeTokenCapturer: f.refresher });
+      expect(r).toEqual({ outcome: "captured", resumeType: "claude_id", token: newId });
+    } else {
+      if (mode === "snapshot") await f.refresher.refresh(registry.getLatestLiveSessions(f.rig.id), { fillNullOnly: true });
+      else await f.teardown.teardown(f.rig.id);
+      expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(newId);
+    }
+    expect(f.tmux.getPanePid).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(f.tmux.getPanePid).mock.calls.every(([target]) => target === "%1")).toBe(true);
+  });
+
+  it("without a recorded pane declines a session with panes in different windows", async () => {
+    const f = multiplePaneFixture();
+    db.prepare("UPDATE bindings SET tmux_pane=NULL WHERE node_id=?").run(f.node.id);
+    expect(await f.refresher.captureClaudeSessionId(f.name, { nodeId: f.node.id })).toBeUndefined();
+    expect(f.tmux.listPanes).toHaveBeenCalledWith(f.name, true);
+    expect(f.tmux.getPanePid).not.toHaveBeenCalled();
+  });
+
+  it("without a recorded pane uses the session's sole pane, even when no node id was supplied", async () => {
+    const f = multiplePaneFixture();
+    db.prepare("UPDATE bindings SET tmux_pane=NULL WHERE node_id=?").run(f.node.id);
+    vi.mocked(f.tmux.listPanes).mockResolvedValue([{ id: "%1" }] as never);
+    expect(await f.refresher.captureClaudeSessionId(f.name)).toBe(newId);
+    expect(f.tmux.listPanes).toHaveBeenCalledWith(f.name, true);
+    expect(vi.mocked(f.tmux.getPanePid).mock.calls.every(([target]) => target === "%1")).toBe(true);
+  });
+
+  it("does not replace a missing bound pane with the session's active pane", async () => {
+    const f = multiplePaneFixture();
+    vi.mocked(f.tmux.getPanePid).mockImplementation(async target => target === "%1" ? null : 910);
+    expect(await f.refresher.captureClaudeSessionId(f.name, { nodeId: f.node.id })).toBeUndefined();
+    expect(vi.mocked(f.tmux.getPanePid).mock.calls.every(([target]) => target === "%1")).toBe(true);
+    expect(f.tmux.getPanePid).toHaveBeenCalledWith("%1");
+  });
+
+  it("does not capture from a recorded pane id reused by another session", async () => {
+    const f = multiplePaneFixture();
+    // This tmux server still resolves %1, but the seat's session now contains only %2.
+    vi.mocked(f.tmux.listPanes).mockResolvedValue([{ id: "%2" }] as never);
+    fs.writeFileSync(f.file, JSON.stringify({ name: "Other session", sessionId: "33333333-3333-4333-8333-333333333333" }));
+    await f.refresher.refresh(registry.getLatestLiveSessions(f.rig.id), { fillNullOnly: true });
+    expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBeNull();
+    expect(f.tmux.listPanes).toHaveBeenCalledWith(f.name, true);
+    expect(f.tmux.getPanePid).not.toHaveBeenCalled();
+    expect(f.probe).not.toHaveBeenCalled();
+  });
 
   it("captures the post-clear conversation in the actual auto-pre-down snapshot", async () => {
     const f = fixture();
@@ -156,11 +226,10 @@ describe("Claude current conversation at shutdown", () => {
     expect(f.probe).not.toHaveBeenCalled();
   });
 
-  it.each(["missing", "malformed", "wrong-name", "invalid-id", "old-file", "changed-process", "ambiguous-process", "background-process"])("keeps existing shutdown behavior on %s evidence", async (kind) => {
+  it.each(["missing", "malformed", "invalid-id", "old-file", "changed-process", "ambiguous-process", "background-process"])("keeps existing shutdown behavior on %s evidence", async (kind) => {
     const f = fixture();
     if (kind === "missing") fs.unlinkSync(f.file);
     if (kind === "malformed") fs.writeFileSync(f.file, "{");
-    if (kind === "wrong-name") fs.writeFileSync(f.file, JSON.stringify({ name: "different-seat", sessionId: newId }));
     if (kind === "invalid-id") fs.writeFileSync(f.file, JSON.stringify({ name: f.name, sessionId: [newId] }));
     if (kind === "old-file") fs.utimesSync(f.file, new Date(0), new Date(0));
     if (kind === "changed-process") f.listClaudeProcesses.mockResolvedValueOnce(f.rows).mockResolvedValue([]);
@@ -188,4 +257,39 @@ describe("Claude current conversation at shutdown", () => {
     expect(f.probe).not.toHaveBeenCalled();
     expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(oldId);
   });
+  it.each([null, "A person's conversation title"])("derives a missing-sidecar token from the current process with title %j", async nativeTitle => {
+    const f = fixture("scrape", path.join(root, ".claude"), { emptyToken: true, nativeTitle });
+    expect(f.contextUsageStore.readSidecar(f.name)).toEqual({ ok: false, reason: "missing_sidecar" });
+    const result = await deriveResumeToken({ runtime: "claude-code", sessionName: f.name, nodeId: f.node.id, cwd: root },
+      { contextUsageStore: f.contextUsageStore, resumeTokenCapturer: f.refresher });
+    expect(result).toEqual({ outcome: "captured", resumeType: "claude_id", token: newId });
+    expect(f.probe).not.toHaveBeenCalled();
+  });
+
+  it("fills an unrecorded titled conversation before snapshot without a manual token", async () => {
+    const f = fixture("scrape", path.join(root, ".claude"), { emptyToken: true, nativeTitle: "My ongoing work" });
+    expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBeNull();
+    await f.refresher.refresh(registry.getLatestLiveSessions(f.rig.id), { fillNullOnly: true });
+    expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(newId);
+    const result = await f.teardown.teardown(f.rig.id);
+    const snap = snapshotRepo.getSnapshot(result.snapshotId!)!;
+    expect(snap.data.sessions.find(s => s.id === f.session.id)?.resumeToken).toBe(newId);
+    expect(f.probe).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "malformed", "invalid-id", "old-file", "changed-process", "ambiguous-process", "background-process"])(
+    "leaves a missing-sidecar token unknown on %s process-file evidence", async kind => {
+      const f = fixture("scrape", path.join(root, ".claude"), { emptyToken: true, nativeTitle: "A native title" });
+      if (kind === "missing") fs.unlinkSync(f.file);
+      if (kind === "malformed") fs.writeFileSync(f.file, "{");
+      if (kind === "invalid-id") fs.writeFileSync(f.file, JSON.stringify({ sessionId: [newId] }));
+      if (kind === "old-file") fs.utimesSync(f.file, new Date(0), new Date(0));
+      if (kind === "changed-process") f.listClaudeProcesses.mockResolvedValueOnce(f.rows).mockResolvedValue([]);
+      if (kind === "ambiguous-process") f.rows.push({ ...f.rows[1]!, pid: 902 });
+      if (kind === "background-process") f.rows[1]!.pgid = 902;
+      await f.refresher.refresh(registry.getLatestLiveSessions(f.rig.id), { fillNullOnly: true });
+      expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBeNull();
+      expect(f.probe).not.toHaveBeenCalled();
+    });
+
 });

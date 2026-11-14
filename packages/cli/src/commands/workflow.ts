@@ -519,8 +519,15 @@ Examples:
 
   cmd
     .command("list")
-    .description("List workflow instances; optionally filter by status")
+    .description("List workflow instances with optional exact filters")
     .option("--status <s>", "Filter by status (active | waiting | completed | failed | aborted)")
+    .option("--project <id>", "Match the instance project")
+    .option("--mission <id>", "Match the instance mission")
+    .option("--slice <id>", "Match the instance slice")
+    .option("--rig <name>", "Match the bound rig")
+    .option("--name <workflow>", "Match the workflow name")
+    .option("--tag <tag>", "Match a scope tag; repeat to require all tags", (tag: string, previous: string[]) => [...previous, tag], [])
+    .option("--limit <n>", "Maximum matching instances (1-10000)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -528,10 +535,12 @@ Examples:
   $ rig workflow list --status active --json
   $ rig workflow list --status waiting | jq -r '.instances[].instanceId'
 `)
-    .action(async (opts: { status?: string; json?: boolean }) => {
+    .action(async (opts: { status?: string; project?: string; mission?: string; slice?: string; rig?: string; name?: string; tag: string[]; limit?: string; json?: boolean }) => {
       const deps = getDeps();
       const params = new URLSearchParams();
       if (opts.status) params.set("status", opts.status);
+      for (const field of ["project", "mission", "slice", "rig", "name", "limit"] as const) if (opts[field] !== undefined) params.set(field, opts[field]!);
+      for (const tag of opts.tag) params.append("tag", tag);
       const qs = params.toString();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/workflow/list${qs ? `?${qs}` : ""}`);
@@ -951,6 +960,7 @@ Examples:
           fromSession?: string;
           toSession?: string;
           instanceStatus?: string;
+          adoptedHandoff?: { successorState?: string };
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/route`, {
           toSession: opts.to,
           packetId: opts.packet,
@@ -959,6 +969,18 @@ Examples:
         });
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
+        if (body.adoptedHandoff) {
+          // The packet was already handed off by the queue; its successor took its place and nothing was closed or created.
+          const state = body.adoptedHandoff.successorState ?? "?";
+          printOutcomeSummary(opts.json ?? false, res.status, {
+            what: `Adopted the queue handoff of step ${body.stepId ?? "?"} to ${body.toSession ?? opts.to}: packet ${body.closedPacketId ?? "?"} was already handed off, and its successor ${body.newPacketId ?? "?"} (${state}) now holds the step`,
+            state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step; no queue row closed or created; no step advanced`,
+            next: state === "done" || state === "handed-off"
+              ? `The successor is already ${state}; its outcome is on rig queue show ${body.newPacketId ?? "<packet>"}, and the step's exit is the workflow owner's to project`
+              : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+          });
+          return;
+        }
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Re-routed step ${body.stepId ?? "?"} from ${body.fromSession ?? "?"} to ${body.toSession ?? opts.to} (packet ${body.closedPacketId ?? "?"} → ${body.newPacketId ?? "?"})`,
           state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step, new owner; no step advanced`,

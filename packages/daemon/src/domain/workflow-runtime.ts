@@ -27,12 +27,13 @@ import {
 import { resolveExceptionRoute, type ExceptionRoute } from "./workflow-exception-router.js";
 import type { WorkflowHumanDestination } from "./workflow-human-destination.js";
 import { classifyGateTrip, workflowExceptionTags } from "./workflow-exception.js";
-import { newQitemId } from "./queue-repository.js";
+import { isBlockerLive, isTerminalState, newQitemId } from "./queue-repository.js";
 import { HUMAN_ALERT_TAG } from "./gateway/human-registry.js";
 import type { WorkflowExceptionClass } from "./workflow-exception.js";
 import {
   WorkflowProjector,
   WorkflowProjectorError,
+  assertBoundWorkflowTarget,
   compileGate,
   nodeRuntimeOf,
   reconcileExplicitOwnerHarness,
@@ -421,7 +422,7 @@ export class WorkflowRuntime {
           spec,
           entryQitemId,
           entryOwnerSession: entryPacket.destinationSession,
-          advisories: [],
+          advisories: this.packetDestinationAdvisories([entryQitemId]),
           replayed: true,
         };
       }
@@ -649,8 +650,8 @@ export class WorkflowRuntime {
     // queue-gate archetype: human-seat classifier BEFORE parse (the
     // identical predicate the transport uses) → non-canonical
     // (raw/adopted destinations are legitimate; the inventory cannot
-    // vouch for them) → unregistered rig (the transport already rejects
-    // those loudly at queue-write — no double advisory) → member probe
+    // vouch for them) → unregistered rig (the actual packet's destination
+    // status is returned after recording below) → member probe
     // (existence at ANY lifecycle state/kind; liveness is projection's
     // business). ONE aggregated advisory per unique unknown target,
     // naming every declaring step/role pair.
@@ -747,6 +748,8 @@ export class WorkflowRuntime {
         { specPath: input.specPath, entryStepId: entryStep.id, entryRole: entryStep.actor_role },
       );
     }
+
+    assertBoundWorkflowTarget(entryOwner, this.queueRepo);
 
     const createdAt = this.now().toISOString();
     const preallocatedEntryQitemId = newQitemId();
@@ -897,14 +900,33 @@ export class WorkflowRuntime {
       spec: specRow,
       entryQitemId: entryQitemId!,
       entryOwnerSession: entryOwner,
-      advisories,
+      advisories: [...advisories, ...this.packetDestinationAdvisories([entryQitemId!])],
       replayed: false,
     };
   }
 
+  /** Observe only committed packets; unavailable teaching must never undo work. */
+  private packetDestinationAdvisories(packetIds: readonly string[]): string[] {
+    return [...new Set(packetIds)].flatMap(packetId => {
+      try {
+        const packet = this.queueRepo.getById(packetId);
+        if (!packet) throw new Error("packet lookup unavailable");
+        const advisory = this.queueRepo.destinationAdvisory(packet.destinationSession);
+        return advisory ? [advisory.message] : [];
+      } catch {
+        return [`Destination status unknown for recorded packet ${packetId}; advisory lookup unavailable.`];
+      }
+    });
+  }
+
   async project(input: ProjectStepInput): Promise<ProjectStepResult> {
     const owner = this.queueRepo.getById(input.currentPacketId)?.destinationSession;
-    const result = await this.projector.project(input);
+    const projected = await this.projector.project(input);
+    const destinationAdvisories = this.packetDestinationAdvisories(
+      projected.nextQitemIds ?? (projected.nextQitemId ? [projected.nextQitemId] : []));
+    const result = destinationAdvisories.length
+      ? { ...projected, advisories: [...(projected.advisories ?? []), ...destinationAdvisories] }
+      : projected;
     this.reconcileStuckExceptions(input.instanceId);
     // A known caller projecting another seat's packet is told so in the response. Nothing is refused and the owner isn't
     // notified: delegated work stays one call. A claimed or unknown-origin caller isn't a mismatch.
@@ -1209,6 +1231,8 @@ export class WorkflowRuntime {
         );
       }
 
+      assertBoundWorkflowTarget(owner, this.queueRepo);
+
       // Fresh frontier packet — the redrive delivery. The --decision
       // text lands durably in the packet body (the resumer’s
       // instruction reaches the step owner).
@@ -1442,6 +1466,7 @@ export class WorkflowRuntime {
       if (!step) throw new WorkflowProjectorError("resume_step_missing_from_spec", `failed step "${occurrence.stepId}" no longer exists`, { instanceId: instance.instanceId, stepId: occurrence.stepId });
       const owner = resolveDefaultOwner(specRow.spec, step, (session) => nodeRuntimeOf(this.db, session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
       if (!owner) throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve owner for failed step "${step.id}"`);
+      assertBoundWorkflowTarget(owner, this.queueRepo);
       const redrivePacketId = newQitemId();
       const created = this.queueRepo.createWithinTransaction({
         qitemId: redrivePacketId,
@@ -1513,6 +1538,8 @@ export class WorkflowRuntime {
     fromSession: string;
     toSession: string;
     instanceStatus: WorkflowInstance["status"];
+    /** The packet was already handed off by an ordinary queue handoff; its successor (in this state) was adopted. */
+    adoptedHandoff?: { successorState: string };
   }> {
     let result!: {
       instanceId: string;
@@ -1522,6 +1549,7 @@ export class WorkflowRuntime {
       fromSession: string;
       toSession: string;
       instanceStatus: WorkflowInstance["status"];
+      adoptedHandoff?: { successorState: string };
     };
     let nudgeTo: { qitemId: string; session: string; nudge: boolean | undefined } | null = null;
 
@@ -1564,7 +1592,31 @@ export class WorkflowRuntime {
           { instanceId: instance.instanceId },
         );
       }
+      // A frontier packet an ordinary queue handoff already closed (`rig queue handoff` doesn't move the workflow): the
+      // queue's own successor carries the step on. Routing it to that same handoff target adopts the successor onto the
+      // frontier, instead of closing the closed packet again (the queue refuses) and assigning the step a second time.
+      // Only a packet handed off to this target, with exactly one successor there, qualifies. No queue row is written.
+      const handoffSuccessorOf = (packetId: string) => {
+        const packet = this.queueRepo.getById(packetId);
+        if (packet?.state !== "handed-off" || packet.closureTarget !== input.toSession) return null;
+        const rows = this.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ? LIMIT 2").all(packetId) as Array<{ qitem_id: string }>;
+        const successor = rows.length === 1 ? this.queueRepo.getById(rows[0]!.qitem_id) : null;
+        return successor?.destinationSession === input.toSession ? { packet, successor } : null;
+      };
       if (!instance.currentFrontier.includes(oldPacketId)) {
+        // The same adoption again: the successor already holds the packet's place, so it's reported with no writes.
+        const adopted = handoffSuccessorOf(oldPacketId);
+        if (adopted && instance.currentFrontier.includes(adopted.successor.qitemId)) {
+          const binding = this.instanceStore.getFrontierBinding(instance.instanceId, adopted.successor.qitemId);
+          result = {
+            instanceId: instance.instanceId,
+            stepId: binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null),
+            closedPacketId: oldPacketId,
+            newPacketId: adopted.successor.qitemId, fromSession: adopted.packet.destinationSession, toSession: input.toSession,
+            instanceStatus: instance.status, adoptedHandoff: { successorState: adopted.successor.state },
+          };
+          return;
+        }
         throw new WorkflowProjectorError(
           "packet_not_on_frontier",
           `qitem ${oldPacketId} is not in workflow instance ${instance.instanceId} frontier`,
@@ -1594,6 +1646,72 @@ export class WorkflowRuntime {
       if (step) {
         reconcileExplicitOwnerHarness(step, input.toSession, (session) =>
           nodeRuntimeOf(this.db, session),
+        );
+      }
+
+      // Re-binds the frontier from the old packet to its successor: same step, version guard held, no hop bump.
+      const rebindFrontier = (packetId: string) => {
+        const nextFrontier = instance.currentFrontier.map((id) => id === oldPacketId ? packetId : id);
+        if (oldBinding) {
+          this.instanceStore.removeFrontierBinding(instance.instanceId, oldPacketId);
+          this.instanceStore.bindFrontierPacket({
+            instanceId: instance.instanceId,
+            packetId,
+            stepId: oldBinding.stepId,
+            branchDrive: oldBinding.branchDrive,
+            hopCount: oldBinding.hopCount,
+            hopsBaseline: oldBinding.hopsBaseline,
+          });
+        }
+        const rebound = this.instanceStore.listFrontierBindings(instance.instanceId);
+        this.instanceStore.updateFrontier(instance.instanceId, nextFrontier, instance.status, {
+          currentStepId: rebound.length === 1 ? rebound[0]!.stepId : rebound.length > 1 ? "clear" : "preserve",
+          expectedVersion: instance.version,
+        });
+      };
+
+      const adopted = handoffSuccessorOf(oldPacketId);
+      if (adopted) {
+        rebindFrontier(adopted.successor.qitemId);
+        // The keepalive follows a live successor, and a closed one needs none.
+        if (this.watchdogJobsRepo) {
+          disarmWorkflowKeepalive(this.watchdogJobsRepo, instance.instanceId,
+            `workflow route: adopted the queue handoff to ${input.toSession}`, oldBinding ? oldPacketId : undefined);
+          if (isBlockerLive(adopted.successor.state)) {
+            ensureWorkflowKeepaliveArmed(this.watchdogJobsRepo, {
+              instanceId: instance.instanceId,
+              packetId: oldBinding ? adopted.successor.qitemId : undefined,
+              targetSession: input.toSession,
+              registeredBySession: input.actorSession,
+            });
+          }
+        }
+        register(this.eventBus.persistWithinTransaction({
+          type: "workflow.routing_table_changed",
+          rigName: instance.boundRig ?? specRow?.targetRig ?? "",
+          cause: "workflow_route_adopted_handoff",
+          instanceId: instance.instanceId,
+          stepId: selectedStepId,
+          from: fromSession,
+          to: input.toSession,
+        }));
+        result = {
+          instanceId: instance.instanceId,
+          stepId: selectedStepId,
+          closedPacketId: oldPacketId,
+          newPacketId: adopted.successor.qitemId,
+          fromSession,
+          toSession: input.toSession,
+          instanceStatus: instance.status,
+          adoptedHandoff: { successorState: adopted.successor.state },
+        };
+        return;
+      }
+      if (isTerminalState(oldPacket.state)) {
+        throw new WorkflowProjectorError(
+          "packet_already_closed",
+          `frontier packet ${oldPacketId} is already ${oldPacket.state}${oldPacket.closureTarget ? ` (to ${oldPacket.closureTarget})` : ""}; route can adopt a queue handoff's successor only when routed to that same target and the handoff left exactly one successor there`,
+          { instanceId: instance.instanceId, packetId: oldPacketId, state: oldPacket.state, closureTarget: oldPacket.closureTarget ?? null },
         );
       }
 
@@ -1716,23 +1834,7 @@ export class WorkflowRuntime {
 
       // (2)+(5)+(7) frontier REBIND: same step, new packet, version
       // guard held; NO hop bump (not an advance).
-      const nextFrontier = instance.currentFrontier.map((packetId) => packetId === oldPacketId ? created.qitemId : packetId);
-      if (oldBinding) {
-        this.instanceStore.removeFrontierBinding(instance.instanceId, oldPacketId);
-        this.instanceStore.bindFrontierPacket({
-          instanceId: instance.instanceId,
-          packetId: created.qitemId,
-          stepId: oldBinding.stepId,
-          branchDrive: oldBinding.branchDrive,
-          hopCount: oldBinding.hopCount,
-          hopsBaseline: oldBinding.hopsBaseline,
-        });
-      }
-      const rebound = this.instanceStore.listFrontierBindings(instance.instanceId);
-      this.instanceStore.updateFrontier(instance.instanceId, nextFrontier, instance.status, {
-        currentStepId: rebound.length === 1 ? rebound[0]!.stepId : rebound.length > 1 ? "clear" : "preserve",
-        expectedVersion: instance.version,
-      });
+      rebindFrontier(created.qitemId);
 
       // Keepalive re-target IN-TXN (arch n3: covers route's lost-nudge
       // window — the armed job re-nudges the new owner).
@@ -1858,8 +1960,9 @@ export class WorkflowRuntime {
   /** List instances (optionally filtered) with the deadline verdict attached. */
   listInstancesWithDeadline(
     status?: "active" | "waiting" | "completed" | "failed" | "aborted",
+    filters?: Omit<Parameters<WorkflowInstanceStore["listFiltered"]>[0], "status">,
   ): WorkflowInstanceWithInspection[] {
-    const rows = status ? this.instanceStore.listByStatus(status) : this.instanceStore.listAll();
+    const rows = filters ? this.instanceStore.listFiltered({ ...filters, status }) : status ? this.instanceStore.listByStatus(status) : this.instanceStore.listAll();
     return rows.map((row) => {
       const inspected = this.inspect(row.instanceId);
       return {

@@ -208,6 +208,16 @@ describe("TmuxAdapter", () => {
     });
   });
 
+  describe("serverStartTime", () => {
+    it("reads the server's start time through the exact session, and null when it can't be read", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("1792810800\n");
+      expect(await new TmuxAdapter(exec).serverStartTime("my-session")).toBe(1792810800);
+      expect(exec.mock.calls[0]![0]).toBe("tmux display-message -p -t '=my-session' '#{start_time}'");
+      expect(await new TmuxAdapter(mockExec({ "display-message": { error: NO_SERVER_ERROR } })).serverStartTime("my-session")).toBeNull();
+      expect(await new TmuxAdapter(mockExec({ "display-message": { stdout: "\n" } })).serverStartTime("my-session")).toBeNull();
+    });
+  });
+
   describe("listPanes", () => {
     it("calls exec with exact tmux list-panes command and format string", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
@@ -693,6 +703,47 @@ describe("TmuxAdapter", () => {
       expect(checks).toBe(2);
       expect(tmux.cmds().some(cmd => cmd.startsWith("tmux paste-buffer"))).toBe(false);
       expect(tmux.cmds()).toContain("tmux delete-buffer -b 'cr'");
+      expect(seat.noteSubmitted).not.toHaveBeenCalled();
+    });
+
+    it("input typed while the carriage return's re-check awaits the caller's checks stops it (#3076)", async () => {
+      const tmux = readOnlyTmux();
+      const adapter = new TmuxAdapter(tmux.exec, tmux.files);
+      let composer = "notice";
+      const seat = guard(async () => {
+        if (composer !== "notice") throw new DeliveryGuardError("draft_input_changed", "The input changed; Enter was not sent.");
+      });
+      adapter.deliveryGuard = seat as unknown as SeatDeliveryGuard;
+      let calls = 0;
+      const beforeKeys = vi.fn(async () => { calls += 1; if (calls === 2) composer = "notice PERSONDRAFT-k7"; });
+      expect(await adapter.sendKeys("dev@rig", ["Enter"], undefined, { beforeKeys }))
+        .toEqual({ ok: false, code: "draft_input_changed", message: "The input changed; Enter was not sent." });
+      expect(tmux.cmds().some(cmd => cmd.startsWith("tmux paste-buffer"))).toBe(false);
+      expect(tmux.cmds()).toContain("tmux delete-buffer -b 'cr'");
+      expect(seat.noteSubmitted).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("sendKeys reads the input after the caller's waiting checks (#3076)", () => {
+    const TARGET = { nodeId: "n1", session: "dev@rig", occupant: "o1", pane: "%1" };
+
+    it("a draft typed while beforeKeys awaits stops the Enter, and nothing reaches the pane", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => cmd.startsWith("tmux list-panes") ? "%1|0|/w|80|24|1\n" : "");
+      const adapter = new TmuxAdapter(exec);
+      let composer = "notice";
+      const seat = {
+        maybeTarget: () => TARGET, target: () => TARGET, ownsLifecycle: () => false,
+        checkInput: vi.fn(), noteSubmitted: vi.fn(), notePasted: async () => {}, attachInputInspection: () => {},
+        input: (_name: string, fn: () => Promise<unknown>) => fn(), humanInput: (_name: string, fn: () => Promise<unknown>) => fn(),
+        needsInputCheck: () => true,
+        beforeInput: vi.fn(async () => {
+          if (composer !== "notice") throw new DeliveryGuardError("draft_input_changed", "The input changed; Enter was not sent.");
+        }),
+      };
+      adapter.deliveryGuard = seat as unknown as SeatDeliveryGuard;
+      const result = await adapter.sendKeys("dev@rig", ["Enter"], undefined, { beforeKeys: async () => { composer = "notice PERSONDRAFT-k7"; } });
+      expect(result).toEqual({ ok: false, code: "draft_input_changed", message: "The input changed; Enter was not sent." });
+      expect(exec.mock.calls.map(([cmd]) => cmd).some(cmd => cmd.startsWith("tmux send-keys"))).toBe(false);
       expect(seat.noteSubmitted).not.toHaveBeenCalled();
     });
   });

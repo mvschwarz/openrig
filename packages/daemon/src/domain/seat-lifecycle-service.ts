@@ -57,6 +57,8 @@ import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 import { recordedProcessStillRunning } from "./reconciler.js";
 import { readProcessTable, type ProcessTableRow } from "./process-table.js";
+import { applySelectedHome, readRuntimeHomeState, recordRuntimeHome, revertSelectedHome, RECORDABLE_HOME_RUNTIMES, type RecordRuntimeHomeResult, type RuntimeHomeRecordRef,
+  type RuntimeHomeState, type SelectedHomePlan } from "./seat-runtime-home-record.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -186,6 +188,7 @@ export interface SeatRefusal {
     | "selection_changed"
     | "stop_uncertain"
     | "missing_permissions_to"
+    | "runtime_home_unsupported"
     | "permissions_to_not_a_person"
     | "permissions_to_unavailable";
   message: string;
@@ -620,6 +623,52 @@ export class SeatLifecycleService {
     return { ok: true, seat, from, to, changed, effect: "next_launch", warnings };
   }
 
+  /** The runtime home a seat's next launch uses, with the occupant, original conversation and revision a recording is
+   *  made against (rig seat runtime-home). Read only. */
+  runtimeHome(seatRef: string): ({ ok: true; seat: SeatDescriptor } & RuntimeHomeState) | SeatRefusal {
+    const resolved = this.resolveSeat(seatRef);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const runtime = resolved.entry.runtime;
+    if (!runtime || !(RECORDABLE_HOME_RUNTIMES as readonly string[]).includes(runtime)) {
+      return { ok: false, code: "runtime_home_unsupported", message: `A runtime home is reported for Claude Code and Codex seats; this seat runs ${runtime ?? "no runtime"}.` };
+    }
+    return { ok: true, seat, ...readRuntimeHomeState(this.db, this.sessionRegistry, seat.nodeId, runtime as typeof RECORDABLE_HOME_RUNTIMES[number]) };
+  }
+
+  /** Record an operator-selected runtime home for an existing seat's next launch (rig seat record-runtime-home): see
+   *  recordRuntimeHome. Nothing running is changed and nothing is launched. */
+  recordRuntimeHome(input: { seatRef: string; home: unknown; expectedOccupant: unknown; expectedOriginal: unknown; expectedRevision: unknown;
+    operationId: unknown; reason: string; operator?: string | null }): ({ seat: SeatDescriptor } & RecordRuntimeHomeResult) | SeatRefusal {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    return { seat, ...recordRuntimeHome({ db: this.db, sessions: this.sessionRegistry, eventBus: this.eventBus }, {
+      node: { id: seat.nodeId, runtime: resolved.entry.runtime ?? null }, seat, home: input.home,
+      expectedOccupant: input.expectedOccupant, expectedOriginal: input.expectedOriginal, expectedRevision: input.expectedRevision,
+      operationId: input.operationId, reason: input.reason.trim(), operator: input.operator ?? null }) };
+  }
+
+  /** A selected-history resume's bound apply: write the selected original's recorded home back to the seat's slot as a
+   *  new revision for it (applySelectedHome). Null when the records moved since the review. */
+  applySelectedRuntimeHome(input: { nodeId: string; runtime: "claude-code" | "codex"; rigId: string; logicalId: string;
+    plan: Extract<SelectedHomePlan, { kind: "apply" }>; original: string; operationId: string; operator: string | null }): RuntimeHomeRecordRef | null {
+    return applySelectedHome({ db: this.db, sessions: this.sessionRegistry, eventBus: this.eventBus }, {
+      node: { id: input.nodeId, runtime: input.runtime }, seat: { rigId: input.rigId, logicalId: input.logicalId }, plan: input.plan,
+      original: input.original, operationId: input.operationId, operator: input.operator });
+  }
+
+  /** After a selected resume that didn't take, put back the home its apply replaced (revertSelectedHome). Null when
+   *  nothing was put back, such as when a record was made since. */
+  revertSelectedRuntimeHome(input: { nodeId: string; runtime: "claude-code" | "codex"; rigId: string; logicalId: string;
+    applied: RuntimeHomeRecordRef; operator: string | null }): RuntimeHomeRecordRef | null {
+    return revertSelectedHome({ db: this.db, sessions: this.sessionRegistry, eventBus: this.eventBus }, {
+      node: { id: input.nodeId, runtime: input.runtime }, seat: { rigId: input.rigId, logicalId: input.logicalId }, applied: input.applied,
+      operator: input.operator });
+  }
+
   /** OPR.0.7.0.7 — save one seat's effort for its next managed continuation. Like set-model it
    *  validates, writes, and persists an audited event in the same transaction; it never restarts
    *  the seat or touches its peers, model or account. `effort: null` clears the explicit choice. */
@@ -951,7 +1000,7 @@ export class SeatLifecycleService {
       let persisted: PersistedEvent | null = null;
       const result = this.db.transaction(() => {
         // Read the current record for the audit; malformed old bytes stay visible as such and are replaced.
-        const row = this.db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null } | undefined;
+        const row = this.db.prepare("SELECT codex_permissions_json, codex_config_profile FROM nodes WHERE id = ? AND runtime = 'codex'").get(seat.nodeId) as { codex_permissions_json: string | null; codex_config_profile: string | null } | undefined;
         if (!row) throw new Error("Seat runtime changed; the envelope was not changed.");
         let from: unknown = null;
         try { from = readCodexMemberPermissions(this.db, seat.nodeId) ?? null; }
@@ -968,7 +1017,7 @@ export class SeatLifecycleService {
             nodeId: seat.nodeId, from, to, ...(replaced ? { replaced } : {}), actor, reason, effect: "future_launches_only" });
         }
         return { ok: true as const, seat, from, to, changed, ...(replaced ? { replaced } : {}),
-          effect: `The envelope applies at the next separately authorized managed launch or resume, as explicit sandbox and approval flags that a profile or policy posture doesn't override.${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
+          effect: `The envelope applies at the next separately authorized managed launch or resume, ${"filesystem" in to ? "as explicit permission and approval flags, with native configuration conflicts refused and inconclusive checks reported as policy not verified." : "as explicit sandbox and approval flags that a profile or policy posture doesn't override."}${replaced ? " It replaces the seat's recorded permission mode." : ""} The current process and history are unchanged. Older readers may ignore it; check rollback compatibility and preserve restrictions before downgrading.` };
       })();
       if (persisted) this.eventBus.notifySubscribers(persisted);
       return result;
@@ -1940,7 +1989,11 @@ export class SeatLifecycleService {
     const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
     if ("code" in probed) return probed;
     if (probed.state === "absent") {
-      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.` };
+      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.`,
+        // A recoverable seat (#3131) comes back in its saved conversation through the ordinary launch, leaving the rest of the rig alone.
+        ...(resolved.entry.lifecycleState === "recoverable"
+          ? { guidance: `The seat is recoverable from its saved conversation: rig launch ${shellQuote(seat.rigName)} ${shellQuote(seat.logicalId)} (add --plan to preview).` }
+          : {}) };
     }
     const binding = this.sessionRegistry.getBindingForNode(node.id);
     if (!binding?.tmuxSession || binding.tmuxSession !== session.session_name || !binding.tmuxPane) {

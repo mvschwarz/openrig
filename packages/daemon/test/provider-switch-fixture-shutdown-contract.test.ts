@@ -227,6 +227,7 @@ describe.skipIf(process.platform === "win32")("provider-switch synthetic Claude 
     const listClaudeProcesses = vi.fn(readForegroundRows);
     const probeClaudeResume = vi.fn(async () => "inconclusive" as const);
     const tmux = {
+      listPanes: vi.fn(async () => [{ id: "%1" }] as never),
       getPanePid: vi.fn(async () => panePid),
       killSession: vi.fn(async () => {
         await stopChild();

@@ -539,4 +539,63 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
     expect(old.handedOffTo).toBe("handler2@rig");
     expect(after.currentFrontier).not.toContain(reviewPacket);
   });
+
+  // A review packet on the frontier was handed off with an ordinary queue handoff, which doesn't move the workflow, and
+  // its successor then finished. Routing the step to that same handoff target adopts the successor: no queue row is
+  // closed again or created, and the verdict on the successor stays as recorded.
+  describe("a frontier packet an ordinary queue handoff already closed", () => {
+    async function handedOffReview() {
+      const { instanceId, entryPacket } = await instantiate();
+      const projected = await runtime.project({ instanceId, currentPacketId: entryPacket, exit: "handoff", actorSession: "producer@rig" });
+      const reviewPacket = projected.nextQitemId!;
+      const { created } = await queueRepo.handoff({ qitemId: reviewPacket, fromSession: "reviewer@rig", toSession: "reviewer2@rig" });
+      queueRepo.update({ qitemId: created.qitemId, actorSession: "reviewer2@rig", state: "done", closureReason: "no-follow-on",
+        transitionNote: "CHANGES REQUESTED" });
+      return { instanceId, reviewPacket, successor: created.qitemId };
+    }
+    const queueSnapshot = () => ({
+      rows: db.prepare("SELECT qitem_id, state, closure_reason, closure_target, handed_off_to FROM queue_items ORDER BY qitem_id").all(),
+      transitions: (db.prepare("SELECT COUNT(*) AS n FROM queue_transitions").get() as { n: number }).n,
+    });
+
+    it("adopts the queue's successor onto the frontier without writing a queue row, and again with no writes", async () => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview();
+      const before = runtime.instanceStore.getByIdOrThrow(instanceId);
+      const queueBefore = queueSnapshot();
+
+      const routed = await runtime.route({ instanceId, packetId: reviewPacket, toSession: "reviewer2@rig", actorSession: "orch@rig" });
+
+      expect(routed).toMatchObject({ stepId: "review", closedPacketId: reviewPacket, newPacketId: successor,
+        fromSession: "reviewer@rig", toSession: "reviewer2@rig", adoptedHandoff: { successorState: "done" } });
+      const after = runtime.instanceStore.getByIdOrThrow(instanceId);
+      expect(after.currentFrontier).toEqual([successor]);
+      expect(after.currentStepId).toBe("review");
+      expect(after.version).toBe(before.version + 1);
+      expect(queueSnapshot()).toEqual(queueBefore);
+      expect(queueRepo.getByIdOrThrow(successor).state).toBe("done");
+
+      // The same route again reports the adoption and writes nothing.
+      const events = (db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n;
+      expect(await runtime.route({ instanceId, packetId: reviewPacket, toSession: "reviewer2@rig", actorSession: "orch@rig" }))
+        .toEqual(routed);
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId).version).toBe(after.version);
+      expect((db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n).toBe(events);
+      expect(queueSnapshot()).toEqual(queueBefore);
+    });
+
+    it("refuses another target by name, with nothing written", async () => {
+      const { instanceId, reviewPacket } = await handedOffReview();
+      const before = runtime.instanceStore.getByIdOrThrow(instanceId);
+      const queueBefore = queueSnapshot();
+      const res = await app.request(`/api/workflow/${instanceId}/route`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ packetId: reviewPacket, toSession: "reviewer3@rig", actorSession: "orch@rig" }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "packet_already_closed", state: "handed-off", closureTarget: "reviewer2@rig" });
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId)).toEqual(before);
+      expect(queueSnapshot()).toEqual(queueBefore);
+    });
+  });
 });

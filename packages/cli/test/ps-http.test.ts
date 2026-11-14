@@ -556,11 +556,12 @@ describe("rig ps --all-hosts fan-out", () => {
   // carriage) — resume material can never survive a projection.
   it("fan-out --nodes -A --full --fields projects named fields only (no resume leakage)", async () => {
     vi.stubEnv("TOK_B", "secret-b");
+    const activityState = { activity: "idle-at-prompt", display: "idle", needsInput: { count: 0, reason: null }, decidedBy: "hook" };
     const client = mockClient({
       "/api/ps": { status: 200, data: [{ rigId: "rig-1", name: "remote-rig", rigName: "remote-rig" }] },
       "/api/rigs/rig-1/nodes": { status: 200, data: [
         { rigId: "rig-1", rigName: "remote-rig", logicalId: "dev.impl", sessionStatus: "running",
-          resumeToken: "SECRET-TOKEN", resumeCommand: "claude --resume SECRET-TOKEN" },
+          activityState, resumeToken: "SECRET-TOKEN", resumeCommand: "claude --resume SECRET-TOKEN" },
       ] },
     });
     const deps: PsDeps = {
@@ -570,14 +571,15 @@ describe("rig ps --all-hosts fan-out", () => {
         { id: "host-b", transport: "http", url: "http://b", bearer_env: "TOK_B" },
       ]),
     };
-    const { stdout } = await captureLogs(async () => {
-      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--all-hosts", "--nodes", "-A", "--full", "--json", "--fields", "logicalId"]);
+    const { stdout, stderr } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--all-hosts", "--nodes", "-A", "--full", "--json", "--fields", "logicalId,activityState"]);
     });
+    expect(stderr).toEqual([]);
     const raw = stdout.join("");
     const parsed = JSON.parse(raw);
     expect(parsed.items).toHaveLength(1);
-    expect(Object.keys(parsed.items[0]).sort()).toEqual(["hostId", "logicalId"]);
-    expect(parsed.items[0]).toEqual({ logicalId: "dev.impl", hostId: "host-b" });
+    expect(Object.keys(parsed.items[0]).sort()).toEqual(["activityState", "hostId", "logicalId"]);
+    expect(parsed.items[0]).toEqual({ logicalId: "dev.impl", activityState, hostId: "host-b" });
     expect(raw).not.toContain("SECRET-TOKEN");
     expect(raw).not.toContain("resumeToken");
     expect(raw).not.toContain("resumeCommand");

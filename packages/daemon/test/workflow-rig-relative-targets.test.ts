@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,8 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { createDaemon } from "../src/startup.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux-transport.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+import { makeTopologyDestinationCheck, makeQueueRecordingCheck } from "../src/domain/queue-destination-check.js";
+import { loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
 import { expandRigRelativeTarget, isRigRelativeTarget } from "../src/domain/workflow-rig-placeholder.js";
 
 // A reusable workflow spec can write `member@{rig}` in preferred_targets;
@@ -477,6 +479,7 @@ ${steps}`;
     expect(status).toBe(400);
     expect(body.error).toBe("unknown_destination_rig");
     expect(body.message).toContain("ops-watcher@{rig}");
+    expect(body.message).toMatch(/bind.*rig|--rig/i);
     expect(count("workflow_instances")).toBe(instances);
     expect(count("queue_items")).toBe(packets);
   });
@@ -503,6 +506,7 @@ ${steps}`;
 `);
     const started = await start(yaml);
     expect(started.status).toBe(201);
+    const packets = count("queue_items");
     const res = await daemon.app.request("/api/workflow/project", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -516,7 +520,81 @@ ${steps}`;
     });
     expect(res.status).toBe(400);
     expect((await res.json() as { error: string }).error).toBe("unknown_destination_rig");
+    expect(count("queue_items")).toBe(packets);
+    expect(entryDestination(started.body.instance.instanceId)).toBe("ops-watcher@rig-a");
   });
+
+  for (const mode of ["missing", "archived", "unknown", "unreadable", "resolved"] as const) {
+    it(`workflow instantiate and project keep the packet with ${mode} destination status`, async () => {
+      const rigName = `workflow-status-${mode}-${n}`;
+      const target = `ops-reader@${rigName}`;
+      if (mode === "archived" || mode === "resolved") {
+        const rig = daemon.deps.rigRepo.createRig(rigName);
+        if (mode === "archived") daemon.db.prepare("UPDATE rigs SET archived_at = ? WHERE id = ?").run("2026-01-01T00:00:00Z", rig.id);
+        else {
+          const node = daemon.deps.rigRepo.addNode(rig.id, "ops.reader", { runtime: null });
+          daemon.deps.sessionRegistry.registerSession(node.id, target);
+        }
+      }
+      const repo = daemon.deps.queueRepo!;
+      const receiverBefore = repo.acceptsDestination(target);
+      const original = repo.destinationAdvisory.bind(repo);
+      const spy = vi.spyOn(repo, "destinationAdvisory").mockImplementation(destination => {
+        if (destination !== target) return original(destination);
+        if (mode === "unreadable") throw new Error("fixture advisory unavailable");
+        if (mode === "unknown") return { code: "destination_status", status: "unknown", destinationSession: destination,
+          availableDestinations: [], message: "Destination status unknown: fixture registry unavailable." };
+        return original(destination);
+      });
+      const assertStatus = (advisories: string[] | undefined) => {
+        const text = (advisories ?? []).join("\n");
+        if (mode === "resolved") expect(text).not.toContain(target);
+        else if (mode === "unknown" || mode === "unreadable") expect(text).toMatch(/status unknown/i);
+        else if (mode === "archived") expect(text).toMatch(/archived since/i);
+        else expect(text).toContain(`No local rig ${rigName}`);
+      };
+      try {
+        const literal = specYaml(`status-entry-${mode}`, `    watcher:
+      preferred_targets:
+        - ${target}
+`);
+        const entry = await start(literal);
+        expect(entry.status).toBe(201);
+        expect(entryDestination(entry.body.instance.instanceId)).toBe(target);
+        assertStatus(entry.body.advisories);
+        expect(repo.acceptsDestination(target)).toBe(receiverBefore);
+        const later = specYaml(`status-next-${mode}`, `    watcher:
+      preferred_targets:
+        - ops-watcher@rig-a
+    finisher:
+      preferred_targets:
+        - ${target}
+`, `    - id: watch
+      actor_role: watcher
+      allowed_exits:
+        - handoff
+      next_hop:
+        mode: require
+        suggested_roles:
+          - finisher
+    - id: finish
+      actor_role: finisher
+      allowed_exits:
+        - done
+`);
+        const initial = await start(later);
+        expect(initial.status).toBe(201);
+        const response = await daemon.app.request("/api/workflow/project", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ instanceId: initial.body.instance.instanceId, currentPacketId: initial.body.entryQitemId,
+            exit: "handoff", actorSession: "ops-watcher@rig-a", resultNote: "next" }) });
+        expect(response.status).toBe(200);
+        const projected = await response.json() as Record<string, any>;
+        expect(repo.getById(projected.nextQitemId)?.destinationSession).toBe(target);
+        expect(entryDestination(initial.body.instance.instanceId)).toBe(target);
+        assertStatus(projected.advisories);
+      } finally { spy.mockRestore(); }
+    });
+  }
 
   describe("only a trailing @{rig} is the form", () => {
     const roles = (target: string) => `    watcher:
@@ -555,5 +633,98 @@ describe("member@{rig} helper", () => {
     expect(expandRigRelativeTarget("ops-{rig}@rig-a", "rig-b")).toBe("ops-{rig}@rig-a");
     expect(expandRigRelativeTarget("ops-watcher@prefix-{rig}", "rig-b")).toBe("ops-watcher@prefix-{rig}");
     expect(expandRigRelativeTarget("ops-watcher@{rig}", null)).toBe("ops-watcher@{rig}");
+  });
+});
+
+
+describe("workflow template checks preserve topology-backed recording", () => {
+  let db: Database.Database;
+  let queue: QueueRepository;
+  let runtime: WorkflowRuntime;
+  let tmp: string;
+  let serial: number;
+  beforeEach(() => {
+    db = createDb(); migrate(db, ALL_MIGRATIONS);
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("r3-rig", "rig-a");
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("r3-orch", "orch");
+    const bus = new EventBus(db);
+    const topology = makeTopologyDestinationCheck({
+      findRigsByName: name => db.prepare("SELECT id FROM rigs WHERE name = ?").all(name), loadHumanRegistry,
+    });
+    queue = new QueueRepository(db, bus, { validateRig: topology, canRecordDestination: makeQueueRecordingCheck(topology) });
+    queue.attachOutbox(new OutboxHandler(db));
+    runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo: queue,
+      exceptionDial: { hostDefault: () => "orchestrator", humanFallbackSeat: "human@host" } });
+    tmp = mkdtempSync(join(tmpdir(), "workflow-template-parity-")); serial = 0;
+  });
+  afterEach(() => { db.close(); rmSync(tmp, { recursive: true, force: true }); });
+
+  function spec(owner: string, nextOwner?: string, graph = false, rescue = "ops-rescue@rig-a") {
+    return `workflow:
+  id: template-parity-${++serial}
+  version: 1
+  objective: template recording parity
+  entry: {role: watcher}
+  roles:
+    watcher:
+      preferred_targets: [${JSON.stringify(owner)}]
+    finisher:
+      preferred_targets: [${JSON.stringify(nextOwner ?? owner)}]
+    rescue:
+      preferred_targets: [${JSON.stringify(rescue)}]
+  exception_routing: {orchestrator_role: rescue}
+  steps:
+    - id: watch
+      actor_role: watcher
+      allowed_exits: [done, failed, handoff]
+${graph ? "      depends_on: []\n" : nextOwner ? "      next_hop: {mode: require, suggested_roles: [finisher]}\n" : ""}${nextOwner ? `    - id: finish
+      actor_role: finisher
+      allowed_exits: [done, failed]
+${graph ? "      depends_on: [watch]\n" : ""}` : ""}`;
+  }
+  const count = () => (db.prepare("SELECT COUNT(*) count FROM queue_items").get() as { count: number }).count;
+  const state = (instanceId: string) => db.prepare("SELECT status, current_frontier_json FROM workflow_instances WHERE instance_id = ?").get(instanceId);
+  async function start(text: string, entryOwnerSession?: string) {
+    const specPath = join(tmp, `spec-${serial}.yaml`); writeFileSync(specPath, text);
+    return runtime.instantiate({ specPath, rootObjective: "template parity", createdBySession: "orch@orch", entryOwnerSession });
+  }
+  for (const archived of [false, true]) {
+    it.each(["entry", "sequential", "graph"] as const)(`records a registered literal brace-rig at %s (archived=${archived})`, async kind => {
+      db.prepare("INSERT INTO rigs (id, name, archived_at) VALUES (?, ?, ?)")
+        .run("literal-rig", "prefix-{rig}", archived ? "2026-01-01T00:00:00Z" : null);
+      const target = "ops-watcher@prefix-{rig}";
+      expect(queue.acceptsDestination(target)).toBe(true);
+      const started = await start(kind === "entry" ? spec(target) : spec("ops-watcher@rig-a", target, kind === "graph"));
+      if (kind === "entry") expect(queue.getById(started.entryQitemId)?.destinationSession).toBe(target);
+      else {
+        const result = await runtime.project({ instanceId: started.instance.instanceId, currentPacketId: started.entryQitemId,
+          actorSession: "ops-watcher@rig-a", exit: kind === "graph" ? "done" : "handoff", resultNote: "next" });
+        expect(queue.getById(result.nextQitemId!)?.destinationSession).toBe(target);
+      }
+    });
+  }
+  it("an unregistered graph target keeps its prior frontier and packet count", async () => {
+    const started = await start(spec("ops-watcher@rig-a", "ops-watcher@prefix-{rig}", true));
+    const before = state(started.instance.instanceId); const packets = count();
+    await expect(runtime.project({ instanceId: started.instance.instanceId, currentPacketId: started.entryQitemId,
+      actorSession: "ops-watcher@rig-a", exit: "done" })).rejects.toMatchObject({ code: "unknown_destination_rig" });
+    expect(state(started.instance.instanceId)).toEqual(before); expect(count()).toBe(packets);
+  });
+  it.each([false, true])("resume retains an unresolved template without a new packet (graph=%s)", async graph => {
+    const started = await start(spec("ops-watcher@{rig}", graph ? "ops-finisher@rig-a" : undefined, graph), "ops-watcher@rig-a");
+    await runtime.project({ instanceId: started.instance.instanceId, currentPacketId: started.entryQitemId,
+      actorSession: "ops-watcher@rig-a", exit: "failed", resultNote: "fixture failure" });
+    const before = state(started.instance.instanceId); const packets = count();
+    await expect(runtime.resume({ instanceId: started.instance.instanceId, actorSession: "orch@orch",
+      ...(graph ? { occurrenceId: started.entryQitemId } : {}) })).rejects.toMatchObject({ code: "unknown_destination_rig" });
+    expect(state(started.instance.instanceId)).toEqual(before); expect(count()).toBe(packets);
+  });
+  it("an unresolved exception target keeps main's configured human fallback", async () => {
+    const started = await start(spec("ops-watcher@rig-a", undefined, false, "ops-rescue@{rig}"));
+    await runtime.project({ instanceId: started.instance.instanceId, currentPacketId: started.entryQitemId,
+      actorSession: "ops-watcher@rig-a", exit: "failed", resultNote: "fixture failure" });
+    const exceptions = db.prepare("SELECT destination_session FROM queue_items WHERE tags LIKE ?").all('%"workflow-exception"%');
+    expect(exceptions).toEqual([{ destination_session: "human@host" }]);
+    expect(db.prepare("SELECT 1 FROM queue_items WHERE destination_session = ?").get("ops-rescue@{rig}")).toBeUndefined();
   });
 });

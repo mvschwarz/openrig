@@ -40,7 +40,7 @@ function mockLifecycle(port: number): LifecycleDeps {
   };
 }
 
-async function runWalk(port: number, argv: string[], failTransportAt?: number, profileResponse: object = PROFILE_RESPONSE): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined; transportPayloads: string[]; profileRequestUrls: string[] }> {
+async function runWalk(port: number, argv: string[], failTransportAt?: number, profileResponse: object = PROFILE_RESPONSE, recordedAt?: number): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined; transportPayloads: string[]; profileRequestUrls: string[] }> {
   const transportPayloads: string[] = [];
   const profileRequestUrls: string[] = [];
   let sends = 0;
@@ -58,6 +58,12 @@ async function runWalk(port: number, argv: string[], failTransportAt?: number, p
         if (failTransportAt !== undefined && sends === failTransportAt) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "send failed" }));
+          return;
+        }
+        if (sends === recordedAt) {
+          transportPayloads.push((JSON.parse(body) as { text: string }).text);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ outcome: "recorded", sent: false, persisted: true, outboxIds: ["outbox-profile"] }));
           return;
         }
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -108,6 +114,18 @@ describe("rig walk --through-profile — the walk/profile join (Test-A)", () => 
       { atomId: "recap", address: "seat:RECAP.md#recent-decisions" },
     ]);
     expect(transportPayloads).toHaveLength(2);
+  });
+
+  it("a recorded first piece aborts a two-piece profile with no delivered identities", async () => {
+    const { logs, errLogs, exitCode, transportPayloads } = await runWalk(0, ARGS, undefined, PROFILE_RESPONSE, 1);
+    expect(exitCode).toBe(1);
+    expect(transportPayloads).toHaveLength(1);
+    expect(errLogs.join("\n")).toMatch(/recorded.*not delivered/i);
+    expect(errLogs.join("\n")).toContain("outbox-profile");
+    const report = JSON.parse(logs[logs.length - 1]!);
+    expect(report.delivered).toEqual([]);
+    expect(report.expected).toHaveLength(2);
+    expect(report.aborted.atomId).toBe("welcome");
   });
 
   it("a profile warning (post-compaction with no seat recap) reaches stderr; the walk delivers what composed", async () => {

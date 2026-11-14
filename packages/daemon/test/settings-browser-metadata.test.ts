@@ -157,6 +157,13 @@ describe("browser entry metadata", () => {
     expect(browser.readOnly).toBe(true);
   });
 
+  it("reports the seat polling interval as requiring a daemon restart", () => {
+    expect(browse().entries.find((e) => e.key === "daemon.seat_poll_interval_ms")).toMatchObject({
+      appliesAt: "daemon_restart",
+      application: "Read once at daemon startup; restart the daemon to apply.",
+    });
+  });
+
   it("marks timing only where the application guidance says a restart applies it, and says unknown otherwise", () => {
     for (const e of browse().entries) {
       const guidanceSaysRestart = /\bdaemon (?:restart|startup)\b/i.test(e.application);

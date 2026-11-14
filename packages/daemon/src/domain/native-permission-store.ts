@@ -53,17 +53,25 @@ export function validatePersistedPermissionSelection(row: { runtime: string; mod
   return { runtime: row.runtime, mode: row.mode };
 }
 
+/** Recorded built-ins that keep the team default: both default to allow, and their rules aren't applied at launch, so
+ *  recording one mustn't leave a seat stricter than recording nothing. Every other policy keeps its meaning. */
+const TEAM_DEFAULT_POLICIES = new Set(["builtin:standard", "builtin:open"]);
+
 function resolveLaunchDefaultFromMetadata(
   runtime: string,
   meta: LaunchDefaultMetadata | null | undefined,
   codexProfileOverride?: string | null,
+  seatRules = false,
 ): "kernel" | "team" | undefined {
   if (runtime !== "claude-code" && runtime !== "codex") return undefined;
-  if (!meta || meta.memberPolicy != null || meta.rigPolicy != null
-    || (runtime === "codex" && (codexProfileOverride === undefined ? meta.codexProfile : codexProfileOverride)?.trim())) {
+  if (!meta || (runtime === "codex" && (codexProfileOverride === undefined ? meta.codexProfile : codexProfileOverride)?.trim())) {
     return undefined;
   }
-  return meta.rigName === "kernel" ? "kernel" : "team";
+  // The member's own policy decides over the rig's, whatever it is.
+  const policy = meta.memberPolicy ?? meta.rigPolicy;
+  if (policy == null) return meta.rigName === "kernel" ? "kernel" : "team";
+  // A seat's own native rules may be that policy applied, so they keep their meaning and precedence alone.
+  return meta.rigName !== "kernel" && !seatRules && TEAM_DEFAULT_POLICIES.has(policy.trim()) ? "team" : undefined;
 }
 
 /** Pure launch-permission decision over already-read facts, shared by NativePermissionStore.launchOverride and batched node inventory. */
@@ -103,7 +111,7 @@ export function resolveLaunchOverrideFromFacts(
   }
   const launchDefault = selection
     ? undefined
-    : resolveLaunchDefaultFromMetadata(facts.runtime, facts.launchDefaultMetadata, facts.target?.codexProfile);
+    : resolveLaunchDefaultFromMetadata(facts.runtime, facts.launchDefaultMetadata, facts.target?.codexProfile, facts.claudePermissions !== undefined);
   if (launchDefault === "kernel") {
     return { ...ruleBinding, kernelAuthority: true, teamPermissionDefault: false, launchPosture: facts.runtime === "codex" ? "full_bypass" : "floor" };
   }

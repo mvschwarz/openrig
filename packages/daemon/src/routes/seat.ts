@@ -349,6 +349,25 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
   return c.json(result, 404);
 });
 
+// #2985 / #2861: adopt the running successor of a handover that failed after launching it, keeping its conversation.
+seatRoutes.post("/handover/:seatRef/recover", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const service = new SeatHandoverService(handoverDeps(c));
+  const result = await service.recover({
+    seatRef: c.req.param("seatRef")!,
+    reason: typeof body["reason"] === "string" ? body["reason"] : null,
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  if (result.ok) return c.json("plan" in result ? result.plan : result.result);
+  if (result.code === "missing_reason" || result.code === "seat_ref_required") return c.json(result, 400);
+  if (result.code === "no_handover_to_recover" || result.code === "discovered_not_found") return c.json(result, 404);
+  if (result.code === "recover_runtime_unsupported") return c.json(result, 501);
+  if (result.code === "tmux_probe_failed") return c.json(result, 502);
+  if (result.code === "handover_commit_failed") return c.json(result, 500);
+  if (result.code === "seat_not_found") return c.json(result, 404);
+  return c.json(result, 409);
+});
+
 // S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model / stop / clean.
 // One service, one resolution path, one status mapping shared by all three verbs.
 export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifecycleService {
@@ -375,12 +394,13 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
     || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
     || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
-    || code === "missing_permissions_to" || code === "permissions_to_not_a_person") return 400;
+    || code === "missing_permissions_to" || code === "permissions_to_not_a_person"
+    || code === "missing_home" || code === "invalid_home" || code === "missing_expectation" || code === "invalid_operation_id") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
     || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
-    || code === "permissions_to_unavailable") return 500;
+    || code === "permissions_to_unavailable" || code === "runtime_home_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -456,6 +476,30 @@ seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   const result = await seatLifecycleService(c).setCwd({
     seatRef: c.req.param("seatRef"),
     cwd: typeof body.cwd === "string" ? body.cwd : "",
+    reason: typeof body.reason === "string" ? body.reason : "",
+    operator: transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : null),
+  });
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+});
+
+// A seat's runtime home and what a recording is made against; read only.
+seatRoutes.get("/runtime-home/:seatRef", (c) => {
+  const result = seatLifecycleService(c).runtimeHome(c.req.param("seatRef"));
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+});
+
+// Record an operator-selected runtime home for a seat's next launch. Every expectation is required and passed through
+// as sent (null for none), so a stale read is a conflict, never a guess.
+seatRoutes.post("/record-runtime-home/:seatRef", async (c) => {
+  const value: unknown = await c.req.json().catch(() => null);
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const result = seatLifecycleService(c).recordRuntimeHome({
+    seatRef: c.req.param("seatRef"),
+    home: body.home,
+    expectedOccupant: body.expectedOccupant,
+    expectedOriginal: body.expectedOriginal,
+    expectedRevision: body.expectedRevision,
+    operationId: body.operationId,
     reason: typeof body.reason === "string" ? body.reason : "",
     operator: transportSenderSession(c) ?? (typeof body.operator === "string" ? body.operator : null),
   });
