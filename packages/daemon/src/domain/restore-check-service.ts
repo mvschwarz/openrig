@@ -220,7 +220,9 @@ export interface RestoreCheckDeps {
   /** Exact ordinary-restore input; never captures an auto-rehydrate snapshot. */
   getRestoreInputs: (rigId: string) =>
     | { snapshot: Pick<Snapshot, "id" | "kind" | "data">; servicesRecord: RigServicesRecord | null }
-    | { currentStateRehydrate: CurrentStateRehydrateEligibility; reason: string }
+    | { currentStateRehydrate: CurrentStateRehydrateEligibility; reason: string;
+      /** The members outside the rig's recorded roster, which a current-state rehydrate leaves as they are. */
+      notRestoredNodeIds?: string[] }
     | { unavailable: string };
   /** Probe daemon health: returns { healthy: boolean; evidence: string } */
   probeDaemonHealth: () => { healthy: boolean; evidence: string };
@@ -456,6 +458,7 @@ export class RestoreCheckService {
         const { ok, blockers } = input.currentStateRehydrate;
         return {
           snapshot: null,
+          ...(input.notRestoredNodeIds ? { notRestored: new Set(input.notRestoredNodeIds) } : {}),
           check: {
             check,
             status: ok ? "yellow" : "red",

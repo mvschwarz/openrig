@@ -11,6 +11,7 @@ import { resolveLegacyTopologyRigsRoot } from "../domain/user-settings/settings-
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
+import { readTopologyRoster } from "../domain/snapshot-capture.js";
 
 function getDeps(c: { get(key: never): unknown }): {
   rigRepo: RigRepository;
@@ -202,9 +203,17 @@ export function createRestoreCheckService(
       if (!rig) return { unavailable: `Rig ${rigId} no longer exists` };
       const selected = snapshotRepo.selectRestoreUsable(rigId);
       if (!selected.ok || !snapshotMatchesCurrentOccupants(snapshotRepo.db, rig, selected.snapshot)) {
+        // A current-state rehydrate takes its roster from the rig's recorded topology roster, so a member outside it
+        // is left as it is there too. A malformed roster stops that restore; restore-check then claims nothing about it.
+        let notRestoredNodeIds: string[] | undefined;
+        try {
+          const roster = readTopologyRoster(snapshotRepo.db, rigId);
+          if (roster) notRestoredNodeIds = rig.nodes.map((node) => node.id).filter((nodeId) => !roster.includes(nodeId));
+        } catch { notRestoredNodeIds = undefined; }
         return {
           currentStateRehydrate: assessCurrentStateRehydrateEligibility(snapshotRepo.db, rig),
           reason: selected.ok ? "Selected snapshot names an older occupant" : selected.message,
+          ...(notRestoredNodeIds ? { notRestoredNodeIds } : {}),
         };
       }
       return { snapshot: selected.snapshot, servicesRecord: rigRepo.getServicesRecord(rigId) };

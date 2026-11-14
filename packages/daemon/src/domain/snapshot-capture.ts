@@ -221,18 +221,24 @@ export class SnapshotCapture {
   }
 
   private materializedRoster(rigId: string): string[] | null {
-    const row = this.db.prepare(
-      "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
-    ).get(rigId) as { payload: string } | undefined;
-    if (!row) return null;
-    try {
-      const parsed = JSON.parse(row.payload) as { intendedNodeIds?: unknown };
-      if (!Array.isArray(parsed.intendedNodeIds) || !parsed.intendedNodeIds.every((id) => typeof id === "string")) {
-        throw new Error("latest topology roster event has no string intendedNodeIds array");
-      }
-      return parsed.intendedNodeIds;
-    } catch (error) {
-      throw new Error(`Cannot capture snapshot from malformed authoritative topology roster: ${(error as Error).message}`);
+    return readTopologyRoster(this.db, rigId);
+  }
+}
+
+/** The rig's latest recorded topology roster, or null when none is recorded. A snapshot taken without an explicit roster,
+ *  an auto-rehydrate one included, restores these members and leaves the rest as they are. Throws on a malformed roster. */
+export function readTopologyRoster(db: Database.Database, rigId: string): string[] | null {
+  const row = db.prepare(
+    "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
+  ).get(rigId) as { payload: string } | undefined;
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.payload) as { intendedNodeIds?: unknown };
+    if (!Array.isArray(parsed.intendedNodeIds) || !parsed.intendedNodeIds.every((id) => typeof id === "string")) {
+      throw new Error("latest topology roster event has no string intendedNodeIds array");
     }
+    return parsed.intendedNodeIds;
+  } catch (error) {
+    throw new Error(`Cannot capture snapshot from malformed authoritative topology roster: ${(error as Error).message}`);
   }
 }
