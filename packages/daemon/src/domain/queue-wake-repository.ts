@@ -64,6 +64,7 @@ export class QueueWakeRepository {
   private lookup: Database.Statement | undefined;
 
   constructor(private readonly db: Database.Database, private readonly isPersonAddress: (value: string) => boolean = (value) => {
+    if (!value.includes("@")) return false;
     if (isHumanSeatSessionRef(value)) return true;
     const registry = loadHumanRegistry();
     return registry.ok && resolveRegisteredHumanAddress(value, registry.entities) !== null;
@@ -108,8 +109,8 @@ export class QueueWakeRepository {
     if (armed && current?.state === "blocked" && this.db.prepare(
       "SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_id > ? AND state <> 'blocked' LIMIT 1",
     ).get(qitemId, armed.transition_id)) armed = undefined;
-    if (armed?.wake_kind === "blocker" && current?.state === "blocked" && armed.wake_ref === current.blocked_on
-      && (isTypedGateBlocker(armed.wake_ref) || this.isPersonAddress(armed.wake_ref))) armed = undefined;
+    if (armed?.wake_kind === "blocker" && current?.state === "blocked"
+      && (armed.wake_ref !== current.blocked_on || isTypedGateBlocker(armed.wake_ref) || this.isPersonAddress(armed.wake_ref))) armed = undefined;
     if (!armed) {
       // Older parks on custom queue IDs have no wake receipt, although the
       // blocker transition still unparks them. Only an existing live row is

@@ -1412,6 +1412,27 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(repo.getById(row.qitemId)?.state).toBe("pending");
   });
 
+  it("does not report an old blocker after a blocked row moves to a typed gate", async () => {
+    const blocker = await repo.create({ qitemId: "named-work", sourceSession: "orch@rig", destinationSession: "peer@rig", body: "work", nudge: false });
+    const row = await item();
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: blocker.qitemId, transitionNote: "wait" });
+    expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ kind: "blocker", ref: blocker.qitemId, live: true });
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "fold:release", transitionNote: "wait for fold" });
+    expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
+    repo.update({ qitemId: blocker.qitemId, actorSession: "peer@rig", state: "done", closureReason: "no-follow-on", transitionNote: "complete" });
+    expect(repo.getById(row.qitemId)).toMatchObject({ state: "blocked", blockedOn: "fold:release" });
+  });
+
+  it("uses the current live blocker when a repark has no wake receipt", async () => {
+    const first = await repo.create({ qitemId: "first-work", sourceSession: "orch@rig", destinationSession: "peer@rig", body: "work", nudge: false });
+    const next = await repo.create({ qitemId: "next-work", sourceSession: "orch@rig", destinationSession: "peer@rig", body: "work", nudge: false });
+    const row = await item();
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: first.qitemId, transitionNote: "first" });
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: next.qitemId, transitionNote: "next" });
+    db.prepare("DELETE FROM queue_transition_wakes WHERE qitem_id = ? AND wake_ref = ?").run(row.qitemId, next.qitemId);
+    expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ kind: "blocker", ref: next.qitemId, live: true });
+  });
+
   it.each(["human@kernel", "fold:release", "auth:permit", "external:vendor"])("does not treat %s as a colliding queue blocker", async (ref) => {
     const collision = await repo.create({ qitemId: ref, sourceSession: "orch@rig", destinationSession: "peer@rig", body: "work", nudge: false });
     const row = await item();
