@@ -306,6 +306,40 @@ cited here by number with the code that carries them):
   `seat-handover-service.ts:1151`), which is separate from the CLI
   `rig restore-packet` below. The rebuild source primes from the seat's
   durable chain (`buildRebuildPrimingChain`, `rebuild-priming-chain.ts:22`).
+- **Seat handover recovery** (#2985, #2861) — a handover that fails after
+  the in-place respawn with its Claude successor launched records the attempt
+  in `seat_handover_attempts` (migration 167; `seat-handover-attempts.ts`):
+  the generation it reserved, the pane, the session id it generated for
+  the launch and its frozen executable (a `#!` script or not, #2341).
+  `rig seat handover <seat> --recover --reason <reason>` calls
+  `POST /api/seat/handover/:seatRef/recover`, which runs
+  `SeatHandoverService.recover`: under the seat's lifecycle lease it checks
+  the attempt still replaces the current occupant, proves the session's only
+  pane holds exactly one foreground Claude naming that session id (two
+  samples, unchanged PID, with the launch's executable as readiness has it),
+  takes the conversation that process holds now from Claude's
+  `sessions/<pid>.json` (`readClaudePidSessionId`, as the resume refresher
+  does; a `/clear` rotates it) as the seat's resume target, even when it is the
+  retiring occupant's or a fork parent's (`recoveredConversation`: the result
+  says so, and a fork on its parent's conversation reports `forkId: "none"`,
+  not a distinct fork; the token is written to the successor's session row only,
+  so the parent's binding and process are untouched), then commits through the same `commit()` with
+  the reserved generation (rolled back if it doesn't register). A classic
+  launch (one not in a native Claude permission mode: the `floor` and
+  `full_bypass` postures included) records no executable, so a Claude a `#!`
+  wrapper starts without exec is proven only when it is itself one the proof
+  recognizes (`claude`, the native installer's version, Nix); as `node cli.js`
+  or a renamed binary it is not, and when the foreground runs the launch's
+  conversation with no such Claude (nor a native one whose executable path
+  this sample could not read), the refusal says `--recover` can't prove it
+  (to run it again only once the pane shows a waiting wrapper has started
+  Claude), but only when a second sample,
+  `UNPROVABLE_CONFIRM_MS` (3 s) later, finds the same foreground: a `#!`
+  wrapper in its start window has not yet exec'd or started its Claude.
+  The result and
+  `seat.handover_completed` carry `recoveredFrom`. Codes: 404
+  `no_handover_to_recover`, 409 `handover_attempt_superseded` and
+  `successor_identity_unproven`, 501 `recover_runtime_unsupported`.
 
 ## 5. Daemon-side restore-check and CLI restore-packet
 

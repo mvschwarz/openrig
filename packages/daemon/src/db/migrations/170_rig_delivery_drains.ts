@@ -1,7 +1,7 @@
 import type { Migration } from "../migrate.js";
 
 export const rigDeliveryDrainsSchema: Migration = {
-  name: "167_rig_delivery_drains.sql",
+  name: "170_rig_delivery_drains.sql",
   sql: `
     CREATE TABLE IF NOT EXISTS rig_delivery_drains (
       id INTEGER PRIMARY KEY,

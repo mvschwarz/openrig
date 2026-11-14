@@ -1477,9 +1477,11 @@ function currentMenuKeyHint(lines: string[]): boolean {
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
 // of at most two rows: the `<model> · <~ or /path>` status line, optionally followed by one known hint row.
+// While a turn runs and the box holds text, Codex 0.167 draws its queue hint on that row instead ("tab to queue
+// message", or "tab to queue" when narrow, optionally followed by a mode label or the right-side context).
 const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
 const CODEX_NATIVE_STATUS_LINE = /^ {2}[^\s·][^·]* · [A-Za-z]:[\\/]/;
-const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$/;
+const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$|^\s*tab to queue(?: message)?(?:\s*$|\s{2,}| · )/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
