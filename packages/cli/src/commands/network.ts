@@ -42,12 +42,24 @@ function defaultReadTokenFile(path: string): string {
   return readFileSync(path, "utf8").trim();
 }
 
+/** A hub URL as status prints it: a query string can carry a credential the person pasted, so its value isn't shown. */
+export function shownHubUrl(hubUrl: string): string {
+  try {
+    const url = new URL(hubUrl);
+    if (!url.search) return hubUrl;
+    url.search = "";
+    return `${url.toString()} (query hidden)`;
+  } catch {
+    return hubUrl;
+  }
+}
+
 function line(b: Binding): string {
   const contact = b.lastContactAt ? `last contact ${b.lastContactAt}` : "no contact yet";
   const state = b.state === "active" ? contact : `${b.state}${b.stateReason ? ` (${b.stateReason})` : ""}`;
   const plain = b.unencrypted ? "  UNENCRYPTED (http, allowed for this binding)" : "";
   const conflicts = (b.closedElsewhere ?? []).map((c) => `\n  hub item ${c.hubItem} was closed elsewhere before its result arrived; the result stays on ${c.localItem}`).join("");
-  return `${b.id}  ${b.localSession} -> ${b.hubSeat} at ${b.hubUrl}${plain}  ${state}${b.lastError && b.state === "active" ? `  last error: ${b.lastError}` : ""}${conflicts}${accountNote(b)}`;
+  return `${b.id}  ${b.localSession} -> ${b.hubSeat} at ${shownHubUrl(b.hubUrl)}${plain}  ${state}${b.lastError && b.state === "active" ? `  last error: ${b.lastError}` : ""}${conflicts}${accountNote(b)}`;
 }
 
 /** `rig network`: connect a selected local seat to a participant of a remote hub (an account's network rig, or

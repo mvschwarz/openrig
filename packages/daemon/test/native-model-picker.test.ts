@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
-import { currentClaudeModelMenu, currentCodexModelPicker } from "../src/domain/native-model-picker.js";
+import { currentClaudeModelMenu, currentCodexModelPicker, isModelPickerHeader } from "../src/domain/native-model-picker.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -101,6 +101,17 @@ describe("an ordinary send never types into an open model picker", () => {
     expect({ ok: sent.result.ok, reason: (sent.result as { reason?: string }).reason, written: sent.written })
       .toEqual({ ok: false, reason: "target_needs_input", written: 0 });
     expect(sent.result).toMatchObject({ sent: false });
+    // It says it's the model picker and to close it; the route that types into a prompt would pick a model here.
+    const header = runtime === "codex" ? currentCodexModelPicker(pane) : currentClaudeModelMenu(pane);
+    const error = (sent.result as { error?: string }).error ?? "";
+    expect(error).toContain("is at an interactive prompt (selection_prompt).");
+    expect(error).toContain(`A model picker is open (${header}): close it (Esc) in that pane, then send again.`);
+    expect(error).not.toContain("--dangerously-interact");
+  });
+
+  it("names only these pickers' headers as a model picker", () => {
+    for (const header of ["Select model", "Select Model and Effort", "Select Reasoning Level for GPT-6.1-Sol"]) expect(isModelPickerHeader(header)).toBe(true);
+    for (const other of ["Select tools", "Select Reasoning Level for", "Do you want to proceed?", "", null, undefined]) expect(isModelPickerHeader(other)).toBe(false);
   });
 
   it.each([

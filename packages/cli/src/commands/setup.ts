@@ -954,9 +954,10 @@ tmux scrollback:
           if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
         }
         listChecks();
-        console.log("A harness needs a login only when a seat you start runs on it (rerun with --providers to leave it out). A built-in team can use one you didn't select: starter runs its reviewer on Codex.");
         console.log("Run `rig doctor` to recheck the system and provider authentication.");
       }
+      // Every run, as doctor says it: a setup that's ready for the providers chosen can still meet a built-in team's other one.
+      console.log("A harness needs a login only when a seat you start runs on it (rerun with --providers to leave it out). A built-in team can use one you didn't select: starter runs its reviewer on Codex.");
       // Keep the conversation route available even after a dry run or incomplete setup,
       // before the optional menu so a short output read still includes the handoff.
       console.log("");
