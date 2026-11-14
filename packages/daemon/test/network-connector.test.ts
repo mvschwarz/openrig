@@ -342,7 +342,7 @@ describe("network connector", () => {
     expect(hub.items.get("hub-h2")).toMatchObject({ state: "failed", closureReason: null, resolution: "The build broke." });
     expect(hub.items.get("hub-h3")).toMatchObject({ state: "done", closureReason: "denied", resolution: "Not mine to do." });
     expect(hub.items.get("hub-h4")).toMatchObject({ state: "in-progress" });
-    expect(hub.items.get("hub-h4")!.notes.at(-1)).toBe(`This item was handed on from ${local("hub-h4").qitemId} without one successor here, so its outcome is unknown. It won't be run again.`);
+    expect(hub.items.get("hub-h4")!.notes.at(-1)).toBe("This item was handed on here without one successor, so its outcome is unknown. It won't be run again.");
   });
 
   it("a disconnect while a hub answer is pending starts no local work, and work already queued stays", async () => {

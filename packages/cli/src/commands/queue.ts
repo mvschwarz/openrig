@@ -168,7 +168,10 @@ function terminalDeliveryResult(
     "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
     "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
     "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
-    "failed": `The wake failed (${wakeResult}).`,
+    // A hosted member with no wake trigger: no wake exists to fail, and the work waits to be read.
+    "failed": wakeResult?.startsWith("awaiting-pickup:")
+      ? `No wake is sent (${wakeResult}): the work waits in the member's queue until it reads it.`
+      : `The wake failed (${wakeResult}).`,
     "indeterminate": wakeResult?.startsWith("wake-accepted:")
       ? `The member's trigger accepted the ring (${wakeResult}). That isn't pickup: its claim is.`
       : `Terminal receipt unconfirmed (${wakeResult}).`,

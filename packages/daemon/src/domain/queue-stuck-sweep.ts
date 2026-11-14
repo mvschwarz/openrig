@@ -1240,7 +1240,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         othersMayHaveRun();
         // judged again on the row as the send (and anyone else during it) left it
         row = undeliveredNow(row.qitemId);
-        if (!recordsNoWakeRoute(row?.lastNudgeResult)) continue;
+        if (!row || !recordsNoWakeRoute(row.lastNudgeResult)) continue;
       }
       const c = undeliveredCandidate(row, true);
       if (c) candidates.push(c);

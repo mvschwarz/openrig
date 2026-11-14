@@ -277,7 +277,7 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
       }
       const end = local.state === "handed-off" ? finalItem(deps.queueRepo, local) : local;
       if (!end) {
-        await unknown(`This item was handed on from ${local.qitemId} without one successor here, so its outcome is unknown. It won't be run again.`);
+        await unknown("This item was handed on here without one successor, so its outcome is unknown. It won't be run again.");
         continue;
       }
       if (!FINAL.has(end.state)) continue;
