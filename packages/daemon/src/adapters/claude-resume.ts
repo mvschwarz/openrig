@@ -38,8 +38,8 @@ interface ClaudeResumeOptions {
   openrigHome?: string;
   /** The compaction settings the restore reads from, so the launch grants those files too. */
   restoreReadPolicy?: () => RestoreReadPolicy | null;
-  /** Slice 13: whether a seat opted in to its hook bridge, read at each restore. */
-  hookBridgeLaunch?: (nodeId: string) => boolean;
+  /** Slice 13: whether this restore adds a seat's hook bridge (opted in, on a Claude with asyncRewake). */
+  hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;

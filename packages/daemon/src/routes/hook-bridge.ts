@@ -1,15 +1,17 @@
 // Slice 13: the hook bridge's routes.
 //
-// - /seat/:seatRef reads and sets a seat's opt-in. The actor comes from the transport header, never the body.
-// - The waiter's routes (arm, poll, ack, turn, expired) accept what the activity hooks accept: the install-wide hook
-//   token, or the seat's own activity grant, which speaks only for its own seat. A waiter must name the seat's current
+// - /seat/:seatRef reads and sets a seat's opt-in. The actor comes from the transport header, never the body; a terminal
+//   with no seat identity is recorded as unattributed, as the typing guard records it.
+// - The waiter's routes (arm, poll, ack, turn, expired) accept what the activity hooks accept, with their checks: the
+//   install-wide hook token, or the seat's own activity grant, bound as the activity route binds it once the body has
+//   arrived (revoked, a run's standing, its runtime, its seat and generation). A waiter must name the seat's current
 //   occupant generation, so a replaced occupant's waiter is refused and exits.
 import { Hono, type Context } from "hono";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
-import { HOOK_BRIDGE_EXPIRE_MARGIN_SECONDS, HOOK_BRIDGE_TIMEOUT_SECONDS, HookBridgeError, type HookBridge } from "../domain/hook-bridge.js";
+import { HOOK_BRIDGE_EXPIRE_MARGIN_SECONDS, HOOK_BRIDGE_TIMEOUT_SECONDS, HookBridgeError, UNATTRIBUTED_ACTOR, type HookBridge } from "../domain/hook-bridge.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
-import { activityPrincipal } from "./activity.js";
+import { activityPrincipal, bindToGrant } from "./activity.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 
 export const hookBridgeRoutes = new Hono();
@@ -38,9 +40,9 @@ hookBridgeRoutes.post("/seat/:seatRef", async (c) => {
   const guard = guardOf(c);
   if (!bridge || !guard) return unavailable(c);
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
-  const actor = transportSenderSession(c);
+  const actor = transportSenderSession(c) ?? UNATTRIBUTED_ACTOR;
   if (typeof body.enabled !== "boolean") return c.json({ ok: false, code: "invalid_hook_bridge", error: "enabled must be true or false." }, 400);
-  if (!actor || typeof body.reason !== "string" || !body.reason.trim()) return c.json({ ok: false, code: "hook_bridge_attribution_required", error: "Sender identity and reason required" }, 400);
+  if (typeof body.reason !== "string" || !body.reason.trim()) return c.json({ ok: false, code: "hook_bridge_reason_required", error: "A reason is required." }, 400);
   try {
     const target = guard.target(c.req.param("seatRef"));
     const preference = bridge.setPreference(target.nodeId, body.enabled, actor, body.reason);
@@ -62,7 +64,12 @@ async function waiter(c: Context): Promise<{ bridge: HookBridge; nodeId: string;
   if (!bridge || !store || !registry || !guard) return unavailable(c);
   const principal = activityPrincipal(c, store, c.get("activityHookToken" as never) as string | undefined);
   if ("refused" in principal) return principal.refused;
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  let body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  if (principal.grant) {
+    const bound = bindToGrant(c, store, principal.grant, body);
+    if ("refused" in bound) return bound.refused;
+    body = bound.body;
+  }
   const sessionName = typeof body.sessionName === "string" ? body.sessionName : "";
   let target;
   try { target = guard.target(sessionName); } catch { return c.json({ ok: false, code: "hook_bridge_seat_unknown", error: "This seat isn't known here." }, 404); }

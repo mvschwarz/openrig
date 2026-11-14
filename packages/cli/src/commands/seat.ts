@@ -602,12 +602,14 @@ for the seat, and a quick UserPromptSubmit marker. Messages to the seat are then
 context at its next turn boundary: OpenRig doesn't type into its input box or touch a dialog. A seat mid-turn gets
 them when the turn ends.
 
-It takes effect only for an occupant launched with it, once its waiter has armed; until then delivery is typed as
-before. With no live waiter (never armed, expired after the hook timeout, or gone), messages are typed after 20 s,
-and the sender is told the bridge wasn't available. The typing guard's hold and levels still decide first.
+It takes effect only for an occupant launched with it, on Claude Code 2.1.287 or later, once its waiter has armed;
+until then delivery is typed as before. With no live waiter (never armed, expired after the hook timeout, gone, or a
+turn past 15 minutes), messages are typed after 20 s, and the sender is told the bridge wasn't available. The typing
+guard's hold and levels still decide first. From a terminal with no seat identity, the change is recorded as
+unattributed.
 
-Each wake is one model turn on the seat's own login. A delivered message is recorded as delivered into the seat's
-context, not as acted on: a queue row's claim and result stay with the agent.
+Each wake is one model turn on the seat's own login. A delivered message is recorded as handed to Claude's hook, not as
+read or acted on: a queue row's claim and result stay with the agent.
 
 Examples:
   rig seat set-hook-bridge dev-impl@my-rig --enabled true --reason "wake at turn boundaries"

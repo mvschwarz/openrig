@@ -76,18 +76,6 @@ function render(sessionName, messages) {
   return [lead, ...messages.map((m) => m.text)].join("\n\n") + "\n";
 }
 
-/** The pid lock: one waiter per seat. A newer waiter takes the lock over (the daemon supersedes the older arm). */
-function lockPath(env = process.env) {
-  const home = first(env.OPENRIG_HOME, env.RIGGED_HOME) || path.join(os.homedir(), ".openrig");
-  const key = (seat(env).nodeId || seat(env).sessionName || "seat").replace(/[^A-Za-z0-9_.@-]/g, "_");
-  return path.join(home, "state", "hook-bridge", `${key}.pid`);
-}
-function takeLock(env = process.env) {
-  const file = lockPath(env);
-  try { fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); fs.writeFileSync(file, String(process.pid), { mode: 0o600 }); } catch { /* best effort */ }
-  return () => { try { if (fs.readFileSync(file, "utf8").trim() === String(process.pid)) fs.unlinkSync(file); } catch { /* gone */ } };
-}
-
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Returns the exit code: 2 after delivering a batch, 0 otherwise. */
@@ -102,11 +90,13 @@ async function waiter({ hookEvent, out = process.stderr, deps = {} } = {}) {
   while (now() < deadline) {
     const answer = await call("poll", { armId });
     if (!answer) { await wait(UNREACHABLE_MS); continue; }
-    if (answer.stop || answer.action === "superseded") return 0;
+    if (answer.stop || answer.action === "superseded" || answer.action === "stop") return 0;
     if (answer.action === "rearm") { await call("arm", { hookEvent: "rearm", armId }); continue; }
     if (answer.action === "deliver" && Array.isArray(answer.messages) && answer.messages.length) {
       out.write(render(seat(deps.env).sessionName, answer.messages));
-      await call("ack", { armId, batchId: answer.batchId });
+      // The ack says the batch was handed to the hook's output; a lost ack is retried, and if it never lands the daemon
+      // marks the batch uncertain rather than resending it.
+      for (let tries = 0; tries < 3 && !(await call("ack", { armId, batchId: answer.batchId })); tries++) await wait(UNREACHABLE_MS);
       return 2;
     }
     await wait(POLL_MS);
@@ -120,11 +110,9 @@ async function main() {
   const input = await readHookInput();
   if (mode === "turn") { await post("turn", { hookEvent: "UserPromptSubmit" }); process.exit(0); }
   if (mode !== "waiter") process.exit(0);
-  const release = takeLock();
   const code = await waiter({ hookEvent: typeof input.hook_event_name === "string" ? input.hook_event_name : "unknown" }).catch(() => 0);
-  release();
   process.exit(code);
 }
 
 if (require.main === module) void main();
-module.exports = { render, waiter, endpoint, lockPath };
+module.exports = { render, waiter, endpoint };

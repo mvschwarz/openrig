@@ -30,8 +30,10 @@ async function seat() {
   const occupant = registry.currentOccupantTenure(node.id)?.generationUuid ?? null;
 
   const writes: string[] = [];
+  const hooks: { onPaste: (() => void) | null } = { onPaste: null };
   const tmux = new TmuxAdapter(async (command) => {
     if (command.includes("paste-buffer") || command.includes("send-keys")) writes.push(command.includes("paste-buffer") ? "paste" : "keys");
+    if (command.includes("paste-buffer")) { const hook = hooks.onPaste; hooks.onPaste = null; hook?.(); }
     return "";
   }, { writeFile: async () => {}, unlink: async () => {}, tmpName: () => join(root, "paste"), bufferName: () => "bridge-test" });
   vi.spyOn(tmux, "getPanePid").mockResolvedValue(10);
@@ -51,7 +53,7 @@ async function seat() {
     bridge.setPreference(node.id, true, "human@team", "wake at turn boundaries");
     return bridge.arm({ nodeId: node.id, sessionName, generation: occupant, hookEvent: "SessionStart" });
   };
-  return { db, guard, bridge, transport, writes, nodeId: node.id, sessionName, optInAndArm, advance: (ms: number) => { now += ms; } };
+  return { db, guard, bridge, transport, writes, hooks, occupant, nodeId: node.id, sessionName, optInAndArm, advance: (ms: number) => { now += ms; } };
 }
 
 describe("the transport's hook-bridge branch (slice 13)", () => {
@@ -95,5 +97,34 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect(typed.map((t) => t.outboxId)).toEqual([id]);
     expect(s.writes).toContain("paste");
     expect(new OutboxHandler(s.db).getById(id)?.deliveryState).not.toBe("sending");
+  });
+  // #3270 round 1: exactly once on the fallback.
+  it("types each queued message once when two sweeps overlap", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    await s.transport.send(s.sessionName, "From: peer@team\n---\none\n---", { actorSession: "peer@team" });
+    await s.transport.send(s.sessionName, "From: peer@team\n---\ntwo\n---", { actorSession: "peer@team" });
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS + 1);
+    const [a, b] = await Promise.all([s.transport.sweepHookBridge(), s.transport.sweepHookBridge()]);
+    expect(a.map((t) => t.outboxId)).toEqual(b.map((t) => t.outboxId));
+    expect(a).toHaveLength(2);
+    expect(s.writes.filter((w) => w === "paste")).toHaveLength(2);
+  });
+
+  it("never types a message a waiter claimed during the sweep, and doesn't let anything behind it overtake", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    await s.transport.send(s.sessionName, "From: peer@team\n---\none\n---", { actorSession: "peer@team" });
+    const second = await s.transport.send(s.sessionName, "From: peer@team\n---\ntwo\n---", { actorSession: "peer@team" });
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS + 1);
+    // While the first is typed, its turn's Stop arms a new waiter, which claims the second.
+    s.hooks.onPaste = () => {
+      const { armId } = s.bridge.arm({ nodeId: s.nodeId, sessionName: s.sessionName, generation: s.occupant, hookEvent: "Stop" });
+      s.bridge.poll(s.nodeId, armId);
+    };
+    const typed = await s.transport.sweepHookBridge();
+    expect(typed).toHaveLength(1);
+    expect(s.writes.filter((w) => w === "paste")).toHaveLength(1);
+    expect(new OutboxHandler(s.db).getById(second.outboxIds![0]!)?.deliveryState).toBe("sending"); // the bridge's, claimed
   });
 });

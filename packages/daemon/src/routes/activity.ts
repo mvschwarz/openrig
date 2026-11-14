@@ -149,7 +149,7 @@ export const activityRoutes = new Hono();
 /** A seat activity grant's post, bound to the grant. A post that names another seat, or claims a generation the grant
  *  wasn't issued for, is refused; so is a grant whose occupant was replaced (stale) or hasn't registered yet (pending).
  *  A refusal records nothing, so a missing event stays unknown. Otherwise the seat and generation come from the grant. */
-function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
+export function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
   { body: Record<string, unknown> } | { refused: Response } {
   const refuse = (status: 401 | 403 | 409 | 503, code: string, error: string) => ({ refused: c.json({ ok: false, code, error }, status) });
   // Read the grant again: it may have been revoked or reissued while the body arrived. Nothing is awaited from here to the

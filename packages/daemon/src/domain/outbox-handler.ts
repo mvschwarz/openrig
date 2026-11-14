@@ -522,13 +522,16 @@ export class OutboxHandler {
    * ambiguous (the external send may or may not have landed after the claim), so
    * it records `indeterminate`, never a forever-transient claim and never a blind
    * re-send. EXACT-CASE prefix, matching the executable selector. Returns the
-   * count reconciled.
+   * count reconciled. A row only queued for a seat's hook bridge (slice 13) was never claimed: it stays queued, and the
+   * bridge's own sweep delivers or types it.
    */
   reconcileAbandonedSending(idPrefix: string): number {
     const result = this.db
       .prepare(
         `UPDATE outbox_entries SET delivery_state = 'indeterminate'
-          WHERE delivery_state = 'sending' AND substr(outbox_id, 1, ?) = ?`
+          WHERE delivery_state = 'sending' AND substr(outbox_id, 1, ?) = ?
+            AND NOT (guard_delivery IS NOT NULL AND json_valid(guard_delivery)
+              AND json_extract(guard_delivery, '$.channel') = 'hook-bridge' AND json_extract(guard_delivery, '$.state') = 'queued')`
       )
       .run(idPrefix.length, idPrefix);
     return result.changes;

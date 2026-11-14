@@ -209,6 +209,7 @@ export type RigEvent =
   | { type: "transport.hook_bridge_wake"; nodeId: string; sessionName: string; armId: string; outboxIds: string[]; hookEvent: string }
   | { type: "transport.hook_bridge_expired"; nodeId: string; sessionName: string; armId: string }
   | { type: "transport.hook_bridge_fallback"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
+  | { type: "transport.hook_bridge_uncertain"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's

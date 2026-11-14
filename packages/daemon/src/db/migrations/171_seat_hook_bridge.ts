@@ -3,7 +3,7 @@ import type { Migration } from "../migrate.js";
 /** Slice 13: a Claude seat's opt-in to delivery through its launch-owned hook bridge, who set it and why, and the occupant
  *  generation whose launch added the bridge's hooks (only that occupant can use it). */
 export const seatHookBridgeSchema: Migration = {
-  name: "170_seat_hook_bridge.sql",
+  name: "171_seat_hook_bridge.sql",
   sql: `
     CREATE TABLE seat_hook_bridge (
       node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,

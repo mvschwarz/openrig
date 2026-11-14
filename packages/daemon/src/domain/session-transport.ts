@@ -2313,6 +2313,8 @@ export class SessionTransport {
   private agentActivityStore?: AgentActivityStore;
   private eventBus?: EventBus;
   private hookBridge?: HookBridge;
+  private hookBridgeSweep: Promise<Array<{ outboxId: string; result: SendResult }>> | null = null;
+  private hookBridgeSweepAgain = false;
   private now: () => Date;
   private sleep: (ms: number) => Promise<void>;
   private waitForIdlePollMs: number;
@@ -2849,6 +2851,21 @@ export class SessionTransport {
    *  for that seat), oldest first, each under its own outbox id through the ordinary send path. The daemon runs this on
    *  an interval; a send that finds the bridge unavailable runs it for its seat. */
   async sweepHookBridge(opts: { nodeId?: string } = {}): Promise<Array<{ outboxId: string; result: SendResult }>> {
+    // One sweep at a time: the interval's and a send's share the one running sweep, and a sweep asked for while one runs
+    // runs once after it.
+    if (this.hookBridgeSweep) { this.hookBridgeSweepAgain = true; return this.hookBridgeSweep; }
+    this.hookBridgeSweep = (async () => {
+      const typed: Array<{ outboxId: string; result: SendResult }> = [];
+      do {
+        this.hookBridgeSweepAgain = false;
+        typed.push(...await this.sweepHookBridgeOnce(opts));
+      } while (this.hookBridgeSweepAgain);
+      return typed;
+    })().finally(() => { this.hookBridgeSweep = null; });
+    return this.hookBridgeSweep;
+  }
+
+  private async sweepHookBridgeOnce(opts: { nodeId?: string }): Promise<Array<{ outboxId: string; result: SendResult }>> {
     const bridge = this.hookBridge;
     if (!bridge) return [];
     bridge.reconcileUnacked();
@@ -2860,15 +2877,16 @@ export class SessionTransport {
     const outbox = new OutboxHandler(this.db);
     const typed: Array<{ outboxId: string; result: SendResult }> = [];
     for (const { nodeId, outboxIds, reason } of due) {
+      // Oldest first, each released only just before it's typed: a row the bridge took meanwhile isn't released, and
+      // the seat's loop stops there, so nothing is typed twice and nothing behind it overtakes it.
       for (const outboxId of outboxIds) {
         const entry = outbox.getById(outboxId);
-        if (!entry) continue;
-        bridge.releaseForTyping(nodeId, entry.destinationSession, [outboxId], reason);
+        if (!entry || !bridge.releaseForTyping(nodeId, entry.destinationSession, outboxId, reason)) break;
         const result = await this.send(entry.destinationSession, entry.body, { deliveryId: outboxId, hookBridgeFallback: true,
           actorSession: entry.senderSession, ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}), ...(entry.urgency === "urgent" ? { urgent: { by: entry.senderSession } } : {}) });
         if (result.outcome !== "retained") {
-          if (result.ok) outbox.markDelivered(outboxId);
-          else if (result.inputPhase === "attempted" || result.inputPhase === "written") outbox.markIndeterminate(outboxId);
+          if (result.ok && result.outcome !== "rendered-unconfirmed") outbox.markDelivered(outboxId);
+          else if (result.ok || result.inputPhase === "attempted" || result.inputPhase === "written") outbox.markIndeterminate(outboxId);
           else outbox.markFailed(outboxId);
         }
         typed.push({ outboxId, result });
@@ -2955,10 +2973,11 @@ export class SessionTransport {
           const target = guard.target(sessionName);
           if (bridge.routes(target)) {
             const bridgeIds = memberOpts?.committedOutboxIds ?? ids;
-            if (bridge.live(target.nodeId)) return bridge.deposit(target, sessionName, memberText, memberOpts ?? {}, bridgeIds);
+            const queueOpts = { ...(memberOpts ?? {}), admission };
+            if (bridge.live(target.nodeId)) return bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds);
             const reason = bridge.unavailable(target.nodeId);
             if (bridge.queued(target.nodeId).length) {
-              const queued = bridge.deposit(target, sessionName, memberText, memberOpts ?? {}, bridgeIds);
+              const queued = bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds);
               setImmediate(() => { void this.sweepHookBridge({ nodeId: target.nodeId }).catch(() => {}); });
               return { ...queued, warning: `${sessionName}'s hook bridge isn't available (${reason}): this message is typed after the ones already queued for it.` };
             }
