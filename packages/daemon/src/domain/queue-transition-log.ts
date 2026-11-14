@@ -505,6 +505,15 @@ export class QueueTransitionLog {
     return rows.map((row) => this.rowToTransition(row));
   }
 
+  /** The first transition after `afterTransitionId` of any of these rows, live or archived: retention may archive
+   * the member whose transition opened a health ceremony episode, and the episode must keep its name (#3192). */
+  firstAfter(qitemIds: string[], afterTransitionId: number): { transitionId: number; ts: string } | undefined {
+    if (qitemIds.length === 0) return undefined;
+    return this.db.prepare(`SELECT transition_id AS transitionId, ts FROM ${this.historySource}
+      WHERE qitem_id IN (${qitemIds.map(() => "?").join(",")}) AND transition_id > ?
+      ORDER BY transition_id ASC LIMIT 1`).get(...qitemIds, afterTransitionId) as { transitionId: number; ts: string } | undefined;
+  }
+
   listForActor(actorSession: string, limit = 100): QueueTransition[] {
     const rows = this.db
       .prepare(

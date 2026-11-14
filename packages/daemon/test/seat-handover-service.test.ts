@@ -1977,6 +1977,22 @@ describe("SeatHandoverService", () => {
     });
   });
 
+  it("wires the recover route: a seat with no failed handover has nothing to adopt, and a reason is required (#2985)", async () => {
+    const setup = createTestApp(db, { tmux: { hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter });
+    const rig = setup.rigRepo.createRig("seat-rig");
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = setup.sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+    setup.sessionRegistry.updateStatus(session.id, "running");
+    const post = (body: unknown) => setup.app.request("/api/seat/handover/dev-impl%40seat-rig/recover", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const none = await post({ reason: "adopt" });
+    expect(none.status).toBe(404);
+    expect(await none.json()).toMatchObject({ ok: false, code: "no_handover_to_recover" });
+    const noReason = await post({});
+    expect(noReason.status).toBe(400);
+    expect(await noReason.json()).toMatchObject({ ok: false, code: "missing_reason" });
+  });
+
   it.each([undefined, "none"] as const)("carries current rules, model, Advisor and MCP selection (%s) to the successor", async claudeMcp => {
     const { node } = seedSeat({ runtime: "claude-code", model: "claude-sonnet-5-5", advisor: "opus" });
     rigRepo.setNodeClaudeMcp(node.id, claudeMcp ?? null);

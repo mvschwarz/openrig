@@ -10,10 +10,10 @@ import { formatCheckIn } from "../lib/check-in.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { DaemonClient } from "../client.js";
 import { realDeps } from "./daemon.js";
-import { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake } from "@openrig/daemon/rosters";
+import { parseRoster, readRosters, rosterTeamName, teamPhrase, type Roster, type RosterMember, type RosterWake } from "@openrig/daemon/rosters";
 
 // One roster parser, shared with the daemon (a hosted member's wake route reads the same files).
-export { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake };
+export { parseRoster, readRosters, rosterTeamName, teamPhrase, type Roster, type RosterMember, type RosterWake };
 export { formatCheckIn };
 
 type Row = Record<string, unknown>;

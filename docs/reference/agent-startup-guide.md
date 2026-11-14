@@ -292,6 +292,32 @@ guidance names that pane and the result carries `replacementStarted` and `succes
 already ended, the new one may be working there without being registered as the seat's occupant, and another
 handover or `rig seat launch <seat> --fresh --stop --reason <why>` ends it if it goes ahead.
 
+**Adopting the successor of a failed handover.** When a handover fails after its successor was launched in the
+respawned pane (the readiness window closed, the context packet didn't land, or the final binding step refused for a
+reason that can change), it records the attempt for a Claude Code successor whose launch named its session id, and its
+guidance leads with `rig seat handover <seat> --recover --reason <why>` and says not to retry the handover, which
+would end that successor. The recovery adopts the successor that is running there and keeps its conversation. It
+first proves, reading only, that the attempt still replaces the seat's current occupant and that the pane is the seat
+session's only pane, with exactly one foreground Claude that names the session id OpenRig generated for that launch,
+the same process in two samples, proven as the launch's readiness proves it (a `#!` wrapper that starts Claude without
+exec included, when the launch recorded its executable: a launch in a native Claude permission mode, `auto` or another
+mode the harness advertises). A classic launch records no executable, and the `floor` and `full_bypass` postures
+launch classically too. A wrapper whose Claude runs as `node cli.js` or under another name is then not proven; when a
+second sample, a few seconds later, finds the same foreground, the refusal says `--recover` can't prove it, and to run
+it again only once the pane shows a waiting wrapper has started Claude (a wrapper still starting, which the second
+sample sees exec Claude or start it, is proven). A
+`/clear` in the successor before the recovery is followed: the conversation it adopts is the one Claude's own session
+file for that process names, when it is newer than the process, even when that is the retiring occupant's conversation
+or a fork parent's. The result says so; a fork successor on its parent's or the retiring occupant's conversation is
+reported as no distinct fork (`forkId: "none"`, continuity `resumed`), and the parent seat is left as it was: both seats
+then name the same conversation, so restoring both opens it twice. Then it commits
+the handover with the occupant generation the attempt reserved, so the successor's identity hooks are accepted from
+then on. It types nothing into the pane, and a packet the failed handover didn't deliver is not delivered: the result
+says so, and a rebuild whose priming never arrived is recorded as fresh. Anything it can't prove, such as another
+conversation, two Claudes or a changed pane, refuses with `successor_identity_unproven` and changes nothing; an
+attempt that another occupant has replaced since is closed as `handover_attempt_superseded`. It adopts Claude Code
+successors only (`recover_runtime_unsupported` otherwise).
+
 **Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
 was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
 same prompt still sitting in the input, it presses Enter once more; if it's still there, it warns "Startup prompt still
