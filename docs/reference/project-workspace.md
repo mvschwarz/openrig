@@ -212,8 +212,14 @@ aliases: [oc-beacon]
 Rows tagged `project:oc-beacon`, and workflow instances compiled under it, then
 count as `default` in the execution view, slice detail and queue counts,
 attention, operating posture and current-work roots. Nothing is rewritten. A
-former id that is another catalogued project's current id, or that two projects
-both declare, names neither project.
+workspace with no `workspace.yaml` lists former ids in its own `project.yaml` the
+same way.
+
+A declared former id that is another catalogued project's current id stays that
+project's, and one that two projects both declare belongs to neither. Either way
+the declaration is ignored, not refused: the project read (`aliasWarnings` on
+`GET /api/scopes/projects`) and the execution view (`alias_warnings`, shown in the
+TUI's execution pane) name the ignored id and the project it conflicts with.
 
 With a project selected, the execution view reports `uncatalogued_project_tags`
 (`{ rows, ids }`): the mission's rows whose project tag no catalogued project

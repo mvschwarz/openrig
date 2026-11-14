@@ -754,6 +754,8 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   projectIds?: readonly string[];
   /** Every current and former id the catalogued projects claim, so rows none of them claims are counted. */
   cataloguedProjectIds?: readonly string[];
+  /** The selected project's former ids that can't apply, as the project read reports them. */
+  aliasWarnings?: readonly string[];
 }): Promise<Record<string, unknown>> {
   const projectionStarted = performance.now();
   const membershipIds = opts?.project ? (opts.projectIds ?? [opts.project]) : undefined;
@@ -1381,6 +1383,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
   const view = {
     ...(opts?.project ? { project: opts.project, membership: "exact project:<id> queue tags and lifecycle identity, for the project's id or a former id its project.yaml declares under aliases; unscoped rows excluded" } : {}),
     ...(catalogued ? { uncatalogued_project_tags: { rows: uncatalogued.length, ids: [...new Set(uncatalogued.flat())].sort() } } : {}),
+    ...(membershipIds && opts?.aliasWarnings?.length ? { alias_warnings: [...opts.aliasWarnings] } : {}),
     view: "execution",
     readiness,
     project_readiness: missionsRoot ? await readProjectReadinessAsync(missionsRoot, readPolicy) : null,

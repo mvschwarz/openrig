@@ -13,7 +13,7 @@ import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projecto
 import { scopesRoutes } from "../src/routes/scopes.js";
 import { viewsRoutes } from "../src/routes/views.js";
 import { slicesRoutes } from "../src/routes/slices.js";
-import { belongsToProject, catalogProjectFor, readCatalogAliases, selectCatalogProject } from "../src/domain/workspace/project-catalog.js";
+import { belongsToProject, readCatalogAliases, selectCatalogProject } from "../src/domain/workspace/project-catalog.js";
 import { workSource, projectMission } from "../src/domain/workspace/project-read.js";
 let root: string, app: Hono, db: ReturnType<typeof createDb>;
 function file(name: string, text: string) { fs.mkdirSync(path.dirname(name), { recursive: true }); fs.writeFileSync(name, text); }
@@ -100,16 +100,27 @@ describe("catalog project identity across work reads", () => {
     // The former id is a's alone.
     expect(JSON.stringify((await get("/api/views/execution?mission=release-x&project=b")).body)).not.toContain("qitem-renamed");
   });
-  it("reads a former id only when exactly one project declares it and no project uses it now", () => {
-    const catalog = path.join(root, "workspace.yaml");
+  it("ignores a former id that's another project's current id or that two projects declare, and says which and why", async () => {
     file(path.join(root, "a", "project.yaml"), "metadata:\n  id: a\naliases: [old, shared, b]\n");
     file(path.join(root, "b", "project.yaml"), "metadata:\n  id: b\naliases: [shared]\n");
-    expect([...readCatalogAliases(catalog)]).toEqual([["old", "a"]]);
-    expect(catalogProjectFor(catalog, "old")).toBe("a");
-    expect(catalogProjectFor(catalog, "b")).toBe("b");
-    expect(catalogProjectFor(catalog, "shared")).toBe("shared");
+    for (const [id, tag] of [["qitem-old", "project:old"], ["qitem-shared", "project:shared"]]) db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,tier,tags,body) VALUES(?,?,?,?,?,'in-progress','normal','light',?,?)")
+      .run(id, "2026-09-10T00:00:00Z", "2026-09-10T00:00:00Z", "root@test", "a@test", JSON.stringify(["mission:release-x", "slice:same-id", tag]), `${id} work`);
+    expect([...readCatalogAliases(path.join(root, "workspace.yaml"))]).toEqual([["old", "a"]]);
+    const projects = (await get("/api/scopes/projects")).body.projects;
+    expect(projects.find((p: any) => p.id === "a").aliasWarnings).toEqual([
+      "aliases: 'shared' is ignored: b also declares it, so rows tagged project:shared belong to no project",
+      "aliases: 'b' is ignored: it's project b's current id, so rows tagged project:b stay b's",
+    ]);
+    expect(projects.find((p: any) => p.id === "b").aliasWarnings).toEqual(["aliases: 'shared' is ignored: a also declares it, so rows tagged project:shared belong to no project"]);
+    const a = await get("/api/views/execution?mission=release-x&project=a");
+    expect(a.status).toBe(200);
+    expect(a.body.rows[0].alias_warnings).toEqual(projects.find((p: any) => p.id === "a").aliasWarnings);
+    // The current id keeps precedence and access: b's rows stay b's. The valid former id applies; the shared one is unclaimed.
+    expect(JSON.stringify(a.body)).toContain("qitem-old");
+    expect(JSON.stringify(a.body)).not.toContain("qitem-b");
+    expect(a.body.rows[0].uncatalogued_project_tags).toEqual({ rows: 1, ids: ["shared"] });
+    expect(JSON.stringify((await get("/api/views/execution?mission=release-x&project=b")).body)).toContain("qitem-b");
     expect(belongsToProject(JSON.stringify(["mission:release-x,project:old"]), ["a", "old"])).toBe(true);
-    expect(belongsToProject(JSON.stringify(["project:shared"]), ["a", "old"])).toBe(false);
   });
   it("accepts a symlink spelling of the selected root and still refuses a different project", async () => {
     const alias = path.join(root, "a-link");

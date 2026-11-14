@@ -140,33 +140,38 @@ function manifestAliases(root: string): string[] {
   } catch { return []; }
 }
 
+/** A declared former id the catalog doesn't use, and why: it's another project's current id (which keeps its rows), or
+ *  several projects declare it (so its rows belong to none). Reported, never refused. */
+export interface IgnoredAlias { alias: string; declaredBy: string[]; currentOwner: string | null }
+
 /** Former project ids, each mapped to the catalogued project that declares it, so rows tagged before a rename stay that
- *  project's. A former id that is a current catalog id, or that two projects both declare, maps to neither: the current
- *  id wins, and an ambiguous former id stays unclaimed. History is never rewritten. */
-export function readCatalogAliases(catalogPath: string): Map<string, string> {
+ *  project's, plus the declarations that can't apply. A former id that is a current catalog id stays that project's, and
+ *  one several projects declare stays unclaimed. History is never rewritten. */
+export function readCatalogAliasReport(catalogPath: string): { aliases: Map<string, string>; ignored: IgnoredAlias[] } {
   let entries: Array<{ id: string; root: string }>;
-  try { entries = readProjectCatalog(catalogPath) ?? []; } catch { return new Map(); }
+  try { entries = readProjectCatalog(catalogPath) ?? []; } catch { return { aliases: new Map(), ignored: [] }; }
   const ids = new Set(entries.map(e => e.id));
   const owners = new Map<string, Set<string>>();
   for (const entry of entries) {
     for (const alias of manifestAliases(path.resolve(path.dirname(catalogPath), entry.root))) {
-      if (ids.has(alias)) continue;
+      if (alias === entry.id) continue;
       const claimed = owners.get(alias) ?? new Set<string>();
       owners.set(alias, claimed.add(entry.id));
     }
   }
-  return new Map([...owners].filter(([, claimed]) => claimed.size === 1).map(([alias, claimed]) => [alias, [...claimed][0]!]));
+  const aliases = new Map<string, string>();
+  const ignored: IgnoredAlias[] = [];
+  for (const [alias, claimed] of owners) {
+    if (!ids.has(alias) && claimed.size === 1) aliases.set(alias, [...claimed][0]!);
+    else ignored.push({ alias, declaredBy: [...claimed].sort(), currentOwner: ids.has(alias) ? alias : null });
+  }
+  return { aliases, ignored };
 }
+export function readCatalogAliases(catalogPath: string): Map<string, string> { return readCatalogAliasReport(catalogPath).aliases; }
 
 /** The former ids one project declares, for a workspace with no catalog (its own project.yaml). */
 export function workspaceAliases(root: string, id: string): string[] {
   return [...new Set(manifestAliases(root))].filter(alias => alias !== id);
-}
-
-/** The catalogued project an id names: itself, or the project that declares it as a former id. */
-export function catalogProjectFor(catalogPath: string, id: string): string {
-  try { if ((readProjectCatalog(catalogPath) ?? []).some(e => e.id === id)) return id; } catch { return id; }
-  return readCatalogAliases(catalogPath).get(id) ?? id;
 }
 
 /** Project membership by exact `project:<id>` tag, for the project's id or any former id it declares. Unscoped historical
