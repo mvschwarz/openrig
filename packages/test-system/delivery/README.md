@@ -1,8 +1,10 @@
 # Delivery conformance suite
 
-This kit proves OpenRig's typed delivery against the real Claude Code and Codex terminal programs. It covers 25 cases, from idle and busy seats to drafts, dialogs, copy mode, ordering, `/clear`, compaction and restart. Quality owns the expected result for each case. This directory holds the code that drives the cases.
+This kit proves OpenRig's typed delivery against the real Claude Code and Codex terminal programs. The delivery measurement case list (kept outside this repository) plans 25 cases, from idle and busy seats to drafts, dialogs, copy mode, ordering, `/clear`, compaction and restart. Quality owns the expected result for each case. This directory holds the code that drives the cases.
 
-**Built so far:** the stand-in model servers, the case harness, the release-run entry point, and the first cases (D01 idle, D02 busy, D03 and D04 drafts, D08 copy mode, D09 order, D15 multi-line paste) on both programs. Dialogs and guards, lifecycle, and fault injection come next.
+**Registered and runnable today:** only the cases `cases/index.mjs` lists, on both programs. Those are D01 idle, D02 busy, D03 and D04 drafts, D05 permission prompt, D06 other dialog (the model picker), D08 copy mode, D09 order, D15 multi-line paste, and issue #3076's two late-gap cells (`R3076-notice`, `R3076-send`). `run.mjs` runs nothing else, and `--cases` refuses an id that isn't registered (`no case D12 in this suite yet`).
+
+**Planned, not fixtures yet:** `cases/expected.yaml` already states the expected result for D07, D14, D18 and D19, and its `later` list names D10, D12 (a managed `/compact` with a typed draft), D16 and D25. Compaction and restart have no fixture yet.
 
 ## Running a release
 

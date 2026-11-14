@@ -211,6 +211,24 @@ export function queueRoutes(): Hono {
       message: `No wake is set for this park: nothing wakes ${item.destinationSession} on a timer while ${item.qitemId} waits on ${item.blockedOn}. To add one, park it again with --wake-after <duration> (or --wake-watchdog <job-id>). When ${item.blockedOn} clears, rig queue resolve ${item.qitemId} --decision <evidence> unparks it.`,
     };
   }
+  /** A summary or evidence ref the update asked for but the stored row doesn't carry (a blank one, which isn't stored
+   *  because it would erase what the row has, or one the repository couldn't write): read from the stored row, so the
+   *  caller is told whatever the reason. */
+  function unstoredAdvisories(body: { summary?: unknown; evidenceRef?: unknown }, item: QueueItem) {
+    return ([["summary", "summary", "summary_not_stored"], ["evidenceRef", "evidence ref", "evidence_ref_not_stored"]] as const)
+      .flatMap(([field, name, code]) => {
+        const requested = body[field];
+        const stored = item[field];
+        if (typeof requested !== "string" || stored === requested) return [];
+        const why = requested.trim().length === 0 ? `The ${name} was blank, so it wasn't stored` : `The ${name} wasn't stored`;
+        return [{
+          code,
+          qitemId: item.qitemId,
+          field,
+          message: `${why}: ${item.qitemId} keeps ${stored ? `its ${name} "${stored}"` : `no ${name}`}. The rest of the update was applied.`,
+        }];
+      });
+  }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
   }
@@ -312,9 +330,6 @@ export function queueRoutes(): Hono {
         : err.code === "reply_to_requires_update" ? 400
         : err.code === "reply_to_not_found" ? 400
         : err.code === "invalid_human_questions" ? 400
-        // OPR.0.5.1 slice-51-06 D2: summary/evidence_ref on a non-park transition — a client
-        // input error surfaced as a structured 400 (the daemon rejects before any mutation).
-        : err.code === "summary_evidence_not_persistable" ? 400
         // OPR.0.4.6.WF3 FR-6: the frontier close-path guard — operator
         // misuse of a queue verb on a live workflow packet; structured
         // 400 with the what/why/fix message, never a 500.
@@ -922,8 +937,9 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisory = body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null;
-      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) });
+      const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, ...unstoredAdvisories(body, item)]
+        .filter((advisory) => advisory !== null);
+      return c.json({ ...item, ...(advisories.length > 0 ? { advisories } : {}) });
     } catch (err) {
       return errorResponse(c, err);
     }

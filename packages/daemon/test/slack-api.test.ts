@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   postWebhook,
+  postChatMessage,
   callWebApi,
   downloadPrivateFile,
   verifyScopes,
@@ -8,6 +9,19 @@ import {
   openSocketConnection,
   type FetchImpl,
 } from "../src/domain/gateway/slack/slack-api.js";
+
+it("preserves preview controls and thread on a rate-limit retry", async () => {
+  const bodies: unknown[] = [];
+  const fetchImpl: FetchImpl = async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return bodies.length === 1
+      ? new Response("rate limited", { status: 429, headers: { "Retry-After": "1" } })
+      : new Response(JSON.stringify({ ok: true, ts: "2.0" }), { status: 200 });
+  };
+  const result = await postChatMessage("synthetic", { channel: "C", text: "link", thread_ts: "1.0", unfurl_links: false, unfurl_media: false }, fetchImpl, 1000, async () => {});
+  expect(result.ok).toBe(true);
+  expect(bodies).toEqual([expect.objectContaining({ thread_ts: "1.0", unfurl_links: false, unfurl_media: false }), bodies[0]]);
+});
 
 // Fake Slack: routes by URL, returns real Response objects (headers + json).
 function fakeSlack(spec: {

@@ -41,6 +41,8 @@ export interface SubsystemSlackDeliveryOpts {
    *  (no map) nothing is recorded and the channel is resolved as before. */
   pinChannel?: boolean;
   sourceLabel: string; // host/box/rig — from config, never hardcoded (item 7)
+  /** Human-row previews; absent defaults off. */
+  unfurl?: "on" | "off";
   /** This daemon's machine name, read per post, shown after a seat sender (message.ts `machine`). */
   machine?: () => string | null;
   bodyExcerpt?: number;
@@ -332,7 +334,8 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     };
     const postInput = (possibleRepeat = false) => {
       const shown = render(possibleRepeat, q.stateUnconfirmed === true, q.quietUnreadable === true);
-      return { channel, text: shown.text, blocks: shown.blocks, thread_ts: threadTs };
+      const unfurl = opts.unfurl === "on";
+      return { channel, text: shown.text, blocks: shown.blocks, thread_ts: threadTs, unfurl_links: unfurl, unfurl_media: unfurl };
     };
     const payloadHash = () => createHash("sha256").update(JSON.stringify({ channel, text: render().text, blocks: render().blocks, thread_ts: threadTs })).digest("hex");
     const failurePrefix = `${decision.decisionId}${TRANSPORT_FAILURE_RECEIPT_PREFIX}`;

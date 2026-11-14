@@ -71,7 +71,7 @@ function capturingFetch(status = 200): { fetchImpl: FetchImpl; calls: { url: str
 }
 
 /** Compose the REAL subsystem outbound path over a temp home: driver → wire → delivery. */
-function composeOutbound(home: string, port: OutboundQueuePort, fetchImpl: FetchImpl, fsx = memFs()) {
+function composeOutbound(home: string, port: OutboundQueuePort, fetchImpl: FetchImpl, fsx = memFs(), unfurl?: "on" | "off", thread?: string) {
   const outboundSeen = new SeenStore("/s/outbound-seen.jsonl", fsx, clock);
   const delivered = new SeenStore("/s/delivered.jsonl", fsx, clock);
   const attempted = new SeenStore("/s/attempted.jsonl", fsx, clock);
@@ -80,6 +80,8 @@ function composeOutbound(home: string, port: OutboundQueuePort, fetchImpl: Fetch
     botToken: "xoxb-EXAMPLE-fake",
     channel: "C-TEST",
     sourceLabel: "vm",
+    unfurl,
+    resolveThreadTs: () => thread,
     fetchImpl,
     delivered,
     attempted,
@@ -115,6 +117,15 @@ describe("S10 cutover — outbound classes ride the SUBSYSTEM path (slice-11 ite
     expect(calls[0]!.url).toBe("https://slack.com/api/chat.postMessage");
     expect(calls.some((c) => c.url.includes("hooks.slack.com"))).toBe(false);
     expect(calls[0]!.body.channel).toBe("C-TEST");
+    expect(calls[0]!.body).toMatchObject({ unfurl_links: false, unfurl_media: false });
+  });
+
+  it("applies enabled previews to a threaded human row", async () => {
+    const { fetchImpl, calls } = capturingFetch(200);
+    const { driver } = composeOutbound(home, fakePort([ALERT]), fetchImpl, memFs(), "on", "100.1");
+    await driver.sweepOnce();
+    await flush();
+    expect(calls[0]!.body).toMatchObject({ thread_ts: "100.1", unfurl_links: true, unfurl_media: true });
   });
 
   it("item 2 idempotent: a second sweep posts nothing", async () => {

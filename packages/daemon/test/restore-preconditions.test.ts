@@ -48,6 +48,24 @@ const cases = [
 ] as const;
 
 describe("shared restore preconditions", () => {
+  it("reports a saved profile cleared on the current Codex seat through restore-check", () => {
+    const snapshot = data();
+    snapshot.nodes[0]!.runtime = "codex";
+    snapshot.nodes[0]!.codexConfigProfile = "limited";
+    const current = { ...node(), runtime: "codex", codexConfigProfile: null };
+    const service = new RestoreCheckService(deps({
+      getNodeInventory: () => [current],
+      getRestoreInputs: () => ({ snapshot: { id: "snapshot-1", kind: "manual", data: snapshot }, servicesRecord: null }),
+    }));
+    const check = service.check({ noHooks: true, noQueue: true }).checks.find((entry) => entry.check === "rig.test-rig.restore-preconditions");
+    expect(check?.status).toBe("yellow");
+    expect(check?.evidence).toContain("had Codex profile limited in this snapshot");
+    expect(check?.evidence).toContain("does not prove what a prior process enforced");
+    for (const profiles of [{ seat: "limited" }, {}, { seat: "other" }]) {
+      expect(validatePreRestore(snapshot, { currentRuntimes: { seat: "codex" }, currentCodexProfiles: profiles }).warnings).toEqual([]);
+    }
+  });
+
   it.each(cases)("preserves the exact refusal for missing %s", (missing, code, message, remediation) => {
     const result = validatePreRestore(data(), { fsOps: { exists: (path) => path !== missing }, servicesRecord: services() });
     expect(result).toEqual({
