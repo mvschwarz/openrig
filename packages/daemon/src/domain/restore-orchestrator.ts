@@ -1303,7 +1303,7 @@ export class RestoreOrchestrator {
 
     // Derive canonical session name for pod-aware nodes
     const rig = this.rigRepo.getRig(rigId);
-    let launchOpts: { sessionName?: string; cwd?: string; keepPane?: string } | undefined = node.cwd
+    let launchOpts: { sessionName?: string; cwd?: string; keepPane?: string; keepsBoundSessionName?: boolean } | undefined = node.cwd
       ? { cwd: node.cwd }
       : undefined;
     if (keptPane) launchOpts = { ...launchOpts, keepPane: keptPane };
@@ -1322,15 +1322,21 @@ export class RestoreOrchestrator {
     // derive (below) is observable, never a silent divergence.
     const pinnedTarget = priorState.binding?.tmuxSession ?? null;
     let pinnedTargetUsed = false;
+    let unusablePin: { name: string; problem: string } | null = null;
     if (pinnedTarget) {
-      const { validateSessionName } = await import("./session-name.js");
-      if (validateSessionName(pinnedTarget)) {
+      const { boundSessionNameProblem, validateSessionName } = await import("./session-name.js");
+      // An adopted seat is bound to its own tmux session's name, which need not follow OpenRig's pattern. It is kept
+      // when tmux and OpenRig's addressing both keep it as given, so the seat comes back at the address its peers use.
+      const conventional = validateSessionName(pinnedTarget);
+      const problem = conventional ? null : boundSessionNameProblem(pinnedTarget);
+      if (!problem) {
         expectedSessionName = pinnedTarget;
-        launchOpts = { ...launchOpts, sessionName: expectedSessionName };
+        launchOpts = { ...launchOpts, sessionName: expectedSessionName, ...(conventional ? {} : { keepsBoundSessionName: true }) };
         pinnedTargetUsed = true;
       } else {
-        // Binding present but the bound name is malformed → observable fallback.
-        warnings?.push(`FR-5: durably-bound session name "${pinnedTarget}" for ${node.logicalId} is invalid; falling back to a derived name.`);
+        // Binding present but the bound name can't be launched again as given: the seat gets a derived address, said
+        // old to new below.
+        unusablePin = { name: pinnedTarget, problem };
       }
     } else {
       // A supported stop deliberately removes the binding after recording an intentional exit.
@@ -1361,6 +1367,11 @@ export class RestoreOrchestrator {
         const { deriveSessionName } = await import("./session-name.js");
         expectedSessionName = deriveSessionName(rig.rig.name, node.logicalId);
       }
+    }
+    if (unusablePin) {
+      // Said before the launch, so it names the attempt: the launch below may still fail and put the prior state back.
+      const planned = expectedSessionName ? `"${expectedSessionName}"` : "a derived session name";
+      warnings?.push(`FR-5: restore starts ${node.logicalId} as ${planned}, not "${unusablePin.name}", the session name it was bound to: ${unusablePin.problem}. Once it runs there, peers that address "${unusablePin.name}" need ${planned}.`);
     }
 
     // Write transcript boundary marker BEFORE launch (before pipe-pane attaches)
