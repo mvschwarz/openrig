@@ -121,6 +121,20 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(notice!.body).not.toMatch(/dead/i);
   });
 
+  it("a row recorded before the awaiting-pickup wording, as unroutable, is read the same way", async () => {
+    const at = new Date(Date.now() - 3 * 3_600_000);
+    repo.recordInboxCheckIn(MEMBER, at);
+    const old = await work(MEMBER, { ageMinutes: 61, result: `unroutable: '${MEMBER}' is a hosted member with no wake trigger, so nothing `
+      + "can push work to it. It picks up its work when its person asks it to, or on a schedule they set." });
+    const current = await work(MEMBER, { ageMinutes: 61 });
+    expect(current.lastNudgeResult).toMatch(/^awaiting-pickup: /);
+    await sweep();
+    expect(perRow()).toEqual([]);
+    const [notice, ...more] = notices();
+    expect(more).toEqual([]);
+    for (const row of [old, current]) expect(notice!.body).toContain(`- ${row.qitemId}, unclaimed since ${row.tsCreated}`);
+  });
+
   /** The member as its roster lists it, with the cadence its person stated at setup (or none). */
   const asListed = (checkInMinutes?: number): RosterMember[] => [{ seat: MEMBER, host: "hub", capabilities: ["research"],
     engagement: ["delegate"], use_when: "research", why: "it researches", hosted: true,

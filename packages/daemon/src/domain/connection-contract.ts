@@ -179,7 +179,8 @@ export function readWakeOutcome(recorded: string | null | undefined): WakeOutcom
   if (recorded.startsWith("failed:webhook")) return at("failed-effect-unknown", "hosted-trigger");
   // The gateway's own ledger records whether the person was posted to; this attempt's own outcome is unknown.
   if (recorded.startsWith("gateway-owned:")) return at("unknown", "gateway");
-  if (recorded.startsWith("unroutable:")) return at("not-delivered", "none");
+  // No route can carry it: an address nothing holds, or a hosted member with no wake trigger, whose work waits to be read.
+  if (recorded.startsWith("unroutable:") || recorded.startsWith("awaiting-pickup:")) return at("not-delivered", "none");
   // `indeterminate:` covers input that may have been written (a paste, an unconfirmed Enter) and timeouts.
   if (recorded.startsWith("indeterminate:")) return at("unknown", "terminal");
   // `failed:` is written only when no input could have reached the seat.

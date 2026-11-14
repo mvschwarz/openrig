@@ -67,7 +67,7 @@ export interface GatewayDeliveryResult extends DeliveryResultBase {
 export interface TerminalDeliveryResult extends DeliveryResultBase {
   receiptSource: "terminal";
   /** The class of wakeResult: verified; delivered-ack-pending; claimed (a claimed row whose wake wasn't confirmed);
-   *  retained:*; failed:* or unroutable:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
+   *  retained:*; failed:*, unroutable:* or awaiting-pickup:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
    *  (still-pending); or no wake requested by --no-nudge (not-requested). */
   outcome: "verified" | "delivered-ack-pending" | "claimed" | "retained" | "failed" | "indeterminate" | "still-pending" | "not-requested";
   /** The row's lastNudgeResult as recorded; null before any wake result. */
@@ -140,7 +140,7 @@ function gatewayReceiptOf(row: QueueRow): GatewayReceipt {
 function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
   if (wakeResult === null) return "still-pending";
   if (wakeResult === "verified" || wakeResult === "delivered-ack-pending" || wakeResult === "claimed") return wakeResult;
-  if (wakeResult.startsWith("failed:") || wakeResult.startsWith("unroutable:")) return "failed";
+  if (wakeResult.startsWith("failed:") || wakeResult.startsWith("unroutable:") || wakeResult.startsWith("awaiting-pickup:")) return "failed";
   if (wakeResult.startsWith("retained:")) return "retained";
   return "indeterminate";
 }
@@ -168,7 +168,10 @@ function terminalDeliveryResult(
     "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
     "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
     "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
-    "failed": `The wake failed (${wakeResult}).`,
+    // A hosted member with no wake trigger: no wake exists to fail, and the work waits to be read.
+    "failed": wakeResult?.startsWith("awaiting-pickup:")
+      ? `No wake is sent (${wakeResult}): the work waits in the member's queue until it reads it.`
+      : `The wake failed (${wakeResult}).`,
     "indeterminate": wakeResult?.startsWith("wake-accepted:")
       ? `The member's trigger accepted the ring (${wakeResult}). That isn't pickup: its claim is.`
       : `Terminal receipt unconfirmed (${wakeResult}).`,

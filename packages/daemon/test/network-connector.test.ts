@@ -128,7 +128,7 @@ describe("network connector", () => {
     expect(local!.body).toContain("Summarize the release notes");
     // The hub claim is custody, not pickup: the item says it's queued and not picked up.
     expect(hub.items.get("hub-1")).toMatchObject({ state: "in-progress" });
-    expect(hub.items.get("hub-1")!.notes).toEqual([`Queued for the connected local seat as ${local!.qitemId}. Not picked up yet.`]);
+    expect(hub.items.get("hub-1")!.notes).toEqual(["Queued for the connected local seat. Not picked up yet."]);
     expect(bindings.get(b.id)!.lastContactAt).not.toBeNull();
 
     await pass(b.id);
@@ -235,7 +235,7 @@ describe("network connector", () => {
     const [local] = runs("hub-7");
     db.prepare("DELETE FROM queue_items WHERE qitem_id = ?").run(local!.qitemId);
     expect(await pass(b.id)).toMatchObject({ unknown: 1 });
-    expect(hub.items.get("hub-7")!.notes.at(-1)).toBe(`This item's local record (${local!.qitemId}) is gone, so whether it ran is unknown. It won't be run again.`);
+    expect(hub.items.get("hub-7")!.notes.at(-1)).toBe("This item's local record is gone, so whether it ran is unknown. It won't be run again.");
     expect(hub.items.get("hub-7")!.state).toBe("in-progress");
     await pass(b.id);
     expect(runs("hub-7")).toHaveLength(0);
@@ -342,7 +342,7 @@ describe("network connector", () => {
     expect(hub.items.get("hub-h2")).toMatchObject({ state: "failed", closureReason: null, resolution: "The build broke." });
     expect(hub.items.get("hub-h3")).toMatchObject({ state: "done", closureReason: "denied", resolution: "Not mine to do." });
     expect(hub.items.get("hub-h4")).toMatchObject({ state: "in-progress" });
-    expect(hub.items.get("hub-h4")!.notes.at(-1)).toBe(`This item was handed on from ${local("hub-h4").qitemId} without one successor here, so its outcome is unknown. It won't be run again.`);
+    expect(hub.items.get("hub-h4")!.notes.at(-1)).toBe("This item was handed on here without one successor, so its outcome is unknown. It won't be run again.");
   });
 
   it("a disconnect while a hub answer is pending starts no local work, and work already queued stays", async () => {
@@ -376,7 +376,7 @@ describe("network connector", () => {
     expect(runs("r-gone")).toHaveLength(0);
     expect(hub.items.get("r-picked")!.notes.at(-1)).toMatch(/^Picked up by the local seat at /);
     expect(hub.items.get("r-done")).toMatchObject({ state: "done", resolution: "Finished before the reconnect." });
-    expect(hub.items.get("r-gone")!.notes.at(-1)).toBe(`This item's local record (${gone}) is gone, so whether it ran is unknown. It won't be run again.`);
+    expect(hub.items.get("r-gone")!.notes.at(-1)).toBe("This item's local record is gone, so whether it ran is unknown. It won't be run again.");
     expect(db.prepare("SELECT DISTINCT binding_id FROM network_receipts").all()).toEqual([{ binding_id: second.id }]);
     await pass(second.id);
     expect(runs("r-gone")).toHaveLength(0);
@@ -390,7 +390,7 @@ describe("network connector", () => {
     expect(await pass(b.id)).toMatchObject({ taken: 1, error: "unavailable" });
     expect(hub.items.get("hub-n1")!.notes).toEqual([]);
     await pass(b.id);
-    expect(hub.items.get("hub-n1")!.notes).toEqual([`Queued for the connected local seat as ${runs("hub-n1")[0]!.qitemId}. Not picked up yet.`]);
+    expect(hub.items.get("hub-n1")!.notes).toEqual(["Queued for the connected local seat. Not picked up yet."]);
 
     // An id used before and erased: the queue refuses it, so whether it ran is unknown.
     hub.add("hub-n2");
