@@ -533,7 +533,7 @@ export class WorkflowProjector {
     // absorption guards above returned/threw for replays — guard B1's
     // zero-inventory-reads-on-replays pin holds by construction).
     // undefined for unbound instances (tier 3 does not exist for them).
-    const roleCtx = roleResolutionContext(this.db, instance.boundRig);
+    const roleCtx = roleResolutionContext(this.db, instance.boundRig, instance.boundPod);
 
     let nextQitemId: string | null = null;
     let nextOwnerSession: string | null = null;
@@ -1042,7 +1042,7 @@ export class WorkflowProjector {
       // and roll back the close. Fresh decision per episode.
       resolveRoleTarget: (role) =>
         spec.roles?.[role]?.preferred_targets?.[0] ??
-        tryResolveRoleByCapability(roleResolutionContext(this.db, instance.boundRig), role),
+        tryResolveRoleByCapability(roleResolutionContext(this.db, instance.boundRig, instance.boundPod), role),
       humanFallbackSeat: this.exceptionDial?.humanFallbackSeat,
     });
     const evidenceRef = `rig workflow trace ${instance.instanceId}`;
@@ -1200,9 +1200,9 @@ export class WorkflowProjector {
       const addEvent = (event: PersistedEvent): void => { emitted.push(event); register(event); };
       const ownerPlans = nextSteps.map((step) => {
         const gate = step.gate
-          ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig))
+          ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod))
           : null;
-        const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig));
+        const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
         if (!owner) {
           throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve next owner for dependency step "${step.id}"`, { instanceId: instance.instanceId, stepId: step.id });
         }
@@ -1603,6 +1603,11 @@ function resolveRoleOnBoundRig(
 /** Preserve the old topology gate for template-looking rig names. Registered
  * literal names, including archived rigs, remain recordable as on main. */
 export function assertBoundWorkflowTarget(target: string, queue: Pick<QueueRepository, "acceptsDestination">): void {
+  if (target.startsWith("{pod}-")) {
+    throw new QueueRepositoryError("unbound_destination_pod",
+      `Workflow target ${target} requires a pod binding. Start the workflow with --pod <namespace> and --rig <name>, or use a concrete destination.`,
+      { destinationSession: target });
+  }
   const at = target.indexOf("@");
   if (at >= 0 && target.slice(at + 1).includes("{rig}") && !queue.acceptsDestination(target)) {
     throw new QueueRepositoryError("unknown_destination_rig",

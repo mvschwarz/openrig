@@ -13,6 +13,7 @@ import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { workflowResumeSchema } from "../src/db/migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "../src/db/migrations/052_workflow_instance_bound_rig.js";
+import { workflowBoundPodSchema } from "../src/db/migrations/170_workflow_bound_pod.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -240,6 +241,7 @@ describe("FAC-1 C3: the six owner-resolution call sites on a bound rig", () => {
       workflowSpecJsonSchema,
       workflowResumeSchema,
       workflowInstanceBoundRigSchema,
+      workflowBoundPodSchema,
     ]);
     bus = new EventBus(db);
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
@@ -257,6 +259,36 @@ describe("FAC-1 C3: the six owner-resolution call sites on a bound rig", () => {
   afterEach(() => {
     db.close();
     rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("keeps role-only entry and next steps inside the bound pod", async () => {
+    seedSeat(rigAId, "factory-a", "feature-a", "planner", { role: "planner" });
+    seedSeat(rigAId, "factory-a", "feature-a", "driver", { role: "driver" });
+    const planner = seedSeat(rigAId, "factory-a", "feature-b", "planner", { role: "planner" });
+    const driver = seedSeat(rigAId, "factory-a", "feature-b", "driver", { role: "driver" });
+    const specPath = writeSpec("pod-role-only.yaml", ROLE_ONLY_SPEC);
+    const inst = await runtime.instantiate({ specPath, rootObjective: "t", createdBySession: "orch@factory-a", targetPod: "feature-b" });
+    expect(inst.entryOwnerSession).toBe(planner);
+    expect(runtime.instanceStore.getById(inst.instance.instanceId)?.boundPod).toBe("feature-b");
+    const projected = await runtime.projector.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId, exit: "handoff", actorSession: planner });
+    expect(projected.nextOwnerSession).toBe(driver);
+  });
+
+  it("honors an explicit entry owner outside the pod while requiring later roles in it", async () => {
+    const planner = seedSeat(rigAId, "factory-a", "outside", "planner", { role: "planner" });
+    const driver = seedSeat(rigAId, "factory-a", "feature-a", "driver", { role: "driver" });
+    const specPath = writeSpec("pod-explicit-entry.yaml", ROLE_ONLY_SPEC);
+    await expect(runtime.instantiate({ specPath, rootObjective: "no override", createdBySession: "orch@factory-a", targetPod: "feature-a" })).rejects.toMatchObject({ code: "bound_rig_role_uncovered" });
+    const inst = await runtime.instantiate({ specPath, rootObjective: "override", createdBySession: "orch@factory-a", targetPod: "feature-a", entryOwnerSession: planner });
+    expect(inst.entryOwnerSession).toBe(planner);
+    const projected = await runtime.projector.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId, exit: "handoff", actorSession: planner });
+    expect(projected.nextOwnerSession).toBe(driver);
+    seedSeat(rigAId, "factory-a", "feature-b", "other", { role: "other" });
+    await expect(runtime.instantiate({ specPath, rootObjective: "later role missing", createdBySession: "orch@factory-a", targetPod: "feature-b", entryOwnerSession: planner })).rejects.toMatchObject({ code: "bound_rig_role_uncovered" });
+    const pinned = writeSpec("pod-explicit-pinned.yaml", ROLE_ONLY_SPEC.replace("actor_role: planner\n", "actor_role: planner\n      harness: codex\n"));
+    await expect(runtime.instantiate({ specPath: pinned, rootObjective: "wrong harness", createdBySession: "orch@factory-a", targetPod: "feature-a", entryOwnerSession: planner })).rejects.toMatchObject({ code: "harness_pin_unsatisfied" });
+    const gated = writeSpec("pod-explicit-gated.yaml", ROLE_ONLY_SPEC.replace("actor_role: planner\n", "actor_role: planner\n      gate:\n        target: human@kernel\n        summary: review\n        evidence_ref: proof/x.md\n"));
+    await expect(runtime.instantiate({ specPath: gated, rootObjective: "gated entry", createdBySession: "orch@factory-a", targetPod: "feature-a", entryOwnerSession: planner })).rejects.toMatchObject({ code: "bound_rig_role_uncovered" });
   });
 
   it("ROW 3 + ROW 1: entry resolves live on the bound rig; the next step resolves-and-records at projection with owner_resolution trail evidence", async () => {

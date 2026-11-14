@@ -41,6 +41,7 @@ interface InstanceRow {
   /** OPR.0.4.6.FAC1 (migration 052) — optional at the row layer like
    *  version: legacy fixtures map to null (unbound). */
   bound_rig?: string | null;
+  bound_pod?: string | null;
   lifecycle_operation_key?: string | null;
   compiled_input_digest?: string | null;
   lifecycle_binding_json?: string | null;
@@ -83,6 +84,7 @@ export interface CreateWorkflowInstanceInput {
    * null/absent = unbound (today's behavior byte-identical).
    */
   boundRig?: string | null;
+  boundPod?: string | null;
   /** Already-normalized scope (workflow-scope.ts); null/absent = unscoped. */
   scope?: WorkflowScope | null;
   /** #2607: the spec this instance runs and its file, kept with it so another file's expansion of the same id and
@@ -114,6 +116,7 @@ export class WorkflowInstanceStore {
   private readonly hasBoundRigColumn: boolean;
   private readonly hasLifecycleColumns: boolean;
   private readonly hasScopeColumn: boolean;
+  private readonly hasBoundPodColumn: boolean;
   private readonly hasSpecColumn: boolean;
   private readonly hasRootObjectiveColumn: boolean;
   private readonly hasFrontierBindingsTable: boolean;
@@ -126,6 +129,7 @@ export class WorkflowInstanceStore {
     this.hasVersionColumn = detectInstanceColumn(db, "version");
     this.hasResumeColumns = detectInstanceColumn(db, "resume_count");
     this.hasBoundRigColumn = detectInstanceColumn(db, "bound_rig");
+    this.hasBoundPodColumn = detectInstanceColumn(db, "bound_pod");
     this.hasLifecycleColumns = detectInstanceColumn(db, "lifecycle_operation_key");
     this.hasScopeColumn = detectInstanceColumn(db, "scope_json");
     this.hasSpecColumn = detectInstanceColumn(db, "spec_json");
@@ -143,6 +147,9 @@ export class WorkflowInstanceStore {
     // legacy INSERT; production always migrates).
     const boundRigCol = this.hasBoundRigColumn ? ", bound_rig" : "";
     const boundRigVal = this.hasBoundRigColumn ? ", ?" : "";
+    if (input.boundPod && !this.hasBoundPodColumn) throw new WorkflowInstanceError("bound_pod_unavailable", "workflow pod binding requires migration 170");
+    const podCol = this.hasBoundPodColumn ? ", bound_pod" : "";
+    const podVal = this.hasBoundPodColumn ? ", ?" : "";
     const lifecycleCols = this.hasLifecycleColumns
       ? ", lifecycle_operation_key, compiled_input_digest, lifecycle_binding_json"
       : "";
@@ -166,6 +173,7 @@ export class WorkflowInstanceStore {
       input.currentStepId ?? null,
     ];
     if (this.hasBoundRigColumn) params.push(input.boundRig ?? null);
+    if (this.hasBoundPodColumn) params.push(input.boundPod ?? null);
     if (this.hasLifecycleColumns) {
       params.push(
         input.lifecycle?.operationKey ?? null,
@@ -180,8 +188,8 @@ export class WorkflowInstanceStore {
       .prepare(
         `INSERT INTO workflow_instances (
            instance_id, workflow_name, workflow_version, created_by_session,
-           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${lifecycleCols}${scopeCol}${specCol}${objectiveCol}
-         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${lifecycleVals}${scopeVal}${specVal}${objectiveVal})`,
+           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}${podCol}${lifecycleCols}${scopeCol}${specCol}${objectiveCol}
+         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal}${podVal}${lifecycleVals}${scopeVal}${specVal}${objectiveVal})`,
       )
       .run(...(params as never[]));
     return this.getByIdOrThrow(instanceId);
@@ -494,6 +502,7 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     resumeCount: row.resume_count ?? 0,
     hopsBaseline: row.hops_baseline ?? 0,
     boundRig: row.bound_rig ?? null,
+    boundPod: row.bound_pod ?? null,
     lifecycleOperationKey: row.lifecycle_operation_key ?? null,
     compiledInputDigest: row.compiled_input_digest ?? null,
     lifecycleBinding: row.lifecycle_binding_json

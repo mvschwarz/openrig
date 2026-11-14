@@ -10,6 +10,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { WorkflowSpecCache } from "../src/domain/workflow-spec-cache.js";
+import { WorkflowInstanceStore } from "../src/domain/workflow-instance-store.js";
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projector.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -120,6 +121,24 @@ describe("workflow preferred_targets: member@{rig}", () => {
   it("--rig A resolves ops-watcher@{rig} to ops-watcher@rig-a", async () => {
     const r = await instantiate(relativePath, "rig-a");
     expect(entryOwner(r.instance.instanceId)).toBe("ops-watcher@rig-a");
+  });
+
+  it("binds pod-relative targets per instance and retains them on later projection", async () => {
+    db.prepare(`INSERT INTO pods (id, rig_id, label, namespace) VALUES ('p-a', 'r-a', 'Feature A', 'feature-a'), ('p-b', 'r-a', 'Feature B', 'feature-b')`).run();
+    const podSpec = relativePath;
+    writeFileSync(podSpec, SPEC_RIG_RELATIVE.replace("ops-watcher@{rig}", '"{pod}-watcher@{rig}"').replace("ops-finisher@{rig}", '"{pod}-finisher@{rig}"'));
+    const a = await runtime.instantiate({ specPath: podSpec, rootObjective: "a", createdBySession: "orch@orch", targetRig: "rig-a", targetPod: "feature-a" });
+    const b = await runtime.instantiate({ specPath: podSpec, rootObjective: "b", createdBySession: "orch@orch", targetRig: "rig-a", targetPod: "feature-b" });
+    expect(a.instance.boundPod).toBe("feature-a");
+    expect(b.instance.boundPod).toBe("feature-b");
+    expect(entryOwner(a.instance.instanceId)).toBe("feature-a-watcher@rig-a");
+    expect(entryOwner(b.instance.instanceId)).toBe("feature-b-watcher@rig-a");
+    const reloaded = new WorkflowInstanceStore(db).getByIdOrThrow(a.instance.instanceId);
+    expect(reloaded.boundPod).toBe("feature-a");
+    expect(new WorkflowSpecCache(db).getForInstance(reloaded)?.spec.roles?.finisher?.preferred_targets).toEqual(["feature-a-finisher@rig-a"]);
+    const projected = await runtime.project({ instanceId: a.instance.instanceId, currentPacketId: a.instance.currentFrontier[0], exit: "handoff", actorSession: "feature-a-watcher@rig-a", resultNote: "next" } as never);
+    expect(projected.nextOwnerSession).toBe("feature-a-finisher@rig-a");
+    await expect(runtime.instantiate({ specPath: podSpec, rootObjective: "x", createdBySession: "orch@orch", targetRig: "rig-a", targetPod: "missing" })).rejects.toMatchObject({ code: "bound_pod_unknown" });
   });
 
   it("--rig B resolves the same spec to ops-watcher@rig-b, a terminal member", async () => {
@@ -355,6 +374,51 @@ ${steps}`;
     });
     return { status: res.status, body: (await res.json()) as Record<string, any> };
   }
+
+  it("accepts a pod on the HTTP instantiate path and rejects an unknown pod", async () => {
+    const rig = daemon.db.prepare(`SELECT id FROM rigs WHERE name = 'rig-a'`).get() as { id: string };
+    daemon.db.prepare(`INSERT INTO pods (id, rig_id, label, namespace) VALUES ('http-pod', ?, 'Feature', 'feature')`).run(rig.id);
+    const yaml = specYaml("pod-http", `    watcher:\n      preferred_targets:\n        - "{pod}-watcher@{rig}"\n`);
+    const good = await start(yaml, { targetRig: "rig-a", targetPod: "feature" });
+    expect(good.status).toBe(201);
+    expect(good.body.instance.boundPod).toBe("feature");
+    expect(entryDestination(good.body.instance.instanceId)).toBe("feature-watcher@rig-a");
+    const bad = await start(yaml, { targetRig: "rig-a", targetPod: "missing" });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe("bound_pod_unknown");
+    const absent = await start(yaml, { targetRig: "rig-a" });
+    expect(absent.status).toBe(400);
+    expect(absent.body.error).toBe("unbound_destination_pod");
+    expect(absent.body.message).toContain("{pod}-watcher@rig-a");
+    expect(absent.body.message).toContain("--pod");
+    const unbound = await start(yaml, { targetPod: "feature" });
+    expect(unbound.status).toBe(400);
+    expect(unbound.body.error).toBe("bound_pod_invalid");
+  });
+
+  it("starts without a pod when a pod-relative role is unused", async () => {
+    const yaml = specYaml("pod-unused", `    watcher:\n      preferred_targets:\n        - ops-watcher@rig-a\n    spare:\n      preferred_targets:\n        - "{pod}-spare@rig-a"\n`);
+    const started = await start(yaml, { targetRig: "rig-a" });
+    expect(started.status).toBe(201);
+    expect(entryDestination(started.body.instance.instanceId)).toBe("ops-watcher@rig-a");
+  });
+
+  it("starts without a pod and reports the missing binding at the later hop", async () => {
+    const yaml = specYaml("pod-later", `    watcher:\n      preferred_targets:\n        - ops-watcher@rig-a\n    finisher:\n      preferred_targets:\n        - "{pod}-finisher@rig-a"\n`, `    - id: watch\n      actor_role: watcher\n      allowed_exits:\n        - handoff\n      next_hop:\n        mode: require\n        suggested_roles:\n          - finisher\n    - id: finish\n      actor_role: finisher\n      allowed_exits:\n        - done\n`);
+    const started = await start(yaml, { targetRig: "rig-a" });
+    expect(started.status).toBe(201);
+    const packets = count("queue_items");
+    const response = await daemon.app.request("/api/workflow/project", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instanceId: started.body.instance.instanceId, currentPacketId: started.body.entryQitemId, exit: "handoff", actorSession: "ops-watcher@rig-a", resultNote: "next" }),
+    });
+    const body = await response.json() as { error: string; message: string };
+    expect(response.status).toBe(400);
+    expect(body.error).toBe("unbound_destination_pod");
+    expect(body.message).toContain("{pod}-finisher@rig-a");
+    expect(body.message).toContain("--pod");
+    expect(count("queue_items")).toBe(packets);
+  });
 
   // The four shapes whose {rig} is never the entry target actually used.
   const STARTS: Record<string, { yaml: string; extra?: Record<string, string> }> = {

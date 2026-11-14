@@ -93,6 +93,14 @@ describe("FAC-1 C2: --rig on both instantiate verbs + bound-rig rendering", () =
     expect((call!.body as Record<string, string>).targetRig).toBe("factory-b");
   });
 
+  it("instantiate --pod posts the pod binding", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/workflow/instantiate": { status: 201, data: { instance: {}, entryQitemId: "q-1" } } } });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "instantiate", "/abs/spec.yaml", "--root-objective", "obj", "--created-by", "ops@rig", "--rig", "factory-b", "--pod", "feature-a", "--json"]);
+    expect((calls.find((c) => c.path === "/api/workflow/instantiate")!.body as Record<string, string>).targetPod).toBe("feature-a");
+  });
+
   it("instantiate WITHOUT --rig omits targetRig (unbound default preserved)", async () => {
     const { deps, calls } = makeDeps({
       routes: { "POST /api/workflow/instantiate": { status: 201, data: { instance: {}, entryQitemId: "q-1" } } },
