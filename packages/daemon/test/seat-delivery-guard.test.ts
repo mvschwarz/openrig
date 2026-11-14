@@ -60,6 +60,24 @@ describe("delivery pause and durable custody", () => {
     await expect(guard.input("a", async () => { writes.push("bad"); })).rejects.toMatchObject({ code: "typing_guard_enabled" });
     db.close();
   });
+  it("one sorted pass leases writing seats and only records custody seats: a paused custody seat isn't refused", async () => {
+    const { db, guard } = fixture();
+    await guard.set("b", true, "actor", "person typing");
+    // Leasing the paused seat for writing is still refused, as before.
+    await expect(guard.lifecycle(["a", "b"], async () => {})).rejects.toMatchObject({ code: "typing_guard_enabled" });
+    let ran = false;
+    await guard.lifecycle(["a"], async () => {
+      expect(guard.ownsLifecycle("a")).toBe(true);
+      expect(guard.ownsCustody("b")).toBe(true);
+      expect(guard.ownsLifecycle("b")).toBe(false);
+      ran = true;
+    }, ["b"]);
+    expect(ran).toBe(true);
+    expect(guard.preference("b")).toMatchObject({ desired: true, effective: true });
+    // A paused writing seat still refuses, whatever is recorded beside it.
+    await expect(guard.lifecycle(["b"], async () => {}, ["a"])).rejects.toMatchObject({ code: "typing_guard_enabled" });
+    db.close();
+  });
   it("service-level strict pause permits only explicit human input and sibling", async () => {
     const { db, guard } = fixture(); await guard.set("a", true, "actor", "draft"); const writes: string[] = [];
     for (let attempt = 0; attempt < 2; attempt++) {
