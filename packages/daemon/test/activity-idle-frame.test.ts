@@ -59,7 +59,7 @@ describe("issue824 existing strict adapter idle frame (behavioral red-first)", (
     const streaming = codexFrame.replace(/^ {2}Worked for[^\n]+$/m, "• Streaming an unfinished answer");
     expect((await adapterFold(streaming, { sourceRuntime: "codex" })).activity.state).toBe("running");
   });
-  it.each(["0.167.0", "99.0.0"])("an unrecorded Codex %s frame stays unknown under redraw motion", async (version) => {
+  it.each(["0.168.0", "99.0.0"])("an unrecorded Codex %s frame stays unknown under redraw motion", async (version) => {
     // Synthetic version edits of the recorded 0.160 fixture, not native newer-version captures.
     const frame = codexFrame.replaceAll("0.160.0", version);
     for (const pane of [frame, frame.replace(/^ {2}Worked for[^\n]+$/m, "• Streaming an unfinished answer")]) {
@@ -115,6 +115,31 @@ describe("issue824 existing strict adapter idle frame (behavioral red-first)", (
     const result = await adapterFold(frame, { sourceRuntime: "codex", hook: null, motion });
     expect(result.observation).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
     expect(result.activity).toMatchObject({ state: "running", evidenceSource: "pane_heuristic", reason: "mid_work_pattern" });
+  });
+  // Synthetic resumed frames: Codex's session header (drawn as 0.160 draws it) or its update notice over the recorded
+  // 0.167 layouts. Codex 0.167.1 and 0.167.2 changed no TUI code from 0.167.0.
+  const codexHeader = (version: string) => `\n  >_ OpenAI Codex (v${version})\n     ~/example/work\n  permissions: YOLO mode\n\n`;
+  const codexNotice = (version: string) => `│ ✨ Update available! ${version} -> 0.169.0 │\n\n`;
+  it.each(["0.167.0", "0.167.1", "0.167.2"])("a resumed Codex %s seat that shows its version reads the recorded 0.167 layout", async (version) => {
+    for (const shown of [codexHeader(version), codexNotice(version)]) {
+      const completed = `${shown}${codexCompleted}`;
+      expect(readSeatBeforePaste(completed, "codex")).toBe("idle");
+      const idle = await adapterFold(completed, { sourceRuntime: "codex", hook: null });
+      expect(idle.observation?.reason).not.toBe("unrecognized_client_version");
+      expect(idle.activity).toMatchObject({ state: "idle", evidenceSource: "pane_heuristic" });
+      const working = `${shown}${codexWorking}`;
+      expect(readSeatBeforePaste(working, "codex")).toBe("not-idle");
+      expect((await adapterFold(working, { sourceRuntime: "codex", hook: null, motion: false })).activity.state).toBe("running");
+    }
+  });
+  it.each(["0.168.0", "0.169.0", "0.167.0-alpha.4.3", "0.167", "0.160.1"])("a Codex %s version over the same layout stays unknown", async (version) => {
+    for (const shown of [codexHeader(version), codexNotice(version)]) {
+      const frame = `${shown}${codexCompleted}`;
+      expect(readSeatBeforePaste(frame, "codex")).toBe("unknown");
+      const result = await adapterFold(frame, { sourceRuntime: "codex", hook: null });
+      expect(result.observation).toMatchObject({ state: "unknown", reason: "unrecognized_client_version" });
+      expect(result.activity.state).toBe("unknown");
+    }
   });
   it("a newer redraw after an old idle capture keeps D2 running", async () => {
     expect((await adapterFold(cframe, { age: 2000 })).activity.state).toBe("running");
