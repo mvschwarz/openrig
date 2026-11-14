@@ -67,15 +67,21 @@ function parseWake(value: unknown): RosterWake {
     ...(hook.secrets_env_file === undefined ? {} : { secrets_env_file: hook.secrets_env_file as string }) } };
 }
 
-/** The most a member's label may hold. */
+/** The most a member's label, or a team's name as it's shown, may hold. */
 export const MEMBER_LABEL_MAX = 200;
 
-/** Why a label can't be used, or null. It's text an assistant repeats to a person, so no markup or control characters. */
-function labelProblem(label: unknown): string | null {
-  if (typeof label !== "string" || !label.trim()) return "label isn't non-empty text";
-  if ([...label].length > MEMBER_LABEL_MAX) return `label is longer than ${MEMBER_LABEL_MAX} characters`;
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f-\u009f<>]/.test(label)) return "label holds a control character or an angle bracket";
+// What changes how the text around it shows: C0 and C1 controls, the line and paragraph separators, and the bidirectional
+// embeddings, overrides and isolates. Joiners and the implicit direction marks are ordinary in names, and stay allowed.
+// eslint-disable-next-line no-control-regex
+const LAYOUT_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+
+/** Why text an assistant repeats to a person (a member's label, a team's name) can't be shown as authored, or null: plain
+ *  text of at most 200 characters, with no markup and nothing that breaks or reorders what's shown. */
+function shownTextProblem(field: string, value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return `${field} isn't non-empty text`;
+  if ([...value].length > MEMBER_LABEL_MAX) return `${field} is longer than ${MEMBER_LABEL_MAX} characters`;
+  if (LAYOUT_CONTROLS.test(value)) return `${field} holds a control character (a line break, a separator or a bidirectional control)`;
+  if (/[<>]/.test(value)) return `${field} holds an angle bracket`;
   return null;
 }
 
@@ -100,7 +106,7 @@ export function parseRoster(value: unknown): Roster {
             : cadence !== undefined && (!Number.isInteger(cadence) || (cadence as number) <= 0) ? `check_in_minutes ${JSON.stringify(cadence)} isn't a positive whole number of minutes`
               : null;
     // A label that can't be used never stops the roster loading either: the member is named by its seat instead.
-    const badLabel = m.label === undefined ? null : labelProblem(m.label);
+    const badLabel = m.label === undefined ? null : shownTextProblem("label", m.label);
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
       use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
       ...(m.hosted === true ? { hosted: true } : {}), ...(m.wake === undefined ? {} : { wake: parseWake(m.wake) }),
@@ -136,10 +142,14 @@ export function readRosters(folder: string): { rosters: Roster[]; warnings: stri
 }
 
 /** The name a person knows a rig's team by: its network roster's (`network-<rig>.json`) authored `name`, which is
- *  "Your OpenRig team" when its owner hasn't named it. Null when there's no such roster, or it can't be read. */
-export function rosterTeamName(folder: string, rig: string): string | null {
-  if (!rig || /[\\/\0]|^\.\.?$/.test(rig)) return null;
-  try { return readRosterFile(join(folder, `network-${rig}.json`)).name; } catch { return null; }
+ *  "Your OpenRig team" when its owner hasn't named it. Null when there's no such roster or it can't be read, and null with
+ *  the reason when its name can't be shown as authored (the label rule): the roster itself still loads. */
+export function rosterTeamName(folder: string, rig: string): { name: string | null; problem?: string } {
+  if (!rig || /[\\/\0]|^\.\.?$/.test(rig)) return { name: null };
+  let name: string;
+  try { name = readRosterFile(join(folder, `network-${rig}.json`)).name; } catch { return { name: null }; }
+  const problem = shownTextProblem("name", name);
+  return problem ? { name: null, problem } : { name };
 }
 
 /** The team's name as a result line says it: quoted when its owner named it, else "your OpenRig team". */

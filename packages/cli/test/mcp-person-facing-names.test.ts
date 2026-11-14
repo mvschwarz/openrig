@@ -29,7 +29,7 @@ function rosters(name: string | null, members: unknown[] = []) {
   return folder;
 }
 
-async function connect(folder: string, opts: { external?: boolean; queueRows?: unknown[] } = {}) {
+async function connect(folder: string, opts: { external?: boolean; seat?: string; queueRows?: unknown[] } = {}) {
   const get = vi.fn(async (p: string): Promise<DaemonResponse> => {
     if (p.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "team" }] };
     if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "team" }, nodes: [{ id: "n1", logicalId: "dev.review" }, { id: "n2", logicalId: "dev.impl" }], edges: [], representative: null } };
@@ -45,7 +45,7 @@ async function connect(folder: string, opts: { external?: boolean; queueRows?: u
   client.get = get;
   const presence = path.join(folder, "presence.json");
   const server = createMcpServer(client, { rostersFolder: () => folder, presenceFile: () => presence,
-    ...(opts.external ? { seat: CALLER, access: EXTERNAL } : {}) });
+    ...(opts.external ? { seat: opts.seat ?? CALLER, access: EXTERNAL } : {}) });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: "names", version: "1.0.0" });
   await server.connect(serverTransport);
@@ -68,16 +68,26 @@ describe("a member's label", () => {
       member("d@team", { label: "<b>bold</b>" }),
       member("e@team", { label: 42 }),
       member("f@team", { label: "é".repeat(200) }),
+      // A bidirectional override and a line separator change what's shown; a joiner and a direction mark are ordinary.
+      member("g@team", { label: "claude \u202Etnatsissa" }),
+      member("h@team", { label: "claude\u2028assistant" }),
+      member("i@team", { label: "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u062f" }),
+      member("j@team", { label: "\u05e9\u05e8\u05d4\u200f (Sara)" }),
     ])).members;
-    expect(parsed.map((m) => m.label ?? null)).toEqual(["claude (Sam's assistant, invited)", null, null, null, null, "é".repeat(200)]);
+    expect(parsed.map((m) => m.label ?? null)).toEqual(["claude (Sam's assistant, invited)", null, null, null, null, "é".repeat(200),
+      null, null, "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u062f", "\u05e9\u05e8\u05d4\u200f (Sara)"]);
     expect(parsed.map((m) => m.label_problem ?? null)).toEqual([null, expect.stringContaining("longer than 200"),
-      expect.stringContaining("control character"), expect.stringContaining("angle bracket"), expect.stringContaining("isn't non-empty text"), null]);
+      expect.stringContaining("control character"), expect.stringContaining("angle bracket"), expect.stringContaining("isn't non-empty text"), null,
+      expect.stringContaining("bidirectional control"), expect.stringContaining("separator"), null, null]);
   });
 
   it("names the team from the rig's network roster, unquoted when its owner hasn't named it", () => {
-    expect(rosterTeamName(rosters("Sam's team"), "team")).toBe("Sam's team");
-    expect(rosterTeamName(rosters(null), "team")).toBeNull();
-    expect(rosterTeamName(rosters("Sam's team"), "../team")).toBeNull();
+    expect(rosterTeamName(rosters("Sam's team"), "team")).toEqual({ name: "Sam's team" });
+    expect(rosterTeamName(rosters(null), "team")).toEqual({ name: null });
+    expect(rosterTeamName(rosters("Sam's team"), "../team")).toEqual({ name: null });
+    // A name that can't be shown as authored isn't used, and says why; the roster itself still loads.
+    expect(rosterTeamName(rosters("Sam's \u202Emaet"), "team")).toEqual({ name: null, problem: expect.stringContaining("bidirectional control") });
+    expect(rosterTeamName(rosters("x".repeat(201)), "team")).toEqual({ name: null, problem: expect.stringContaining("longer than 200") });
     expect(teamPhrase("Sam's team")).toBe('the team "Sam\'s team"');
     expect(teamPhrase("Your OpenRig team")).toBe("your OpenRig team");
     expect(teamPhrase(null)).toBe("your OpenRig team");
@@ -85,12 +95,13 @@ describe("a member's label", () => {
 });
 
 describe("rig_team for a person's assistant", () => {
+  const named = () => rosters("Sam's team", [
+    member("dev-review@team", { label: "codex (Sam's reviewer)", caveat: "Reads, doesn't push" }),
+    member("grok@team", { hosted: true, label: "grok (Sam's researcher)" }),
+  ]);
+
   it("names the team and its members, and puts a network seat's roster entry and presence on its own entry", async () => {
-    const folder = rosters("Sam's team", [
-      member("dev-review@team", { label: "codex (Sam's reviewer)", caveat: "Reads, doesn't push" }),
-      member("grok@team", { hosted: true, label: "grok (Sam's researcher)" }),
-    ]);
-    const s = await connect(folder);
+    const s = await connect(named(), { external: true });
     try {
       const team = await s.team();
       expect(team.rig).toEqual({ id: "rig-1", name: "team", displayName: "Sam's team" });
@@ -101,6 +112,36 @@ describe("rig_team for a person's assistant", () => {
       const impl = team.seats.find((seat: { session: string }) => seat.session === "dev-impl@team");
       expect(Object.keys(impl).sort()).toEqual(["activity", "delegatesTo", "kind", "logicalId", "pod", "reportsTo", "role", "runtime", "session", "sessionStatus"]);
       expect(team.hostedMembers).toMatchObject([{ session: "grok@team", label: "grok (Sam's researcher)" }]);
+    } finally { await s.close(); }
+  });
+
+  it("gives an internal caller the answer it had: no display name, no seat entries, no labels", async () => {
+    const s = await connect(named());
+    try {
+      const team = await s.team();
+      expect(team.rig).toEqual({ id: "rig-1", name: "team" });
+      const plain = ["activity", "delegatesTo", "kind", "logicalId", "pod", "reportsTo", "role", "runtime", "session", "sessionStatus"];
+      for (const seat of team.seats) expect(Object.keys(seat).sort()).toEqual(plain);
+      expect(team.hostedMembers).toHaveLength(1);
+      expect(team.hostedMembers[0]).toMatchObject({ session: "grok@team", activity: "unknown", presence: expect.any(Object) });
+      expect(team.hostedMembers[0]).not.toHaveProperty("label");
+    } finally { await s.close(); }
+  });
+
+  it("says why a label or the team's name isn't shown, so neither reads as absent", async () => {
+    const folder = rosters("Sam's \u202Emaet", [
+      member("dev-review@team", { label: "codex\u2028reviewer" }),
+      member("grok@team", { hosted: true, label: "<b>grok</b>" }),
+    ]);
+    const s = await connect(folder, { external: true });
+    try {
+      const team = await s.team();
+      expect(team.rig).toEqual({ id: "rig-1", name: "team", displayNameProblem: expect.stringContaining("bidirectional control") });
+      const review = team.seats.find((seat: { session: string }) => seat.session === "dev-review@team");
+      expect(review).toMatchObject({ label_problem: expect.stringContaining("separator"), roster: "network-team" });
+      expect(review).not.toHaveProperty("label");
+      expect(team.hostedMembers[0]).toMatchObject({ session: "grok@team", label_problem: expect.stringContaining("angle bracket") });
+      expect(team.hostedMembers[0]).not.toHaveProperty("label");
     } finally { await s.close(); }
   });
 
@@ -119,12 +160,25 @@ describe("rig_team for a person's assistant", () => {
       const own = (await external.team()).hostedMembers.find((m: { session: string }) => m.session === CALLER);
       expect(own).toMatchObject({ session: CALLER, label: "chatgpt (Sam's assistant)", capabilities: ["code review"] });
       expect(own).not.toHaveProperty("presence");
+      expect(own).not.toHaveProperty("activity");
       expect((await external.team()).hostedMembers.find((m: { session: string }) => m.session === "grok@team")).toHaveProperty("presence");
       // Its own rows aren't even read for it.
       expect(external.get.mock.calls.some(([p]) => p.includes(`destinationSession=${encodeURIComponent(CALLER)}`))).toBe(false);
       // An internal caller sees every member's presence, as before.
       expect((await internal.team()).hostedMembers.find((m: { session: string }) => m.session === CALLER)).toHaveProperty("presence");
     } finally { await external.close(); await internal.close(); }
+  });
+
+  it("keeps a node caller's own seat, with its identity and label, and no line about its activity", async () => {
+    const s = await connect(named(), { external: true, seat: "dev-review@team" });
+    try {
+      const team = await s.team();
+      const own = team.seats.find((seat: { session: string }) => seat.session === "dev-review@team");
+      expect(own).toMatchObject({ logicalId: "dev.review", session: "dev-review@team", label: "codex (Sam's reviewer)" });
+      for (const key of ["activity", "sessionStatus", "presence"]) expect(own).not.toHaveProperty(key);
+      const other = team.seats.find((seat: { session: string }) => seat.session === "dev-impl@team");
+      expect(other).toHaveProperty("activity");
+    } finally { await s.close(); }
   });
 });
 
@@ -135,11 +189,13 @@ describe("rig_queue_list: an empty inbox", () => {
     const none = await connect(rosters(null), { external: true });
     try {
       const listed = await named.list({ owned: true });
-      expect(listed.structuredContent).toEqual({ items: [], message: 'No requests are addressed to you on the team "Sam\'s team" yet.' });
-      expect(listed.content.map((c) => c.text)).toEqual(["[]", 'No requests are addressed to you on the team "Sam\'s team" yet.']);
-      expect((await named.list()).structuredContent.message).toBe('No requests are addressed to you on the team "Sam\'s team" yet.');
-      expect((await unnamed.list({ owned: true })).structuredContent.message).toBe("No requests are addressed to you on your OpenRig team yet.");
-      expect((await none.list({ owned: true })).structuredContent.message).toBe("No requests are addressed to you on your OpenRig team yet.");
+      expect(listed.structuredContent).toEqual({ items: [], message: 'No open requests are addressed to you on the team "Sam\'s team".' });
+      expect(listed.content.map((c) => c.text)).toEqual(["[]", 'No open requests are addressed to you on the team "Sam\'s team".']);
+      expect((await named.list()).structuredContent.message).toBe('No open requests are addressed to you on the team "Sam\'s team".');
+      expect((await unnamed.list({ owned: true })).structuredContent.message).toBe("No open requests are addressed to you on your OpenRig team.");
+      expect((await none.list({ owned: true })).structuredContent.message).toBe("No open requests are addressed to you on your OpenRig team.");
+      // A list of every state says none at all, not "open".
+      expect((await named.list({ owned: true, all: true })).structuredContent.message).toBe('No requests are addressed to you on the team "Sam\'s team".');
       // A narrowed list that comes back empty isn't an empty inbox.
       expect((await named.list({ owned: true, state: "done" })).structuredContent).toEqual({ items: [] });
     } finally { await named.close(); await unnamed.close(); await none.close(); }

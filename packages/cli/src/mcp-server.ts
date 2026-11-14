@@ -10,7 +10,7 @@ import { resolveRigHandle } from "./rig-handle.js";
 import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
 import { CLI_VERSION } from "./version.js";
 import { ConfigStore } from "./config-store.js";
-import { readRosters, rosterTeamName, teamPhrase } from "./commands/roster.js";
+import { readRosters, rosterTeamName, teamPhrase, type RosterMember } from "./commands/roster.js";
 import { mcpPresenceFilePath, readPresence } from "./mcp-presence.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "./queue-artifact.js";
 
@@ -150,12 +150,13 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
 /** A rig's hosted member: a tool that lives outside a terminal (an assistant, a bot) and reaches the team over this server
  *  under a grant. Its roster entry authors what it's good at and its limits; it has no node or pane, and OpenRig doesn't
  *  observe it between calls, so its activity is unknown, never idle. */
-type HostedMember = { session: string; label?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; pane: null;
-  activity: "unknown"; presence?: HostedPresence };
+type HostedMember = { session: string; label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string;
+  caveat: string | null; pane: null; activity?: "unknown"; presence?: HostedPresence };
 
 /** A node seat's authored roster entry, merged into its own rig_team entry: how the person knows it, what it's good at,
  *  its limits, and what OpenRig last saw of it, so an assistant can tell a disconnected seat from its own history. */
-type SeatRosterEntry = { label?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; presence?: HostedPresence };
+type SeatRosterEntry = { label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null;
+  presence?: HostedPresence };
 
 /** What OpenRig last saw of a hosted member: its last call to this host's MCP server, and the latest ring among its recent
  *  rows. Presence isn't pickup (a claim on a row), and null is unknown, never idle. */
@@ -181,38 +182,48 @@ function newestWake(rows: unknown, seat: string): HostedPresence["lastWake"] {
 }
 
 const ROSTERS_INCOMPLETE = "Some rosters couldn't be read, so hosted members may be missing.";
+/** An external caller's answer also carries the roster entries of the team's seats, and loses those too. */
+const ROSTERS_INCOMPLETE_EXTERNAL = "Some rosters couldn't be read, so hosted members, and the labels, caveats and presence they give the team's seats, may be missing.";
 
-/** The roster members on this host whose seat is in this rig: those marked hosted that aren't one of its nodes, and the
- *  entries of its node seats (by seat). A roster folder that doesn't exist means none. One that can't be inspected or
- *  read, or a host id that isn't known yet, is said, never read as none. The note stays generic (a scoped caller doesn't
- *  see other rosters' names or errors); the detail goes to this server's log. presenceOf gives null for a seat whose
- *  presence isn't shown (an external caller's own), and that entry has none. */
+/** The roster members on this host whose seat is in this rig and marked hosted, that aren't one of its nodes. For an
+ *  external caller, also the entries of its node seats (by seat) and each member's label (or why it isn't used): the names
+ *  a person knows them by. An internal caller's answer is as it was. A roster folder that doesn't exist means none. One
+ *  that can't be inspected or read, or a host id that isn't known yet, is said, never read as none. The note stays generic
+ *  (a scoped caller doesn't see other rosters' names or errors); the detail goes to this server's log. presenceOf gives
+ *  null for a seat whose presence isn't shown (an external caller's own), and that entry has none. */
 async function hostedMembersOf(folder: string, rigName: string, nodeSeats: ReadonlySet<string>,
-  selfHostId: () => Promise<string | null>, presenceOf: (seat: string) => Promise<HostedPresence | null>):
+  selfHostId: () => Promise<string | null>, presenceOf: (seat: string) => Promise<HostedPresence | null>, external: boolean):
   Promise<{ members: HostedMember[]; seats: Map<string, SeatRosterEntry>; note?: string }> {
+  const incomplete = external ? ROSTERS_INCOMPLETE_EXTERNAL : ROSTERS_INCOMPLETE;
   const seats = new Map<string, SeatRosterEntry>();
   try {
     statSync(folder);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { members: [], seats };
     console.error(`rig_team: the roster folder ${folder} can't be inspected: ${(error as Error).message}`);
-    return { members: [], seats, note: ROSTERS_INCOMPLETE };
+    return { members: [], seats, note: incomplete };
   }
   const { rosters, warnings } = readRosters(folder);
   if (warnings.length > 0) console.error(`rig_team: ${warnings.join("; ")}`);
-  const unread = warnings.length > 0 ? { note: ROSTERS_INCOMPLETE } : {};
+  const unread = warnings.length > 0 ? { note: incomplete } : {};
+  const hostedHere = (member: RosterMember) => member.hosted === true && member.seat.endsWith(`@${rigName}`);
   const candidates = rosters.flatMap((roster) => roster.members
-    .filter((member) => nodeSeats.has(member.seat) || (member.hosted === true && member.seat.endsWith(`@${rigName}`)))
+    .filter((member) => external ? nodeSeats.has(member.seat) || hostedHere(member) : hostedHere(member) && !nodeSeats.has(member.seat))
     .map((member) => ({ roster: roster.id, member })));
   if (candidates.length === 0) return { members: [], seats, ...unread };
   const host = await selfHostId();
-  if (!host) return { members: [], seats, note: "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
+  if (!host) {
+    return { members: [], seats, note: external
+      ? "This daemon's host id isn't known yet, so hosted members on its rosters, and the roster entries of the team's seats, can't be matched to it."
+      : "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
+  }
   // A seat in two rosters is one member: the first roster (by file name) supplies its entry.
   const members = new Map<string, HostedMember>();
   for (const { roster, member } of candidates) {
     if (member.host !== host || members.has(member.seat) || seats.has(member.seat)) continue;
-    const entry = { ...(member.label ? { label: member.label } : {}), roster, capabilities: member.capabilities, useWhen: member.use_when,
-      caveat: member.caveat ?? null };
+    // A label that can't be used says why, so it doesn't read as absent.
+    const named = !external ? {} : member.label ? { label: member.label } : member.label_problem ? { label_problem: member.label_problem } : {};
+    const entry = { ...named, roster, capabilities: member.capabilities, useWhen: member.use_when, caveat: member.caveat ?? null };
     const presence = await presenceOf(member.seat);
     if (nodeSeats.has(member.seat)) seats.set(member.seat, { ...entry, ...(presence ? { presence } : {}) });
     else members.set(member.seat, { session: member.seat, ...entry, pane: null, activity: "unknown", ...(presence ? { presence } : {}) });
@@ -1657,10 +1668,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const rows = res.data.filter((row) => scope.item(row));
           const result = mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
           // An external caller's empty inbox says so in a line its assistant can repeat, naming the team as the person
-          // knows it. The rows keep their shape; the line rides beside them, only when nothing narrowed the list.
+          // knows it. The rows keep their shape; the line rides beside them, only when nothing narrowed the list. The
+          // default list holds open items only, so its empty answer says no open requests, never none at all.
           const inbox = access?.external && (owned || mine) && !destination && !source && !state && tags.length === 0 && !since && !handedOffFrom;
           if (!inbox || rows.length > 0) return result;
-          const message = `No requests are addressed to you on ${teamPhrase(rosterTeamName(rostersFolder(), sessionName!.split("@")[1] ?? ""))} yet.`;
+          const team = teamPhrase(rosterTeamName(rostersFolder(), sessionName!.split("@")[1] ?? "").name);
+          const message = `No ${all ? "" : "open "}requests are addressed to you on ${team}.`;
           return { ...result, content: [...result.content, { type: "text", text: message }], structuredContent: { ...result.structuredContent, message } };
         }
         return mapResult(res, undefined, { structured: true });
@@ -1916,16 +1929,32 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             const visible = access?.external && Array.isArray(rows) ? rows.filter((row) => scope?.item(row)) : rows;
             return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(visible, seat),
               lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows`, checkIn: await checkInOf(seat) };
-          });
+          }, !!access?.external);
+        const note = hosted.note ? { hostedMembersNote: hosted.note } : {};
+        // The names a person knows the team by are for a person's assistant on an external grant; an internal caller's
+        // answer is as it was.
+        if (!access?.external) return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...note } }, undefined, { structured: true });
+        // The caller's own entry keeps its address and identity, with no line about its own activity.
+        const own = seatOf();
         // A node seat on a roster carries its authored entry and presence; a seat on none is as the daemon reports it.
         const seats = (view.seats as Array<Record<string, unknown>>).map((seat) => {
           const entry = hosted.seats.get(seat.session as string) ?? hosted.seats.get(`${String(seat.logicalId).replace(".", "-")}@${rigName}`);
-          return entry ? { ...seat, ...entry } : seat;
+          const merged = entry ? { ...seat, ...entry } : seat;
+          if (!own || merged.session !== own) return merged;
+          const { activity: _activity, sessionStatus: _status, ...identity } = merged;
+          return identity;
         });
-        // The name the person knows the team by, where its network roster names it; otherwise the rig's own fields.
-        const displayName = rosterTeamName(rostersFolder(), rigName);
-        const rigView = { ...(view.rig as Record<string, unknown>), ...(displayName ? { displayName } : {}) };
-        return mapResult({ status: 200, data: { ...view, rig: rigView, seats, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });
+        const hostedMembers = hosted.members.map((member) => {
+          if (member.session !== own) return member;
+          const { activity: _activity, ...identity } = member;
+          return identity;
+        });
+        // The name the person knows the team by, where its network roster names it; otherwise the rig's own fields, and why
+        // an authored name isn't shown.
+        const team = rosterTeamName(rostersFolder(), rigName);
+        const rigView = { ...(view.rig as Record<string, unknown>), ...(team.name ? { displayName: team.name } : {}),
+          ...(team.problem ? { displayNameProblem: team.problem } : {}) };
+        return mapResult({ status: 200, data: { ...view, rig: rigView, seats, hostedMembers, ...note } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
