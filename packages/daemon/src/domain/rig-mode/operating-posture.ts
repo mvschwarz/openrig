@@ -114,13 +114,14 @@ export class OperatingPostureService {
       return current.id;
     };
     if (ctx.projectId) ctx.projectId = currentProject(ctx.projectId);
-    const merge = (key: keyof OperatorContextReadContext, value: unknown, source: string) => {
-      if (value === undefined || value === null) return;
-      if (typeof value !== "string" || !value.trim()) throw new Error("invalid " + key + " from " + source);
+    const merge = (key: keyof OperatorContextReadContext, raw: unknown, source: string) => {
+      if (raw === undefined || raw === null) return;
+      if (typeof raw !== "string" || !raw.trim()) throw new Error("invalid " + key + " from " + source);
+      let value: string = raw;
       if (key === "rigId") value = rigIdentity(value);
       if (key === "projectId") value = currentProject(value);
       if (ctx[key] && ctx[key] !== value) throw new Error("conflicting " + key + " from " + source);
-      ctx[key] = value as string; ctx.sources.push(source);
+      ctx[key] = value; ctx.sources.push(source);
     };
     if (ctx.workstreamId?.includes("/")) {
       const parts = ctx.workstreamId.split("/");
