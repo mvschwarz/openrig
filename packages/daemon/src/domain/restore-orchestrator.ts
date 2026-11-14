@@ -113,6 +113,8 @@ export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 export interface SelectedRestoreHistory {
   nodeId: string;
   historySessionId: string;
+  /** Only the banked-original operation uses current cwd/effort instead of snapshot defaults. */
+  currentChoices?: true;
   beforeEffect: () => boolean;
   beforeRegistration: () => boolean;
   beforeNative: (resultSessionId?: string, bindingId?: string) => boolean;
@@ -815,7 +817,11 @@ export class RestoreOrchestrator {
       if (opts.selectedHistory && !opts.selectedHistory.beforeEffect()) {
         return { ok: false, code: "selection_changed", message: "The selected history or seat changed during terminal verification. No resume was started." };
       }
-      const planEntry = { node };
+      const liveChoice = opts.selectedHistory?.currentChoices
+        ? this.rigRepo.getRig(rigId)?.nodes.find(current => current.id === node.id) : undefined;
+      const currentEffort = liveChoice ? readSeatEffort(this.db, liveChoice.id) : null;
+      const planEntry = { node: liveChoice ? { ...node, cwd: liveChoice.cwd, model: liveChoice.model,
+        effort: currentEffort?.effective ?? null, effortChoice: currentEffort?.choice ?? null } : node };
       const result = await this.restoreNodeWithCompensation(
         planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory, resumePeriodicCarry }, subsetWarnings,
       );
