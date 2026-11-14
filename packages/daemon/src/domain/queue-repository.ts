@@ -176,6 +176,8 @@ const CLAIM_OVERRIDDEN_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}claim-overridden-`;
 const CLAIM_OVERRIDDEN_WAKE_END = `${WAKE_INTENT_PREFIX}claim-overridden.`;
 /** On a wake intent whose ring a hosted member's trigger accepted: recovery doesn't ring that intent again. */
 const HOSTED_WAKE_ACCEPTED_TAG = "queue:hosted-wake-accepted";
+/** A failed intent whose latest transport attempt positively stopped before input. Cleared on its next claim. */
+const WAKE_PRE_INPUT_FAILURE_TAG = "queue:wake-pre-input-failure";
 
 /** Who triggered a wake, which is its source at the seat's interruption level: an agent's create or handoff nudge, or
  *  OpenRig's own scheduling on an agent's row (ladder retries, an auto-unpark, boot recovery, health re-presentation). */
@@ -402,6 +404,7 @@ export interface QueueNudgeTransport {
 type WakeAttemptOutcome = {
   classified: "verified" | "indeterminate" | "failed" | "retained";
   nudgeResult: string;
+  preInputFailure?: boolean;
 };
 
 /** `principal:v1` marks only the transitions that record the request's own action. What that action sets off elsewhere
@@ -1334,7 +1337,7 @@ export class QueueRepository {
     if (inputUncertain || isWakeTimeoutSignal(res.reason) || isWakeTimeoutSignal(res.error)) {
       return { classified: "indeterminate", nudgeResult: `indeterminate:${detail}` };
     }
-    return { classified: "failed", nudgeResult: `failed:${detail}` };
+    return { classified: "failed", nudgeResult: `failed:${detail}`, preInputFailure: res.inputPhase === "not_reached" && res.sent !== true };
   }
 
   /**
@@ -1610,6 +1613,14 @@ export class QueueRepository {
     this.db.prepare("UPDATE outbox_entries SET guard_binding = ? WHERE outbox_id = ?").run(JSON.stringify(live), entry.outboxId);
   }
 
+  private setWakePreInputFailure(outboxId: string, proved: boolean): void {
+    const entry = this.outbox!.getById(outboxId);
+    if (!entry || (!proved && !entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG))) return;
+    const tags = (entry.tags ?? []).filter(tag => tag !== WAKE_PRE_INPUT_FAILURE_TAG);
+    if (proved) tags.push(WAKE_PRE_INPUT_FAILURE_TAG);
+    this.db.prepare("UPDATE outbox_entries SET tags = ? WHERE outbox_id = ?").run(JSON.stringify(tags), outboxId);
+  }
+
   private async deliverWakeIntent(
     outboxId: string,
     attempted: Set<string> = new Set(), // this pass's attempt history, inherited by any release it delivers
@@ -1626,6 +1637,7 @@ export class QueueRepository {
     let recovering = false;
     const claim = (entry: OutboxEntry): boolean => {
       if (!eligible(entry) || attempted.has(entry.outboxId) || !this.outbox!.claimForDelivery(entry.outboxId)) return false;
+      if (entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG)) this.setWakePreInputFailure(entry.outboxId, false);
       this.bindFirstTarget(entry);
       attempted.add(entry.outboxId);
       recovering ||= entry.deliveryState !== "pending";
@@ -1709,7 +1721,9 @@ export class QueueRepository {
       });
       for (const entry of group) {
         if (keep.includes(entry)) continue;
-        this.db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ? AND delivery_state = 'sending'").run(entry.deliveryState, entry.outboxId);
+        const restored = this.db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ? AND delivery_state = 'sending'").run(entry.deliveryState, entry.outboxId);
+        // This member never reached transport input, so its earlier failed-attempt proof still applies.
+        if (restored.changes && entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG)) this.setWakePreInputFailure(entry.outboxId, true);
         released.push(entry);
       }
       return { text: recoveryNotice + keep.map(entry => entry.body).join("\n"), outboxIds: keep.map(entry => entry.outboxId) };
@@ -1735,6 +1749,7 @@ export class QueueRepository {
       const wakeEvent = this.db.transaction(() => {
         this.recordNudgeAttempt(qitemId, nudgeResult);
         this.outbox!.finalizeDelivery(intent.outboxId, finalState);
+        if (finalState === "failed" && outcome.preInputFailure === true) this.setWakePreInputFailure(intent.outboxId, true);
         // The acceptance (or a ring that may have arrived) belongs to this intent, so recovery can tell this wake already rang.
         if (hostedRingMayHaveArrived(outcome.nudgeResult)) {
           this.db.prepare(`UPDATE outbox_entries SET tags = json_insert(COALESCE(tags, '[]'), '$[#]', ?)
@@ -2001,27 +2016,35 @@ export class QueueRepository {
    *  gateway, not held or released for quiet hours, and its seat now pane-bound. A handoff's retry ladder is the
    *  caller's to check: the sweep defers to a live ladder, the reachable-seat retry leaves every handed-off row to it. */
   unroutableWakeRetryable(row: QueueItem, now: Date = new Date()): boolean {
-    return row.lastNudgeResult?.startsWith("unroutable:") === true
-      && !row.claimedAt
+    return row.lastNudgeResult?.startsWith("unroutable:") === true && this.reachableWakeRetryable(row, now);
+  }
+
+  private reachableWakeRetryable(row: QueueItem, now: Date): boolean {
+    return !row.claimedAt
       && row.deliveryOutcome !== "never-posted" && row.deliveryOutcome !== "transport-failed"
       && !this.isLocalHumanDecisionWithoutGateway(row)
       && !["held", "released"].includes(quietHoldCustody(this.db, row.qitemId, now)?.state ?? "")
       && this.classifyDestinationOf(row.destinationSession).class === "pane-bound";
   }
 
-  /** A wake recorded unroutable because its seat wasn't bound yet, as just after a restart (#2789), is re-sent as soon
-   *  as the seat is seen running or idle, rather than at the stuck sweep's next tick; the sweep remains the backstop.
-   *  Only this seat's own pending rows, oldest first, that {@link unroutableWakeRetryable} admits. */
+  /** Re-send an unroutable wake, or the same failed intent with typed proof that its latest attempt never reached input,
+   *  when its seat returns running/idle. Unknown delivery stays unknown; deliberate quiet and compaction keep custody. */
   async retryUnroutableWakesOnReachable(sessionName: string, state: AgentActivity["state"] | undefined): Promise<void> {
     if (state !== "running" && state !== "idle") return;
     const addresses = this.resolveSessionAddresses(sessionName);
     if (!addresses.length) return;
     // As for a prompt clear (#2575): while a compaction's restore is owed, the wake would reach the agent before it.
     if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return;
-    const rows = this.db.prepare(`SELECT qitem_id FROM queue_items
-      WHERE destination_session IN (${addresses.map(() => "?").join(",")}) AND state = 'pending'
-        AND handed_off_from IS NULL AND last_nudge_result LIKE 'unroutable:%' ORDER BY ts_created, qitem_id`)
-      .all(...addresses) as Array<{ qitem_id: string }>;
+    const provedFailure = this.outbox ? `OR EXISTS (
+      SELECT 1 FROM outbox_entries o WHERE o.audit_pointer = q.qitem_id
+        AND substr(o.outbox_id, 1, ?) = ? AND o.delivery_state = 'failed'
+        AND EXISTS (SELECT 1 FROM json_each(o.tags) WHERE value = ?)
+    )` : "";
+    const rows = this.db.prepare(`SELECT q.qitem_id FROM queue_items q
+      WHERE q.destination_session IN (${addresses.map(() => "?").join(",")}) AND q.state = 'pending'
+        AND q.handed_off_from IS NULL AND (q.last_nudge_result LIKE 'unroutable:%' ${provedFailure})
+      ORDER BY q.ts_created, q.qitem_id`)
+      .all(...addresses, ...(this.outbox ? [WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, WAKE_PRE_INPUT_FAILURE_TAG] : [])) as Array<{ qitem_id: string }>;
     const now = new Date();
     // One attempt per intent for the pass: a returned result and its resume go as one send, so the second row's turn
     // mustn't send them again after a refusal.
@@ -2033,11 +2056,12 @@ export class QueueRepository {
       if (entry.deliveryState !== "failed" || !entry.auditPointer) return false;
       const current = this.getById(entry.auditPointer);
       return current?.state === "pending" && addresses.includes(current.destinationSession) && !current.handedOffFrom
-        && this.unroutableWakeRetryable(current, now);
+        && this.reachableWakeRetryable(current, now)
+        && (this.unroutableWakeRetryable(current, now) || entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG) === true);
     };
     for (const { qitem_id } of rows) {
       const row = this.getById(qitem_id);
-      if (!row || row.state !== "pending" || !this.unroutableWakeRetryable(row, now)) continue;
+      if (!row || row.state !== "pending" || !this.reachableWakeRetryable(row, now)) continue;
       // The failed wake may be the row's own intent or an un-park's blocker intent: re-send whichever failed.
       // One in flight or delivered is never sent again; only a row with no intent at all takes the plain nudge.
       const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries
@@ -2045,7 +2069,7 @@ export class QueueRepository {
         .all(qitem_id, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX) as Array<{ outbox_id: string; delivery_state: string }> : [];
       if (intents.length) {
         for (const intent of intents) if (intent.delivery_state === "failed") await this.deliverWakeIntent(intent.outbox_id, attempted, eligible);
-      } else await this.maybeNudge(qitem_id, row.destinationSession, undefined, row.sourceSession);
+      } else if (this.unroutableWakeRetryable(row, now)) await this.maybeNudge(qitem_id, row.destinationSession, undefined, row.sourceSession);
     }
   }
 
