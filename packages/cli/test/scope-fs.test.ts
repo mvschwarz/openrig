@@ -54,10 +54,16 @@ it("uses only the rig association as the default, preserving explicit targets", 
     expect(resolveMissionsRoot()).toBe(path.join(shared, "missions"));
     writeFile(catalog, "projects:\n  - id: alpha\n    root: alpha\n    rigs: [rig-a]\n  - id: beta\n    root: beta\n    rigs: [rig-a]\n");
     vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig-a");
-    expect(() => resolveMissionsRoot()).toThrow(/several projects/);
+    expect(resolveMissionsRoot()).toBe(path.join(shared, "missions"));
+    expect(report).toHaveBeenCalledWith(expect.stringMatching(/several projects.*--workspace/));
     writeFile(catalog, "projects:\n  - id: alpha\n    root: alpha\n    rigs: [rig-a]\n");
     writeFile(path.join(alpha, "project.yaml"), "id: different\n");
-    expect(() => resolveMissionsRoot()).toThrow(/conflicts with project identity/);
+    expect(resolveMissionsRoot()).toBe(path.join(shared, "missions"));
+    expect(report).toHaveBeenCalledWith(expect.stringMatching(/conflicts with project identity[\s\S]*--workspace/));
+    writeFile(catalog, "projects: [broken\n");
+    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@no-match");
+    expect(resolveMissionsRoot()).toBe(path.join(shared, "missions"));
+    expect(report).toHaveBeenCalledWith(expect.stringMatching(/warning:.*--workspace/));
   } finally {
     report.mockRestore();
     vi.unstubAllEnvs();

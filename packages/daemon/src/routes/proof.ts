@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { proofSourceObservation } from "../domain/proof/source-watch.js";
 import * as path from "node:path";
+import * as fs from "node:fs";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { JudgmentError, evidenceAt, readSliceReadiness, readMissionReadiness, readProjectReadinessAsync, recordJudgment, resolveProofScope, resolveProjectRoot, type JudgeInput } from "../domain/proof/judgments.js";
@@ -51,6 +52,7 @@ export function proofRoutes(): Hono {
     return value?.isReady() ? value.slicesRoot : null;
   };
   const target = (c: Parameters<typeof indexer>[0], rawScope: string | undefined, project: unknown, expectedRoot?: unknown, expectedProject?: unknown, expectedMissionsRoot?: unknown) => {
+    const warnings: string[] = [];
     if (project !== undefined && typeof project !== "string") throw new JudgmentError("judgment_invalid", "Project must be a catalog project id");
     if (expectedRoot !== undefined && typeof expectedRoot !== "string") throw new JudgmentError("judgment_invalid", "projectRoot must be the root a prepared read returned");
     if (expectedProject !== undefined && expectedProject !== null && typeof expectedProject !== "string") throw new JudgmentError("judgment_invalid", "expectedProject must be the project id a prepared read returned, or null");
@@ -87,7 +89,37 @@ export function proofRoutes(): Hono {
         try {
           const selected = selectRigProject(projectCatalogPaths(c).catalog, rig);
           if (selected) { id = selected.id; selectedBy = "rig"; }
-        } catch (e) { throw catalogError(e); }
+        } catch (e) {
+          warnings.push(`Rig project selection failed: ${e instanceof Error ? e.message : String(e)}; using configured workspace. Fix the catalog or select with --project, --workspace, or a project: prefix.`);
+        }
+      }
+    }
+    let selectedProject: ReturnType<typeof projectById> | undefined;
+    if (id !== undefined) {
+      try { selectedProject = projectById(c, id); }
+      catch (e) {
+        if (selectedBy !== "rig" && !(expectedProject !== undefined && expectedMissionsRoot !== undefined)) throw catalogError(e);
+        warnings.push(`Rig project '${id}' is unavailable: ${e instanceof Error ? e.message : String(e)}; using configured workspace. Fix the project or select with --project, --workspace, or a project: prefix.`);
+        id = undefined;
+      }
+    }
+    if (expectedProject !== undefined && expectedMissionsRoot !== undefined) {
+      const currentRoot = selectedProject?.missionsRoot ?? workspaceRoot(c);
+      const changed = expectedProject !== (selectedProject?.id ?? null)
+        || !currentRoot || !sameProjectRoot(expectedMissionsRoot as string, currentRoot)
+        || (typeof expectedRoot === "string" && (!selectedProject || !sameProjectRoot(expectedRoot, selectedProject.root)));
+      if (changed) {
+        const preparedMissions = expectedMissionsRoot as string;
+        const preparedRoot = typeof expectedRoot === "string" ? expectedRoot : path.dirname(preparedMissions);
+        const relative = path.relative(preparedRoot, preparedMissions);
+        if (!path.isAbsolute(preparedMissions) || !path.isAbsolute(preparedRoot) || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+            || !fs.existsSync(preparedRoot) || !fs.statSync(preparedRoot).isDirectory()
+            || !fs.existsSync(preparedMissions) || !fs.statSync(preparedMissions).isDirectory()) {
+          throw new JudgmentError("project_changed", "The prepared project or missions root no longer exists; read the proof again", 409);
+        }
+        warnings.push(`Project selection changed since preparation; judging against the prepared root ${preparedMissions}. Select explicitly with --project, --workspace, or a project: prefix.`);
+        return { root: preparedMissions, evidenceRoot: preparedRoot, scope, owner: null,
+          project: expectedProject === null ? null : { id: expectedProject as string, root: preparedRoot, selectedBy: "prepared" }, warnings };
       }
     }
     if (id === undefined) {
@@ -97,26 +129,24 @@ export function proofRoutes(): Hono {
       if (typeof expectedRoot === "string" && !sameProjectRoot(expectedRoot, path.dirname(owner.slicesRoot))) {
         throw new JudgmentError("project_changed", "The prepared project is no longer selected; read the proof again", 409);
       }
-      return { root: owner.slicesRoot, evidenceRoot: path.dirname(owner.slicesRoot), scope, owner, project: null };
+      return { root: owner.slicesRoot, evidenceRoot: path.dirname(owner.slicesRoot), scope, owner, project: null, warnings };
     }
     // Evidence is prepared against the project root (where project.yaml lives), the same root recordJudgment derives,
     // so prepared references still match at judgment time under a nested authored missions.root.
-    let p: ReturnType<typeof projectById>;
-    try { p = projectById(c, id); }
-    catch (e) { throw catalogError(e); }
+    const p = selectedProject!;
     if (expectedProject !== undefined && expectedProject !== p.id) throw new JudgmentError("project_changed", "The selected project changed since preparation; read the proof again", 409);
     // A judgment carries the root its prepared read resolved: if the catalog now maps the id elsewhere, refuse
     // rather than record against a different project.
     if (typeof expectedRoot === "string" && !sameProjectRoot(expectedRoot, p.root)) throw new JudgmentError("project_changed", `Project ${id} now resolves to ${p.root}, not the ${expectedRoot} the prepared read used; read the proof again`, 409);
-    return { root: p.missionsRoot, evidenceRoot: p.root, scope, owner: null, project: { id: p.id, root: p.root, selectedBy } };
+    return { root: p.missionsRoot, evidenceRoot: p.root, scope, owner: null, project: { id: p.id, root: p.root, selectedBy }, warnings };
   };
   // Catalog-project reads have no source watcher (it observes the daemon's selected workspace only), so their
   // freshness is reported as unverified rather than borrowing the selected workspace's state.
   const observation = (c: Parameters<typeof indexer>[0], project: { id: string; root: string } | null) =>
     project ? { state: "unavailable" as const, revision: "unverified" } : proofSourceObservation(c);
   app.get("/", async c => {
-    const { root, evidenceRoot, scope, project } = target(c, c.req.query("scope"), c.req.query("project"), c.req.query("projectRoot"));
-    const common = { sourceObservation: observation(c, project), ...(project ? { project } : { selection: { selectedBy: "workspace", missionsRoot: root } }) };
+    const { root, evidenceRoot, scope, project, warnings } = target(c, c.req.query("scope"), c.req.query("project"), c.req.query("projectRoot"));
+    const common = { sourceObservation: observation(c, project), ...(warnings.length ? { warnings } : {}), ...(project ? { project: { ...project, missionsRoot: root } } : { selection: { selectedBy: "workspace", missionsRoot: root } }) };
     // A catalog project's own root bounds policy, scope identity and evidence (never an ancestor's project.yaml).
     const bound = project?.root;
     if (!scope) {
@@ -143,7 +173,7 @@ export function proofRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "proof judgment", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
     const { project: _project, projectRoot: _projectRoot, expectedProject: _expectedProject, expectedMissionsRoot: _expectedMissionsRoot, ...input } = body;
-    const { root, scope, owner, project } = target(c, body.scope, body.project, body.projectRoot, body.expectedProject, body.expectedMissionsRoot);
+    const { root, scope, owner, project, warnings } = target(c, body.scope, body.project, body.projectRoot, body.expectedProject, body.expectedMissionsRoot);
     const result = recordJudgment(root, { ...input, scope: scope! }, identity.session, resolveRecordedProvenance(c, identity), project?.root);
     owner?.invalidate();
     // The receipt is already durable. A lost notification must not turn a committed write into a claimed rollback.
@@ -155,7 +185,7 @@ export function proofRoutes(): Hono {
         else { bus.emit({ type: "proof.judged", scope: body.scope, revision: result.readiness.revision }); notification = "emitted"; }
       } catch { notification = "unavailable; quiet refresh repairs views"; }
     }
-    return c.json({ ...result, ...(project ? { project } : { selection: { selectedBy: "workspace", missionsRoot: root } }), notification }, result.replayed ? 200 : 201);
+    return c.json({ ...result, ...(warnings.length ? { warnings } : {}), ...(project ? { project } : { selection: { selectedBy: "workspace", missionsRoot: root } }), notification }, result.replayed ? 200 : 201);
   });
   return app;
 }

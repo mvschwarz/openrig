@@ -53,6 +53,15 @@ function fixture(alphaMissions = "missions") {
 }
 
 describe("project-qualified proof scope (#132)", () => {
+  it("warns and uses the workspace for an unreadable catalog even for an unassociated caller", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), "projects: [broken\n");
+    const res = await f.get("scope=m0/slices/01-t001", "judge@elsewhere");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.items[0].text).toContain("Prove legacy.");
+    expect(body.warnings[0]).toMatch(/--project/);
+  });
   // Windows filesystems do not permit ':' in a directory name.
   it.skipIf(process.platform === "win32")("resolves a literal colon path in the caller's rig project before a catalog prefix", async () => {
     const f = fixture();
@@ -100,21 +109,23 @@ describe("project-qualified proof scope (#132)", () => {
     expect(fs.existsSync(join(f.legacy.slice, "proof/judgments"))).toBe(false);
   });
 
-  it("refuses an ambiguous rig association and leaves an unassociated caller on the workspace", async () => {
+  it("warns and falls back for an ambiguous rig association", async () => {
     const f = fixture();
     write(join(f.workspace, "workspace.yaml"), { projects: [
       { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta", rigs: ["rig"] },
     ] });
     const ambiguous = await f.get("scope=m0/slices/01-t001", "judge@rig");
-    expect(ambiguous.status).toBe(409);
-    expect((await ambiguous.json()).error).toBe("project_required");
+    expect(ambiguous.status).toBe(200);
+    const fallback = await ambiguous.json();
+    expect(fallback.items[0].text).toContain("Prove legacy.");
+    expect(fallback.warnings[0]).toMatch(/several projects.*--project/);
     const unbound = await (await f.get("scope=m0/slices/01-t001", "judge@elsewhere")).json();
     expect(unbound.project).toBeUndefined();
     expect(unbound.selection).toMatchObject({ selectedBy: "workspace" });
     expect(unbound.items[0].text).toContain("Prove legacy.");
   });
 
-  it("does not judge a different project when the rig association changes after preparation", async () => {
+  it("judges the prepared project when the rig association changes", async () => {
     const f = fixture();
     write(join(f.workspace, "workspace.yaml"), { projects: [
       { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
@@ -123,27 +134,28 @@ describe("project-qualified proof scope (#132)", () => {
     write(join(f.workspace, "workspace.yaml"), { projects: [
       { id: "alpha", root: "alpha" }, { id: "beta", root: "beta", rigs: ["rig"] },
     ] });
-    const res = await f.judge("m0/slices/01-t001", { projectRoot: view.project.root, expectedProject: view.project.id });
-    expect(res.status).toBe(409);
-    expect((await res.json()).error).toBe("project_changed");
+    const res = await f.judge("m0/slices/01-t001", { projectRoot: view.project.root, expectedProject: view.project.id, expectedMissionsRoot: view.project.missionsRoot });
+    expect(res.status).toBe(201);
+    expect((await res.json()).warnings[0]).toMatch(/changed since preparation/);
+    expect(fs.existsSync(join(f.alpha.slice, "proof/judgments/00000001.md"))).toBe(true);
     expect(fs.existsSync(join(f.beta.slice, "proof/judgments"))).toBe(false);
   });
 
-  it("does not silently replace a prepared workspace with a newly associated project", async () => {
+  it("keeps a prepared workspace when a newly associated project appears", async () => {
     const f = fixture();
     const view = await (await f.get("scope=m0/slices/01-t001", "judge@rig")).json();
     write(join(f.workspace, "workspace.yaml"), { projects: [
       { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
     ] });
     expect(view.selection).toMatchObject({ selectedBy: "workspace", missionsRoot: f.legacy.missions });
-    const res = await f.judge("m0/slices/01-t001", { expectedProject: null }, f.legacy.slice);
-    expect(res.status).toBe(409);
-    expect((await res.json()).error).toBe("project_changed");
+    const res = await f.judge("m0/slices/01-t001", { expectedProject: null, expectedMissionsRoot: view.selection.missionsRoot }, f.legacy.slice);
+    expect(res.status).toBe(201);
+    expect((await res.json()).warnings[0]).toMatch(/changed since preparation/);
   });
 
-  it("rejects a changed workspace missions root after preparation", async () => {
+  it("rejects a prepared missions root that no longer exists", async () => {
     const f = fixture();
-    const res = await f.judge("m0/slices/01-t001", { expectedProject: null, expectedMissionsRoot: f.alpha.missions }, f.legacy.slice);
+    const res = await f.judge("m0/slices/01-t001", { expectedProject: null, expectedMissionsRoot: join(f.workspace, "missing", "missions") }, f.legacy.slice);
     expect(res.status).toBe(409);
     expect((await res.json()).error).toBe("project_changed");
   });

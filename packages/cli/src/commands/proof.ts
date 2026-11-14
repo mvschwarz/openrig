@@ -179,6 +179,7 @@ checkboxes do not accept an item under the selected proof policy.
     if (r.status >= 400) {
       throw new Error(`${data.error ?? r.status}: ${data.message ?? "Read the named source and retry"}${data.error === "path_escape" ? escapeHint(project) : ""}`);
     }
+    if (Array.isArray(data.warnings)) for (const warning of data.warnings) console.error(`warning: ${warning}`);
     return data;
   };
   const projectHelp = "Workspace-catalog project id; resolves the scope under that project's missions root (same as a <project>:<scope> prefix)";
@@ -221,8 +222,8 @@ checkboxes do not accept an item under the selected proof policy.
           expectedRevision: opts.revision ?? item.revision, expectedPrevious: item.judgment?.id ?? null,
           operationId: opts.operationId, replace: opts.replace === true, ...(opts.project ? { project: opts.project } : {}),
           ...((view.project || view.selection) ? { expectedProject: (view.project as { id?: string } | undefined)?.id ?? null } : {}),
-          ...((view.selection as { missionsRoot?: string } | undefined)?.missionsRoot ? { expectedMissionsRoot: (view.selection as { missionsRoot: string }).missionsRoot } : {}),
-          // Pin the project root the prepared read resolved; the daemon refuses (409 project_changed) if it moved.
+          ...((view.project?.missionsRoot ?? view.selection?.missionsRoot) ? { expectedMissionsRoot: view.project?.missionsRoot ?? view.selection?.missionsRoot } : {}),
+          // Pin the project and missions roots the prepared read resolved.
           ...((view.project as { root?: string } | undefined)?.root ? { projectRoot: (view.project as { root: string }).root } : {}) };
         const result = await response(await c.post("/api/proof/judge", body), projectSelected(opts.project, scope));
         console.log(opts.json ? JSON.stringify(result) : JSON.stringify(result, null, 2));

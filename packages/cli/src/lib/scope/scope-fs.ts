@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { selectRigProject, rigFromSession, ProjectReadError } from "@openrig/daemon/project-catalog";
+import { selectRigProject, rigFromSession } from "@openrig/daemon/project-catalog";
 import { ConfigStore } from "../../config-store.js";
 
 import type {
@@ -327,8 +327,8 @@ export function resolveMissionsRoot(opts: {
           return root;
         }
       } catch (error) {
-        if (!(error instanceof ProjectReadError)) throw error;
-        throw new ScopeCliError({ fact: error.message, consequence: "No project was selected.", action: "Correct the catalog or select a workspace explicitly." });
+        const problem = error instanceof Error ? error.message : String(error);
+        console.error(`warning: rig project selection failed: ${problem}; using configured workspace. Fix the catalog or select explicitly with --project, --workspace, or a project: prefix.`);
       }
     }
   }
