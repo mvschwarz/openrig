@@ -1,5 +1,7 @@
 import type { RunnerGrantLaunch, RunnerGrantIssuer } from "../domain/runner-grant-launch.js";
 import { piAccountSwitchStateRoot } from "../domain/pi-account-state.js";
+import { verifyPiRecovery } from "./pi-runtime-recovery.js";
+import type { RecoveryVerificationInput } from "../domain/runtime-recovery.js";
 // OPR.0.4.6.PI1 — the Pi runtime adapter (RPC-first, runner-in-a-pane).
 //
 // The adapter launches the OpenRig-owned pi-runner inside the seat's normal
@@ -463,6 +465,17 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     } finally {
       try { await authority?.finish(authorizedLaunchSucceeded); } catch { /* optional reporting cannot change the native launch outcome */ }
     }
+  }
+
+  async verifyRecovery(input: RecoveryVerificationInput) {
+    if (this.runtime !== "pi" && this.runtime !== "omp") {
+      return { ok: false as const, code: "fg_process_not_runtime" as const, detail: `Recovery verification is not supported for ${this.runtime}.` };
+    }
+    const stateRoot = this.stateRootForSession(input.sessionName);
+    return verifyPiRecovery(input, {
+      runtime: this.runtime, stateRoot, entryPath: this.runnerEntryPath,
+      readState: () => this.readRunnerState(input.sessionName, stateRoot),
+    }).catch(() => ({ ok: false as const, code: "runner_rpc_unavailable" as const, detail: "The runner recovery proof could not be read." }));
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

@@ -111,6 +111,17 @@ describe('restore proof binding in the inventory batch', () => {
     const status=new SeatStatusService({rigRepo:f.repo}).getStatus(f.name);
     expect(status).toMatchObject({ok:true,status:{continuity_outcome:'resumed',restore_outcome:'operator_recovered'}});
   });
+  it.each(['pi', 'omp'] as const)('requires RPC and identity proof for %s continuity', runtime => {
+    const f = fixture('startup');
+    f.db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, f.node.id);
+    f.db.prepare("UPDATE sessions SET startup_status = 'ready'").run();
+    const attemptId = receipt(f);
+    reconcile(f, attemptId, { evidence: { ...proof, fgProcess: runtime } });
+    expect(both(f).continuityOutcome).toBeNull();
+    reconcile(f, attemptId, { evidence: { ...proof, fgProcess: runtime,
+      runner: { pid: 10, childPid: 11, launchId: 'live', rpcConfirmed: true, identityConfirmed: true } } });
+    expect(both(f).continuityOutcome).toBe('resumed');
+  });
   it.each([
     undefined, null, [], 'strict', {source:'strict'}, {runtimeCwdVerified:true},
     {...proof,tmux:false}, {...proof,resumeTokenUsed:false}, {...proof,paneState:'unknown'},
