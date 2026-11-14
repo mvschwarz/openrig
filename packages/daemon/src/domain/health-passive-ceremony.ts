@@ -145,7 +145,8 @@ export class PassiveCeremonySource implements HealthObservationSource {
         const sliceId = one(slices);
         scope = sliceId ? { type: "slice", projectId, missionId, sliceId } : { type: "mission", projectId, missionId };
       }
-      const first = this.queue.db.prepare("SELECT ts FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id LIMIT 1").get(lineageId) as { ts: string } | undefined;
+      // Live and archived history: retention may archive the root of a family that is still active.
+      const first = this.queue.transitionLog.firstAfter([lineageId], 0);
       if (!first) throw new Error("health_passive_episode_start_unavailable");
       const boundaries = this.closedBoundaries(lineageId);
       const cuts = boundaries.map((b) => b.transitionId);
@@ -171,13 +172,14 @@ export class PassiveCeremonySource implements HealthObservationSource {
         const cut = cuts.filter((c) => c < segmentFirst.transitionId).at(-1);
         if (cut !== undefined && familyIds === undefined) {
           try { familyIds = this.familyOf(lineageId); } catch (error) {
-            // Only this family falls back to the window's first transition; the other families are still read.
+            // Only this family falls back to the members active in the window (at most 1000, checked above); the
+            // other families are still read.
             if ((error as Error).message !== "health_passive_family_member_limit") throw error;
             familyIds = null;
           }
         }
         const opener = cut === undefined ? undefined
-          : (familyIds ? this.queue.transitionLog.firstAfter(familyIds, cut) : undefined) ?? segmentFirst;
+          : this.queue.transitionLog.firstAfter(familyIds ?? ids, cut) ?? segmentFirst;
         const episodeStartedAt = opener?.ts ?? first.ts;
         const episodeKey = opener ? `${lineageId}:${opener.transitionId}` : lineageId;
         const measuredEnd = endedAt ?? now;
@@ -201,7 +203,7 @@ export class PassiveCeremonySource implements HealthObservationSource {
         if (resolved?.posture === "unknown") missingFacts.push("scope identity unresolved: " + resolved.reason);
         if (Date.parse(episodeStartedAt) < Date.parse(start)) missingFacts.push("lineage begins before retained observation window; full interval unavailable");
         if (new Set(slices).size > 1) missingFacts.push("handoff family crosses slice identities; product boundary unresolved");
-        if (cut !== undefined && familyIds === null) missingFacts.push("handoff family exceeds 1000 members; the resumed episode is named by its first transition in the retained window, so it may be renamed when that transition ages out");
+        if (cut !== undefined && familyIds === null) missingFacts.push("handoff family exceeds 1000 members; the resumed episode is named by its first transition after the cut among the members active in the observation window, so an opener on a dormant member is not read and the episode may be renamed");
         if (receipt && receipt.result.basis !== basis) missingFacts.push("normal evidence changed since the attributed assessment; reassess the current basis");
         if (receipt?.evidenceChanged) missingFacts.push("assessment evidence changed or became unavailable");
         const assessment = receipt ? { result: receipt.result, actor: receipt.actor, at: receipt.at, transitionId: receipt.transitionId, identityProvenance: receipt.identityProvenance } : undefined;
