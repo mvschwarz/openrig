@@ -800,6 +800,8 @@ async function readBackQueueUpdate(
   }
   const mismatches = UPDATE_READ_BACK_FIELDS.flatMap((field) => {
     if (requested[field] === undefined) return [];
+    // A blank summary isn't stored (the daemon says so, summary_not_stored), so there's nothing of it to read back.
+    if (field === "summary" && typeof requested[field] === "string" && !(requested[field] as string).trim()) return [];
     return queueUpdateFieldMatches(field, requested[field], response.data[field])
       ? []
       : [`${field}: requested ${JSON.stringify(requested[field])}, read ${JSON.stringify(response.data[field])}`];
