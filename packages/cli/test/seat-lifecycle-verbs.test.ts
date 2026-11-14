@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Command } from "commander";
 import { seatCommand } from "../src/commands/seat.js";
-import { DaemonTimeoutError } from "../src/client.js";
+import { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -233,6 +233,18 @@ describe("rig seat runtime-home and record-runtime-home", () => {
     const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([...args, "--operation-id", "op-retry-00001", "--json"]).then(() => {}));
     expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, code: "record_runtime_home_outcome_unknown",
       guidance: expect.stringContaining("--operation-id op-retry-00001") });
+    expect(exitCode).toBe(1);
+  });
+
+  it.each([
+    ["a lost connection", () => new DaemonConnectionError("fetch failed", "ECONNRESET"), "The connection to the daemon was lost"],
+    ["an unreadable answer", () => new DaemonResponseError(200, ""), "The daemon's answer couldn't be read"],
+  ])("treats %s as an unknown result too, with the same operation id", async (_label, error, said) => {
+    const post = vi.fn(async () => { throw error(); });
+    const deps = { ...makeDeps({ status: 200, data: {} }, []), clientFactory: () => ({ post }) as never };
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([...args, "--operation-id", "op-retry-00002", "--json"]).then(() => {}));
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, code: "record_runtime_home_outcome_unknown", message: expect.stringContaining(said),
+      guidance: expect.stringContaining("--operation-id op-retry-00002") });
     expect(exitCode).toBe(1);
   });
 });

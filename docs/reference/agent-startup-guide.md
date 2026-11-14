@@ -633,8 +633,9 @@ record command with those values. It works for Claude Code and Codex seats.
   since, because a successor took the seat or someone else recorded a home, nothing is applied and the current values
   are shown, so a replacement occupant is never changed by mistake.
 - **Retrying is safe.** Each recording has an operation id, generated and printed when you don't pass
-  `--operation-id`. If the result is unknown (a timeout), run the same command with that id: it returns what was
-  recorded, or records it once. The same id with a different request applies nothing.
+  `--operation-id`. If the result is unknown (a timeout, a lost connection or an unreadable answer), run the same
+  command with that id: it returns what was recorded, or records it once, even if the seat's runtime changed since. The
+  same id with a different request applies nothing.
 - **What changes.** Only the seat's home and an audit record (`seat.runtime_home_recorded`). No running process,
   pane, login, credential, conversation, model, effort or cwd changes; nothing is copied, switched or launched.
 - **Where it's stored, and credentials.** In the place that decides the seat's home today, so credential handling
@@ -642,12 +643,20 @@ record command with those values. It works for Claude Code and Codex seats.
   launch, and gets the new path. Any other seat gets its own `env:` value for the home variable, as a seat that declares
   one in its spec has, and nothing is unset.
 - **What it says, and doesn't.** The result says whether the home exists and whether the original conversation's
-  record was found in it. That doesn't show one copy of a conversation is fresher than another, and whether a running
+  record was found in it; a path it can't read leaves that unknown, never "not found". That doesn't show one copy of a conversation is fresher than another, and whether a running
   process uses the home isn't checked (the result says `runningProcess: unverified`).
 - **Restore.** Snapshots carry each seat's recorded home. Reviewing a selected history shows the current record beside
-  the snapshot's, and whether it was recorded for the selected conversation or another one. A recording made after the
-  review, even to the same home, changes the review's revision, so a resume reviewed before it doesn't run. Review
-  again and decide.
+  the snapshot's, whether it was recorded for the selected conversation or another one, and which home the resume
+  uses (`uses`):
+  - the seat's home as set, when nothing was recorded or the latest record is for the selected conversation;
+  - the newest home recorded for the selected conversation, when a later record is for another one. The resume writes
+    it back as a new revision for the selected conversation before it launches, and its result names the home and
+    revision it used;
+  - none, when only another conversation's home is recorded: the resume stops before anything starts, rather than run
+    the selected conversation under that home.
+
+  A recording made after the review, even to the same home, changes the review's revision, so a resume reviewed before
+  it doesn't run. Review again and decide.
 
 ### Codex guidance at launch
 

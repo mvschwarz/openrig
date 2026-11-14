@@ -57,7 +57,8 @@ import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 import { recordedProcessStillRunning } from "./reconciler.js";
 import { readProcessTable, type ProcessTableRow } from "./process-table.js";
-import { readRuntimeHomeState, recordRuntimeHome, RECORDABLE_HOME_RUNTIMES, type RecordRuntimeHomeResult, type RuntimeHomeState } from "./seat-runtime-home-record.js";
+import { applySelectedHome, readRuntimeHomeState, recordRuntimeHome, RECORDABLE_HOME_RUNTIMES, type RecordRuntimeHomeResult, type RuntimeHomeRecordRef,
+  type RuntimeHomeState, type SelectedHomePlan } from "./seat-runtime-home-record.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -648,6 +649,15 @@ export class SeatLifecycleService {
       node: { id: seat.nodeId, runtime: resolved.entry.runtime ?? null }, seat, home: input.home,
       expectedOccupant: input.expectedOccupant, expectedOriginal: input.expectedOriginal, expectedRevision: input.expectedRevision,
       operationId: input.operationId, reason: input.reason.trim(), operator: input.operator ?? null }) };
+  }
+
+  /** A selected-history resume's bound apply: write the selected original's recorded home back to the seat's slot as a
+   *  new revision for it (applySelectedHome). Null when the records moved since the review. */
+  applySelectedRuntimeHome(input: { nodeId: string; runtime: "claude-code" | "codex"; rigId: string; logicalId: string;
+    plan: Extract<SelectedHomePlan, { kind: "apply" }>; original: string; operationId: string; operator: string | null }): RuntimeHomeRecordRef | null {
+    return applySelectedHome({ db: this.db, sessions: this.sessionRegistry, eventBus: this.eventBus }, {
+      node: { id: input.nodeId, runtime: input.runtime }, seat: { rigId: input.rigId, logicalId: input.logicalId }, plan: input.plan,
+      original: input.original, operationId: input.operationId, operator: input.operator });
   }
 
   /** OPR.0.7.0.7 — save one seat's effort for its next managed continuation. Like set-model it

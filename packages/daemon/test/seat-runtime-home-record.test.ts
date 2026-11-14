@@ -1,7 +1,7 @@
 // Recording the runtime home an existing seat's original conversation lives under (rig seat record-runtime-home):
 // what is written and where, what it's recorded against, and everything it leaves alone.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -160,6 +160,48 @@ describe("rig seat record-runtime-home", () => {
     expect(after.account_home).toBeNull();
     expect(JSON.parse(after.env_json as string)).toEqual({ OPENAI_API_KEY: "sk-kept", OTHER: "x", CODEX_HOME: codexHome("b") });
     expect({ ...after, env_json: node.env_json }).toEqual(node);
+  });
+
+  it("returns a recorded operation after the seat's runtime changed; a different request is still a conflict", async () => {
+    const b = codexHome("b");
+    const s = seat();
+    const body = { home: b, expectedOccupant: s.generation, expectedOriginal: ORIGINAL, expectedRevision: 0, operationId: "op-home-switch-01" };
+    expect((await record(body)).body).toMatchObject({ ok: true, revision: 1, replayed: false });
+    for (const runtime of ["claude-code", "pi"]) {
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, s.node.id);
+      expect((await record(body)).body).toMatchObject({ ok: true, runtime: "codex", variable: "CODEX_HOME", to: b, revision: 1, replayed: true,
+        observation: { home: "present", original: "found" } });
+    }
+    expect((await record({ ...body, home: codexHome("c") })).body).toMatchObject({ ok: false, code: "operation_conflict" });
+    expect(counts()).toEqual({ records: 1, events: 1 });
+  });
+
+  it("reads the original from the seat's current session, not a newer row a failed launch left beside it", async () => {
+    const s = seat();
+    db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(s.session.id);
+    const newer = (id: string, status: string, token: string) => db.prepare(
+      "INSERT INTO sessions (id, node_id, session_name, status, resume_type, resume_token) VALUES (?, ?, 'dev-impl@homes', ?, 'codex_id', ?)")
+      .run(id, s.node.id, status, token);
+    // A later launch's row, superseded when its launch failed and the earlier occupant was put back.
+    newer("zz-failed-launch-row", "superseded", "newer-failed-token");
+    expect((await read()).body).toMatchObject({ original: ORIGINAL });
+    expect((await record({ home: codexHome("b"), expectedOccupant: s.generation, expectedOriginal: ORIGINAL, expectedRevision: 0,
+      operationId: "op-home-compensated" })).body).toMatchObject({ ok: true, original: ORIGINAL });
+    // Two rows that could each be current, and neither running: no single original, and it says which.
+    db.prepare("UPDATE sessions SET status = 'detached' WHERE id = ?").run(s.session.id);
+    newer("zz-second-detached-row", "detached", "another-token");
+    expect((await read()).body).toMatchObject({ original: null, originalCandidates: [s.session.id, "zz-second-detached-row"] });
+  });
+
+  it("reads an inner path it can't read as unknown, not absent, and still records", async () => {
+    if (process.getuid?.() === 0) return; // permissions don't bind for root
+    const b = codexHome("b");
+    const s = seat();
+    chmodSync(b, 0o600);
+    try {
+      const recorded = await record({ home: b, expectedOccupant: s.generation, expectedOriginal: ORIGINAL, expectedRevision: 0, operationId: "op-home-unreadable" });
+      expect(recorded.body).toMatchObject({ ok: true, revision: 1, observation: { home: "present", original: "unknown" } });
+    } finally { chmodSync(b, 0o700); }
   });
 
   it("states what it's recorded against and refuses only a malformed request", async () => {

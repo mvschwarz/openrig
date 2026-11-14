@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
 import { RUNTIME_HOME_VAR, seatAccountHome, seatRuntimeHome, type HomeRuntime } from "./seat-runtime-home.js";
+import { resolveActiveOccupantRow } from "./active-occupant.js";
 
 /** The runtimes whose home an operator can record: a Pi seat keeps its managed login, so it isn't one of them. */
 export const RECORDABLE_HOME_RUNTIMES = ["claude-code", "codex"] as const;
@@ -37,6 +38,9 @@ export interface RuntimeHomeState {
   ignored?: { source: "member" | "rig"; value: string };
   occupantGeneration: string | null;
   original: string | null;
+  /** When several session rows could be the seat's current one and none is uniquely running: their ids. The seat then has
+   *  no single original. */
+  originalCandidates?: string[];
   /** 0 until a home is first recorded for this seat. */
   revision: number;
   record: RuntimeHomeRecordRef | null;
@@ -72,11 +76,18 @@ export function runtimeHomeRecordsByNode(db: Database.Database, nodeIds: readonl
   return out;
 }
 
-/** The seat's original conversation: the native id its newest session row carries, else none. */
-function currentOriginal(db: Database.Database, nodeId: string): string | null {
-  const row = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(nodeId) as
-    { resume_token: string | null } | undefined;
-  return row?.resume_token ?? null;
+/** The seat's original conversation: the native id its current session carries. The current session is read as the restore
+ *  paths read it (the occupant ladder over rows that aren't superseded or exited), so a newer row a failed launch left
+ *  beside the live occupant isn't taken for it. A stopped seat, with none of those, falls back to its newest row that
+ *  wasn't superseded. Several candidates with none uniquely running give no single original, and say which. */
+function currentOriginal(db: Database.Database, nodeId: string): { original: string | null; candidates?: string[] } {
+  const rows = db.prepare("SELECT id, node_id AS nodeId, status, resume_token AS resumeToken FROM sessions WHERE node_id = ? ORDER BY id")
+    .all(nodeId) as Array<{ id: string; nodeId: string; status: string | null; resumeToken: string | null }>;
+  const live = rows.filter((row) => row.status !== "superseded" && row.status !== "exited");
+  const resolved = resolveActiveOccupantRow(live, undefined, nodeId);
+  if (resolved.kind === "resolved") return { original: resolved.session.resumeToken ?? null };
+  if (resolved.kind === "ambiguous") return { original: null, candidates: resolved.candidateIds };
+  return { original: rows.filter((row) => row.status !== "superseded").at(-1)?.resumeToken ?? null };
 }
 
 export function readRuntimeHomeState(db: Database.Database, sessions: SessionRegistry, nodeId: string, runtime: RecordableRuntime,
@@ -85,12 +96,13 @@ export function readRuntimeHomeState(db: Database.Database, sessions: SessionReg
   const own = seatRuntimeHome(db, nodeId, runtime);
   const daemonHome = daemonEnv[variable];
   const record = latestRuntimeHomeRecord(db, nodeId);
+  const current = currentOriginal(db, nodeId);
   return { runtime, variable,
     home: own.home ?? daemonHome ?? null,
     source: own.source ?? (daemonHome ? "daemon_environment" : "native_default"),
     ...(own.ignored ? { ignored: own.ignored } : {}),
     occupantGeneration: sessions.currentOccupantTenure(nodeId)?.generationUuid ?? null,
-    original: currentOriginal(db, nodeId),
+    original: current.original, ...(current.candidates ? { originalCandidates: current.candidates } : {}),
     revision: record?.revision ?? 0, record };
 }
 
@@ -103,10 +115,14 @@ export interface RuntimeHomeObservation {
   runningProcess: "unverified";
 }
 
-/** Look for the original's record in a home, bounded: Codex keeps `sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`, Claude
- *  keeps `projects/<project>/<id>.jsonl`. */
+/** Look for the original's record in a home. Codex keeps `sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`, read with an entry
+ *  budget and a depth bound; Claude keeps `projects/<project>/<id>.jsonl`, read one project level deep with no entry
+ *  bound. Only what the filesystem reports absent reads not_found; a path it won't let us read reads unknown. */
 export function observeRuntimeHome(home: string, runtime: RecordableRuntime, original: string | null): RuntimeHomeObservation {
   const runningProcess = "unverified" as const;
+  const look = (target: string): "present" | "absent" | "unreadable" => {
+    try { fs.statSync(target); return "present"; } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable"; }
+  };
   let stat: fs.Stats;
   try { stat = fs.statSync(home); } catch (error) {
     return { home: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable", original: original ? "unknown" : "none", runningProcess };
@@ -116,9 +132,10 @@ export function observeRuntimeHome(home: string, runtime: RecordableRuntime, ori
   try {
     if (runtime === "claude-code") {
       const projects = path.join(home, "projects");
-      if (!fs.existsSync(projects)) return { home: "present", original: "not_found", runningProcess };
-      const found = fs.readdirSync(projects).some(dir => fs.existsSync(path.join(projects, dir, `${original}.jsonl`)));
-      return { home: "present", original: found ? "found" : "not_found", runningProcess };
+      const top = look(projects);
+      if (top !== "present") return { home: "present", original: top === "absent" ? "not_found" : "unknown", runningProcess };
+      const seen = fs.readdirSync(projects).map(dir => look(path.join(projects, dir, `${original}.jsonl`)));
+      return { home: "present", original: seen.includes("present") ? "found" : seen.includes("unreadable") ? "unknown" : "not_found", runningProcess };
     }
     let budget = 50_000;
     const walk = (dir: string, depth: number): boolean | null => {
@@ -132,11 +149,29 @@ export function observeRuntimeHome(home: string, runtime: RecordableRuntime, ori
       return false;
     };
     const sessions = path.join(home, "sessions");
-    const found = fs.existsSync(sessions) ? walk(sessions, 0) : false;
+    const top = look(sessions);
+    if (top === "unreadable") return { home: "present", original: "unknown", runningProcess };
+    const found = top === "present" ? walk(sessions, 0) : false;
     return { home: "present", original: found === null ? "unknown" : found ? "found" : "not_found", runningProcess };
   } catch {
     return { home: "present", original: "unknown", runningProcess };
   }
+}
+
+/** Write a home into the slot that decides the seat's home today (see RuntimeHomeSlot). Null, writing nothing, when the
+ *  member's stored env can't be read. */
+function writeHomeSlot(db: Database.Database, nodeId: string, runtime: RecordableRuntime, home: string): RuntimeHomeSlot | null {
+  if (seatAccountHome(db, nodeId, runtime)) {
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run(home, nodeId);
+    return "account_home";
+  }
+  // Only this variable changes; every other entry of the member's env keeps its value.
+  const row = db.prepare("SELECT env_json FROM nodes WHERE id = ?").get(nodeId) as { env_json: string | null };
+  let env: unknown = {};
+  if (row.env_json) { try { env = JSON.parse(row.env_json); } catch { env = null; } }
+  if (!env || typeof env !== "object" || Array.isArray(env)) return null;
+  db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ ...env, [RUNTIME_HOME_VAR[runtime]]: home }), nodeId);
+  return "member_env";
 }
 
 export interface RecordRuntimeHomeInput {
@@ -170,10 +205,6 @@ export function recordRuntimeHome(deps: { db: Database.Database; sessions: Sessi
   input: RecordRuntimeHomeInput): RecordRuntimeHomeResult {
   const { db } = deps;
   const runtime = input.node.runtime;
-  if (!runtime || !(RECORDABLE_HOME_RUNTIMES as readonly string[]).includes(runtime)) {
-    return refused("runtime_home_unsupported", `A runtime home can be recorded for Claude Code and Codex seats; this seat runs ${runtime ?? "no runtime"}.`);
-  }
-  const recordable = runtime as RecordableRuntime;
   if (typeof input.home !== "string" || !input.home.trim()) return refused("missing_home", "An absolute runtime home is required (--home).");
   if (!path.isAbsolute(input.home) || /[\0\r\n]/.test(input.home)) {
     return refused("invalid_home", "The runtime home must be an absolute path on the daemon's host.");
@@ -191,20 +222,35 @@ export function recordRuntimeHome(deps: { db: Database.Database; sessions: Sessi
   const operationId = input.operationId;
   const expected = { occupant: input.expectedOccupant as string | null, original: input.expectedOriginal as string | null,
     revision: input.expectedRevision };
-  const requestHash = createHash("sha256").update(JSON.stringify({ nodeId: input.node.id, runtime, home, ...expected })).digest("hex");
-
+  const hashFor = (recordedRuntime: string | null) =>
+    createHash("sha256").update(JSON.stringify({ nodeId: input.node.id, runtime: recordedRuntime, home, ...expected })).digest("hex");
   type Applied = Omit<Extract<RecordRuntimeHomeResult, { ok: true }>, "observation">;
+  // A completed operation answers first, under the runtime it was recorded for: the same request retried after the seat's
+  // runtime changed returns what was recorded, not a conflict or a refusal. A different request is still a conflict.
+  const replay = (prior: RecordRow): Applied | Extract<RecordRuntimeHomeResult, { ok: false }> => {
+    if (prior.request_hash !== hashFor(prior.runtime)) {
+      return refused("operation_conflict", "This operation id was already used for a different recording; nothing was applied. Use a new id.");
+    }
+    const recorded = prior.runtime as RecordableRuntime;
+    return { ok: true, runtime: recorded, variable: RUNTIME_HOME_VAR[recorded], from: { home: prior.previous_home, source: prior.previous_source },
+      to: prior.home, slot: prior.slot, revision: prior.revision, operationId, original: prior.original,
+      occupantGeneration: prior.occupant_generation, changed: prior.previous_home !== prior.home, replayed: true, effect: "next_launch" };
+  };
+  const observed = (outcome: Applied | Extract<RecordRuntimeHomeResult, { ok: false }>): RecordRuntimeHomeResult =>
+    outcome.ok ? { ...outcome, observation: observeRuntimeHome(outcome.to, outcome.runtime, outcome.original) } : outcome;
+  const stored = db.prepare("SELECT * FROM seat_runtime_home_records WHERE operation_id = ?").get(operationId) as RecordRow | undefined;
+  if (stored) return observed(replay(stored));
+  if (!runtime || !(RECORDABLE_HOME_RUNTIMES as readonly string[]).includes(runtime)) {
+    return refused("runtime_home_unsupported", `A runtime home can be recorded for Claude Code and Codex seats; this seat runs ${runtime ?? "no runtime"}.`);
+  }
+  const recordable = runtime as RecordableRuntime;
+  const requestHash = hashFor(runtime);
+
   let persisted = null as ReturnType<EventBus["persistWithinTransaction"]> | null;
   const outcome = db.transaction((): Applied | Extract<RecordRuntimeHomeResult, { ok: false }> => {
+    // The same id written meanwhile, by another request on this daemon.
     const prior = db.prepare("SELECT * FROM seat_runtime_home_records WHERE operation_id = ?").get(operationId) as RecordRow | undefined;
-    if (prior) {
-      if (prior.request_hash !== requestHash) {
-        return refused("operation_conflict", "This operation id was already used for a different recording; nothing was applied. Use a new id.");
-      }
-      return { ok: true, runtime: recordable, variable: RUNTIME_HOME_VAR[recordable], from: { home: prior.previous_home, source: prior.previous_source },
-        to: prior.home, slot: prior.slot, revision: prior.revision, operationId, original: prior.original,
-        occupantGeneration: prior.occupant_generation, changed: prior.previous_home !== prior.home, replayed: true, effect: "next_launch" };
-    }
+    if (prior) return replay(prior);
     const current = readRuntimeHomeState(db, deps.sessions, input.node.id, recordable);
     if (current.occupantGeneration !== expected.occupant || current.original !== expected.original || current.revision !== expected.revision) {
       return { ...refused("runtime_home_conflict",
@@ -213,19 +259,8 @@ export function recordRuntimeHome(deps: { db: Database.Database; sessions: Sessi
           home: current.home, source: current.source } };
     }
     const variable = RUNTIME_HOME_VAR[recordable];
-    const slot: RuntimeHomeSlot = seatAccountHome(db, input.node.id, recordable) ? "account_home" : "member_env";
-    if (slot === "account_home") {
-      db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run(home, input.node.id);
-    } else {
-      // Only this variable changes; every other entry of the member's env is kept exactly as stored.
-      const row = db.prepare("SELECT env_json FROM nodes WHERE id = ?").get(input.node.id) as { env_json: string | null };
-      let env: unknown = {};
-      if (row.env_json) { try { env = JSON.parse(row.env_json); } catch { env = null; } }
-      if (!env || typeof env !== "object" || Array.isArray(env)) {
-        return refused("member_env_unreadable", "The seat's stored env can't be read, so it wasn't rewritten; nothing was applied.");
-      }
-      db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ ...env, [variable]: home }), input.node.id);
-    }
+    const slot = writeHomeSlot(db, input.node.id, recordable, home);
+    if (!slot) return refused("member_env_unreadable", "The seat's stored env can't be read, so it wasn't rewritten; nothing was applied.");
     const revision = current.revision + 1;
     db.prepare(`INSERT INTO seat_runtime_home_records (operation_id, node_id, runtime, revision, home, slot, previous_home, previous_source,
       original, occupant_generation, request_hash, reason, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -240,5 +275,63 @@ export function recordRuntimeHome(deps: { db: Database.Database; sessions: Sessi
   }).immediate();
   if (persisted) deps.eventBus.notifySubscribers(persisted);
   // Read after the write commits, outside its transaction.
-  return outcome.ok ? { ...outcome, observation: observeRuntimeHome(outcome.to, recordable, outcome.original) } : outcome;
+  return observed(outcome);
+}
+
+/** Which runtime home a resume of a selected original conversation uses, so the home, original and revision stay one
+ *  tuple through review and effect (a record made for one conversation is never applied to another):
+ *  - as_is: nothing recorded, or the latest record was made for this original, so the seat's home slot already holds it;
+ *  - apply: the latest record was made for another conversation and one was made for this original, so the newest of
+ *    those is written back to the slot before the launch, as a new revision for this original;
+ *  - other_conversation: every record was made for other conversations, so a resume would put this original under
+ *    their home, and it stops before any effect. */
+export type SelectedHomePlan =
+  | { kind: "as_is"; record: RuntimeHomeRecordRef | null }
+  | { kind: "apply"; record: RuntimeHomeRecordRef; latest: RuntimeHomeRecordRef }
+  | { kind: "other_conversation"; latest: RuntimeHomeRecordRef };
+
+export function selectedHomePlan(db: Database.Database, nodeId: string, selectedOriginal: string | null): SelectedHomePlan {
+  const latest = latestRuntimeHomeRecord(db, nodeId);
+  if (!latest || (selectedOriginal !== null && latest.original === selectedOriginal)) return { kind: "as_is", record: latest };
+  const own = selectedOriginal === null ? undefined
+    : db.prepare("SELECT * FROM seat_runtime_home_records WHERE node_id = ? AND original = ? ORDER BY revision DESC LIMIT 1")
+      .get(nodeId, selectedOriginal) as RecordRow | undefined;
+  return own ? { kind: "apply", record: toRef(own), latest } : { kind: "other_conversation", latest };
+}
+
+/** The plan's apply: write the selected original's recorded home back to the seat's slot, as a new revision recorded for
+ *  that original, with its audit row and event, before the resume launches. The operation id is the review it was bound
+ *  to, so a retry of the same apply writes nothing more. Null, writing nothing, when the records moved since the review
+ *  or the member's env can't be read. */
+export function applySelectedHome(deps: { db: Database.Database; sessions: SessionRegistry; eventBus: EventBus },
+  input: { node: { id: string; runtime: RecordableRuntime }; seat: { rigId: string; logicalId: string }; plan: Extract<SelectedHomePlan, { kind: "apply" }>;
+    original: string; operationId: string; operator: string | null }): RuntimeHomeRecordRef | null {
+  const { db } = deps;
+  if (!hasRecords(db)) return null;
+  const { record, latest } = input.plan;
+  const requestHash = createHash("sha256").update(JSON.stringify({ nodeId: input.node.id, runtime: input.node.runtime, home: record.home,
+    original: input.original, from: latest.revision })).digest("hex");
+  let persisted = null as ReturnType<EventBus["persistWithinTransaction"]> | null;
+  const applied = db.transaction((): RuntimeHomeRecordRef | null => {
+    const prior = db.prepare("SELECT * FROM seat_runtime_home_records WHERE operation_id = ?").get(input.operationId) as RecordRow | undefined;
+    if (prior) return prior.request_hash === requestHash ? toRef(prior) : null;
+    const current = readRuntimeHomeState(db, deps.sessions, input.node.id, input.node.runtime);
+    if (current.revision !== latest.revision) return null;
+    const slot = writeHomeSlot(db, input.node.id, input.node.runtime, record.home);
+    if (!slot) return null;
+    const revision = current.revision + 1;
+    const reason = `resume of the selected conversation, with the home recorded for it at revision ${record.revision}`;
+    const createdAt = new Date().toISOString();
+    db.prepare(`INSERT INTO seat_runtime_home_records (operation_id, node_id, runtime, revision, home, slot, previous_home, previous_source,
+      original, occupant_generation, request_hash, reason, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(input.operationId, input.node.id, input.node.runtime, revision, record.home, slot, current.home, current.source, input.original,
+        current.occupantGeneration, requestHash, reason, input.operator, createdAt);
+    persisted = deps.eventBus.persistWithinTransaction({ type: "seat.runtime_home_recorded", rigId: input.seat.rigId, nodeId: input.node.id,
+      logicalId: input.seat.logicalId, runtime: input.node.runtime, from: current.home, to: record.home, slot, revision,
+      operationId: input.operationId, original: input.original, occupantGeneration: current.occupantGeneration, reason, operator: input.operator });
+    return { revision, home: record.home, slot, original: input.original, occupantGeneration: current.occupantGeneration,
+      operationId: input.operationId, recordedAt: createdAt };
+  }).immediate();
+  if (persisted) deps.eventBus.notifySubscribers(persisted);
+  return applied;
 }

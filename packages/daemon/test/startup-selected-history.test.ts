@@ -522,4 +522,60 @@ describe("selected-history startup", () => {
     expect(await stale.json()).toMatchObject({ ok: false, code: "selection_changed" });
     expect(create).not.toHaveBeenCalled();
   });
+
+  // A record row as the record verb writes it, for a conversation the seat held then: the verb records only the current one.
+  function recordFor(nodeId: string, revision: number, home: string, original: string) {
+    db.prepare(`INSERT INTO seat_runtime_home_records (operation_id, node_id, runtime, revision, home, slot, previous_home, previous_source,
+      original, occupant_generation, request_hash, reason, operator, created_at) VALUES (?, ?, 'codex', ?, ?, 'member_env', NULL, 'native_default', ?, NULL, 'fixture', 'fixture', NULL, ?)`)
+      .run(`op-fixture-${revision}`, nodeId, revision, home, original, new Date().toISOString());
+  }
+  async function recordCurrent(home: string, operationId: string) {
+    const state = await (await setup.app.request("/api/seat/runtime-home/desk.lead")).json() as Record<string, unknown>;
+    const res = await setup.app.request("/api/seat/record-runtime-home/desk.lead", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ home, expectedOccupant: state.occupantGeneration, expectedOriginal: state.original,
+        expectedRevision: state.revision, operationId, reason: "home after recovery" }) });
+    expect(res.status).toBe(200);
+  }
+
+  it("resumes the selected original under the newest home recorded for it, not a later record for another conversation, and says which", async () => {
+    const f = fixture();
+    recordFor(f.node.id, 1, "/homes/codex-a", tokenA);
+    const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
+    // A correction for the same original after that snapshot, then a record for the seat's current conversation (B).
+    recordFor(f.node.id, 2, "/homes/codex-a2", tokenA);
+    await recordCurrent("/homes/codex-b", "op-home-b-current");
+    const refs = { snapshotId: snapshot.id, historySessionId: f.old.id };
+    const { body } = await review({ ...f, refs });
+    expect(body).toMatchObject({ settingsSource: { runtimeHome: { value: "/homes/codex-b", record: { revision: 3 }, snapshotRecord: { revision: 1 },
+      recordedFor: "another_conversation", uses: { plan: "apply_recorded_for_selected", home: "/homes/codex-a2", revision: 2 } } } });
+    let launchedUnder: string | undefined;
+    vi.spyOn(CodexResumeAdapter.prototype, "resume").mockImplementation(async () => {
+      launchedUnder = JSON.parse((db.prepare("SELECT env_json FROM nodes WHERE id = ?").get(f.node.id) as { env_json: string }).env_json).CODEX_HOME;
+      return { ok: false, code: "attention_required", message: "fixture native refused" };
+    });
+    const response = await request(f.path, { action: "resume", ...refs, revision: body.revision });
+    const result = await response.json() as Record<string, unknown>;
+    expect(launchedUnder).toBe("/homes/codex-a2");
+    expect(result).toMatchObject({ runtimeHome: { home: "/homes/codex-a2", revision: 4, applied: true, recordedFor: "selected_history" } });
+    expect(db.prepare("SELECT original, home, operation_id FROM seat_runtime_home_records WHERE revision = 4").get())
+      .toMatchObject({ original: tokenA, home: "/homes/codex-a2", operation_id: expect.stringMatching(/^resume-/) });
+    expect(JSON.stringify(result)).not.toContain(tokenA);
+  });
+
+  it("stops before any effect when the only recorded home is another conversation's", async () => {
+    const f = fixture();
+    await recordCurrent("/homes/codex-b", "op-home-b-only");
+    const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
+    const refs = { snapshotId: snapshot.id, historySessionId: f.old.id };
+    const { body } = await review({ ...f, refs });
+    expect(body).toMatchObject({ settingsSource: { runtimeHome: { recordedFor: "another_conversation", uses: { plan: "stop_other_conversation", revision: 1 } } } });
+    const native = vi.spyOn(CodexResumeAdapter.prototype, "resume");
+    const create = vi.spyOn(setup.tmuxAdapter, "createSession");
+    const response = await request(f.path, { action: "resume", ...refs, revision: body.revision });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ ok: false, code: "runtime_home_other_conversation" });
+    expect(native).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect((db.prepare("SELECT COUNT(*) AS n FROM seat_runtime_home_records").get() as { n: number }).n).toBe(1);
+  });
 });

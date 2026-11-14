@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { accountHomePlanMatches } from "../lib/account-home-switch.js";
 import { readFileSync } from "node:fs";
 import { Command } from "commander";
-import { DaemonClient, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -783,13 +783,18 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: (body as Record<string, unknown>)["codexProfile"] !== undefined ? 30_000 : 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
+      // A record's answer can be lost in more ways than a timeout: a connection lost after the request was sent, or a
+      // response that couldn't be read. Each may follow a recorded home, so each keeps the operation id.
+      const recordAnswerLost = path === "record-runtime-home" && (err instanceof DaemonConnectionError || err instanceof DaemonResponseError);
       if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart" && path !== "set-cwd"
-        && path !== "record-runtime-home") || !(err instanceof DaemonTimeoutError)) throw err;
+        && path !== "record-runtime-home") || !(err instanceof DaemonTimeoutError || recordAnswerLost)) throw err;
+      const lost = err instanceof DaemonTimeoutError ? "The CLI timed out waiting for the daemon"
+        : err instanceof DaemonResponseError ? "The daemon's answer couldn't be read" : "The connection to the daemon was lost";
       const error = path === "record-runtime-home" ? {
         ok: false as const,
         code: "record_runtime_home_outcome_unknown",
         status: "unknown",
-        message: "The CLI timed out waiting for the daemon; the runtime home may or may not have been recorded.",
+        message: `${lost}; the runtime home may or may not have been recorded.`,
         guidance: `Run the same command again with --operation-id ${String(body["operationId"])}: it returns what was recorded, or records it once.`,
       } : path === "restart" ? {
         ok: false as const,
