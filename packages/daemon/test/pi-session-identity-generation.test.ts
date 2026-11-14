@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { RunnerCore } from "../src/adapters/pi-runner.js";
-import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { AgentActivityStore, hookEventState } from "../src/domain/agent-activity-store.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import type { EventBus } from "../src/domain/event-bus.js";
 import type { RigEvent } from "../src/domain/types.js";
@@ -260,5 +260,216 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
       hookEvent: "Notification", subtype: "runtime_error", occurredAt: "2026-11-09T16:20:00.000Z" });
     expect(own.latest()).toMatchObject({ rawSubtype: "runtime_error", stale: false });
     expect(own.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a refused prompt on a pi-rpc fork raises runtime_error, so the seat reads needs_input", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    f.runner().handlePiLine(JSON.stringify({ type: "response", id: "prompt-1", command: "prompt", success: false, error: "No API key found for zai" }));
+    await f.settle();
+    expect(f.posts).toContainEqual(expect.objectContaining({ hookEvent: "Notification", subtype: "runtime_error", runtime: "omo" }));
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error", stale: false });
+    expect(hookEventState("Notification", "runtime_error", "omo", false, true)).toBe("needs_input");
+  });
+
+  it("a typed transient 429 on a pi-rpc fork is attention during the turn and clears at agent_end", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    const failed = { role: "assistant", stopReason: "error", errorStatus: 429, errorMessage: "429 overloaded" };
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: failed }));
+    core.handlePiLine(JSON.stringify({ type: "turn_end", message: failed }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).toBe("idle");
+  });
+
+  it("a refused prompt on a built-in pi seat stays pane output, not attention (regression guard)", async () => {
+    const f = forkFixture({ runtime: "pi", agentRunner: 0 });
+    f.runner().handlePiLine(JSON.stringify({ type: "response", id: "prompt-1", command: "prompt", success: false, error: "No API key found for zai" }));
+    await f.settle();
+    expect(f.posts).toEqual([]);
+    expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("an untyped fork provider error the harness will retry does not hold needs_input through the backoff", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    const failed = { role: "assistant", stopReason: "error", errorMessage: "rate limited" };
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: failed }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a fork's exhausted automatic retry settles in Pi's emit order (agent_end, then the summary, then agent_settled)", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    const err = "429 overloaded";
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
+    // Pi 0.87.1's order: agent_end (willRetry: false) BEFORE the summary.
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: false }));
+    await f.settle();
+    // The terminal summary arrives after the run ended: the correlation
+    // survives the boundary, so a MATCHED summary settles instead of raising
+    // a fresh persistent error.
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: false, attempt: 2, finalError: err }));
+    await f.settle();
+    core.handlePiLine(JSON.stringify({ type: "agent_settled" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a genuine unmatched failure after the run still raises needs_input", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: false }));
+    // No retry correlation exists: this summary is not ours to settle.
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: false, attempt: 7, finalError: "something else" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+  });
+
+  it("a refused steer after an assistant error keeps needing input through a willRetry release", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "429" } }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "s-1", command: "steer", success: false, error: "refused" }));
+    await f.settle();
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    await f.settle();
+    // The assistant failure will be retried, but the refused steer still needs
+    // the person: the release is owner-scoped, not subtype-scoped.
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+  });
+
+  it("a refused steer before an assistant error keeps needing input through a willRetry release", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "s-1", command: "steer", success: false, error: "refused" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "429" } }));
+    await f.settle();
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    await f.settle();
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+  });
+
+  it("an auto_retry_start on a fork does not release a refused input's attention", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "p-1", command: "prompt", success: false, error: "No API key found for zai" }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    await f.settle();
+    // The retry's working beat may be the latest activity, but the refused
+    // input's attention is still HELD: at the run's end the Stop is dropped
+    // and the attention restored, proving the retry-start did not clear it.
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+  });
+
+  it("a fork's final unretried provider error stays needs_input", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "401 unauthorized" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error", stale: false });
+  });
+
+
+  it("a refused input and a state-owned finding survive an automatic retry's opening (Pi 0.87.1's real order)", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "s-1", command: "steer", success: false, error: "refused" }));
+    // A state-owned attention arrives too: get_state reports no session file.
+    core.handlePiLine(JSON.stringify({ type: "response", id: "gs-1", command: "get_state", success: true, data: { sessionId: "x" } }));
+    await f.settle();
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    // The retry OPENS with agent_start + turn_start, per Pi's loop.
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "turn_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+  });
+
+  it("an assistant-only failure clears when the retry opens", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "429" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a genuinely new user run after a retry clears the refused input's needs-input (no agent_settled)", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "s-1", command: "steer", success: false, error: "refused" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
+    // No agent_settled ever arrives. The next run is a PERSON's: a new prompt
+    // opens it (agent_start), and — the retry-opening flag already consumed —
+    // the refused input's attention ends as it would without a retry.
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_start", message: { role: "assistant" } }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a refused prompt posts its attention exactly once", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    f.runner().handlePiLine(JSON.stringify({ type: "response", id: "prompt-1", command: "prompt", success: false, error: "No API key found for zai" }));
+    await f.settle();
+    expect(f.posts.filter((p) => p.hookEvent === "Notification")).toHaveLength(1);
+  });
+
+  it.each([["steer"], ["follow_up"]])("a refused %s on a pi-rpc fork raises runtime_error", async (command) => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    f.runner().handlePiLine(JSON.stringify({ type: "response", id: "cmd-1", command, success: false, error: "refused" }));
+    await f.settle();
+    expect(f.posts).toContainEqual(expect.objectContaining({ hookEvent: "Notification", subtype: "runtime_error", runtime: "omo" }));
+    expect(f.latest()).toMatchObject({ state: "needs_input" });
   });
 });
