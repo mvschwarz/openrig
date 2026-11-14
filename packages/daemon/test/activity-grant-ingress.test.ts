@@ -538,13 +538,13 @@ describe("credential-bound observation-only reports", () => {
     expect(f.store.getRunnerObservation(f.guest.id, "model", { freshnessMs: 600_000 }).report?.observations.model?.id).toBe(observations.model.id);
   });
 
-  it.each(["pi", "senpi"])("accepts a %s session reference but only promotes a resume-format-compatible path", async runtime => {
+  it.each(["pi", "senpi", "omp"])("accepts a %s session reference but only promotes a resume-format-compatible path", async runtime => {
     const f = runner();
     f.db.prepare("UPDATE nodes SET runtime=? WHERE id=?").run(runtime, f.guest.id);
-    if (runtime === "pi") f.db.prepare("UPDATE sessions SET agent_app=NULL,agent_runner=NULL WHERE id=?").run(f.row.id);
+    if (runtime === "pi" || runtime === "omp") f.db.prepare("UPDATE sessions SET agent_app=NULL,agent_runner=NULL WHERE id=?").run(f.row.id);
     else f.sessions.recordCommunityHarnessSelection(f.row.id, runtime, "pi-rpc");
     const grant = f.grants.issue({ nodeId: f.guest.id, generation: f.grant.generation, issuedBy: "Core launch",
-      run: { runId: "pi-observation", sessionId: f.row.id, binding: { ...f.grant.binding!, runtime, runner: runtime === "pi" ? 0 : 2 } } });
+      run: { runId: "pi-observation", sessionId: f.row.id, binding: { ...f.grant.binding!, runtime, runner: runtime === "pi" || runtime === "omp" ? 0 : 2 } } });
     expect(f.grants.activate(grant.grantId)).toBe(true);
     const observations = { session: { nativeRef: "/tmp/pi-\u200Djoiner.jsonl" }, model: { id: "reported-model" }, context: { inputTokens: 11 } };
     const body = { ...f.report(1, observations), runId: grant.runId }, first = await f.post(grant.token, body);
@@ -558,7 +558,10 @@ describe("credential-bound observation-only reports", () => {
     }
     const compatible = { session: { nativeRef: "/tmp/pi-session.jsonl" } };
     expect((await f.post(grant.token, { ...f.report(2, compatible), runId: grant.runId })).status).toBe(200);
-    expect(f.db.prepare("SELECT resume_token FROM sessions WHERE id=?").get(f.row.id)).toEqual({ resume_token: compatible.session.nativeRef });
+    expect(f.db.prepare("SELECT resume_type,resume_token,resume_provenance FROM sessions WHERE id=?").get(f.row.id)).toEqual({
+      resume_type: runtime === "pi" || runtime === "omp" ? `${runtime}_session_file` : `community:${runtime}`,
+      resume_token: compatible.session.nativeRef, resume_provenance: "launcher",
+    });
     expect(f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE type='agent.session_identity'").get()).toEqual({ n: 1 });
   });
 

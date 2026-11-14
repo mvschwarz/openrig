@@ -70,7 +70,7 @@ describe("OMP runtime adapter exact session tokens", () => {
     expect(finish).toHaveBeenCalledExactlyOnceWith(false);
   });
 
-  it.each([true, false])("binds direct OMP resume to its new attempt and fails before dispatch on missing authority=%s", async unavailable => {
+  it.each([true, false])("binds direct OMP resume once and preserves unbound fallback on missing authority=%s", async unavailable => {
       const { fs, tmux } = fakeSeat({ [currentFile]: "history" });
       const finish = vi.fn(async (_ok: boolean) => {}), dispatched = vi.fn();
       const runnerGrant = vi.fn(async () => {
@@ -80,11 +80,37 @@ describe("OMP runtime adapter exact session tokens", () => {
       const adapter = new OmpResumeAdapter(tmux, fs, { stateRoot, runnerEntryPath: "/daemon/pi-runner.js" },
         { runnerGrant, newLaunchId: () => "omp-resume", sleep: async () => {} });
       const result = await adapter.resume(seat, "omp_session_file", currentFile, "/work", "openrouter/example", "floor");
-      expect(result.ok).toBe(!unavailable);
+      expect(result.ok).toBe(true);
       expect(runnerGrant).toHaveBeenCalledExactlyOnceWith(seat, "omp-resume", "/work");
-      expect(vi.mocked(tmux.sendShellCommand)).toHaveBeenCalledTimes(unavailable ? 0 : 1);
+      expect(vi.mocked(tmux.sendShellCommand)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[1].includes("private-omp")).toBe(!unavailable);
+      if (result.ok && unavailable) expect(result.warnings?.join(" ")).toContain("unbound install-token");
       expect(finish).toHaveBeenCalledTimes(unavailable ? 0 : 1);
       if (!unavailable) expect(finish).toHaveBeenCalledWith(true);
+  });
+
+  it.each(["issue", "activation"] as const)("keeps fresh OMP's lazy session success and warning after optional %s failure", async phase => {
+    const { fs, tmux } = fakeSeat({});
+    const finish = vi.fn(async (_ok: boolean) => {});
+    const dispatched = vi.fn(() => { throw new Error("activation unavailable"); });
+    const runnerGrants = vi.fn<RunnerGrantIssuer>(async () => {
+      if (phase === "issue") throw new Error("binding unavailable");
+      return { grantId: "own-omp", generation: "g", wrap: (command: string) => command, dispatched, finish };
+    });
+    const result = await new OmpRuntimeAdapter({ fsOps: fs, tmux, stateRoot, runnerEntryPath: "/daemon/pi-runner.js", runnerGrants,
+      newLaunchId: () => "optional-omp", sleep: async () => {} })
+      .launchHarness({ tmuxSession: seat, cwd: "/work" } as never, { name: seat });
+    expect(result.ok).toBe(true);
+    expect(runnerGrants).toHaveBeenCalledOnce();
+    expect(tmux.sendShellCommand).toHaveBeenCalledOnce();
+    if (result.ok) {
+      expect(result.resumeToken).toBeUndefined();
+      expect(result.activityGrantId).toBeUndefined();
+      expect(result.warnings?.join(" ")).toContain(phase === "issue" ? "unbound install-token" : "nothing was replayed");
+    }
+    expect(dispatched).toHaveBeenCalledTimes(phase === "activation" ? 1 : 0);
+    expect(finish).toHaveBeenCalledTimes(phase === "activation" ? 1 : 0);
+    if (phase === "activation") expect(finish).toHaveBeenCalledWith(false);
   });
 
   it("resumes only the OMP token, and returns the same validated session file", async () => {

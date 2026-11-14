@@ -10,6 +10,7 @@ import type { TmuxServerSelection } from "../src/domain/tmux-server-selection.js
 import Database from "better-sqlite3";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 
 // The scenario grammar has no config-write or socket-inventory surface. Use its
 // normal scaffold, daemon lifecycle, topology staging and stub seat, with native
@@ -93,6 +94,7 @@ if(process.argv.includes('--version')){console.log('offline-dsh');process.exit(0
     smokeDb = db;
     const grant = () => db.prepare("SELECT grant_id,node_id,run_id,session_id,generation,binding_json,revoked_at FROM activity_grants WHERE run_id IS NOT NULL AND activated_at IS NOT NULL AND revoked_at IS NULL").get() as Record<string, unknown> | undefined;
     const origin = grant(); expect(origin?.run_id).toBeTruthy();
+    expect(new ActivityGrantStore(db).standing(String(origin!.grant_id))).toBe("current");
     const registry = new SessionRegistry(db);
     expect(registry.findResumeContextByName(SEAT)?.sessionId).toBe(origin!.session_id);
     const selected = JSON.parse(readFileSync(join(scaffold.openrigHome, "tmux-server.json"), "utf8")) as { socketPath: string };
