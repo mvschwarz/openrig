@@ -135,7 +135,8 @@ export class SeatLaunchEnvironment {
     /** In-place restart only: the shell that will run this command. The pane foreground is the running agent, so it is not probed. Set => a refusal throws. */
     launchShell?: string;
     /** A Claude seat's own token step (claude-seat-token.ts), run before Claude in the staged subshell. Not in a fish or
-     *  Nushell pane: a caller whose command comes back without it knows the token wasn't applied. */
+     *  Nushell pane: a caller whose command comes back without it knows the token wasn't applied, and one whose command
+     *  carries it stages it with sendShellCommand's `posix`, so a POSIX shell runs it. */
     claudeTokenStep?: string } = {}): Promise<string> {
     const accountHome = target.accountHome !== undefined ? target.accountHome : (target.nodeId && target.runtime ? this.accountHome(target.nodeId, target.runtime) : undefined);
     const clearing = target.accountHome === null;
@@ -157,12 +158,6 @@ export class SeatLaunchEnvironment {
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
       shell = path.basename(target.launchShell ?? await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
-      // A Claude launch is staged (sendShellCommand with sourceInPane): a POSIX pane shell sources it, fish may, and any
-      // other pane runs it with /bin/sh. So a probed foreground that names neither (Claude still drawn there, an unreadable
-      // pane, another shell) is the /bin/sh that runs it; reading it as "not POSIX" dropped the seat's token step while
-      // Claude still started.
-      if (target.runtime === "claude-code" && target.launchShell === undefined
-        && !["bash", "zsh", "sh", "dash", "ksh", "mksh", "fish", "nu", "nu.exe"].includes(shell)) shell = "sh";
       if (shell === "nu" || shell === "nu.exe" || ((accountHome || clearing || wrapped || target.failClosed) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
       // Pi keeps its existing command on shells where this PATH expression is not supported.
       if (target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
@@ -208,8 +203,11 @@ export class SeatLaunchEnvironment {
       if (target.runtime === "claude-code") {
         const assignments = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`);
         const launch = `${accountStep}${accountHome && target.claudeTokenStep ? `${target.claudeTokenStep} && ` : ""}${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
-        // The token step is POSIX shell; a fish pane gets the command without it.
-        const token = !accountHome && target.claudeTokenStep && ["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell) ? [target.claudeTokenStep] : [];
+        // The token step is POSIX shell, and its caller stages it with sendShellCommand's `posix`: sourced in a POSIX pane,
+        // run by /bin/sh anywhere else, never sourced by fish. So only a fish pane gets the command without it. A pane that
+        // reads as Claude, as nothing or as another shell keeps it; reading those as "not POSIX" dropped the step while
+        // Claude still started.
+        const token = !accountHome && target.claudeTokenStep && shell !== "fish" ? [target.claudeTokenStep] : [];
         if (target.claudeShellLookup === false) return [...token, launch].join("\n");
         // ksh calls a function without exporting a leading assignment that isn't already
         // exported, so it keeps the form above, where every assignment reaches Claude.
@@ -247,7 +245,7 @@ export class SeatLaunchEnvironment {
         : "[seat launch] Environment correction unavailable; using the previous launch command.");
       if (target.launchShell !== undefined || target.failClosed) throw new Error("launch_wrapper unavailable; no agent started.");
       // The seat's token step doesn't depend on the correction that failed, so the previous command keeps it.
-      const token = target.runtime === "claude-code" && target.claudeTokenStep && ["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell)
+      const token = target.runtime === "claude-code" && target.claudeTokenStep && !["fish", "nu", "nu.exe"].includes(shell)
         ? `${target.claudeTokenStep}\n` : "";
       return wrapped ? "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false"
         : accountHome || clearing ? "printf '%s\\n' 'OpenRig: isolated account launch unavailable; no agent started.' >&2; false"

@@ -11,7 +11,7 @@ import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { claudeSeatTokenStep } from "../src/domain/claude-seat-token.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
-import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
@@ -289,8 +289,9 @@ printf '%s|%s' "\${CLAUDE_CONFIG_DIR-}" "\${CLAUDE_CODE_OAUTH_TOKEN+set}"
   };
   const fixtureStep = "{ __openrig_token_step_fixture; }";
 
-  // Claude's own name, as tmux reports it on macOS and Linux, and an unreadable pane: the staged launch runs in /bin/sh there.
-  it.each([["bash", true], ["zsh", true], ["fish", false], ["claude.exe", true], ["claude", true], [null, true]] as const)(
+  // Claude's own name (as tmux reports it on macOS and Linux), an unreadable pane and another shell: the sender runs the
+  // staged launch with /bin/sh there.
+  it.each([["bash", true], ["zsh", true], ["fish", false], ["tcsh", true], ["claude.exe", true], ["claude", true], [null, true]] as const)(
     "a launch without an explicit permission mode runs the token step before Claude in a %s pane: %s",
     async (shell, included) => {
       const command = await classicLaunch(shell).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
@@ -298,12 +299,13 @@ printf '%s|%s' "\${CLAUDE_CONFIG_DIR-}" "\${CLAUDE_CODE_OAUTH_TOKEN+set}"
       if (included) expect(command.indexOf(fixtureStep)).toBeLessThan(command.indexOf("claude --resume abc"));
     });
 
-  it("a pane whose foreground isn't a shell gets the launch an sh pane gets", async () => {
-    const asSh = await classicLaunch("sh").command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
+  it("a pane whose foreground isn't a shell keeps the launch it had, with the token step first", async () => {
     const tidy = (command: string) => command.replace(/\/seat-bin\/[0-9a-f]+/, "/seat-bin/<cli>").replace(/'[^']*claude-seat-token-classic-[^']*'/g, "'<root>'");
     for (const shell of ["claude.exe", null]) {
-      const command = await classicLaunch(shell).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
-      expect(tidy(command)).toBe(tidy(asSh));
+      const withStep = await classicLaunch(shell).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
+      const without = await classicLaunch(shell).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node" });
+      expect(tidy(withStep)).toBe(tidy(`${fixtureStep}\n${without}`));
+      expect(without).not.toContain("_openrig_claude_executable");
     }
   });
 
@@ -325,7 +327,7 @@ printf '%s|%s' "\${CLAUDE_CONFIG_DIR-}" "\${CLAUDE_CODE_OAUTH_TOKEN+set}"
     const cli = path.join(root, "rig");
     writeFileSync(cli, "#!/bin/sh\n", { mode: 0o700 });
     const identity: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat@rig" };
-    const sendShellCommand = vi.fn(async (_target: string, _command: string) => ({ ok: true as const }));
+    const sendShellCommand = vi.fn(async (_target: string, _command: string, _beforeInput?: () => void, _options?: object) => ({ ok: true as const }));
     // The launch reads Claude's own name in the pane; the resume probe afterwards sees the resumed Claude.
     const tmux = { getPaneCommand: vi.fn().mockResolvedValueOnce("claude.exe").mockResolvedValue("claude"), capturePaneContent: async () => "", getPanePid: async () => null,
       getSessionEnv: async (_session: string, key: string) => identity[key], sendShellCommand,
@@ -337,6 +339,59 @@ printf '%s|%s' "\${CLAUDE_CONFIG_DIR-}" "\${CLAUDE_CODE_OAUTH_TOKEN+set}"
     expect(result).toMatchObject({ ok: true });
     expect(JSON.stringify(result)).not.toContain("wasn't applied");
     expect(sendShellCommand.mock.calls[0]![1]).toContain(fixtureStep);
+    expect(sendShellCommand.mock.calls[0]![3]).toEqual({ sourceInPane: true, posix: true });
+  });
+
+  // Through the real sender, which reads the pane again on its own (a first read that names nothing: a pane being respawned).
+  const throughSender = async (reads: Array<string | null>, withToken: boolean) => {
+    const root = mkdtempSync(path.join(tmpdir(), "claude-seat-token-sender-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const cli = path.join(root, "rig");
+    writeFileSync(cli, "#!/bin/sh\n", { mode: 0o700 });
+    const identity: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat@rig" };
+    const scriptPath = "/tmp/launch.sh";
+    const files = new Map<string, string>();
+    let names = 0;
+    const fileOps: TmuxFileOps = {
+      tmpName: () => names++ === 0 ? scriptPath : "/tmp/paste.txt",
+      bufferName: () => "buffer",
+      writeFile: vi.fn(async (file, text) => { files.set(file, text); }),
+      unlink: vi.fn(async file => { files.delete(file); }),
+    };
+    const tmux = new TmuxAdapter(vi.fn(async () => ""), fileOps);
+    const probe = vi.spyOn(tmux, "getPaneCommand");
+    for (const read of reads) probe.mockResolvedValueOnce(read);
+    probe.mockResolvedValue("claude");
+    vi.spyOn(tmux, "getSessionEnv").mockImplementation(async (_session, key) => identity[key]);
+    vi.spyOn(tmux, "capturePaneContent").mockResolvedValue("");
+    vi.spyOn(tmux, "getPanePid").mockResolvedValue(null);
+    const launch = new SeatLaunchEnvironment(tmux, { PATH: "/usr/bin:/bin", HOME: root, OPENRIG_HOME: path.join(root, "instance") }, root, cli);
+    const resume = new ClaudeResumeAdapter(tmux, { seatLaunchEnvironment: launch, pollMs: 1, maxWaitMs: 2, sleep: async () => {},
+      ...(withToken ? { claudeManagedLaunch: { seatTokenLaunch: () => ({ step: fixtureStep, ref: { label: "work", tokenFile: "/fixture/work.token" }, warnings: [] }) } as never } : {}) });
+    const result = await resume.resume("seat@rig", "claude_id", "conversation", root, undefined, undefined, undefined, "node");
+    return { result, invocation: vi.mocked(fileOps.writeFile).mock.calls[1]![1], script: files.get(scriptPath)! };
+  };
+  const fishSource = "if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source '/tmp/launch.sh'; else; /bin/sh '/tmp/launch.sh'; end";
+
+  it("with no token, a pane read as nothing and then as fish gets the launch fish sources, as before", async () => {
+    const { result, invocation, script } = await throughSender([null, "fish"], false);
+    expect(result).toMatchObject({ ok: true });
+    expect(invocation).toBe(fishSource);
+    expect(script).not.toContain("_openrig_claude_executable");
+    expect(script.split("\n").some(line => line.startsWith("if "))).toBe(false);
+  });
+
+  it.each([[[null, "fish"]], [[null, null]]] as const)("with a token, the sender runs the launch with /bin/sh when the pane reads %j", async reads => {
+    const { result, invocation, script } = await throughSender([...reads], true);
+    expect(result).toMatchObject({ ok: true });
+    expect(invocation).toBe("/bin/sh '/tmp/launch.sh'");
+    expect(script).toContain(fixtureStep);
+  });
+
+  it("a pane read as fish both times gets the fish source form without the token step", async () => {
+    const { result, invocation, script } = await throughSender(["fish", "fish"], true);
+    expect(result).toMatchObject({ ok: true });
+    expect(invocation).toBe(fishSource);
+    expect(script).not.toContain(fixtureStep);
   });
 
   it("wins over a CLAUDE_CODE_OAUTH_TOKEN the pane shell already exports, and over one the daemon forwards", async () => {
