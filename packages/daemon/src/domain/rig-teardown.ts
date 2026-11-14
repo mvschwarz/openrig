@@ -401,6 +401,27 @@ export class RigTeardownOrchestrator {
         }
       })();
     }
+    // A released session that's no longer its seat's latest (the seat bound or launched another since) stays its
+    // owner's until tmux reports it absent; then its stop is recorded. The seat's binding belongs to its latest
+    // session, so it's left alone, and the row keeps its status.
+    const earlier = this.db.prepare(`
+      SELECT s.id, s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE n.rig_id = ? AND s.origin = 'claimed' AND s.status = 'detached' AND s.intentionally_stopped = 0
+        AND s.id <> (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+    `).all(rigId) as Array<{ id: string; session_name: string }>;
+    for (const row of earlier) {
+      try {
+        let observed = await probe.call(this.deps.tmuxAdapter, row.session_name);
+        if (isMissingTmuxServer(observed)) {
+          if (!(await this.deps.tmuxAdapter.startServer()).ok) continue;
+          observed = await probe.call(this.deps.tmuxAdapter, row.session_name);
+        }
+        if (observed.state === "absent") this.deps.sessionRegistry.recordStopIntent(row.id);
+      } catch {
+        // Unknown: the session stays in use.
+      }
+    }
   }
 
   /** Atomically delete rig + persist rig.deleted event */
@@ -426,15 +447,13 @@ export class RigTeardownOrchestrator {
     return this.deps.sessionRegistry.getLatestLiveSessions(rigId);
   }
 
-  /** This rig's seats whose files may still be in use: each live session, and each released one. A released seat's
-   *  session (claimed, then detached by rig unclaim or down) is its owner's and may still be running, so its cwd stays
-   *  in use until recordAlreadyStoppedIntent sees tmux report the session absent and marks it stopped. */
+  /** This rig's seats whose files may still be in use: each live session, and each released one. A released session
+   *  (claimed, then detached by rig unclaim or down) is its owner's and may still be running, whether or not it's still
+   *  its seat's latest, so its cwd stays in use until recordAlreadyStoppedIntent sees tmux report it absent. */
   private seatsInUse(rigId: string): Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd">> {
     const released = this.db.prepare(`
       SELECT n.id AS nodeId, n.runtime, n.cwd FROM nodes n JOIN sessions s ON s.node_id = n.id
       WHERE n.rig_id = ? AND s.origin = 'claimed' AND s.status = 'detached' AND s.intentionally_stopped = 0
-        AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
-          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
     `).all(rigId) as Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd">>;
     return [...this.getLatestLiveSessions(rigId), ...released];
   }

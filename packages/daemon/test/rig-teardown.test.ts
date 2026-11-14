@@ -1542,6 +1542,44 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
       } finally { await h.close(); }
     });
 
+  // An earlier released session stays its owner's after the seat binds or launches another: once that one ends or is
+  // stopped, down still keeps the shared cwd's files while the released session runs, and drops them when tmux reports
+  // it gone, recording its stop without touching the row's status.
+  it.each([
+    ["another claimed session that has ended", "claimed", true], ["another claimed session that has ended", "claimed", false],
+    ["a launched session it stops", "launched", true], ["a launched session it stops", "launched", false],
+  ] as const)("after %s (%s successor), down keeps an earlier released seat's files while it runs: %s", async (_label, successor, running) => {
+    const h = await harness();
+    try {
+      const guidance = path.join(h.home, "CLAUDE.md");
+      const managed = "Operator notes\n<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nworking guidance\n<!-- END OpenRig MANAGED BLOCK: role -->\n";
+      fs.writeFileSync(guidance, managed);
+      await h.tmux("new-session", "-d", "-s", "keepalive", "sleep 300");
+      await h.tmux("new-session", "-d", "-s", "person-a", "sleep 300");
+      const paneA = (await h.tmux("list-panes", "-t", "=person-a:", "-F", "#{pane_id}")).split("\n")[0]!;
+      h.sessionRegistry.updateBinding(h.node.id, { attachmentType: "tmux", tmuxSession: "person-a", tmuxPane: paneA });
+      const a = h.sessionRegistry.registerClaimedSession(h.node.id, "person-a");
+      expect(await h.teardown()).toMatchObject({ released: ["person-a"], errors: [] });
+
+      if (successor === "claimed") {
+        await h.tmux("new-session", "-d", "-s", NAME, "sleep 300");
+        await h.claim();
+        await h.tmux("kill-session", "-t", `=${NAME}`);
+      } else {
+        await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, "sleep 300");
+        await h.bind();
+      }
+      if (!running) await h.tmux("kill-session", "-t", "=person-a");
+      expect(await h.teardown()).toMatchObject({ sessionsKilled: successor === "launched" ? 1 : 0, errors: [] });
+
+      expect(await h.alive(NAME)).toBe(false);
+      expect(await h.alive("person-a")).toBe(running);
+      expect(fs.readFileSync(guidance, "utf-8")).toBe(running ? managed : "Operator notes\n");
+      expect(h.db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id=?").get(a.id))
+        .toEqual({ status: "detached", intentionally_stopped: running ? 0 : 1 });
+    } finally { await h.close(); }
+  });
+
   it("a server replaced between reading the seat's marker and stopping it leaves the new terminal alone", async () => {
     let replaced = false;
     const h = await harness(async (argv, tmux) => {
