@@ -313,16 +313,20 @@ export class RigTeardownOrchestrator {
    * OPR.0.7.0.13: the seats whose consumer is confirmed gone: its latest session was confirmed stopped (this down killed
    * it or found it absent, or an earlier down did; both record the stop), or it never had a session. A running,
    * exited or detached row whose absence wasn't confirmed (a session still present, a probe unavailable or failing, no
-   * probe at all) leaves the seat unsettled: a detached row doesn't prove the process is gone.
+   * probe at all) leaves the seat unsettled: a detached row doesn't prove the process is gone. So does any released
+   * session (claimed, then detached) whose stop isn't recorded, latest or not: it may still run and hold the seat's
+   * skill catalog.
    */
   private settledSkillSeats(seats: ReadonlyArray<{ id: string }>): Set<string> {
     const settled = new Set<string>();
     const latest = this.db.prepare(`SELECT intentionally_stopped AS stopped FROM sessions WHERE node_id = ?
       ORDER BY created_at DESC, id DESC LIMIT 1`);
+    const released = this.db.prepare(`SELECT 1 FROM sessions WHERE node_id = ? AND origin = 'claimed'
+      AND status = 'detached' AND intentionally_stopped = 0 LIMIT 1`);
     for (const seat of seats) {
       try {
         const row = latest.get(seat.id) as { stopped: number } | undefined;
-        if (!row || row.stopped === 1) settled.add(seat.id);
+        if ((!row || row.stopped === 1) && released.get(seat.id) === undefined) settled.add(seat.id);
       } catch {}
     }
     return settled;

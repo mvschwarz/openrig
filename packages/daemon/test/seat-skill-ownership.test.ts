@@ -192,6 +192,37 @@ describe("F2: rig down cleans a seat's storage only once its consumer is confirm
       expect(existsSync(s.paths.pluginManifestPath)).toBe(false);
     });
   }
+
+  // A released session (claimed, then detached) may hold the seat's skill catalog after the seat moved on to another
+  // session: once that later one is stopped, the seat's files still stay until tmux reports the released one gone too.
+  for (const earlier of ["present", "absent"] as const) {
+    it(`after the latest session stops, ${earlier === "present" ? "keeps" : "cleans"} a seat's files when an earlier released session is ${earlier}`, async () => {
+      const rigRepo = new RigRepository(db);
+      const sessionRegistry = new SessionRegistry(db);
+      const rig = rigRepo.createRig("own-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: home });
+      const a = sessionRegistry.registerClaimedSession(node.id, "person-a");
+      sessionRegistry.markDetached(a.id);
+      db.prepare("UPDATE sessions SET created_at = datetime('now', '-1 minute') WHERE id = ?").run(a.id);
+      const b = sessionRegistry.registerSession(node.id, "dev-impl@own-rig");
+      sessionRegistry.updateStatus(b.id, "running");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@own-rig" });
+      const paths = seatSkillPaths({ rigId: rig.id, logicalId: "dev.impl", runtime: "claude-code" });
+      ensureSeatSkillPlugin(paths);
+      const file = join(paths.skillsRoot, "queue-handoff", "SKILL.md");
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, "skill\n");
+      recordSeatSkillWrite(paths.skillsRoot, file, file, "skill\n");
+      const probeSession = vi.fn(async (name: string) => ({ state: name === "person-a" ? earlier : "absent" }));
+      const result = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus: new EventBus(db),
+        tmuxAdapter: { ...tmux("none"), probeSession } as unknown as TmuxAdapter,
+        snapshotCapture: { captureSnapshot: () => ({ id: "snap" }), db } as unknown as SnapshotCapture }).teardown(rig.id);
+      expect(probeSession).toHaveBeenCalledWith("person-a");
+      expect(existsSync(file)).toBe(earlier === "present");
+      expect(existsSync(paths.pluginManifestPath)).toBe(earlier === "present");
+      if (earlier === "present") expect(result.errors.join("\n")).toContain("its consumer isn't confirmed stopped");
+    });
+  }
 });
 
 describe("F3: a restore's decisions hold through every later writer", () => {
