@@ -3,6 +3,7 @@ import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 import { resolveActiveSnapshotSession } from "./active-occupant.js";
 import { effectiveRestorePolicy } from "./restore-policy.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { describeSharedConversation, findSharedConversations, type ConversationSeat } from "./shared-conversation.js";
 
 // Shared read-only validation. Keep restore's refusal order and replay eligibility here.
 export function validatePreRestore(
@@ -194,6 +195,27 @@ export function validatePreRestore(
         warnings.push(`projection_drift: entry missing for ${node.logicalId}: ${entry.absolutePath} (projection will be skipped at startup; session continuity is unaffected)`);
       }
     }
+  }
+
+  // #3218 item 3: two seats this restore would resume on the same recorded conversation are named, with the
+  // conversation, so the person can decide. A reported gap, not a guard: nothing is refused or picked.
+  const resuming: ConversationSeat[] = [];
+  for (const node of topology.intendedNodes) {
+    if (opts.freshLogicalIds?.includes(node.logicalId)) continue;
+    const currentRuntime = opts.currentRuntimes?.[node.logicalId] ?? node.runtime;
+    if (currentRuntime === "terminal") continue;
+    const resolution = resolveActiveSnapshotSession({ ...data, sessions: sessions ?? [] }, node.id);
+    if (resolution.kind !== "resolved") continue;
+    const policy = effectiveRestorePolicy({
+      savedRuntime: node.runtime,
+      currentRuntime,
+      recordedSessions: sessions?.filter((recorded) => recorded.nodeId === node.id) ?? [],
+    }, resolution.session.restorePolicy);
+    if (policy !== "resume_if_possible") continue;
+    resuming.push({ seat: node.logicalId, resumeType: resolution.session.resumeType, resumeToken: resolution.session.resumeToken });
+  }
+  for (const shared of findSharedConversations(resuming)) {
+    warnings.push(`Restore pre-validation: ${describeSharedConversation(shared)}`);
   }
 
   const servicesRecord = opts.servicesRecord ?? null;
