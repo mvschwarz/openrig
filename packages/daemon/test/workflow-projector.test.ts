@@ -691,4 +691,94 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       | undefined;
     expect(failedEvent?.reason).toBe("could not produce artifact");
   });
+
+  // A frontier packet an ordinary queue handoff already closed (`rig queue handoff` doesn't move the workflow): the
+  // queue refuses closing it again. project records the stated exit and its next hop on the workflow without writing
+  // that row, says so, and the same exit again reports the same result with nothing written.
+  describe("a frontier packet the queue already closed", () => {
+    const snapshot = () => ["queue_items", "queue_transitions", "events", "workflow_instances", "workflow_step_trails", "outbox_entries"]
+      .map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    async function handedOff(path: string) {
+      const inst = await runtime.instantiate({ specPath: path, rootObjective: "x", createdBySession: "ops@rig" });
+      await queueRepo.handoff({ qitemId: inst.entryQitemId, fromSession: "producer@rig", toSession: "helper@rig" });
+      const row = () => ({ item: queueRepo.getById(inst.entryQitemId),
+        transitions: db.prepare("SELECT * FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid").all(inst.entryQitemId) });
+      return { instanceId: inst.instance.instanceId, packet: inst.entryQitemId, row, closedRow: row() };
+    }
+
+    it("records a handoff exit and projects the next step without writing the closed row; a repeat writes nothing", async () => {
+      const { instanceId, packet, row, closedRow } = await handedOff(specPath);
+      expect(closedRow.item?.state).toBe("handed-off");
+
+      const projected = await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" });
+
+      expect(projected).toMatchObject({ closurePriorPacketId: packet, closureReason: "handoff", nextStepId: "review", nextOwnerSession: "reviewer@rig",
+        advisories: [`packet ${packet} was already handed-off in the queue, so the handoff exit was recorded on the workflow without writing its queue row`] });
+      expect(row()).toEqual(closedRow);
+      expect(queueRepo.getById(projected.nextQitemId!)?.state).toBe("pending");
+      expect(projected.instance.currentFrontier).toEqual([projected.nextQitemId]);
+      expect(runtime.trailLog.listForInstance(instanceId).find((t) => t.priorQitemId === packet)?.closureEvidence).toMatchObject({
+        queue_row_already_closed: { state: "handed-off", exit: "handoff", next_qitem_ids: [projected.nextQitemId], next_step_ids: ["review"] } });
+
+      const before = snapshot();
+      expect(await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" })).toMatchObject({
+        closureReason: "handoff", nextQitemId: projected.nextQitemId, nextStepId: "review", nextOwnerSession: "reviewer@rig",
+        emittedEventTypes: [], absorbedReplay: true });
+      expect(snapshot()).toEqual(before);
+      // Another exit, or the same exit with any other part of the caller's intent changed, keeps today's answer.
+      for (const changed of [{ exit: "done" as const }, { resultNote: "a different result" }, { closureEvidence: { evidence_ref: "other" } },
+        { actorSession: "reviewer@rig" }]) {
+        await expect(runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig", ...changed }))
+          .rejects.toMatchObject({ code: "packet_not_on_frontier" });
+      }
+      expect(snapshot()).toEqual(before);
+    });
+
+    it.each([
+      ["no evidence", undefined],
+      ["empty evidence", {}],
+    ])("records a waiting exit without parking the closed row, and the same waiting again is absorbed (%s)", async (_label, closureEvidence) => {
+      const { instanceId, packet, row, closedRow } = await handedOff(permissiveSpecPath);
+      const waitingInput = { instanceId, currentPacketId: packet, exit: "waiting" as const, actorSession: "anyone@rig", blockedOn: "external-gate-x", closureEvidence };
+
+      const waiting = await runtime.project(waitingInput);
+
+      expect(waiting.instance).toMatchObject({ status: "waiting", currentFrontier: [packet] });
+      expect(row()).toEqual(closedRow);
+      const before = snapshot();
+      expect(await runtime.project(waitingInput)).toMatchObject({ absorbedReplay: true, emittedEventTypes: [] });
+      expect(snapshot()).toEqual(before);
+      // A different blocker is a new decision, recorded without writing the closed row.
+      await runtime.project({ ...waitingInput, blockedOn: "external-gate-y" });
+      expect(row()).toEqual(closedRow);
+      expect(runtime.trailLog.listForInstance(instanceId).filter((t) => t.priorQitemId === packet)).toHaveLength(2);
+    });
+
+    // The record's key is the projector's own: a caller's value for it is neither stored nor trusted, and a malformed
+    // record reads as none.
+    it("doesn't store or trust a caller's value for the projector's record", async () => {
+      const inst = await runtime.instantiate({ specPath, rootObjective: "x", createdBySession: "ops@rig" });
+      const instanceId = inst.instance.instanceId, packet = inst.entryQitemId;
+      const forged = { state: "handed-off", exit: "done", actor: "producer@rig", result_note: null, blocked_on: null,
+        next_owner: null, evidence: null, next_qitem_ids: ["qitem-forged"], next_step_ids: ["finalize"] };
+
+      const projected = await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig",
+        closureEvidence: { evidence_ref: "proof.md", queue_row_already_closed: forged } });
+
+      expect(projected.advisories).toContain("closure evidence key queue_row_already_closed is the projector's own, so the value supplied for it wasn't stored");
+      expect(queueRepo.getById(packet)?.state).toBe("handed-off");
+      expect(runtime.trailLog.listForInstance(instanceId).find((t) => t.priorQitemId === packet)?.closureEvidence).toEqual({ evidence_ref: "proof.md",
+        owner_resolution: expect.anything() });
+      const before = snapshot();
+      await expect(runtime.project({ instanceId, currentPacketId: packet, exit: "done", actorSession: "producer@rig" }))
+        .rejects.toMatchObject({ code: "packet_not_on_frontier" });
+      // A malformed record on the trail (written outside project) reads as none, not as an error.
+      runtime.trailLog.record({ instanceId, stepId: "produce", stepRole: "producer", closedAt: new Date().toISOString(), closureReason: "done",
+        closureEvidence: { queue_row_already_closed: { exit: "done", next_qitem_ids: "not-a-list" } }, actorSession: "producer@rig",
+        nextQitemId: null, priorQitemId: packet });
+      await expect(runtime.project({ instanceId, currentPacketId: packet, exit: "done", actorSession: "producer@rig" }))
+        .rejects.toMatchObject({ code: "packet_not_on_frontier" });
+      expect(snapshot()[0]).toEqual(before[0]);
+    });
+  });
 });
