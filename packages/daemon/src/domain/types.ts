@@ -1,5 +1,5 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
-import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record.js";
+import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record-types.js";
 
 export interface Rig {
   id: string;
