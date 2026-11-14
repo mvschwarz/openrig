@@ -199,6 +199,19 @@ export function buildCodexResumeDisplay(
   }
 
   const recordedApproval = recorded.approvalPolicy ?? null;
+  const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
+  // A filesystem launch records only the profile name, never its entries, so the same name can't prove the same policy.
+  if (permissions && "filesystem" in permissions && recorded.value === currentSandbox && recordedApproval === currentApproval) {
+    return {
+      command,
+      status: "recorded_uncertain",
+      label: composeCodexResumeLabel(
+        `launched with ${recordedFlags}; the launch record doesn't keep the filesystem entries; a resume now uses ${currentFlags}`,
+        hasLaunchWrapper,
+      ),
+    };
+  }
+
   // A NULL approval_policy cannot distinguish a plain floor launch without -a from a pre-upgrade envelope whose
   // on-request/untrusted approval was not recorded, so only a non-null recorded approval can prove recorded_match.
   if (
@@ -214,7 +227,6 @@ export function buildCodexResumeDisplay(
     };
   }
 
-  const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
   const isSameSandboxUnrecordedApproval = currentSandbox !== null
     && recorded.value === currentSandbox
     && recorded.value !== "read-only"

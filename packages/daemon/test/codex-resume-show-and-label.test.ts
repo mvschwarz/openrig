@@ -155,10 +155,35 @@ describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () 
         + ` ${UPDATE_OFF} resume 'tok-filesystem'`,
       );
       expect(display.command).not.toContain(" -s ");
-      expect(display.status).toBe(hasRecord ? "recorded_match" : "no_recorded_launch");
+      // The record keeps the profile name, not the entries, so even the same name and approval isn't a match.
+      expect(display.status).toBe(hasRecord ? "recorded_uncertain" : "no_recorded_launch");
       expect(display.label).toBe(hasRecord
-        ? "omits launch_wrapper (managed resume uses the wrapper)"
+        ? `launched with -c default_permissions="openrig-seat" -a never; the launch record doesn't keep the filesystem entries;`
+          + ` a resume now uses -c default_permissions="openrig-seat" -a never; omits launch_wrapper (managed resume uses the wrapper)`
         : "flags from current settings; omits launch_wrapper (managed resume uses the wrapper)");
+    });
+  });
+
+  it("never reads a filesystem launch as a match when the entries changed, and still reads a changed approval as a difference", () => {
+    const recordedNever: AppliedLaunchObservation = {
+      runtime: "codex", axis: "sandbox", state: "observed", value: "permissions:openrig-seat",
+      approvalPolicy: "never", reason: "emitted_launch_arguments",
+    };
+    // Launched with write access to /work and network on; the seat's policy is now read-only with network off.
+    const tightened = buildCodexResumeDisplay("tok-fs-tightened", {
+      codexPermissions: { filesystem: { "/work": "read" }, approval: "never", network_access: false },
+      recordedLaunch: recordedNever,
+    });
+    expect(tightened.status).toBe("recorded_uncertain");
+    expect(tightened.label).toContain("the launch record doesn't keep the filesystem entries");
+
+    const approvalChanged = buildCodexResumeDisplay("tok-fs-approval", {
+      codexPermissions: { filesystem: { "/work": "write" }, approval: "on-request" },
+      recordedLaunch: recordedNever,
+    });
+    expect(approvalChanged).toMatchObject({
+      status: "recorded_difference",
+      label: `launched with -c default_permissions="openrig-seat" -a never; a resume now uses -c default_permissions="openrig-seat" -a on-request`,
     });
   });
 
@@ -172,7 +197,8 @@ describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () 
     expect(uncertain.command).toContain("network={enabled=true}");
     expect(uncertain).toMatchObject({
       status: "recorded_uncertain",
-      label: `launched with -c default_permissions="openrig-seat" (approval unrecorded); a resume now uses -c default_permissions="openrig-seat" -a on-request`,
+      label: `launched with -c default_permissions="openrig-seat" (approval unrecorded); the launch record doesn't keep the filesystem entries;`
+        + ` a resume now uses -c default_permissions="openrig-seat" -a on-request`,
     });
 
     const fromEnvelope = buildCodexResumeDisplay("tok-fs-from-envelope", {
