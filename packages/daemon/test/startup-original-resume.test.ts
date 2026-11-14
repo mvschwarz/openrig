@@ -100,6 +100,40 @@ describe("opt-in original conversation resume", () => {
     expect(native).toHaveBeenCalledOnce();
     expect(JSON.stringify(out)).not.toContain(token);
   });
+  it("binds an original-only resume to its reviewed recorded home while keeping current model and cwd", async () => {
+    const f = fixture();
+    // The seat previously recorded A's home, then B's; its slot still contains B's last record.
+    const record = db.prepare(`INSERT INTO seat_runtime_home_records
+      (operation_id,node_id,runtime,revision,home,slot,previous_home,previous_source,original,
+       occupant_generation,request_hash,reason,operator,created_at)
+      VALUES (?,?,'claude-code',?,?,'account_home',NULL,'native_default',?,NULL,'fixture','fixture',NULL,?)`);
+    record.run("composition-home-a", f.node.id, 1, "/fixture-original-account", token, new Date().toISOString());
+    record.run("composition-home-b", f.node.id, 2, "/fixture-current-account", "other-retained-original", new Date().toISOString());
+    const b = await review(f);
+    expect(b.settingsSource).toMatchObject({ runtimeHome: { uses: {
+      plan: "apply_recorded_for_selected", home: "/fixture-original-account", revision: 1,
+    } } });
+    let launchedHome: unknown;
+    const native = vi.spyOn(ClaudeResumeAdapter.prototype, "resume").mockImplementation(async () => {
+      launchedHome = (db.prepare("SELECT account_home FROM nodes WHERE id=?").get(f.node.id) as { account_home: string }).account_home;
+      live.original = true;
+      return { ok: true };
+    });
+    const args = apply(f, b.revision);
+    const r = await request(f.path, args);
+    const out = await r.json() as Record<string, any>;
+    expect(r.status).toBe(200);
+    expect(out).toMatchObject({ ok: true, code: "resumed", operationId: args.operationId,
+      runtimeHome: { attempted: { home: "/fixture-original-account", revision: 3, appliedBeforeLaunch: true },
+        sessionRegistered: true, putBack: null, notPutBack: "resume_confirmed" } });
+    expect(launchedHome).toBe("/fixture-original-account");
+    expect(native.mock.calls[0]![2]).toBe(token);
+    expect(native.mock.calls[0]![3]).toBe(f.currentCwd);
+    expect(native.mock.calls[0]![5]).toBe("current-model");
+    expect(await (await request(f.path, args)).json()).toMatchObject({ code: "already_running_original" });
+    expect(native).toHaveBeenCalledOnce();
+    expect(JSON.stringify(out)).not.toContain(token);
+  });
   it("a positively matching original already running is a no-op even on the first operation", async () => {
     const f = fixture(); const b = await review(f); live.original = true;
     const launch = vi.spyOn(setup.restoreOrchestrator, "launchSingleNode");
