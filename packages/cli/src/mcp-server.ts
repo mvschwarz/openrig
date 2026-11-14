@@ -331,12 +331,14 @@ function recordedPrincipal(value: unknown): { principal: string | null; grant: s
 
 /** An external connection's show labels the creator and each transition's actor apart from itself: a connected assistant
  *  once read the creator's principal and grant as its own and stopped before claiming the request it was sent. An actor
- *  is you when it's this connection's seat and, where a principal was recorded, this connection's principal. */
+ *  is you only when it's this connection's seat with this connection's recorded principal; another seat or another
+ *  principal isn't, and the same seat with no principal recorded can't be told, so it reads null, never you. */
 function labelActors(shown: { item: unknown; transitions: unknown },
   viewer: { seat: string | null; principal: string | null; grant: string | null }): Record<string, unknown> {
   const label = (seat: unknown, recorded: unknown) => {
     const who = recordedPrincipal(recorded);
-    const you = typeof seat === "string" && seat === viewer.seat && (who.principal === null || who.principal === viewer.principal);
+    const sameSeat = typeof seat === "string" && seat === viewer.seat;
+    const you = !sameSeat ? false : who.principal === null || viewer.principal === null ? null : who.principal === viewer.principal;
     return { seat: typeof seat === "string" ? seat : null, ...who, you };
   };
   const transitions = Array.isArray(shown.transitions)
@@ -1682,7 +1684,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_show")) server.registerTool(
     "rig_queue_show",
     {
-      ...worded("rig_queue_show", "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord. The item's sourceSession is who created it, and each transition's actorSession and identityPrincipal (with its grant) name who made that change, not necessarily you; for an external connection, viewer is you (this connection), and createdBy and each transition's actor say whether that one is you. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", READ_ONLY),
+      ...worded("rig_queue_show", "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord. The item's sourceSession is who created it, and each transition's actorSession and identityPrincipal (with its grant) name who made that change, not necessarily you; for an external connection, viewer is you (this connection), and createdBy and each transition's actor say whether that one is you (you: null when no principal was recorded to tell). host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", READ_ONLY),
       inputSchema: z.object({
         qitemId: z.string().describe("The qitemId returned by rig_queue_create (or any queue item)"),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
