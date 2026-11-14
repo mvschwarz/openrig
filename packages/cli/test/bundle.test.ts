@@ -8,7 +8,6 @@ import { bundleCommand } from "../src/commands/bundle.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
-import { allowFetchTarget } from "./fetch-guard.js";
 
 function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   return {
@@ -57,7 +56,7 @@ function runningDeps(port: number): StatusDeps {
       }),
       fetch: vi.fn(async () => ({ ok: true })),
     }),
-    clientFactory: () => new DaemonClient(`http://127.0.0.1:${port}`),
+    clientFactory: (baseUrl) => new DaemonClient(baseUrl),
   };
 }
 
@@ -171,9 +170,8 @@ describe("Bundle CLI", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+    await new Promise<void>((resolve) => { server.listen(0, resolve); });
     port = (server.address() as { port: number }).port;
-    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
 
   afterAll(() => { server.close(); });
@@ -408,22 +406,20 @@ describe("Bundle CLI", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("bundle create checks declarations even without a configuration choice", async () => {
+  it("default bundle create keeps the authored rig despite an inconsistent recommendation", async () => {
     const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "cli-default-config-"));
-    fs.writeFileSync(nodePath.join(dir, "rig.yaml"), 'version: "0.2"\nname: r\npods:\n  - id: build\n    members:\n      - { id: lead, agent_ref: "local:a", profile: lead, runtime: claude-code }\n');
-    const config = "schema: openrig.bundle-configurations/v1\nrecommended: recommended\nseats:\n  build.lead: { runtimes: { claude-code: lead, pi: lead-pi } }\npresets:\n  recommended: { build.lead: claude-code }\n  all-pi: { build.lead: pi }\n";
-    const run = async () => { await makeCmd().parseAsync(["node", "rig", "bundle", "create", nodePath.join(dir, "rig.yaml"), "-o", nodePath.join(dir, "out.rigbundle")]); };
-    fs.writeFileSync(nodePath.join(dir, "configurations.yaml"), config);
-    capturedCreateBodies = [];
-    await captureLogs(run);
-    expect(capturedCreateBodies).toHaveLength(1);
-    fs.writeFileSync(nodePath.join(dir, "configurations.yaml"), config.replace("recommended: recommended", "recommended: all-pi"));
-    capturedCreateBodies = [];
-    const { logs, exitCode } = await captureLogs(run);
-    expect(exitCode).toBe(2);
-    expect(logs.join("\n")).toContain("must be rig.yaml as written");
-    expect(capturedCreateBodies).toHaveLength(0);
-    fs.rmSync(dir, { recursive: true, force: true });
+    try {
+      const spec = nodePath.join(dir, "rig.yaml");
+      fs.writeFileSync(spec, 'version: "0.2"\nname: r\npods:\n  - id: build\n    members:\n      - { id: lead, agent_ref: "local:a", profile: lead, runtime: claude-code }\n');
+      fs.writeFileSync(nodePath.join(dir, "configurations.yaml"), "schema: openrig.bundle-configurations/v1\nrecommended: all-pi\nseats:\n  build.lead: { runtimes: { claude-code: lead, pi: lead-pi } }\npresets:\n  authored: { build.lead: claude-code }\n  all-pi: { build.lead: pi }\n");
+      capturedCreateBodies = [];
+      await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "bundle", "create", spec, "-o", nodePath.join(dir, "out.rigbundle")]);
+      });
+      expect(capturedCreateBodies).toHaveLength(1);
+      expect(capturedCreateBodies[0]!["specPath"]).toBe(spec);
+      expect(capturedCreateBodies[0]!["configuration"]).toBeUndefined();
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
   it("bundle create names the bundle after the rig unless --name says otherwise", async () => {

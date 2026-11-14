@@ -282,15 +282,6 @@ describe("GitHub bundle source", () => {
     expect(bundleIdentityLines(result.res.data)).toContain("Assembler: OpenRig 0.6.6");
   });
 
-  it("rejects inconsistent declarations before a default GitHub link create", async () => {
-    const f = fixture();
-    fs.writeFileSync(path.join(f.prepared.folder, "rig.yaml"), 'version: "0.2"\nname: sample\npods:\n  - id: dev\n    members:\n      - { id: helper, runtime: codex }\n');
-    fs.writeFileSync(path.join(f.prepared.folder, "configurations.yaml"), 'schema: openrig.bundle-configurations/v1\nrecommended: alternate\nseats:\n  dev.helper: { runtimes: { codex: default, pi: default } }\npresets:\n  authored: { dev.helper: codex }\n  alternate: { dev.helper: pi }\n');
-    await expect(importGitHubBundle(URL, f.deps, {}, f.prepare)).rejects.toThrow(/must be rig.yaml as written/);
-    expect(f.post).not.toHaveBeenCalled();
-    expect(fs.existsSync(f.prepared.checkoutDir)).toBe(false);
-  });
-
   it("retains input after an unknown create outcome and never installs/retries", async () => {
     const f = fixture(); f.post.mockRejectedValueOnce(new Error("socket lost"));
     await expect(importGitHubBundle(URL, f.deps, {}, f.prepare)).rejects.toThrow(/outcome is unknown/);

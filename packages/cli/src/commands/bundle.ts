@@ -133,22 +133,22 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       let rigRoot = opts.rigRoot ? nodePath.resolve(opts.rigRoot) : undefined;
       let chosen: ChosenConfiguration | undefined;
       let stagingDir: string | undefined;
-      try {
-        const declared = readDeclaredConfigurations(nodePath.dirname(specPath));
-        if (opts.preset !== undefined || (opts.seat?.length ?? 0) > 0) {
+      if (opts.preset !== undefined || (opts.seat?.length ?? 0) > 0) {
+        try {
           const rigDir = rigRoot ?? nodePath.dirname(specPath);
+          const declared = readDeclaredConfigurations(nodePath.dirname(specPath));
           if (!declared) throw new ConfigurationError(`${nodePath.join(nodePath.dirname(specPath), "configurations.yaml")} doesn't exist, so this bundle offers no other configurations`);
           chosen = resolveConfiguration(declared, authoredMapping(specPath), { preset: opts.preset, seats: opts.seat });
           const staged = stageConfiguration(rigDir, specPath, declared, chosen);
           stagingDir = staged.stagingDir;
           specPath = staged.rigSpecPath;
           if (rigRoot) rigRoot = staged.stagingDir;
-        } else if (declared) checkDeclaredConfigurations(declared, authoredMapping(specPath));
-      } catch (err) {
-        if (!(err instanceof ConfigurationError)) throw err;
-        console.error(err.message);
-        process.exitCode = 2;
-        return;
+        } catch (err) {
+          if (!(err instanceof ConfigurationError)) throw err;
+          console.error(err.message);
+          process.exitCode = 2;
+          return;
+        }
       }
       const res = await client.post<Record<string, unknown>>("/api/bundles/create", {
         specPath, bundleName, bundleVersion: opts.bundleVersion, outputPath: nodePath.resolve(opts.output),
