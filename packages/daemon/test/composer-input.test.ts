@@ -53,6 +53,22 @@ describe("cursor-bound composer input", () => {
     expect(inspectComposerInput(frame, "codex").state).toBe("unknown");
   });
 
+  // D18: while a turn runs, Codex 0.167 replaces the shortcuts hint with its queue hint once the box holds text, as
+  // it does right after our paste into a busy seat (Codex 0.167.1 and 0.167.2, banked); the narrow form drops "message".
+  it.each(["  tab to queue message", "  tab to queue", "  tab to queue message · Plan mode", "  tab to queue message   ⚠ 1 · f2"])
+  ("reads the input box above Codex's queue hint (%j)", hint => {
+    const frame = codexTwoRowComposer("a pasted message");
+    frame.screen = frame.screen.replace("  ? for shortcuts                ⚠ 1 · f2", hint);
+    expect(inspectComposerInput(frame, "codex")).toMatchObject({ state: "text", rows: ["a pasted message"] });
+  });
+
+  it.each(["  tab to queue messages", "  shift+tab to queue message", "  tab to queued", "  press tab to queue message"])
+  ("keeps a near miss of the queue hint unknown (%j)", hint => {
+    const frame = codexTwoRowComposer("a pasted message");
+    frame.screen = frame.screen.replace("  ? for shortcuts                ⚠ 1 · f2", hint);
+    expect(inspectComposerInput(frame, "codex")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+  });
+
   // #2605: Claude 2.1.319 prints "✔ Update installed · Restart to update" on its own row under the footer in a narrow
   // pane. The draft-aware guard read every idle prompt there as unknown and held each wake as draft_input_unknown.
   it("reads the input under Claude's own-row Restart to update banner, and nothing like it (#2605)", () => {
