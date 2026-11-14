@@ -470,7 +470,7 @@ export function assessNativeResumeProbe(
         detail: "Codex reported that the requested saved session does not exist.",
       };
     }
-    if (looksLikeCodexAuthRefusal(paneContent)) {
+    if (currentCodexAuthRefusal(paneContent, paneCommand)) {
       return {
         status: "attention_required",
         code: "codex_auth_refusal",
@@ -874,12 +874,64 @@ function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): 
 //    logged out or signed in to another account. Please sign in again."
 //   "Your access token could not be refreshed. Please log out and sign
 //    in again."
-function looksLikeCodexAuthRefusal(paneContent: string): boolean {
-  if (!paneContent.includes("access token could not be refreshed")) return false;
-  return (
-    paneContent.includes("Please sign in again")
-    || paneContent.includes("Please log out and sign in again")
-  );
+// codex-cli 0.162.1 has those two and three more ("... because your refresh token has expired / was already used / was
+// revoked. Please log out and sign in again."), all starting the same way.
+//
+// The message starts its own row: printed by the CLI, perhaps after `Error:`, or drawn as a TUI error cell (`■`). A row
+// that starts any other way (a reply, a prompt, an indented quote) or sits in a fenced block isn't Codex's message. Its
+// opening words must fit on that first row; the sign-in instruction may wrap onto any number of rows after it.
+const CODEX_AUTH_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )?Your access token could not be refreshed\b/;
+const CODEX_AUTH_INSTRUCTIONS = ["Please sign in again", "Please log out and sign in again"];
+const CODEX_INPUT_ROW = /^\s*[›»](?:\s|$)/;
+const CODEX_MESSAGE_ROW = /^(?:[›»•■]|Error: |ERROR: )/;
+// A shell's own prompt row ends like one. Other prompt endings aren't recognized.
+const SHELL_PROMPT_END = /[$%#>❯]\s?$/;
+const squeeze = (text: string): string => text.replace(/\s+/g, "");
+
+/** A fence marker row moves fenced-block state: three or more backticks or tildes open a block, and only the same family,
+ *  at least as long, with nothing after it closes it. The state after the row, or undefined when it isn't a marker. */
+function codexFenceAfter(fence: string, line: string): string | undefined {
+  const marker = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!marker) return undefined;
+  if (!fence) return marker[1]!;
+  return marker[1]![0] === fence[0] && marker[1]!.length >= fence.length && !marker[2]!.trim() ? "" : fence;
+}
+
+// A refusal blocks only as the newest thing Codex printed, as Claude's counts only as its latest response
+// (`currentClaudeLoginRefusal`). The message runs from its first row to the row that completes its sign-in instruction;
+// a blank, message or input row before that ends it without one. After it only blank rows may follow, then either
+// Codex's composer (an input row that isn't a numbered option, with its model footer below it and no message), or, for a
+// pane back at its shell, one row that ends like a shell prompt. Anything else (a prompt just submitted, a numbered
+// chooser, a newer reply or error, unrecognized output) means the refusal isn't shown to be current, and the probe goes
+// on to read the rest of the pane.
+function currentCodexAuthRefusal(paneContent: string, paneCommand: string): boolean {
+  const lines = paneContent.split(/\r?\n/);
+  let at = -1;
+  let fence = "";
+  for (let i = 0; i < lines.length; i++) {
+    const next = codexFenceAfter(fence, lines[i]!);
+    if (next !== undefined) fence = next;
+    else if (!fence && CODEX_AUTH_REFUSAL_ROW.test(lines[i]!)) at = i;
+  }
+  if (at < 0) return false;
+  let end = -1;
+  for (let i = at; i < lines.length && end < 0; i++) {
+    const line = lines[i]!;
+    if (i > at && (line.trim() === "" || CODEX_MESSAGE_ROW.test(line) || CODEX_INPUT_ROW.test(line))) break;
+    const message = squeeze(lines.slice(at, i + 1).join(""));
+    if (CODEX_AUTH_INSTRUCTIONS.some((instruction) => message.includes(squeeze(instruction)))) end = i;
+  }
+  if (end < 0) return false;
+  const after = lines.slice(end + 1);
+  let inputAt = -1;
+  for (let i = after.length - 1; i >= 0 && inputAt < 0; i--) if (CODEX_INPUT_ROW.test(after[i]!)) inputAt = i;
+  const below = inputAt < 0 ? [] : after.slice(inputAt + 1);
+  const composer = inputAt >= 0 && hasCodexComposer(after[inputAt]!)
+    && below.some(isCodexModelFooterLine) && !below.some((line) => CODEX_MESSAGE_ROW.test(line));
+  const rows = (composer ? after.slice(0, inputAt) : after).filter((line) => line.trim() !== "");
+  if (rows.length === 0) return true;
+  return !composer && rows.length === 1 && SHELL_COMMANDS.has(paneCommand)
+    && !CODEX_MESSAGE_ROW.test(rows[0]!) && SHELL_PROMPT_END.test(rows[0]!);
 }
 
 function looksLikeCodexLoginPrompt(paneContent: string): boolean {
@@ -888,10 +940,9 @@ function looksLikeCodexLoginPrompt(paneContent: string): boolean {
   let fence = "";
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    const marker = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
-    if (marker) {
-      if (!fence) fence = marker[1]!;
-      else if (marker[1]![0] === fence[0] && marker[1]!.length >= fence.length && !marker[2]!.trim()) fence = "";
+    const next = codexFenceAfter(fence, line);
+    if (next !== undefined) {
+      fence = next;
       welcome = -1;
     } else if (!fence && line === "  Welcome to Codex, OpenAI's command-line coding agent") {
       welcome = index;

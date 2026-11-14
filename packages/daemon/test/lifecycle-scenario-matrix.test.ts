@@ -427,7 +427,7 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
       // Codex auth-refusal → attention_required end-to-end. Closes the
       // deferral previously documented in this file. Implemented by the
       // codex-auth-refusal-attention-required slice via:
-      //   (a) `looksLikeCodexAuthRefusal` in native-resume-probe.ts;
+      //   (a) `currentCodexAuthRefusal` in native-resume-probe.ts;
       //   (b) `attention_required` pass-through in codex-resume.ts;
       //   (c) Codex-branch translation in restore-orchestrator.ts:944-960.
       // The runtime-agnostic per-node mapping at restore-orchestrator.ts:725-735
