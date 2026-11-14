@@ -5,6 +5,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { checkBundleFolder } from "../src/lib/bundle-check.js";
 import { bundleCommand } from "../src/commands/bundle.js";
+import { readDeclaredConfigurations, resolveConfiguration } from "../src/lib/bundle-configuration.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
 const SPEC = `version: "0.2"
@@ -133,5 +134,8 @@ presets:
     expect(await check(config)).toBe("pass");
     expect(await check(config.replaceAll("authored", "Authored"))).toBe("finding");
     expect(await check(config.replace("codex: default", "Codex: default"))).toBe("finding");
+    fs.writeFileSync(path.join(root, "configurations.yaml"), config.replaceAll("authored", "Authored"));
+    const declared = readDeclaredConfigurations(root)!;
+    expect(resolveConfiguration(declared, { "infra.observer": "terminal" }, { preset: "Authored" }).mapping).toEqual({ "infra.observer": "terminal" });
   });
 });

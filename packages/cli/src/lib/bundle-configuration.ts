@@ -45,8 +45,6 @@ export function readDeclaredConfigurations(rigDir: string): DeclaredConfiguratio
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isNameMap = (v: unknown): v is Record<string, string> =>
   isObject(v) && Object.keys(v).length > 0 && Object.values(v).every((x) => typeof x === "string" && x.length > 0);
-const memberName = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
-const runtimeName = /^[a-z0-9][a-z0-9-]*$/;
 
 /** The shape bundle-configurations.v1 requires, so a malformed file is named instead of failing later. */
 function shapeProblem(raw: Record<string, unknown>): string | undefined {
@@ -54,21 +52,12 @@ function shapeProblem(raw: Record<string, unknown>): string | undefined {
   const seats = raw["seats"];
   if (!isObject(seats) || Object.keys(seats).length === 0) return "seats must give at least one pod.member its runtimes";
   for (const [member, seat] of Object.entries(seats)) {
-    if (!memberName.test(member)) return `seats.${member} must be a pod.member`;
     if (!isObject(seat) || !isNameMap(seat["runtimes"])) return `seats.${member}.runtimes must map each runtime to a profile`;
-    for (const runtime of Object.keys(seat["runtimes"])) {
-      if (!runtimeName.test(runtime)) return `seats.${member}.runtimes has invalid runtime '${runtime}'`;
-    }
   }
   const presets = raw["presets"];
   if (!isObject(presets) || Object.keys(presets).length === 0) return "presets must declare at least one preset";
   for (const [name, mapping] of Object.entries(presets)) {
-    if (!runtimeName.test(name)) return `invalid preset name '${name}'`;
     if (!isNameMap(mapping)) return `presets.${name} must map each pod.member to a runtime`;
-    for (const [member, runtime] of Object.entries(mapping)) {
-      if (!memberName.test(member)) return `presets.${name} has invalid member '${member}'`;
-      if (!runtimeName.test(runtime)) return `presets.${name} has invalid runtime '${runtime}'`;
-    }
   }
   return undefined;
 }
