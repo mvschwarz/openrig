@@ -311,6 +311,15 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(calls.find((c) => c.path === "/api/workflow/list?status=active")).toBeDefined();
   });
 
+  it("passes combined workflow filters and repeated tags to the list API", async () => {
+    const url = "/api/workflow/list?status=active&project=p&mission=m&slice=s&rig=rig&name=wf&limit=4&tag=one&tag=two";
+    const { deps, calls } = makeDeps({ routes: { [`GET ${url}`]: { status: 200, data: [] } } });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "list", "--status", "active", "--project", "p", "--mission", "m", "--slice", "s", "--rig", "rig", "--name", "wf", "--limit", "4", "--tag", "one", "--tag", "two", "--json"]);
+    expect(calls.find((call) => call.path === url)).toBeDefined();
+  });
+
   it("show GETs /api/workflow/:instanceId", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/workflow/inst-1": { status: 200, data: { instanceId: "inst-1" } } },

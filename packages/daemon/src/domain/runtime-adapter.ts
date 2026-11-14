@@ -147,7 +147,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
 // `launchedProcess` (Claude resume launches): the first process the launch's own readiness check
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
-export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed;
+export type HarnessLaunchResult = {
+  /** Non-secret issuance ID for exact cleanup by later Core readiness owners. Never the token. */
+  activityGrantId?: string;
+  firstInput?: import("./community-harness-first-input.js").FirstInputPassed;
   /** A community launcher that opts in was handed the seat's declared model as OPENRIG_MODEL: "confirmed" when the launch
    *  command's send succeeded, "uncertain" when typing began and the send then failed. Never proof of the model that runs. */
   modelInput?: { model: string; dispatch: "confirmed" | "uncertain" } } & (
@@ -250,6 +253,9 @@ export interface RuntimeAdapter {
   /** Claude's managed capability/launch seam, shared with seat selection. */
   readonly claudeManagedLaunch?: import("./claude-managed-launch.js").ClaudeManagedLaunch;
   readonly runtime: string;
+  /** Check launch preconditions before an in-place handover ends the predecessor.
+   * A concrete conflict refuses; an inconclusive check may allow launch with a warning. */
+  preflightLaunch?(binding: NodeBinding): Promise<{ ok: true; warnings?: string[] } | { ok: false; error: string }>;
   /** The file an adapter's project() writes for a skill when it lives outside
    *  the Claude project tree, for "already in place" detection. Absent = the
    *  instantiator's default target. */

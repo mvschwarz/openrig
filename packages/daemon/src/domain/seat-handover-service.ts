@@ -518,7 +518,9 @@ export class SeatHandoverService {
       if (permissionOverride.codexPermissions) {
         // Saved envelopes retain ordinary launch additions; only an observed predecessor
         // policy uses the exact carry path. Describe policy, not an observed native delta.
-        const directoryPolicy = permissionOverride.codexPermissions.sandbox === "workspace-write"
+        const directoryPolicy = "filesystem" in permissionOverride.codexPermissions
+          ? "with its explicit filesystem policy and no additional writable directory grants"
+          : permissionOverride.codexPermissions.sandbox === "workspace-write"
           ? "with OpenRig's usual Git metadata, seat-folder and pod-state writable roots as on a fresh launch"
           : "without additional writable directory grants, as on a read-only fresh launch";
         permissionContinuity = { state: "selection_used", detail: `The seat's saved permission envelope was used ${directoryPolicy}. This describes launch policy, not an observed difference. The predecessor policy was not carried; native successor equivalence is unverified.`
@@ -617,7 +619,9 @@ export class SeatHandoverService {
         // The registry binding is unchanged (commit never ran). A resolve_pane failure leaves the live
         // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
-        guidance: "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
+        guidance: launch.code === "successor_preflight_failed"
+          ? `The predecessor is still running and its binding is unchanged. ${launch.message}`
+          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
       };
     }
 
@@ -657,7 +661,7 @@ export class SeatHandoverService {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
         // unwind the discovery candidate (cleanup marks it vanished; it NEVER kills the preserved seat)
         // and leave the binding unchanged (no false-green). The seat is re-wakeable from its session file.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -742,7 +746,7 @@ export class SeatHandoverService {
       if (!delivered.ok) {
         // Same partial-state contract as the fresh packet: unwind the candidate,
         // binding unchanged, seat re-wakeable — never a false complete.
-        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId);
         return {
           ok: false,
           code: "context_delivery_failed",
@@ -779,8 +783,8 @@ export class SeatHandoverService {
       sourceOutcome,
       launchAdditionNotes,
       startedWithoutRequired,
-      launchWarnings: coreCopyNotes,
-      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
+      launchWarnings: [...coreCopyNotes, ...(launch.warnings ?? [])],
+      cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
     });
   }
 
@@ -1458,10 +1462,6 @@ export class SeatHandoverService {
         };
       }
       committed = outcome;
-      // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
-      // oracle sees the swap as its own event, keyed by the durable node id, identified
-      // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
-      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
     } catch (err) {
       return {
         ok: false,
@@ -1469,6 +1469,16 @@ export class SeatHandoverService {
         message: `Seat handover commit failed: ${err instanceof Error ? err.message : String(err)}`,
         guidance: "Inspect daemon logs and retry after the seat state is consistent.",
       };
+    }
+
+    // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
+    // oracle sees the swap as its own event, keyed by the durable node id, identified
+    // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
+    try {
+      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
+    } catch (err) {
+      // A notification failure cannot roll back the committed binding or abandon its grant.
+      console.warn(`Seat activity swap notification failed: ${err instanceof Error ? err.name : typeof err}`);
     }
 
     this.eventBus.notifySubscribers(committed.event);

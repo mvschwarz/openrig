@@ -155,13 +155,27 @@ describe("#707 the service passes only an absolute resolved tmux to the composer
 
   it("resolves once, so the preview's plan still matches the open", async () => {
     let calls = 0;
-    const { svc, herdr } = service(async () => { calls++; return "/usr/local/bin/tmux"; });
+    const { svc, herdr } = service(async () => { calls++; return process.execPath; });
     const preview = await svc.previewView({ view: "rig:r" }) as { planId: string };
     const res = await svc.openView({ view: "rig:r", expectedPlan: preview.planId });
     expect(res.code).toBeUndefined();
     expect(res.ok).toBe(true);
     expect(herdr.last).not.toBeNull();
     expect(calls).toBe(1);
+  });
+
+  it("resolves again once the resolved tmux is gone, so a removed shim does not break later views", async () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-tmux-gone-"));
+    const shim = join(root, "tmux");
+    writeFileSync(shim, "");
+    let found = shim;
+    const { svc, herdr } = service(async () => found);
+    await svc.openView({ view: "rig:r" });
+    expect(herdr.last!.opened[0]!.recoveryCommand).toBe(`'${shim}' attach -t 'a@r'`);
+    rmSync(root, { recursive: true });
+    found = process.execPath;
+    await svc.openView({ view: "rig:r" });
+    expect(herdr.last!.opened[0]!.recoveryCommand).toBe(`${shellQuote(process.execPath)} attach -t 'a@r'`);
   });
 });
 

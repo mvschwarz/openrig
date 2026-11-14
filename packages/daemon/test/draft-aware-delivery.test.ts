@@ -1314,4 +1314,31 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
     const sent = await f.send("attach-quiet", "Wake timer fired again.", { openrigNotice: true, verify: false });
     expect(sent).toMatchObject({ ok: true });
   });
+
+  it("re-reads the input after the Enter's own waiting checks, so a draft typed while they wait is not submitted with the notice", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const typed = " PERSONDRAFT-k7";
+    const result = await f.guard.operation("worker@test", async () => {
+      expect(await f.tmux.sendText("worker@test", notice)).toMatchObject({ ok: true });
+      // A conditional Enter awaits its own checks (a conversation lookup); the person types after the pasted notice.
+      return f.tmux.sendKeys("worker@test", ["Enter"], undefined, { beforeKeys: async () => { f.bodies.a += typed; } });
+    });
+    expect(result).toMatchObject({ ok: false, code: "draft_input_changed" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(w => w.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(notice + typed);
+  });
+
+  it("still presses the Enter when the input stays as pasted while the Enter's checks wait", async () => {
+    const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
+    await f.enable();
+    const result = await f.guard.operation("worker@test", async () => {
+      expect(await f.tmux.sendText("worker@test", notice)).toMatchObject({ ok: true });
+      return f.tmux.sendKeys("worker@test", ["Enter"], undefined, { beforeKeys: async () => {} });
+    });
+    expect(result).toEqual({ ok: true });
+    expect(f.submissions).toEqual([notice]);
+    expect(f.bodies.a).toBe("");
+  });
 });

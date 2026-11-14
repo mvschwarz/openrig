@@ -11,7 +11,7 @@
 // usage data short-circuit, send-failure no-dedup-update semantics.
 
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
-import { ClaudeCompactionEnforcer as ActualEnforcer, buildPostCompactRestorePrompt } from "../src/domain/claude-compaction-enforcer.js";
+import { ClaudeCompactionEnforcer as ActualEnforcer, MANUAL_SEAT_READ_INTERVAL_MS, buildPostCompactRestorePrompt } from "../src/domain/claude-compaction-enforcer.js";
 import { CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS, type SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
@@ -843,6 +843,9 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[4]![1]).toContain("Required items are your restore map's ranked entries above your restore class's tier line");
     expect(send.mock.calls[4]![1]).toContain("the session JSONL stay lookup-only");
     expect(send.mock.calls[4]![1]).toContain("Read every required item that is not FULL in full now");
+    expect(send.mock.calls[4]![1]).toContain("before acting on the restored work, and keep any hold you verified as live");
+    expect(send.mock.calls[4]![1]).toContain("Report the final read-depth table and the reconnect note as you resume; don't hold unaffected work for them.");
+    expect(send.mock.calls[4]![1]).not.toContain("before doing any other work");
     expect(send.mock.calls[4]![1]).not.toContain("Do not optimize for token conservation");
     expect(send.mock.calls[3]![1]).toContain("read your newest restore map and use the restore packet as a lookup");
     expect(send.mock.calls[3]![1]).not.toContain("read the restore packet files");
@@ -1196,7 +1199,7 @@ describe("ClaudeCompactionEnforcer", () => {
         expect(enforcer.getManualCompactionState(SEAT)?.stage).toBe("preparing");
 
         // DEGRADED duplicate: usedPercentage null (bad-sidecar projection). The guard
-        // now PRECEDES the no_usage_data recordManualFailure path, so it must NOT record
+        // PRECEDES every manual refusal, so it must NOT record
         // skipped-or-failed / erase the preparing marker (the bug rev1-r2 caught).
         const degraded = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: null });
         expect(degraded).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "already_in_progress" });
@@ -1380,14 +1383,79 @@ describe("ClaudeCompactionEnforcer", () => {
       expect(enforcer.getManualCompactionState("codex@rig")?.stage).toBe("skipped-or-failed");
     });
 
-    it("no known usage sample → rejected with no_usage_data (never triggers blind)", async () => {
+    it("no known usage sample: an explicit manual request still prepares and compacts; unknown usage isn't a reason to stop", async () => {
       const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
       const { transport, send } = makeSessionTransport();
-      const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { now: () => 1_700_000_000_000 });
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: null });
-      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "no_usage_data" });
-      expect(send).not.toHaveBeenCalled();
+      expect(outcome).toEqual({ triggered: true, stage: "compact-sent" });
+      const texts = send.mock.calls.map((call) => String(call[1]));
+      expect(texts[0]).toContain("OpenRig manual compaction was requested for this seat");
+      expect(texts[0]).not.toContain("null");
+      expect(texts[1]).toMatch(/^\/compact /);
+    });
+
+    it("the preparation request asks for a turn free of approval prompts: file-edit writes and a literal recap-write path", async () => {
+      const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+      const { transport, send } = makeSessionTransport();
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { now: () => 1_700_000_000_000 });
+      await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+      expect(String(send.mock.calls[0]![1])).toContain("To avoid one cause of approval prompts, which hold /compact until someone answers them: write files with your file-edit tool (acceptEdits covers your working directory, not a preparation root outside it), and if you publish a seat recap, run rig context recap-write --file with the file's literal absolute path, with no shell variable assignment or command substitution, so an allow rule for rig commands can match it.");
+    });
+
+    it("when the idle wait and the /compact send disagree, each round pauses a reading interval, bounded by the deadline", async () => {
+      const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+      const { transport, send } = makeSessionTransport();
+      // The idle wait reads idle (a hook), while every /compact finds the pane at a prompt and writes nothing.
+      send.mockImplementation(async (_s: string, text: string) => text.startsWith("/compact")
+        ? { ok: false, sent: false, inputPhase: "not_reached", reason: "target_needs_input", activity: { state: "needs_input" } }
+        : { ok: true });
+      let clock = 1_700_000_000_000;
+      const sleeps: number[] = [];
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { manualPrepWaitMs: 20_000, now: () => clock,
+        sleep: async (ms) => { sleeps.push(ms); clock += ms; } });
+
+      const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+      expect(outcome).toMatchObject({ triggered: false, reason: "preparation_needs_input" });
+      const compacts = send.mock.calls.filter((call) => String(call[1]).startsWith("/compact")).length;
+      expect(compacts).toBeGreaterThan(1);
+      expect(compacts).toBeLessThanOrEqual(20_000 / MANUAL_SEAT_READ_INTERVAL_MS + 1);
+      // Every deferred send is followed by a pause, the last one running into the deadline.
+      expect(sleeps.filter((ms) => ms === MANUAL_SEAT_READ_INTERVAL_MS).length).toBe(compacts);
+    });
+
+    it("a /compact refused before input because the seat reached a prompt waits again within the deadline, then compacts", async () => {
+      const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+      const { transport, send } = makeSessionTransport();
+      send.mockImplementationOnce(async () => ({ ok: true })); // the preparation request lands
+      // The seat read idle, then its preparation turn reached a permission prompt before /compact: refused, nothing written.
+      send.mockImplementationOnce(async () => ({ ok: false, sent: false, inputPhase: "not_reached", reason: "target_needs_input" }));
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { now: () => 1_700_000_000_000, sleep: async () => {} });
+
+      const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+      expect(outcome).toEqual({ triggered: true, stage: "compact-sent" });
+      const texts = send.mock.calls.map((call) => String(call[1]));
+      expect(texts.filter((text) => text.startsWith("/compact"))).toHaveLength(2);
+      expect(enforcer.getPreparationState(SEAT)).toMatchObject({ status: "compact-sent" });
+    });
+
+    it("a seat still at a prompt when the deadline passes stops naming the prompt, and --state showed what it waited on", async () => {
+      const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+      const { transport, send } = makeSessionTransport();
+      let clock = 1_700_000_000_000;
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { manualPrepWaitMs: 1000, now: () => clock, sleep: async (ms) => { clock += ms; } });
+      const seen: unknown[] = [];
+      transport.waitUntilIdle = async () => {
+        seen.push(enforcer.getPreparationState(SEAT)?.awaitingInput);
+        return { ok: false, reason: "target_needs_input", error: "fixture", activity: { state: "needs_input" } as any, waitedMs: 0, attempts: 1 } as any;
+      };
+
+      const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+      expect(outcome).toMatchObject({ triggered: false, stage: "skipped-or-failed", reason: "preparation_needs_input",
+        preparation: { delivery: "delivered", compact: "not_sent" } });
+      expect(seen.slice(1)).toContainEqual({ since: expect.any(Number), reason: "target_needs_input", observedAt: expect.any(Number), current: true });
+      expect(send.mock.calls.filter((call) => String(call[1]).startsWith("/compact"))).toHaveLength(0);
     });
 
     it("bounded to the triggered seat: only that seat is sent to; no other seat gets manual state", async () => {

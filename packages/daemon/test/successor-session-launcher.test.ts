@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -62,6 +63,76 @@ describe("SuccessorSessionLauncher", () => {
       tmuxOptionDefaults,
     });
   }
+
+  it.each([false, true])("leaves the predecessor untouched when launch preflight refuses or throws (throws: %s)", async throws => {
+    const preflightLaunch = vi.fn(async () => {
+      if (throws) throw new Error("preflight unavailable");
+      return { ok: false as const, error: "policy conflicts with the successor" };
+    });
+    const runtime = { ...fakeAdapter("codex"), preflightLaunch };
+    const tmux = { listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead,
+      getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const guarded = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters: { codex: runtime } });
+    const onReplacementStarted = vi.fn();
+    const result = await guarded.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" },
+      departingSessionName: "dev-impl@rig", onReplacementStarted });
+    expect(result).toMatchObject({ ok: false, code: "successor_preflight_failed", replacementStarted: false });
+    expect(signalPaneProcess).not.toHaveBeenCalled();
+    expect(setRemainOnExit).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
+    expect(launchHarness).not.toHaveBeenCalled();
+    expect(onReplacementStarted).not.toHaveBeenCalled();
+  });
+
+  it("preflights the same binding it launches and retains an inconclusive-policy warning", async () => {
+    const preflightLaunch = vi.fn(async () => ({ ok: true as const, warnings: ["policy not verified: native read timed out"] }));
+    const runtime = { ...fakeAdapter("codex"), preflightLaunch };
+    const tmux = { listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead,
+      getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const guarded = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters: { codex: runtime } });
+    signalPaneProcess.mockImplementation(async () => {
+      expect(preflightLaunch).toHaveBeenCalledTimes(1);
+      return { ok: true };
+    });
+    const result = await guarded.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w",
+      codexPermissions: { approval: "never", filesystem: { ":minimal": "read" } } },
+      departingSessionName: "dev-impl@rig", occupantGeneration: "successor-generation" });
+    expect(result).toMatchObject({ ok: true, warnings: ["policy not verified: native read timed out"] });
+    expect(preflightLaunch.mock.calls[0]?.[0]).toBe(launchHarness.mock.calls[0]?.[0]);
+  });
+
+  it("revokes the staged attempt if its separate readiness probe fails", async () => {
+    db.prepare("INSERT INTO rigs (id,name) VALUES ('rig-bound','bound')").run();
+    db.prepare("INSERT INTO nodes (id,rig_id,logical_id,runtime) VALUES ('node-1','rig-bound','dev.impl','codex')").run();
+    const grants = new ActivityGrantStore(db);
+    const issue = (runId: string) => grants.issue({ nodeId: "node-1", generation: "reserved", issuedBy: "launch",
+      run: { runId, binding: { runtime: "pi", runner: 0, pane: "%7", panePid: 101 } } });
+    const first = issue("staged"), unrelated = issue("other-staged");
+    launchHarness.mockResolvedValue({ ok: true, activityGrantId: first.grantId });
+    checkReady.mockRejectedValue(new Error("probe unavailable"));
+    expect(await launcher().createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" },
+      departingSessionName: "dev-impl@rig" })).toMatchObject({ ok: false, code: "successor_readiness_failed" });
+    expect(grants.standing(first.grantId)).toBe("revoked");
+    expect(grants.standing(unrelated.grantId)).toBe("pending");
+  });
+
+  it("carries its exact issuance to abandoned cutover cleanup without revoking another pending run", async () => {
+    db.prepare("INSERT INTO rigs (id,name) VALUES ('rig-bound','bound')").run();
+    db.prepare("INSERT INTO nodes (id,rig_id,logical_id,runtime) VALUES ('node-1','rig-bound','dev.impl','codex')").run();
+    const grants = new ActivityGrantStore(db);
+    const issue = (runId: string) => grants.issue({ nodeId: "node-1", generation: "reserved", issuedBy: "launch",
+      run: { runId, binding: { runtime: "pi", runner: 0, pane: "%7", panePid: 101 } } });
+    const first = issue("ready-staged"), unrelated = issue("other-staged");
+    launchHarness.mockResolvedValue({ ok: true, activityGrantId: first.grantId });
+    const subject = launcher();
+    const result = await subject.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+    expect(result).toMatchObject({ ok: true, activityGrantId: first.grantId });
+    if (!result.ok) throw new Error("successor did not start");
+    await subject.cleanup(result.tmuxSession, result.discoveredId, result.activityGrantId);
+    expect(grants.standing(first.grantId)).toBe("revoked");
+    expect(grants.standing(unrelated.grantId)).toBe("pending");
+  });
 
   it("the successor's respawned pane gets the seat's declared env, and the declared names are recorded", async () => {
     const res = await launcher().createSuccessor({

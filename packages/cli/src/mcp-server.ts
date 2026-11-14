@@ -632,19 +632,54 @@ export const MEMBER_WORKFLOW = [
 
 // Short guidance a client may show the model (the server's MCP instructions). An external caller's connection asks the
 // team for work and isn't one of its members, so it isn't given the member workflow.
-const SHARED_INSTRUCTIONS = [
-  "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
-  "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
-  "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
-  "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
-];
+/** The paragraphs every seat's connection shares, naming a tool only where `has` says the connection offers it. A local or
+ *  authenticated member is offered every tool named here; an external grant is offered only the ones its grant names. */
+function sharedInstructions(has: (tool: string) => boolean): string[] {
+  const finding = [has("rig_whoami") ? "rig_whoami shows which, and whether the caller is authenticated" : "",
+    has("rig_team") ? "rig_team shows a rig's seats and its lead" : ""].filter(Boolean).join("; ");
+  const showing = "rig_queue_show, which names the next item when the work was handed on";
+  const handing = has("rig_queue_create")
+    ? `To hand work to a seat, use rig_queue_create and keep its qitemId${has("rig_queue_show") ? `; read the answer later with ${showing}` : ""}. `
+    : has("rig_queue_show") ? `Read an item's answer with ${showing}. ` : "";
+  return [
+    `This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant${finding ? ` (${finding})` : ""}. The daemon attributes this server's writes to that seat.`,
+    `${handing}${has("rig_queue_handoff") ? "To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. " : ""}Queue items are durable: they outlive this conversation and this server.`,
+    "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
+    `A question reserved for a person is theirs to answer: don't answer it on their behalf.${has("rig_queue_decide") ? " rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one." : ""}`,
+  ];
+}
+const SHARED_INSTRUCTIONS = sharedInstructions(() => true);
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
+
+/** For a connection that relays a person's request to another assistant (an external caller, or the front door): which one
+ *  they mean is theirs to say when more than one fits, never inferred from the agent's own history. The listing steps need
+ *  rig_team, so a connection without it is told only to ask. Pickup is said only where it's true: another connected
+ *  assistant waits for its person; on the front door, a running team seat is woken, and one sent to anyway waits until it's
+ *  back. A member, which works items, isn't given it. */
+function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
+  if (!canList) {
+    return "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
+  }
+  return [
+    "Before sending a request to another assistant, list the team's members.",
+    "If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude assistant\"), never reading the address out.",
+    "Don't pick from your own history or memory.",
+    "If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.",
+    "If the list says the chosen one's person was removed from the team, don't send; tell your person and ask whether to send it to someone else.",
+    ...(frontDoor ? ["When you send to a running team seat, tell your person that seat will pick it up on its own."] : []),
+    "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.",
+    ...(frontDoor ? ["If you sent it anyway, tell your person it waits until that one is back."] : []),
+    "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.",
+    "If your person still asks to send to one whose person was removed, tell them it can't be delivered: requests to a removed person's assistant are closed unanswered.",
+  ].join(" ");
+}
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
-export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v2";
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v3";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
+  askWhichAssistant(true, true),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
   "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
   "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
@@ -671,16 +706,22 @@ const EXTERNAL_PERSON_INSTRUCTIONS = [
   "To answer one, show the person the question and its options as rig_question_list gives them. Then pass rig_question_answer its qitemId, the revision you showed, and either the options they chose or exactly what they typed, with no label or words of your own. If the question changed, show them the new one; if it was already answered or closed, say so. It's recorded as their answer, given through this connection. A question reserved for a person is theirs to answer, never yours.",
 ].join("\n");
 
-/** For an external grant that names claim and update: how it works the items addressed to it, messages included. */
-const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
-  "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.",
-].join("\n");
+/** For an external grant that names claim and update: how it works the items addressed to it, messages included. It names
+ *  only the tools that grant offers. */
+function externalInboxInstructions(tools: ReadonlySet<string>): string {
+  return [...sharedInstructions((tool) => tools.has(tool)),
+    `Items addressed to your seat are yours${tools.has("rig_queue_list") ? ": rig_queue_list with owned set lists them" : ""}. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.`,
+  ].join("\n");
+}
 
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
   if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
   const tools = externalTools(access.external);
-  const instructions = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? EXTERNAL_INBOX_INSTRUCTIONS
+  const workflow = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
     : tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
+  // Only a grant with team/list may reach another connected assistant's seat, and it lists the team with rig_team.
+  const instructions = tools.has("rig_queue_create")
+    ? `${workflow}\n${askWhichAssistant(tools.has("rig_team"), false)}` : workflow;
   return tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
 }
 
@@ -1675,7 +1716,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         resolution: z.string().optional().describe("The outcome the item keeps, stored only by the update that closes an open item (as rig queue update --resolution)"),
         reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
         summary: z.string().optional().describe("Replace the one-line summary"),
-        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it. For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
+        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item with a state change (a park, a done close; a blank one isn't stored). For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
         blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
       }),
@@ -1823,7 +1864,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     {
       ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown.", READ_ONLY),
       inputSchema: z.object({
-        rigId: z.string().optional().describe("Rig name or identifier; optional for an external grant to discover its team"),
+        rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
     },
     async ({ rigId }) => {
@@ -1840,7 +1881,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           rigId = rigs[0]!;
         }
         // An external caller names one of its grant's rigs, so a lookup never answers about another workspace's rig.
-        if (access?.external && !scope?.rig(rigId)) return outOfScope(`Rig ${rigId}`);
+        if (access?.external && !scope?.rig(rigId)) return outOfScope(`Rig ${rigId}`, "Leave rigId out to see this connection's own team.");
         const rig = await rigIdFor(client, rigId);
         if ("content" in rig) return rig;
         if (inferred && !rig.resolved) {

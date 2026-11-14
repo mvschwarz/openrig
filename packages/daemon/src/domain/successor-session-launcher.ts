@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
 import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
@@ -94,6 +95,7 @@ export type SuccessorLaunchResult =
   | {
       ok: true;
       discoveredId: string;
+      activityGrantId?: string;
       tmuxSession: string;
       tmuxPane: string;
       resumeToken?: string;
@@ -248,6 +250,21 @@ export class SuccessorSessionLauncher {
       };
     }
 
+    const binding = successorBinding(input.node, departingSession, pane.id, cwd, input.occupantGeneration);
+    const adapter = input.node.runtime ? this.runtimeAdapters[input.node.runtime] : undefined;
+    let preflightWarnings: string[] = [];
+    if (adapter?.preflightLaunch) {
+      try {
+        const checked = await adapter.preflightLaunch(binding);
+        if (!checked.ok) return { ok: false, code: "successor_preflight_failed", step: "create_successor",
+          message: checked.error, replacementStarted: false };
+        preflightWarnings = checked.warnings ?? [];
+      } catch (error) {
+        return { ok: false, code: "successor_preflight_failed", step: "create_successor",
+          message: `Successor launch preflight threw: ${error instanceof Error ? error.message : String(error)}`, replacementStarted: false };
+      }
+    }
+
     // 2. Terminate the retiree IN PLACE, then respawn the now-dead pane WITHOUT -k so native scrollback
     //    survives (respawn-pane -k CLEARS the pane history — verified on tmux 3.6a; that would defeat the
     //    money-proof). The swap: set remain-on-exit so the pane survives the exit → graceful SIGTERM
@@ -302,7 +319,7 @@ export class SuccessorSessionLauncher {
     //    not repointed. When the harness launch was already sent and only readiness failed, the pane is NOT left as
     //    a bare shell: the successor may still come up there, unadopted (#2985). The failure says so, so the caller
     //    can tell the operator that a retry would end it.
-    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration);
+    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration, undefined, binding);
     if (!started.ok) {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true,
         tmuxPane: pane.id, ...(started.launched ? { successorLaunched: true } : {}) };
@@ -318,6 +335,7 @@ export class SuccessorSessionLauncher {
       cwd: input.node.cwd ?? undefined,
     });
 
+    const warnings = [...preflightWarnings, ...(respawned.warnings ?? [])];
     return {
       ok: true,
       discoveredId: discovered.id,
@@ -326,8 +344,9 @@ export class SuccessorSessionLauncher {
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
       appliedLaunch: started.appliedLaunch,
+      ...(started.activityGrantId ? { activityGrantId: started.activityGrantId } : {}),
       retireeExit: terminated.path,
-      ...(respawned.warnings ? { warnings: respawned.warnings } : {}),
+      ...(warnings.length ? { warnings } : {}),
     };
   }
 
@@ -345,7 +364,7 @@ export class SuccessorSessionLauncher {
     occupantGeneration: string;
     onPaneCreated: (pane: string) => void;
     staged: Omit<StagedLaunch, "canonicalSession">;
-  }): Promise<{ ok: true; tmuxPane: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] }
+  }): Promise<{ ok: true; activityGrantId?: string; tmuxPane: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] }
     | { ok: false; code: string; message: string }> {
     const env = compactEnv({
       OPENRIG_NODE_ID: input.node.id,
@@ -394,7 +413,8 @@ export class SuccessorSessionLauncher {
     forkSource?: ForkSource,
     launchGeneration?: string | null,
     staged?: StagedLaunch,
-  ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] } | { ok: false; code: string; message: string; launched?: true }> {
+    preparedBinding?: NodeBinding,
+  ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] } | { ok: false; code: string; message: string; launched?: true }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
       return {
@@ -411,39 +431,7 @@ export class SuccessorSessionLauncher {
     // edge of the same seat, so its launch must read the seat's spec, else the
     // running topology silently drifts from the founder-designed one at every
     // handover. (config profile is still a tracked follow-on.)
-    const binding: NodeBinding = {
-      id: "",
-      nodeId: node.id,
-      attachmentType: "tmux",
-      tmuxSession,
-      tmuxWindow: null,
-      tmuxPane,
-      cmuxWorkspace: null,
-      cmuxSurface: null,
-      updatedAt: "",
-      cwd: cwd ?? "",
-      launchGeneration: launchGeneration ?? undefined,
-      nonInterruptive: node.nonInterruptive,
-      kernelAuthority: node.kernelAuthority,
-      teamPermissionDefault: node.teamPermissionDefault,
-      claudePermissions: node.claudePermissions,
-      claudeMcp: node.runtime === "claude-code" ? node.claudeMcp : undefined,
-      codexPermissions: node.codexPermissions,
-      // Seam B: continuity — the successor launches at the departing seat's posture.
-      ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
-      ...(node.permissionMode ? { permissionMode: node.permissionMode } : {}),
-      // 0.5.2-07: the successor reads the seat's SPEC-pinned model (adapter emits -m/--model).
-      model: node.model ?? undefined,
-      // #75: the successor reads the seat's resolved effort (saved choice, else authored).
-      effort: node.effort ?? undefined,
-      advisor: node.advisor ?? undefined,
-      // 0.5.2-07 A4-profile: the successor reads the seat's SPEC-pinned codex config profile (adapter emits -p).
-      codexConfigProfile: node.codexConfigProfile ?? undefined,
-      codexRebuildPermissions: node.codexRebuildPermissions,
-      ...(node.launchAdditions ? { launchAdditions: node.launchAdditions } : {}),
-      ...(node.launchWrapper?.length ? { launchWrapper: node.launchWrapper } : {}),
-      ...(staged?.binding ?? {}),
-    };
+    const binding = preparedBinding ?? successorBinding(node, tmuxSession, tmuxPane, cwd, launchGeneration, staged?.binding);
 
     // Slice 16: a staged runtime-switch successor gets its target materials before its harness starts.
     let notes: string[] | undefined;
@@ -483,10 +471,14 @@ export class SuccessorSessionLauncher {
     // Catch it here and return a STRUCTURED ok:false so the caller fails loudly at
     // step=start_agent, exactly like a returned readiness failure. Nothing kills the
     // pane (unwind invariant above): the launched successor may still be running there.
+    const revokeRun = () => {
+      if (launch.activityGrantId) new ActivityGrantStore(this.discoveryRepo.db).revoke({ grantId: launch.activityGrantId }, "successor_readiness_failed");
+    };
     let readiness: ReadinessResult;
     try {
       readiness = await this.waitForReady(adapter, binding);
     } catch (err) {
+      revokeRun();
       return {
         ok: false,
         code: "successor_readiness_failed",
@@ -495,6 +487,7 @@ export class SuccessorSessionLauncher {
       };
     }
     if (!readiness.ready) {
+      revokeRun();
       return {
         ok: false,
         code: isAttentionRequiredReadinessCode(readiness.code) ? "successor_attention_required" : "successor_not_ready",
@@ -503,7 +496,7 @@ export class SuccessorSessionLauncher {
       };
     }
 
-    return { ok: true, resumeToken, resumeType, appliedLaunch: launch.appliedLaunch, ...(notes?.length ? { notes } : {}) };
+    return { ok: true, resumeToken, resumeType, ...(launch.activityGrantId ? { activityGrantId: launch.activityGrantId } : {}), appliedLaunch: launch.appliedLaunch, ...(notes?.length ? { notes } : {}) };
   }
 
   /**
@@ -564,9 +557,47 @@ export class SuccessorSessionLauncher {
    * candidate vanished; the re-wakeable shell stays in the pane and the seat is recoverable from its
    * provider session file. (`tmuxSession` is retained for signature stability + call-site logging.)
    */
-  async cleanup(_tmuxSession: string, discoveredId: string | null): Promise<void> {
+  async cleanup(_tmuxSession: string, discoveredId: string | null, activityGrantId?: string): Promise<void> {
+    if (activityGrantId) new ActivityGrantStore(this.discoveryRepo.db).revoke({ grantId: activityGrantId }, "cutover_abandoned");
     if (discoveredId) this.discoveryRepo.markVanished([discoveredId]);
   }
+}
+
+function successorBinding(node: SuccessorNode, tmuxSession: string, tmuxPane: string, cwd: string | undefined,
+  launchGeneration?: string | null, bindingOverrides?: StagedLaunch["binding"]): NodeBinding {
+  return {
+      id: "",
+      nodeId: node.id,
+      attachmentType: "tmux",
+      tmuxSession,
+      tmuxWindow: null,
+      tmuxPane,
+      cmuxWorkspace: null,
+      cmuxSurface: null,
+      updatedAt: "",
+      cwd: cwd ?? "",
+      launchGeneration: launchGeneration ?? undefined,
+      nonInterruptive: node.nonInterruptive,
+      kernelAuthority: node.kernelAuthority,
+      teamPermissionDefault: node.teamPermissionDefault,
+      claudePermissions: node.claudePermissions,
+      claudeMcp: node.runtime === "claude-code" ? node.claudeMcp : undefined,
+      codexPermissions: node.codexPermissions,
+      // Seam B: continuity — the successor launches at the departing seat's posture.
+      ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
+      ...(node.permissionMode ? { permissionMode: node.permissionMode } : {}),
+      // 0.5.2-07: the successor reads the seat's SPEC-pinned model (adapter emits -m/--model).
+      model: node.model ?? undefined,
+      // #75: the successor reads the seat's resolved effort (saved choice, else authored).
+      effort: node.effort ?? undefined,
+      advisor: node.advisor ?? undefined,
+      // 0.5.2-07 A4-profile: the successor reads the seat's SPEC-pinned codex config profile (adapter emits -p).
+      codexConfigProfile: node.codexConfigProfile ?? undefined,
+      codexRebuildPermissions: node.codexRebuildPermissions,
+      ...(node.launchAdditions ? { launchAdditions: node.launchAdditions } : {}),
+      ...(node.launchWrapper?.length ? { launchWrapper: node.launchWrapper } : {}),
+      ...(bindingOverrides ?? {}),
+  };
 }
 
 function compactEnv(input: Record<string, string | undefined>): Record<string, string> {
