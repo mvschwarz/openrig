@@ -290,6 +290,30 @@ describe("RestoreOrchestrator", () => {
     return updated;
   }
 
+  // #3218 item 3: a restore names a conversation two resuming seats share, and still resumes each of them as recorded.
+  it.each([["shared", true], ["distinct", false]])("names a conversation two restored seats share (%s tokens)", async (_mode, shared) => {
+    const seeded = seedRigAndSnapshot({
+      nodes: [{ logicalId: "dev.a", role: "worker", runtime: "claude-code" }, { logicalId: "dev.b", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "conv-shared",
+    });
+    const snap = shared ? seeded : updateSnapshotData(seeded, (data) => {
+      const second = data.sessions.find((sess: { nodeId: string }) => sess.nodeId === data.nodes[1].id);
+      second.resumeToken = "conv-b";
+    });
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes).toHaveLength(2);
+    const named = result.result.warnings.filter((line) => line.includes("carry the same"));
+    if (shared) {
+      expect(named).toHaveLength(1);
+      expect(named[0]).toContain("conv-shared");
+      expect(named[0]).toContain("dev.a and dev.b");
+    } else {
+      expect(named).toEqual([]);
+    }
+  });
+
   it("refuses an explicit snapshot for a recreated logical seat before changing state", async () => {
     const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [],
       resumeType: "claude_id", resumeToken: "old-conversation" });

@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { validatePreRestore } from "./restore-preconditions.js";
+import { describeSharedConversation, findSharedConversations } from "./shared-conversation.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -313,6 +314,7 @@ export class RestoreCheckService {
       ]);
     }
 
+    const allRigs = rigs;
     if (opts.rig) {
       rigs = rigs.filter((r) => r.name === opts.rig);
       if (rigs.length === 0) {
@@ -419,6 +421,10 @@ export class RestoreCheckService {
       }
 
       rigRollupInputs.push({ rig, nodes, checks: rigChecks, preconditionError });
+    }
+
+    if (!opts.recoveryOnly) {
+      checks.push(...this.checkSharedConversations(rigRollupInputs, allRigs));
     }
 
     const rigRollups = rigRollupInputs.map((input) => this.buildRigRollup(input));
@@ -1602,6 +1608,47 @@ export class RestoreCheckService {
       return `${actions.length} ${pluralize(actions.length, "rig")} can be recovered by known OpenRig command; ${blocked.length} ${pluralize(blocked.length, "rig")} blocked; ${unknown.length} unknown.`;
     }
     return `${blocked.length} ${pluralize(blocked.length, "rig")} blocked; ${actions.length} actionable; ${unknown.length} unknown.`;
+  }
+
+  /**
+   * #3218 item 3: running seats that would resume the same conversation, named on each evaluated seat with the
+   * conversation and the other seats (also those of a rig left out by --rig). A caveat with no remediation: restore is
+   * not refused, no seat is stopped and none is picked.
+   */
+  private checkSharedConversations(inputs: RigRollupInput[], allRigs: Array<{ rigId: string; name: string }>): CheckEntry[] {
+    const label = (node: NodeInventoryEntry) => node.canonicalSessionName ?? `${node.logicalId}@${node.rigName}`;
+    const live = (node: NodeInventoryEntry) => node.sessionStatus === "running" && seatResumes(node);
+    const evaluated = new Set(inputs.map((input) => input.rig.rigId));
+    const seats: Array<{ node: NodeInventoryEntry; input?: RigRollupInput }> = [];
+    for (const input of inputs) {
+      for (const node of input.nodes) if (live(node)) seats.push({ node, input });
+    }
+    for (const rig of allRigs) {
+      if (evaluated.has(rig.rigId)) continue;
+      let nodes: NodeInventoryEntry[] = [];
+      try {
+        nodes = this.deps.getNodeInventory(rig.rigId);
+      } catch {
+        continue;   // a partner rig that cannot be read only narrows the report
+      }
+      for (const node of nodes) if (live(node)) seats.push({ node });
+    }
+    const out: CheckEntry[] = [];
+    const groups = findSharedConversations(seats.map(({ node }) => ({ seat: label(node), resumeType: node.resumeType, resumeToken: node.resumeToken })));
+    for (const group of groups) {
+      for (const { node, input } of seats) {
+        if (!input || !group.seats.includes(label(node))) continue;
+        const check: CheckEntry = {
+          check: `seat.${node.canonicalSessionName ?? node.logicalId}.shared-conversation`,
+          status: "yellow",
+          evidence: describeSharedConversation(group),
+          remediation: "",
+        };
+        input.checks.push(check);
+        out.push(check);
+      }
+    }
+    return out;
   }
 
   private buildRigRollup(input: RigRollupInput): RigRestoreRollup {
