@@ -72,6 +72,10 @@ person needs in their project or home folder and name that path.
 
 ## 2. Open OpenRig and give its operator the goal
 
+A seat's startup text points an installing agent here. [references/installing-for-someone.md](references/installing-for-someone.md)
+adds what this step does not spell out (starting the daemon and kernel, what counts as ready and as finished) and relays the same
+commands; if the two ever differ, this step is right.
+
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it. If its output says no person is registered, make the offer it names before you go on, and register only on

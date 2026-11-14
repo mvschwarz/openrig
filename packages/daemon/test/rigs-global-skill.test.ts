@@ -33,6 +33,46 @@ describe("the rigs skill installed globally", () => {
     }
   });
 
+  it("keeps the installer's whole procedure on demand, and the skill points to it (issue #3228)", () => {
+    // This procedure used to sit in every seat's startup text (onboarding file 02). It moved here intact; seat startup keeps a pointer.
+    const reference = readFileSync(join(PACKAGED, "references/installing-for-someone.md"), "utf8");
+    for (const kept of [
+      "rig daemon start",
+      "rig daemon start --no-kernel",
+      "rig status",
+      "rig ps --nodes --rig kernel",
+      "rig terminal open saved:kernel --window --json",
+      "rig tui --shared",
+      "Over headless SSH",
+      "operator.agent",
+      "tmuxAttachCommand",
+      "env -u TMUX",
+      "rig send <canonicalSessionName>",
+      "Installation is complete when the operator is ready and the person is talking to it",
+      "rig context get reference/getting-started.md#open-the-kernel-conversations",
+      "Opening a terminal is not permission to start or reset seats or provision accounts.",
+    ]) expect(reference, kept).toContain(kept);
+    expect(readFileSync(join(PACKAGED, "SKILL.md"), "utf8")).toContain("(references/installing-for-someone.md)");
+  });
+
+  it("keeps one procedure: the reference gives the same handoff commands as step 2 of the skill (PR #3238 review)", () => {
+    const skill = readFileSync(join(PACKAGED, "SKILL.md"), "utf8");
+    const reference = readFileSync(join(PACKAGED, "references/installing-for-someone.md"), "utf8");
+    // The exact handoff message and the attach-command rule must read the same in both, so the two can't drift apart again.
+    const handoff = "This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.";
+    expect(skill).toContain(handoff);
+    expect(reference).toContain(handoff);
+    expect(skill).toContain("Relay it exactly rather than composing one");
+    expect(reference).toContain("relay the command OpenRig printed, exactly, rather than composing one");
+    expect(reference).not.toContain("one complete connection and attachment command using the current Herdr endpoint");
+    for (const attach of ["`env -u TMUX` followed by", "`tmuxAttachCommand`", "`operator.agent`"]) {
+      expect(skill, attach).toContain(attach);
+      expect(reference, attach).toContain(attach);
+    }
+    // The note in SKILL.md doesn't call step 2 a different audience's version.
+    expect(skill).not.toContain("person-facing version");
+  });
+
   it("is not an openrig-core plugin skill", () => {
     expect(existsSync(resolve(import.meta.dirname, "../assets/plugins/openrig-core/skills/rigs"))).toBe(false);
   });
@@ -52,6 +92,8 @@ describe("the rigs skill installed globally", () => {
     try {
       const claude = join(root, ".claude/skills/rigs");
       expect(readFileSync(join(claude, "SKILL.md"))).toEqual(readFileSync(join(PACKAGED, "SKILL.md")));
+      expect(readFileSync(join(claude, "references/installing-for-someone.md")))
+        .toEqual(readFileSync(join(PACKAGED, "references/installing-for-someone.md")));   // the setup route reaches the whole procedure
       expect(readFileSync(join(claude, ".openrig-vendor-version"), "utf8")).toBe(`${getDaemonVersion()}\n`);
       expect(readFileSync(join(skillsSh, "SKILL.md"), "utf8")).toBe("# rigs, installed by skills.sh\n");
       expect(existsSync(join(skillsSh, ".openrig-vendor-version"))).toBe(false);
