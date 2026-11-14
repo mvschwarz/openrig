@@ -562,6 +562,9 @@ export interface RestoreNodeResult {
   /** Set only by an explicit selected-history startup: this launch was rolled back, and the seat's binding and sessions
    *  as they were before it were put back. */
   compensated?: true;
+  /** Set only by an explicit selected-history startup: this seat's restore returned before its launch, so no terminal was
+   *  started, no session registered and no resume sent. */
+  notStarted?: true;
   // L3: `attention_required` is set when the post-launch probe detects a
   // Claude resume-selection prompt. `operator_recovered` is the terminal
   // outcome after `restore.outcome_reconciled`; never produced directly by

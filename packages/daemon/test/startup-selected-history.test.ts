@@ -560,8 +560,8 @@ describe("selected-history startup", () => {
   }
 
   /** A's own older home, a correction for A after the snapshot, then B's (the seat's current conversation) home. */
-  async function appliedFixture(tag: string) {
-    const f = fixture();
+  async function appliedFixture(tag: string, podAware = false) {
+    const f = fixture(podAware);
     recordFor(f.node.id, 1, "/homes/codex-a", tokenA);
     const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
     recordFor(f.node.id, 2, "/homes/codex-a2", tokenA);
@@ -592,6 +592,55 @@ describe("selected-history startup", () => {
     expect(codexHomeOf(f.node.id)).toBe("/homes/codex-b");
     expect(db.prepare("SELECT original, home FROM seat_runtime_home_records WHERE revision = 5").get()).toMatchObject({ original: tokenB, home: "/homes/codex-b" });
     expect(JSON.stringify(result)).not.toContain(tokenA);
+  });
+
+  it("puts B's home back when the selected restore returns before its launch (continuity recovery owns the seat)", async () => {
+    const { f, refs } = await appliedFixture("restoring", true);
+    db.prepare("INSERT INTO continuity_state (pod_id, node_id, status) VALUES ('pod-selected', ?, 'restoring')").run(f.node.id);
+    const { body } = await review({ ...f, refs });
+    const create = vi.spyOn(setup.tmuxAdapter, "createSession");
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, any>;
+    expect(create).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, code: "failed", runtimeHome: { attempted: { revision: 4, appliedBeforeLaunch: true },
+      sessionRegistered: false, putBack: { home: "/homes/codex-b", revision: 5 } } });
+    expect(result.runtimeHome).not.toHaveProperty("notPutBack");
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-b");
+  });
+
+  it("puts B's home back when the orchestrator says the selected launch never started", async () => {
+    const { f, refs } = await appliedFixture("not-started");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode").mockResolvedValue({ ok: false, launched: [{ nodeId: f.node.id,
+      logicalId: "desk.lead", status: "failed", error: "The selected seat or history changed before launch.", notStarted: true }] });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+  });
+
+  it("puts B's home back when tmux reports no terminal was created, and keeps it when the creation is unconfirmed", async () => {
+    const { f, refs } = await appliedFixture("not-created");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.tmuxAdapter, "createSession").mockResolvedValue({ ok: false, code: "session_not_created", message: "fixture: no session" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+  });
+
+  it("keeps the selected home when tmux can't confirm whether the terminal was created", async () => {
+    const { f, refs } = await appliedFixture("unconfirmed-create");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.tmuxAdapter, "createSession").mockResolvedValue({ ok: false, code: "session_unconfirmed", message: "fixture: unconfirmed" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: null, notPutBack: "outcome_unknown" } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-a2");
+  });
+
+  it("keeps the selected home when the rolled-back blank's terminal stop isn't confirmed", async () => {
+    const { f, refs } = await appliedFixture("unconfirmed-stop");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(CodexResumeAdapter.prototype, "resume").mockResolvedValue({ ok: false, code: "resume_failed", message: "fixture native failed" });
+    vi.spyOn(setup.tmuxAdapter, "killSession").mockResolvedValue({ ok: false, code: "kill_failed", message: "fixture: stop unconfirmed" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ code: "awaiting-decision", runtimeHome: { attempted: { revision: 4 }, putBack: null, notPutBack: "outcome_unknown" } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-a2");
   });
 
   it("keeps the selected home after a native resume whose outcome isn't confirmed, and says it isn't known", async () => {

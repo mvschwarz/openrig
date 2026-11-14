@@ -653,9 +653,10 @@ record command with those values. It works for Claude Code and Codex seats.
   - the newest home recorded for the selected conversation, when a later record is for another one and the seat's home
     is still that later record's. The resume writes it back as a new revision for the selected conversation before it
     launches. It's put back, as a new revision, only when the launch is known to have been rolled back and the seat's
-    conversation is the one it had before: OpenRig undid the launch, or stopped before starting a terminal, so no session
-    was registered and no resume was sent. A terminal registered without a resume, or a launch that failed with an
-    error, isn't known to be undone, so the home stays. After a confirmed resume it stays, a Claude
+    conversation is the one it had before: OpenRig undid the launch and its terminal is known to be gone (none was
+    created, or tmux confirmed the stop), or it stopped before starting one, so no session was registered and no resume
+    was sent. A terminal registered without a resume, a creation or stop tmux couldn't confirm, or a launch that failed
+    with an error isn't known to be undone, so the home stays. After a confirmed resume it stays, a Claude
     conversation continued under a new id included, and when what the launch left isn't known it stays too and the
     result says so;
   - otherwise the seat's home as set, with no record revision for the selected conversation: when nothing was recorded,

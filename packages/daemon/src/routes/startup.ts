@@ -461,12 +461,14 @@ startupRoutes.post("/:rigId/nodes/:nodeId", async (c) => {
     const outcome = result.launched?.[0];
     const ok = result.ok && outcome?.status === "resumed" && outcome.sourceSessionId === refs.historySessionId
       && !!outcome.resultSessionId && !!launchedBindingId && beforeNative(outcome.resultSessionId, launchedBindingId);
-    // A written-back home is put back only when the launch is known to have been rolled back, and the seat's conversation
-    // is the one it had before: the orchestrator's compensation ran, or it returned no outcome for this seat, meaning it
-    // stopped before starting a terminal, so no session was registered and no resume was sent. A terminal registered
-    // without a resume, a thrown launch, a confirmed resume (a Claude conversation continued under a new id included) and
-    // an outcome that isn't known all keep it, and the result says which.
-    const rolledBack = !!appliedHome && !!homeRuntime && !ok && (!outcome || outcome.compensated === true)
+    // A written-back home is put back only when the launch is known to have been rolled back or never to have started, and
+    // the seat's conversation is the one it had before. Known means one of the orchestrator's positive facts: its
+    // compensation left no terminal (none created, or tmux confirmed the stop) and put the earlier state back, or it
+    // returned before the launch (notStarted, or no outcome for this seat), so no session was registered and no resume
+    // was sent. A terminal registered without a resume, an unconfirmed creation or stop, a thrown launch, a confirmed
+    // resume (a Claude conversation continued under a new id included) and an outcome that isn't known all keep it, and
+    // the result says which.
+    const rolledBack = !!appliedHome && !!homeRuntime && !ok && (!outcome || outcome.compensated === true || outcome.notStarted === true)
       && readRuntimeHomeState(repo(c).db, sessions(c), nodeId, homeRuntime).original === originalBefore;
     const putBack = appliedHome && homeRuntime && rolledBack
       ? seatLifecycleService(c).revertSelectedRuntimeHome({ nodeId, runtime: homeRuntime, rigId, logicalId: facts.node.logicalId,
