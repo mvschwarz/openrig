@@ -519,7 +519,7 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   const verb = drawn.map((line) => /Choose (?:a|the) conversation|Select a conversation/.test(line)).lastIndexOf(true);
   if (verb < 0) return false;
   const recentStart = Math.max(verb + 1, drawn.length - 30);
-  const lastOption = drawn.map((line, at) => at >= recentStart && /^\s*(?:[›»]\s*)?\d+\.\s+\S/.test(line)).lastIndexOf(true);
+  const lastOption = drawn.map((line, at) => at >= recentStart && /^\s*(?:[❯›»]\s*)?\d+\.\s+\S/.test(line)).lastIndexOf(true);
   if (lastOption < 0) return false;
   // A narrow pane wraps the last option's title onto the rows right under it, indented to the title's column; such a
   // row is the option's text even when it reads like Claude's header ("     ▐▛███▜▌   Claude Code v2.1.322 twice").
@@ -576,10 +576,11 @@ function isClaudeVersionHeader(line: string): boolean {
  *  ("Accessing workspace:") or a mark of the gated-grants backstop, with no reply of Claude's or input frame between
  *  them, and above the dialog's end. The dialog ends at its last footer ("Enter to confirm · Esc to cancel") before a
  *  reply or an input frame. A row with a footer below it is inside; a row with no footer below it is inside while the
- *  dialog is still being drawn (no footer yet), and outside once a footer above it closed the dialog: that is where
- *  Claude's real header sits. The dialog's text can read like an option or the footer ("No, exit", "Enter to confirm
- *  · Esc to cancel": a path or a title that a narrow pane wraps), and that text sits above the real footer, so it never
- *  ends the dialog. */
+ *  dialog is still being drawn, and outside once the footer of the dialog's options block, above the row, closed it:
+ *  that is where Claude's real header sits. The dialog's text can read like an option or the footer ("No, exit",
+ *  "Enter to confirm · Esc to cancel": a path, a title or a grant that a narrow pane wraps), and that text sits above
+ *  the real options and footer, so it never ends the dialog. A path that forges both an option and the footer on
+ *  consecutive rows, captured before the real footer is drawn, is a known limit of a textual boundary. */
 function insideClaudeTrustDialog(rows: string[], at: number): boolean {
   const isReply = (row: string) => /^[●⏺]/.test(row);
   const isFooter = (row: string) => row.trim() === CLAUDE_TRUST_FOOTER;
@@ -595,7 +596,12 @@ function insideClaudeTrustDialog(rows: string[], at: number): boolean {
     if (isReply(row) || (CLAUDE_INPUT_RULE.test(row) && /^\s*❯/.test(rows[index + 1] ?? ""))) break;
     if (isFooter(row)) return true;
   }
-  return !rows.slice(heading + 1, at).some(isFooter);
+  // No footer below: the dialog is still being drawn, unless a footer above the row closed it. Only the footer of the
+  // dialog's own options block closes it, so it counts only below one of its options ("Yes, I trust this folder", which
+  // both the plain prompt and the backstop draw); a row of the dialog's text equal to the footer, above the options,
+  // does not.
+  const option = rows.findIndex((row, index) => index > heading && index < at && CLAUDE_TRUST_OPTION_ROW.exec(row)?.[2] === CLAUDE_TRUST_YES);
+  return option < 0 || !rows.slice(option + 1, at).some(isFooter);
 }
 
 // Claude's version header row: "Claude Code v<x.y.z>" at column 0, or after Claude's logo or a box border (with any

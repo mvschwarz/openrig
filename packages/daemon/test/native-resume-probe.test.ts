@@ -1676,6 +1676,25 @@ describe("Claude gated grants backstop (#2820 item 2)", () => {
     expect(result).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
   });
 
+  it("a dialog still being drawn whose text has a row equal to the footer above a header-like row is not closed by it", () => {
+    // A1b: the plain prompt with its options drawn and its real footer not yet; the path wraps onto the footer's words
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const forged = plain.replace("<lab>/simples/repo/cadeiras/rig/seat",
+      ["/tmp/long", " Enter to confirm · Esc to cancel", " ─Claude Code v2.1.322 lab"].join("\n"));
+    const drawing = forged.replace(/\n\s*Enter to confirm · Esc to cancel\s*$/, "\n");
+    expect(drawing.match(/Enter to confirm/g)).toHaveLength(1);
+    expect(probe(drawing)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    expect(probe(forged)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+    const closed = [forged, "", " ▐▛███▛█▄╱✦  Claude Code v2.1.323", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(closed)).toMatchObject({ status: "resumed" });
+    // A1e: a backstop captured before its options, with a grant row equal to the footer above a header-like grant
+    const grants = capture.gatedGrantsScreen.flatMap(line => line.includes("Bash(ls:*)")
+      ? ["   Enter to confirm · Esc to cancel", " ─Claude Code v2.1.322 lab"] : [line]);
+    const partial = grants.slice(0, grants.indexOf(" ─Claude Code v2.1.322 lab") + 1);
+    expect(probe([...partial, "", "❯ "].join("\n"))).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
   it("a complete backstop whose grant reads 'Claude Code v', with Claude's real header drawn below it, is history (closed-dialog control)", () => {
     const grants = capture.gatedGrantsScreen.map(line => line.includes("Bash(ls:*)") ? "   Bash(echo Claude Code v*)" : line);
     expect(probe(grants.join("\n"))).toMatchObject(gate);
@@ -1702,6 +1721,19 @@ describe("Claude's version header is read by its shape (#2820 follow-up, maintai
   ])("a legacy chooser whose last option wraps a title that starts with %s, reading like the header, still reads as the chooser", (_case, wrapped) => {
     const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
       "  2. why does my pane show", wrapped, "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it("a legacy chooser whose last option wraps a 'Claude Code v2.1.300' title less indented than the title still reads as the chooser", () => {
+    // only the header's shape tells this row apart: it is not indented to the title's column
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo (modified 2h ago)",
+      "  2. read the release notes for", "    Claude Code v2.1.300 upgrade notes", "", "Enter a number, or press q to cancel."].join("\n");
+    expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+  });
+
+  it("a legacy chooser whose focused last option (❯) wraps a title that starts with Claude's logo still reads as the chooser", () => {
+    const chooser = ["Choose a conversation to resume:", "", "  1. project-foo", "  2. project-bar",
+      "❯ 3. why does my pane show", "     ▐▛███▜▌   Claude Code v2.1.322 twice", "", "Enter a number, or press q to cancel."].join("\n");
     expect(probe(chooser)).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
   });
 
