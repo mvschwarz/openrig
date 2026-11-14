@@ -707,7 +707,7 @@ function buildSliceCloseCommand(): Command {
                 { cause: error },
               );
             }
-            if (error === readBackMismatch) {
+            if (error instanceof ScopeCliError && error === readBackMismatch) {
               throw new ScopeCliError({
                 fact: error.fact,
                 consequence: "In-place closure rolled back: every file it changed was restored, so readers cannot disagree about this slice's status.",
