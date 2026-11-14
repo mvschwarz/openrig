@@ -6,6 +6,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unli
 import { resolveCodexDbPaths } from "./codex-thread-id.js";
 import { declaredRuntimeHomes } from "./seat-runtime-home.js";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
+import { hasPiUsageEntriesTable } from "./pi-usage-entries-store.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import {
   contextUsageDirectory,
@@ -189,6 +190,50 @@ export class ContextUsageStore {
       threadId,
       transcriptPath: thread.rollout_path,
     });
+  }
+
+  /** Read a Pi seat's own spend from the usage entries its runner already posts, and normalize it. Pi posts no
+   *  context-window sample, so the window size is unknown here and usedPercentage stays null: the token
+   *  threshold and the burn series work from the cumulative counters, while a percent threshold honestly
+   *  cannot (absent, never invented). Only `origin = 'own'` entries count, and only the seat's CURRENT Pi
+   *  session: a fork's copied entries and an earlier launch are history, not this occupant's context. */
+  readPiUsageAndNormalize(input: { seatSession: string }): ContextUsage {
+    if (!hasPiUsageEntriesTable(this.db)) return this.unknownUsage("no_data");
+    const row = this.db
+      .prepare(
+        `SELECT pi_session_id AS piSessionId,
+                SUM(input_tokens + cache_read_tokens + cache_write_tokens) AS totalInput,
+                SUM(output_tokens) AS totalOutput,
+                MAX(entry_timestamp) AS sampledAt
+           FROM pi_usage_entries
+          WHERE seat_session = ? AND origin = 'own'
+            AND pi_session_id = (
+              SELECT pi_session_id FROM pi_usage_entries
+               WHERE seat_session = ? AND origin = 'own'
+               ORDER BY entry_timestamp DESC, id DESC LIMIT 1)
+          GROUP BY pi_session_id`,
+      )
+      .get(input.seatSession, input.seatSession) as
+        | { piSessionId: string; totalInput: number | null; totalOutput: number | null; sampledAt: string | null }
+        | undefined;
+    if (!row?.piSessionId || row.sampledAt === null) return this.unknownUsage("no_data");
+    return {
+      availability: "known",
+      reason: null,
+      source: "pi_usage_entries",
+      usedPercentage: null,
+      remainingPercentage: null,
+      contextWindowSize: null,
+      totalInputTokens: row.totalInput ?? 0,
+      totalOutputTokens: row.totalOutput ?? 0,
+      currentUsage: null,
+      transcriptPath: null,
+      sessionId: row.piSessionId,
+      sessionName: input.seatSession,
+      sampledAt: row.sampledAt,
+      fresh: this.isFresh(row.sampledAt),
+      clientCostEstimateUsd: null,
+    };
   }
 
   /** Resolve an explicitly selected native thread, even before its first token count. */
