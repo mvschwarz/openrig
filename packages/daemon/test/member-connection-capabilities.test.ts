@@ -1,0 +1,136 @@
+// The member-connection.v1 declarations: what each delivery route says it supports, read from the running daemon's
+// route and from the contract module the consumers read.
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type Database from "better-sqlite3";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { resolveMemberConnection } from "../src/domain/member-connection.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import type { LoadResult } from "../src/domain/gateway/human-registry.js";
+import { ROUTE_DECLARATIONS, declaredCapabilities, memberConnection, type ConnectionCapabilities } from "../src/domain/connection-contract.js";
+
+const dbs: Database.Database[] = [];
+afterEach(() => {
+  for (const db of dbs.splice(0)) db.close();
+  vi.restoreAllMocks();
+});
+
+const flatten = (c: ConnectionCapabilities) => Object.values(c).flatMap((group) => Object.values(group));
+
+describe("declared capabilities", () => {
+  it("declares Codex's queue command as a route that isn't armed, and the typed route as armed", () => {
+    expect(ROUTE_DECLARATIONS.map((d) => [d.route, d.armed])).toEqual([["typed", true], ["codex-queue", false], ["hosted-trigger", true], ["gateway", true]]);
+  });
+
+  it("declares in the design's four groups, with what only Claude Code's screen gives limited to it", () => {
+    const claude = declaredCapabilities("typed", "claude-code"), codex = declaredCapabilities("typed", "codex");
+    expect(Object.keys(claude)).toEqual(["observe", "control", "nativeIdentity", "continuity"]);
+    expect(claude.continuity.restorePacketConfirmation).toBe("supported");
+    expect(codex.continuity.restorePacketConfirmation).toBe("not-supported");
+    expect(codex.continuity.managedCompaction).toBe("not-supported");
+    // No route correlates a turn start to a delivery yet.
+    expect(ROUTE_DECLARATIONS.flatMap((d) => Object.values(d.capabilities)).map((c) => c.observe.turnStart)).not.toContain("supported");
+    // Any other runtime: typing works; what it would need to read its screen isn't claimed.
+    expect(declaredCapabilities("typed", "some-new-runtime")).toMatchObject({ control: { submit: "supported" }, observe: { dialog: "not-supported" } });
+  });
+
+  it("a seat with no live terminal keeps its declaration, with what needs the terminal unavailable, never supported or idle", () => {
+    const stopped = memberConnection("dev-impl@r", { kind: "seat", runtime: "codex", live: false });
+    expect(stopped).toMatchObject({ route: "typed", runtime: "codex", reason: "it has no session recorded as current",
+      capabilities: { control: { submit: "unavailable" }, observe: { dialog: "unavailable" }, nativeIdentity: { resume: "supported" } } });
+    const nobody = memberConnection("ghost@r", { kind: "none", reason: "no one has it" });
+    expect(nobody).toMatchObject({ route: null, reason: "no one has it" });
+    expect(new Set(flatten(nobody.capabilities))).toEqual(new Set(["unknown"]));
+  });
+});
+
+describe("GET /api/member-connection/capabilities", () => {
+  function setup() {
+    const db = createFullTestDb();
+    dbs.push(db);
+    // The running daemon's queue, with nobody registered yet: a readable registry with no one in it.
+    const queueRepo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => ({ ok: false, error: "none", noHumans: true }) });
+    const app = createTestApp(db, { appDeps: { queueRepo } });
+    const get = async (query = "") => {
+      const res = await app.app.request(`/api/member-connection/capabilities${query}`);
+      return { status: res.status, body: await res.json() as Record<string, any> };
+    };
+    return { ...app, get };
+  }
+
+  it("answers every route's declaration, and the member an address names: its route, runtime and capabilities", async () => {
+    const t = setup();
+    const rig = t.rigRepo.createRig("team");
+    const live = t.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    t.sessionRegistry.updateStatus(t.sessionRegistry.registerSession(live.id, "dev-impl@team").id, "running");
+    t.sessionRegistry.updateBinding(live.id, { tmuxSession: "dev-impl@team", tmuxPane: "%1" });
+    const stopped = t.rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
+    t.sessionRegistry.updateStatus(t.sessionRegistry.registerSession(stopped.id, "dev-qa@team").id, "exited");
+
+    const all = await t.get();
+    expect(all.status).toBe(200);
+    expect(all.body).toEqual({ contract: "member-connection.v1", routes: JSON.parse(JSON.stringify(ROUTE_DECLARATIONS)) });
+
+    expect((await t.get("?session=dev-impl@team")).body.member).toEqual({ member: "dev-impl@team", route: "typed", runtime: "claude-code",
+      capabilities: declaredCapabilities("typed", "claude-code") });
+    expect((await t.get("?session=dev-qa@team")).body.member).toMatchObject({ route: "typed", runtime: "codex",
+      capabilities: { control: { submit: "unavailable" } }, reason: "it has no session recorded as current" });
+    expect((await t.get("?session=human@host")).body.member).toMatchObject({ route: "gateway" });
+    const unknown = (await t.get("?session=nobody@nowhere")).body.member;
+    expect(unknown).toMatchObject({ route: null, runtime: null, reason: expect.stringContaining("no seat, hosted member or registered person") });
+    expect(new Set(flatten(unknown.capabilities))).toEqual(new Set(["unknown"]));
+  });
+});
+
+describe("resolveMemberConnection: a person is one the registry resolves, never an address's spelling", () => {
+  const ana = { entityId: "ana", class: "human" as const, displayName: "Ana", address: "ana@external", connectorBindings: [],
+    prefs: { deliveryClass: "A" as const } };
+  function resolver(registry: (() => LoadResult) | null) {
+    const db = createFullTestDb();
+    dbs.push(db);
+    // A recorded seat whose name is also a person's canonical spelling, when `ana` is registered.
+    const rigRepo = new RigRepository(db), sessions = new SessionRegistry(db);
+    const seat = rigRepo.addNode(rigRepo.createRig("team").id, "ana", { runtime: "claude-code" });
+    sessions.updateStatus(sessions.registerSession(seat.id, "ana@team").id, "running");
+    sessions.updateBinding(seat.id, { tmuxSession: "ana@team", tmuxPane: "%1" });
+    const queue = registry === null ? undefined
+      : new QueueRepository(db, new EventBus(db), { loadHumanRegistry: registry, isHostedMember: (address) => address === "assistant@team" });
+    return (member: string) => resolveMemberConnection(db, queue, member);
+  }
+  const unknown = (reason: string) => expect.objectContaining({ route: null, reason: expect.stringContaining(reason) });
+
+  it("an @external address nobody registered is unknown, not a person; a registered one is reached through the gateway", () => {
+    const empty = resolver(() => ({ ok: true as const, entities: [] }));
+    expect(empty("not-registered@external")).toEqual(unknown("no seat, hosted member or registered person"));
+    const registered = resolver(() => ({ ok: true as const, entities: [ana] }));
+    expect(registered("ana@external")).toMatchObject({ route: "gateway", capabilities: { control: { submit: "not-applicable" } } });
+    expect(registered("bob@external")).toEqual(unknown("no seat, hosted member or registered person"));
+    expect(registered("assistant@team")).toMatchObject({ route: "hosted-trigger",
+      capabilities: { observe: { dialog: "not-applicable" }, control: { submit: "not-applicable" } } });
+  });
+
+  it("with no registry to read, whether a person has the address is unknown; the reserved terminal person's seat is still one", () => {
+    const unreadable = resolver(() => ({ ok: false, error: "registry unreadable" }) as LoadResult);
+    expect(unreadable("ana@external")).toEqual(unknown("the person registry couldn't be read"));
+    const noQueue = resolver(null);
+    expect(noQueue("ana@external")).toEqual(unknown("the person registry couldn't be read"));
+    expect(noQueue("human@host")).toMatchObject({ route: "gateway" });
+  });
+
+  it("with no registry to read, a canonical spelling a person could have is unknown, never the seat or hosted member with that name", () => {
+    for (const lookup of [resolver(() => ({ ok: false, error: "registry unreadable" }) as LoadResult), resolver(null)]) {
+      expect(lookup("ana@team")).toEqual(unknown("the person registry couldn't be read"));
+      expect(lookup("assistant@team")).toEqual(unknown("the person registry couldn't be read"));
+      expect(lookup("nobody@team")).toEqual(unknown("the person registry couldn't be read"));
+    }
+    // Readable, the same names resolve: a person first, as the queue does, then the hosted member and the seat.
+    const registered = resolver(() => ({ ok: true as const, entities: [ana] }));
+    expect(registered("ana@team")).toMatchObject({ route: "gateway" });
+    expect(registered("assistant@team")).toMatchObject({ route: "hosted-trigger" });
+    const nobodyRegistered = resolver(() => ({ ok: false, error: "none", noHumans: true }) as LoadResult);
+    expect(nobodyRegistered("ana@team")).toMatchObject({ route: "typed", runtime: "claude-code" });
+    expect(nobodyRegistered("ana@external")).toEqual(unknown("no seat, hosted member or registered person"));
+  });
+});

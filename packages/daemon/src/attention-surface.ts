@@ -28,8 +28,11 @@ export interface AttentionItem {
   /** A queue request's decision revision: the same opaque token its single-row read returns and a settling act can name. */
   revision?: string;
   /** The requests this is about, by ID: a parked row is itself the request; an ask is about the open rows blocked on it
-   *  (at most 100). Empty when no request is recorded as waiting on it. */
+   *  (at most 100). Empty when no request is recorded as waiting on it, which isn't proof that it's about nothing: a
+   *  request that names it only in its text isn't counted. */
   about?: string[];
+  /** Present when more than 100 open rows are blocked on this ask: `about` is the newest 100, not all of them. */
+  aboutTruncated?: true;
 }
 export interface AttentionDetail {
   item: AttentionItem;

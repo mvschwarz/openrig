@@ -349,6 +349,7 @@ function withoutDaemonLinkedRows<T>(row: T): T {
   delete fields.successorsTruncated;
   delete fields.successorNote;
   delete fields.answers;
+  delete fields.answersFrom;
   return fields as T;
 }
 

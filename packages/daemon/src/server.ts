@@ -39,6 +39,8 @@ import type { SelfAttachService } from "./domain/self-attach-service.js";
 import { rigsRoutes } from "./routes/rigs.js";
 import { OPERATION_CONTRACT, OPERATION_KINDS } from "./domain/operation-correlation.js";
 import { teamOperationsCapabilities } from "./domain/team-operations.js";
+import { MEMBER_CONNECTION_CONTRACT, ROUTE_DECLARATIONS } from "./domain/connection-contract.js";
+import { resolveMemberConnection } from "./domain/member-connection.js";
 import { sessionsRoutes, nodesRoutes, sessionAdminRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
@@ -798,6 +800,13 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/rigs", rigsRoutes);
   app.get("/api/operations/capabilities", (c) => c.json({ contract: OPERATION_CONTRACT, kinds: OPERATION_KINDS }));
   app.get("/api/team-operations/capabilities", (c) => c.json(teamOperationsCapabilities()));
+  // What each delivery route declares it supports, and with ?session=, the route and declaration of the member that
+  // address names.
+  app.get("/api/member-connection/capabilities", (c) => {
+    const member = c.req.query("session")?.trim();
+    return c.json({ contract: MEMBER_CONNECTION_CONTRACT, routes: ROUTE_DECLARATIONS,
+      ...(member ? { member: resolveMemberConnection(deps.rigRepo.db, deps.queueRepo, member) } : {}) });
+  });
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);

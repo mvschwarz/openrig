@@ -186,3 +186,139 @@ export function readWakeOutcome(recorded: string | null | undefined): WakeOutcom
   if (recorded.startsWith("failed:")) return at("not-delivered", "terminal");
   return at("unknown", null);
 }
+
+/** A delivery route as the member-connection contract names it. `typed` is OpenRig typing into the member's terminal
+ *  (what `WakeRoute` calls `terminal`); `codex-queue` is Codex's own queue command, a route that doesn't type. */
+export type ConnectionRoute = "typed" | "codex-queue" | "hosted-trigger" | "gateway";
+
+/** What a connection says about one capability. `unavailable`: the connection has it, but it can't be used for this member
+ *  now (a terminal seat with no session recorded as current). `not-applicable`: it means nothing on this route (a dialog check on a webhook).
+ *  A client reads an absent key as `unknown`, never as `not-supported`, idle or success. */
+export type Declared = "supported" | "not-supported" | "unavailable" | "not-applicable" | "unknown";
+
+/** A connection's declared capabilities, in the design's four groups. Each says what this build of OpenRig can do on the
+ *  route, not what the member's program could do. */
+export interface ConnectionCapabilities {
+  observe: {
+    /** A dialog or picker on the member's screen is read before typing, so a send doesn't answer it. */
+    dialog: Declared;
+    /** A turn's start is correlated to the delivery that caused it. */
+    turnStart: Declared;
+  };
+  control: {
+    /** OpenRig can submit input for the member (type and press Enter). */
+    submit: Declared;
+  };
+  nativeIdentity: {
+    /** The program's own session id is captured. */
+    sessionId: Declared;
+    /** A stopped member can be resumed into its own conversation. */
+    resume: Declared;
+  };
+  continuity: {
+    /** OpenRig runs the member's compaction when its context fills. */
+    managedCompaction: Declared;
+    /** A handover's restore packet is seen leaving the member's input box, not only typed and submitted. */
+    restorePacketConfirmation: Declared;
+    /** A handover can fork the member's conversation. */
+    fork: Declared;
+  };
+}
+
+/** One route's declaration. A route that isn't armed is declared but not used: nothing is delivered on it until a
+ *  setting arms it. */
+export interface RouteDeclaration {
+  route: ConnectionRoute;
+  armed: boolean;
+  /** Capabilities by runtime for the typed route (`*` is any other runtime); one set for the others. */
+  capabilities: Record<string, ConnectionCapabilities>;
+}
+
+const caps = (dialog: Declared, turnStart: Declared, submit: Declared, sessionId: Declared, resume: Declared,
+  managedCompaction: Declared, restorePacketConfirmation: Declared, fork: Declared): ConnectionCapabilities =>
+  ({ observe: { dialog, turnStart }, control: { submit }, nativeIdentity: { sessionId, resume },
+    continuity: { managedCompaction, restorePacketConfirmation, fork } });
+
+/** What this build declares on each route. Turn starts aren't correlated to deliveries yet on any route. Managed compaction
+ *  and restore-packet confirmation read Claude Code's own screen, so other runtimes don't have them. Codex's queue command
+ *  is declared and not armed: nothing uses it until a route setting does, and what it would support is unknown until it's built. A hosted member's trigger and a person's
+ *  gateway carry no terminal, so the terminal capabilities don't apply to them. */
+export const ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
+  { route: "typed", armed: true, capabilities: {
+    "claude-code": caps("supported", "not-supported", "supported", "supported", "supported", "supported", "supported", "supported"),
+    codex: caps("supported", "not-supported", "supported", "supported", "supported", "not-supported", "not-supported", "supported"),
+    "*": caps("not-supported", "not-supported", "supported", "unknown", "unknown", "not-supported", "not-supported", "unknown"),
+  } },
+  { route: "codex-queue", armed: false, capabilities: {
+    codex: caps("not-applicable", "unknown", "unknown", "unknown", "unknown", "unknown", "not-applicable", "unknown"),
+  } },
+  { route: "hosted-trigger", armed: true, capabilities: {
+    "*": caps("not-applicable", "unknown", "not-applicable", "unknown", "unknown", "not-applicable", "not-applicable", "not-applicable"),
+  } },
+  { route: "gateway", armed: true, capabilities: {
+    "*": caps("not-applicable", "not-applicable", "not-applicable", "not-applicable", "not-applicable", "not-applicable", "not-applicable", "not-applicable"),
+  } },
+];
+
+/** The capabilities this build declares for a route and runtime: the runtime's own entry, else the route's `*` entry,
+ *  else every capability unknown. */
+export function declaredCapabilities(route: ConnectionRoute, runtime: string | null | undefined): ConnectionCapabilities {
+  const declared = ROUTE_DECLARATIONS.find((d) => d.route === route)?.capabilities;
+  return (runtime ? declared?.[runtime] : undefined) ?? declared?.["*"] ?? UNKNOWN_CAPABILITIES;
+}
+
+const UNKNOWN_CAPABILITIES = caps("unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown");
+
+/** One member's connection as the daemon resolves it: the route it's reached on and its runtime, with that route's
+ *  declaration. `unavailable` marks what the route has but this member can't use now. Null route: the address names no
+ *  member this daemon can reach, and every capability is unknown. */
+export interface MemberConnection {
+  member: string;
+  route: ConnectionRoute | null;
+  runtime: string | null;
+  capabilities: ConnectionCapabilities;
+  /** Why the route is null, or why a capability is unavailable. */
+  reason?: string;
+}
+// A declaration says what a route can do, never that the member is ready now: `live` below is what OpenRig has recorded
+// as the seat's current session, not an observed pane or process.
+
+export function memberConnection(member: string, found: { kind: "person" } | { kind: "hosted" }
+  | { kind: "seat"; runtime: string | null; /** A session recorded as current, not an observed pane. */ live: boolean }
+  | { kind: "none"; reason: string }): MemberConnection {
+  if (found.kind === "person") return { member, route: "gateway", runtime: null, capabilities: declaredCapabilities("gateway", null) };
+  if (found.kind === "hosted") return { member, route: "hosted-trigger", runtime: null, capabilities: declaredCapabilities("hosted-trigger", null) };
+  if (found.kind === "none") return { member, route: null, runtime: null, capabilities: UNKNOWN_CAPABILITIES, reason: found.reason };
+  const declared = declaredCapabilities("typed", found.runtime);
+  if (found.live) return { member, route: "typed", runtime: found.runtime, capabilities: declared };
+  // A seat with no session recorded as current keeps its declaration; what needs its terminal can't be used until it has one.
+  const live = (value: Declared): Declared => value === "supported" ? "unavailable" : value;
+  return { member, route: "typed", runtime: found.runtime, reason: "it has no session recorded as current",
+    capabilities: { ...declared, observe: { dialog: live(declared.observe.dialog), turnStart: declared.observe.turnStart },
+      control: { submit: live(declared.control.submit) } } };
+}
+
+/** What a typed send's input reached, as the transport reads it from the send's result (`writtenFact`). */
+export type WrittenFact = "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
+
+/** What a typed send's own result says happened to it, in the shared words, read from what its input reached (`written`,
+ *  the transport's own reading) so the two can't disagree. Submitted is `accepted` (with `renderVerified` when the screen
+ *  showed it). Held by a guard is `held`. Text typed without Enter on a send that otherwise succeeded (a prompt answer
+ *  sent without one) is `unknown`: whether the prompt took it isn't known. Input that may have landed on a failed send is
+ *  `failed-effect-unknown`, and none written is `not-delivered`. Anything else is `unknown`. None of them means the
+ *  member read the work. */
+export function readSendOutcome(result: { ok: boolean; outcome?: string; verified?: boolean }, written: WrittenFact):
+  ReportedFact<DeliveryFact> & { route: "typed"; renderVerified?: true } {
+  const at = (fact: DeliveryFact, extra: { renderVerified?: true } = {}) => ({ fact, reporter: "openrig-observed" as const, route: "typed" as const, ...extra });
+  if (result.outcome === "retained") return at("held");
+  switch (written) {
+    case "submitted":
+    case "submit_only":
+      return result.outcome === "delivered" && result.verified === true ? at("accepted", { renderVerified: true }) : at("accepted");
+    case "text_only": return at(result.ok ? "unknown" : "failed-effect-unknown");
+    case "uncertain":
+    case "text_submit_unknown": return at("failed-effect-unknown");
+    case "none": return at("not-delivered");
+    default: return at("unknown");
+  }
+}

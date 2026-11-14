@@ -1574,8 +1574,10 @@ export function queueRoutes(): Hono {
       ...item,
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
-      // The answer rows returned to this row, read by their link rather than their text; empty when none came back.
+      // The answer rows returned to this row, read by their link rather than their text; empty when none came back here.
+      // Only this daemon's rows are read: an answer another host holds isn't in them, so empty isn't proof of none.
       answers: repo.answersForAsk(qitemId),
+      answersFrom: "this-daemon",
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,
