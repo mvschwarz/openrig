@@ -1474,7 +1474,9 @@ export class QueueRepository {
   }
 
   /** #2895 (a): the envelope meta for a sender `rig send` can't reach; empty (today's bytes) otherwise or when unwired. */
-  private senderReach(sender: string | undefined): { senderReachable?: false } {
+  private senderReach(sender: string | undefined): { senderReachable?: false; senderRegistered?: false } {
+    // #3268: an @external sender's reply is a queue row to it, so name that command only when the queue would accept it.
+    if (sender?.endsWith("@external") && !this.canRecordDestination(sender)) return { senderRegistered: false };
     return sender && this.isSenderSendable && !this.isSenderSendable(sender) ? { senderReachable: false } : {};
   }
 

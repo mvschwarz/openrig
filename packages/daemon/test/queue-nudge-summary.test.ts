@@ -11,12 +11,18 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import type { QueueNudgeTransport } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { makeQueueRecordingCheck, makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
+import type { HumanFragment, LoadResult } from "../src/domain/gateway/human-registry.js";
 import {
   QUEUE_NUDGE_SUMMARY_MAX_CHARS,
   renderQueueHandoffNudge,
 } from "../src/domain/queue-nudge-text.js";
 
-function makeHarness(opts?: { isSenderSendable?: (sender: string) => boolean }) {
+function makeHarness(opts?: {
+  isSenderSendable?: (sender: string) => boolean;
+  canRecordDestination?: (sessionRef: string) => boolean;
+  loadHumanRegistry?: () => LoadResult;
+}) {
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
   const calls: Array<{ session: string; text: string }> = [];
@@ -115,6 +121,28 @@ describe("queue wake nudge carries the stored summary", () => {
       const row = await h.repo.create({ sourceSession: "alex@external", destinationSession: "dev@rig", body: "can you check the build?" });
       await vi.waitFor(() => expect(h.calls).toHaveLength(1));
       expect(h.calls[0]!.text.split("\n").at(-1)).toBe(`↩ Reply if needed: rig queue create --destination alex@external --human-intent update --reply-to ${row.qitemId} --summary "<one line>" --body "..." --verify`);
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it("#3268: a message from an @external source that isn't registered offers no reply command the queue would refuse", async () => {
+    const registry = (): LoadResult => ({ ok: true, entities: [{ entityId: "alex", address: "alex@external" } as HumanFragment] });
+    const h = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry, sharedChannels: () => [] })),
+      loadHumanRegistry: registry,
+    });
+    try {
+      const row = await h.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      const envelope = h.calls[0]!.text;
+      expect(envelope.split("\n").at(-1)).toBe("↩ No reply route: some-team@external isn't a registered person (rig gateway human list lists who's registered).");
+      expect(envelope).not.toContain("rig queue create");
+      // The command the old hint named is the one the queue refuses.
+      await expect(h.repo.create({ sourceSession: "dev@rig", destinationSession: "some-team@external", humanIntent: "update",
+        replyTo: row.qitemId, summary: "s", body: "b", nudge: false })).rejects.toMatchObject({ code: "unknown_destination_rig" });
+      // A registered person keeps the reply hint.
+      const registered = await h.repo.create({ sourceSession: "alex@external", destinationSession: "dev@rig", body: "hi" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(2));
+      expect(h.calls[1]!.text.split("\n").at(-1)).toBe(`↩ Reply if needed: rig queue create --destination alex@external --human-intent update --reply-to ${registered.qitemId} --summary "<one line>" --body "..." --verify`);
     } finally { await settle(); h.db.close(); }
   });
 
