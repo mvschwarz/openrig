@@ -96,6 +96,28 @@ describe("cursor-bound composer input", () => {
     expect(inspectComposerInput(snapshot, "claude-code").state).toBe(body ? "text" : "empty");
   });
 
+  // D04 at full width: Claude 2.1.322 and 2.1.323 draw the paste hint and an auto-update failure on one footer row
+  // (200x50, as banked), where an 80-column pane gives the failure its own clipped row (above).
+  it.each([
+    "✘ Auto-update failed · Run claude doctor",
+    "✘ Auto-update failed: no write permission to npm prefix · Run claude doctor",
+    "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code",
+    "✘ Auto-update failed · Try claude doctor or cd ~/.claude/local && npm update @anthropic-ai/claude-code",
+  ])("reads the paste hint and %s on one footer row", warning => {
+    const frame = (body: string, right = warning) => {
+      const snapshot = claude(body, undefined, 200);
+      snapshot.screen = snapshot.screen.replace("? for shortcuts", `  paste again to expand${" ".repeat(97)}${right}`);
+      return snapshot;
+    };
+    expect(inspectComposerInput(frame(""), "claude-code").state).toBe("empty");
+    expect(inspectComposerInput(frame("person's draft"), "claude-code").state).toBe("text");
+    // Only a known failure shares the row; a near miss, or one clipped at this width, keeps the input unknown.
+    for (const nearMiss of [warning + " now", warning.replace("failed", "succeeded"), warning.replace("doctor", "doctors"),
+      "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…"]) {
+      expect(inspectComposerInput(frame("", nearMiss), "claude-code")).toMatchObject({ state: "unknown", unknownReason: "unrecognized_composer" });
+    }
+  });
+
   it("keeps near misses unknown below the footer and warning text inside a draft", () => {
     const warning = "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…";
     for (const nearMiss of [warning + " now", warning.replace("doctor", "doctors"), warning.replace("claude-c…", "other…")]) {

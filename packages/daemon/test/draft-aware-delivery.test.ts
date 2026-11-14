@@ -389,6 +389,31 @@ describe("current draft-aware delivery through the real transport", () => {
       expect(f.bodies.a).toBe(text);
     });
 
+  // D04 at full width (Claude 2.1.322 and 2.1.323, 200x50, as banked): the paste hint and the auto-update failure share
+  // the footer row under an empty input box, before any paste of ours.
+  const wideFooter = `  paste again to expand${" ".repeat(97)}✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code`;
+  const underWideFooter = (f: ReturnType<typeof fixture>) => vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+    const snapshot = frame(f.bodies.a ?? "");
+    snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${wideFooter}\n`);
+    return snapshot;
+  });
+
+  it("delivers once to an empty input box under the full-width paste hint and auto-update failure row", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    underWideFooter(f);
+    const result = await f.send("wide-footer", "next work", { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["next work"]);
+  });
+
+  it("still holds a person's draft under the same full-width footer row", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "a person's draft";
+    underWideFooter(f);
+    expect(await f.send("wide-footer-draft", "next work")).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe("a person's draft");
+  });
+
   it.each(Array.from({ length: nativePaste.afterSamples }, (_, i) => i + 1))("submits its retained native paste across the footer change (sample %i)", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const text = Array.from({ length: 71 }, (_, i) => `delivery line ${i}`).join("\n");
