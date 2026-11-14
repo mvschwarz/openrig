@@ -220,6 +220,8 @@ checkboxes do not accept an item under the selected proof policy.
           ...(opts.subject ? { subject: { kind: opts.subject.slice(0, subjectAt), ref: opts.subject.slice(subjectAt + 1), ...(opts.comparison ? { comparison: opts.comparison } : {}) } } : {}),
           expectedRevision: opts.revision ?? item.revision, expectedPrevious: item.judgment?.id ?? null,
           operationId: opts.operationId, replace: opts.replace === true, ...(opts.project ? { project: opts.project } : {}),
+          ...((view.project || view.selection) ? { expectedProject: (view.project as { id?: string } | undefined)?.id ?? null } : {}),
+          ...((view.selection as { missionsRoot?: string } | undefined)?.missionsRoot ? { expectedMissionsRoot: (view.selection as { missionsRoot: string }).missionsRoot } : {}),
           // Pin the project root the prepared read resolved; the daemon refuses (409 project_changed) if it moved.
           ...((view.project as { root?: string } | undefined)?.root ? { projectRoot: (view.project as { root: string }).root } : {}) };
         const result = await response(await c.post("/api/proof/judge", body), projectSelected(opts.project, scope));
@@ -272,7 +274,7 @@ checkboxes do not accept an item under the selected proof policy.
           });
         }
         const parentOpts = (command.parent?.opts() ?? {}) as { workspace?: string };
-        const missionsRoot = resolveMissionsRoot({ override: parentOpts.workspace });
+        const missionsRoot = resolveMissionsRoot({ override: parentOpts.workspace, targetPath: slicePath });
         const slice = findSliceInCatalog(missionsRoot, slicePath, opts.mission ?? null, parentOpts.workspace, warns);
 
         // Resolve the artifact body.

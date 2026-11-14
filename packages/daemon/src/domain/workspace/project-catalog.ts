@@ -42,6 +42,20 @@ export function rigFromSession(sessionName: string | null | undefined): string |
   return at > 0 && at < sessionName!.length - 1 ? sessionName!.slice(at + 1) : null;
 }
 
+/** Only an explicit, unique rigs association is a rig default; cwd and unclaimed projects are not bindings. */
+export function selectRigProject(catalogPath: string, rigName: string | null): { id: string; root: string } | null {
+  if (!rigName) return null;
+  const projects = readProjectCatalog(catalogPath);
+  if (!projects) return null;
+  const entries = yamlObject(catalogPath).projects as Array<{ id: string; rigs?: unknown }>;
+  const malformed = entries.filter((entry) => entry.rigs !== undefined
+    && (!Array.isArray(entry.rigs) || !entry.rigs.every((rig: unknown) => typeof rig === "string")));
+  if (malformed.length) throw new ProjectReadError("workspace_catalog_invalid", `${catalogPath}: project rigs must be lists of rig names`);
+  const matches = entries.filter((entry) => Array.isArray(entry.rigs) && entry.rigs.includes(rigName));
+  if (matches.length > 1) throw new ProjectReadError("project_required", `rig '${rigName}' is listed under several projects; choose a target explicitly`, matches.map((entry) => entry.id));
+  return matches.length ? selectCatalogProject(catalogPath, matches[0]!.id) : null;
+}
+
 export type CatalogInferenceBasis = "rig" | "cwd" | "unclaimed";
 
 function catalogEntries(catalogPath: string): unknown[] {
