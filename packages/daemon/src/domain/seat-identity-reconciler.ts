@@ -101,7 +101,7 @@ export interface SeatIdentityReconcilerDeps {
   now?: () => Date;
   listProcesses?: NativeProcessLister;
   readProcessTableCensus?: () => Promise<RunnerProcessCensus>;
-  readPiRunnerState?: (sessionName: string) => PiRunnerState | null;
+  readPiRunnerState?: (sessionName: string, runtime?: "pi" | "omp") => PiRunnerState | null;
 }
 
 /**
@@ -195,16 +195,18 @@ export class SeatIdentityReconciler {
     const observedGrants = new Map(seats.map(seat => {
       const grant = grants?.activeForNode(seat.node_id);
       let bootstrapComplete = false;
-      if (grant?.binding?.runtime === "pi" && grant.binding.runner === 0) {
+      const bootstrapRuntime = grant?.binding?.runner === 0 && (grant.binding.runtime === "pi" || grant.binding.runtime === "omp")
+        ? grant.binding.runtime : null;
+      if (bootstrapRuntime) {
         // A shell can be the launch bootstrap. Capture current-attempt readiness BEFORE observing the pane;
         // a later ready result cannot turn an earlier bootstrap-shell sample into a definitive exit.
         try {
-          const state = this.readPiRunnerState?.(seat.session_name);
-          bootstrapComplete = !!state && state.launchId === grant.runId && (state.ready || !!state.exited);
+          const state = this.readPiRunnerState?.(seat.session_name, bootstrapRuntime);
+          bootstrapComplete = !!state && state.launchId === grant?.runId && (state.ready || !!state.exited);
         } catch { /* Missing launch evidence is unknown, not proof that the runner exited. */ }
       }
       return [seat.node_id, grant?.runId && grant.binding?.pane === seat.tmux_pane
-        ? { grantId: grant.grantId, shellExitConfirmed: grant.binding.runtime !== "pi" || grant.binding.runner !== 0 || bootstrapComplete }
+        ? { grantId: grant.grantId, shellExitConfirmed: !bootstrapRuntime || bootstrapComplete }
         : null];
     }));
     // Prune verdicts for nodes no longer running (keep the table bounded), except a released seat's.
