@@ -236,6 +236,26 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
     for (let index = 0; index < lines; index += 1) sequence += index === 0 ? "\r\u001b[2K" : "\u001b[1A\r\u001b[2K";
     if (sequence) out.write(sequence);
   };
+  /** The visible tail of the held streamed line: at most the pane's spare rows, so a
+   *  newline-free paragraph longer than the viewport never scrolls its own repaint —
+   *  what scrolls stays in history, and the whole line is committed once when it ends. */
+  const heldTail = (text: string): string => {
+    const height = typeof out.rows === "number" && out.rows > 0 ? out.rows : 24;
+    const budget = Math.max(1, height - 2
+      - (seat !== null ? 1 : 0) - (pinned !== null ? 1 : 0) - composeRows());
+    if (composeLayout(text, out.columns).rows <= budget) return text;
+    const cells = Math.max(1, budget * out.columns - 1);
+    const graphemes = [...graphemesOf(text)];
+    let used = 0;
+    let start = graphemes.length;
+    while (start > 0) {
+      const width = Math.max(0, stringWidth(graphemes[start - 1]!));
+      if (used + width > cells) break;
+      used += width;
+      start -= 1;
+    }
+    return `\u2026${graphemes.slice(start).join("")}`;
+  };
   /** Rows this compositor has on screen, recorded when it painted them. Readline never writes
    *  to the terminal, so nothing else can change these rows behind the compositor's back —
    *  except a reflow, which the resize handler owns. */
@@ -249,13 +269,19 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
       screenRows = 0;
       return;
     }
+    // A transcript line a verbatim write left open must not be spliced by the region:
+    // close it first, so the region starts on its own row and the line stays whole.
+    if (openLine && (seat !== null || pinned !== null || composeRows() > 0)) {
+      out.write("\n");
+      openLine = false;
+    }
     paintedSeat = seat !== null ? clip(seat) : null;
     paintedPinned = pinned !== null ? clip(pinned) : null;
     const statusRows = [paintedSeat, paintedPinned].filter((text): text is string => text !== null);
     // An in-progress streamed line stays visible as the region's first row while a status
-    // row is painted; without one the pane keeps its verbatim fallback and the line is
-    // held until it ends, so the transcript is never split mid-word.
-    paintedHeld = statusRows.length > 0 && held.length > 0 ? held : null;
+    // row is painted — bounded to the pane's spare rows so its own repaint never scrolls;
+    // without one the pane keeps its verbatim fallback and the line is held until it ends.
+    paintedHeld = statusRows.length > 0 && held.length > 0 ? heldTail(held) : null;
     let heldRows = 0;
     if (paintedHeld !== null) {
       out.write(paintedHeld);
@@ -307,6 +333,16 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
   const onResize = () => {
     if (!widthKnown()) {
       screenRows = 0;
+      return;
+    }
+    if (screenRows === 0) {
+      // Nothing painted: nothing to erase. A line a verbatim write left open is closed
+      // so the retained region starts on its own row instead of splicing into it.
+      if (openLine) {
+        out.write("\n");
+        openLine = false;
+      }
+      paint();
       return;
     }
     const draft = composeText();
@@ -369,21 +405,25 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
         return;
       }
       held += text;
-      let newline = held.indexOf("\n");
-      let repainted = false;
-      while (newline >= 0) {
-        const line = held.slice(0, newline + 1);
-        held = held.slice(newline + 1);
-        writeAbove(line);
-        repainted = true;
-        newline = held.indexOf("\n");
+      const first = held.indexOf("\n");
+      if (first < 0) {
+        // A delta with no newline yet must still show as it streams: repaint the region
+        // (the painted tail is bounded) while a status row is painted.
+        if (seat !== null || pinned !== null) {
+          eraseScreen();
+          paint();
+        }
+        return;
       }
-      // A delta with no newline yet must still show as it streams: repaint the region so
-      // the held line stays visible while a status row is painted.
-      if (held && !repainted && (seat !== null || pinned !== null)) {
-        eraseScreen();
-        paint();
-      }
+      // Drain every complete line in one batch: erase once, write them above in order,
+      // then repaint. Painting the remainder between lines would scroll a long chunk.
+      const last = held.lastIndexOf("\n");
+      const complete = held.slice(0, last + 1);
+      held = held.slice(last + 1);
+      eraseScreen();
+      out.write(complete);
+      openLine = false;
+      paint();
     },
     line(text) {
       pane.transcript(`${text}\n`);
@@ -1361,6 +1401,11 @@ export class RunnerCore {
     const message = event.message as Record<string, unknown> | undefined;
     if (event.type === "agent_start" || (event.type === "message_start" && message?.role === "assistant")) {
       this.assistantErrorShown = false;
+      // A new assistant message supersedes the failed one it follows, even in the same turn.
+      if (event.type === "message_start" && this.paneError) {
+        this.paneError = false;
+        this.refreshPaneStatus();
+      }
     }
     // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
     // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
@@ -1389,11 +1434,15 @@ export class RunnerCore {
       this.paneRetrying = false;
       this.refreshPaneStatus();
     }
-    // Pi can open a turn with turn_start alone: the previous turn's failure is then stale.
-    // OMP keeps its failures until agent_start, so its attention policy is untouched here.
-    if (event.type === "turn_start" && this.runtime !== "omp") {
+    // A turn's opening supersedes the previous turn's failure — on either runtime, since
+    // both can open a turn with turn_start alone. omp's attention policy is untouched.
+    if (event.type === "turn_start") {
       this.paneError = false;
       this.paneRetrying = false;
+      if (this.runtime === "omp" && !this.streaming) {
+        // A turn the runtime opened itself is work in flight; agent_end still closes it.
+        this.streaming = true;
+      }
       this.refreshPaneStatus();
     }
     if (this.runtime === "omp") {
@@ -1428,6 +1477,11 @@ export class RunnerCore {
     // the daemon confirms the token. Pi's get_state identity is final.
     if (event.type === "agent_end" && this.runtime === "omp") this.postSessionIdentity();
     if (event.type === "agent_end") {
+      // A retry that never reported its end must not outlive the turn it belonged to.
+      if (this.paneRetrying) {
+        this.paneRetrying = false;
+        this.refreshPaneStatus();
+      }
       // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every

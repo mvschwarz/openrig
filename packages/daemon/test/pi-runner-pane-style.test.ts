@@ -155,6 +155,40 @@ describe("pane status row", () => {
     expect(statuses.at(-1)).toBe("seat-lead · idle");
   });
 
+  it("clears an omp failure at turn_start: the turn reads working, then idle", () => {
+    const statuses: string[] = [];
+    const io: RunnerIo = {
+      sendRpc: () => {},
+      mirrorLine: () => {},
+      mirrorAppend: () => {},
+      postActivity: () => {},
+      writeSidecar: () => {},
+      now: () => "2026-11-14T00:00:00Z",
+      status: (text) => statuses.push(text),
+    };
+    const core = new RunnerCore(io, { sessionName: "seat-a@some-rig", launchId: "launch-1" }, { runtime: "omp", model: "seat-lead" });
+    core.start();
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: GET_STATE,
+      data: { sessionFile: "/state/omp/seat-a/sessions/2026_0198.jsonl", sessionId: "0198b1" },
+    }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", stopReason: "error", errorMessage: "429 rate limited", errorStatus: 429 },
+    }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(statuses.at(-1)).toBe("seat-lead · error");
+    core.handlePiLine(JSON.stringify({ type: "turn_start" }));
+    expect(statuses.at(-1)).toBe("seat-lead · working");
+    core.handlePiLine(JSON.stringify({
+      type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "partial" },
+    }));
+    expect(statuses.at(-1)).toBe("seat-lead · working");
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(statuses.at(-1)).toBe("seat-lead · idle");
+  });
+
   it("shows an automatic retry as retrying, and the failure when it exhausts", () => {
     const { core, statuses, ready } = seat({ model: "seat-lead" });
     ready();
@@ -218,6 +252,49 @@ describe("compositor status region", () => {
     pane.diagnostic("[pi-runner] ERROR rpc: no session");
     pane.transcript("partial reply");
     expect(out.text()).toContain("partial reply\n");
+  });
+
+  it("commits a paragraph longer than the viewport once, showing only a bounded tail", () => {
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 20, rows: 4 });
+    let buf = "";
+    output.on("data", (chunk: Buffer) => { buf += chunk.toString(); });
+    const pane = createPaneCompositor(output as unknown as NodeJS.WriteStream);
+    const paragraph = `START${"0123456789".repeat(12)}END`;
+    pane.status("seat-lead · working");
+    pane.transcript(paragraph);
+    expect(buf).toContain("END");
+    expect(buf).toContain("\u2026"); // the visible tail is bounded, not the whole paragraph
+    expect(buf).not.toContain("START"); // not committed yet; the head is not painted
+    pane.transcript("\n");
+    expect(buf.match(/START/g)).toHaveLength(1); // committed once when the line ends
+  });
+
+  it("drains a multiline chunk in one batch, without repainting the remainder between lines", () => {
+    const out = paneOut(40);
+    const pane = createPaneCompositor(out.output);
+    pane.status("seat-lead · working");
+    pane.transcript("line1\nline2\nline3\npartial");
+    const text = out.text();
+    expect(text.match(/line1/g)).toHaveLength(1);
+    expect(text.match(/line2/g)).toHaveLength(1);
+    expect(text).toContain("partial");
+  });
+
+  it("keeps an open transcript line intact when the width becomes known", () => {
+    const output = Object.assign(new PassThrough(), { isTTY: true });
+    let buf = "";
+    output.on("data", (chunk: Buffer) => { buf += chunk.toString(); });
+    const pane = createPaneCompositor(output as unknown as NodeJS.WriteStream);
+    pane.status("seat-lead · idle"); // kept, not painted: no width yet
+    pane.transcript("Hello"); // verbatim; the line stays open
+    expect(buf).toBe("Hello");
+    Object.assign(output, { columns: 40 });
+    output.emit("resize");
+    pane.transcript(" wor");
+    expect(buf).toContain("Hello\n"); // closed, not spliced by the region
+    expect(buf).not.toContain("Helloseat");
+    expect(buf).toContain("seat-lead · idle");
+    expect(buf).toContain(" wor");
   });
 
   it("drops only the pinned diagnostic on a new turn", () => {
