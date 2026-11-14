@@ -280,20 +280,64 @@ printf '%s|%s' "\${CLAUDE_CONFIG_DIR-}" "\${CLAUDE_CODE_OAUTH_TOKEN+set}"
       reason: `the token file ${tokenFile} doesn't exist` }));
   });
 
-  it.each([["bash", true], ["zsh", true], ["fish", false]] as const)(
+  const classicLaunch = (shell: string | null, identity: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat@rig" }) => {
+    const root = mkdtempSync(path.join(tmpdir(), "claude-seat-token-classic-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const cli = path.join(root, "rig");
+    writeFileSync(cli, "#!/bin/sh\n", { mode: 0o700 });
+    const tmux = { getPaneCommand: async () => shell, getSessionEnv: async (_session: string, key: string) => identity[key] } as unknown as TmuxAdapter;
+    return new SeatLaunchEnvironment(tmux, { PATH: "/usr/bin:/bin", HOME: root, OPENRIG_HOME: path.join(root, "instance") }, root, cli);
+  };
+  const fixtureStep = "{ __openrig_token_step_fixture; }";
+
+  // Claude's own name, as tmux reports it on macOS and Linux, and an unreadable pane: the staged launch runs in /bin/sh there.
+  it.each([["bash", true], ["zsh", true], ["fish", false], ["claude.exe", true], ["claude", true], [null, true]] as const)(
     "a launch without an explicit permission mode runs the token step before Claude in a %s pane: %s",
     async (shell, included) => {
-      const root = mkdtempSync(path.join(tmpdir(), "claude-seat-token-classic-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
-      const cli = path.join(root, "rig");
-      writeFileSync(cli, "#!/bin/sh\n", { mode: 0o700 });
-      const identity: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat@rig" };
-      const tmux = { getPaneCommand: async () => shell, getSessionEnv: async (_session: string, key: string) => identity[key] } as unknown as TmuxAdapter;
-      const launch = new SeatLaunchEnvironment(tmux, { PATH: "/usr/bin:/bin", HOME: root, OPENRIG_HOME: path.join(root, "instance") }, root, cli);
-      const step = "{ __openrig_token_step_fixture; }";
-      const command = await launch.command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: step });
-      expect(command.includes(step)).toBe(included);
-      if (included) expect(command.indexOf(step)).toBeLessThan(command.indexOf("claude --resume abc"));
+      const command = await classicLaunch(shell).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
+      expect(command.includes(fixtureStep)).toBe(included);
+      if (included) expect(command.indexOf(fixtureStep)).toBeLessThan(command.indexOf("claude --resume abc"));
     });
+
+  it("a pane whose foreground isn't a shell gets the launch an sh pane gets", async () => {
+    const asSh = await classicLaunch("sh").command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
+    const tidy = (command: string) => command.replace(/\/seat-bin\/[0-9a-f]+/, "/seat-bin/<cli>").replace(/'[^']*claude-seat-token-classic-[^']*'/g, "'<root>'");
+    for (const shell of ["claude.exe", null]) {
+      const command = await classicLaunch(shell).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
+      expect(tidy(command)).toBe(tidy(asSh));
+    }
+  });
+
+  it("when the environment correction fails, the previous command still runs the token step first, except in a fish pane", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const shell of ["zsh", "claude.exe"]) {
+        // No OpenRig identity in the session: the correction can't be built, so the previous command is used.
+        const command = await classicLaunch(shell, {}).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
+        expect(command).toBe(`${fixtureStep}\nclaude --resume abc`);
+      }
+      expect(await classicLaunch("fish", {}).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep }))
+        .toBe("claude --resume abc");
+    } finally { warn.mockRestore(); }
+  });
+
+  it("a switch's resume in a pane that still reads as Claude stages the seat's token step, with no not-applied warning", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "claude-seat-token-resume-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const cli = path.join(root, "rig");
+    writeFileSync(cli, "#!/bin/sh\n", { mode: 0o700 });
+    const identity: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat@rig" };
+    const sendShellCommand = vi.fn(async (_target: string, _command: string) => ({ ok: true as const }));
+    // The launch reads Claude's own name in the pane; the resume probe afterwards sees the resumed Claude.
+    const tmux = { getPaneCommand: vi.fn().mockResolvedValueOnce("claude.exe").mockResolvedValue("claude"), capturePaneContent: async () => "", getPanePid: async () => null,
+      getSessionEnv: async (_session: string, key: string) => identity[key], sendShellCommand,
+      sendText: vi.fn(async () => ({ ok: true as const })), sendKeys: vi.fn(async () => ({ ok: true as const })) } as unknown as TmuxAdapter;
+    const launch = new SeatLaunchEnvironment(tmux, { PATH: "/usr/bin:/bin", HOME: root, OPENRIG_HOME: path.join(root, "instance") }, root, cli);
+    const resume = new ClaudeResumeAdapter(tmux, { seatLaunchEnvironment: launch, pollMs: 1, maxWaitMs: 2, sleep: async () => {},
+      claudeManagedLaunch: { seatTokenLaunch: () => ({ step: fixtureStep, ref: { label: "work", tokenFile: "/fixture/work.token" }, warnings: [] }) } as never });
+    const result = await resume.resume("seat@rig", "claude_id", "conversation", root, undefined, undefined, undefined, "node");
+    expect(result).toMatchObject({ ok: true });
+    expect(JSON.stringify(result)).not.toContain("wasn't applied");
+    expect(sendShellCommand.mock.calls[0]![1]).toContain(fixtureStep);
+  });
 
   it("wins over a CLAUDE_CODE_OAUTH_TOKEN the pane shell already exports, and over one the daemon forwards", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "claude-seat-token-file-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
