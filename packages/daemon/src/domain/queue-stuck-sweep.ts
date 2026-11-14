@@ -1396,6 +1396,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const findings: StuckSweepFindingAction[] = [];
     const liveDedupTags = new Set<string>();
     const candidateIds = new Set(candidates.map((c) => c.row.qitemId));
+    const drainDeferredIds = new Set<string>();
     // A finding that could not be created (a row whose destination no longer resolves, say) must not
     // stop the others: it is reported, its row stays detected, and the pass is still a failure.
     const failedCreates: string[] = [];
@@ -1483,7 +1484,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       if (dueToYield()) await yieldLoop();
       if (deps.queueRepo.deliveryDrains.hasActive()
-        && deliveryHeld(deps.queueRepo.getById(c.row.qitemId, { waiting: false }) ?? c.row)) continue;
+        && deliveryHeld(deps.queueRepo.getById(c.row.qitemId, { waiting: false }) ?? c.row)) {
+        drainDeferredIds.add(c.row.qitemId);
+        continue;
+      }
       const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
       const shared = recoveries.find(c.row.qitemId);
       const fold = foldable(c, shared);
@@ -1952,9 +1956,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!current || !["pending", "in-progress", "blocked"].includes(current.state)) continue;
       // "No longer detected" rests on lists read before this loop's yields: a row that came back (blocked, then
       // in-progress past its deadline) during the pass still holds, so its rule runs again on the row as it is now.
+      // A drain-deferred candidate likewise needs its live rule checked: deferral is not completion.
       // (A row this pass did find, whose finding isn't live because another recovery now holds its custody, closes as
       // the base closed it.)
-      if (kind && stuckId && resolvedByRule.has(kind) && !candidateIds.has(stuckId) && ruleHolds(kind as StuckFindingKind, stuckId)) continue;
+      if (kind && stuckId && resolvedByRule.has(kind) && (!candidateIds.has(stuckId) || drainDeferredIds.has(stuckId)) && ruleHolds(kind as StuckFindingKind, stuckId)) continue;
       await deps.queueRepo.update({
         qitemId: f.qitem_id,
         // The sweep performed this transition; ownership stays on the existing row.

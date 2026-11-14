@@ -119,6 +119,45 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     return repo.getById(row.qitemId)!;
   }
 
+
+  it.each([false, true])("ordinary operator fallback retains its cross-rig carrier through readiness (consumedHop=%s)", async consumedHop => {
+    const rigs = new RigRepository(db); rigs.createRig("fixture"); const carrierRig = rigs.createRig("carrier");
+    const jobs = new WatchdogJobsRepository(db);
+    const first = await repo.create({ sourceSession: "sender@carrier", destinationSession: "relay@carrier", body: "work", nudge: false,
+      ...(consumedHop ? { tags: ["escalation-route:one-hop"] } : {}) });
+    const { created: row } = await repo.handoff({ qitemId: first.qitemId, fromSession: "relay@carrier", toSession: seat, nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt=?,last_nudge_result='failed:offline' WHERE qitem_id=?")
+      .run(new Date(Date.now() - 3600_000).toISOString(), row.qitemId);
+    const posts: unknown[] = [], dispatchedTo: string[] = [];
+    let release!: (value: { ready: boolean; reason: string }) => void;
+    const pending = new Promise<{ ready: boolean; reason: string }>(resolve => { release = resolve; });
+    const readiness = vi.fn(() => pending);
+    const port = engine(posts, true, dispatchedTo, readiness);
+    const now = new Date(Date.now() + 301_000);
+    const run = () => runWakeLadderTick({ db, queueRepo: repo, now, retryCap: 0, resolveOrchestrator: () => null,
+      readPromptState: () => "clear", humanRung: "always", deliveryEngine: port });
+    const inFlight = run();
+    await vi.waitFor(() => expect(readiness).toHaveBeenCalledTimes(1));
+    const carriers = repo.list({ limit: 100 }).filter(x => x.tags?.includes("recovery-for:" + row.qitemId));
+    expect(carriers).toHaveLength(1);
+    expect(carriers[0]!.destinationSession).toBe("relay@carrier");
+    const before = repo.listTransitions(row.qitemId);
+    const drain = repo.deliveryDrains.begin(carrierRig.id, { drainId: "carrier-readiness", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    release({ ready: true, reason: "readiness resumed after carrier BEGIN" });
+    expect((await inFlight).outcome).not.toBe("failed");
+    expect(dispatchedTo).toEqual([]);
+    expect(new DispatchBuffer(home).pending()).toEqual([]);
+    expect(repo.listTransitions(row.qitemId)).toEqual(before);
+    repo.deliveryDrains.end(carrierRig.id, drain.drainId, jobs);
+    await run();
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(dispatchedTo).toHaveLength(1);
+    expect(repo.list({ limit: 100 }).filter(x => x.tags?.includes("recovery-for:" + row.qitemId)).map(x => x.qitemId)).toEqual([carriers[0]!.qitemId]);
+    await run();
+    expect(dispatchedTo).toHaveLength(1);
+  });
+
   it.each(["negative", "rejected"])("cross-rig %s readiness during a destination drain preserves the carrier rung", async failure => {
     const original = await refusal();
     const rigs = new RigRepository(db), target = rigs.createRig("fixture");

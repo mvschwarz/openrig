@@ -581,8 +581,9 @@ function deliveryHeld(repo: QueueRepository, row: QueueItem): boolean {
   return repo.deliveryDrains.holds(row.destinationSession);
 }
 
-function appendMarker(repo: QueueRepository, row: QueueItem, note: string): void {
-  if (deliveryHeld(repo, row)) return;
+function appendMarker(repo: QueueRepository, row: QueueItem, note: string, admittedOutcome = false): void {
+  // A new drain defers admission, not the durable outcome of an attempt already admitted.
+  if (!admittedOutcome && deliveryHeld(repo, row)) return;
   repo.transitionLog.append({
     qitemId: row.qitemId,
     state: row.state,
@@ -877,6 +878,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           deps.queueRepo,
           row,
           `${LADDER_ATTEMPT_PREFIX} ${view.attempts + 1}/${cap} outcome=${outcome}`,
+          true,
         );
         actions.push({ qitemId: row.qitemId, action: "retry", target: row.destinationSession });
         continue;
@@ -903,9 +905,14 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         // Keep this recovery visible without sharing the ordinary destination aggregate or forwarding another hop.
         const escalation = await ensureEscalationRow(deps, row.destinationSession, humanAlertCarrier(deps, row.destinationSession, row.sourceSession),
           [{ row, reason: consumedReason }], consumedReason, `consumed-hop:${row.qitemId}`, [ESCALATION_HOP_TAG]);
-        if (!escalation || deliveryHeld(deps.queueRepo, row)) continue;
+        if (!escalation) continue;
+        const carrierDeferred = () => {
+          const carrier = deps.queueRepo.getById(escalation.qitemId);
+          return !!carrier && deliveryHeld(deps.queueRepo, carrier);
+        };
+        if (deliveryHeld(deps.queueRepo, row) || carrierDeferred()) continue;
         if (!view.orchRung) appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${consumedReason}`);
-        if (await operatorRung(deps, row, consumedReason, actions, view)) {
+        if (await operatorRung(deps, row, consumedReason, actions, view, true, carrierDeferred)) {
           appendExhausted(deps.queueRepo, row, "consumed escalation hop reached operator fallback");
           exhaustedThisTick += 1;
         }
@@ -944,15 +951,20 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           // escalations view and the health count
           // expose it — it stays open past the batons' exhaustion.
           const floorDest = humanAlertCarrier(deps, dest, needsOrchRung[0]!.row.sourceSession);
-          if (!await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason)) continue;
-          if (members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
+          const escalation = await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason);
+          if (!escalation) continue;
+          const carrierDeferred = () => {
+            const carrier = deps.queueRepo.getById(escalation.qitemId);
+            return !!carrier && deliveryHeld(deps.queueRepo, carrier);
+          };
+          if (members.some(m => deliveryHeld(deps.queueRepo, m.row)) || carrierDeferred()) continue;
           for (const m of needsOrchRung) {
             appendMarker(
               deps.queueRepo,
               m.row,
               `${LADDER_RUNG_PREFIX} orchestrator self-skip (resolves to ${orch === null ? "no orchestrator" : "destination"}) reason=${m.reason}`,
             );
-            if (await operatorRung(deps, m.row, m.reason, actions, m.view)) {
+            if (await operatorRung(deps, m.row, m.reason, actions, m.view, true, carrierDeferred)) {
               appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
               exhaustedThisTick += 1;
             }
@@ -969,6 +981,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
               deps.queueRepo,
               m.row,
               `${LADDER_RUNG_PREFIX} orchestrator -> ${recoveryOwner} outcome=${outcome} reason=${m.reason}`,
+              true,
             );
             actions.push({ qitemId: m.row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });
             if (!outcome.startsWith("failed:")) {
@@ -978,6 +991,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
                 deps.queueRepo,
                 m.row,
                 `escalated to orchestrator (${outcome === "verified" ? "delivered" : outcome})`,
+                true,
               );
               exhaustedThisTick += 1;
             }
@@ -988,8 +1002,12 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
       // Orchestrator rung recorded and failed → advance to the operator rung.
       for (const m of actionable) {
-        if (m.view.orchRung && (m.view.orchRungFailed || m.view.opUnresolved !== null) && !m.view.opEngineDispatched) {
-          if (await operatorRung(deps, m.row, m.reason, actions, m.view)) {
+        // A self-skip whose readiness was deferred still owes its first operator rung.
+        if (m.view.orchRung && (m.view.orchRungFailed || !m.view.opRung || m.view.opUnresolved !== null) && !m.view.opEngineDispatched) {
+          if (await operatorRung(deps, m.row, m.reason, actions, m.view, true, () => {
+            const carrier = openEscalationOwner(deps, escalationDedupTag(dest));
+            return !!carrier && deps.queueRepo.deliveryDrains.holds(carrier);
+          })) {
             appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
             exhaustedThisTick += 1;
           }
@@ -1581,9 +1599,9 @@ async function advancePromptRefusals(
         const recoveryOwner = row.destinationSession;
         const outcome = await attemptWake(row.qitemId, recoveryOwner);
         if (outcome === "deferred:rig_delivery_drain") continue;
-        appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator -> ${recoveryOwner} outcome=${outcome} reason=${reason}`);
+        appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator -> ${recoveryOwner} outcome=${outcome} reason=${reason}`, true);
         actions.push({ qitemId: row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });
-        if (!outcome.startsWith("failed:")) appendExhausted(deps.queueRepo, row, `escalated to orchestrator (${outcome})`);
+        if (!outcome.startsWith("failed:")) appendExhausted(deps.queueRepo, row, `escalated to orchestrator (${outcome})`, true);
         continue;
       }
       appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
@@ -1681,8 +1699,8 @@ async function operatorRung(
   return outcome.resolved;
 }
 
-function appendExhausted(repo: QueueRepository, row: QueueItem, why: string): void {
-  appendMarker(repo, row, `${LADDER_EXHAUSTED_PREFIX} ${why}`);
+function appendExhausted(repo: QueueRepository, row: QueueItem, why: string, admittedOutcome = false): void {
+  appendMarker(repo, row, `${LADDER_EXHAUSTED_PREFIX} ${why}`, admittedOutcome);
 }
 
 /** Ensure the per-destination aggregate escalation row (F3): one open row, deduped by

@@ -99,4 +99,29 @@ describe("delivery drain and standing stuck sweep", () => {
       expect(result.findings.filter(x => x.action === "created")).toEqual([]);
     } finally { spy?.mockRestore(); f.db.close(); }
   });
+  it("a BEGIN after collection preserves an existing overdue finding, but completion still closes it", async () => {
+    const f = fixture();
+    const realImmediate = globalThis.setImmediate;
+    let spy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const row = await f.overdue();
+      await f.sweep();
+      const [finding] = f.withTag(findingDedupTag("overdue-claim", row.qitemId));
+      expect(finding?.state).toBe("pending");
+      for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 2; i++) await f.overdue();
+      const accounting = vi.spyOn(f.queue, "recordClosureOverdue");
+      let began = false;
+      spy = vi.spyOn(globalThis, "setImmediate").mockImplementation(((callback: (...args: unknown[]) => void, ...args: unknown[]) => realImmediate(() => {
+        if (!began && accounting.mock.calls.length > 0) { f.begin(); began = true; }
+        callback(...args);
+      })) as typeof setImmediate);
+      expect((await f.sweep()).outcome).not.toBe("failed");
+      expect(began).toBe(true);
+      expect(f.queue.getById(finding!.qitemId)?.state).toBe("pending");
+      f.queue.update({ qitemId: row.qitemId, actorSession: row.destinationSession, state: "done", closureReason: "no-follow-on" });
+      expect((await f.sweep()).outcome).not.toBe("failed");
+      expect(f.queue.getById(finding!.qitemId)?.state).toBe("done");
+    } finally { spy?.mockRestore(); f.db.close(); }
+  });
+
 });

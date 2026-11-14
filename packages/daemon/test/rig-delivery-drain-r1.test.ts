@@ -124,3 +124,26 @@ it("an explicit resolve notifies its owner even during the owner's delivery drai
   await contract.act({verb:"resolve",qitemId:row.qitemId,actorSession:"sender@other",decision:"Use the recorded option"});
   expect(send).toHaveBeenCalledTimes(1);expect(t.queue.getById(row.qitemId)?.state).toBe("in-progress");
 });
+
+it("records an admitted cross-rig wake even if BEGIN starts on its origin before completion", async () => {
+  const t = fixture(); cleanup.push(() => t.db.close());
+  const row = await baton(t);
+  let drain!: ReturnType<typeof t.begin>;
+  const send = vi.fn(async () => { drain = t.begin("target"); return { ok: true, verified: true }; });
+  t.queue.attachTransport({ send });
+  const now = new Date(Date.now() + 301_000);
+  const tick = () => runWakeLadderTick({ db: t.db, queueRepo: t.queue, now, retryCap: 0, resolveOrchestrator: () => "orch@other" });
+  expect((await tick()).outcome).not.toBe("failed");
+  expect(send).toHaveBeenCalledTimes(1);
+  const notes = () => t.queue.listTransitions(row.qitemId).map(x => x.transitionNote ?? "");
+  expect(notes().some(n => n.startsWith("escalation-rung: orchestrator -> orch@other outcome=verified"))).toBe(true);
+  expect(notes().filter(n => n.startsWith("ladder-exhausted:"))).toHaveLength(1);
+  const carriers = t.queue.list({ limit: 100 }).filter(x => x.tags?.includes("recovery-for:" + row.qitemId));
+  expect(carriers).toHaveLength(1);
+  expect(t.queue.getById(carriers[0]!.qitemId)?.lastNudgeResult).toBe("verified");
+  const before = notes();
+  t.queue.deliveryDrains.end(drain.rigId, drain.drainId, t.jobs);
+  await tick();
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(notes()).toEqual(before);
+});
