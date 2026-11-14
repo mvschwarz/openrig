@@ -268,6 +268,15 @@ export class RigLifecycleService {
           // best-effort only
         }
       }
+      // The seat's OPENRIG_NODE_ID marker goes with the claim, so the released session is no longer stoppable as this
+      // seat's. Another seat's marker isn't this release's to remove.
+      try {
+        if (await this.tmuxAdapter.getSessionEnv(session.tmux_session, "OPENRIG_NODE_ID") === session.node_id) {
+          await this.tmuxAdapter.unsetSessionEnv(session.tmux_session, "OPENRIG_NODE_ID");
+        }
+      } catch {
+        // best-effort only
+      }
     }
 
     let persistedSeq = 0;

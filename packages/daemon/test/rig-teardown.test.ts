@@ -28,6 +28,9 @@ import { replaceFile } from "../src/adapters/replace-file.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { claudeActivityRelayPath } from "../src/domain/claude-activity-hooks.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { RigLifecycleService } from "../src/domain/rig-lifecycle-service.js";
+import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 
 
@@ -1378,11 +1381,24 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
       sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: NAME, tmuxPane: pane });
       return session;
     };
+    // A session OpenRig didn't launch: one joined with rig attach --self, or adopted (origin claimed).
+    const claim = async () => {
+      const pane = (await tmux("list-panes", "-t", `=${NAME}:`, "-F", "#{pane_id}")).split("\n")[0]!;
+      sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: NAME, tmuxPane: pane });
+      return sessionRegistry.registerClaimedSession(node.id, NAME);
+    };
+    // rig unclaim's own path, as the daemon wires it for down.
+    const lifecycle = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo: new DiscoveryRepository(db), eventBus,
+      queueRepo: new QueueRepository(db, eventBus, { validateRig: () => true }), tmuxAdapter: adapter });
+    const releaseClaimedSession = async (sessionId: string) => {
+      const released = await lifecycle.unclaimSession(sessionId);
+      return released.ok ? { ok: true as const } : { ok: false as const, error: released.error };
+    };
     const teardown = () => new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: adapter,
-      snapshotCapture: mockSnapshotCapture(db) }).teardown(rig.id, { snapshot: false });
+      snapshotCapture: mockSnapshotCapture(db), releaseClaimedSession }).teardown(rig.id, { snapshot: false });
     const alive = (name: string) => tmux("has-session", "-t", `=${name}`).then(() => true, () => false);
     const close = async () => { await tmux("kill-server").catch(() => {}); db.close(); fs.rmSync(home, { recursive: true, force: true }); };
-    return { tmux, node, bind, teardown, alive, close, sessionRegistry, db };
+    return { tmux, node, bind, claim, lifecycle, adapter, teardown, alive, close, sessionRegistry, db };
   }
 
   // What's left after a refusal: the session row still running and its binding intact, so nothing reads as stopped.
@@ -1460,6 +1476,50 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
       expect(result.errors[0]).toMatch(/Managed pane identity unavailable or changed; no input written/);
       expect(await h.alive(NAME)).toBe(true);
       expect(h.db.prepare("SELECT status FROM sessions WHERE id=?").get(session.id)).toEqual({ status: "running" });
+    } finally { await h.close(); }
+  });
+
+  // A person's own session joined with rig attach --self, or one adopted before adoption set the seat's marker, is its
+  // owner's: down releases the seat as rig unclaim does, says so, and never ends the session.
+  it("a claimed session without the seat's marker is released, not stopped, and keeps running", async () => {
+    const h = await harness();
+    try {
+      await h.tmux("new-session", "-d", "-s", NAME, "sleep 300");
+      const session = await h.claim();
+      const result = await h.teardown();
+      expect(result).toMatchObject({ sessionsKilled: 0, errors: [], released: [NAME] });
+      expect(await h.alive(NAME)).toBe(true);
+      expect(h.sessionRegistry.getBindingForNode(h.node.id)).toBeNull();
+      expect(h.db.prepare("SELECT status FROM sessions WHERE id=?").get(session.id)).toEqual({ status: "detached" });
+    } finally { await h.close(); }
+  });
+
+  it("an adopted session that carries the seat's marker is stopped like the rest", async () => {
+    const h = await harness();
+    try {
+      await h.tmux("new-session", "-d", "-s", "keepalive", "sleep 300");
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, "sleep 300");
+      await h.claim();
+      const result = await h.teardown();
+      expect(result).toMatchObject({ sessionsKilled: 1, errors: [] });
+      expect(result.released).toBeUndefined();
+      expect(await h.alive(NAME)).toBe(false);
+    } finally { await h.close(); }
+  });
+
+  // The seat's marker goes with its claim, so a released session can't later be stopped as this seat's; another seat's
+  // marker isn't the release's to remove.
+  it.each([
+    ["this seat's", (nodeId: string) => nodeId, undefined],
+    ["another seat's", () => "another-node", "another-node"],
+  ] as const)("releasing a claimed session removes only %s marker", async (_label, marker, after) => {
+    const h = await harness();
+    try {
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${marker(h.node.id)}`, "sleep 300");
+      const session = await h.claim();
+      expect(await h.lifecycle.unclaimSession(session.id)).toMatchObject({ ok: true });
+      expect(await h.adapter.getSessionEnv(NAME, "OPENRIG_NODE_ID")).toBe(after);
+      expect(await h.alive(NAME)).toBe(true);
     } finally { await h.close(); }
   });
 

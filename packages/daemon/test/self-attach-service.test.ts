@@ -71,6 +71,19 @@ describe("SelfAttachService", () => {
     expect(sessionRegistry.getSessionsForRig(rig.id)).toHaveLength(0);
   });
 
+  // A person's own session joined with rig attach --self never gets the seat's OPENRIG_NODE_ID marker, so rig down releases
+  // that seat and never ends the session.
+  it("never marks a self-attached tmux session as the seat's", async () => {
+    const setSessionEnv = vi.fn(async () => undefined), setSessionOption = vi.fn(async () => ({ ok: true as const }));
+    const service = new SelfAttachService({ db, rigRepo, podRepo, sessionRegistry, eventBus,
+      tmuxAdapter: { startPipePane: startPipePaneSpy, setSessionEnv, setSessionOption } as unknown as TmuxAdapter });
+    const rig = rigRepo.createRig("self-marker");
+    rigRepo.addNode(rig.id, "dev.self", { runtime: "stub" });
+    expect(await service.attachToNode({ rigId: rig.id, logicalId: "dev.self", context: { attachmentType: "tmux", tmuxSession: "person-shell" } }))
+      .toMatchObject({ ok: true, attachmentType: "tmux" });
+    expect(setSessionEnv).not.toHaveBeenCalled();
+  });
+
   it("accepts the selected socket and keeps external CLI attachment available", async () => {
     const service = new SelfAttachService({ db, rigRepo, podRepo, sessionRegistry, eventBus,
       tmuxServer: { socketPath: "/selected/server", mode: "isolated" } });

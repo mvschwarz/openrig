@@ -42,6 +42,10 @@ export interface TeardownResult {
   /** Sessions of community-harness seats whose pane was stopped. OpenRig stops only the pane; the harness's own
    *  processes (a gateway, say) may keep running, as its preset's limits say. Present only when there was one. */
   paneOnly?: string[];
+  /** Sessions OpenRig didn't create for their seat (joined with `rig attach --self`, or adopted without the seat's
+   *  OPENRIG_NODE_ID marker): down released each seat, as `rig unclaim` does, and left the session running as its owner's.
+   *  Present only when there was one. */
+  released?: string[];
 }
 
 interface TeardownOptions {
@@ -63,6 +67,9 @@ interface TeardownDeps {
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   /** The shipped Claude context collector. A cwd's copy is removed only while its bytes match this file. */
   claudeCollectorAssetPath?: string;
+  /** Releases a claimed session's seat without stopping the session: `rig unclaim`'s own path. Absent: such a seat's
+   *  unproven stop stays a failure, as before. */
+  releaseClaimedSession?: (sessionId: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 interface LatestNodeSession {
@@ -75,6 +82,7 @@ interface LatestNodeSession {
   resumeToken: string | null;
   cwd: string | null;
   communityHarness?: string | null;
+  origin?: string | null;
 }
 
 /** Only a reported missing server permits a bootstrap; other unreadable/permission results do not. */
@@ -186,6 +194,7 @@ export class RigTeardownOrchestrator {
     // 5. Kill each live session
     let killFailures = 0;
     const external = new Set<string>();
+    const toRelease: LatestNodeSession[] = [];
     for (const session of liveSessions) {
       // OpenRig neither launches nor stops a seat joined with `rig attach` as an external CLI, and it has no tmux session:
       // a missing one isn't a stop. Keep its claim, as the historical path below does for non-tmux bindings.
@@ -231,6 +240,12 @@ export class RigTeardownOrchestrator {
         this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd, currentLiveGuidanceTargets(), result, session.nodeId);
         if (killResult.ok) result.sessionsKilled++;
         if (killResult.ok && communityHarnessOf(session.communityHarness, session.runtime)) (result.paneOnly ??= []).push(session.sessionName);
+      } else if (session.origin === "claimed" && (killResult as { code?: string }).code === "seat_target_unproven"
+        && this.deps.releaseClaimedSession) {
+        // A session OpenRig didn't create for this seat (joined with rig attach --self, or adopted without the seat's
+        // marker) is its owner's: down releases the seat and leaves the session running. The release waits until the
+        // file cleanups below have counted the seat as still in use, so they leave its owner's files alone.
+        toRelease.push(session);
       } else {
         // Real kill failure — don't update this node
         result.errors.push(`Kill failed for session '${session.sessionName}': ${(killResult as { message?: string }).message ?? "unknown"}`);
@@ -251,6 +266,17 @@ export class RigTeardownOrchestrator {
       } catch (err) {
         result.errors.push(`Service teardown warning: ${(err as Error).message}`);
         // Best-effort — rig teardown continues
+      }
+    }
+
+    for (const session of toRelease) {
+      const released = await this.deps.releaseClaimedSession!(session.sessionId);
+      if (released.ok) {
+        external.add(session.nodeId);
+        (result.released ??= []).push(session.sessionName);
+      } else {
+        result.errors.push(`Release failed for session '${session.sessionName}': ${released.error}`);
+        killFailures++;
       }
     }
 
