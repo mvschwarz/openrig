@@ -112,8 +112,9 @@ including its `bwrap` AppArmor profile guidance; changes to AppArmor are the own
 **Choose permissions before starting the team.** Ordinary OpenRig launches use
 Codex's `-s workspace-write`, with approval policy from your native configuration,
 or Claude Code's `acceptEdits`, which still leaves commands subject to native
-rules and prompts. A team seat with no permission policy, per-seat choice or
-(for Codex) named profile also gets a per-launch
+rules and prompts. A team seat with no permission policy (or with `standard` or
+`open`, whose rules aren't applied at launch), per-seat choice or (for Codex)
+named profile also gets a per-launch
 [team default](rig-spec.md#team-launch-defaults): Claude runs ordinary `rig`
 commands, project reads and common tests without prompting, while lifecycle
 commands such as `rig up` and `rig down` still ask; Codex also gets the OpenRig
@@ -671,7 +672,7 @@ rig ps --nodes --rig starter
 Preview the selected seats, models and resources. Plan checks resolution and
 preflight for the working directory. The kernel is already your entry point; this step starts the chosen project
 team. Read readiness for the project seats, not only daemon health. Have the person answer a named authentication, trust, hook-review or
-permission prompt before giving that seat work; a launch default, or their answer for another seat, isn't their answer to this one. When a seat stops at such a prompt, `rig up` reports
+permission prompt before giving that seat work; a launch default, or their answer for another seat, isn't their answer to this one. When the person works through their own agent, the agent brings each trust, hook-review or permission prompt to them as a question and sends their choice, so they don't need to open that seat's terminal; a sign-in still needs the person. When a seat stops at such a prompt, `rig up` reports
 `Status: partial`, prints `Startup attention (<seat>): <reason>` and exits 1;
 `rig ps --nodes` repeats it as "Startup details". The reason ends with the command
 to run once the prompt is answered: `rig seat continue <seat>`, which delivers the
@@ -1288,7 +1289,7 @@ and `off` for ordinary automatic sends (`--enabled false`).
 In the shipped `starter`, `dev-build` runs Claude Code. For a **Claude Code** seat,
 OpenRig normally passes `--permission-mode acceptEdits`: edits can proceed, while
 other actions follow native rules and prompts. For a seat with no permission
-policy or per-seat choice it also passes the per-launch team default (`--settings` allowing ordinary
+policy (or with `standard` or `open`) and no per-seat choice it also passes the per-launch team default (`--settings` allowing ordinary
 `rig` commands, project reads and common tests, with a session hook asking for
 lifecycle commands while allowing literal help forms such as `rig down --help`);
 personal and project rules still apply. Nothing is written to your settings files. To explicitly select the bypass launch flag for that rig:
