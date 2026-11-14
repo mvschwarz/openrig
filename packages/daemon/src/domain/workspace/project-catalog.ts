@@ -129,10 +129,62 @@ export function inferCatalogProject(
   throw required;
 }
 
-/** Exact project membership; unscoped historical rows are not assigned to a selected project. */
-export function belongsToProject(raw: string | null | undefined, id: string): boolean {
+/** The former ids a project's own project.yaml lists under `aliases:`. Unreadable or malformed entries add none. */
+function manifestAliases(root: string): string[] {
+  try {
+    const realRoot = fs.realpathSync(root);
+    const manifest = fs.realpathSync(path.join(realRoot, "project.yaml"));
+    if (!inside(realRoot, manifest)) return [];
+    const aliases: unknown = parse(fs.readFileSync(manifest, "utf8"))?.aliases;
+    return Array.isArray(aliases) ? aliases.filter((a): a is string => typeof a === "string" && a.trim() !== "").map(a => a.trim()) : [];
+  } catch { return []; }
+}
+
+/** Former project ids, each mapped to the catalogued project that declares it, so rows tagged before a rename stay that
+ *  project's. A former id that is a current catalog id, or that two projects both declare, maps to neither: the current
+ *  id wins, and an ambiguous former id stays unclaimed. History is never rewritten. */
+export function readCatalogAliases(catalogPath: string): Map<string, string> {
+  let entries: Array<{ id: string; root: string }>;
+  try { entries = readProjectCatalog(catalogPath) ?? []; } catch { return new Map(); }
+  const ids = new Set(entries.map(e => e.id));
+  const owners = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    for (const alias of manifestAliases(path.resolve(path.dirname(catalogPath), entry.root))) {
+      if (ids.has(alias)) continue;
+      const claimed = owners.get(alias) ?? new Set<string>();
+      owners.set(alias, claimed.add(entry.id));
+    }
+  }
+  return new Map([...owners].filter(([, claimed]) => claimed.size === 1).map(([alias, claimed]) => [alias, [...claimed][0]!]));
+}
+
+/** The former ids one project declares, for a workspace with no catalog (its own project.yaml). */
+export function workspaceAliases(root: string, id: string): string[] {
+  return [...new Set(manifestAliases(root))].filter(alias => alias !== id);
+}
+
+/** The catalogued project an id names: itself, or the project that declares it as a former id. */
+export function catalogProjectFor(catalogPath: string, id: string): string {
+  try { if ((readProjectCatalog(catalogPath) ?? []).some(e => e.id === id)) return id; } catch { return id; }
+  return readCatalogAliases(catalogPath).get(id) ?? id;
+}
+
+/** Project membership by exact `project:<id>` tag, for the project's id or any former id it declares. Unscoped historical
+ *  rows are not assigned to a selected project. */
+export function belongsToProject(raw: string | null | undefined, ids: string | readonly string[]): boolean {
+  const wanted = new Set((typeof ids === "string" ? [ids] : ids).map(id => `project:${id}`));
   try {
     const tags: unknown = JSON.parse(raw ?? "null");
-    return Array.isArray(tags) && tags.flatMap(t => typeof t === "string" ? t.split(",").map(s => s.trim()) : []).includes(`project:${id}`);
+    return Array.isArray(tags) && tags.flatMap(t => typeof t === "string" ? t.split(",").map(s => s.trim()) : []).some(t => wanted.has(t));
   } catch { return false; }
+}
+
+/** The project ids a row's tags name, comma-split as membership reads them. */
+export function projectTagIds(raw: string | null | undefined): string[] {
+  try {
+    const tags: unknown = JSON.parse(raw ?? "null");
+    if (!Array.isArray(tags)) return [];
+    return [...new Set(tags.flatMap(t => typeof t === "string" ? t.split(",").map(s => s.trim()) : [])
+      .filter(t => t.startsWith("project:") && t.length > "project:".length).map(t => t.slice("project:".length)))];
+  } catch { return []; }
 }

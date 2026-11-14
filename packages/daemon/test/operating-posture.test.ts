@@ -357,3 +357,13 @@ it("leaves explicit projects alone and stays unknown when no single project is i
   await unclaimedPair.row("pair", unclaimedPair.seat("user-rig", join(unclaimedPair.home, "elsewhere")), ["mission:release"]);
   expect(unclaimedPair.service.resolve({ qitemId: "pair" })).toMatchObject({ posture: "unknown", reason: expect.stringContaining("multiple projects are declared") });
 });
+
+it("resolves a row tagged with a project's former id as that project, and records the mapping (#3261)", async () => {
+  const t = await setup();
+  t.write("alpha/project.yaml", "metadata: {id: alpha}\naliases: [old-alpha]\n");
+  await t.queue.create({ qitemId: "renamed", sourceSession: "author@demo", destinationSession: "owner@demo", body: "Tagged before the rename", tags: ["project:old-alpha", "mission:release", "slice:work-1"], nudge: false });
+  expect((await t.put("delegated", "project", "alpha")).status).toBe(200);
+  const result = t.service.resolve({ qitemId: "renamed" });
+  expect(result).toMatchObject({ posture: "delegated", binding: { id: "project:alpha" }, context: { projectId: "alpha", workstreamId: "alpha/release/work-1" } });
+  expect(result.context!.sources).toContain(join(realpathSync(t.home), "workspace.yaml") + "#former-id=old-alpha");
+});

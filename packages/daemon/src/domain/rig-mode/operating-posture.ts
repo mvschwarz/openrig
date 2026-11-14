@@ -9,7 +9,7 @@ import type { HealthRecord } from "../health-projection.js";
 import type { RigModeStore } from "./rig-mode-store.js";
 import { missionModeQualifier, type OperatorContextReadContext, type OperatorContextScope } from "./rig-mode-types.js";
 import { validateModeName, validateRecord } from "./rig-mode-validator.js";
-import { inferCatalogProject, rigFromSession, selectCatalogProject, ProjectReadError } from "../workspace/project-catalog.js";
+import { catalogProjectFor, inferCatalogProject, rigFromSession, selectCatalogProject, ProjectReadError } from "../workspace/project-catalog.js";
 import type { SettingsStore } from "../user-settings/settings-store.js";
 
 /** Production wiring for the catalogPath callback: an explicitly configured
@@ -127,6 +127,11 @@ export class OperatingPostureService {
       const catalogPath = this.catalogPath?.() || join(workspace, "workspace.yaml");
       let projectRoot = workspace;
       let selected: { id: string; root: string } | null;
+      // A former id a catalogued project declares names that project (#3261), so a row tagged before a rename keeps its posture.
+      if (ctx.projectId) {
+        const current = catalogProjectFor(catalogPath, ctx.projectId);
+        if (current !== ctx.projectId) { ctx.sources.push(catalogPath + "#former-id=" + ctx.projectId); ctx.projectId = current; }
+      }
       try { selected = selectCatalogProject(catalogPath, ctx.projectId); }
       catch (error) {
         if (!(error instanceof ProjectReadError) || error.code !== "project_required") throw error;

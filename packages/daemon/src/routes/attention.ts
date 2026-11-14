@@ -8,7 +8,7 @@ import { isHumanSeatSessionRef } from "../domain/session-name.js";
 import { unansweredQuestions } from "../domain/human-questions.js";
 import type { HealthProjectionService } from "../domain/health-detectors.js";
 import type { OperatingPostureService } from "../domain/rig-mode/operating-posture.js";
-import { listProjects, insideProject, projectMission, type ProjectRead } from "../domain/workspace/project-read.js";
+import { listProjects, insideProject, namesProject, projectMission, type ProjectRead } from "../domain/workspace/project-read.js";
 import { readMissionReadiness } from "../domain/proof/judgments.js";
 import { WorkflowInstanceStore } from "../domain/workflow-instance-store.js";
 import { WorkflowStepTrailLog } from "../domain/workflow-step-trail-log.js";
@@ -70,7 +70,7 @@ export function attentionRoutes(): Hono {
       const detailOnly = opened && !current.some(q => q.qitemId === opened.qitemId) ? opened : null;
       for (const q of [...current, ...(detailOnly ? [detailOnly] : [])]) {
         const tags = [...new Set((q.tags ?? []).filter(t => t.startsWith("project:")).map(t => t.slice(8)))];
-        const p = tags.length === 1 ? projects.find(p => p.id === tags[0] && !p.error) : undefined;
+        const p = tags.length === 1 ? projects.find(p => namesProject(p, tags[0]) && !p.error) : undefined;
         const deps = queue.db.prepare("SELECT summary, qitem_id FROM queue_items WHERE blocked_on = ? AND state IN ('pending','in-progress','blocked') ORDER BY ts_created DESC LIMIT 101").all(q.qitemId) as Array<{ summary: string | null; qitem_id: string }>;
         const unblocks = isHumanSeatSessionRef(q.blockedOn ?? "") ? q.summary || "The blocked task (inspect the request)" : deps.length ? deps.slice(0, 100).map(d => d.summary || "An unnamed dependent task").join("; ") + (deps.length > 100 ? "; more dependents omitted" : "") : "No dependent task recorded; inspect the request for its intended outcome.";
         const toPerson = isHumanSeatSessionRef(q.destinationSession) || asked.has(q.qitemId);
@@ -122,7 +122,7 @@ export function attentionRoutes(): Hono {
         && !current.some(q => q.qitemId === opened.qitemId) ? opened : null;
       for (const q of [...current, ...(detailOnly ? [detailOnly] : [])]) {
         const tags = [...new Set((q.tags ?? []).filter(t => t.startsWith("project:")).map(t => t.slice(8)))];
-        const p = tags.length === 1 ? projects.find(p => p.id === tags[0] && !p.error) : undefined;
+        const p = tags.length === 1 ? projects.find(p => namesProject(p, tags[0]) && !p.error) : undefined;
         const item: AttentionItem = { id: `queue-update:${q.qitemId}`, kind: "update", recipient: q.destinationSession,
           summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Update summary unavailable",
           urgency: q.priority, unblocks: null, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown",
@@ -175,7 +175,7 @@ export function attentionRoutes(): Hono {
       for (const { instance_id: id } of ids.slice(0, 200)) {
         const instance = instances.getByIdOrThrow(id), binding = instance.lifecycleBinding!;
         const identity = binding.identity as { project?: string; mission?: string } | undefined;
-        const p = projects.find(p => p.id === identity?.project && !p.error);
+        const p = projects.find(p => namesProject(p, identity?.project) && !p.error);
         if (!p || !identity?.mission) continue;
         const sources = binding.sources as Array<{ kind: string; path: string }> | undefined;
         const mission = projectMission(p, identity.mission);
@@ -201,7 +201,7 @@ export function attentionRoutes(): Hono {
             : `${s.source}: partial — evaluated ${s.evaluated} of ${s.total} ${s.unit}; ${s.omitted} omitted (limit ${s.limit}, ${s.order}).`)].join(" ") });
       for (const r of records.slice(0, 200)) {
         const projectId = "projectId" in r.scope ? r.scope.projectId : undefined;
-        const p = projects.find(p => p.id === projectId && !p.error);
+        const p = projects.find(p => namesProject(p, projectId) && !p.error);
         const item: AttentionItem = { id: `health:${r.id}`, kind: "update", summary: `${r.summary} · ${r.status}`, urgency: r.severity, unblocks: null, at: r.lastObservedAt, scope: `instance health · ${Object.values(r.scope).join(" / ")}`, project: p ? { id: p.id, root: p.root } : null, source: `/api/health/${encodeURIComponent(r.id)}` };
         add(item, () => [`Status: ${r.status}; first observed ${r.startedAt ?? "unknown"}; last observed ${r.lastObservedAt ?? "unknown"}`, `Freshness: ${r.freshness.state}; ${r.indeterminateReason ?? ""}`, `Posture: ${r.operatingPosture?.posture ?? "unknown"} · ${r.operatingPosture?.reason ?? "not supplied by source"}`, r.explanation, r.suggestedInspection, `Threshold: ${r.threshold}`, "Canonical source and bounded evidence:", JSON.stringify(r, null, 2)]);
       }

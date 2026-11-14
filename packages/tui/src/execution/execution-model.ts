@@ -36,6 +36,8 @@ export interface ExecutionViewSnap {
   /** S06: existing workflow engine facts joined to the selected mission. */
   lifecycle_instances?: Array<Record<string, unknown>>;
   planning_guidance?: Array<{ label: string; text: string; source: string; wave?: string }>;
+  /** #3261: this mission's rows whose project tag no catalogued project claims, current or former id, so they aren't shown. */
+  uncatalogued_project_tags?: { rows: number; ids: string[] };
 }
 
 const INDETERMINATE = "INDETERMINATE";
@@ -505,6 +507,11 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   lines.push(fact("NEXT", nextValue, next ? "accentBright" : "dim"));
   lines.push(fact("PROGRESS", progress, "bright"));
   lines.push(fact("LIFECYCLE", `${execution.readiness?.historicalStatus ?? "unknown"} · separate from outcomes`, "dim"));
+  const unmatched = execution.uncatalogued_project_tags;
+  if (unmatched?.rows) {
+    lines.push(fact("UNMATCHED", `${unmatched.rows} row${unmatched.rows === 1 ? "" : "s"} not shown`, "warn"));
+    lines.push(...wrapDetailLines([{ text: `  Tagged ${unmatched.ids.map(id => `project:${id}`).join(", ")}, which no catalogued project claims. A renamed project lists its former id under aliases: in its project.yaml.` }], width));
+  }
   if (needsHuman.length) {
     const first = needsHuman[0]!;
     lines.push(semanticAction([

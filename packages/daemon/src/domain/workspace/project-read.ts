@@ -3,9 +3,14 @@ import * as path from "node:path";
 import { parse, YAMLParseError } from "yaml";
 import type { SettingsStore } from "../user-settings/settings-store.js";
 import { NODE_FILE_PRECEDENCE } from "../scope/node-file.js";
-import { readProjectCatalog, selectCatalogProject, yamlObject, ProjectReadError } from "./project-catalog.js";
+import { readProjectCatalog, readCatalogAliases, selectCatalogProject, workspaceAliases, yamlObject, ProjectReadError } from "./project-catalog.js";
 
-export interface ProjectRead { id: string; root: string; name: string; sourcePath: string | null; missionsRoot: string; error?: string }
+/** `aliases` are the former ids the project declares in its project.yaml; rows tagged with one are still this project's. */
+export interface ProjectRead { id: string; root: string; name: string; sourcePath: string | null; missionsRoot: string; aliases?: string[]; error?: string }
+/** Every id a project's rows can carry: its current id, then its declared former ids. */
+export function projectIds(p: Pick<ProjectRead, "id" | "aliases">): string[] { return [p.id, ...(p.aliases ?? [])]; }
+/** Whether an id is a project's current id or one of its declared former ids. */
+export function namesProject(p: Pick<ProjectRead, "id" | "aliases">, id: string | null | undefined): boolean { return !!id && projectIds(p).includes(id); }
 type ReadContext = { get: (key: never) => unknown; req: { query: (key: string) => string | undefined } };
 export function projectCatalogPaths(c: Pick<ReadContext, "get">) {
   const store = c.get("settingsStore" as never) as SettingsStore | undefined;
@@ -41,8 +46,8 @@ export function workSource(root: string, dir: string, validate = true): string {
   }
   return source;
 }
-function projectEntry(id: string, root: string): ProjectRead {
-  let p: ProjectRead = { id, root, name: id, sourcePath: null, missionsRoot: path.join(root, "missions") };
+function projectEntry(id: string, root: string, aliases: string[] = []): ProjectRead {
+  let p: ProjectRead = { id, root, name: id, sourcePath: null, missionsRoot: path.join(root, "missions"), aliases };
   try {
     p.root = fs.realpathSync(root);
     const manifest = path.join(p.root, "project.yaml");
@@ -58,20 +63,27 @@ function projectEntry(id: string, root: string): ProjectRead {
   } catch (err) { p.error = (err as Error).message; }
   return p;
 }
+function aliasesOf(aliases: Map<string, string>, id: string): string[] {
+  return [...aliases].filter(([, owner]) => owner === id).map(([alias]) => alias);
+}
 export function listProjects(c: Pick<ReadContext, "get">): { catalogPath: string; projects: ProjectRead[] } {
   const { workspace, catalog } = projectCatalogPaths(c);
   const entries = readProjectCatalog(catalog);
-  if (entries) return { catalogPath: catalog, projects: entries.map(e => projectEntry(e.id, path.resolve(path.dirname(catalog), e.root))) };
+  if (entries) {
+    const aliases = readCatalogAliases(catalog);
+    return { catalogPath: catalog, projects: entries.map(e => projectEntry(e.id, path.resolve(path.dirname(catalog), e.root), aliasesOf(aliases, e.id))) };
+  }
   // Uncatalogued workspaces keep their existing single-project authority.
   const manifest = path.join(workspace, "project.yaml");
   const value = fs.existsSync(manifest) ? yamlObject(manifest) : {};
-  return { catalogPath: catalog, projects: [projectEntry(value.id ?? value.metadata?.id ?? "workspace", workspace)] };
+  const id = value.id ?? value.metadata?.id ?? "workspace";
+  return { catalogPath: catalog, projects: [projectEntry(id, workspace, workspaceAliases(workspace, id))] };
 }
 function lookupProject(c: Pick<ReadContext, "get">, id: string): ProjectRead {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) throw new ProjectReadError("invalid_project", "Invalid project ID");
   const { catalog } = projectCatalogPaths(c);
   const selected = selectCatalogProject(catalog, id);
-  const p = selected ? projectEntry(selected.id, selected.root) : listProjects(c).projects.find(p => p.id === id);
+  const p = selected ? projectEntry(selected.id, selected.root, aliasesOf(readCatalogAliases(catalog), selected.id)) : listProjects(c).projects.find(p => p.id === id);
   if (!p) throw new ProjectReadError("project_not_found", `Project ${id} is unavailable`);
   return p;
 }

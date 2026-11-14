@@ -38,7 +38,7 @@ import {
   type MissionsRootResolver,
   type RoleOrientation,
 } from "../domain/current-work.js";
-import { listProjects, projectCatalogPaths } from "../domain/workspace/project-read.js";
+import { listProjects, namesProject, projectCatalogPaths, projectIds as projectIdsOf } from "../domain/workspace/project-read.js";
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
@@ -172,7 +172,7 @@ export function queueRoutes(): Hono {
           const { catalog } = projectCatalogPaths(c as never);
           const entries = readProjectCatalog(catalog);
           if (!entries) return null;
-          const project = listProjects(c as never).projects.find((entry) => entry.id === projectId);
+          const project = listProjects(c as never).projects.find((entry) => namesProject(entry, projectId));
           if (!project || project.error || !project.missionsRoot) return null;
           return project.missionsRoot;
         }
@@ -1212,10 +1212,11 @@ export function queueRoutes(): Hono {
       if (entries) {
         catalogStatus = "usable";
         const projects = listProjects(c).projects;
-        projectMissionsRoots = new Map(projects.map((project) => [project.id, {
+        // A former id a project declares resolves to that project's root too (#3261).
+        projectMissionsRoots = new Map(projects.flatMap((project) => projectIdsOf(project).map((id) => [id, {
           root: project.error ? null : project.missionsRoot,
           error: project.error,
-        }]));
+        }] as const)));
         workRoots = projects.filter((project) => !project.error).map((project) => project.root);
       }
     } catch {

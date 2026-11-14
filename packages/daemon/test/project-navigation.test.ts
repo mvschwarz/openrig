@@ -13,7 +13,7 @@ import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projecto
 import { scopesRoutes } from "../src/routes/scopes.js";
 import { viewsRoutes } from "../src/routes/views.js";
 import { slicesRoutes } from "../src/routes/slices.js";
-import { selectCatalogProject } from "../src/domain/workspace/project-catalog.js";
+import { belongsToProject, catalogProjectFor, readCatalogAliases, selectCatalogProject } from "../src/domain/workspace/project-catalog.js";
 import { workSource, projectMission } from "../src/domain/workspace/project-read.js";
 let root: string, app: Hono, db: ReturnType<typeof createDb>;
 function file(name: string, text: string) { fs.mkdirSync(path.dirname(name), { recursive: true }); fs.writeFileSync(name, text); }
@@ -84,6 +84,32 @@ describe("catalog project identity across work reads", () => {
       const detail = await get(`/api/slices/01-story?mission=release-x&project=${id}`);
       expect(detail.status).toBe(200); expect(detail.body.qitemIds).toEqual([`qitem-${id}`]);
     }
+  });
+  it("shows a renamed project's earlier rows once its project.yaml declares the former id, and counts rows no project claims", async () => {
+    // Project a was renamed from oc-beacon; its earlier row keeps the old tag. Another row's tag names no project at all.
+    for (const [id, tag] of [["qitem-renamed", "project:oc-beacon"], ["qitem-stray", "project:retired-name"]]) db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,priority,tier,tags,body) VALUES(?,?,?,?,?,'in-progress','normal','light',?,?)")
+      .run(id, "2026-09-10T00:00:00Z", "2026-09-10T00:00:00Z", "root@test", "a@test", JSON.stringify(["mission:release-x", "slice:same-id", tag]), `${id} work`);
+    let execution = await get("/api/views/execution?mission=release-x&project=a");
+    expect(JSON.stringify(execution.body)).not.toContain("qitem-renamed");
+    expect(execution.body.rows[0].uncatalogued_project_tags).toEqual({ rows: 2, ids: ["oc-beacon", "retired-name"] });
+    file(path.join(root, "a", "project.yaml"), "metadata:\n  id: a\n  name: Same project\naliases: [oc-beacon]\n");
+    execution = await get("/api/views/execution?mission=release-x&project=a");
+    expect(JSON.stringify(execution.body)).toContain("qitem-renamed");
+    expect(execution.body.rows[0].uncatalogued_project_tags).toEqual({ rows: 1, ids: ["retired-name"] });
+    expect((await get("/api/slices/01-story?mission=release-x&project=a")).body.qitemIds).toEqual(expect.arrayContaining(["qitem-a", "qitem-renamed"]));
+    // The former id is a's alone.
+    expect(JSON.stringify((await get("/api/views/execution?mission=release-x&project=b")).body)).not.toContain("qitem-renamed");
+  });
+  it("reads a former id only when exactly one project declares it and no project uses it now", () => {
+    const catalog = path.join(root, "workspace.yaml");
+    file(path.join(root, "a", "project.yaml"), "metadata:\n  id: a\naliases: [old, shared, b]\n");
+    file(path.join(root, "b", "project.yaml"), "metadata:\n  id: b\naliases: [shared]\n");
+    expect([...readCatalogAliases(catalog)]).toEqual([["old", "a"]]);
+    expect(catalogProjectFor(catalog, "old")).toBe("a");
+    expect(catalogProjectFor(catalog, "b")).toBe("b");
+    expect(catalogProjectFor(catalog, "shared")).toBe("shared");
+    expect(belongsToProject(JSON.stringify(["mission:release-x,project:old"]), ["a", "old"])).toBe(true);
+    expect(belongsToProject(JSON.stringify(["project:shared"]), ["a", "old"])).toBe(false);
   });
   it("accepts a symlink spelling of the selected root and still refuses a different project", async () => {
     const alias = path.join(root, "a-link");
