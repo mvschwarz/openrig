@@ -26,9 +26,9 @@ use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.14/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.15/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.14/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.15/skills/rigs --skill rigs --agent codex
 ```
 
 Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what you want built. The skill has your agent tell
@@ -68,11 +68,11 @@ Setting up Node.js on Linux, on a Mac where you aren't an administrator, or on W
 
 ### Install it yourself
 
-This runs OpenRig's install script from the `v0.7.14` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+This runs OpenRig's install script from the `v0.7.15` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.14/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.14/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.15/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.15/scripts/install.sh | sh
 ```
 
 If the last step isn't ready, the installer reports `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any reported Fix, then rerun `rig setup`; the CLI does not need reinstalling. If the only remaining failures are provider sign-ins, sign in to each selected provider as below and continue.
@@ -521,7 +521,7 @@ OpenRig is open source and self-hosted, with Claude Code and Codex in the same t
 - **Docs**: [openrig.dev/docs](https://openrig.dev/docs) ([documentation index for agents](https://openrig.dev/llms.txt))
 - **What's new**: [openrig.dev/whats-new](https://openrig.dev/whats-new) (every release, in plain words)
 - **Features**: [openrig.dev/features](https://openrig.dev/features)
-- **Integrations**: [openrig.dev/integrations](https://openrig.dev/integrations) (assistants, harnesses and environments, with setup and test status)
+- **Integrations**: [openrig.dev/integrations](https://openrig.dev/integrations) (coding agents, chat agents and the tools around them, with setup and test status)
 - **Blog**: [openrig.dev/blog](https://openrig.dev/blog) · [Why I Built OpenRig](https://esoteric.run/blog/why-i-built-openrig)
 - **Open Specification**: [openrig.dev/specs](https://openrig.dev/specs)
 - **Videos**: [youtube.com/@openrig](https://www.youtube.com/@openrig)
