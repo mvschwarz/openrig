@@ -14,7 +14,7 @@ It's the open-source system behind my AI civilization experiments.
 
 ![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
 
-**Start here:** [the guided first-use path](docs/reference/quickstart.md): install, talk to the kernel operator, then choose a team for your first useful change.
+**Start here:** [the guided first-use path](docs/reference/quickstart.md): install, talk to OpenRig's operator, then choose a team for your first useful change.
 
 Not setting this up today? Get the next walkthrough and occasional OpenRig updates → https://openrig.dev/follow
 
@@ -26,9 +26,9 @@ use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.14/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.14/skills/rigs --skill rigs --agent codex
 ```
 
 Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what you want built. The skill has your agent tell
@@ -68,11 +68,11 @@ Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Co
 
 ### Install it yourself
 
-This runs OpenRig's install script from the `v0.7.12` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+This runs OpenRig's install script from the `v0.7.14` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.14/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.14/scripts/install.sh | sh
 ```
 
 If the last step isn't ready, the installer reports `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any reported Fix, then rerun `rig setup`; the CLI does not need reinstalling. If the only remaining failures are provider sign-ins, sign in to each selected provider as below and continue.
@@ -367,7 +367,7 @@ Hono HTTP daemon
   SQLite + tmux + runtime adapters
 ```
 
-- **CLI**: Commands for both humans and agents to launch teams, inspect state, send messages, track owned work, and manage context.
+- **CLI**: Commands for both humans and agents to launch teams, inspect state, send messages, track tasks in the queue, and manage context.
 - **TUI**: Topology explorer, table and graph views, seat details, Specs, Projects, Terminals, Feed, and System. Navigate with the keyboard, mouse, or command bar.
 - **MCP**: Tools so agents can manage their own topology (`rig_up`, `rig_ps`, `rig_send`, `rig_chatroom_send`, etc.)
 - **Runtimes**: Native Claude Code and Codex sessions, terminal nodes, and Pi and Oh My Pi via RPC runners.
