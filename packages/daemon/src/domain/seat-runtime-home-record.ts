@@ -120,8 +120,12 @@ export interface RuntimeHomeObservation {
  *  bound. Only what the filesystem reports absent reads not_found; a path it won't let us read reads unknown. */
 export function observeRuntimeHome(home: string, runtime: RecordableRuntime, original: string | null): RuntimeHomeObservation {
   const runningProcess = "unverified" as const;
-  const look = (target: string): "present" | "absent" | "unreadable" => {
-    try { fs.statSync(target); return "present"; } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable"; }
+  // `notADirectoryIsAbsent`: a path under an entry that isn't a directory can't hold the record, so ENOTDIR reads absent.
+  const look = (target: string, notADirectoryIsAbsent = false): "present" | "absent" | "unreadable" => {
+    try { fs.statSync(target); return "present"; } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return code === "ENOENT" || (notADirectoryIsAbsent && code === "ENOTDIR") ? "absent" : "unreadable";
+    }
   };
   let stat: fs.Stats;
   try { stat = fs.statSync(home); } catch (error) {
@@ -134,8 +138,8 @@ export function observeRuntimeHome(home: string, runtime: RecordableRuntime, ori
       const projects = path.join(home, "projects");
       const top = look(projects);
       if (top !== "present") return { home: "present", original: top === "absent" ? "not_found" : "unknown", runningProcess };
-      const seen = fs.readdirSync(projects, { withFileTypes: true }).filter(entry => entry.isDirectory())
-        .map(entry => look(path.join(projects, entry.name, `${original}.jsonl`)));
+      // Each entry is followed as stat follows it, so a linked project directory is read through its link.
+      const seen = fs.readdirSync(projects).map(dir => look(path.join(projects, dir, `${original}.jsonl`), true));
       return { home: "present", original: seen.includes("present") ? "found" : seen.includes("unreadable") ? "unknown" : "not_found", runningProcess };
     }
     let budget = 50_000;
@@ -280,11 +284,14 @@ export function recordRuntimeHome(deps: { db: Database.Database; sessions: Sessi
 }
 
 /** Which runtime home a resume of a selected original conversation uses, so the home, original and revision stay one
- *  tuple through review and effect, and a record made for one conversation is never presented as another's:
+ *  tuple through review and effect, and a record made for one conversation is never presented as another's. The seat's
+ *  home is still a record's only when it's the same path from the same kind of slot the record wrote: a path that now
+ *  comes from elsewhere (the rig's declaration after an account home was cleared, say) is another setting, even when it
+ *  names the same directory.
  *  - as_recorded: the latest record was made for this original, and the seat's home is still that record's home;
  *  - apply: the seat's home is still the latest record's, which was made for another conversation, and one was made for
  *    this original. The newest of those is written back to the slot before the launch, as a new revision for this
- *    original, and put back if the resume doesn't take;
+ *    original, and put back only when the launch is known to have been rolled back or never to have run;
  *  - as_set: the seat's home as it's set, with no record revision for this original. Either nothing was recorded, or
  *    the home changed since the latest record (an account or runtime switch, say) and isn't reapplied over that change,
  *    or no record was made for this original (`otherConversation` then names the latest, another conversation's). */
@@ -298,7 +305,9 @@ export function selectedHomePlan(db: Database.Database, nodeId: string, runtime:
   const latest = latestRuntimeHomeRecord(db, nodeId);
   if (!latest) return { kind: "as_set", why: "nothing_recorded" };
   // The slot no longer holds the latest record's home: something else set it since, and that setting stands.
-  if (seatRuntimeHome(db, nodeId, runtime).home !== latest.home) return { kind: "as_set", why: "home_changed_since_record" };
+  const current = seatRuntimeHome(db, nodeId, runtime);
+  const sameSlot = latest.slot === "account_home" ? current.source === "account-switch" : current.source === "member";
+  if (current.home !== latest.home || !sameSlot) return { kind: "as_set", why: "home_changed_since_record" };
   if (selectedOriginal !== null && latest.original === selectedOriginal) return { kind: "as_recorded", record: latest };
   const own = selectedOriginal === null ? undefined
     : db.prepare("SELECT * FROM seat_runtime_home_records WHERE node_id = ? AND original = ? ORDER BY revision DESC LIMIT 1")
@@ -343,8 +352,8 @@ export function applySelectedHome(deps: { db: Database.Database; sessions: Sessi
   return applied;
 }
 
-/** After a selected resume that didn't take (the seat's current conversation isn't the selected one), put the slot back
- *  to the home the apply replaced, as a new revision recorded for the seat's current conversation, so its next launch
+/** After a selected launch that was rolled back, or never launched, with the seat's conversation the one it had before,
+ *  put the slot back to the home the apply replaced, as a new revision recorded for the seat's current conversation, so its next launch
  *  doesn't run it under the selected one's home. That home was the seat's own (an earlier record wrote it), so it goes
  *  back to the same slot. CAS on the applied revision: a record made since is left alone. Null when nothing was put back. */
 export function revertSelectedHome(deps: { db: Database.Database; sessions: SessionRegistry; eventBus: EventBus },
@@ -363,7 +372,7 @@ export function revertSelectedHome(deps: { db: Database.Database; sessions: Sess
     const slot = writeHomeSlot(db, input.node.id, input.node.runtime, applied.previous_home);
     if (!slot) return null;
     const revision = current.revision + 1;
-    const reason = `put back after the selected resume at revision ${applied.revision} didn't take`;
+    const reason = `put back after the selected launch at revision ${applied.revision} was rolled back or didn't run`;
     const createdAt = new Date().toISOString();
     db.prepare(`INSERT INTO seat_runtime_home_records (operation_id, node_id, runtime, revision, home, slot, previous_home, previous_source,
       original, occupant_generation, request_hash, reason, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)

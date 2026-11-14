@@ -559,6 +559,9 @@ export interface RestoreNodeResult {
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
   sourceSessionId?: string;
   resultSessionId?: string;
+  /** Set only by an explicit selected-history startup: this launch was rolled back, and the seat's binding and sessions
+   *  as they were before it were put back. */
+  compensated?: true;
   // L3: `attention_required` is set when the post-launch probe detects a
   // Claude resume-selection prompt. `operator_recovered` is the terminal
   // outcome after `restore.outcome_reconciled`; never produced directly by

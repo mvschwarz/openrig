@@ -1,11 +1,12 @@
 // Recording the runtime home an existing seat's original conversation lives under (rig seat record-runtime-home):
 // what is written and where, what it's recorded against, and everything it leaves alone.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { effectiveRuntimeHome } from "../src/domain/seat-runtime-home.js";
+import { observeRuntimeHome, selectedHomePlan } from "../src/domain/seat-runtime-home-record.js";
 
 const ORIGINAL = "019a0000-0000-7000-8000-00000000a11a";
 
@@ -202,6 +203,36 @@ describe("rig seat record-runtime-home", () => {
       const recorded = await record({ home: b, expectedOccupant: s.generation, expectedOriginal: ORIGINAL, expectedRevision: 0, operationId: "op-home-unreadable" });
       expect(recorded.body).toMatchObject({ ok: true, revision: 1, observation: { home: "present", original: "unknown" } });
     } finally { chmodSync(b, 0o700); }
+  });
+
+  it("follows a linked Claude project directory, and reads an ordinary file among the projects as holding nothing", () => {
+    const target = path.join(root, "elsewhere", "project-x");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(path.join(target, `${ORIGINAL}.jsonl`), "{}\n");
+    const home = path.join(root, "claude-home");
+    mkdirSync(path.join(home, "projects"), { recursive: true });
+    symlinkSync(target, path.join(home, "projects", "linked-project"));
+    writeFileSync(path.join(home, "projects", "notes.txt"), "");
+    expect(observeRuntimeHome(home, "claude-code", ORIGINAL)).toMatchObject({ home: "present", original: "found" });
+    rmSync(path.join(home, "projects", "linked-project"));
+    expect(observeRuntimeHome(home, "claude-code", ORIGINAL)).toMatchObject({ home: "present", original: "not_found" });
+  });
+
+  it("doesn't take the rig's declaration for an account-home record's home, even when it names the same path", () => {
+    const a = codexHome("a"), b = codexHome("b");
+    const s = seat();
+    const insert = (revision: number, home: string, slot: string, original: string) => db.prepare(`INSERT INTO seat_runtime_home_records
+      (operation_id, node_id, runtime, revision, home, slot, previous_home, previous_source, original, occupant_generation, request_hash,
+      reason, operator, created_at) VALUES (?, ?, 'codex', ?, ?, ?, NULL, 'native_default', ?, NULL, 'fixture', 'fixture', NULL, ?)`)
+      .run(`op-slot-${revision}`, s.node.id, revision, home, slot, original, new Date().toISOString());
+    insert(1, b, "member_env", "selected-original");
+    insert(2, a, "account_home", ORIGINAL);
+    db.prepare("UPDATE rigs SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: a }), s.rig.id);
+    // A switch cleared the account home that record wrote, so the rig's declaration of the same path decides now.
+    expect(selectedHomePlan(db, s.node.id, "codex", "selected-original")).toEqual({ kind: "as_set", why: "home_changed_since_record" });
+    // Still in the record's own slot, the same records apply the selected original's home.
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run(a, s.node.id);
+    expect(selectedHomePlan(db, s.node.id, "codex", "selected-original")).toMatchObject({ kind: "apply", record: { revision: 1, home: b } });
   });
 
   it("states what it's recorded against and refuses only a malformed request", async () => {

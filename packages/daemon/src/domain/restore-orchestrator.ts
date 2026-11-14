@@ -1410,13 +1410,15 @@ export class RestoreOrchestrator {
     });
     if (!launchResult.ok) {
       // Launch failed — restore prior state (compensating action)
-      if (!selectedHistory || (launchResult.code !== "selection_changed_after_creation" && selectedHistory.beforeRegistration())) this.restoreNodeState(nodeId, priorState);
+      const compensate = !selectedHistory || (launchResult.code !== "selection_changed_after_creation" && selectedHistory.beforeRegistration());
+      if (compensate) this.restoreNodeState(nodeId, priorState);
       return {
         nodeId,
         logicalId: node.logicalId,
         status: selectedHistory && launchResult.code === "selection_changed_after_creation" ? "attention_required" : "failed",
         error: launchResult.message,
         ...(keptPane && NOTHING_STOPPED_LAUNCH_CODES.has(launchResult.code) ? { nothingStopped: true as const } : {}),
+        ...(selectedHistory && compensate ? { compensated: true as const } : {}),
       };
     }
 
@@ -1428,12 +1430,15 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
+    // A selected launch's own blank rolled back after the shell started (postLaunchRestore has many return points).
+    const compensation = { ran: false };
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
-      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
+      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
-    return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
+    return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id,
+      ...(compensation.ran ? { compensated: true as const } : {}) } : checked;
   }
 
   private async claudeContinuationExecutable(pane: string, keepLaunch = false, session?: string): Promise<{ executable: string; launch?: ClaudeContinuationLaunch } | undefined> {
@@ -1703,7 +1708,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1751,11 +1756,15 @@ export class RestoreOrchestrator {
     // row ordering (cite site 2 of 2; "latest = max id" was the incident's
     // defect: a superseded row with a newer ULID defeated the real occupant).
     const selected = opts?.selectedHistory;
-    const rollbackOwnBlank = async (): Promise<boolean> => this.rollbackToZeroSession(
-      node.id, sessionName, launchResult?.session.id, priorState,
-      selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
-      opts?.keepPane,
-    );
+    const rollbackOwnBlank = async (): Promise<boolean> => {
+      const rolledBack = await this.rollbackToZeroSession(
+        node.id, sessionName, launchResult?.session.id, priorState,
+        selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
+        opts?.keepPane,
+      );
+      if (rolledBack && priorState && !opts?.keepPane && opts?.compensation) opts.compensation.ran = true;
+      return rolledBack;
+    };
     const changedDuringRollback = (): RestoreNodeResult => ({ nodeId: node.id, logicalId: node.logicalId,
       status: "attention_required", error: "The selected terminal or source changed during cleanup. Its current owner was preserved; inspect the partial launch before retrying." });
     const selectedRows = selected ? data.sessions.filter(row => row.nodeId === node.id && row.id === selected.historySessionId) : [];
