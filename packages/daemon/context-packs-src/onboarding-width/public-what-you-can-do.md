@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety-three top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.13`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.15`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -33,7 +33,12 @@ one command away. Your memory of the fleet is a claim about the past.
   *including the broken ones*. **The bare form is the question you usually want:** `--active`
   filters to running and **hides detached, exited and attention states** — which are exactly the
   cells you were scanning for. A seat whose tmux session is confirmed gone reads `detached`
-  (activity reason `session_missing`), and `rig ps --nodes` says to restore or relaunch it.
+  (activity reason `session_missing`), and `rig ps --nodes` says to restore or relaunch it. Since 0.7.14 `rig ps` ends with connected
+  assistants and their check-in line, and node reads take turns through their three synchronous
+  steps. In the change's own tests, health checks and queue reads were no longer held behind a whole
+  burst of them; a comparison under load didn't attribute a gain to it (`rig ps --nodes` showed no
+  change, and sends were inconclusive). A nodes response is no longer one snapshot across those
+  steps, and in a burst each one comes later.
   A verified exited process in a retained pane reads `pane_exited`, instead of running and ready;
   outstanding work uses the existing recovery-finding route. An unknown observation is not an exit.
   `rig ps --nodes` also shows the model each seat was last seen using (`modelObservation`, with its
@@ -109,7 +114,8 @@ one command away. Your memory of the fleet is a claim about the past.
   Closed work's content and metadata can also be erased on a schedule
   (`retention.closed_content_days`, `retention.closed_metadata_days`; `0`, the default, keeps them),
   with an optional `retention.erasure_ledger`, for a retention policy or an account deletion. It's
-  opt-in, and a retried create can't bring erased work back.
+  opt-in, and a retried create can't bring erased work back. Since 0.7.14 an account's erasure also
+  removes OpenRig's own wakes and notices for that account's seats.
 - **Check the exit code.** Many commands used to print nothing and exit 0 when a daemon read
   failed; now they exit 1 or 2. Empty output from a failed read is not empty state.
 
@@ -124,7 +130,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   consequential delivery gets an effect check at the far end rather than a blind retry.
   `--verify` exits 1 when it can't confirm what its Enter did (`submission unconfirmed`, or text
   staged but not submitted): the message may still have arrived, so inspect with `rig capture`
-  before any resend, and don't let a script resend on that exit code alone. A
+  before any resend, and don't let a script resend on that exit code alone. Since 0.7.14 an ordinary
+  send is refused as needing input while an open Claude Code or Codex `/model` picker is
+  positively identified; nothing is typed. That's shown by the change's own tests, not yet checked
+  with the real Claude Code and Codex programs on 0.7.14. A
   producer-link advisory reading `no_activity_signal` means activity could not be determined;
   confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
   question waiting for a person is refused with `target_needs_input`, even when its screen
@@ -175,7 +184,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   and the box was empty after Enter; it only reports.
 - **`rig broadcast`** — one fact to everyone at once, rather than relaying it N times and getting
   the wording wrong on the fourth. **Blast radius is real** — on a large rig this lands in every
-  seat's turn. A broadcast that reached no one says so.
+  seat's turn. A broadcast that reached no one says so, and a recipient a seat's setting held
+  reads as retained, not sent.
 - **`rig capture <seat>`** — read what is on their screen right now. **`--rig` / `--pod`** captures
   every seat in one call. `--lines N` is the last N lines (stderr says how many earlier lines were
   cut); `--history-plus-pane` gives the older N history lines plus the whole pane. A short capture
@@ -255,7 +265,7 @@ unseen — which makes messages the one delivery channel that never gets skipped
   default. **Opening `rig terminal open saved:kernel --window` is the step after install or start**:
   say you're opening it, run it on the daemon's desktop, then tell the person where it opened. Don't
   wait for a phrase like “show me my agents”; the same command brings their agents back later. No
-  YAML, herdr when installed or plain tmux. The layout follows the terminal's width: on a narrow
+  YAML, herdr when installed or plain tmux. Rex tiles show each seat's agent and its activity. The layout follows the terminal's width: on a narrow
   one the operator gets the first tab; on a wide one the dashboard and operator sit side by side
   and the advisor gets its own tab. A `kernel` view the person saved still wins.
   Tiles show their seat's screen without attaching, so whole lines show at any tile width; a
@@ -345,7 +355,12 @@ unseen — which makes messages the one delivery channel that never gets skipped
   never posted. By default, an emoji reaction on a message posted for an ask reaches the asking seat
   as a task tagged `human-reaction`: a signal to interpret, not an answer, and the ask stays open.
   `rig slack setup --reactions off` disables that routing; the default is `route`, and regenerating
-  the app manifest preserves the setting.
+  the app manifest preserves the setting. Since 0.7.15 link and media previews on posts to a person
+  are off by default: `rig slack setup --unfurl on` turns them back on from the connector's next
+  rewire, and `rig slack status` shows the mode. When the arrival note is recorded before the
+  answer is routed, an answer to a reply in an older thread posts back into that thread; a failed
+  note write posts it top-level; a notification posted before the note is recorded can also lead
+  to a top-level answer.
   It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app);
   `rig slack verify` warns when the scope is missing. A long ask is posted in numbered thread parts; one that
   still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
@@ -480,7 +495,8 @@ relay is a reason to inspect the available routing, not to surrender judgment to
 - **`rig workflow validate`** — will this spec instantiate at all, before a run finds out for you. A
   step with no allowed exit that can finish it or route onward is reported as `step_cannot_finish`.
   An allowed mapped exit is valid; in a dependency graph, `handoff` can finish a sink without a next
-  step.
+  step. Since 0.7.14 each step with a `harness:` pin gets a `harness_pin_unchecked` warning:
+  validation doesn't check pins against seats.
 - **`rig workflow compile <mission>`** / **`instantiate-lifecycle`** — derive one executable graph
   from `project.yaml` → `mission.yaml` → `slice.yaml`, inspect it without writing, then start an
   eligible graph with an opaque replay key. Typed acceptance candidate, verdict, and evidence
@@ -596,12 +612,16 @@ not have to tear one down to change it, and you rarely have to start from nothin
   A fresh Pi seat normally keeps OpenRig's guidance in its own agent folder, and a fresh Codex
   0.164.0+ seat normally gets it as launch developer instructions, so neither adds it to the
   repository's `AGENTS.md`. The repository file is still used when the Pi folder or its `AGENTS.md`
-  is a link, when a Codex config layer sets `developer_instructions` or can't be read, and for a
-  Codex resume, fork, restore or handover successor, or an older or unknown Codex version
-  (`docs/reference/agent-startup-guide.md` has the rule). At
+  is a link, when a Codex config layer sets `developer_instructions` or can't be read, for a Codex
+  fork or handover successor, a Codex resume in a rig without pods, or an older or unknown Codex
+  version. An eligible Codex resume (a rig with pods, Codex 0.164.0 or later, no configured
+  guidance, readable configuration) sends the missing blocks it can read with the resume instead;
+  a block whose source is gone or can't be read is reported missing, and the seat-skills line,
+  after the person's yes, still goes to `AGENTS.md` (`docs/reference/agent-startup-guide.md` has
+  the rule). At
   launch, a block a person edited is kept and named (`guidance_block_edited`), not replaced.
   `rig up <rig> --existing` puts back the OpenRig guidance blocks `rig down` removed before a
-  resumed seat starts. A seat still missing one makes the rig `partially_restored` (its node lists
+  resumed seat starts, except on that eligible Codex resume, where those readable blocks go with the resume. A seat still missing one makes the rig `partially_restored` (its node lists
   `guidanceGaps`) and `rig up` exits 1. A seat that wasn't running at the snapshot, but whose
   earlier session left a resume token, stops at `awaiting-decision` instead of starting fresh, in
   `rig up --existing` and in `rig launch` (exit 1); the message names the command that starts it
@@ -632,6 +652,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
   steps): hand it work, follow it, answer the team's questions in their own words, and read the
   result. VS Code, Copilot CLI and Cursor load it with no seat: give the app its own
   `rig mcp serve --front-door` server with `OPENRIG_SESSION_NAME` set and turn the plugin's off.
+  A skill-only edition for Claude's plugin directory, in `plugins/claude-directory/`, follows
+  handed-on work and keeps its reply route. The plugin needs Claude Code 2.1.119 or later: on
+  earlier versions, with its OpenRig seat setting blank, the agent has no OpenRig tools.
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
@@ -715,6 +738,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   (or, when it names none, the only one Codex has logged since it started); OpenRig can't tell
   which conversation Codex is on now. If the conversation was changed inside the running Codex,
   the restart may refuse or resume the earlier one, so look at the pane (`rig capture <seat>`) first.
+  Since 0.7.15, when it refuses a recoverable seat whose tmux session is gone (`session_not_live`),
+  it names the way back: `rig launch '<rig>' '<node>'` (add `--plan` to preview).
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
   already running. `rig add`, `rig grow` and `rig remove` take the rig's name or ID; a name two active rigs share is refused
   with `rig_ambiguous` and the candidates. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
@@ -782,6 +807,14 @@ version, from checking the environment to a useful report to the OpenRig team.
   Stop distinguishes process/listener exit from a clean asynchronous drain: inspect the matching
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
+  Since 0.7.15 start gives the child it started a 180-second readiness budget, with a progress
+  line about every 20 s: let it finish rather than starting again. Synchronous work can run past
+  the budget, and it isn't a cure for a slow start.
+  When the daemon stalls, read `$OPENRIG_HOME/logs/slow-operations.jsonl` before guessing: it names
+  slow synchronous steps by site, since 0.7.15 including three queue sites and three selected steps
+  of an ordinary nodes read (`nodes.inventory.build`, `nodes.inventory.activity_sync`,
+  `nodes.inventory.terminal_work`). These nodes records are written after a slow call completes; a
+  missing record doesn't rule out unfinished work or work outside those steps.
   On Linux, when the daemon runs as a systemd user service, the seats' tmux server starts in its
   own user scope, so stopping or restarting the daemon's unit keeps the seats; otherwise it starts
   as before, with one log line giving the reason.
@@ -848,6 +881,12 @@ version, from checking the environment to a useful report to the OpenRig team.
   Use `rig launch ... --snapshot-id <id>` when selection must be exact, and `rig restore status
   <attempt> --rig <rig>` for the derived intended-set receipt after an asynchronous restore.
   restore-check's per-seat `seat.<s>.queue-file` check is now `seat.<s>.queue-store`.
+  Since 0.7.15, for an eligible seat in a rig with pods that it starts in its own pane, restore
+  tries the saved conversation when the seat has a resume token but no saved startup context, and
+  records the `startup_context` gap; a successful resume reads `partially_restored`, and a missing
+  conversation or failed start keeps its own status. restore-check reads that seat yellow. Both warn when a snapshot's named Codex profile was cleared
+  from the current seat. A rig can still read `fully_restored` past a seat restore didn't start or
+  one left attached, and a seat left as a bare shell still counts as running in `rig ps`.
 - **`rig restore-packet write` / `read` / `validate`** — a seat is about to die or must move
   runtimes; capture what it knows into a portable artifact instead of losing it with the process.
 - **Upgrading is agent-led** — load the shipped `openrig-upgrade` skill for the bounded inspect,
@@ -946,6 +985,12 @@ version, from checking the environment to a useful report to the OpenRig team.
   re-nudges). `--enabled true|false` remains compatible: true selects hold, false selects off.
   Known limit: in `draft-aware`, a multi-line message to a Claude seat can stay unsubmitted when the
   paste changes Claude's footer hint, and later sends wait behind it; check the seat's composer.
+  Since 0.7.15 `draft-aware` re-checks right before an automatic paste and holds after recent
+  client activity or when tmux can't be read; typing after that last check still isn't seen. With
+  Claude Code's full-width auto-update-failure footer on screen, an empty `draft-aware` seat can
+  hold an ordinary send; `rig seat held-messages` shows it. On Codex (seen with 0.167.1 and
+  0.167.2), a send to a busy `draft-aware` seat can be pasted without Enter, neither delivered
+  nor held; its text stays in the input, and there's no fix for it in this release.
   `rig seat status` shows the requested/effective mode; wait for pending activation to finish.
   **`rig seat held-messages`** lists what was retained and **`rig seat retire-held-message`**
   retires one; changing mode does not replay old held messages. A seat that starts, or a successor
@@ -962,7 +1007,8 @@ version, from checking the environment to a useful report to the OpenRig team.
 - **`rig compact-plan`** → **`rig compact`** — who is near the context wall, then act on it.
   **Ordering matters: running `compact` without the plan is guessing which seat needed it.**
   Managed compaction waits for the seat's restore map before compacting; `rig compact --state`,
-  `--cancel` and `--skip-map` inspect, stop or skip that wait. If preparation stops at an ordinary
+  `--cancel` and `--skip-map` inspect, stop or skip that wait; since 0.7.14 `--state` also names the
+  input check behind a `draft_input_unknown` stop (`inputReadFailure`). If preparation stops at an ordinary
   approval, a manual `rig compact` keeps waiting for someone to answer it, within its 180-second
   budget; OpenRig never answers it, and the request times out after 240 seconds. The `claude-compaction-restore`
   skill covers writing and reading the map; `claude-compact-in-place` no longer ships. After a
@@ -1018,6 +1064,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   cached hook keeps that trust, as with any hook trusted in Codex; the trust covers that
   `CODEX_HOME`, so your own Codex sessions there load the plugin too, and its hooks do nothing
   outside an OpenRig seat; adding your own Codex hook can trigger a re-review of one OpenRig hook.
+  Since 0.7.15, when a new openrig-core changes one of those six hook declarations, the boot or
+  launch that installs it renews OpenRig's approvals from its own record, in the daemon's Codex
+  home at boot and in a seat's own Codex home at its launch, instead of stopping at Codex's review.
+  A person's own choice in any layer OpenRig reads keeps the review.
 - **Know what compaction costs before you reach for it.** On some runtimes what comes back has
   enough context left to believe it knows everything and not enough to actually know anything — and
   **the compacted agent is the only one who knows it happened**, while every other seat keeps
@@ -1098,7 +1148,8 @@ scheme, and nothing downstream can see it.
   System World, topology, and Project World plan. Add `--runtime` to see the composed managed skill
   loadout, `--apply-skills` to reconcile its owned harness projection, or `--deliver` to emit the
   exact extant files in order while marking absent pieces visibly. Without the flags it remains
-  plan-only. Without `--project` it picks the project itself, in order: the only project, the
+  plan-only. Since 0.7.15 a `--mission` that doesn't exist adds a warning and reads
+  `missionRoot` null, instead of quietly serving the project's context. Without `--project` it picks the project itself, in order: the only project, the
   project whose `rigs:` lists the seat's rig, the deepest project root containing the working
   folder, then the only unclaimed project. It reports `position.selectedBy`. If a step is
   ambiguous (two projects list the rig, or two roots tie), it stops there and asks for
@@ -1502,7 +1553,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   0.7.13, `rig daemon start` ends with that offer when the person registry can be read and holds
   nobody. The kernel operator's startup is also taught to run `rig gateway participants` before its
   first greeting and offer registration when nobody is registered. The agent asks first and
-  registers only on the person's yes.
+  registers only on the person's yes. Since 0.7.14 setup guidance tells the agent to fit a first
+  team to the person's logins: a login `rig doctor` reports missing matters when a seat you'd start
+  runs on that harness, so say which one before launch
+  (`rig specs preview <team> --kind rig --json` shows each seat's runtime).
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig usage top`** — which of this machine's seats used the most tokens over a window (`--window
@@ -1587,7 +1641,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
   Clients on MCP protocol revision 2026-07-28 and on the 2025 revisions share the same endpoint.
   With a grant service (experimental and off by default; you serve it to the internet behind
   your own tunnel), `--task-destination <member@rig>` names where a caller's `rig_queue_create`
-  goes when it gives no destination, and a seat's name alone resolves within the grant's team. A
+  goes when it gives no destination, and a seat's name alone resolves within the grant's team. Since
+  0.7.14 a plain name finds the seat's actual session (its own name, then its pod-member form, then
+  that name's slug, among seats the grant can address): an ambiguous name returns
+  `destination_ambiguous` with the candidates, an unknown one `destination_not_found`, and an
+  unreadable team `destination_unchecked`. Its person sees each tool's plain title, and under a
+  grant service's fair-use limit only new work is held back. A
   grant that names a person adds `rig_question_list` and `rig_question_answer`, so that person
   answers the team's questions from their assistant, recorded as their answer through that
   connection.
@@ -1601,7 +1660,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   member nothing can wake, or a rung member doesn't claim it in time, its person is told.
   A hosted member's roster entry shows whether it's checking in: its expected cadence and its last
   check-in, read as checking in, overdue, not yet checked in or checking in on request, and unknown
-  when that can't be read. It's a status, never a gate on delivery.
+  when that can't be read. It's a status, never a gate on delivery. Since 0.7.14 `rig ps`,
+  `rig_team` and the TUI's tables list connected assistants with that check-in line; since 0.7.15
+  the TUI keeps it when a rig's inventory can't be read. An assistant that passes its team's
+  display name as `rig_team`'s `rigId` is told to leave `rigId` out to see its own team.
   **Internet-facing hosted members are experimental, unsupported, off by default and at your
   own risk.** Local assistants can connect locally. Internet access needs your own TLS tunnel or
   proxy and a narrowly scoped, revocable token; see `reference/hosted-members.md`. Task terminal
@@ -1659,7 +1721,8 @@ database. It is one more set of primitives on a machine full of them.
   original byte size and the exact expansion command. Read the complete original record with
   `rig queue show <qitemId> --full --json`; a preview or a compact list is not the whole body.
   Compact `rig queue list` rows carry `summary`; the fields they leave out are absent, not empty,
-  and `fieldsElided` names them.
+  and `fieldsElided` names them. Since 0.7.14 `--tag` (repeatable; every tag must match),
+  `--mission` and `--slice` filter exactly, and bounded listings over retained history use indexes.
   Delivery status is separate from content: inspect its receipt before claiming it was consumed.
 - **"What am I waiting on?"** — the queue row's `waiting` view derives its owner, exact blocker
   and blocker owner, last meaningful change, activity confidence and next backstop from live

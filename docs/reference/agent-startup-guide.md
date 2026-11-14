@@ -42,10 +42,11 @@ They are recognized from each harness's English prompt text.
 pre-approves N tool permissions" (from the folder's `.claude/settings.json`): OpenRig never
 answers it, not even with `recovery.auto_drive_provider_prompts`, because its default choice
 declines those permissions (or exits) and approving them is your call. With that setting on,
-the plain workspace trust prompt is answered only when its options are exactly "No, exit" and
+when a Claude Code seat is resumed, the plain workspace trust prompt is answered only when its options are exactly "No, exit" and
 "Yes, I trust this folder": Claude Code 2.1.322 opens it on "No, exit", so OpenRig moves the
 selection down once and presses Enter only after it reads the focus on "Yes". Any other option
 set, a prompt drawn without a cursor or a focus that does not reach "Yes" gets no confirmation.
+A fresh launch still stops at the trust prompt for you to answer.
 
 ## Continue a Codex fork whose child ID arrived late
 
@@ -415,7 +416,7 @@ Each startup file and action specifies when it applies:
 - `restore` — delivered when a seat is restored without its earlier conversation: a restore whose resume falls back to a fresh conversation, or a retried start
 - Default: `[fresh_start, restore]` (both)
 
-**An exact resume delivers neither.** When a restore reopens the seat's saved conversation (`rig up <rig> --existing` with a resume token), OpenRig types no startup actions and delivers no startup files, `restore` ones included: the conversation already has them, and typing them again would add turns to it. The one exception: the guidance file's managed blocks are brought up to date before the harness starts. A missing block is put back, and a stale one is refreshed (see below).
+**An exact resume delivers neither.** When a restore reopens the seat's saved conversation (`rig up <rig> --existing` with a resume token), OpenRig types no startup actions and delivers no startup files, `restore` ones included: the conversation already has them, and typing them again would add turns to it. The one exception: the guidance file's managed blocks are brought up to date before the harness starts. A missing block is put back, except on an eligible Codex resume, where it goes with the resume instead (see [Codex guidance at launch](#codex-guidance-at-launch)), and a stale one is refreshed (see below).
 
 **A seat handover does the same put-back.** Before a fresh, fork or rebuild successor starts, the handover puts the seat's missing managed guidance blocks back in its guidance file from the saved startup context. That's the rig's Claude file (`CLAUDE.md`, or `CLAUDE.local.md` when the rig uses it) for Claude, and `AGENTS.md` for Codex, Pi and omp. So a seat rebuilt into a new working directory keeps its guidance.
 

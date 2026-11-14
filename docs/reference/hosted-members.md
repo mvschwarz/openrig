@@ -182,7 +182,8 @@ and nothing else is offered:
   can address count, and the first of these that any of them matches decides, so another seat's slug never makes an exact
   name ambiguous and a seat the grant can't address never shadows one it can. The item is stored under that
   seat's actual session. A slug two seats match returns `destination_ambiguous` with the candidates, and a name that no
-  seat the grant can reach has returns `destination_not_found`. A name the grant can't address as written (its own seat,
+  seat the grant can reach has returns `destination_not_found`. If the team couldn't be read to check, it returns
+  `destination_unchecked` and nothing was written; try again. A name the grant can't address as written (its own seat,
   or another assistant's without `team`/`list`) stays `out_of_scope`, whether or not that seat exists.
 - **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form
