@@ -322,9 +322,12 @@ Follow these steps by default. Only when the person declined the Codex offer abo
   anything else.
 - **Then ask what's next.** If no team can take the work, fix that or ask the person. Don't quietly do it yourself.
 - **Coming back later:** in a new session, use the same return address and the task IDs you gave the person. Read
-  each with `rig queue show <id> --json` and follow its `successors` to the newest item, as above;
+  each with `rig queue show <id> --json` and follow its `successors` to the newest item, as above. A task handed to
+  another host has no `successors` here: its `successorNote` names the successor as `<id>@<host>`, so read it there
+  with `rig queue show <id> --host <host> --json`.
   `OPENRIG_SESSION_NAME=<address> rig queue list --mine -a` lists everything this address sent or owns, finished work
-  included (without `-a` it shows only open items). Follow that work rather than creating it again.
+  included (without `-a` it shows only open items). It returns at most 100 rows unless you pass `--limit`, so on a busy
+  address keep the task IDs you created, or raise `--limit`. Follow that work rather than creating it again.
   Adding OpenRig's MCP plugin to this app later starts a new session; it doesn't carry this conversation over.
 - **Other ways to work with the team:** `rig send <seat>@<rig> "..."` types into an agent's terminal,
   `rig capture <seat>@<rig>` reads its screen, and `rig ps --nodes --rig <rig>` shows who's on it.
