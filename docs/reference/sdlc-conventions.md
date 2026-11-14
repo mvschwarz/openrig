@@ -157,13 +157,16 @@ bucket each word falls in as the slice's `status`, and its
 | `active`, `in-flight`, `ratified` | `active` |
 | `draft`, `draft-pending-orch-ratification`, `placeholder` | `draft` |
 | `done`, `shipped`, `promoted`, `closed` | `done` |
-| `wontfix`, `deferred`, `superseded`, `stale`, `closed-wontfix`, `closed-deferred`, `closed-superseded`, `closed-stale` | `closed` |
+| `closed-wontfix`, `closed-deferred`, `closed-superseded`, `closed-stale` | `closed` |
 | `blocked`, `parked-with-evidence` | `blocked` |
 
 Words are matched ignoring case. Any other word is matched by what it contains:
 `done`, `ship` or `close` makes it `done`; `block` or `park`, `blocked`; `draft`
 or `pending`, `draft`. A word that matches none of these counts as `active`, so a
-slice marked `complete` counts as `active`. A slice with no `status:` counts as
+slice marked `complete` counts as `active`, and so does one marked a bare `wontfix`,
+`deferred`, `superseded` or `stale`: only the `closed-<reason>` words that
+`rig scope slice close` writes read as `closed` (a slice moved to `closed/` with one
+of them used to read `done`). A slice with no `status:` counts as
 `draft`.
 
 `rig view show execution` shows the slice's own `status:` word (from its
@@ -208,13 +211,12 @@ or by hand) reopens its judged items:
 `rig proof show` reports each as `unknown`, and each needs a new judgment on its
 current revision. Opt-in `rig scope slice close <slice> --in-place --reason delivered`
 (or `--in-place --reason <wontfix|deferred|superseded|stale>` for non-delivery
-exits) updates status in place under `<mission>/slices/<slice>` (and reconciles
-any existing uncommented top-level scalar `status:` in `PROGRESS.md` frontmatter,
-refusing before modifying any file if either the slice node file or `PROGRESS.md`
-frontmatter carries an inline `#` comment on `status:` or an ambiguous
-duplicate, nested or malformed-delimiter `status:` entry that line-based slice
-readers would parse differently)
-without moving the folder, so recorded judgments stay applicable while the item
+exits) updates status in place under `<mission>/slices/<slice>` (and writes the same
+status to a `status:` that the slice indexer reads in `PROGRESS.md` frontmatter).
+It then reads the status back the way the slice indexer does; if the indexer does
+not read the new status (for example a duplicate, nested or commented `status:`
+line), it restores every file it changed and refuses with one message naming the
+file. It does not move the folder, so recorded judgments stay applicable while the item
 text, policy and cited evidence bytes are unchanged (judgments citing files
 updated by closure, such as `SPEC.md`, reconciled `PROGRESS.md` or `mission.yaml`,
 reopen to `unknown`), and parent mission status is never automatically marked

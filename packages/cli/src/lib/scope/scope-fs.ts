@@ -14,7 +14,7 @@ import type {
   SliceInfo,
   SliceState,
 } from "./types.js";
-import { NON_DELIVERY_CLOSE_REASONS, ScopeCliError } from "./types.js";
+import { ScopeCliError } from "./types.js";
 import {
   DEFAULT_PROJECT_PREFIX,
   inferMissionDotId,
@@ -77,129 +77,63 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
   }
 }
 
-export type ProgressStatusFrontmatterState =
-  | { kind: "absent" }
-  | { kind: "reconcile" }
-  | { kind: "ambiguous"; detail: string };
-
-/** Classify how a slice node file (`SPEC.md` / `README.md`) or `PROGRESS.md`
- *  frontmatter defines `status` across structured YAML (`readFrontmatter` /
- *  `updateFrontmatter`) and line-based slice readers
- *  (`SliceIndexer.parseFrontmatter`, which trims every frontmatter line at any
- *  indentation, keeps inline `#` comments in raw values, and lets the last
- *  `status:` line win). Returns `"ambiguous"` before mutation whenever
- *  malformed frontmatter delimiters, duplicate top-level `status:` lines,
- *  nested/indented `status:` lines, inline `#` comments on top-level `status:`,
- *  or non-scalar/flow `status` syntax would leave consumers disagreeing or
- *  discard comments on update. */
-export function classifyProgressStatusFrontmatter(content: string): ProgressStatusFrontmatterState {
-  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(content);
-  if (!match) {
-    if (content.startsWith("---")) {
-      const rest = content.slice(3);
-      const endIdx = rest.indexOf("\n---");
-      if (endIdx !== -1) {
-        for (const rawLine of rest.slice(0, endIdx).split("\n")) {
-          const trimmed = rawLine.trim();
-          if (!trimmed || trimmed.startsWith("#")) continue;
-          const colonIdx = trimmed.indexOf(":");
-          if (colonIdx !== -1 && trimmed.slice(0, colonIdx).trim() === "status") {
-            return {
-              kind: "ambiguous",
-              detail: 'malformed "---" frontmatter delimiter with a "status:" line that line-based readers still parse',
-            };
-          }
-        }
-      }
-    }
-    return { kind: "absent" };
-  }
-
-  const block = match[1]!;
-  const unindentedStatusLines: number[] = [];
-  const indentedStatusLines: number[] = [];
-  const rawLines = block.split(/\r?\n/);
-  for (let i = 0; i < rawLines.length; i++) {
-    const rawLine = rawLines[i]!;
-    const trimmed = rawLine.trim();
+/** The line-based frontmatter reader the daemon's slice indexer applies to a
+ *  slice's files (`parseFrontmatter` in packages/daemon/src/domain/slices/slice-indexer.ts):
+ *  every line is trimmed at any indentation, `#` lines are skipped, wrapping quotes are
+ *  stripped, an inline `#` stays in the value, and the last `status:` line wins. */
+function parseIndexerFrontmatter(content: string): Record<string, string> {
+  if (!content.startsWith("---")) return {};
+  const rest = content.slice(3);
+  const endIdx = rest.indexOf("\n---");
+  if (endIdx === -1) return {};
+  const out: Record<string, string> = {};
+  for (const line of rest.slice(0, endIdx).split("\n")) {
+    const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const colonIdx = trimmed.indexOf(":");
     if (colonIdx === -1) continue;
-    if (trimmed.slice(0, colonIdx).trim() !== "status") continue;
-    if (/^[ \t]/.test(rawLine)) {
-      indentedStatusLines.push(i + 2);
-    } else {
-      unindentedStatusLines.push(i + 2);
+    const key = trimmed.slice(0, colonIdx).trim();
+    let value = trimmed.slice(colonIdx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** The files the slice indexer merges for a slice's frontmatter, in its merge order:
+ *  later files win, so `PROGRESS.md` overrides the node file (`SPEC.md` / `README.md`). */
+function indexerFrontmatterFiles(sliceAbsPath: string): string[] {
+  const node = resolveNodeFile(sliceAbsPath);
+  return [
+    path.join(sliceAbsPath, "IMPLEMENTATION-PRD.md"),
+    ...(node ? [path.join(sliceAbsPath, path.basename(node))] : []),
+    path.join(sliceAbsPath, "PROGRESS.md"),
+  ];
+}
+
+/** Whether the slice indexer would read a `status` out of this file on its own. */
+export function indexerReadsStatusIn(content: string): boolean {
+  return Object.prototype.hasOwnProperty.call(parseIndexerFrontmatter(content), "status");
+}
+
+/** Read a slice's status back the way the slice indexer does, and name the file that
+ *  supplies it. `status` is `null` when no file gives the indexer one. This follows the
+ *  indexer's merge (later files win) rather than listing frontmatter shapes up front, so it
+ *  reads what every shape actually becomes; a parity test holds it to the real indexer. */
+export function readIndexerSliceStatus(sliceAbsPath: string): { status: string | null; file: string | null } {
+  let status: string | null = null;
+  let file: string | null = null;
+  for (const candidate of indexerFrontmatterFiles(sliceAbsPath)) {
+    if (!fs.existsSync(candidate)) continue;
+    const frontmatter = parseIndexerFrontmatter(fs.readFileSync(candidate, "utf8"));
+    if (Object.prototype.hasOwnProperty.call(frontmatter, "status")) {
+      status = frontmatter["status"]!;
+      file = candidate;
     }
   }
-
-  if (indentedStatusLines.length > 0) {
-    const detail =
-      unindentedStatusLines.length === 0
-        ? `nested "status:" entry at line ${indentedStatusLines[0]} without a top-level status key`
-        : `nested "status:" entry at line ${indentedStatusLines[0]} alongside top-level status`;
-    return { kind: "ambiguous", detail };
-  }
-
-  if (unindentedStatusLines.length > 1) {
-    return {
-      kind: "ambiguous",
-      detail: `duplicate top-level "status:" entries at lines ${unindentedStatusLines[0]} and ${unindentedStatusLines[1]}`,
-    };
-  }
-
-  let yamlValid = false;
-  let yamlMapping: Record<string, unknown> | null = null;
-  let statusHasInlineComment = false;
-  try {
-    const doc = YAML.parseDocument(block, { keepSourceTokens: true });
-    if (doc.errors.length === 0 && (doc.contents === null || YAML.isMap(doc.contents))) {
-      const js = doc.toJS() as unknown;
-      yamlValid = true;
-      if (js && typeof js === "object" && !Array.isArray(js)) {
-        yamlMapping = js as Record<string, unknown>;
-      }
-      if (YAML.isMap(doc.contents)) {
-        const statusPair = doc.contents.items.find(
-          (pair) => YAML.isScalar(pair.key) && pair.key.value === "status",
-        );
-        const statusValueNode =
-          statusPair && YAML.isNode(statusPair.value) ? statusPair.value : null;
-        if (
-          statusValueNode &&
-          (statusValueNode.comment != null || statusValueNode.commentBefore != null)
-        ) {
-          statusHasInlineComment = true;
-        }
-      }
-    }
-  } catch {
-    yamlValid = false;
-  }
-
-  if (yamlValid) {
-    const hasYamlStatus = yamlMapping !== null && Object.prototype.hasOwnProperty.call(yamlMapping, "status");
-    if (hasYamlStatus) {
-      const statusVal = yamlMapping!["status"];
-      if (statusVal !== null && typeof statusVal === "object") {
-        return { kind: "ambiguous", detail: 'non-scalar top-level "status" frontmatter value' };
-      }
-    }
-    if (hasYamlStatus !== (unindentedStatusLines.length > 0)) {
-      return {
-        kind: "ambiguous",
-        detail: 'quoted or flow-style "status" frontmatter entry that line-based slice readers parse differently',
-      };
-    }
-    if (statusHasInlineComment) {
-      return {
-        kind: "ambiguous",
-        detail: `top-level "status:" entry with an inline "#" comment at line ${unindentedStatusLines[0]}`,
-      };
-    }
-  }
-
-  return unindentedStatusLines.length > 0 ? { kind: "reconcile" } : { kind: "absent" };
+  return { status, file };
 }
 
 /** Update specific keys in a markdown file's frontmatter. The writer owns only
@@ -566,14 +500,7 @@ export function sliceStanding(slice: SliceInfo, inClosedFolder: boolean): Exclud
   const status = (slice.status ?? "").toLowerCase();
   const stage = typeof slice.frontmatter.stage === "string" ? slice.frontmatter.stage.toLowerCase() : "";
   if (status === "done" || status.startsWith("shipped")) return "shipped";
-  if (
-    status.startsWith("closed")
-    || (NON_DELIVERY_CLOSE_REASONS as readonly string[]).includes(status)
-    || stage === "superseded"
-    || stage === "retired"
-  ) {
-    return "closed";
-  }
+  if (status.startsWith("closed") || status === "superseded" || stage === "superseded" || stage === "retired") return "closed";
   return "active";
 }
 

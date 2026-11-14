@@ -193,10 +193,6 @@ function parseStatusFromFrontmatter(raw: string | null): string | null {
 }
 
 const NON_DELIVERY_CLOSURE_WORDS = new Set([
-  "wontfix",
-  "deferred",
-  "superseded",
-  "stale",
   "closed-wontfix",
   "closed-deferred",
   "closed-superseded",
