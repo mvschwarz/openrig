@@ -228,14 +228,17 @@ function printOpenAll(json: boolean, r: OpenAllResult, status: number): void {
     for (const rig of rigs) {
       const openedCount = Array.isArray(rig.opened) ? rig.opened.length : 0;
       lines.push(`  [${rig.outcome}] ${rig.view}${openedCount ? ` (${openedCount} tiles)` : ""}${rig.error ? `: ${rig.error}` : ""}`);
+      for (const a of Array.isArray(rig.absent) ? rig.absent : []) lines.push(`    ○ ${a.seat} — absent: ${a.reason}`);
+      for (const d of Array.isArray(rig.degraded) ? rig.degraded : []) lines.push(`    ▲ ${d.seat} — ${d.code === "pane_unconfirmed" ? "unconfirmed" : "skipped"} (${d.host}): ${d.reason}`);
       for (const s of Array.isArray(rig.skipped) ? rig.skipped : []) lines.push(`    skipped ${s.seat}: ${s.reason}`);
       for (const n of Array.isArray(rig.notes) ? rig.notes : []) lines.push(`    note: ${n}`);
     }
     for (const n of notes) lines.push(`  note: ${n}`);
     console.log(lines.join("\n"));
   }
-  const hasOpenedOrReused = !!rigs && rigs.some(rig => rig.outcome === "opened" || rig.outcome === "reused");
-  if (status >= 400 || !rigs || (!r.ok && !hasOpenedOrReused)) {
+  // The daemon reports ok:true when some rig opened/reused, so a top-level ok:false (for example a
+  // terminal_session_mismatch) is a hard failure even when returned rows say opened/reused; those rows stay in the output.
+  if (status >= 400 || !rigs || !r.ok) {
     process.exitCode = status >= 500 ? 2 : 1;
   }
 }

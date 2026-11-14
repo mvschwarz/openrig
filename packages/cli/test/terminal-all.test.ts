@@ -245,6 +245,106 @@ describe("#3081 rig terminal open/close --all CLI", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  describe("hard selected-session mismatch with active rows", () => {
+    const workStatus = {
+      status: 200,
+      data: { session: "work", tmux: { mode: "isolated" }, providers: [{ name: "herdr", status: { available: true, launch: { socketPath: "/tmp/work.sock", session: "work" } }, liveness: { alive: true } }] },
+    };
+    const windowDeps: Partial<WindowDeps> = {
+      platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/tmp/home" },
+      exists: p => p.endsWith("/herdr") || p === "herdr" || p === "/usr/local/bin/herdr",
+      exec: async file => (file === "/usr/bin/osascript" ? "window" : "/usr/local/bin/herdr"),
+    };
+    const activeRigs = [
+      { rig: "demo-a", view: "rig:demo-a", outcome: "opened", opened: ["worker1@demo-a"], absent: [], degraded: [], skipped: [], workspaceId: "w1" },
+      { rig: "demo-b", view: "rig:demo-b", outcome: "reused", opened: ["worker1@demo-b"], absent: [], degraded: [], skipped: [], workspaceId: "w2" },
+    ];
+
+    it.each([
+      { mode: "json", flags: ["--json"] },
+      { mode: "human", flags: [] as string[] },
+    ])("exits nonzero on a wrong echoed session even when rows say opened/reused ($mode), keeping rows, code and one open-all request", async ({ mode, flags }) => {
+      const { deps, calls } = makeDeps({
+        routes: {
+          "GET /api/terminal/status?provider=herdr&session=work": workStatus,
+          "POST /api/terminal/open-all": { status: 200, data: { ok: true, provider: "herdr", session: "default", rigs: activeRigs } },
+        },
+        windowDeps,
+      });
+      const program = createProgram({ terminalDeps: deps });
+      await program.parseAsync(["node", "rig", "terminal", "open", "--all", "--window", "--session", "work", ...flags]);
+      expect(process.exitCode).toBe(1);
+      expect(calls.filter(c => c.method === "POST" && c.path === "/api/terminal/open-all")).toHaveLength(1);
+      if (mode === "json") {
+        const out = JSON.parse(logs[0]!) as OpenAllResult;
+        expect(out).toMatchObject({ ok: false, code: "terminal_session_mismatch", rigs: activeRigs });
+        expect(out.error).toMatch(/did not confirm selected Herdr session/);
+      } else {
+        const text = logs.join("\n");
+        expect(text).toMatch(/did not confirm selected Herdr session/);
+        expect(text).toContain("[opened] rig:demo-a");
+        expect(text).toContain("[reused] rig:demo-b");
+      }
+    });
+
+    it("keeps a confirmed partial success (some rigs opened, one absent, endpoint confirmed) at exit 0", async () => {
+      const partial = {
+        ok: true,
+        provider: "herdr",
+        session: "work",
+        rigs: [
+          activeRigs[0],
+          { rig: "demo-c", view: "rig:demo-c", outcome: "absent", opened: [], absent: [{ seat: "worker1@demo-c", host: null, reason: "stopped" }], degraded: [], skipped: [] },
+        ],
+      };
+      const { deps, calls } = makeDeps({
+        routes: {
+          "GET /api/terminal/status?provider=herdr&session=work": workStatus,
+          "POST /api/terminal/open-all": { status: 200, data: partial },
+        },
+        windowDeps,
+      });
+      const program = createProgram({ terminalDeps: deps });
+      await program.parseAsync(["node", "rig", "terminal", "open", "--all", "--window", "--session", "work", "--json"]);
+      expect(process.exitCode ?? 0).toBe(0);
+      expect(calls.filter(c => c.method === "POST" && c.path === "/api/terminal/open-all")).toHaveLength(1);
+      expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, session: "work", rigs: partial.rigs });
+    });
+  });
+
+  it("names absent, degraded and stopped seats with their reasons in human bulk output and leaves JSON untouched", async () => {
+    const data = {
+      ok: true,
+      provider: "herdr",
+      rigs: [{
+        rig: "demo-a", view: "rig:demo-a", outcome: "opened", opened: ["worker1@demo-a"],
+        absent: [{ seat: "worker2@demo-a", host: null, reason: "stopped" }, { seat: "worker3@demo-a", host: "remote-host-1", reason: "no session" }],
+        degraded: [{ seat: "worker4@demo-a", host: "remote-host-2", reason: "attach failed" }, { seat: "worker5@demo-a", host: "remote-host-3", reason: "no pane id", code: "pane_unconfirmed" }],
+        skipped: [{ seat: "worker6@demo-a", reason: "unchanged" }],
+      }],
+    };
+    const route = { "POST /api/terminal/open-all": { status: 200, data } };
+    const human = makeDeps({ routes: route });
+    await createProgram({ terminalDeps: human.deps }).parseAsync(["node", "rig", "terminal", "open", "--all", "--provider", "herdr"]);
+    const text = logs.join("\n");
+    expect(process.exitCode ?? 0).toBe(0);
+    expect(text).toContain("worker2@demo-a");
+    expect(text).toContain("stopped");
+    expect(text).toContain("worker3@demo-a");
+    expect(text).toContain("no session");
+    expect(text).toContain("worker4@demo-a");
+    expect(text).toContain("attach failed");
+    expect(text).toContain("worker5@demo-a");
+    expect(text).toContain("no pane id");
+    expect(text).toContain("skipped worker6@demo-a: unchanged");
+
+    logs.length = 0;
+    const json = makeDeps({ routes: route });
+    await createProgram({ terminalDeps: json.deps }).parseAsync(["node", "rig", "terminal", "open", "--all", "--provider", "herdr", "--json"]);
+    expect(logs).toEqual([JSON.stringify(data)]);
+  });
+
   it("refuses open --all --window in currentHerdr mode on endpoint mismatch with zero POST /api/terminal/open-all or desktop side effects", async () => {
     const selectedSocket = "/tmp/home/.config/herdr/sessions/work/herdr.sock";
     const statusRoute = {
