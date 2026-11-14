@@ -2068,6 +2068,8 @@ export class QueueRepository {
     // failed for another reason, isn't claimed here.
     const eligible = (entry: OutboxEntry): boolean => {
       if (entry.deliveryState !== "failed" || !entry.auditPointer) return false;
+      // An earlier member's awaited send may have started restore custody before this claim.
+      if ([sessionName, ...addresses].some(address => this.hasPendingPostCompactStage?.(address))) return false;
       const current = this.getById(entry.auditPointer);
       return current?.state === "pending" && addresses.includes(current.destinationSession) && !current.handedOffFrom
         && this.reachableWakeRetryable(current, now)

@@ -254,6 +254,37 @@ describe("a failed queue wake when its seat returns", () => {
     expect(f.sendsFor(f.row.qitemId)).toBe(1);
   });
 
+  it("rechecks compaction custody before a later intent claims after an awaited retry", async () => {
+    let owed = false;
+    const f = await failed(undefined, () => owed);
+    const peer = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "later work" });
+    await vi.waitFor(() => expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed"));
+    const before = f.intentOf(peer.qitemId);
+    expect(before.tags).toContain(proof);
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    let finish!: (result: Result) => void;
+    f.send.mockImplementationOnce(() => new Promise<Result>(resolve => { finish = resolve; }));
+    const inFlight = reachable(f);
+    await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3)); // Two original failures, then the first retry.
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("sending");
+    owed = true;
+    finish({ ok: true, verified: true, sessionName: "worker@test" });
+    await inFlight;
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("delivered"); // Already claimed; no cancellation is asserted.
+    expect(f.intentOf(peer.qitemId)).toMatchObject({ outboxId: before.outboxId, body: before.body, deliveryState: "failed" });
+    expect(f.intentOf(peer.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(3);
+    expect(f.sendsFor(peer.qitemId)).toBe(0);
+    owed = false;
+    await reachable(f);
+    expect(f.intentOf(peer.qitemId)).toMatchObject({ outboxId: before.outboxId, deliveryState: "delivered" });
+    expect(f.intentOf(peer.qitemId).tags).not.toContain(proof);
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(4);
+    expect(f.sendsFor(peer.qitemId)).toBe(1);
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE audit_pointer=?").get(peer.qitemId)).toEqual({ n: 1 });
+  });
+
   it.each(["held", "released"])("leaves deliberate quiet custody %s", async state => {
     const f = await failed();
     holdForQuiet({ queueRepo: f.repo, jobsRepo: new WatchdogJobsRepository(f.db), qitemId: f.row.qitemId,
@@ -267,7 +298,8 @@ describe("a failed queue wake when its seat returns", () => {
   });
 
   it("preserves no-input proof for a grouped member removed before the send", async () => {
-    const f = await failed();
+    let owed = false;
+    const f = await failed(undefined, () => owed);
     const peer = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "urgent peer", priority: "urgent" });
     await vi.waitFor(() => expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed"));
     for (const row of [f.row, peer]) {
@@ -280,10 +312,17 @@ describe("a failed queue wake when its seat returns", () => {
       expect(selected.outboxIds).toEqual([f.intentOf(f.row.qitemId).outboxId]);
       expect(f.intentOf(peer.qitemId).tags).toContain(proof); // Restored before this member gets its own attempt.
       vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+      owed = true;
       return { ok: false, outcome: "retained", reason: "typing_guard_enabled", sent: false, inputPhase: "not_reached", sessionName: "worker@test" };
     });
     await reachable(f);
     expect(f.intentOf(f.row.qitemId).deliveryState).toBe("retained");
+    expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed");
+    expect(f.intentOf(peer.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(3);
+    expect(f.sendsFor(peer.qitemId)).toBe(0);
+    owed = false;
+    await reachable(f);
     expect(f.intentOf(peer.qitemId).deliveryState).toBe("delivered");
     expect(f.intentOf(peer.qitemId).tags).not.toContain(proof); // Its own send consumed the one retry.
     expect(f.sendsFor(peer.qitemId)).toBe(1);
