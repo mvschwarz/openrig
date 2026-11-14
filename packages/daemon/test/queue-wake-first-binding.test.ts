@@ -168,11 +168,39 @@ describe("a failed queue wake when its seat returns", () => {
     expect(before.tags).toContain(proof);
     expect(f.intentOf(f.row.qitemId)).toMatchObject({ outboxId: before.outboxId, body: before.body, deliveryState: "delivered" });
     expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
+    expect(String(f.send.mock.calls[1]?.[1])).toContain("failed before input is retried once when the same binding is reachable again");
+    expect(String(f.send.mock.calls[1]?.[1])).not.toContain("delivery may repeat");
     await reachable(f);
     await f.repo.drainPendingWakeIntents();
     expect(f.send).toHaveBeenCalledTimes(2); // failed probe, then one input
     expect(f.sendsFor(f.row.qitemId)).toBe(1);
     expect(f.db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE audit_pointer=?").get(f.row.qitemId)).toEqual({ n: 1 });
+  });
+
+  it.each(["target_needs_input", "Refused: waiting at an interactive prompt"])("leaves %s to prompt-clear even with a running reading", async reason => {
+    const f = await failed({ ok: false, sessionName: "worker@test", sent: false, inputPhase: "not_reached", reason });
+    await f.repo.retryPromptWakesOnClear("worker@test", "running", true);
+    await f.repo.retryUnroutableWakesOnReachable("worker@test", "running");
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("failed");
+    f.send.mockResolvedValue({ ok: true, verified: true, sessionName: "worker@test" });
+    await f.repo.retryPromptWakesOnClear("worker@test", "running", false);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("delivered");
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("consumes one return-retry proof even when that retry again fails before input", async () => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    await reachable(f); // tmux is still unavailable: a second definite no-input outcome.
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ outboxId: before.outboxId, deliveryState: "failed" });
+    expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
+    await reachable(f);
+    await f.repo.retryUnroutableWakesOnReachable("worker@test", "running");
+    expect(f.send).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -250,15 +278,16 @@ describe("a failed queue wake when its seat returns", () => {
       // Under the lease the ordinary member is now held; the urgent peer is removed, not attempted.
       const selected = opts!.recheckMembers!((input) => !input.urgent, true);
       expect(selected.outboxIds).toEqual([f.intentOf(f.row.qitemId).outboxId]);
+      expect(f.intentOf(peer.qitemId).tags).toContain(proof); // Restored before this member gets its own attempt.
+      vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
       return { ok: false, outcome: "retained", reason: "typing_guard_enabled", sent: false, inputPhase: "not_reached", sessionName: "worker@test" };
     });
     await reachable(f);
     expect(f.intentOf(f.row.qitemId).deliveryState).toBe("retained");
-    expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed");
-    expect(f.intentOf(peer.qitemId).tags).toContain(proof);
-    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
-    await reachable(f);
     expect(f.intentOf(peer.qitemId).deliveryState).toBe("delivered");
+    expect(f.intentOf(peer.qitemId).tags).not.toContain(proof); // Its own send consumed the one retry.
+    expect(f.sendsFor(peer.qitemId)).toBe(1);
+    await reachable(f);
     expect(f.sendsFor(peer.qitemId)).toBe(1);
   });
 
