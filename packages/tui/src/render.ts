@@ -376,6 +376,10 @@ function agentDetailLines(
   const effortReport = snap.seatEffort && snap.seatEffort.seatRef === `${agent.name}@${rig.name}`
     ? snap.seatEffort.report
     : null;
+  // A remote agent's page is a read-only view: actions that only work for a
+  // local seat (opening its terminal, cross-drilling its spec) are left out
+  // rather than offered as dead ends; identity, state and context stay.
+  const localSeat = found.host === snap.hosts[0];
   const activityReason = agent.activity?.needsInput?.reason ?? agent.activity?.signalReason ?? null;
   const attention = agent.needsAttention == null ? "unknown" : agent.needsAttention ? "needed" : "not raised";
   const rawInputSource = agent.activity?.signalSource === "runtime_hook" ? "hook"
@@ -405,7 +409,9 @@ function agentDetailLines(
           ...wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
           // The agent page opens just this agent; the pod and rig pages open theirs.
-          fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } }),
+          ...(localSeat
+            ? [fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } })]
+            : [fieldLine({ label: "terminal", value: `on ${hostLabel(found.host)} · read-only view — open it there` })]),
         ],
       },
       {
@@ -453,9 +459,9 @@ function agentDetailLines(
       },
       {
         title: "SPEC · effective seat binding",
-        fields: [specInLibrary
+        fields: [specInLibrary && localSeat
           ? { label: "spec", value: agent.spec, link: { type: "cross", kind: "spec-of", name: agent.name, target: { host: found.host.name, rig: rig.name, pod: pod.name } } }
-          : { label: "spec", value: agent.spec ? `${agent.spec}  (not in library)` : "—" }],
+          : { label: "spec", value: agent.spec ? `${agent.spec}${localSeat ? "  (not in library)" : `  · read-only view`}` : "—" }],
         lines: [
           ...wrapDetailValue("profile", agent.profile ?? "not served", contentWidth),
           ...wrapDetailValue("version", agent.specVersion ?? "not served", contentWidth),
@@ -995,19 +1001,22 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
         : `host ${hostName} is not a registered host here · rig host list` }];
       return [{ text: "(no rigs served — proven empty, not fabricated)" }];
     }
-    if (rig.remoteHost) {
+    if (rig.remoteHost && (snap.topologyRemoteSeats !== true || state.viewTab !== "table")) {
       // ui.topology_remote_seats (default off): the TABLE tab reads the open rig's seats through this daemon and
       // renders them here; every other tab, and the shipped default, keeps the CLI pointer.
-      if (snap.topologyRemoteSeats !== true || state.viewTab !== "table") return [
+      return [
         { text: `rig ${rig.name} on ${rig.remoteHost} · ${rig.lifecycleState ?? "unknown"}` },
         snap.topologyRemoteSeats === true
           ? { text: `Seats are read on the TABLE tab; graph, health and recent stay unread for a remote host: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` }
           : { text: `Its seats aren't read in this view: rig ps --host ${rig.remoteHost} --nodes --rig ${rig.name}` },
       ];
-      if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name} on ${rig.remoteHost}…` }];
-      if (rig.inventoryUnavailable) return [{ text: `Inventory unavailable for ${rig.name} on ${rig.remoteHost} · refresh to Retry` }];
-      return remoteRigSeatLines(state, rig, contentWidth, motion);
     }
+    // The local inventory states sit BEFORE the remote branch again: a
+    // person's own rigs keep "Reading…" and "Inventory unavailable" (with the
+    // remote-seats setting off too); a remote rig names its host.
+    if (rig.inventoryNotLoaded) return [{ text: `Reading ${rig.name}${rig.remoteHost ? ` on ${rig.remoteHost}` : ""}…` }];
+    if (rig.inventoryUnavailable) return [{ text: `Inventory unavailable for ${rig.name}${rig.remoteHost ? ` on ${rig.remoteHost}` : ""} · refresh to Retry` }];
+    if (rig.remoteHost) return remoteRigSeatLines(state, rig, contentWidth, motion);
     const podFilter = leaf?.kind === "pod" ? leaf.name : null;
     const all = rig.pods.flatMap((p) => p.agents.map((a) => ({ pod: p.name, ...a })));
     const rows = all

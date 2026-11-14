@@ -27,7 +27,7 @@ const REMOTE_NODES = [
 
 interface Fake { calls: string[]; ownName?: unknown; hosts?: unknown[]; hostsStatus?: number; remoteStatus?: number; aggregateHosts?: unknown[];
   /** ui.topology_remote_seats as the daemon's config browser resolves it; absent = no entry. */
-  remoteSeatToggle?: boolean; remoteNodesStatus?: number }
+  remoteSeatToggle?: boolean; remoteNodesStatus?: number; localNodesStatus?: number }
 
 function daemon(fake: Fake): DaemonClient {
   return new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (input) => {
@@ -55,8 +55,12 @@ function daemon(fake: Fake): DaemonClient {
         defaultValue: false, source: "file", visibility: "shown", reason: null, scope: "Displayed daemon instance",
         application: "Resolved configuration; running application unverified." }] });
     if (u.pathname.startsWith("/api/rigs/") && u.pathname.endsWith("/nodes")) {
-      if (fake.remoteNodesStatus) return Response.json({ error: "remote_read_failed" }, { status: fake.remoteNodesStatus });
-      return Response.json(u.searchParams.get("host") ? REMOTE_NODES : []);
+      if (u.searchParams.get("host")) {
+        if (fake.remoteNodesStatus) return Response.json({ error: "remote_read_failed" }, { status: fake.remoteNodesStatus });
+        return Response.json(REMOTE_NODES);
+      }
+      if (fake.localNodesStatus) return Response.json({ error: "read_failed" }, { status: fake.localNodesStatus });
+      return Response.json([]);
     }
     if (u.pathname.endsWith("/nodes") || u.pathname.startsWith("/api/queue/")) return Response.json([]);
     return Response.json({}, { status: 404 });
@@ -233,6 +237,48 @@ describe("a registered remote host in the topology tree (#2049)", () => {
     expect(snap.readErrors).toEqual([expect.stringMatching(/^nodes\(web\): .*502/)]);
     expect(text).toContain("Inventory unavailable for web on vps");
     expect(text).not.toContain("no seats reported");
+  });
+
+
+  it("a local rig still shows its own inventory states with the remote-seats setting off", async () => {
+    // A failed local nodes read: the local rig's page names it, not an empty rig.
+    const failing: Fake = { calls: [], remoteSeatToggle: false, localNodesStatus: 500 };
+    const { text } = await page(failing, "rig kernel");
+    expect(text).toContain("Inventory unavailable for kernel · refresh to Retry");
+    // And a not-yet-loaded inventory renders Reading…, local wording, host-less.
+    const snap = emptySnapshot();
+    snap.hosts = [{ id: "local", name: "mac", reachable: true, rigs: [{ id: "r-kernel", name: "kernel", pods: [], inventoryNotLoaded: true }] }];
+    const view = createViewState({ instanceId: "local-states", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "kernel" });
+    const reading = renderScreen(view.get(), snap, { cols: 120, rows: 40, colorMode: "none" }).lines.join("\n");
+    expect(reading).toContain("Reading kernel…");
+    expect(reading).not.toContain("Reading kernel on");
+  });
+
+  it("a remote agent page is a read-only view: no local terminal action, an explicit pointer", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const { text } = await page(fake, "host vps",
+      { type: "drill", resource: "rig", name: "web", target: { host: "vps" } },
+      { type: "drill", resource: "agent", name: "runner", target: { host: "vps", rig: "web", pod: "ops" } });
+    expect(text).toContain("agent runner");
+    expect(text).not.toContain("agent \"runner\" not in the current snapshot");
+    expect(text).toContain("read-only view");
+    expect(text).not.toContain("Open terminal ▸");
+  });
+
+  it("reads a remote rig's nodes and the toggle only while the TABLE tab is open", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const { view, refresh, text } = await page(fake, "host vps",
+      { type: "drill", resource: "rig", name: "web", target: { host: "vps" } });
+    expect(fake.calls).toContain("/api/rigs/r-web/nodes?host=vps");
+    expect(fake.calls).toContain("/api/config?view=browser");
+    fake.calls.length = 0;
+    for (const tab of ["graph", "health", "recent"]) {
+      view.dispatch(parseCommand(`tab ${tab}`));
+      await refresh();
+    }
+    expect(fake.calls.filter((call) => call.includes("/nodes?host=") || call.startsWith("/api/config"))).toEqual([]);
+    expect(text).toContain("seats read through this daemon");
   });
 
   it("keeps the other tabs on the CLI pointer when the toggle is on", async () => {

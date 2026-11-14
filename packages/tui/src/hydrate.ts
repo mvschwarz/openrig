@@ -381,6 +381,10 @@ function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
 export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
 export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen" | "attentionView" | "pendingDrill">;
 
+/** Last-resolved ui.topology_remote_seats per drilled remote host — see the
+ *  gated read in the topology section; memory-only, reset by re-drilling. */
+let remoteSeatsToggleMemo: { host: string; on: boolean } | null = null;
+
 export async function hydrateSnapshot(
   client: DaemonClient,
   reviewCache?: SpecReviewCache,
@@ -696,10 +700,21 @@ export async function hydrateSnapshot(
   // `?host=` forwarding. The toggle is the daemon's resolved setting (config browser); a failed or absent read
   // keeps the shipped refusal line, never a fabricated page. Bounded: one config read only while a remote host is
   // drilled into, and one nodes read only for the open rig while the toggle is on.
-  const remoteSeatRig = drilledRemote && (topologyLeaf?.kind === "rig" || topologyLeaf?.kind === "pod") ? drillRig : null;
+  // The remote rig's nodes are read ONLY while the TABLE tab is open — the
+  // one tab that renders them; the config-browser read below rides the same
+  // gate, so no remote seat read happens on any other tab.
+  const remoteSeatRig = drilledRemote && (topologyLeaf?.kind === "rig" || topologyLeaf?.kind === "pod" || topologyLeaf?.kind === "agent") && viewContext?.viewTab === "table" ? drillRig : null;
+  // The toggle is read only while the TABLE tab holds the remote rig open (the
+  // one tab that renders seats), and MEMOIZED per drilled host: later refreshes
+  // on other tabs reuse it, so the CLI pointer keeps saying where seats are
+  // read without re-issuing the config-browser read on every refresh.
+  if (remoteSeatRig && drilledRemote) {
+    const resolved = (await client.configBrowser().catch(() => null))?.entries?.find((entry) => entry.key === "ui.topology_remote_seats")?.value === true;
+    remoteSeatsToggleMemo = { host: drilledRemote, on: resolved };
+  }
   const topologyRemoteSeats = remoteSeatRig
-    ? (await client.configBrowser().catch(() => null))?.entries?.find((entry) => entry.key === "ui.topology_remote_seats")?.value === true
-    : false;
+    ? remoteSeatsToggleMemo?.on === true
+    : (drilledRemote && remoteSeatsToggleMemo?.host === drilledRemote ? remoteSeatsToggleMemo.on : false);
   const remoteSeatRigId = topologyRemoteSeats ? (remoteRigs ?? []).find((rig) => rig.name === remoteSeatRig)?.id : undefined;
   const remoteNodes = remoteSeatRigId
     ? await safe<NodeInventoryRead[]>(`nodes(${remoteSeatRig})`, () => client.rigNodes(remoteSeatRigId, drilledRemote!))
