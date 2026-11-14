@@ -579,8 +579,9 @@ function isClaudeVersionHeader(line: string): boolean {
  *  dialog is still being drawn, and outside once the footer of the dialog's options block, above the row, closed it:
  *  that is where Claude's real header sits. The dialog's text can read like an option or the footer ("No, exit",
  *  "Enter to confirm · Esc to cancel": a path, a title or a grant that a narrow pane wraps), and that text sits above
- *  the real options and footer, so it never ends the dialog. A path that forges both an option and the footer on
- *  consecutive rows, captured before the real footer is drawn, is a known limit of a textual boundary. */
+ *  the real options and footer, so it never ends the dialog. A path or a grant that forges the "Yes, I trust this
+ *  folder" option and, anywhere below it, the footer, above a header-like row, captured before the real footer is
+ *  drawn, is a known limit of a textual boundary. */
 function insideClaudeTrustDialog(rows: string[], at: number): boolean {
   const isReply = (row: string) => /^[●⏺]/.test(row);
   const isFooter = (row: string) => row.trim() === CLAUDE_TRUST_FOOTER;
