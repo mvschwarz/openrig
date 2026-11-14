@@ -32,8 +32,10 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   is the built-in `standard` or `open` launches with the team default's
   allowances, as a seat with no policy does; before, any recorded policy turned
   the team default off. The member's policy decides over the rig's, other
-  recorded choices keep their meaning, and lifecycle commands such as `rig up`
-  and `rig down` still ask. The launch plan says whether a seat gets the team
+  recorded choices keep their meaning. The Claude team default includes ask
+  rules for lifecycle commands such as `rig up` and `rig down`; the Codex team
+  default does not add equivalent per-command ask rules, and native settings
+  and explicit permission choices still apply. The launch plan says whether a seat gets the team
   default's allowances. ([#3230](https://github.com/mvschwarz/openrig/pull/3230))
 - **Bring a seat's permission, trust or hook-review prompt to your person as a
   question** by default (the `rigs` skill). Show the prompt, capture the seat
@@ -53,8 +55,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - On an external grant, `rig_team` names the team the way the person knows it
   and its members by their roster `label`; a label that breaks the rules is set
   aside with `label_problem`. ([#3221](https://github.com/mvschwarz/openrig/pull/3221), [#3249](https://github.com/mvschwarz/openrig/pull/3249))
-- An installing assistant the person stays with gets its own return address
-  from the `rigs` skill, so the team's questions come back to it. ([#3134](https://github.com/mvschwarz/openrig/pull/3134))
+- The `rigs` skill's setup path teaches an installing assistant the person
+  stays with to keep its own return address, so the team's questions come back
+  to it. ([#3134](https://github.com/mvschwarz/openrig/pull/3134))
 
 ## Recovery
 
@@ -66,8 +69,10 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - **A seat's conversation lives under a home OpenRig doesn't know:**
   `rig seat runtime-home <seat>` shows the home the next launch uses, and
   `rig seat record-runtime-home <seat> --home <abs> --expect-occupant <gen>
-  --expect-original <id> --expect-revision <n> --reason "<why>"` records it for
-  the next launch or restore, with no relaunch or database edit. ([#3220](https://github.com/mvschwarz/openrig/pull/3220))
+  --expect-original <id> --expect-revision <n> --reason "<why>"` records it,
+  with no relaunch or manual database edit. Recording sets the home used by the
+  seat's next launch; a later explicit home change is retained, and restoring a
+  selected conversation shows and applies the home selected for that original. ([#3220](https://github.com/mvschwarz/openrig/pull/3220))
 - **A runtime switch stuck after a reboot:** a switch still before commit,
   past its deadline, with its staging session gone and no sign of its
   successor, settles as `abandoned` at daemon start or on
@@ -81,17 +86,21 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   metadata. ([#3242](https://github.com/mvschwarz/openrig/pull/3242))
 - `rig launch` isn't refused because another seat is paused or being typed in,
   and takes a seat's session name. ([#3184](https://github.com/mvschwarz/openrig/pull/3184))
-- The TUI's daemon-only start keeps the daemon's default bind and doesn't
+- For the default `http://127.0.0.1:<port>` target, the TUI's daemon-only
+  start passes only the port, so it honours the daemon's configured bind, or
+  its default loopback-plus-Tailscale bind when none is configured. It doesn't
   promise a kernel that isn't listed. ([#3181](https://github.com/mvschwarz/openrig/pull/3181), [#3227](https://github.com/mvschwarz/openrig/pull/3227))
 
 ## Delivery, workflows and tools
 
 - **A send to a missing seat prints "Recorded, not delivered"**: the message is
   in the sender's outbox, `--verify` exits nonzero, and a queue row keeps its
-  exact address with a `destination_status`. It isn't lost and it wasn't
+  exact address with a destination advisory (`destination_status`, or
+  `unmatched_destination_seat` for a missing seat in a known rig). It isn't lost and it wasn't
   delivered: restore the seat or redirect the work. ([#3142](https://github.com/mvschwarz/openrig/pull/3142))
-- A park or close carrying `--summary` or `--evidence-ref` is applied and
-  stores both. ([#3136](https://github.com/mvschwarz/openrig/pull/3136))
+- A state-changing park or close carrying `--summary` or `--evidence-ref` is
+  applied and stores the supplied non-blank fields; note-append and re-estimate
+  rules are unchanged. ([#3136](https://github.com/mvschwarz/openrig/pull/3136))
 - A draft typed while a conditional Enter's own checks wait makes the guard
   refuse with `draft_input_changed`. ([#3176](https://github.com/mvschwarz/openrig/pull/3176))
 - A send to a busy Codex seat (0.167.1 and 0.167.2) with an empty input is

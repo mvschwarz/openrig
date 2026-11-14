@@ -162,8 +162,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   missing record doesn't show there was no send.
   Since 0.7.16 a direct send that finds no receiver keeps the message in your outbox: the CLI
   prints "Recorded, not delivered", `--verify` exits nonzero, and `rig walk` stops there. A queue
-  row to an absent rig or seat keeps its exact address, with a `destination_status` advisory
-  (missing, archived, hosted or unknown). Nothing is forwarded or retried: restore the seat or
+  row to an absent rig or seat keeps its exact address, with a destination advisory
+  (`destination_status`, or `unmatched_destination_seat` for a missing seat in a known rig) naming
+  missing, archived, hosted or unknown. Nothing is forwarded or retried: restore the seat or
   redirect the work.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
@@ -418,9 +419,10 @@ your context, your compaction and your replacement — and it is the only thing 
   --evidence-ref <path>` also keeps the artifact's pointer on it. To accept a re-estimate,
   `--closure-required-at <iso>` on an in-progress row moves its deadline and keeps the claim,
   recording the old and new time and who accepted it.
-  Since 0.7.16 a park or close that carries `--summary` or `--evidence-ref` is applied and stores
-  both, instead of refusing the whole update; a blank value isn't stored, and the receipt names a
-  requested field the stored row doesn't carry.
+  Since 0.7.16 an otherwise-admitted state-changing park or close stores its supplied non-blank
+  `--summary` or `--evidence-ref`, instead of refusing the whole update; note-append and
+  re-estimate rules are unchanged, and the receipt names a requested field the stored row doesn't
+  carry.
 - **`rig queue handoff`** — pass work so the close and the create are **one transaction**, instead
   of closing yours, failing to create theirs, and stranding the work in between. A standing sweep
   checks recently closed rows (a 24-hour lookback) and flags a `handed_off_to` closure whose
@@ -593,11 +595,12 @@ and folder to the operator; don't build their project yourself. `rig setup` prin
 even after an incomplete or dry-run result. The `rigs` skill takes an agent outside OpenRig from
 install to a team doing the work. The daemon installs it for the person's own agent
 (`~/.claude/skills/rigs` and `~/.agents/skills/rigs`) and refreshes it on every upgrade; a copy
-added with skills.sh is left alone and never refreshed. Since 0.7.16 the skill has the person's
-agent bring each seat's permission, trust or hook-review prompt to them as a question and send the
-key the screen shows for their choice, never answering it itself; an installing assistant the
-person stays with gets its own return address, so the team's questions come back to it; and it
-follows a task handed on to another host with `rig queue show <id> --host <host>`.
+added with skills.sh is left alone and never refreshed. Since 0.7.16 the skill tells the agent to
+bring these prompts (a seat's permission, trust or hook-review prompt) to the person as questions
+by default, and to send the key the current screen shows for their choice. It may decide a kind of
+prompt only under the person's explicit instruction, and never records its own decision as the
+person's. Its setup path teaches an installing assistant the person stays with to keep its own
+return address, so the team's questions come back to it, and the skill follows a task handed on to another host with `rig queue show <id> --host <host>`.
 
 `starter` and `factory` are built in: preview the team, inspect `rig up <team> --cwd . --plan`,
 and follow `docs/reference/getting-started.md`. `first-project` is starter's old name and still
@@ -667,8 +670,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   A skill-only edition for Claude's plugin directory, in `plugins/claude-directory/`, follows
   handed-on work and keeps its reply route. The plugin needs Claude Code 2.1.119 or later: on
   earlier versions, with its OpenRig seat setting blank, the agent has no OpenRig tools. Since
-  0.7.16, when more than one assistant on the team could be the one a person means, their assistant
-  lists the team and asks which. Copilot CLI installs the plugin from the repository's main branch.
+  0.7.16 OpenRig's MCP instructions tell the assistant to list the team and ask which assistant a
+  person means when more than one could be. Copilot CLI installs the plugin from the repository's main branch.
 - **A Claude member can bring its own setup** in the rig spec: `agent_file`,
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
@@ -732,7 +735,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   its kept pane reads `attention_required` (exit 1), not already running: resume it, or
   `rig seat launch <session> --fresh --stop`. Since 0.7.16 a launch isn't refused because another
   seat in the rig is paused or being typed in, and it takes a seat's session name, including an
-  adopted seat's raw tmux name; a name that matches more than one seat replies `seat_ambiguous`.
+  adopted seat's raw tmux name; ambiguous names aren't launched, and the other unambiguous
+  selections are handled normally.
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
   siblings and durable work stay put, and unmanaged ambiguity refuses. With `--stop`, a seat with a
@@ -984,8 +988,10 @@ version, from checking the environment to a useful report to the OpenRig team.
 - **`rig seat runtime-home <seat>`** / **`rig seat record-runtime-home <seat> --home <abs>
   --expect-occupant <gen> --expect-original <id> --expect-revision <n> --reason <text>`** (since
   0.7.16) — see which runtime home (Claude Code's config directory or a Codex home) the seat's next
-  launch uses, and record the one its existing conversation lives under, for the next launch or
-  restore, with no successor, relaunch or database edit. A stale expectation returns
+  launch uses, and record the one its existing conversation lives under, with no successor,
+  relaunch or manual database edit. Recording sets the home used by the seat's next launch; a later
+  explicit home change is retained, and restoring a selected conversation shows and applies the
+  home selected for that original. A stale expectation returns
   `runtime_home_conflict` and applies nothing. The result says whether the home and the original
   conversation are found there, and reports the running process as unverified.
 - **`rig seat set-permissions <seat> --mode <mode> --reason <text>`** — select one seat's native
@@ -1025,10 +1031,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   Since 0.7.15 `draft-aware` re-checks right before an automatic paste and holds after recent
   client activity or when tmux can't be read; typing after that last check still isn't seen. With
   Claude Code's full-width auto-update-failure footer on screen, an empty `draft-aware` seat can
-  hold an ordinary send; `rig seat held-messages` shows it. On Codex (seen with 0.167.1 and
-  0.167.2), a send to a busy `draft-aware` seat can be pasted without Enter, neither delivered
-  nor held; its text stays in the input, and there's no fix for it in this release. Since 0.7.16
-  OpenRig reads Codex's "tab to queue" hint row, so a send to a busy Codex seat with an empty input
+  hold an ordinary send; `rig seat held-messages` shows it. On OpenRig 0.7.15, with Codex 0.167.1
+  and 0.167.2, a send to a busy `draft-aware` seat could be pasted without Enter, neither delivered
+  nor held, with its text left in the input. Since OpenRig 0.7.16, OpenRig reads Codex's "tab to
+  queue" hint row, so a send to a busy Codex seat with an empty input
   is delivered once, and a person's draft under that hint is still held. A draft typed while a
   conditional Enter's own checks wait makes the guard refuse with `draft_input_changed`; text typed
   after its input read can still be submitted with OpenRig's text.

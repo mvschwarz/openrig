@@ -13,8 +13,8 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 OpenRig 0.7.16 is a patch for a person's first team and for recovering the same
 work. A seat whose policy is the built-in `standard` or `open` keeps the team's
 launch default, so choosing `standard` no longer brings more prompts than
-choosing nothing. The `rigs` skill has a person's own agent bring a seat's
-permission, trust and hook-review prompts to them as questions, then run the
+choosing nothing. The `rigs` skill tells a person's own agent to bring a seat's
+permission, trust and hook-review prompts to them as questions, then to run the
 `rig seat continue` a seat shows after its startup prompt is answered. A failed
 handover's running successor can be adopted, a seat's runtime home can be
 recorded without a relaunch, and a send to a missing seat is kept and says so.
@@ -51,33 +51,35 @@ contributed by people using OpenRig.
   choice, a Codex envelope or named Codex profile, a Claude seat's own rules,
   `none`, `locked`, custom, `auto` and `yolo`, and kernel, Pi and terminal seats
   keep their meaning. This keeps the team default; it doesn't apply the whole
-  policy. Lifecycle commands such as `rig up` and `rig down` still ask. The
-  launch plan now says whether a seat gets the team default's allowances,
+  policy. The Claude team default includes ask rules for lifecycle commands
+  such as `rig up` and `rig down`. The Codex team default does not add
+  equivalent per-command ask rules; native settings and explicit permission
+  choices still apply. The launch plan now says whether a seat gets the team default's allowances,
   instead of a bare `launch_posture=floor`. OpenRig can't see rules applied in
   project or user native settings files; those seats keep the team default
   alongside them, and keeping it doesn't loosen those rules. ([#3230](https://github.com/mvschwarz/openrig/pull/3230))
-- **A person's own agent brings a seat's permission, trust or hook-review
-  prompt to them as a question** by default, instead of answering it itself
-  (the `rigs` skill). It shows the prompt, captures the seat again before
-  sending, and sends the digit or letter the screen shows for their choice,
-  never their words; when the screen shows no key, it asks. A yes to one prompt
-  isn't a yes to the next, a "don't ask again" choice is picked only when they
-  picked it, and an instruction they gave outright lets the agent decide that
-  kind of prompt within what they said. The agent never records its own answer
-  as the person's. The getting-started guide names each authentication, trust,
+- **The `rigs` skill tells a person's own agent to bring a seat's permission,
+  trust or hook-review prompt to them as a question** by default, instead of
+  answering it itself. It tells the agent to show the prompt, capture the seat
+  again before sending, and send the digit or letter the screen shows for their
+  choice, never their words, and to ask when the screen shows no key. A yes to
+  one prompt isn't a yes to the next, a "don't ask again" choice is picked only
+  when they picked it, and an instruction they gave outright lets the agent
+  decide that kind of prompt within what they said. The agent is told never to
+  record its own answer as the person's. The getting-started guide names each authentication, trust,
   hook-review or permission prompt as the person's to answer before that seat
   gets work. ([#3206](https://github.com/mvschwarz/openrig/pull/3206))
-- **After the person answers a prompt a seat stopped at while starting,** their
-  agent checks `rig ps --nodes` again and, when it shows
-  `Startup details (<seat>)` ending in `rig seat continue <seat>`, runs that
-  command, which delivers the seat's startup instructions in the same
-  conversation. When the person's choice is Escape, the agent sends the key
-  itself (`rig send <seat>@<rig> $'\e' --dangerously-interact --reason "…"`),
-  once, with no Enter added. It also repeats the prompt check while it waits for
-  a seat's result. ([#3271](https://github.com/mvschwarz/openrig/pull/3271))
-- When more than one assistant on the team could be the one a person means,
-  their assistant lists the team and asks which, instead of picking one from
-  its own history. `rig mcp serve --front-door` says a request is picked up on
+- **After the person answers a prompt a seat stopped at while starting,** the
+  `rigs` skill tells their agent to check `rig ps --nodes` again and, when it
+  shows `Startup details (<seat>)` ending in `rig seat continue <seat>`, to run
+  that command, which delivers the seat's startup instructions in the same
+  conversation. When the person's choice is Escape, it tells the agent to send
+  the key itself (`rig send <seat>@<rig> $'\e' --dangerously-interact --reason "…"`),
+  which is sent once, with no Enter added, and to repeat the prompt check while
+  it waits for a seat's result. ([#3271](https://github.com/mvschwarz/openrig/pull/3271))
+- OpenRig's MCP instructions tell the assistant to list the team and ask which
+  assistant a person means when more than one could be, instead of picking one
+  from its own history. `rig mcp serve --front-door` says a request is picked up on
   its own only by a running team seat. ([#3179](https://github.com/mvschwarz/openrig/pull/3179))
 - A person's assistant on an external grant sees the team by the name the
   person knows it by, and its members by their roster `label`. The team's name
@@ -86,9 +88,10 @@ contributed by people using OpenRig.
   characters, line or paragraph separators, bidirectional embeddings, overrides
   or isolates, certain invisible formatting characters, or angle brackets, is
   set aside with `label_problem`; the member and the roster still load. ([#3221](https://github.com/mvschwarz/openrig/pull/3221), [#3249](https://github.com/mvschwarz/openrig/pull/3249))
-- An assistant that installed OpenRig for a person, and that they keep talking
-  to, gets its own return address from the `rigs` skill's setup path, so the
-  team's questions come back to it, answered with the person's exact words. ([#3134](https://github.com/mvschwarz/openrig/pull/3134))
+- The `rigs` skill's setup path teaches an assistant that installed OpenRig for
+  a person, and that they keep talking to, to keep its own return address, so
+  the team's questions come back to it and it answers them with the person's
+  exact words. ([#3134](https://github.com/mvschwarz/openrig/pull/3134))
 
 ### Recovering the same work
 
@@ -106,7 +109,9 @@ contributed by people using OpenRig.
   **`rig seat record-runtime-home <seat> --home <abs> --expect-occupant <gen>
   --expect-original <id> --expect-revision <n> --reason "<why>"`** records the
   one its existing conversation lives under, with no successor, relaunch or
-  database edit; the next launch or restore uses it. A stale expectation returns
+  manual database edit. Recording sets the home used by the seat's next launch.
+  A later explicit home change is retained; restoring a selected conversation
+  shows and applies the home selected for that original. A stale expectation returns
   `runtime_home_conflict` and applies nothing. The result reports whether the
   home is present and whether the original conversation is found there, and
   reports the running process as unverified. ([#3220](https://github.com/mvschwarz/openrig/pull/3220))
@@ -137,24 +142,29 @@ contributed by people using OpenRig.
   the rig is paused or being typed in; the other seats keep their pane, draft,
   guard mode and binding, and a paused target still refuses. `rig launch` also
   takes a seat's session name, including an adopted seat's raw tmux name or its
-  `<name>@<rig>` form; a name that matches more than one seat replies
-  `seat_ambiguous` with the candidates. ([#3184](https://github.com/mvschwarz/openrig/pull/3184))
-- A daemon-only start from the TUI's crash cart or start-and-return page uses
-  the daemon's default bind (127.0.0.1, plus the Tailscale address when one is
-  present) instead of loopback alone, and no longer promises a kernel that
-  isn't listed. ([#3181](https://github.com/mvschwarz/openrig/pull/3181), [#3227](https://github.com/mvschwarz/openrig/pull/3227))
+  `<name>@<rig>` form. A name matching several seats isn't launched. The
+  single-seat form returns `seat_ambiguous` with candidates; under `--seats` it
+  is listed in `ambiguousSeats` while other unambiguous selections proceed
+  normally. If every selection is ambiguous, the reply is `seat_ambiguous`. ([#3184](https://github.com/mvschwarz/openrig/pull/3184))
+- For the default `http://127.0.0.1:<port>` target, the TUI's daemon-only
+  start (from its crash cart or start-and-return page) passes only the port, so
+  it honours the daemon's configured bind, or its default loopback-plus-Tailscale
+  bind when none is configured, instead of loopback alone. It no longer promises
+  a kernel that isn't listed. ([#3181](https://github.com/mvschwarz/openrig/pull/3181), [#3227](https://github.com/mvschwarz/openrig/pull/3227))
 
 ### Delivery, the queue and status
 
 - **A send or row to a missing destination is kept and says so.** A queue row
-  whose rig or seat is absent keeps its exact address, with a
-  `destination_status` advisory: missing, archived, hosted or unknown. A direct
+  whose rig or seat is absent keeps its exact address, with a destination
+  advisory (`destination_status`, or `unmatched_destination_seat` for a missing
+  seat in a known rig): missing, archived, hosted or unknown. A direct
   send that finds no receiver keeps the message in the sender's outbox; the CLI
   prints "Recorded, not delivered", `--verify` exits nonzero, and `rig walk`
   stops there. No forwarding, retry or reassignment is added. ([#3142](https://github.com/mvschwarz/openrig/pull/3142))
-- A park or close that carries `--summary` or `--evidence-ref` is applied and
-  stores both, instead of refusing the whole update with
-  `summary_evidence_not_persistable`. A blank value isn't stored, and the
+- An otherwise-admitted state-changing park or close stores its supplied
+  non-blank `--summary` or `--evidence-ref`, instead of refusing the whole
+  update with `summary_evidence_not_persistable`; note-append and re-estimate
+  rules remain unchanged. A blank value isn't stored, and the
   receipt names any requested field the stored row doesn't carry. ([#3136](https://github.com/mvschwarz/openrig/pull/3136))
 - A draft typed while a conditional Enter's own checks wait is no longer
   submitted with OpenRig's text: the guard refuses with `draft_input_changed`,
@@ -232,8 +242,8 @@ contributed by people using OpenRig.
   effective policy is the built-in `standard` or `open` now launches with the
   team default's allowances, as a seat with no policy does. Before, any
   recorded policy turned the team default off. ([#3230](https://github.com/mvschwarz/openrig/pull/3230))
-- **A park or close carrying `--summary` or `--evidence-ref` is applied**
-  instead of refused. ([#3136](https://github.com/mvschwarz/openrig/pull/3136))
+- **A state-changing park or close carrying `--summary` or `--evidence-ref` is
+  applied** instead of refused. ([#3136](https://github.com/mvschwarz/openrig/pull/3136))
 - **`rig ps` summary lines end with `· daemon <address>`.** ([#3107](https://github.com/mvschwarz/openrig/pull/3107))
 
 ### Known limits
