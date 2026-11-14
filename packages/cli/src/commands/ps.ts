@@ -241,6 +241,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "inProgressWorkCount",
   "blockedWorkCount",
   "agentActivity",
+  "activityState",
   "needsAttention",
   "arbitratedNeedsInput",
   "needsInputEvidence",
@@ -961,7 +962,7 @@ podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarn
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
-agentActivity, needsAttention, arbitratedNeedsInput, needsInputEvidence,
+agentActivity, activityState, needsAttention, arbitratedNeedsInput, needsInputEvidence,
 contextUsage, heldReason, startedWithoutRequired, storedSessionStatus, identityVerdict.
 
 --host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
