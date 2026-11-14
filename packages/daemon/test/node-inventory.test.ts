@@ -102,6 +102,9 @@ describe("Node Inventory Projection", () => {
     seedPodAwareRig(db);
     const read = () => getNodeInventory(db, "rig-1");
     expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBe("login");
+    db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run("/private/account-home", "node-1");
+    expect(read().find((n) => n.nodeId === "node-1")?.configuredAccount).toBeNull();
+    expect(JSON.stringify(read())).not.toContain("/private/account-home");
     expect(read().find((n) => n.nodeId === "node-2")?.configuredAccount).toBeNull();
     db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?")
       .run(JSON.stringify({ label: "team-1", tokenFile: "/private/token" }), "node-1");

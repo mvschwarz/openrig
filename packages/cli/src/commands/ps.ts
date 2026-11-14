@@ -760,7 +760,6 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // runtime is complete fleet-wide; model is a DECLARATION, absent on 13 of
       // 15 claude-code seats — see formatDeclaredModel for the render rule.
       runtime: n.runtime ?? null,
-      configuredAccount: n.configuredAccount ?? null,
       ...(n.communityHarness ? { communityHarness: n.communityHarness } : {}),
       ...(n.launchWrapper?.length ? { launchWrapper: n.launchWrapper } : {}),
       model: n.model ?? null,
@@ -1430,7 +1429,7 @@ async function handleNodes(
   const humanTruncated = !opts.full && limit === null && filtered.length > HUMAN_NODE_BUDGET;
 
   if (useCompact) {
-    console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON", "ATTN", "ACCT"));
+    console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON", "ATTN"));
     for (const n of humanList as NodeEntry[]) {
       // With the daemon's attention flag set, a live question shows its own reason rather than a recorded error. Without
       // that flag (an older daemon), the order stays as it was, so a startup failure isn't hidden by a hook. The question's
@@ -1448,7 +1447,6 @@ async function handleNodes(
         formatHasWork(n.hasAssignedWork, n.assignedWorkCount ?? n.pendingWorkCount),
         reason,
         n.needsAttention === undefined ? "?" : n.needsAttention ? "yes" : "no",
-        n.runtime === "claude-code" ? n.configuredAccount ?? "unknown" : "—",
       ));
     }
   } else {
@@ -1482,8 +1480,8 @@ async function handleNodes(
       ));
     }
   }
-  if ((humanList as NodeEntry[]).some((n) => n.runtime === "claude-code")) {
-    console.log("ACCT is configured, not verified sign-in; full labels: --json.");
+  if (!useCompact && (humanList as NodeEntry[]).some((n) => n.runtime === "claude-code")) {
+    console.log("ACCT is configured, not verified sign-in; full labels: --full --json.");
   }
   for (const line of modelLines(humanList as NodeEntry[])) console.log(line);
   // Keep an actionable startup continuation outside the table's clipped cells.
@@ -1568,7 +1566,7 @@ export function padNodeRow(rig: string, pod: string, member: string, session: st
   ].join(NODE_COLUMN_SEPARATOR);
 }
 
-export function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string, attention = "?", account = "—"): string {
+export function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string, attention = "?"): string {
   return [
     fitCell(rig, 22),
     fitCell(session, 38),
@@ -1576,7 +1574,6 @@ export function padCompactNodeRow(rig: string, session: string, lifecycle: strin
     fitCell(activity, 17),
     fitCell(work, 6),
     fitCell(attention, 4),
-    fitCell(account, 12),
     reason,
   ].join(NODE_COLUMN_SEPARATOR);
 }
