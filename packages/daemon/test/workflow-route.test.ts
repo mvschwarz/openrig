@@ -544,12 +544,12 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
   // its successor then finished. Routing the step to that same handoff target adopts the successor: no queue row is
   // closed again or created, and the verdict on the successor stays as recorded.
   describe("a frontier packet an ordinary queue handoff already closed", () => {
-    async function handedOffReview() {
+    async function handedOffReview(finished = true) {
       const { instanceId, entryPacket } = await instantiate();
       const projected = await runtime.project({ instanceId, currentPacketId: entryPacket, exit: "handoff", actorSession: "producer@rig" });
       const reviewPacket = projected.nextQitemId!;
       const { created } = await queueRepo.handoff({ qitemId: reviewPacket, fromSession: "reviewer@rig", toSession: "reviewer2@rig" });
-      queueRepo.update({ qitemId: created.qitemId, actorSession: "reviewer2@rig", state: "done", closureReason: "no-follow-on",
+      if (finished) queueRepo.update({ qitemId: created.qitemId, actorSession: "reviewer2@rig", state: "done", closureReason: "no-follow-on",
         transitionNote: "CHANGES REQUESTED" });
       return { instanceId, reviewPacket, successor: created.qitemId };
     }
@@ -581,6 +581,32 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
       expect(runtime.instanceStore.getByIdOrThrow(instanceId).version).toBe(after.version);
       expect((db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n).toBe(events);
       expect(queueSnapshot()).toEqual(queueBefore);
+    });
+
+    // Without --packet the first route selects the closed packet and adopts its successor; the same command again selects
+    // that successor, and is the same adoption: reported with no writes, whether the successor is finished or still live.
+    it.each([true, false])("absorbs the same adoption retried without --packet (successor finished: %s)", async (finished) => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview(finished);
+      const routed = await runtime.route({ instanceId, toSession: "reviewer2@rig", actorSession: "orch@rig", reason: "adopt the handoff" });
+      expect(routed).toMatchObject({ closedPacketId: reviewPacket, newPacketId: successor, adoptedHandoff: { successorState: finished ? "done" : "pending" } });
+      const version = runtime.instanceStore.getByIdOrThrow(instanceId).version;
+      const queueBefore = queueSnapshot();
+      const events = (db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n;
+
+      expect(await runtime.route({ instanceId, toSession: "reviewer2@rig", actorSession: "orch@rig", reason: "adopt the handoff" })).toEqual(routed);
+
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId)).toMatchObject({ version, currentFrontier: [successor] });
+      expect((db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n).toBe(events);
+      expect(queueSnapshot()).toEqual(queueBefore);
+    });
+
+    // No queue transition records an adoption, so its event says who adopted, why, and which packet it replaced.
+    it("records the actor, reason and replaced packet in the adoption event", async () => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview();
+      await runtime.route({ instanceId, packetId: reviewPacket, toSession: "reviewer2@rig", actorSession: "orch@rig", reason: "adopt the handoff" });
+      const row = db.prepare("SELECT payload FROM events WHERE type = 'workflow.routing_table_changed' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+      expect(JSON.parse(row.payload)).toMatchObject({ cause: "workflow_route_adopted_handoff", instanceId, actorSession: "orch@rig",
+        reason: "adopt the handoff", oldPacketId: reviewPacket, newPacketId: successor });
     });
 
     it("refuses another target by name, with nothing written", async () => {
