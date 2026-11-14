@@ -1,19 +1,12 @@
-// The queue's production destination check: which session refs a queue row may be addressed to. Startup wires it into
-// QueueRepository as validateRig; anything that must know whether a row would be accepted, without writing one, uses the
-// same check (QueueRepository.acceptsDestination).
+// The existing topology-backed destination preflight, used when choosing a receiver.
+// Recording canonical work is separate: absence must not prevent keeping the row.
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { LoadResult } from "./gateway/human-registry.js";
 import { sharedChannelAddresses } from "./gateway/participants.js";
 
-// PL-004 Phase A revision (R1): topology-backed validateRig.
-// Reject `<member>@<unknown-rig>` shapes against the rig registry.
-// Bare ids without `@` are also rejected
-// (no canonical rig binding).
-// OPR.0.4.6.MH1 FR-8: this gate is the ARCHETYPE consumer of the shared
-// parse contract — human-seat classification BEFORE parse, then the
-// greedy first-@ rig (so "member@rig@x" looks up rig "rig@x", misses,
-// and rejects with the same unknown_destination_rig as ever — BR-1).
+// Human and external admission still use their registered-address rules.
+// Bare ids without a canonical rig binding remain outside this address contract.
 export function makeTopologyDestinationCheck(deps: {
   findRigsByName: (name: string) => unknown[];
   loadHumanRegistry: () => LoadResult;
@@ -40,4 +33,9 @@ export function makeTopologyDestinationCheck(deps: {
     if (parsed.kind !== "canonical") return false;
     return deps.findRigsByName(parsed.rig).length > 0;
   };
+}
+
+/** Keep canonical work even before its topology exists; retain the other admission rules. */
+export function makeQueueRecordingCheck(topologyCheck: (sessionRef: string) => boolean): (sessionRef: string) => boolean {
+  return sessionRef => parseSessionName(sessionRef).kind === "canonical" || topologyCheck(sessionRef);
 }

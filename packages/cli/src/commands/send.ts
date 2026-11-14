@@ -561,11 +561,14 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // Context beside the send's own result: the seat was in a managed compaction or restore when it ran.
       const compactionNotice = (res.data["managedCompaction"] as { notice?: unknown } | undefined)?.notice;
       const printCompactionNotice = (write: (line: string) => void) => { if (typeof compactionNotice === "string") write(`Notice: ${compactionNotice}`); };
+      if (!opts.json) printDestinationStatus(res.data, console.error);
       if (res.data["outcome"] === "retained") {
         console.log(opts.json ? JSON.stringify(res.data) : `Retained, not delivered to ${session}. ${String(res.data["warning"] ?? "")}`);
         if (!opts.json) printCompactionNotice(console.log);
         return;
       }
+
+      if (printRecordedSend(res.data, session, Boolean(opts.json), Boolean(opts.verify))) return;
 
       // S3 wave-1 fix (r2 F2): effect classification runs BEFORE any output
       // encoding or routing, so the human and JSON encoders render the same
@@ -977,11 +980,12 @@ async function runHttpHostSend(
       ...(opts.verify ? { effectCheck: { checked: false, why: "cross-host http — the pane-effect check does not run cross-host" } } : {}),
       ...(!result.ok && hint ? { hint } : {}),
     }));
-    if (!result.ok) process.exitCode = 1;
+    if (!result.ok || (opts.verify && (result.data as Record<string, unknown> | undefined)?.["outcome"] === "recorded")) process.exitCode = 1;
     return;
   }
 
   printExistingInput((result.data as Record<string, unknown> | undefined)?.["existingInput"], console.error);
+  printDestinationStatus((result.data ?? {}) as Record<string, unknown>, console.error);
   if (!result.ok) {
     emitRemoteHttpFailure(host.id, hostDisplayTarget(host), shown, false, hint);
     if (unconfirmed) {
@@ -993,6 +997,7 @@ async function runHttpHostSend(
 
   console.log(`[via host=${host.id} (${hostDisplayTarget(host)})]`);
   const data = (result.data ?? {}) as Record<string, unknown>;
+  if (printRecordedSend(data, session, false, Boolean(opts.verify))) return;
   if (data["outcome"] === "retained") {
     console.log(`Retained for ${session}; not delivered. ${data["warning"] ?? ""}`);
     return;
@@ -1018,6 +1023,18 @@ async function runHttpHostSend(
     // the REMOTE transport's; the pane-effect check does not run cross-host.
     console.log("Effect: UNCHECKED — the pane-effect check does not run cross-host; the verdict above is transport-level only.");
   }
+}
+
+function printDestinationStatus(data: Record<string, unknown>, print: (line: string) => void): void {
+  const status = data["destinationStatus"] as { message?: unknown } | undefined;
+  if (typeof status?.message === "string") print(`Destination status: ${status.message}`);
+}
+
+function printRecordedSend(data: Record<string, unknown>, session: string, json: boolean, verify: boolean): boolean {
+  if (data["outcome"] !== "recorded") return false;
+  console.log(json ? JSON.stringify(data) : `Recorded, not delivered to ${session}. ${String(data["warning"] ?? "")}`);
+  if (verify) process.exitCode = 1;
+  return true;
 }
 
 /** Print transient caller evidence only. JSON escaping prevents pane control bytes from acting on this terminal. */
