@@ -23,6 +23,7 @@ import { validateResumeToken } from "./resume-token-validation.js";
 import { readProcessTable } from "./process-table.js";
 import type { HomeRuntime } from "./seat-runtime-home.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { ObservationPass } from "./process-observation-pass.js";
 
 export interface ResumeRefreshSession {
   /** The seat, when known, so its own runtime home is read. */
@@ -58,6 +59,8 @@ interface ResumeMetadataRefresherDeps {
   };
   /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is not used. */
   claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
+  /** One fresh identity lister per seat, shared only within a snapshot refresh. */
+  claudeStartedAtForPass?: (pass: ObservationPass) => NonNullable<ResumeTokenCaptureDeps["claudeProcessStartedAt"]>;
   /** Provider root used by the daemon's Claude launches; no scan of other homes. */
   claudeConfigDir?: string;
   listClaudeProcesses?: NativeProcessLister;
@@ -77,6 +80,7 @@ export class ResumeMetadataRefresher {
   private homeDir: string;
   private contextUsageStore: ResumeMetadataRefresherDeps["contextUsageStore"] | null;
   private claudeProcessStartedAt: ResumeMetadataRefresherDeps["claudeProcessStartedAt"] | null;
+  private claudeStartedAtForPass: ResumeMetadataRefresherDeps["claudeStartedAtForPass"];
   private claudeConfigDir: string;
   private seatHome?: (nodeId: string, runtime: HomeRuntime) => string | undefined;
   private listClaudeProcesses: NativeProcessLister | undefined;
@@ -112,6 +116,7 @@ export class ResumeMetadataRefresher {
     this.homeDir = deps.homeDir ?? os.homedir();
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
+    this.claudeStartedAtForPass = deps.claudeStartedAtForPass;
     this.claudeConfigDir = deps.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(this.homeDir, ".claude");
     this.seatHome = deps.seatHome;
     this.listClaudeProcesses = deps.listClaudeProcesses;
@@ -151,6 +156,8 @@ export class ResumeMetadataRefresher {
     },
   ): Promise<void> {
     const fillNullOnly = opts?.fillNullOnly === true;
+    const claudeStartedAt = fillNullOnly && this.claudeStartedAtForPass
+      ? this.claudeStartedAtForPass(new ObservationPass()) : this.claudeProcessStartedAt;
     // Snapshot-time discovery is SINGLE-ATTEMPT (mini-req 2): the 8-attempt
     // 250ms-sleep loop exists for the adoption boundary racing a booting codex;
     // on a recurring tick it multiplied `ps` spawns per seat, forever.
@@ -207,7 +214,7 @@ export class ResumeMetadataRefresher {
           if (sidecar?.ok) {
             const token = sidecar.data.session_id;
             if (typeof token === "string" && token.trim().length > 0
-              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, this.claudeProcessStartedAt))) {
+              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, claudeStartedAt))) {
               this.sessionRegistry.updateResumeToken(session.sessionId, "claude_id", token.trim(), "scrape");
             }
           }
@@ -231,7 +238,7 @@ export class ResumeMetadataRefresher {
           if (sidecar?.ok) {
             const derived = sidecar.data.session_id;
             if (typeof derived === "string" && derived.trim().length > 0 && derived.trim() === session.resumeToken
-              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, this.claudeProcessStartedAt))) {
+              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, claudeStartedAt))) {
               this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
             }
           }

@@ -122,57 +122,67 @@ export const CODEX_NETWORK_READER_DEADLINE_MS = 4_000;
 
 /** The production reader: asynchronous, so the daemon keeps serving while Codex starts. */
 export function codexNetworkDefaultReader(options: CodexNetworkReaderOptions = {}): CodexNetworkDefaultReader {
-  const deadlineMs = options.deadlineMs ?? CODEX_NETWORK_READER_DEADLINE_MS;
-  const graceMs = options.graceMs ?? 500;
-  const maxOutputBytes = options.maxOutputBytes ?? 4 * 1024 * 1024;
   return async (cwd, seatHome) => {
-    const codexHome = seatHome ?? options.codexHome;
     const started = performance.now();
-    const env = {
-      ...process.env,
-      ...(options.launchPath ? { PATH: options.launchPath } : {}),
-      ...(options.home ? { HOME: options.home } : {}),
-      ...(codexHome ? { CODEX_HOME: codexHome } : {}),
-    };
-    // The launch flag `-s workspace-write` is `sandbox_mode` for the server; plugins and apps are
-    // switched off for the reader only. app-server serves stdio by default.
-    const args = ["-c", 'sandbox_mode="workspace-write"', "-c", "features.plugins=false", "-c", "features.apps=false", "app-server"];
-    let child: ReturnType<typeof spawn>;
-    try {
-      // Its own process group, so cleanup reaches the reader's descendants and nothing else.
-      child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
-    } catch (error) {
-      return { ...no(`codex app-server could not start: ${firstLine(error)}`), elapsedMs: Math.round(performance.now() - started) };
-    }
-    const decision = await converse(child, cwd, deadlineMs, maxOutputBytes);
-    await stopGroup(child, graceMs);
+    const result = await readCodexConfiguration({ ...options, cwd, codexHome: seatHome ?? options.codexHome,
+      args: ["-c", 'sandbox_mode="workspace-write"', "-c", "features.plugins=false", "-c", "features.apps=false"] });
+    const decision = result.ok ? decideCodexNetworkDefault(result.configRead, result.requirementsRead) : no(result.reason);
     return { ...decision, elapsedMs: Math.round(performance.now() - started) };
   };
 }
 
-function converse(child: ReturnType<typeof spawn>, cwd: string, deadlineMs: number, maxOutputBytes: number): Promise<CodexNetworkDecision> {
+export type CodexConfigurationRead = { ok: true; configRead: unknown; requirementsRead: unknown } | { ok: false; reason: string };
+const unread = (reason: string): CodexConfigurationRead => ({ ok: false, reason });
+
+/** One native config read with the caller's launch overrides. No thread, turn or persistent server. */
+export async function readCodexConfiguration(options: CodexNetworkReaderOptions & { cwd: string; args: readonly string[] }): Promise<CodexConfigurationRead> {
+  const deadlineMs = options.deadlineMs ?? CODEX_NETWORK_READER_DEADLINE_MS;
+  const graceMs = options.graceMs ?? 500;
+  const maxOutputBytes = options.maxOutputBytes ?? 4 * 1024 * 1024;
+  const { cwd, codexHome } = options;
+  const env = {
+    ...process.env,
+    ...(options.launchPath ? { PATH: options.launchPath } : {}),
+    ...(options.home ? { HOME: options.home } : {}),
+    ...(codexHome ? { CODEX_HOME: codexHome } : {}),
+  };
+  // app-server serves stdio by default. The caller states the same permission overrides as its launch.
+  const args = [...options.args, "app-server"];
+  let child: ReturnType<typeof spawn>;
+  try {
+    // Its own process group, so cleanup reaches the reader's descendants and nothing else.
+    child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
+  } catch (error) {
+    return unread(`codex app-server could not start: ${firstLine(error)}`);
+  }
+  const decision = await converse(child, cwd, deadlineMs, maxOutputBytes);
+  await stopGroup(child, graceMs);
+  return decision;
+}
+
+function converse(child: ReturnType<typeof spawn>, cwd: string, deadlineMs: number, maxOutputBytes: number): Promise<CodexConfigurationRead> {
   return new Promise((resolve) => {
     const answers = new Map<number, Record<string, unknown>>();
     let buffered = "";
     let received = 0;
     let settled = false;
-    const finish = (decision: CodexNetworkDecision) => {
+    const finish = (decision: CodexConfigurationRead) => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
       resolve(decision);
     };
-    const deadline = setTimeout(() => finish(no(`codex app-server did not answer within ${deadlineMs} ms`)), deadlineMs);
+    const deadline = setTimeout(() => finish(unread(`codex app-server did not answer within ${deadlineMs} ms`)), deadlineMs);
     const send = (message: Record<string, unknown>) => {
       if (child.stdin?.writable) child.stdin.write(`${JSON.stringify(message)}\n`);
     };
-    child.on("error", (error) => finish(no(`codex app-server could not start: ${firstLine(error)}`)));
-    child.on("exit", () => finish(no("codex app-server exited before answering")));
-    child.stdin?.on("error", () => finish(no("codex app-server closed its input before answering")));
+    child.on("error", (error) => finish(unread(`codex app-server could not start: ${firstLine(error)}`)));
+    child.on("exit", () => finish(unread("codex app-server exited before answering")));
+    child.stdin?.on("error", () => finish(unread("codex app-server closed its input before answering")));
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       received += Buffer.byteLength(chunk);
-      if (received > maxOutputBytes) return finish(no("codex app-server answered with more output than expected"));
+      if (received > maxOutputBytes) return finish(unread("codex app-server answered with more output than expected"));
       buffered += chunk;
       let newline: number;
       while ((newline = buffered.indexOf("\n")) >= 0) {
@@ -183,7 +193,7 @@ function converse(child: ReturnType<typeof spawn>, cwd: string, deadlineMs: numb
         try { message = JSON.parse(line); } catch { continue; }
         // Only responses to our own requests: notifications and server requests carry a method.
         if (!isRecord(message) || typeof message.id !== "number" || "method" in message) continue;
-        if (message.error !== undefined) return finish(no(`codex app-server returned an error for request ${message.id}`));
+        if (message.error !== undefined) return finish(unread(`codex app-server returned an error for request ${message.id}`));
         if (message.id === 1) {
           send({ method: "initialized", params: {} });
           send({ id: 2, method: "config/read", params: { includeLayers: true, cwd } });
@@ -192,7 +202,7 @@ function converse(child: ReturnType<typeof spawn>, cwd: string, deadlineMs: numb
         }
         answers.set(message.id, message);
         if (answers.has(2) && answers.has(3)) {
-          return finish(decideCodexNetworkDefault(answers.get(2)!.result, answers.get(3)!.result));
+          return finish({ ok: true, configRead: answers.get(2)?.result, requirementsRead: answers.get(3)?.result });
         }
       }
     });

@@ -268,7 +268,8 @@ export function diagnoseRuntimePosture(input: {
   const launchArguments = applied?.state === "observed" && applied.runtime === input.runtime
     && (input.runtime === "claude-code" || input.runtime === "codex");
   const enforcement = launchArguments
-    ? unknownEnforcement(applied.axis, applied.value, null, "native_permission_effect_unverified")
+    ? unknownEnforcement(applied.axis, applied.value, null,
+      applied.runtime === "codex" && applied.reason?.startsWith("policy not verified:") ? applied.reason : "native_permission_effect_unverified")
     : input.runtime === "claude-code"
     ? inspectClaude(input.cwd, input.applied, input.fs)
     : inspectLaunchBoundRuntime(input.runtime, input.applied);
