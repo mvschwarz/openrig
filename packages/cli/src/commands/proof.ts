@@ -223,6 +223,7 @@ checkboxes do not accept an item under the selected proof policy.
           operationId: opts.operationId, replace: opts.replace === true, ...(opts.project ? { project: opts.project } : {}),
           ...((view.project || view.selection) ? { expectedProject: (view.project as { id?: string } | undefined)?.id ?? null } : {}),
           ...((view.project?.missionsRoot ?? view.selection?.missionsRoot) ? { expectedMissionsRoot: view.project?.missionsRoot ?? view.selection?.missionsRoot } : {}),
+          ...(view.preparationReceipt ? { preparationReceipt: view.preparationReceipt } : {}),
           // Pin the project and missions roots the prepared read resolved.
           ...((view.project as { root?: string } | undefined)?.root ? { projectRoot: (view.project as { root: string }).root } : {}) };
         const result = await response(await c.post("/api/proof/judge", body), projectSelected(opts.project, scope));

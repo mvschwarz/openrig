@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { proofSourceObservation } from "../domain/proof/source-watch.js";
 import * as path from "node:path";
-import * as fs from "node:fs";
+import { ProofPreparations } from "./proof-preparations.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { JudgmentError, evidenceAt, readSliceReadiness, readMissionReadiness, readProjectReadinessAsync, recordJudgment, resolveProofScope, resolveProjectRoot, type JudgeInput } from "../domain/proof/judgments.js";
@@ -18,6 +18,9 @@ const QUALIFIED_SCOPE = /^([A-Za-z0-9][A-Za-z0-9._-]{0,63}):(.*)$/;
 
 export function proofRoutes(): Hono {
   const app = new Hono();
+  // Opaque, bounded daemon-local capabilities: request fields alone cannot select
+  // an old root. A daemon restart invalidates them and requires a fresh read.
+  const preparations = new ProofPreparations();
   app.onError((e, c) => {
     if (e instanceof JudgmentError) return c.json({ error: e.code, message: e.message }, e.status as 400);
     return c.json({ error: "proof_unavailable", message: e.message }, 503);
@@ -51,7 +54,7 @@ export function proofRoutes(): Hono {
     const value = c.get("sliceIndexer" as never) as SliceIndexer | undefined;
     return value?.isReady() ? value.slicesRoot : null;
   };
-  const target = (c: Parameters<typeof indexer>[0], rawScope: string | undefined, project: unknown, expectedRoot?: unknown, expectedProject?: unknown, expectedMissionsRoot?: unknown) => {
+  const target = (c: Parameters<typeof indexer>[0], rawScope: string | undefined, project: unknown, expectedRoot?: unknown, expectedProject?: unknown, expectedMissionsRoot?: unknown, receipt?: unknown) => {
     const warnings: string[] = [];
     if (project !== undefined && typeof project !== "string") throw new JudgmentError("judgment_invalid", "Project must be a catalog project id");
     if (expectedRoot !== undefined && typeof expectedRoot !== "string") throw new JudgmentError("judgment_invalid", "projectRoot must be the root a prepared read returned");
@@ -111,15 +114,14 @@ export function proofRoutes(): Hono {
       if (changed) {
         const preparedMissions = expectedMissionsRoot as string;
         const preparedRoot = typeof expectedRoot === "string" ? expectedRoot : path.dirname(preparedMissions);
-        const relative = path.relative(preparedRoot, preparedMissions);
-        if (!path.isAbsolute(preparedMissions) || !path.isAbsolute(preparedRoot) || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
-            || !fs.existsSync(preparedRoot) || !fs.statSync(preparedRoot).isDirectory()
-            || !fs.existsSync(preparedMissions) || !fs.statSync(preparedMissions).isDirectory()) {
-          throw new JudgmentError("project_changed", "The prepared project or missions root no longer exists; read the proof again", 409);
+        const verified = preparations.verify(receipt, { session: transportSenderSession(c as never) ?? null, scope: rawScope,
+          project: expectedProject as string | null, root: preparedRoot, missions: preparedMissions });
+        if (!verified) {
+          throw new JudgmentError("project_changed", "Prepared root receipt is invalid or no longer matches; read the proof again", 409);
         }
         warnings.push(`Project selection changed since preparation; judging against the prepared root ${preparedMissions}. Select explicitly with --project, --workspace, or a project: prefix.`);
-        return { root: preparedMissions, evidenceRoot: preparedRoot, scope, owner: null,
-          project: expectedProject === null ? null : { id: expectedProject as string, root: preparedRoot, selectedBy: "prepared" }, warnings };
+        return { root: verified.missions, evidenceRoot: verified.root, scope, owner: null,
+          project: expectedProject === null ? null : { id: expectedProject as string, root: verified.root, selectedBy: "prepared" }, warnings };
       }
     }
     if (id === undefined) {
@@ -146,7 +148,8 @@ export function proofRoutes(): Hono {
     project ? { state: "unavailable" as const, revision: "unverified" } : proofSourceObservation(c);
   app.get("/", async c => {
     const { root, evidenceRoot, scope, project, warnings } = target(c, c.req.query("scope"), c.req.query("project"), c.req.query("projectRoot"));
-    const common = { sourceObservation: observation(c, project), ...(warnings.length ? { warnings } : {}), ...(project ? { project: { ...project, missionsRoot: root } } : { selection: { selectedBy: "workspace", missionsRoot: root } }) };
+    const preparationReceipt = preparations.issue({ session: transportSenderSession(c as never) ?? null, scope: c.req.query("scope"), project: project?.id ?? null, root: project?.root ?? evidenceRoot, missions: root });
+    const common = { preparationReceipt, sourceObservation: observation(c, project), ...(warnings.length ? { warnings } : {}), ...(project ? { project: { ...project, missionsRoot: root } } : { selection: { selectedBy: "workspace", missionsRoot: root } }) };
     // A catalog project's own root bounds policy, scope identity and evidence (never an ancestor's project.yaml).
     const bound = project?.root;
     if (!scope) {
@@ -165,15 +168,15 @@ export function proofRoutes(): Hono {
     return c.json({ ...readSliceReadiness(dir, undefined, undefined, bound), ...common, ...(refs.length ? { preparedEvidence: refs.map(ref => evidenceAt(preparedRoot, dir, ref)) } : {}) });
   });
   app.post("/judge", async c => {
-    const body = await c.req.json<JudgeInput & { actorSession?: string; project?: string; projectRoot?: string; expectedProject?: string | null; expectedMissionsRoot?: string }>().catch(() => null);
+    const body = await c.req.json<JudgeInput & { actorSession?: string; project?: string; projectRoot?: string; expectedProject?: string | null; expectedMissionsRoot?: string; preparationReceipt?: string }>().catch(() => null);
     if (!body || typeof body.scope !== "string" || typeof body.item !== "string" || typeof body.expectedRevision !== "string" || !(body.expectedPrevious === null || typeof body.expectedPrevious === "string") || (body.evidence !== undefined && (!Array.isArray(body.evidence) || body.evidence.some(e => typeof e !== "string")))) throw new JudgmentError("judgment_invalid", "Provide scope, item, expected revision/predecessor and evidence references; rig proof judge resolves these in the ordinary path");
     if ((body.actorSession !== undefined && typeof body.actorSession !== "string") || typeof body.reason !== "string" || (body.operationId !== undefined && (typeof body.operationId !== "string" || !body.operationId.trim())) || (body.subject !== undefined && (!body.subject || typeof body.subject !== "object" || typeof body.subject.kind !== "string" || typeof body.subject.ref !== "string")) || (body.replace !== undefined && typeof body.replace !== "boolean")) throw new JudgmentError("judgment_invalid", "Reason, operation identity and subject must have their declared types");
     if (body.expectedEvidence !== undefined && (!Array.isArray(body.expectedEvidence) || body.expectedEvidence.some(e => !e || typeof e.ref !== "string" || typeof e.sha256 !== "string"))) throw new JudgmentError("judgment_invalid", "Expected evidence must be prepared reference/digest pairs");
     if (body.subject?.comparison !== undefined && typeof body.subject.comparison !== "string") throw new JudgmentError("judgment_invalid", "Comparison must be an evidence reference");
     const identity = requireSenderIdentity(c, { verb: "proof judgment", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
-    const { project: _project, projectRoot: _projectRoot, expectedProject: _expectedProject, expectedMissionsRoot: _expectedMissionsRoot, ...input } = body;
-    const { root, scope, owner, project, warnings } = target(c, body.scope, body.project, body.projectRoot, body.expectedProject, body.expectedMissionsRoot);
+    const { project: _project, projectRoot: _projectRoot, expectedProject: _expectedProject, expectedMissionsRoot: _expectedMissionsRoot, preparationReceipt: _receipt, ...input } = body;
+    const { root, scope, owner, project, warnings } = target(c, body.scope, body.project, body.projectRoot, body.expectedProject, body.expectedMissionsRoot, body.preparationReceipt);
     const result = recordJudgment(root, { ...input, scope: scope! }, identity.session, resolveRecordedProvenance(c, identity), project?.root);
     owner?.invalidate();
     // The receipt is already durable. A lost notification must not turn a committed write into a claimed rollback.

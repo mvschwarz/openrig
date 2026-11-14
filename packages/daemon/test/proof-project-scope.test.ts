@@ -134,10 +134,38 @@ describe("project-qualified proof scope (#132)", () => {
     write(join(f.workspace, "workspace.yaml"), { projects: [
       { id: "alpha", root: "alpha" }, { id: "beta", root: "beta", rigs: ["rig"] },
     ] });
-    const res = await f.judge("m0/slices/01-t001", { projectRoot: view.project.root, expectedProject: view.project.id, expectedMissionsRoot: view.project.missionsRoot });
+    const res = await f.judge("m0/slices/01-t001", { projectRoot: view.project.root, expectedProject: view.project.id, expectedMissionsRoot: view.project.missionsRoot, preparationReceipt: view.preparationReceipt });
     expect(res.status).toBe(201);
     expect((await res.json()).warnings[0]).toMatch(/changed since preparation/);
     expect(fs.existsSync(join(f.alpha.slice, "proof/judgments/00000001.md"))).toBe(true);
+    expect(fs.existsSync(join(f.beta.slice, "proof/judgments"))).toBe(false);
+  });
+
+  it("rejects a forged prepared root even with a receipt for another root", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
+    ] });
+    const view = await (await f.get("scope=m0/slices/01-t001", "judge@rig")).json();
+    const res = await f.judge("m0/slices/01-t001", { expectedProject: "beta", projectRoot: join(f.workspace, "beta"), expectedMissionsRoot: f.beta.missions, preparationReceipt: view.preparationReceipt }, f.beta.slice);
+    expect(res.status).toBe(409);
+    expect((await res.json()).message).toMatch(/receipt is invalid/);
+    expect(fs.existsSync(join(f.beta.slice, "proof/judgments"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a symlink changed after preparation", async () => {
+    const f = fixture();
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
+    ] });
+    const view = await (await f.get("scope=m0/slices/01-t001", "judge@rig")).json();
+    fs.renameSync(f.alpha.missions, `${f.alpha.missions}-saved`);
+    fs.symlinkSync(f.beta.missions, f.alpha.missions, "dir");
+    write(join(f.workspace, "workspace.yaml"), { projects: [
+      { id: "alpha", root: "alpha" }, { id: "beta", root: "beta", rigs: ["rig"] },
+    ] });
+    const res = await f.judge("m0/slices/01-t001", { projectRoot: view.project.root, expectedProject: view.project.id, expectedMissionsRoot: view.project.missionsRoot, preparationReceipt: view.preparationReceipt }, f.beta.slice);
+    expect(res.status).toBe(409);
     expect(fs.existsSync(join(f.beta.slice, "proof/judgments"))).toBe(false);
   });
 
@@ -148,7 +176,7 @@ describe("project-qualified proof scope (#132)", () => {
       { id: "alpha", root: "alpha", rigs: ["rig"] }, { id: "beta", root: "beta" },
     ] });
     expect(view.selection).toMatchObject({ selectedBy: "workspace", missionsRoot: f.legacy.missions });
-    const res = await f.judge("m0/slices/01-t001", { expectedProject: null, expectedMissionsRoot: view.selection.missionsRoot }, f.legacy.slice);
+    const res = await f.judge("m0/slices/01-t001", { expectedProject: null, expectedMissionsRoot: view.selection.missionsRoot, preparationReceipt: view.preparationReceipt }, f.legacy.slice);
     expect(res.status).toBe(201);
     expect((await res.json()).warnings[0]).toMatch(/changed since preparation/);
   });
