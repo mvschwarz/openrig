@@ -734,6 +734,15 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       expect(snapshot()).toEqual(before);
     });
 
+    // The replay reports the owner the projection resolved, not the successor row's current one (a fallback can move it).
+    it("replays the recorded next owner after the successor row is redirected", async () => {
+      const { instanceId, packet } = await handedOff(specPath);
+      const projected = await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" });
+      db.prepare("UPDATE queue_items SET destination_session = 'fallback@rig' WHERE qitem_id = ?").run(projected.nextQitemId);
+      expect(await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" }))
+        .toMatchObject({ absorbedReplay: true, nextQitemId: projected.nextQitemId, nextOwnerSession: "reviewer@rig" });
+    });
+
     it.each([
       ["no evidence", undefined],
       ["empty evidence", {}],

@@ -215,12 +215,15 @@ const QUEUE_ROW_ALREADY_CLOSED = "queue_row_already_closed";
 type QueueRowAlreadyClosed = {
   state: string; exit: WorkflowExitKind; actor: string; result_note: string | null; blocked_on: string | null;
   next_owner: string | null; evidence: Record<string, unknown> | null; next_qitem_ids: string[]; next_step_ids: string[];
+  /** The owner each next packet was projected to, as resolved then (absent from a record written before it was kept). */
+  next_owners?: string[];
 };
 
-function alreadyClosedRecord(input: ProjectStepInput, state: string, nextQitemIds: string[], nextStepIds: string[]): QueueRowAlreadyClosed {
+function alreadyClosedRecord(input: ProjectStepInput, state: string, nextQitemIds: string[], nextStepIds: string[],
+  nextOwners: string[]): QueueRowAlreadyClosed {
   return { state, exit: input.exit, actor: input.actorSession, result_note: input.resultNote ?? null,
     blocked_on: input.blockedOn ?? null, next_owner: input.nextOwnerSession ?? null, evidence: input.closureEvidence ?? null,
-    next_qitem_ids: nextQitemIds, next_step_ids: nextStepIds };
+    next_qitem_ids: nextQitemIds, next_step_ids: nextStepIds, next_owners: nextOwners };
 }
 
 /** The record, when the trail evidence holds a well-formed one; anything else reads as none. */
@@ -234,7 +237,7 @@ function readAlreadyClosedRecord(evidence: Record<string, unknown> | null | unde
   const objectOrNull = (v: unknown) => v === null || (typeof v === "object" && !Array.isArray(v));
   return text(r.state) && isTerminalState(r.state) && text(r.exit) && text(r.actor) && textOrNull(r.result_note)
     && textOrNull(r.blocked_on) && textOrNull(r.next_owner) && objectOrNull(r.evidence) && ids(r.next_qitem_ids)
-    && ids(r.next_step_ids) ? r as unknown as QueueRowAlreadyClosed : null;
+    && ids(r.next_step_ids) && (r.next_owners === undefined || ids(r.next_owners)) ? r as unknown as QueueRowAlreadyClosed : null;
 }
 
 /** The caller repeats the recorded projection exactly: the same exit, actor, result note, blocker, next owner and evidence. */
@@ -758,7 +761,8 @@ export class WorkflowProjector {
       // 4. Append step trail entry (prior + next ids).
       if (alreadyClosed) {
         effectiveClosureEvidence = { ...(effectiveClosureEvidence ?? {}), [QUEUE_ROW_ALREADY_CLOSED]:
-          alreadyClosedRecord(input, alreadyClosed, nextQitemId ? [nextQitemId] : [], nextStepId ? [nextStepId] : []) };
+          alreadyClosedRecord(input, alreadyClosed, nextQitemId ? [nextQitemId] : [], nextStepId ? [nextStepId] : [],
+            nextQitemId && nextOwnerSession ? [nextOwnerSession] : []) };
       }
       this.trailLog.record({
         instanceId: instance.instanceId,
@@ -1005,7 +1009,9 @@ export class WorkflowProjector {
       closurePriorPacketId: input.currentPacketId,
       closureReason: entry.closureReason as WorkflowExitKind,
       nextQitemId,
-      nextOwnerSession: nextQitemId ? this.queueRepo.getById(nextQitemId)?.destinationSession ?? null : null,
+      // The owner recorded at projection, not the row's current one; an older record without it reads the row.
+      nextOwnerSession: recorded.next_owners ? recorded.next_owners[0] ?? null
+        : nextQitemId ? this.queueRepo.getById(nextQitemId)?.destinationSession ?? null : null,
       nextStepId: recorded.next_step_ids[0] ?? null,
       nextQitemIds: recorded.next_qitem_ids,
       nextStepIds: recorded.next_step_ids,
@@ -1375,7 +1381,8 @@ export class WorkflowProjector {
           ...(effectiveClosureEvidence ?? {}),
           next_qitem_ids: createdPackets.map((packet) => packet.qitemId),
           ...(alreadyClosed ? { [QUEUE_ROW_ALREADY_CLOSED]: alreadyClosedRecord(input, alreadyClosed,
-            createdPackets.map((packet) => packet.qitemId), createdPackets.map((packet) => packet.step.id)) } : {}),
+            createdPackets.map((packet) => packet.qitemId), createdPackets.map((packet) => packet.step.id),
+            createdPackets.map((packet) => packet.owner)) } : {}),
         },
         actorSession: input.actorSession,
         nextQitemId: createdPackets[0]?.qitemId ?? null,

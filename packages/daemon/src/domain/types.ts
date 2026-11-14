@@ -377,7 +377,7 @@ export type RigEvent =
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string }
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string; actorSession?: string; reason?: string; oldPacketId?: string; newPacketId?: string }
   // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
   // deletion path. Emitted once per workflow_specs cache row removed
   // because its source file disappeared from the scanned workflows folder.

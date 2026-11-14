@@ -1549,6 +1549,28 @@ export class WorkflowRuntime {
           { instanceId: instance.instanceId, status: instance.status },
         );
       }
+      // A frontier packet an ordinary queue handoff already closed (`rig queue handoff` doesn't move the workflow): the
+      // queue's own successor carries the step on. Routing it to that same handoff target adopts the successor onto the
+      // frontier, instead of closing the closed packet again (the queue refuses) and assigning the step a second time.
+      // Only a packet handed off to this target, with exactly one successor there, qualifies. No queue row is written.
+      const handoffSuccessorOf = (packetId: string) => {
+        const packet = this.queueRepo.getById(packetId);
+        if (packet?.state !== "handed-off" || packet.closureTarget !== input.toSession) return null;
+        const rows = this.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ? LIMIT 2").all(packetId) as Array<{ qitem_id: string }>;
+        const successor = rows.length === 1 ? this.queueRepo.getById(rows[0]!.qitem_id) : null;
+        return successor?.destinationSession === input.toSession ? { packet, successor } : null;
+      };
+      // The same adoption again: the successor already holds the packet's place, so it's reported with no writes.
+      const adoptionReplay = (adopted: NonNullable<ReturnType<typeof handoffSuccessorOf>>) => {
+        const binding = this.instanceStore.getFrontierBinding(instance.instanceId, adopted.successor.qitemId);
+        result = {
+          instanceId: instance.instanceId,
+          stepId: binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null),
+          closedPacketId: adopted.packet.qitemId,
+          newPacketId: adopted.successor.qitemId, fromSession: adopted.packet.destinationSession, toSession: input.toSession,
+          instanceStatus: instance.status, adoptedHandoff: { successorState: adopted.successor.state },
+        };
+      };
       let oldPacketId = input.packetId;
       if (!oldPacketId) {
         if (instance.currentFrontier.length !== 1) {
@@ -1571,6 +1593,15 @@ export class WorkflowRuntime {
           );
         }
         [oldPacketId] = instance.currentFrontier;
+        // Retried without --packet, the adoption selects its own successor. Only a queue handoff records handed_off_from
+        // (route's own packets don't), so a selected packet that is the sole successor of a packet handed off to this
+        // same target, with that packet off the frontier, is that adoption again.
+        const selected = oldPacketId ? this.queueRepo.getById(oldPacketId) : null;
+        const original = selected?.handedOffFrom ? handoffSuccessorOf(selected.handedOffFrom) : null;
+        if (original && original.successor.qitemId === oldPacketId && !instance.currentFrontier.includes(original.packet.qitemId)) {
+          adoptionReplay(original);
+          return;
+        }
       }
       if (!oldPacketId) {
         throw new WorkflowProjectorError(
@@ -1579,29 +1610,10 @@ export class WorkflowRuntime {
           { instanceId: instance.instanceId },
         );
       }
-      // A frontier packet an ordinary queue handoff already closed (`rig queue handoff` doesn't move the workflow): the
-      // queue's own successor carries the step on. Routing it to that same handoff target adopts the successor onto the
-      // frontier, instead of closing the closed packet again (the queue refuses) and assigning the step a second time.
-      // Only a packet handed off to this target, with exactly one successor there, qualifies. No queue row is written.
-      const handoffSuccessorOf = (packetId: string) => {
-        const packet = this.queueRepo.getById(packetId);
-        if (packet?.state !== "handed-off" || packet.closureTarget !== input.toSession) return null;
-        const rows = this.db.prepare("SELECT qitem_id FROM queue_items WHERE handed_off_from = ? LIMIT 2").all(packetId) as Array<{ qitem_id: string }>;
-        const successor = rows.length === 1 ? this.queueRepo.getById(rows[0]!.qitem_id) : null;
-        return successor?.destinationSession === input.toSession ? { packet, successor } : null;
-      };
       if (!instance.currentFrontier.includes(oldPacketId)) {
-        // The same adoption again: the successor already holds the packet's place, so it's reported with no writes.
         const adopted = handoffSuccessorOf(oldPacketId);
         if (adopted && instance.currentFrontier.includes(adopted.successor.qitemId)) {
-          const binding = this.instanceStore.getFrontierBinding(instance.instanceId, adopted.successor.qitemId);
-          result = {
-            instanceId: instance.instanceId,
-            stepId: binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null),
-            closedPacketId: oldPacketId,
-            newPacketId: adopted.successor.qitemId, fromSession: adopted.packet.destinationSession, toSession: input.toSession,
-            instanceStatus: instance.status, adoptedHandoff: { successorState: adopted.successor.state },
-          };
+          adoptionReplay(adopted);
           return;
         }
         throw new WorkflowProjectorError(
@@ -1681,6 +1693,11 @@ export class WorkflowRuntime {
           stepId: selectedStepId,
           from: fromSession,
           to: input.toSession,
+          // No queue transition records an adoption, so this event carries who adopted, why, and which packet it replaced.
+          actorSession: input.actorSession,
+          ...(input.reason ? { reason: input.reason } : {}),
+          oldPacketId,
+          newPacketId: adopted.successor.qitemId,
         }));
         result = {
           instanceId: instance.instanceId,
