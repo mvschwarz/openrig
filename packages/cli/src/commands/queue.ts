@@ -1252,6 +1252,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const advisory = value as { code?: unknown; message?: unknown };
             if (typeof advisory.message !== "string") continue;
             switch (advisory.code) {
+              case "unmatched_destination_seat":
+              case "destination_status":
+                console.error(`Destination status: ${advisory.message}`);
+                break;
               case "scope_check_skipped":
                 console.error(`Note: ${advisory.message}`);
                 break;

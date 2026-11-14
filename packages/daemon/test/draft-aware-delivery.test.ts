@@ -321,6 +321,35 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect(f.writes).toEqual([]);
     expect(f.bodies.a).toBe("my real draft");
   });
+
+  // D18 (Codex 0.167.1 and 0.167.2, as banked): while a turn runs, an empty box keeps the shortcuts hint, and once the
+  // box holds text (our paste, or a person's draft) Codex draws its queue hint on that row instead.
+  const codexBusyViewport = (body: string): ComposerSnapshot => {
+    const rows = body.split("\n");
+    return { screen: ["› Busy turn", "", "• Working (0s • esc to interrupt)", "",
+      body ? `› ${rows[0]}` : "› \x1b[2mAsk Codex to do anything\x1b[0m", ...rows.slice(1).map(row => `  ${row}`), "",
+      "  GPT-6.1-Sol low · ~/project", body ? "  tab to queue message" : "  ← for agents · ? for shortcuts", ""].join("\n"),
+      cursor: { x: body ? 2 + stringWidth(rows.at(-1)!) : 2, y: 3 + rows.length, width: 80, height: 24 }, inMode: false };
+  };
+
+  it("delivers once to an empty input box of a busy Codex seat, under the queue hint its paste brings (D18)", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 24 });
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => codexBusyViewport(f.bodies.a ?? ""));
+    expect(await f.send("busy", "next work", f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["next work"]);
+    expect(f.writes).toHaveLength(2);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it("holds a person's draft under the busy queue hint before any write (D18)", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 24 });
+    f.bodies.a = "a person's draft";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => codexBusyViewport(f.bodies.a ?? ""));
+    expect(await f.send("busy-draft", "next work", f.options)).toMatchObject({ outcome: "retained", sent: false,
+      inputPhase: "not_reached", reason: "draft_input_busy" });
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("a person's draft");
+  });
 });
 
 describe("current draft-aware delivery through the real transport", () => {
