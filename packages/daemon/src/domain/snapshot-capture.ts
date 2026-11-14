@@ -226,18 +226,27 @@ export class SnapshotCapture {
   }
 
   private materializedRoster(rigId: string): string[] | null {
-    const row = this.db.prepare(
-      "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
-    ).get(rigId) as { payload: string } | undefined;
-    if (!row) return null;
-    try {
-      const parsed = JSON.parse(row.payload) as { intendedNodeIds?: unknown };
-      if (!Array.isArray(parsed.intendedNodeIds) || !parsed.intendedNodeIds.every((id) => typeof id === "string")) {
-        throw new Error("latest topology roster event has no string intendedNodeIds array");
-      }
-      return parsed.intendedNodeIds;
-    } catch (error) {
-      throw new Error(`Cannot capture snapshot from malformed authoritative topology roster: ${(error as Error).message}`);
-    }
+    return readMaterializedRoster(this.db, rigId);
   }
 }
+
+/** The rig's latest recorded topology roster (node ids), or null when none is recorded. A malformed recorded roster
+ *  throws: it isn't the same as no roster, which means every current node. */
+export function readMaterializedRoster(db: Database.Database, rigId: string): string[] | null {
+  const row = db.prepare(
+    "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
+  ).get(rigId) as { payload: string } | undefined;
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.payload) as { intendedNodeIds?: unknown };
+    if (!Array.isArray(parsed.intendedNodeIds) || !parsed.intendedNodeIds.every((id) => typeof id === "string")) {
+      throw new Error("latest topology roster event has no string intendedNodeIds array");
+    }
+    return parsed.intendedNodeIds;
+  } catch (error) {
+    throw new Error(`Cannot capture snapshot from malformed authoritative topology roster: ${(error as Error).message}`);
+  }
+}
+
+// Both restore-check call sites use the same authoritative roster reader.
+export { readMaterializedRoster as readTopologyRoster };

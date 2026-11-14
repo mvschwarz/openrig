@@ -499,7 +499,9 @@ export interface RestoreSnapshotSelection extends RestoreSnapshotSummary {
 export interface RestoreExcludedNode {
   nodeId: string;
   logicalId: string;
-  reason: "historical_not_in_intended_roster";
+  /** Historical: no longer a node of the rig. Current: still a node of the rig (a seat claimed after the rig's topology was
+   *  recorded), which this restore skipped. */
+  reason: "historical_not_in_intended_roster" | "current_seat_not_in_intended_roster";
 }
 
 export interface Snapshot {
@@ -1700,4 +1702,6 @@ export interface ContextUsage {
   fresh: boolean;
   /** Claude only: the statusline's cumulative client-side cost estimate for `sessionId` (USD); null when not reported. */
   clientCostEstimateUsd?: number | null;
+  /** Claude only: the occupant generation the status-line collector recorded with this sample; null when none. */
+  occupantGeneration?: string | null;
 }

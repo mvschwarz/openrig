@@ -96,3 +96,22 @@ describe("a fork child's start second", () => {
     expect(await f.finish().resolveForkChild(60422, identity)).toBeUndefined();
   });
 });
+
+
+it.each(["default", "process-cache", "explicit"] as const)("carries the positive %s home with PID/start-time thread evidence", async mode => {
+  const target = fixture(); target.thread("selected-thread"); target.log("selected-thread"); target.finish();
+  const processHome = vi.fn(() => target.home);
+  let resolver: CodexThreadIdResolver;
+  if (mode === "process-cache") {
+    const daemon = fixture(); daemon.finish();
+    resolver = new CodexThreadIdResolver({ defaultHome: daemon.home, resolveHomeDirByPid: processHome });
+  } else if (mode === "explicit") {
+    resolver = new CodexThreadIdResolver({ codexHome: path.join(target.home, ".codex"), resolveHomeDirByPid: processHome });
+  } else {
+    resolver = new CodexThreadIdResolver({ defaultHome: target.home, resolveHomeDirByPid: processHome });
+  }
+  for (let i = 0; i < 2; i++) expect(await resolver.resolveWithHome(60422, identity)).toEqual({
+    thread: "selected-thread", codexHome: path.join(target.home, ".codex"),
+  });
+  expect(processHome).toHaveBeenCalledTimes(mode === "process-cache" ? 1 : 0);
+});
