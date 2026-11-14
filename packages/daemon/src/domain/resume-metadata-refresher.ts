@@ -309,7 +309,9 @@ export class ResumeMetadataRefresher {
       const valid = validateResumeToken("claude-code", record.sessionId);
       if (!valid.ok) return undefined;
       const final = await observeClaudePaneRuntime(input);
-      return final?.fingerprint === first.fingerprint ? valid.token : undefined;
+      if (final?.fingerprint !== first.fingerprint) return undefined;
+      // A pane moved to another session mid-capture shows that session's process, so membership is read again last.
+      return (await this.tmuxAdapter.listPanes(sessionName, true)).some(pane => pane.id === target) ? valid.token : undefined;
     } catch { return undefined; }
   }
 
