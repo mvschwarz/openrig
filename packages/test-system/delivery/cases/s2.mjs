@@ -47,6 +47,14 @@ export async function deliveredOnce(ctx, marker, body, { label = marker, alone =
   return turn;
 }
 
+/** Whether one received turn carries `body` intact, exactly or through a listed program transform: deliveredOnce's own
+ *  byte check, for a delivery judged without the attempt's record. */
+export function bodyIntact(ctx, turn, marker, body) {
+  const { part } = partWith(turn, marker, body);
+  const wireSha256s = ctx.writtenSince("1970-01-01T00:00:00Z").map((w) => w.wireSha256);
+  return { ...arrivedAs(part, body, { kind: ctx.kind, version: ctx.version, wireSha256s }), bytes: part?.bytes ?? null, expectedBytes: Buffer.byteLength(body) };
+}
+
 function sendAccepted(ctx, sent, label) {
   ctx.verdict.check(`${label}: rig send accepted it`, sent.exit === 0 && sent.json?.ok === true,
     { exit: sent.exit, ok: sent.json?.ok, warning: sent.json?.warning?.slice(0, 120), stderr: sent.stderr?.slice(0, 300) });

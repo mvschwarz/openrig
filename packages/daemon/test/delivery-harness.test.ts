@@ -17,7 +17,8 @@ import { ownsEnviron, parseStat, reapByIdentity } from "../../test-system/delive
 import { caseContext } from "../../test-system/delivery/harness/case-context.mjs";
 import { isRefusal } from "../../test-system/delivery/cases/s3.mjs";
 import { attempt, enterState, expectFor, idsCorrelate, judge, modeChangeControl, occurrenceResult } from "../../test-system/delivery/cases/d18.mjs";
-import { runArm } from "../../test-system/delivery/cases/d04.mjs";
+import { runArm, runArms } from "../../test-system/delivery/cases/d04.mjs";
+import { NotRun } from "../../test-system/delivery/harness/case-context.mjs";
 import { recordScreen } from "../../test-system/delivery/harness/screen.mjs";
 import { bankCell } from "../../test-system/delivery/harness/evidence.mjs";
 
@@ -279,11 +280,11 @@ describe("delivery harness: D18's round-2 controls (Q2 to Q5)", () => {
   });
 
   it("fails a held result whose returned outboxIds miss or misname its held messages (Q3)", async () => {
-    expect(idsCorrelate({ outboxIds: ["g1"] }, ["g1"], "send")).toBe(true);
-    expect(idsCorrelate({ outboxIds: ["watchdog-occurrence-1", "g1"] }, ["g1"], "watchdog")).toBe(true);
-    expect(idsCorrelate({ outboxIds: [] }, ["g1"], "send")).toBe(false);
-    expect(idsCorrelate({ outboxIds: ["g2"] }, ["g1"], "send")).toBe(false);
-    expect(idsCorrelate({ outboxIds: ["watchdog-occurrence-1", "g1"] }, ["g1"], "send")).toBe(false);
+    expect(idsCorrelate({ outboxIds: ["g1"] }, ["g1"], { source: "send" })).toBe("yes");
+    expect(idsCorrelate({ outboxIds: ["watchdog-occurrence-1", "g1"] }, ["g1"], { source: "watchdog", occurrenceIds: ["watchdog-occurrence-1"] })).toBe("yes");
+    expect(idsCorrelate({ outboxIds: [] }, ["g1"], { source: "send" })).toBe("no");
+    expect(idsCorrelate({ outboxIds: ["g2"] }, ["g1"], { source: "send" })).toBe("no");
+    expect(idsCorrelate({ outboxIds: ["watchdog-occurrence-1", "g1"] }, ["g1"], { source: "send" })).toBe("no");
     const { ctx, verdict } = fakeCtx({ heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: "retained", body: "Delivery check DLV-q3-1: deliberate message." }] }) });
     const at = { since: 0, source: "send", json: { ok: true, outcome: "retained", sent: false, reason: "typing_guard_enabled", outboxIds: ["g2"] } };
     await judge(ctx, { mode: "hold", state: "idle", sender: "deliberate", marker: "DLV-q3-1", attempt: at, expect: { type: "held", reasons: ["typing_guard_enabled"] } });
@@ -313,6 +314,67 @@ describe("delivery harness: D18's round-2 controls (Q2 to Q5)", () => {
     const at = { since: 0, source: "send", json: { ok: false, sent: false, reason: "target_needs_input", inputPhase: "not_reached" } };
     await judge(ctx, { mode: "off", state: "dialog", sender: "deliberate", marker: "DLV-q5-1", attempt: at, expect: { type: "refuse", reasons: ["target_needs_input"] } });
     expect(verdict.result).toBe("FAIL");
+  });
+});
+
+describe("delivery harness: D18's and D04's round-3 controls", () => {
+  const offResult = { pending: false, desiredMode: "off", effectiveMode: "off", desiredLevel: null, effectiveLevel: null };
+  const kept = { id: "g1", marker: "DLV-k-3", name: "draft · deliberate" };
+
+  it("keeps a D04 arm's FAIL when a later arm throws NOT RUN (fix 1)", async () => {
+    let arm = 0;
+    const { ctx, verdict } = fakeCtx({
+      resize: async (w: number, h: number) => { arm++; return `${w}x${h}`; },
+      settle: async () => { if (arm === 2) throw new NotRun("no screen observation after the action"); return true; },
+      observe: async () => ({ screen: "❯ \n  ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…" }),
+      composerOf: () => "", eraseDraft: async () => {}, mark: () => "DLV-arm-1", retireHeld: async () => ({ exit: 0, state: "retired" }),
+      send: async () => ({ exit: 0, json: { ok: true, outcome: "retained", sent: false, reason: "draft_input_unknown", outboxIds: ["g1"] } }),
+    });
+    const arms = [1, 2].map((i) => ({ label: `arm ${i}`, size: [80, 24], footer: () => true, footerText: "any" }));
+    await runArms(ctx, arms, "");
+    expect(verdict.result).toBe("FAIL");
+    expect(verdict.checks.some((c) => c.name === "arm 2: arm NOT RUN")).toBe(true);
+  });
+
+  it("fails the replay control on an observed replay, before a precondition can make it NOT RUN (fix 2)", async () => {
+    const { ctx, verdict } = fakeCtx({ heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: "delivered" }] }),
+      deliveries: (m: string) => ({ thread: "t", identified: true, turns: m === kept.marker ? [userTurn(1, sendBody(m))] : [] }) });
+    expect(await modeChangeControl(ctx, { mode: "draft-aware", kept, watched: [kept.marker] })).toBeNull();
+    expect(verdict.result).toBe("FAIL");
+  });
+
+  it("fails when retiring the kept message delivers it (fix 3)", async () => {
+    let retired = false;
+    const { ctx, verdict } = fakeCtx({ settle: async () => true, setGuard: async () => offResult,
+      retireHeld: async () => { retired = true; return { exit: 0, state: "retired" }; },
+      heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: retired ? "retired" : "retained" }] }),
+      deliveries: (m: string) => ({ thread: "t", identified: true, turns: retired && m === kept.marker ? [userTurn(1, sendBody(m))] : [] }) });
+    expect(await modeChangeControl(ctx, { mode: "hold", kept, watched: [kept.marker] })).toBeNull();
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/retiring the kept held message delivered nothing/);
+  });
+
+  it("confirms a reminder's occurrence only from its own outbox row (fix 4)", async () => {
+    expect(idsCorrelate({ outboxIds: ["g1", "watchdog-occurrence-other"] }, ["g1"], { source: "watchdog", occurrenceIds: ["watchdog-occurrence-mine"] })).toBe("no");
+    expect(idsCorrelate({ outboxIds: ["g1", "watchdog-occurrence-mine"] }, ["g1"], { source: "watchdog", occurrenceIds: null })).toBe("unverified");
+    const held = { items: [{ outboxId: "g1", deliveryState: "retained", body: "Reminder DLV-o-1: an automatic notice.", delivery: { reason: "typing_guard_enabled" } }] };
+    const args = (occurrenceIds: string[] | null) => ({ mode: "hold", state: "idle", sender: "automatic", marker: "DLV-o-1", expect: { type: "held", reasons: ["typing_guard_enabled"] },
+      attempt: { since: 0, source: "watchdog", occurrenceIds, json: occurrenceResult({ deliveryStatus: "retained", evaluationNotes: { outboxIds: ["watchdog-occurrence-mine", "g1"] } }) } });
+    const other = fakeCtx({ heldMessages: async () => held });
+    await judge(other.ctx, args(["watchdog-occurrence-another"]));
+    expect(other.verdict.toJSON().failed.join(" ")).toMatch(/outboxIds name its held messages/);
+    const unread = fakeCtx({ heldMessages: async () => held });
+    expect((await judge(unread.ctx, args(null))).notRun).toMatch(/occurrence couldn't be read/);
+    expect(unread.verdict.result).toBe("PASS");
+  });
+
+  it("fails a delivery with no record whose one observed turn lost part of its body (fix 5)", async () => {
+    const m = "DLV-t-1";
+    const { ctx, verdict, turns } = fakeCtx();
+    turns[m] = [userTurn(1, `Delivery check ${m}: delib`)];
+    const judged = await judge(ctx, { mode: "off", state: "idle", sender: "deliberate", marker: m, expect: { type: "deliver" },
+      attempt: { since: 0, source: "send", json: null, exit: 1, missing: "the send gave no JSON result (exit 1): lost" } });
+    expect(judged.notRun).toBeNull();
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/no forbidden effect without a record/);
   });
 });
 

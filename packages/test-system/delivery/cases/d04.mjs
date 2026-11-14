@@ -15,7 +15,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NotRun } from "../harness/case-context.mjs";
-import { deliveredOnce } from "./s2.mjs";
+import { bodyIntact, deliveredOnce } from "./s2.mjs";
 
 const PACKAGE = "@anthropic-ai/claude-code";
 const NEWER = "2.1.999";
@@ -68,9 +68,11 @@ export async function runArm(ctx, arm, empty) {
     const pastes = ctx.paneWrites(since).filter((w) => w.argv[0] === "paste-buffer" && w.argv.some((a) => a.startsWith("openrig_")));
     const turns = ctx.deliveries(marker).turns;
     const missing = `the send gave no JSON result (exit ${sent.exit}): ${String(sent.stderr || sent.stdout || "").slice(0, 300)}`;
-    if ((pastes.length > 0 && turns.length === 0) || pastes.length > 1 || turns.length > 1) {
+    // One observed delivery is still judged by its bytes: a body that didn't arrive intact is positive evidence.
+    const one = turns.length === 1 ? bodyIntact(ctx, turns[0], marker, body) : null;
+    if ((pastes.length > 0 && turns.length === 0) || pastes.length > 1 || turns.length > 1 || (one !== null && !one.intact)) {
       verdict.check(`${arm.label}: no forbidden effect without a record of the send (${missing})`, false, { pastes: pastes.length, delivered: turns.length,
-        input: await ctx.readComposer().catch(() => null) });
+        ...(one ? { body: one } : {}), input: await ctx.readComposer().catch(() => null) });
       return null;
     }
     return missing;
@@ -97,6 +99,19 @@ export async function runArm(ctx, arm, empty) {
   await ctx.sleep(3000);
   verdict.check(`${arm.label}: nothing reached the model for it`, ctx.deliveries(marker).turns.length === 0, ctx.deliveries(marker).turns.map((t) => t.seq));
   return null;
+}
+
+/** Each arm in turn. An arm that can't establish its state, whether it returns why or a step throws NOT RUN, is NOT RUN on
+ *  its own; the cell is NOT RUN only if no arm that ran failed. Other errors stop the cell as before. */
+export async function runArms(ctx, arms, empty) {
+  const notRun = [];
+  for (const arm of arms) {
+    let short;
+    try { short = await runArm(ctx, arm, empty); } catch (error) { if (!error.notRun) throw error; short = error.message; }
+    ctx.verdict.info(`${arm.label}: arm ${short ? "NOT RUN" : "run"}`, short);
+    if (short) notRun.push(`${arm.label}: ${short}`);
+  }
+  if (notRun.length && ctx.verdict.result !== "FAIL") ctx.verdict.skip(`arms not run: ${notRun.join("; ")}`);
 }
 
 export const CASES = [
@@ -128,14 +143,7 @@ export const CASES = [
         await ctx.settle({ timeoutMs: 20_000 });
       }
 
-      const notRun = [];
-      for (const arm of ARMS[ctx.kind]) {
-        const short = await runArm(ctx, arm, empty);
-        verdict.info(`${arm.label}: arm ${short ? "NOT RUN" : "run"}`, short);
-        if (short) notRun.push(`${arm.label}: ${short}`);
-      }
-      // An arm that couldn't run leaves the cell NOT RUN, unless an arm that ran already failed.
-      if (notRun.length && verdict.result !== "FAIL") verdict.skip(`arms not run: ${notRun.join("; ")}`);
+      await runArms(ctx, ARMS[ctx.kind], empty);
     },
   },
 ];

@@ -11,7 +11,7 @@
 // The harness's sends carry no sender identity, so per-sender coalescing (which doesn't apply to unattributed
 // senders) isn't exercised here.
 import { NotRun } from "../harness/case-context.mjs";
-import { deliveredOnce } from "./s2.mjs";
+import { bodyIntact, deliveredOnce } from "./s2.mjs";
 
 const MODES = ["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold"];
 // The dialog runs last: where a version types into it, the program's state (a model chosen, a sub-dialog open) is no
@@ -21,6 +21,8 @@ const SENDERS = ["deliberate", "deliberate_urgent", "automatic"];
 const PICKER = [/Select model/i, /Select Model and Effort/];
 // How long held and refused messages are watched for a replay after the walk and the change to off.
 const REPLAY_WINDOW_MS = 15_000;
+// How long after retiring the kept held message its marker is watched: retirement delivers nothing.
+const RETIRE_READ_MS = 3000;
 
 /** Whether a mode lets this kind of sender type at all (seat-delivery.md's mode table). */
 function permitted(mode, sender) {
@@ -178,7 +180,10 @@ export async function attempt(ctx, sender, marker, { occurrenceTimeoutMs = 40_00
       }
     } finally { await ctx.stopWatchdog(jobId); }
     if (!entry) return { since, source: "watchdog", json: null, missing: `no occurrence of the reminder was evaluated within ${occurrenceTimeoutMs / 1000} s` };
-    return { since, source: "watchdog", json: occurrenceResult(entry), occurrence: entry };
+    // The occurrence's own outbox row: from watchdog@system, naming this job and carrying this marker. Null when unreadable.
+    const rows = await ctx.watchdogOccurrences?.() ?? null;
+    const occurrenceIds = rows ? rows.filter((r) => r.auditPointer === jobId && (r.body ?? "").includes(marker)).map((r) => r.outboxId) : null;
+    return { since, source: "watchdog", json: occurrenceResult(entry), occurrence: entry, jobId, occurrenceIds };
   }
   const sent = await ctx.send(bodyFor(sender, marker), sender === "deliberate_urgent" ? ["--urgent"] : []);
   if (!sent.json) return { since, source: "send", json: null, exit: sent.exit, missing: `the send gave no JSON result (exit ${sent.exit}): ${String(sent.stderr || sent.stdout || "").slice(0, 300)}` };
@@ -190,13 +195,18 @@ const openrigPastes = (writes) => writes.filter((w) => w.argv[0] === "paste-buff
 const enterKeys = (writes) => writes.filter((w) => w.argv[0] === "send-keys" && w.argv.some((a) => a === "Enter" || a === "C-m"));
 
 /** Whether a held result's returned outboxIds name exactly its held rows: every retained row for the marker, plus (for a
- *  reminder) its own occurrence and nothing else. */
-export function idsCorrelate(json, heldIds, source) {
+ *  reminder) its own occurrence, positively read from its outbox row, and nothing else. "unverified" when a reminder
+ *  names an occurrence that couldn't be read; never confirmed from an id's prefix. */
+export function idsCorrelate(json, heldIds, at = {}) {
   const returned = Array.isArray(json?.outboxIds) ? json.outboxIds : [];
-  if (!returned.length || !heldIds.every((id) => returned.includes(id))) return false;
+  if (!returned.length || !heldIds.every((id) => returned.includes(id))) return "no";
   const extra = returned.filter((id) => !heldIds.includes(id));
-  return extra.length === 0 || (source === "watchdog" && extra.length === 1 && extra[0].startsWith("watchdog-occurrence-"));
+  if (extra.length === 0) return "yes";
+  if (at.source !== "watchdog" || extra.length !== 1) return "no";
+  if (!Array.isArray(at.occurrenceIds)) return "unverified";
+  return at.occurrenceIds.includes(extra[0]) ? "yes" : "no";
 }
+const UNVERIFIED_OCCURRENCE = "the reminder's occurrence couldn't be read (rig queue outbox-list watchdog@system), so its id in the result can't be confirmed";
 
 /** Judge one attempt against its expected outcome. Returns the held outboxIds to retire, whether it was refused, and
  *  why the combination is NOT RUN when its evidence is short (only where nothing it showed was a failure). */
@@ -216,10 +226,13 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
     // No record of the attempt. An effect the matrix forbids, observed independently, is still a failure; otherwise
     // there is nothing to judge.
     const { writes, turns } = await observe();
+    const delivering = ["deliver", "merge", "copy-then-deliver", "deliver-or-held"].includes(expect.type);
+    // One observed delivery is still judged by its bytes: a body that didn't arrive intact is positive evidence.
+    const one = delivering && turns.length === 1 ? bodyIntact(ctx, turns[0], marker, body) : null;
     const forbidden = expect.type === "refuse" || expect.type === "held" ? writes.length > 0 || turns.length > 0
-      : ["deliver", "merge", "copy-then-deliver", "deliver-or-held"].includes(expect.type) ? (openrigPastes(writes).length > 0 && turns.length === 0) || turns.length > 1
+      : delivering ? (openrigPastes(writes).length > 0 && turns.length === 0) || turns.length > 1 || (one !== null && !one.intact)
         : false;
-    const seen = { source: at.source, missing: at.missing, exit: at.exit ?? null, writes: writes.length, delivered: turns.length };
+    const seen = { source: at.source, missing: at.missing, exit: at.exit ?? null, writes: writes.length, delivered: turns.length, ...(one ? { body: one } : {}) };
     if (forbidden) { verdict.check(`${label}: no forbidden effect without a record of the attempt (${at.missing})`, false, seen); return { heldIds, notRun: null, refused: false }; }
     verdict.info(`${label}: no record of the attempt, and no forbidden effect observed`, seen);
     return { heldIds, notRun: at.missing, refused: false };
@@ -229,7 +242,7 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
   // An automatic hold's reason is on its held row's own delivery record, where the version keeps one.
   const reason = json.reason ?? held.map((i) => i.delivery?.reason).find(Boolean) ?? null;
   const delivered = json.ok === true && !retained;
-  const correlated = idsCorrelate(json, heldIds, at.source);
+  const correlation = idsCorrelate(json, heldIds, at);
   const seenWith = (writes) => ({ source: at.source, json, reason, held: held.map((h) => ({ outboxId: h.outboxId, state: h.deliveryState, reason: h.delivery?.reason ?? null })), writes: writes.length });
   // A named reason must be the one recorded; where the version records none, the combination can't be confirmed.
   const reasonFits = (reasons) => !reasons || reason === null || reasons.includes(reason);
@@ -261,11 +274,11 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
     }
     case "refuse": {
       const { writes, turns } = await observe();
-      const refused = json.sent === false && writes.length === 0 && (retained ? correlated : json.ok === false);
+      const refused = json.sent === false && writes.length === 0 && (retained ? correlation !== "no" : json.ok === false);
       const quiet = turns.length === 0;
       verdict.check(`${label}: refused before input (${expect.reasons ? expect.reasons.join(" or ") : "any no-input reason"}), nothing written or delivered`,
         refused && quiet && reasonFits(expect.reasons), seenWith(writes));
-      if (refused && quiet) notRun = reasonShort(expect.reasons);
+      if (refused && quiet) notRun = retained && correlation === "unverified" ? UNVERIFIED_OCCURRENCE : reasonShort(expect.reasons);
       break;
     }
     case "held": {
@@ -274,15 +287,17 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
       verdict.check(`${label}: held (${expect.reasons ? expect.reasons.join(" or ") : "any reason"}), retained, no write, not delivered`, isHeld && reasonFits(expect.reasons), seenWith(writes));
       if (retained) {
         verdict.check(`${label}: readable with rig seat held-messages`, held.length > 0, seenWith(writes).held);
-        verdict.check(`${label}: the result's outboxIds name its held messages`, correlated, { returned: json.outboxIds ?? null, held: heldIds });
+        verdict.check(`${label}: the result's outboxIds name its held messages`, correlation !== "no",
+          { returned: json.outboxIds ?? null, held: heldIds, occurrence: at.occurrenceIds ?? null });
       }
-      if (isHeld && correlated) notRun = reasonShort(expect.reasons);
+      if (isHeld && correlation === "unverified") notRun = UNVERIFIED_OCCURRENCE;
+      else if (isHeld && correlation === "yes") notRun = reasonShort(expect.reasons);
       break;
     }
     case "deliver-or-held": {
       const { writes } = await observe();
       verdict.check(`${label}: delivered once, or held (${expect.reasons.join(" or ")}) with no write`,
-        delivered || (retained && correlated && writes.length === 0 && reasonFits(expect.reasons)), seenWith(writes));
+        delivered || (retained && correlation !== "no" && writes.length === 0 && reasonFits(expect.reasons)), seenWith(writes));
       if (delivered) await deliveredOnce(ctx, marker, body, { label, alone: false });
       break;
     }
@@ -297,26 +312,37 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
  *  watched, then that message retired. Returns why the control can't run, or null. */
 export async function modeChangeControl(ctx, { mode, kept, watched }) {
   const { verdict } = ctx;
+  const markers = [...new Set([...watched, ...(kept ? [kept.marker] : [])])];
+  const replays = () => markers.filter((m) => ctx.deliveries(m).turns.length > 0);
+  // A replay already observed fails the control before any precondition could make it NOT RUN.
+  const shortfall = (reason) => {
+    if (!replays().length) return reason;
+    verdict.check(`${mode}: no held or refused message was replayed (seen before the control's precondition: ${reason})`, false, { replayed: replays() });
+    return null;
+  };
   if (kept) {
     const before = (await ctx.heldMessages())?.items?.find((i) => i.outboxId === kept.id) ?? null;
-    if (before?.deliveryState !== "retained") return `the kept held message (${kept.name}) wasn't active before the mode change (${before?.deliveryState ?? "not listed"})`;
+    if (before?.deliveryState !== "retained") return shortfall(`the kept held message (${kept.name}) wasn't active before the mode change (${before?.deliveryState ?? "not listed"})`);
   }
   if (mode !== "off") {
     const set = await ctx.setGuard("off");
     const effective = set?.pending === false && set?.desiredMode === "off" && set?.effectiveMode === "off" && !set?.desiredLevel && !set?.effectiveLevel;
-    if (!effective) return `the change to off wasn't observed effective, so a no-replay result would prove nothing (${JSON.stringify(set)?.slice(0, 300)})`;
+    if (!effective) return shortfall(`the change to off wasn't observed effective, so a no-replay result would prove nothing (${JSON.stringify(set)?.slice(0, 300)})`);
   }
+  // The kept message stays active through the change and the whole window, then is retired, then read once more.
   await ctx.settle({ timeoutMs: 20_000 });
   await ctx.sleep(REPLAY_WINDOW_MS);
-  const replayed = watched.filter((m) => ctx.deliveries(m).turns.length > 0);
   verdict.check(`${mode}: no held or refused message was replayed by leaving each state${mode === "off" ? "" : " or by the change to off"} (watched ${REPLAY_WINDOW_MS / 1000} s)`,
-    replayed.length === 0, { watched: watched.length, replayed });
+    replays().length === 0, { watched: markers.length, replayed: replays() });
   if (kept) {
     const after = (await ctx.heldMessages())?.items?.find((i) => i.outboxId === kept.id) ?? null;
     verdict.check(`${mode}: the held message kept active through the change (${kept.name}) is still held, not flushed or delivered`,
       after?.deliveryState === "retained" && ctx.deliveries(kept.marker).turns.length === 0, after ? { state: after.deliveryState } : null);
     const r = await ctx.retireHeld(kept.id);
     verdict.check(`${mode}: the kept held message retired afterwards`, r.exit === 0 && r.state === "retired", r);
+    await ctx.sleep(RETIRE_READ_MS);
+    verdict.check(`${mode}: retiring the kept held message delivered nothing (read ${RETIRE_READ_MS / 1000} s after)`,
+      ctx.deliveries(kept.marker).turns.length === 0, ctx.deliveries(kept.marker).turns.map((t) => t.seq));
   } else {
     verdict.info(`${mode}: no held message to keep through the change (this mode held nothing)`, null);
   }

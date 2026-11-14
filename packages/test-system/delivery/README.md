@@ -74,9 +74,12 @@ This is the real TUI with timing injected at the wrapper boundary, after the gua
 
 - **A `rig send`** is judged by its JSON result.
 - **A reminder** is judged by its occurrence's entry in the watchdog's history (`rig watchdog status <job> --json`): sent, retained with its held ids, or refused with its input phase.
-- **No record** (a send with no JSON result, or no occurrence within 40 seconds) is NOT RUN, unless an effect the matrix forbids was observed anyway: a write to the pane or a delivery where nothing may arrive, or a paste that never arrived. That's FAIL.
+- **No record** (a send with no JSON result, or no occurrence within 40 seconds) is NOT RUN, unless an effect the matrix forbids was observed anyway. That's FAIL:
+  - a write to the pane, or a delivery, where nothing may arrive;
+  - a paste that never arrived;
+  - one observed delivery whose body didn't arrive intact.
 - **Pane writes** are read after the 3-second no-arrival observation, so a late paste is seen.
-- **A held result's** returned outboxIds must name exactly its held messages; a reminder's may also name its own occurrence.
+- **A held result's** returned outboxIds must name exactly its held messages. A reminder's may also name its own occurrence: the outbox row from `watchdog@system` whose `auditPointer` is the reminder's job (`rig queue outbox-list watchdog@system`). If that row can't be read, the occurrence id isn't confirmed: that check is NOT RUN, never passed by the id's prefix.
 - **Each fixture** (draft, copy mode, busy, the picker) starts from an input box positively read as clean. Otherwise that combination is NOT RUN.
 
 **Reasons.** Where the matrix names a reason, the recorded one must match. Where the version records none, the combination is NOT RUN. OpenRig 0.7.12 records none for a reminder held by its mode or refused at a dialog.
@@ -85,7 +88,7 @@ This is the real TUI with timing injected at the wrapper boundary, after the gua
 
 **Busy.** A busy turn's answer is held on a stand-in gate named after its marker until the attempt is over. So the attempt meets a running turn by construction, not by a longer wait. The input box read at that moment picks the matrix's row: empty (deliver) or unreadable (held, `draft_input_unknown`). A join must show OpenRig's paste and Enter before the gate opened: OpenRig wrote into the running turn instead of waiting for idle. That doesn't pin how the program then places the text in its conversation, whether in the same request or a following item.
 
-**Never replayed.** One held message stays active through an observed effective change to off (pending:false), and the cell watches 15 seconds for a replay before retiring it. Every other held message is retired after its combination, and a retire that fails is a failed check, since the later combinations rely on the freed quota.
+**Never replayed.** One held message stays active through an observed effective change to off (pending:false), and the cell watches 15 seconds for a replay before retiring it. Retiring it is then watched for 3 seconds: retirement delivers nothing. A replay already observed fails the control even when its preconditions weren't met. Every other held message is retired after its combination, and a retire that fails is a failed check, since the later combinations rely on the freed quota.
 
 A refused reminder's occurrence stays owed and can retry after the cell ends. That retry is outside what a cell observes.
 

@@ -195,6 +195,12 @@ export function caseContext(cell, { caseId, kind, version }) {
       const out = await cell.rig(["watchdog", "status", jobId, "--json"], { allowFail: true });
       try { return JSON.parse(out.stdout); } catch { return null; }
     },
+    /** OpenRig's own watchdog occurrence rows (rig queue outbox-list watchdog@system): each names its job in
+     *  auditPointer. Null when they can't be read. */
+    async watchdogOccurrences() {
+      const out = await cell.rig(["queue", "outbox-list", "watchdog@system", "--limit", "500", "--json"], { allowFail: true });
+      try { const rows = JSON.parse(out.stdout); return Array.isArray(rows) ? rows : null; } catch { return null; }
+    },
     /** Let the stand-in answer turns held on `gate`. */
     releaseGate(gate) { cell.record({ step: "release-gate", caseId, gate }); cell.standIn.release(gate); },
     async stopWatchdog(jobId) { await cell.rig(["watchdog", "stop", jobId, "--json"], { allowFail: true }); },
