@@ -280,6 +280,7 @@ export class ContextMonitor {
       LEFT JOIN bindings b ON b.node_id = n.id
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
+          OR (n.runtime = 'pi' AND s.status = 'running')
           OR (n.runtime = 'stub' AND s.status = 'running')
           OR (
             n.runtime = 'codex'
@@ -297,6 +298,12 @@ export class ContextMonitor {
   }
 
   private readContextUsage(session: EligibleSession) {
+    // A Pi seat's usage arrives as persisted entries its runner posts (no sidecar to poll), so the same tick
+    // reads the store the runner already wrote — one sampler, not a second one.
+    if (session.runtime === "pi") {
+      return this.store.readPiUsageAndNormalize({ seatSession: session.session_name });
+    }
+
     if (session.runtime === "codex") {
       return this.store.readCodexAndNormalize({
         threadId: session.resume_token,
