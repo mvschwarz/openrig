@@ -138,6 +138,28 @@ function makeValidFlagPolicy(posture: "floor" | "full_bypass"): string {
 }
 
 describe("Issue #2989 — native-resume-probe Codex show-and-label builder", () => {
+  describe.each(["floor", "full_bypass", "auto"] as const)("filesystem policy with %s posture fallback", (resolvedPosture) => {
+    it.each([false, true])("labels the omitted policy with recorded launch=%s, including wrappers", (hasRecord) => {
+      const display = buildCodexResumeDisplay("tok-filesystem", {
+        codexPermissions: { filesystem: { ":root": "read", "/work": "write" }, approval: "never" },
+        resolvedPosture,
+        recordedLaunch: hasRecord ? {
+          runtime: "codex", axis: "sandbox", state: "observed", value: "permissions:openrig-seat",
+          approvalPolicy: "never", reason: "emitted_launch_arguments",
+        } : null,
+        launchWrapper: ["env", "POLICY_WRAPPER=1"],
+      });
+      const fallback = buildCodexResumeDisplay("tok-filesystem", { resolvedPosture });
+      expect(display.command).toBe(fallback.command);
+      expect(display.command).not.toContain("default_permissions");
+      expect(display.label).toContain("shown command uses posture fallback");
+      expect(display.label).toContain("does not carry the agent's filesystem policy");
+      expect(display.label).toContain("omits launch_wrapper");
+      expect(display.label).not.toContain("a resume now uses");
+      expect(display.status).toBe(hasRecord ? "recorded_uncertain" : "no_recorded_launch");
+    });
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });

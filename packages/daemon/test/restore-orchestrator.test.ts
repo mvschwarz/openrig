@@ -6064,6 +6064,24 @@ describe("RestoreOrchestrator", () => {
   });
 
   describe("launch_wrapper native resume, fail-closed, and snapshot retention", () => {
+    it.each(["replace", "clear"])("legacy Codex restore reads the live filesystem selection after snapshot (%s)", async change => {
+      const rig = rigRepo.createRig("fs-restore");
+      const oldPolicy = { approval: "never", filesystem: { ":minimal": "read", "/old": "write" }, network_access: false } satisfies import("../src/domain/codex-member-permissions.js").CodexFilesystemPermissions;
+      const currentPolicy = { approval: "never", filesystem: { ":minimal": "read", "/current": "write", "/current/private": "deny" }, network_access: false };
+      const node = rigRepo.addNode(rig.id, "codex-worker", { runtime: "codex", cwd: "/repo/codex", codexPermissions: oldPolicy });
+      const session = sessionRegistry.registerSession(node.id, "dev-worker@fs-restore");
+      db.prepare("UPDATE sessions SET resume_type = 'codex_id', resume_token = 'fs-thread', restore_policy = 'resume_if_possible' WHERE id = ?").run(session.id);
+      sessionRegistry.updateStatus(session.id, "running");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+      db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(change === "replace" ? JSON.stringify(currentPolicy) : null, node.id);
+      sessionRegistry.updateStatus(session.id, "exited");
+      const codexResume = mockCodexResume({ ok: true as const });
+      expect(await createOrchestrator({ codex: codexResume, listProcesses: nativeLineage("codex", "fs-thread") }).restore(snap.id))
+        .toMatchObject({ ok: true });
+      const call = vi.mocked(codexResume.resume).mock.calls[0]!;
+      expect(call[12]).toEqual(change === "replace" ? currentPolicy : undefined);
+    });
+
     it("passes current launch_wrapper as the new LAST arg after effort on Pi native resume and after beforeNativeDispatch (with undefined padding) on Codex native resume", async () => {
       const rig = rigRepo.createRig("r99");
       const piNode = rigRepo.addNode(rig.id, "pi-worker", {
