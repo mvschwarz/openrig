@@ -273,7 +273,10 @@ export type RigEvent =
        *  session. The seat list marks the seat while this session is its current one. */
       startedWithoutRequired?: string[]; successorSessionId?: string;
       /** #2985: the handover adopted the running successor of an earlier failed one (`rig seat handover --recover`). */
-      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string } }
+      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
+      /** #3218 item 6: the recovery recorded the conversation its launch named because the successor's current one could
+       *  not be read (Claude's session file for its process); the warning the command printed, kept in the history. */
+      conversationUnconfirmed?: string }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
