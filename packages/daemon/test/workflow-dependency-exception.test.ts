@@ -92,6 +92,29 @@ describe("dependency failure ownership and occurrence-local recovery", () => {
     expect(snapshot()).toEqual(before); expect(sent).toHaveLength(sends);
   });
 
+  // A branch packet an ordinary queue handoff already closed, whose review then failed: the agent's failed exit is
+  // recorded on the workflow and the failure is owned as usual, with no write to the closed row; the same exit again
+  // writes nothing.
+  it("records a failed exit on a branch packet the queue already closed, without writing its row, and once", async () => {
+    const b = await branches(); const sibling = queue.getById(b.right);
+    await queue.handoff({ qitemId: b.left, fromSession: "owner@rig", toSession: "reviewer2@rig" });
+    const closedRow = () => ({ item: queue.getById(b.left),
+      transitions: db.prepare("SELECT * FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid").all(b.left) });
+    const closed = closedRow();
+
+    const projected = await project(b.id, b.left, "failed");
+
+    expect(closedRow()).toEqual(closed); expect(closed.item?.state).toBe("handed-off");
+    expect(projected.advisories).toEqual([`packet ${b.left} was already handed-off in the queue, so the failed exit was recorded on the workflow without writing its queue row`]);
+    expect(runtime.inspect(b.id).instance.status).toBe("active"); expect(queue.getById(b.right)).toEqual(sibling);
+    expect(exceptions()).toHaveLength(1);
+    expect(runtime.inspect(b.id).failures).toMatchObject([{ occurrenceId: b.left, stepId: "left", status: "unresolved" }]);
+    expect(runtime.inspect(b.id).instance.currentFrontier).toEqual([b.right]);
+    const before = snapshot(); const sends = sent.length;
+    expect(await project(b.id, b.left, "failed")).toMatchObject({ closureReason: "failed", nextQitemIds: [], absorbedReplay: true, emittedEventTypes: [] });
+    expect(snapshot()).toEqual(before); expect(sent).toHaveLength(sends);
+  });
+
   it("redrives only the selected episode once and preserves a distinct unresolved failure and completed work", async () => {
     const b = await branches(); const completed = queue.getById(b.root);
     await project(b.id, b.left, "failed"); await project(b.id, b.right, "failed");

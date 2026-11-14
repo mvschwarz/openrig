@@ -691,4 +691,57 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       | undefined;
     expect(failedEvent?.reason).toBe("could not produce artifact");
   });
+
+  // A frontier packet an ordinary queue handoff already closed (`rig queue handoff` doesn't move the workflow): the
+  // queue refuses closing it again. project records the stated exit and its next hop on the workflow without writing
+  // that row, says so, and the same exit again reports the same result with nothing written.
+  describe("a frontier packet the queue already closed", () => {
+    const snapshot = () => ["queue_items", "queue_transitions", "events", "workflow_instances", "workflow_step_trails", "outbox_entries"]
+      .map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    async function handedOff(path: string) {
+      const inst = await runtime.instantiate({ specPath: path, rootObjective: "x", createdBySession: "ops@rig" });
+      await queueRepo.handoff({ qitemId: inst.entryQitemId, fromSession: "producer@rig", toSession: "helper@rig" });
+      const row = () => ({ item: queueRepo.getById(inst.entryQitemId),
+        transitions: db.prepare("SELECT * FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid").all(inst.entryQitemId) });
+      return { instanceId: inst.instance.instanceId, packet: inst.entryQitemId, row, closedRow: row() };
+    }
+
+    it("records a handoff exit and projects the next step without writing the closed row; a repeat writes nothing", async () => {
+      const { instanceId, packet, row, closedRow } = await handedOff(specPath);
+      expect(closedRow.item?.state).toBe("handed-off");
+
+      const projected = await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" });
+
+      expect(projected).toMatchObject({ closurePriorPacketId: packet, closureReason: "handoff", nextStepId: "review", nextOwnerSession: "reviewer@rig",
+        advisories: [`packet ${packet} was already handed-off in the queue, so the handoff exit was recorded on the workflow without writing its queue row`] });
+      expect(row()).toEqual(closedRow);
+      expect(queueRepo.getById(projected.nextQitemId!)?.state).toBe("pending");
+      expect(projected.instance.currentFrontier).toEqual([projected.nextQitemId]);
+      expect(runtime.trailLog.listForInstance(instanceId).find((t) => t.priorQitemId === packet)?.closureEvidence).toMatchObject({
+        queue_row_already_closed: { state: "handed-off", exit: "handoff", next_qitem_ids: [projected.nextQitemId], next_step_ids: ["review"] } });
+
+      const before = snapshot();
+      expect(await runtime.project({ instanceId, currentPacketId: packet, exit: "handoff", actorSession: "producer@rig" })).toMatchObject({
+        closureReason: "handoff", nextQitemId: projected.nextQitemId, nextStepId: "review", nextOwnerSession: "reviewer@rig",
+        emittedEventTypes: [], absorbedReplay: true });
+      expect(snapshot()).toEqual(before);
+      // Another exit on the projected packet keeps today's answer.
+      await expect(runtime.project({ instanceId, currentPacketId: packet, exit: "done", actorSession: "producer@rig" }))
+        .rejects.toMatchObject({ code: "packet_not_on_frontier" });
+      expect(snapshot()).toEqual(before);
+    });
+
+    it("records a waiting exit without parking the closed row, and the same waiting again is absorbed", async () => {
+      const { instanceId, packet, row, closedRow } = await handedOff(permissiveSpecPath);
+
+      const waiting = await runtime.project({ instanceId, currentPacketId: packet, exit: "waiting", actorSession: "anyone@rig", blockedOn: "external-gate-x" });
+
+      expect(waiting.instance).toMatchObject({ status: "waiting", currentFrontier: [packet] });
+      expect(row()).toEqual(closedRow);
+      const before = snapshot();
+      expect(await runtime.project({ instanceId, currentPacketId: packet, exit: "waiting", actorSession: "anyone@rig", blockedOn: "external-gate-x" }))
+        .toMatchObject({ absorbedReplay: true, emittedEventTypes: [] });
+      expect(snapshot()).toEqual(before);
+    });
+  });
 });

@@ -46,7 +46,7 @@ import {
 } from "./workflow-role-context.js";
 import { packetScopeTags } from "./workflow-scope.js";
 import { classifyFailureOccurrence, classifyGateTrip, workflowExceptionTags } from "./workflow-exception.js";
-import { newQitemId, QueueRepositoryError } from "./queue-repository.js";
+import { isTerminalState, newQitemId, QueueRepositoryError } from "./queue-repository.js";
 import { resolveExceptionRoute } from "./workflow-exception-router.js";
 import { workflowHumanDestination, type WorkflowHumanDestination } from "./workflow-human-destination.js";
 import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
@@ -207,6 +207,15 @@ export interface ProjectStepResult {
   advisories?: string[];
 }
 
+/** Trail evidence for a projection whose frontier packet the queue had already closed (an ordinary queue handoff moved
+ *  the work on): the exit and next hop were recorded on the workflow, and the queue row wasn't written. */
+const QUEUE_ROW_ALREADY_CLOSED = "queue_row_already_closed";
+type QueueRowAlreadyClosed = { state: string; exit: WorkflowExitKind; next_qitem_ids: string[]; next_step_ids: string[] };
+
+function alreadyClosedNotice(packetId: string, state: string, exit: WorkflowExitKind): string {
+  return `packet ${packetId} was already ${state} in the queue, so the ${exit} exit was recorded on the workflow without writing its queue row`;
+}
+
 export class WorkflowProjector {
   constructor(
     private readonly db: Database.Database,
@@ -241,6 +250,11 @@ export class WorkflowProjector {
    */
   async project(input: ProjectStepInput): Promise<ProjectStepResult> {
     const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
+    // The same exit again on a packet that was already closed when it was projected: report that projection, no writes.
+    if (!instance.currentFrontier.includes(input.currentPacketId)) {
+      const replay = this.alreadyClosedReplay(instance, input);
+      if (replay) return replay;
+    }
     if (instance.status !== "active" && instance.status !== "waiting") {
       throw new WorkflowProjectorError(
         "instance_not_active",
@@ -329,6 +343,10 @@ export class WorkflowProjector {
 
     validateAcceptance(currentStep, input, instance);
 
+    // A frontier packet an ordinary queue handoff already closed: the queue refuses closing it again, and its history
+    // stays as recorded. The exit and next hop are still recorded on the workflow; only this row isn't written.
+    const alreadyClosed = isTerminalState(currentPacket.state) ? currentPacket.state : null;
+
     const unansweredHumanGate =
       (input.exit === "done" || input.exit === "handoff") &&
       currentStep.gate && isHumanSeatSession(currentStep.gate.target) &&
@@ -354,6 +372,7 @@ export class WorkflowProjector {
         packetBinding,
         currentOwnerSession: currentPacket.destinationSession,
         unansweredHumanGate,
+        alreadyClosed,
       });
     }
 
@@ -533,39 +552,41 @@ export class WorkflowProjector {
       // metadata (closure_reason, closure_target, handed_off_to / blocked_on),
       // appends queue_transitions, and emits queue.updated — all inside this
       // outer transaction. The Phase A closure authority is preserved.
-      const closure = workflowExitToQueueClosure(
-        { ...input, exit: effectiveExit, resultNote: effectiveResultNote },
-        resolvedNextOwner,
-      );
-      const queueUpdate = this.queueRepo.updateWithinTransaction({
-        qitemId: input.currentPacketId,
-        actorSession: input.actorSession,
-        identityProvenance: input.identityProvenance ?? null,
-        viaWorkflowVerb: true,
-        state: closure.state,
-        closureReason: closure.closureReason,
-        closureTarget: closure.closureTarget ?? undefined,
-        handedOffTo: closure.handedOffTo,
-        blockedOn: closure.blockedOn,
-        transitionNote: [closure.transitionNote, unansweredHumanGate].filter(Boolean).join("; "),
-        wakeMaxSeconds: effectiveExit === "waiting" && !routes ? currentStep.re_present_max_seconds : undefined,
-        wakeProgressEvidence: input.closureEvidence,
-        wakeAfterSeconds:
-          effectiveExit === "waiting" && !routes
-            ? currentStep.re_present_after_seconds
-            : undefined,
-        wakeMessage:
-          effectiveExit === "waiting" && !routes && currentStep.re_present_after_seconds !== undefined
-            ? workflowWaitWakeMessage({
-                spec,
-                instance,
-                step: currentStep,
-                packetId: input.currentPacketId,
-                ownerSession: currentPacket.destinationSession,
-              })
-            : undefined,
-      });
-      registerEvent(queueUpdate.persistedEvent);
+      if (!alreadyClosed) {
+        const closure = workflowExitToQueueClosure(
+          { ...input, exit: effectiveExit, resultNote: effectiveResultNote },
+          resolvedNextOwner,
+        );
+        const queueUpdate = this.queueRepo.updateWithinTransaction({
+          qitemId: input.currentPacketId,
+          actorSession: input.actorSession,
+          identityProvenance: input.identityProvenance ?? null,
+          viaWorkflowVerb: true,
+          state: closure.state,
+          closureReason: closure.closureReason,
+          closureTarget: closure.closureTarget ?? undefined,
+          handedOffTo: closure.handedOffTo,
+          blockedOn: closure.blockedOn,
+          transitionNote: [closure.transitionNote, unansweredHumanGate].filter(Boolean).join("; "),
+          wakeMaxSeconds: effectiveExit === "waiting" && !routes ? currentStep.re_present_max_seconds : undefined,
+          wakeProgressEvidence: input.closureEvidence,
+          wakeAfterSeconds:
+            effectiveExit === "waiting" && !routes
+              ? currentStep.re_present_after_seconds
+              : undefined,
+          wakeMessage:
+            effectiveExit === "waiting" && !routes && currentStep.re_present_after_seconds !== undefined
+              ? workflowWaitWakeMessage({
+                  spec,
+                  instance,
+                  step: currentStep,
+                  packetId: input.currentPacketId,
+                  ownerSession: currentPacket.destinationSession,
+                })
+              : undefined,
+        });
+        registerEvent(queueUpdate.persistedEvent);
+      }
 
       // 3. If this close routes (structural handoff OR branch-mapped
       // exit): create the next-step qitem in the same txn. A gated
@@ -695,6 +716,11 @@ export class WorkflowProjector {
       }
 
       // 4. Append step trail entry (prior + next ids).
+      if (alreadyClosed) {
+        const record: QueueRowAlreadyClosed = { state: alreadyClosed, exit: input.exit,
+          next_qitem_ids: nextQitemId ? [nextQitemId] : [], next_step_ids: nextStepId ? [nextStepId] : [] };
+        effectiveClosureEvidence = { ...(effectiveClosureEvidence ?? {}), [QUEUE_ROW_ALREADY_CLOSED]: record };
+      }
       this.trailLog.record({
         instanceId: instance.instanceId,
         stepId: currentStep.id,
@@ -921,7 +947,30 @@ export class WorkflowProjector {
       nextOwnerSession,
       nextStepId,
       emittedEventTypes: persistedEvents.map((e) => e.type),
-      ...(unansweredHumanGate ? { advisories: [unansweredHumanGate] } : {}),
+      ...withAdvisories([unansweredHumanGate, alreadyClosed ? alreadyClosedNotice(input.currentPacketId, alreadyClosed, input.exit) : undefined]),
+    };
+  }
+
+  /** A repeat of the projection that recorded `input.exit` on a packet the queue had already closed: the same result,
+   *  read from that projection's trail record, with nothing written. Any other off-frontier packet returns null. */
+  private alreadyClosedReplay(instance: WorkflowInstance, input: ProjectStepInput): ProjectStepResult | null {
+    const entry = this.trailLog.listForInstanceInAppendOrder(instance.instanceId)
+      .filter((candidate) => candidate.priorQitemId === input.currentPacketId).at(-1);
+    const recorded = entry?.closureEvidence?.[QUEUE_ROW_ALREADY_CLOSED] as QueueRowAlreadyClosed | undefined;
+    if (!entry || !recorded || recorded.exit !== input.exit) return null;
+    const nextQitemId = recorded.next_qitem_ids[0] ?? null;
+    return {
+      instance,
+      closurePriorPacketId: input.currentPacketId,
+      closureReason: entry.closureReason as WorkflowExitKind,
+      nextQitemId,
+      nextOwnerSession: nextQitemId ? this.queueRepo.getById(nextQitemId)?.destinationSession ?? null : null,
+      nextStepId: recorded.next_step_ids[0] ?? null,
+      nextQitemIds: recorded.next_qitem_ids,
+      nextStepIds: recorded.next_step_ids,
+      emittedEventTypes: [],
+      absorbedReplay: true,
+      advisories: [alreadyClosedNotice(input.currentPacketId, recorded.state, input.exit)],
     };
   }
 
@@ -1014,8 +1063,10 @@ export class WorkflowProjector {
     packetBinding: import("./workflow-types.js").WorkflowFrontierBinding;
     currentOwnerSession: string;
     unansweredHumanGate?: string;
+    /** The queue state of a frontier packet that was already closed; its row isn't written. */
+    alreadyClosed: string | null;
   }): Promise<ProjectStepResult> {
-    const { input, instance, spec, currentStep, packetBinding, currentOwnerSession, unansweredHumanGate } = args;
+    const { input, instance, spec, currentStep, packetBinding, currentOwnerSession, unansweredHumanGate, alreadyClosed } = args;
     if (input.exit === "waiting" && instance.status === "waiting" && matchesStoredWaitingDecision(instance, input, currentStep.id, this.trailLog)) {
       return {
         instance,
@@ -1118,47 +1169,49 @@ export class WorkflowProjector {
         return { step, gate, owner, packetId: newQitemId() };
       });
 
-      const closureOwner = ownerPlans.length === 1 ? ownerPlans[0]!.owner : null;
-      const closure = effectiveExit === "handoff" && ownerPlans.length !== 1
-        ? {
-            state: "done" as const,
-            closureReason: "no-follow-on",
-            closureTarget: null,
-            transitionNote: `workflow graph: ${input.actorSession} completed ${currentStep.id}; ${ownerPlans.length} successors projected transactionally`,
-          }
-        : workflowExitToQueueClosure(
-            { ...input, exit: effectiveExit, resultNote: effectiveResultNote },
-            closureOwner,
-          );
-      const updated = this.queueRepo.updateWithinTransaction({
-        qitemId: input.currentPacketId,
-        actorSession: input.actorSession,
-        identityProvenance: input.identityProvenance ?? null,
-        viaWorkflowVerb: true,
-        state: closure.state,
-        closureReason: closure.closureReason,
-        closureTarget: closure.closureTarget ?? undefined,
-        handedOffTo: closure.handedOffTo,
-        blockedOn: closure.blockedOn,
-        transitionNote: [closure.transitionNote, unansweredHumanGate].filter(Boolean).join("; "),
-        wakeMaxSeconds: effectiveExit === "waiting" && ownerPlans.length === 0 ? currentStep.re_present_max_seconds : undefined,
-        wakeProgressEvidence: input.closureEvidence,
-        wakeAfterSeconds:
-          effectiveExit === "waiting" && ownerPlans.length === 0
-            ? currentStep.re_present_after_seconds
-            : undefined,
-        wakeMessage:
-          effectiveExit === "waiting" && ownerPlans.length === 0 && currentStep.re_present_after_seconds !== undefined
-            ? workflowWaitWakeMessage({
-                spec,
-                instance,
-                step: currentStep,
-                packetId: input.currentPacketId,
-                ownerSession: currentOwnerSession,
-              })
-            : undefined,
-      });
-      addEvent(updated.persistedEvent);
+      if (!alreadyClosed) {
+        const closureOwner = ownerPlans.length === 1 ? ownerPlans[0]!.owner : null;
+        const closure = effectiveExit === "handoff" && ownerPlans.length !== 1
+          ? {
+              state: "done" as const,
+              closureReason: "no-follow-on",
+              closureTarget: null,
+              transitionNote: `workflow graph: ${input.actorSession} completed ${currentStep.id}; ${ownerPlans.length} successors projected transactionally`,
+            }
+          : workflowExitToQueueClosure(
+              { ...input, exit: effectiveExit, resultNote: effectiveResultNote },
+              closureOwner,
+            );
+        const updated = this.queueRepo.updateWithinTransaction({
+          qitemId: input.currentPacketId,
+          actorSession: input.actorSession,
+          identityProvenance: input.identityProvenance ?? null,
+          viaWorkflowVerb: true,
+          state: closure.state,
+          closureReason: closure.closureReason,
+          closureTarget: closure.closureTarget ?? undefined,
+          handedOffTo: closure.handedOffTo,
+          blockedOn: closure.blockedOn,
+          transitionNote: [closure.transitionNote, unansweredHumanGate].filter(Boolean).join("; "),
+          wakeMaxSeconds: effectiveExit === "waiting" && ownerPlans.length === 0 ? currentStep.re_present_max_seconds : undefined,
+          wakeProgressEvidence: input.closureEvidence,
+          wakeAfterSeconds:
+            effectiveExit === "waiting" && ownerPlans.length === 0
+              ? currentStep.re_present_after_seconds
+              : undefined,
+          wakeMessage:
+            effectiveExit === "waiting" && ownerPlans.length === 0 && currentStep.re_present_after_seconds !== undefined
+              ? workflowWaitWakeMessage({
+                  spec,
+                  instance,
+                  step: currentStep,
+                  packetId: input.currentPacketId,
+                  ownerSession: currentOwnerSession,
+                })
+              : undefined,
+        });
+        addEvent(updated.persistedEvent);
+      }
 
       if (effectiveExit !== "waiting") {
         this.instanceStore.removeFrontierBinding(instance.instanceId, input.currentPacketId);
@@ -1277,7 +1330,13 @@ export class WorkflowProjector {
         stepRole: currentStep.actor_role,
         closedAt: evaluatedAt,
         closureReason: effectiveExit,
-        closureEvidence: { ...(effectiveClosureEvidence ?? {}), next_qitem_ids: createdPackets.map((packet) => packet.qitemId) },
+        closureEvidence: {
+          ...(effectiveClosureEvidence ?? {}),
+          next_qitem_ids: createdPackets.map((packet) => packet.qitemId),
+          ...(alreadyClosed ? { [QUEUE_ROW_ALREADY_CLOSED]: { state: alreadyClosed, exit: input.exit,
+            next_qitem_ids: createdPackets.map((packet) => packet.qitemId),
+            next_step_ids: createdPackets.map((packet) => packet.step.id) } satisfies QueueRowAlreadyClosed } : {}),
+        },
         actorSession: input.actorSession,
         nextQitemId: createdPackets[0]?.qitemId ?? null,
         priorQitemId: input.currentPacketId,
@@ -1310,7 +1369,7 @@ export class WorkflowProjector {
       nextQitemIds: createdPackets.map((packet) => packet.qitemId),
       nextStepIds: createdPackets.map((packet) => packet.step.id),
       emittedEventTypes: emitted.map((event) => event.type),
-      ...(unansweredHumanGate ? { advisories: [unansweredHumanGate] } : {}),
+      ...withAdvisories([unansweredHumanGate, alreadyClosed ? alreadyClosedNotice(input.currentPacketId, alreadyClosed, input.exit) : undefined]),
     };
   }
 }
@@ -1354,7 +1413,15 @@ function matchesStoredWaitingDecision(
     (t) => t.priorQitemId === input.currentPacketId && t.closureReason === "waiting",
   );
   if (!storedRow) return false;
-  return isDeepEqual(storedRow.closureEvidence ?? null, input.closureEvidence ?? null);
+  // The already-closed record is the projector's own note, not the caller's evidence.
+  const { [QUEUE_ROW_ALREADY_CLOSED]: marker, ...callerEvidence } = storedRow.closureEvidence ?? {};
+  const storedEvidence = marker === undefined ? storedRow.closureEvidence ?? null : Object.keys(callerEvidence).length ? callerEvidence : null;
+  return isDeepEqual(storedEvidence, input.closureEvidence ?? null);
+}
+
+function withAdvisories(notices: Array<string | undefined>): { advisories?: string[] } {
+  const advisories = notices.filter((notice): notice is string => Boolean(notice));
+  return advisories.length ? { advisories } : {};
 }
 
 function isDeepEqual(a: unknown, b: unknown): boolean {
