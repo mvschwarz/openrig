@@ -71,6 +71,31 @@ describe("rig scope slice progress (FR-3 add/set)", () => {
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
 
+  it("replaces current state, stamps it once, and preserves other sections", async () => {
+    const slice = await createSlice(env, "current-state");
+    const file = path.join(slice, "PROGRESS.md");
+    fs.writeFileSync(file, "# Progress\r\n\r\n## Current state\r\n\r\nOld\r\n\r\n### Detail\r\nold detail\r\n\r\n## Outcomes\r\n\r\n- [ ] Keep\r\n");
+    const args = ["slice", "progress", slice, "--current-state", "Waiting\nNext: review", "--json"];
+    const first = await run(args, env.missionsRoot);
+    expect(first.exitCode).toBe(0);
+    const written = fs.readFileSync(file, "utf8");
+    expect(written).toMatch(/current_state_updated:.*\d{4}-\d\d-\d\dT/);
+    expect(written).toContain("## Current state\r\n\r\nWaiting\r\nNext: review\r\n\r\n## Outcomes\r\n\r\n- [ ] Keep\r\n");
+    expect(written).not.toContain("old detail");
+    const second = await run(args, env.missionsRoot);
+    expect(JSON.parse(second.stdout).progress.changed).toBe(false);
+    expect(fs.readFileSync(file, "utf8")).toBe(written);
+  });
+
+  it("rejects conflicting modes without writing", async () => {
+    const slice = await createSlice(env, "current-state-conflict");
+    const file = path.join(slice, "PROGRESS.md");
+    const before = fs.readFileSync(file, "utf8");
+    const result = await run(["slice", "progress", slice, "--current-state", "new", "--add", "row", "--json"], env.missionsRoot);
+    expect(result.exitCode).toBe(1);
+    expect(fs.readFileSync(file, "utf8")).toBe(before);
+  });
+
   it("--add appends a UI-valid checkbox row into the default Rail section", async () => {
     const slicePath = await createSlice(env, "verb-add");
     const r = await run(["slice", "progress", slicePath, "--add", "Guard approved", "--json"], env.missionsRoot);
@@ -154,6 +179,12 @@ describe("rig scope slice progress (FR-3 add/set)", () => {
     const readme = fs.readFileSync(path.join(slicePath, "SPEC.md"), "utf8");
     expect(readme).toMatch(/## Rail\n\n- \[ \] Rail item/);
     expect(readme).toMatch(/progress_rail:\s*readme-only/); // frontmatter preserved
+    const state = await run(["slice", "progress", slicePath, "--current-state", "Waiting for review", "--json"], env.missionsRoot);
+    expect(state.exitCode).toBe(0);
+    const updated = fs.readFileSync(path.join(slicePath, "SPEC.md"), "utf8");
+    expect(updated).toMatch(/current_state_updated:.*T/);
+    expect(updated).toContain("Waiting for review");
+    expect(fs.existsSync(path.join(slicePath, "PROGRESS.md"))).toBe(false);
   });
 
   it("errors when the scope has no progress surface (stale-host ghost)", async () => {
@@ -173,6 +204,18 @@ describe("rig scope mission progress (FR-3)", () => {
   let env: { root: string; missionsRoot: string };
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
+
+  it("creates and timestamps a missing current-state section without changing other content", async () => {
+    await run(["mission", "repair", "release-0.4.0", "--json"], env.missionsRoot);
+    const file = path.join(env.missionsRoot, "release-0.4.0", "PROGRESS.md");
+    fs.writeFileSync(file, "---\nowner: somebody # retain\n---\n# Progress\n\n## Outcomes\n\nKeep\n");
+    const result = await run(["mission", "progress", "release-0.4.0", "--current-state", "Ready", "--json"], env.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("owner: somebody # retain\n");
+    expect(content).toMatch(/current_state_updated:.*T/);
+    expect(content).toContain("## Outcomes\n\nKeep\n\n## Current state\n\nReady\n");
+  });
 
   it("--add updates the mission PROGRESS.md", async () => {
     // Backfill the mission PROGRESS.md first (the seed mission has none).
