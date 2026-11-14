@@ -78,8 +78,12 @@ codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --fr
   copilot plugin install openrig@openrig-app
   ```
 
+  Unlike the other apps, this installs the plugin from this repository's main branch, not from your OpenRig package, so
+  its skill can be newer than the OpenRig you run.
+
   Copilot CLI also loads the skills in `~/.agents/skills`. Where OpenRig's own skills are installed there, it can choose
-  OpenRig's `openrig-skills` skill before this plugin's `working-with-an-openrig-team`.
+  OpenRig's `openrig-skills` skill before this plugin's `working-with-an-openrig-team`. If it does, it may ask for a
+  skill pack that isn't there and get `pack_not_found`: ask it to use `working-with-an-openrig-team`.
 
 In VS Code and Cursor, install the plugin from this folder with the app's own install-from-folder step. In VS Code
 that's **Chat: Install Plugin from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload.
