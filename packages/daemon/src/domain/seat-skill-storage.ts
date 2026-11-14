@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { retireDirectPluginCopies, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
+import { inspectSkillDirectory, retireDirectPluginCopies, type CatalogSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
+import { selectedCorePluginDir } from "./claude-core-plugin-env.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
 import { MANAGED_BLOCK_APPEND_SEPARATOR, hasEditedManagedBlock, managedBlockText } from "./managed-blocks.js";
 
@@ -611,6 +612,81 @@ export interface SeatSkillSelection {
   selected: ReadonlySet<string>;
   /** The selected skills whose resource says `on_restore: follow_source`, with their source folders. */
   following: ReadonlyArray<{ id: string; source: string }>;
+  /** OpenRig's own packaged plugin skills in the seat's loadout today (`packagedSeatSkills`): they follow the packaged
+   *  source by default, under the loadout's own record. */
+  packaged?: ReadonlyArray<{ id: string; sourceDir: string; revision: string }>;
+}
+
+/** The loadout's skills that are OpenRig's own packaged copies: those of the vendored openrig-core plugin, unless the
+ *  seat's profile selects that skill itself (its own resource then keeps its own restore policy). */
+export function packagedSeatSkills(entries: ReadonlyArray<Pick<CatalogSkill, "id" | "sourceDir" | "sourceRoot" | "revision" | "pluginId">>,
+  ownIds: ReadonlySet<string>, pluginsDir?: string): Array<{ id: string; sourceDir: string; revision: string }> {
+  return entries
+    .filter((entry) => entry.pluginId !== undefined && !ownIds.has(entry.id) && selectedCorePluginDir([entry.sourceRoot], pluginsDir) !== undefined)
+    .map((entry) => ({ id: entry.id, sourceDir: entry.sourceDir, revision: entry.revision }));
+}
+
+/**
+ * For a restore, before the saved skills are put back: bring OpenRig's own packaged skills in the seat's loadout up to
+ * the packaged source as it is now, so an upgrade's changed copy comes back with today's bytes instead of being named
+ * missing. Only a copy still as OpenRig wrote it (or removed by `rig down` for being so) is replaced, and the loadout's
+ * own record is updated, so a later launch reads it as current. An edited or unrecorded copy is kept and named; a source
+ * that can't be read leaves the saved copy to the usual rehydration. Returns the warnings to report.
+ */
+function followPackagedSeatSkills(paths: SeatSkillPaths, packaged: ReadonlyArray<{ id: string; sourceDir: string; revision: string }>): string[] {
+  const warnings: string[] = [];
+  let manifest: Record<string, unknown> & { skills: Array<Record<string, unknown>> };
+  try {
+    manifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8"));
+    if (!manifest || !Array.isArray(manifest.skills)) return warnings;
+  } catch { return warnings; } // no loadout record: no copy of OpenRig's here to follow
+  const refreshed: string[] = [];
+  for (const { id, sourceDir, revision } of packaged) {
+    const dir = nodePath.resolve(paths.skillsRoot, id);
+    const skill = manifest.skills.find((candidate) => typeof candidate?.target === "string" && nodePath.resolve(candidate.target) === dir);
+    const recorded = skill?.files && typeof skill.files === "object" ? skill.files as Record<string, string> : undefined;
+    if (!skill || !recorded) continue; // the loadout doesn't record this copy: it isn't OpenRig's to replace
+    let why: string | undefined;
+    if (!insideSeatStorageFolder(paths.root, dir)) why = "it is not inside this seat's storage (a link on the way)";
+    else {
+      try {
+        for (const rel of filesBelow(dir)) {
+          const file = nodePath.join(dir, rel);
+          if (typeof recorded[rel] !== "string") { why = `${file} is not a file OpenRig wrote`; break; }
+          if (!insideSeatStorage(paths.root, file)) { why = `${file} is not inside this seat's storage (a link on the way)`; break; }
+          if (sha256(fs.readFileSync(file)) !== recorded[rel]) { why = `${file} was edited`; break; }
+        }
+      } catch { why = `${dir} can't be read`; }
+    }
+    if (why) { warnings.push(`Restore: kept ${dir}: ${why}; OpenRig's packaged skill follows its current source, but an edit is never overwritten`); continue; }
+    let tree: { digest: string; files: Record<string, string> };
+    try {
+      tree = inspectSkillDirectory(sourceDir);
+      if (typeof tree.files["SKILL.md"] !== "string") throw new Error("no SKILL.md");
+    } catch {
+      warnings.push(`Restore: ${id} follows OpenRig's packaged source, but ${sourceDir} can't be read as a skill; its saved copy is kept`);
+      continue;
+    }
+    const same = Object.keys(tree.files).length === Object.keys(recorded).length
+      && Object.entries(tree.files).every(([rel, digest]) => recorded[rel] === digest);
+    if (same) continue; // the saved copy is today's; the usual rehydration puts back whatever rig down removed
+    for (const rel of Object.keys(recorded)) {
+      const file = nodePath.join(dir, rel);
+      if (lexists(file)) removeInsideSeatStorage(paths.root, file);
+    }
+    removeEmptyFolders(paths.root, dir);
+    for (const rel of Object.keys(tree.files)) {
+      const source = nodePath.join(sourceDir, rel);
+      writeInsideSeatStorage(paths.root, nodePath.join(dir, rel), fs.readFileSync(source), fs.statSync(source).mode & 0o777);
+    }
+    Object.assign(skill, { sourceDir, revision, digest: tree.digest, files: tree.files });
+    refreshed.push(id);
+  }
+  if (refreshed.length > 0) {
+    writeInsideSeatStorage(paths.root, paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    warnings.unshift(`Restore: brought OpenRig's packaged skills up to the current packaged source: ${refreshed.join(", ")}`);
+  }
+  return warnings;
 }
 
 export interface SeatSkillFollow {
@@ -681,6 +757,8 @@ function adoptFollowingLoadoutFiles(paths: SeatSkillPaths, ids: string[], record
  */
 export function followSeatSkills(paths: SeatSkillPaths, today: SeatSkillSelection): SeatSkillFollow {
   const out: SeatSkillFollow = { refreshed: [], added: [], removed: [], warnings: [] };
+  try { out.warnings.push(...followPackagedSeatSkills(paths, today.packaged ?? [])); }
+  catch (error) { out.warnings.push(`Restore: OpenRig's packaged skills kept as saved: ${(error as Error).message}`); }
   let record = readProjections(paths.projectionsPath);
   if (today.following.length === 0 && Object.keys(record.following ?? {}).length === 0) return out; // nothing follows
   record = adoptFollowingLoadoutFiles(paths, [...Object.keys(record.following ?? {}), ...today.following.map(({ id }) => id)], record);
