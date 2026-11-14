@@ -125,7 +125,7 @@ function tmuxFormatChange(name: string): string | null {
   for (let i = 0; i < name.length; i++) {
     if (name[i] !== "#") continue;
     const next = name[i + 1];
-    if (next === undefined) return 'tmux drops a "#" at the end of a new session\'s name';
+    if (next === undefined) return 'tmux can\'t reliably handle a "#" at the end of a new session\'s name';
     let run = i + 1;
     while (name[run] === "#") run++;
     if (name[run] === "[") {
