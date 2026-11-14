@@ -264,6 +264,19 @@ describe("a registered remote host in the topology tree (#2049)", () => {
     expect(text).not.toContain("agent \"runner\" not in the current snapshot");
     expect(text).toContain("read-only view");
     expect(text).not.toContain("Open terminal ▸");
+    // This host's queue-derived sections never appear on a remote seat's page.
+    expect(text).not.toContain("CURRENT WORK");
+    expect(text).not.toContain("UP NEXT");
+    expect(text).not.toContain("NEEDS YOU");
+    expect(text).not.toContain("RECENTLY FINISHED");
+    expect(text).not.toContain("effort");
+  });
+
+  it("a filter that matches no remote agent reads differently from a rig that has none", async () => {
+    const fake: Fake = { calls: [], remoteSeatToggle: true };
+    const filtered = await page(fake, "host vps", { type: "drill", resource: "rig", name: "web", target: { host: "vps" } }, "/no-seat-matches");
+    expect(filtered.text).toContain("no seats match the filter");
+    expect(filtered.text).not.toContain("no seats reported for this rig");
   });
 
   it("reads a remote rig's nodes and the toggle only while the TABLE tab is open", async () => {

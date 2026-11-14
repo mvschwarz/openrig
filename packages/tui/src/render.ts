@@ -405,8 +405,9 @@ function agentDetailLines(
           fieldLine({ label: "tokens", value: `${number(agent.totalInputTokens)} input · ${number(agent.totalOutputTokens)} output · ${number(agent.contextWindowSize)} window` }),
           runtimeLine,
           // #1347 — four values stay distinguishable on one wrapped row. "applied"
-          // appears only for outcome `accepted`; unknowns stay unknown.
-          ...wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth),
+          // appears only for outcome `accepted`; unknowns stay unknown. The
+          // effort report is this host's read — a remote seat has none here.
+          ...(localSeat ? wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth) : []),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
           // The agent page opens just this agent; the pod and rig pages open theirs.
           ...(localSeat
@@ -434,7 +435,11 @@ function agentDetailLines(
           local: found.host === snap.hosts[0],
         }, contentWidth),
       },
-      { title: `CURRENT WORK · ${currentRows.length}${queueIncomplete(snap) ? " sampled" : ""}`, lines: workRows(currentRows, contentWidth, queueIncomplete(snap)) },
+      // CURRENT WORK / UP NEXT / NEEDS YOU / RECENTLY FINISHED match this
+      // host's queue by session name — a remote seat's page must not show
+      // them as if they were the remote agent's; read-only identity, state
+      // and context only.
+      ...(localSeat ? [{ title: `CURRENT WORK · ${currentRows.length}${queueIncomplete(snap) ? " sampled" : ""}`, lines: workRows(currentRows, contentWidth, queueIncomplete(snap)) }] : []),
       {
         title: "QUEUE",
         lines: [
@@ -443,9 +448,11 @@ function agentDetailLines(
           ...(agent.assignedWorkCount == null ? wrapDetailValue("basis", `${visibleAssigned} rows visible in bounded list reads; complete count not served`, contentWidth) : []),
         ],
       },
-      { title: `UP NEXT · ${pending}${queueIncomplete(snap) ? " · sampled rows" : ""}`, lines: workRows(pendingRows, contentWidth, queueIncomplete(snap)) },
-      { title: `NEEDS YOU · ${needs.length || agent.activity?.needsInput?.count || 0}`, lines: needsRows },
-      ...(recentRows.length ? [{ title: "RECENTLY FINISHED · bounded window", lines: workRows(recentRows, contentWidth) }] : []),
+      ...(localSeat ? [
+        { title: `UP NEXT · ${pending}${queueIncomplete(snap) ? " · sampled rows" : ""}`, lines: workRows(pendingRows, contentWidth, queueIncomplete(snap)) },
+        { title: `NEEDS YOU · ${needs.length || agent.activity?.needsInput?.count || 0}`, lines: needsRows },
+        ...(recentRows.length ? [{ title: "RECENTLY FINISHED · bounded window", lines: workRows(recentRows, contentWidth) }] : []),
+      ] : []),
       {
         title: "SEAT",
         fields: [
@@ -746,7 +753,9 @@ function remoteRigSeatLines(state: ViewState, rig: FleetSnapshot["hosts"][number
     { text: "━".repeat(columnsWidth(columns)) },
   ];
   if (rows.length === 0) {
-    lines.push({ text: "  (no seats reported for this rig)" });
+    lines.push({ text: all.length > 0 && state.filter
+      ? `  (no seats match the filter "${state.filter}")`
+      : "  (no seats reported for this rig)" });
     return lines;
   }
   let previousPod: string | null = null;
