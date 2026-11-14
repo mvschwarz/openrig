@@ -9,6 +9,10 @@
 //     Safe by TIMING — invoked INSIDE commit() BEFORE the successor accumulates any name-keyed state,
 //     so a name-scoped delete clears exactly the retiree's entries. (The name does NOT isolate the
 //     retiree from the successor — they share it — the timing does.)
+//     #3044 C3: a recovery (`rig seat handover --recover`) commits a successor that has already run, so the timing
+//     doesn't hold there. Its compaction maps are still cleared: the unadopted successor's hooks were refused until
+//     this commit, so they hold only the retiree's or the failed attempt's state. Its sidecar is the successor's
+//     own sample once it has written one, so the delete keeps a sidecar recording `successorGeneration`.
 //   Class-B (durable queue_items / watchdog_jobs, seat-ROLE-bearing): a name-scoped drop would
 //     NEUTRALIZE THE SUCCESSOR'S OWN legitimate role items, so it MUST gen-scope. That requires the
 //     occupant-generation identity (atom-B). Until `retiringGeneration` is supplied, Class-B is a LOUD
@@ -23,6 +27,8 @@ export interface OccupantInvalidator {
     retiringSessionName: string;
     successorSessionName: string;
     retiringGeneration?: string;
+    /** The successor's occupant generation; a sidecar it already wrote (a recovery's) is kept. */
+    successorGeneration?: string;
   }): void;
 }
 
@@ -30,7 +36,7 @@ export interface OccupantInvalidator {
  *  import cycle with the enforcer / context-usage store. */
 export interface OccupantInvalidatorDeps {
   enforcer: { invalidateOccupant(sessionName: string): void };
-  contextUsage: { invalidateOccupantSidecar(sessionName: string): void };
+  contextUsage: { invalidateOccupantSidecar(sessionName: string, keepGeneration?: string): void };
   /** (e/Class-B) durable watchdog_jobs store — armed jobs the retiring generation registered for its own
    *  seat are stopped at swap (a stale wake into the successor's context is the ghost). Optional: absent ⇒
    *  the watchdog branch is skipped (never a name-scoped fallback). */
@@ -59,13 +65,14 @@ export class DefaultOccupantInvalidator implements OccupantInvalidator {
     retiringSessionName: string;
     successorSessionName: string;
     retiringGeneration?: string;
+    successorGeneration?: string;
   }): void {
     const { retiringSessionName, retiringGeneration } = args;
     const log = this.deps.log ?? (() => {});
 
     // Class-A — hard-delete by name (safe by TIMING; runs at commit() before the successor writes).
     this.deps.enforcer.invalidateOccupant(retiringSessionName);
-    this.deps.contextUsage.invalidateOccupantSidecar(retiringSessionName);
+    this.deps.contextUsage.invalidateOccupantSidecar(retiringSessionName, args.successorGeneration);
 
     // Class-B — gen-scoped ONLY. Never name-scope (a shared name can't discriminate retiree from
     // successor; a name-scoped drop would neutralize the successor's own live role items).

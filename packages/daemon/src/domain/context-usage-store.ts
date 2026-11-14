@@ -135,10 +135,16 @@ export class ContextUsageStore {
    * writes its own sidecar. Missing file = no-op; best-effort (a leftover is caught downstream by
    * the freshness gate). NOTE: this is the DISK sidecar (name-keyed); the context_usage DB table is
    * node_id-keyed + already session_mismatch-gated, so it needs no invalidation here.
+   * #3044 C3: a recovery adopts a successor that has already run under the same name, so its own sample may be the
+   * file. `keepGeneration` names that successor's generation: a sidecar recording it is kept, anything else is removed.
    */
-  invalidateOccupantSidecar(sessionName: string): void {
+  invalidateOccupantSidecar(sessionName: string, keepGeneration?: string): void {
     const filePath = this.getSidecarPath(sessionName);
     try {
+      if (keepGeneration !== undefined) {
+        const sidecar = this.readSidecarAt(filePath);
+        if (sidecar.ok && sidecar.data.occupant_generation === keepGeneration) return;
+      }
       if (existsSync(filePath)) unlinkSync(filePath);
     } catch {
       /* best-effort — a stale leftover is still gated by isFresh downstream */

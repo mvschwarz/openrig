@@ -31,6 +31,8 @@ import { abandonOpenHandoverAttempt, openHandoverAttempt } from "../src/domain/s
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { SessionAddressConflict } from "../src/domain/session-registry.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
+import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.js";
+import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 
 const relay = createRequire(import.meta.url)(path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs")) as {
   buildSessionIdentityPayload(p: unknown, env: Record<string, string>): Record<string, unknown> | null;
@@ -251,6 +253,33 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     db.prepare("UPDATE nodes SET runtime = 'claude-code' WHERE id = ?").run(nodeId);
     expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
     expect(db.prepare("SELECT COUNT(*) AS n FROM activity_grants WHERE node_id = ?").get(nodeId)).toEqual({ n: 0 });
+  });
+
+  // #3044 C3: the retiring occupant's name-keyed cleanup runs at the recovery's commit, after the successor has already
+  // run under the same name. The real invalidator and context store, on a temporary state folder.
+  it.each([
+    ["keeps the context sample the running successor wrote", (generation: string) => generation, true],
+    ["still removes a sample the retiring occupant left", () => "retired-generation", false],
+  ])("#3044 C3: a recovery's cleanup %s, and clears the retiree's compaction state", async (_label, writer, kept) => {
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), "recover-sidecar-"));
+    try {
+      const contextUsage = new ContextUsageStore(db, { stateDir });
+      const enforcer = { invalidateOccupant: vi.fn() };
+      const generation = await failedHandover();
+      const sidecar = contextUsage.getSidecarPath(SEAT);
+      mkdirSync(path.dirname(sidecar), { recursive: true });
+      writeFileSync(sidecar, JSON.stringify({ session_name: SEAT, occupant_generation: writer(generation),
+        context_window: { used_percentage: 41 }, sampled_at: "2026-11-10T16:21:30Z" }));
+
+      const result = await service({ occupantInvalidator: new DefaultOccupantInvalidator({ enforcer, contextUsage }) })
+        .recover({ seatRef: SEAT, reason: "adopt the running successor" });
+
+      expect(result).toMatchObject({ ok: true });
+      expect(contextUsage.readSidecar(SEAT).ok).toBe(kept);
+      expect(enforcer.invalidateOccupant).toHaveBeenCalledWith(SEAT);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("#3044: the recovered successor keeps the applied-launch observation its launch returned", async () => {

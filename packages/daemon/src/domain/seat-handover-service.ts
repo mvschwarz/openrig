@@ -1839,10 +1839,13 @@ export class SeatHandoverService {
       // cutover the successor reuses the seat name, so retiring === successor here — Class-A is safe by
       // TIMING (runs before the successor writes) and Class-B is gen-scoped via retiringGeneration (the
       // retiree's generation, captured above pre-mint). Optional dep: absent → skipped, never blocks.
+      // #3044 C3: a recovery's successor has already run, so the timing doesn't cover its sidecar; the successor's
+      // generation keeps a sidecar it wrote itself.
       this.occupantInvalidator?.invalidateRetiringOccupant({
         retiringSessionName: input.latestSession.session_name,
         successorSessionName: input.discovered.tmuxSession,
         retiringGeneration,
+        ...(input.occupantGeneration ? { successorGeneration: input.occupantGeneration } : {}),
       });
 
       const event = this.eventBus.persistWithinTransaction({
