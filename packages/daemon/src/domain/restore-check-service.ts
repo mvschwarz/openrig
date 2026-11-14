@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { validatePreRestore } from "./restore-preconditions.js";
+import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -219,7 +220,9 @@ export interface RestoreCheckDeps {
   /** Exact ordinary-restore input; never captures an auto-rehydrate snapshot. */
   getRestoreInputs: (rigId: string) =>
     | { snapshot: Pick<Snapshot, "id" | "kind" | "data">; servicesRecord: RigServicesRecord | null }
-    | { currentStateRehydrate: CurrentStateRehydrateEligibility; reason: string }
+    | { currentStateRehydrate: CurrentStateRehydrateEligibility; reason: string;
+      /** The members outside the rig's recorded roster, which a current-state rehydrate leaves as they are. */
+      notRestoredNodeIds?: string[] }
     | { unavailable: string };
   /** Probe daemon health: returns { healthy: boolean; evidence: string } */
   probeDaemonHealth: () => { healthy: boolean; evidence: string };
@@ -350,6 +353,7 @@ export class RestoreCheckService {
       // No added snapshot/history read on a routine status poll for an all-ready rig.
       // Explicit restore-check still assesses its next restore, even while it is running.
       let preconditionError: string | undefined;
+      let notRestored: ReadonlySet<string> | undefined;
       const allReady = nodes.length > 0 && nodes.every((node) =>
         Boolean(node.canonicalSessionName) && node.sessionStatus === "running" && node.startupStatus === "ready"
       );
@@ -358,6 +362,7 @@ export class RestoreCheckService {
         checks.push(preconditions.check);
         rigChecks.push(preconditions.check);
         preconditionError = preconditions.error;
+        notRestored = preconditions.notRestored;
         restoreInputsByRig.set(rig.rigId, { snapshot: preconditions.snapshot, error: preconditions.error });
       }
 
@@ -376,7 +381,7 @@ export class RestoreCheckService {
         // are not skipping (full, --ready/includeReady, or a non-ready seat).
         const omitReadyDetail = opts.compact && !opts.includeReady && readinessCheck.status === "green";
 
-        const startupContextCheck = this.checkStartupContext(node, rig.name);
+        const startupContextCheck = this.checkStartupContext(node, rig.name, notRestored);
         if ("unknownChecks" in startupContextCheck) {
           return this.buildUnknown([
             ...checks,
@@ -441,6 +446,8 @@ export class RestoreCheckService {
   private checkRestorePreconditions(rig: { rigId: string; name: string }, inventory: NodeInventoryEntry[]): {
     check: CheckEntry;
     snapshot: { id: string; kind: string } | null;
+    /** The members outside the snapshot's roster: restore leaves them as they are. */
+    notRestored?: ReadonlySet<string>;
     error?: string;
   } {
     const check = `rig.${rig.name}.restore-preconditions`;
@@ -451,6 +458,7 @@ export class RestoreCheckService {
         const { ok, blockers } = input.currentStateRehydrate;
         return {
           snapshot: null,
+          ...(input.notRestoredNodeIds ? { notRestored: new Set(input.notRestoredNodeIds) } : {}),
           check: {
             check,
             status: ok ? "yellow" : "red",
@@ -470,8 +478,12 @@ export class RestoreCheckService {
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
       });
       const { blockers, warnings } = validation;
+      // Restore acts only on the snapshot's roster. A current member outside it is left as it is: one the roster leaves
+      // out, or one the snapshot doesn't hold at all (it joined after the snapshot).
+      const restored = new Set(resolveSnapshotRestoreTopology(input.snapshot.data).intendedRoster.map((member) => member.nodeId));
       return {
         snapshot: { id: input.snapshot.id, kind: input.snapshot.kind },
+        notRestored: new Set(inventory.flatMap((current) => current.nodeId && !restored.has(current.nodeId) ? [current.nodeId] : [])),
         check: {
           check,
           status: blockers.length > 0 ? "red" : warnings.length > 0 ? "yellow" : "green",
@@ -910,7 +922,8 @@ export class RestoreCheckService {
     };
   }
 
-  private checkStartupContext(node: NodeInventoryEntry, rigName: string): { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
+  private checkStartupContext(node: NodeInventoryEntry, rigName: string, notRestored?: ReadonlySet<string>):
+    { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
     const session = node.canonicalSessionName ?? node.logicalId;
     const check = `seat.${session}.startup-context`;
     const runningReady = node.sessionStatus === "running" && node.startupStatus === "ready";
@@ -942,6 +955,19 @@ export class RestoreCheckService {
         // A seat that only ever resumed or was attached has a resume token and no saved startup context. Restore tries its
         // saved conversation without replaying a saved startup plan, as on any resume (a resume replays no startup context).
         // A pod-aware seat's restore names the gap; a legacy seat's resume path is unchanged and names none.
+        // A member outside the restore snapshot's roster (joined later with `rig attach --self`, say) isn't restored:
+        // restore leaves it attached as it is, so its saved conversation isn't tried.
+        if (seatResumes(node) && notRestored?.has(node.nodeId)) {
+          return {
+            check: {
+              check,
+              status: "yellow",
+              evidence: `${probe.evidence}. Restore leaves ${session} attached and doesn't restore it: it isn't in this rig's restore roster.`,
+              remediation: "No startup-context repair is needed: restore doesn't touch this member.",
+              remediationSafe: false,
+            },
+          };
+        }
         if (seatResumes(node)) {
           return {
             check: {
