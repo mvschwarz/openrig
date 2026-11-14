@@ -356,8 +356,8 @@ export function createPaneCompositor(out: NodeJS.WriteStream): PaneCompositor {
 }
 
 export function createRunnerInput(
-  input: NodeJS.ReadStream,
-  output: NodeJS.WriteStream,
+  input: NodeJS.ReadableStream & { readonly isTTY?: boolean; readonly isRaw?: boolean; setRawMode: (raw: boolean) => unknown },
+  output: NodeJS.WritableStream & { readonly isTTY?: boolean; readonly columns?: number; readonly rows?: number },
   onSubmit: (block: string) => void,
   pane?: PaneCompositor,
 ): readline.Interface {
@@ -508,7 +508,7 @@ export function createRunnerInput(
     }
     pane?.refresh();
   };
-  const wasRaw = input.isRaw;
+  const wasRaw = input.isRaw ?? false;
   const end = () => editor.close();
   input.setRawMode(true);
   output.write("\u001b[?2004h");
@@ -647,7 +647,8 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       // summary (Pi's docs/rpc.md). An end that names neither is done.
       const failure = diagnosticText([event.errorMessage]).slice(0, 400);
       return { mirrorLines: [event.aborted === true ? `[${runtime}] compaction cancelled`
-        : failure ? `[${runtime}] compaction failed: ${failure}` : `[${runtime}] compaction done`] };
+        : failure ? `[${runtime}] compaction failed: ${failure}` : `[${runtime}] compaction done`],
+        ...(runtime === "pi" ? { activity: { hookEvent: "Stop", subtype: "compaction" } } : {}) };
     }
     // OMP names its automatic compaction separately. Pi keeps main's mapping
     // (unmapped), so an idle Pi seat never reads as running after one.
@@ -710,7 +711,16 @@ export interface RunnerIo {
   now(): string;
 }
 
+export function writePiRunnerSidecar(path: string, state: PiRunnerState): void {
+  const temporary = `${path}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
+  fs.renameSync(temporary, path);
+}
+
 const GET_STATE_ID = "pi-runner-get-state";
+/** The reserved manual-compaction input carries its attempt id in the RPC id, so a
+ *  reply and the sidecar record can name exactly the request OpenRig made. */
+const COMPACT_ID = "pi-runner-compact:";
 const CATCH_UP_ID = "pi-runner-catch-up";
 const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
 const NEGOTIATE_ID = "omp-runner-negotiate";
@@ -778,6 +788,15 @@ export async function readPiSessionEntryIds(
 }
 
 export class RunnerCore {
+  private compaction: PiRunnerState["compaction"];
+  /** The last attempt-stamped record, kept beside `compaction` so a later
+   *  automatic run cannot erase a requested attempt's result. */
+  private requestedCompaction: PiRunnerState["requestedCompaction"];
+  /** The attempt a `/openrig-compact <id>` input named, awaiting its compaction_start. */
+  private pendingCompactAttemptId: string | null = null;
+  /** Durable copy of that pending attempt: written before the compact RPC, so a
+   *  restarted daemon reads the newest request as uncertain, not as an older run. */
+  private pendingCompaction: PiRunnerState["pendingCompaction"];
   private streaming = false;
   /** Pi runs this runner has opened, each posted as an accepted turn (contract section 4): the working beat names it. */
   private turn = 0;
@@ -926,6 +945,21 @@ export class RunnerCore {
 
   /** One aggregated paste block from pane stdin. */
   handleUserBlock(block: string): void {
+    const compact = /^\/openrig-compact ([\w-]+)$/.exec(block);
+    if (this.runtime === "pi" && compact) {
+      const attemptId = compact[1]!;
+      if (this.pendingCompactAttemptId || (this.compaction?.startedAt && !this.compaction.endedAt)) {
+        this.diag("[pi-runner] compact already in progress; request not sent");
+        return;
+      }
+      this.pendingCompactAttemptId = attemptId;
+      this.pendingCompaction = { attemptId, requestedAt: this.io.now() };
+      // Persist the request before the RPC leaves: the id survives a daemon
+      // restart, so the newest attempt reads uncertain, never an older result.
+      this.writeSidecar({});
+      this.io.sendRpc({ type: "compact", id: COMPACT_ID + attemptId });
+      return;
+    }
     if (block === "/abort") {
       this.io.sendRpc({ type: "abort" });
       this.diag("[pi-runner] abort sent");
@@ -977,9 +1011,37 @@ export class RunnerCore {
       }
       return;
     }
+    if (this.runtime === "pi" && record.success === true && record.error == null
+      && typeof record.id === "string" && record.id.startsWith(COMPACT_ID)) {
+      const attemptId = record.id.slice(COMPACT_ID.length);
+      if (this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+      if (this.pendingCompaction?.attemptId === attemptId) this.pendingCompaction = undefined;
+      this.writeSidecar({});
+      return;
+    }
     if (record.success === false || record.error != null) {
       const detail = typeof record.error === "string" ? record.error : "request failed";
       const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
+      const compactId = this.runtime === "pi" && typeof record.id === "string" && record.id.startsWith(COMPACT_ID)
+        ? record.id : null;
+      if (compactId) {
+        const attemptId = compactId.slice(COMPACT_ID.length);
+        const unsupported = /unknown command|unsupported|not supported/i.test(detail);
+        this.io.mirrorLine(`[pi-runner] ERROR rpc compact${unsupported ? " unsupported" : " failed"}: ${message}`);
+        // A failure with no start replaces any older record: this attempt is the answer.
+        const prior = this.compaction?.attemptId === attemptId ? this.compaction : undefined;
+        const wasPending = this.pendingCompactAttemptId === attemptId;
+        if (this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+        if (this.pendingCompaction?.attemptId === attemptId) this.pendingCompaction = undefined;
+        const failed = { attemptId, reason: prior?.reason ?? "manual",
+          ...(prior?.requestId ? { requestId: prior.requestId } : {}),
+          ...(prior?.startedAt ? { startedAt: prior.startedAt } : {}),
+          endedAt: prior?.endedAt ?? this.io.now(), errorMessage: detail };
+        if (wasPending || !this.compaction?.attemptId || this.compaction.attemptId === attemptId) this.compaction = failed;
+        if (wasPending || !this.requestedCompaction || this.requestedCompaction.attemptId === attemptId) this.requestedCompaction = failed;
+        this.writeSidecar({});
+        return;
+      }
       if (record.id === GET_STATE_ID) {
         this.ready = false;
         this.writeSidecar({});
@@ -1191,6 +1253,44 @@ export class RunnerCore {
   }
 
   private handleEvent(event: Record<string, unknown>): void {
+    if (this.runtime === "pi" && (event.type === "compaction_start" || event.type === "compaction_end")) {
+      const identity = {
+        ...(typeof event.requestId === "string" ? { requestId: event.requestId } : {}),
+        ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
+      };
+      // The attempt id OpenRig's reserved input named rides the runner's native
+      // compact command and returns here. An automatic run (threshold/overflow)
+      // never takes it, so its result cannot answer a requested attempt.
+      const manualReason = typeof event.reason !== "string" || event.reason === "manual";
+      if (event.type === "compaction_start") {
+        const attemptId = manualReason ? this.pendingCompactAttemptId ?? undefined : undefined;
+        if (attemptId) {
+          this.pendingCompactAttemptId = null;
+          this.pendingCompaction = undefined;
+        }
+        this.compaction = { ...(attemptId ? { attemptId } : {}), ...identity, startedAt: this.io.now() };
+      } else {
+        const result = event.result;
+        const summary = result !== null && typeof result === "object" ? Object.fromEntries(
+          Object.entries(result).filter(([key, value]) =>
+            (["summary", "firstKeptEntryId"].includes(key) && typeof value === "string") ||
+            (["tokensBefore", "estimatedTokensAfter"].includes(key) && typeof value === "number")),
+        ) : undefined;
+        const attemptId = this.compaction?.attemptId
+          ?? (manualReason ? this.pendingCompactAttemptId ?? undefined : undefined);
+        if (attemptId && this.pendingCompactAttemptId === attemptId) this.pendingCompactAttemptId = null;
+        this.compaction = { ...this.compaction, ...(attemptId ? { attemptId } : {}), ...identity, endedAt: this.io.now(),
+          ...(result === null ? { result: null } : summary ? { result: summary } : {}),
+          ...(typeof event.aborted === "boolean" ? { aborted: event.aborted } : {}),
+          ...(typeof event.willRetry === "boolean" ? { willRetry: event.willRetry } : {}),
+          ...(typeof event.errorMessage === "string" ? { errorMessage: event.errorMessage } : {}),
+        };
+        // Keep the attempt-stamped record beside `compaction`: a later automatic
+        // run replaces that field, and this request must still read completed.
+        if (this.compaction.attemptId) this.requestedCompaction = this.compaction;
+      }
+      this.writeSidecar({});
+    }
     if (event.type === "extension_ui_request") {
       const method = event.method;
       const dialog = method === "select" || method === "confirm" || method === "input" || method === "editor";
@@ -1304,13 +1404,23 @@ export class RunnerCore {
     }
     if (!mapped.activity) return;
     if (event.type === "agent_end" && this.attention === "transient_turn_error") this.clearAttention();
-    if (mapped.activity.hookEvent === "Stop" && this.attention) {
-      // The turn ended, but the operator still has to act. Drop the Stop; if
-      // later activity replaced the attention, restore it as the final state.
-      if (!this.attentionIsLatest) this.raiseAttention(this.attention);
-    } else {
-      this.attentionIsLatest = false;
-      this.io.postActivity(this.activityPayload(mapped.activity.hookEvent, mapped.activity.subtype));
+    const compactionBeat = this.runtime === "pi" && mapped.activity.subtype === "compaction";
+    try {
+      if (mapped.activity.hookEvent === "Stop" && this.attention) {
+        // The turn ended, but the operator still has to act. Drop the Stop; if
+        // later activity replaced the attention, restore it as the final state.
+        if (!this.attentionIsLatest) this.raiseAttention(this.attention);
+      } else {
+        this.attentionIsLatest = false;
+        this.io.postActivity(this.activityPayload(mapped.activity.hookEvent, mapped.activity.subtype,
+          compactionBeat ? { requestId: this.compaction?.requestId, reason: this.compaction?.reason,
+            ...(event.type === "compaction_end" ? { endedAt: this.compaction?.endedAt } : {}) } : {}));
+      }
+    } finally {
+      if (compactionBeat && event.type === "compaction_end") {
+        this.lastPostedHook = null;
+        this.lastHeartbeatMs = null;
+      }
     }
   }
 
@@ -1384,6 +1494,11 @@ export class RunnerCore {
       sessionFile: this.sessionFile,
       sessionId: this.sessionId,
       lastEntryId: this.lastEntryId,
+      ...(this.runtime === "pi" ? {
+        compaction: this.compaction,
+        requestedCompaction: this.requestedCompaction,
+        pendingCompaction: this.pendingCompaction,
+      } : {}),
       updatedAt: this.io.now(),
       ...patch,
     });
@@ -1849,7 +1964,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     },
     writeSidecar: (state) => {
       try {
-        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(state));
+        if (runtime === "pi") writePiRunnerSidecar(paths.runnerStatePath, state);
+        else fs.writeFileSync(paths.runnerStatePath, JSON.stringify(state));
       } catch { /* best-effort; adapter falls back to pane markers */ }
     },
     now: () => new Date().toISOString(),
