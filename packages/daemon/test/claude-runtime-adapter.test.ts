@@ -410,6 +410,52 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  // #3245: an organization's Claude Code managed settings set disableSideloadFlags, so Claude refuses the plugin folders
+  // OpenRig passes and exits at startup. The refusal line is the reported one; these are tmux fixtures, not a native run.
+  const sideloadRefusal = "CLAUDE_CODE_PLUGIN_DIRS is disabled by your organization's managed settings (disableSideloadFlags). Unset it to continue.";
+  const sideloadReason = (line: string) => `the pane shows Claude Code's refusal (${line}). If that line is from this launch, Claude Code's managed settings turn on disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load this seat's skills and plugins, so this seat can't start while that setting applies.`;
+
+  it("checkReady names Claude's sideload refusal on a pane back at its shell, and keeps waiting (#3245)", async () => {
+    expect(await idleShellAfter(sideloadRefusal)).toEqual({ ready: false, reason: sideloadReason(sideloadRefusal), code: "returned_to_shell" });
+  });
+
+  it("checkReady keeps a wrapped sideload refusal whole by reading the joined capture (#3245)", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("bash");
+    (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
+    const shown = (joined: boolean) => `$ claude --name dev-impl@test-rig\n${joined ? sideloadRefusal
+      : `${sideloadRefusal.slice(0, 80)}\n${sideloadRefusal.slice(80)}`}\nuser@example.test:~/project$ `;
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockImplementation(async (_t: string, _n?: number, opts?: { joinWrappedLines?: boolean }) =>
+      shown(opts?.joinWrappedLines === true));
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: false, reason: sideloadReason(sideloadRefusal), code: "returned_to_shell" });
+  });
+
+  it.each([
+    ["an ordinary failed start", "Error: something else went wrong"],
+    ["a settings file printed in the shell", `"disableSideloadFlags": true`],
+  ])("checkReady keeps the plain returned-to-shell reason for %s (#3245)", async (_label, line) => {
+    expect(await idleShellAfter(line)).toEqual({
+      ready: false,
+      reason: "The probe pane returned to a shell instead of staying inside the runtime.",
+      code: "returned_to_shell",
+    });
+  });
+
+  it("checkReady stays ready when a working Claude conversation quotes the sideload refusal (#3245)", async () => {
+    const tmux = mockTmux();
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(
+      `Claude Code v2.1.325\n> Why did my seat print "${sideloadRefusal}"?\n● It's a managed setting.\n❯ `);
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: true });
+  });
+
   it("checkReady returns awaiting_runtime when the shell label is a launch script still starting Claude", async () => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("sh");
@@ -898,6 +944,17 @@ describe("Claude Code runtime adapter", () => {
       error: "Claude resume failed: the pane shows that claude wasn't found (zsh: command not found: claude). If that line is from this launch, Claude Code may have been updating or being reinstalled at that moment; relaunch this seat once claude is back.",
       recovery: "retry_fresh",
     });
+  });
+
+  it("launchHarness names Claude's sideload refusal when a resume's pane is back at its shell (#3245)", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(`${sideloadRefusal}\nuser@example.test %`);
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(result).toMatchObject({ ok: false, error: `Claude resume failed: ${sideloadReason(sideloadRefusal)}`, recovery: "retry_fresh" });
   });
 
   describe("a resume still starting is watched, not failed (pane command is sh for every OpenRig launch)", () => {

@@ -2884,6 +2884,17 @@ describe("StartupOrchestrator", () => {
     if (!result.ok) expect(result.errors).toEqual([`Readiness timeout after 0.1s — harness did not become interactive: ${notFound}`]);
   });
 
+  it("a launch Claude refused under disableSideloadFlags reports the refusal when the readiness wait ends (#3245)", async () => {
+    // A stub adapter returning the Claude adapter's refusal reason: this checks OpenRig's plumbing to the start failure.
+    const refusal = "the pane shows Claude Code's refusal (CLAUDE_CODE_PLUGIN_DIRS is disabled by your organization's managed settings (disableSideloadFlags). Unset it to continue.). If that line is from this launch, Claude Code's managed settings turn on disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load this seat's skills and plugins, so this seat can't start while that setting applies.";
+    const seed = seedSession();
+    const adapter = mockAdapter({ checkReady: vi.fn(async () => ({ ready: false, reason: refusal, code: "returned_to_shell" })) });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 100 }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toEqual([`Readiness timeout after 0.1s — harness did not become interactive: ${refusal}`]);
+  });
+
   it("a pane back at its shell for another reason still waits for the readiness timeout", async () => {
     const seed = seedSession();
     const adapter = mockAdapter({
