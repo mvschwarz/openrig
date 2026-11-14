@@ -17,6 +17,7 @@ import { costLines } from "./cost/cost-model.js";
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
 import { scopesContentLines } from "./scopes/scopes-model.js";
+import { fleetScopesLines } from "./scopes/fleet-scopes-model.js";
 import { executionContentLines, executionSliceStripLines } from "./execution/execution-model.js";
 import { navigatorDisplay } from "./navigator.js";
 import { specGraph } from "./specs/graph.js";
@@ -1337,6 +1338,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
   }
 
   if (state.section === "needs") return attentionLines(state, snap, contentWidth);
+  if (state.section === "fleet") return fleetScopesLines(state, snap, contentWidth);
   if (state.section === "scopes") {
     const catalog = snap.projects;
     if (!state.project && catalog !== undefined) return wrapDetailLines([
@@ -1923,7 +1925,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     if (options.completion.candidates.length > 4) lines.push(pad("  … keep typing to narrow matches", cols));
   }
 
-  const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", scopes: "PROJECTS", needs: "FEED", system: "SYSTEM · HEALTH", config: "SYSTEM · CONFIGURATION", connections: "SYSTEM · CONNECTIONS" }[state.section] ?? state.section.toUpperCase();
+  const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", scopes: "PROJECTS", fleet: "FLEET · PROJECTS", needs: "FEED", system: "SYSTEM · HEALTH", config: "SYSTEM · CONFIGURATION", connections: "SYSTEM · CONNECTIONS" }[state.section] ?? state.section.toUpperCase();
   // active-pane emphasis (k9s-class chrome): the focused pane's title is bracketed
   const explorerTitle = state.focusedPane === "explorer" ? "{ EXPLORER }" : "EXPLORER";
   const contentTitle = noticeDetail ? "{ ACTION RESULT }" : state.focusedPane === "content" ? `{ ${sectionTitle} }` : sectionTitle;

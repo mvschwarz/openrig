@@ -23,6 +23,7 @@ import { validateResumeToken } from "./resume-token-validation.js";
 import { readProcessTable } from "./process-table.js";
 import type { HomeRuntime } from "./seat-runtime-home.js";
 import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { ObservationPass } from "./process-observation-pass.js";
 
 export interface ResumeRefreshSession {
   /** The seat, when known, so its own runtime home is read. */
@@ -58,6 +59,8 @@ interface ResumeMetadataRefresherDeps {
   };
   /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is not used. */
   claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
+  /** One fresh identity lister per seat, shared only within a snapshot refresh. */
+  claudeStartedAtForPass?: (pass: ObservationPass) => NonNullable<ResumeTokenCaptureDeps["claudeProcessStartedAt"]>;
   /** Provider root used by the daemon's Claude launches; no scan of other homes. */
   claudeConfigDir?: string;
   listClaudeProcesses?: NativeProcessLister;
@@ -77,6 +80,7 @@ export class ResumeMetadataRefresher {
   private homeDir: string;
   private contextUsageStore: ResumeMetadataRefresherDeps["contextUsageStore"] | null;
   private claudeProcessStartedAt: ResumeMetadataRefresherDeps["claudeProcessStartedAt"] | null;
+  private claudeStartedAtForPass: ResumeMetadataRefresherDeps["claudeStartedAtForPass"];
   private claudeConfigDir: string;
   private seatHome?: (nodeId: string, runtime: HomeRuntime) => string | undefined;
   private listClaudeProcesses: NativeProcessLister | undefined;
@@ -112,6 +116,7 @@ export class ResumeMetadataRefresher {
     this.homeDir = deps.homeDir ?? os.homedir();
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
+    this.claudeStartedAtForPass = deps.claudeStartedAtForPass;
     this.claudeConfigDir = deps.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(this.homeDir, ".claude");
     this.seatHome = deps.seatHome;
     this.listClaudeProcesses = deps.listClaudeProcesses;
@@ -151,6 +156,8 @@ export class ResumeMetadataRefresher {
     },
   ): Promise<void> {
     const fillNullOnly = opts?.fillNullOnly === true;
+    const claudeStartedAt = fillNullOnly && this.claudeStartedAtForPass
+      ? this.claudeStartedAtForPass(new ObservationPass()) : this.claudeProcessStartedAt;
     // Snapshot-time discovery is SINGLE-ATTEMPT (mini-req 2): the 8-attempt
     // 250ms-sleep loop exists for the adoption boundary racing a booting codex;
     // on a recurring tick it multiplied `ps` spawns per seat, forever.
@@ -207,7 +214,7 @@ export class ResumeMetadataRefresher {
           if (sidecar?.ok) {
             const token = sidecar.data.session_id;
             if (typeof token === "string" && token.trim().length > 0
-              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, this.claudeProcessStartedAt))) {
+              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, claudeStartedAt))) {
               this.sessionRegistry.updateResumeToken(session.sessionId, "claude_id", token.trim(), "scrape");
             }
           }
@@ -231,7 +238,7 @@ export class ResumeMetadataRefresher {
           if (sidecar?.ok) {
             const derived = sidecar.data.session_id;
             if (typeof derived === "string" && derived.trim().length > 0 && derived.trim() === session.resumeToken
-              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, this.claudeProcessStartedAt))) {
+              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, claudeStartedAt))) {
               this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
             }
           }
@@ -272,24 +279,12 @@ export class ResumeMetadataRefresher {
       const input = { target: session.sessionName, tmux: this.tmuxAdapter, listProcesses: this.listClaudeProcesses };
       const first = await observeClaudePaneRuntime(input);
       if (!first) return undefined;
-      const started = Date.parse(first.process.startedAt ?? "");
-      if (!Number.isFinite(started)) return undefined;
       const seatHome = session.nodeId ? this.seatHome?.(session.nodeId, "claude-code") : undefined;
       const configDir = nodePath.resolve(session.cwd ?? process.cwd(), seatHome ?? this.claudeConfigDir);
-      const file = nodePath.join(configDir, "sessions", `${first.process.pid}.json`);
-      const fd = fs.openSync(file, "r");
-      let record: { name?: unknown; sessionId?: unknown };
-      try {
-        const stat = fs.fstatSync(fd);
-        // A leftover file for a reused PID is not current-process evidence.
-        if (!stat.isFile() || stat.size > 64 * 1024 || stat.mtimeMs < started) return undefined;
-        record = JSON.parse(fs.readFileSync(fd, "utf8"));
-      } finally { fs.closeSync(fd); }
-      if (record?.name !== session.sessionName) return undefined;
-      const valid = validateResumeToken("claude-code", record.sessionId);
-      if (!valid.ok) return undefined;
+      const token = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt, sessionName: session.sessionName });
+      if (!token) return undefined;
       const final = await observeClaudePaneRuntime(input);
-      return final?.fingerprint === first.fingerprint ? valid.token : undefined;
+      return final?.fingerprint === first.fingerprint ? token : undefined;
     } catch { return undefined; }
   }
 
@@ -545,4 +540,26 @@ function resolveProbeCwd(cwd: string | null | undefined, homeDir: string): strin
     return process.cwd();
   }
   return cwd;
+}
+
+/** The conversation a Claude process holds now, from Claude's own `<configDir>/sessions/<pid>.json` (read only): its
+ *  session id when the file is a regular file of at most 64 KiB written after the process started (a leftover for a
+ *  reused PID is not evidence) and names the seat's session; else undefined. /clear rotates it without replacing the
+ *  process, so the launch argv can't tell it. Callers bracket it with two equal process observations. */
+export function readClaudePidSessionId(input: { configDir: string; pid: number; startedAt: string | null | undefined; sessionName: string }): string | undefined {
+  try {
+    const started = Date.parse(input.startedAt ?? "");
+    if (!Number.isFinite(started)) return undefined;
+    const file = nodePath.join(input.configDir, "sessions", `${input.pid}.json`);
+    const fd = fs.openSync(file, "r");
+    let record: { name?: unknown; sessionId?: unknown };
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size > 64 * 1024 || stat.mtimeMs < started) return undefined;
+      record = JSON.parse(fs.readFileSync(fd, "utf8"));
+    } finally { fs.closeSync(fd); }
+    if (record?.name !== input.sessionName) return undefined;
+    const valid = validateResumeToken("claude-code", record.sessionId);
+    return valid.ok ? valid.token : undefined;
+  } catch { return undefined; }
 }

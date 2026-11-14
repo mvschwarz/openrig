@@ -14,6 +14,8 @@ import { sessionAddressReadIndexesSchema } from "./migrations/162_session_addres
 import { networkInstallationsSchema } from "./migrations/163_network_installations.js";
 import { queueItemsReplyToIndexSchema } from "./migrations/164_queue_items_reply_to_index.js";
 import { queueListReadIndexesSchema } from "./migrations/166_queue_list_read_indexes.js";
+import { seatHandoverAttemptsSchema } from "./migrations/167_seat_handover_attempts.js";
+import { seatRuntimeHomeRecordsSchema } from "./migrations/169_seat_runtime_home_records.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -335,4 +337,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsReplyToIndexSchema,
   runBoundActivityGrantsSchema,
   queueListReadIndexesSchema,
+  seatHandoverAttemptsSchema,
+  seatRuntimeHomeRecordsSchema,
 ];

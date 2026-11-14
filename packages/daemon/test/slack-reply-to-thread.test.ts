@@ -274,6 +274,60 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     const inboundRow = (ts: string, channel = "C-TEST") =>
       repo.getById(`qitem-slack-inbound-${createHash("sha256").update(`${channel}:${ts}`).digest("hex").slice(0, 20)}`);
 
+    it.each(["open", "closed"] as const)("#2990: an answer to a reply in the old shared root uses its arrival thread (%s)", async (state) => {
+      const humanReply = await connectInbound();
+      const work = await park();
+      await deliver(work.qitemId); // root 1.1
+      await resolvePark(work.qitemId);
+      const update = await repo.create({ ...request, sourceSession: "worker@rig", humanIntent: "update", body: "Merged.", replyTo: work.qitemId });
+      await deliver(update.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe("1.1");
+      repo.update({ qitemId: work.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "human-founder@kernel", summary: "Deploy it too?", evidenceRef: "/proof/deploy.md", transitionNote: "parked again" });
+      await deliver(work.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(new ThreadSeatMap(db).resolveByThread(`${posts.length}.1`)?.conversationId).toBe(work.qitemId);
+
+      await humanReply("1.1", "930.1");
+      expect(repo.getById(work.qitemId)?.state).toBe("blocked");
+      await vi.waitFor(() => expect(inboundRow("930.1")).toMatchObject({ destinationSession: "worker@rig", replyTo: null }));
+      if (state === "closed") new ThreadSeatMap(db).close("1.1");
+
+      const answer = await repo.create({ ...request, sourceSession: "worker@rig", humanIntent: "update", body: "On it.", replyTo: inboundRow("930.1")!.qitemId });
+      await deliver(answer.qitemId);
+      if (state === "open") {
+        expect(posts.at(-1)?.thread_ts).toBe("1.1");
+        expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+      } else {
+        expect(posts.at(-1)?.thread_ts).toBeUndefined();
+        expect(repo.getById(answer.qitemId)?.replyToFallback).toBe("root-closed (thread 1.1)");
+      }
+      expect(repo.getById(work.qitemId)?.state).toBe("blocked");
+    });
+
+    it("#2990: an answer to a reply in a superseded person-started root uses that root's mapped channel", async () => {
+      saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-DEFAULT", secretsEnvFile: join(home, "fake.env"), minimumLevelThatInterrupts: "NOTICE",
+        channelMap: [{ match: "operator-agent@kernel", channel: "C-AGENT" }] }, home);
+      const humanReply = await connectInbound();
+      await humanReply(undefined, "0.1", "C-PERSON");
+      const conversation = inboundRow("0.1", "C-PERSON")!;
+      expect(conversation).toMatchObject({ destinationSession: "operator-agent@kernel", replyTo: null });
+      expect(conversation.tags).toContain("slack-thread-root");
+
+      repo.update({ qitemId: conversation.qitemId, actorSession: "operator-agent@kernel", state: "blocked", blockedOn: "human-founder@kernel",
+        summary: "Which branch?", evidenceRef: "/proof/branches.md", transitionNote: "parked for a question" });
+      await deliver(conversation.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(new ThreadSeatMap(db).resolveByThread("1.1", String(posts.at(-1)?.channel))).toMatchObject({ conversationId: conversation.qitemId });
+
+      await humanReply("0.1", "0.2", "C-PERSON");
+      await vi.waitFor(() => expect(inboundRow("0.2", "C-PERSON")).toMatchObject({ destinationSession: "operator-agent@kernel", replyTo: null }));
+      const answer = await repo.create({ ...request, sourceSession: "operator-agent@kernel", humanIntent: "update", body: "On it.",
+        replyTo: inboundRow("0.2", "C-PERSON")!.qitemId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)).toMatchObject({ channel: "C-PERSON", thread_ts: "0.1" });
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+    });
+
     it("#822: an answer to a reply the person typed in an OpenRig thread posts in that thread", async () => {
       const humanReply = await connectInbound();
       const decision = await repo.create({ ...request, humanAlert: true });
@@ -791,6 +845,23 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await deliver(update.qitemId);
       expect(posts.at(-1)?.thread_ts).toBe("1.1");
       expect(repo.replyToChoiceFor(update.qitemId)).toEqual({ kind: "thread", threadTs: "1.1" });
+    });
+
+    it.each([
+      { actorSession: "author@rig" },
+      { actorSession: "author@rig", identityProvenance: "transport:v1" },
+      { actorSession: "daemon@kernel", identityProvenance: "transport:v1" },
+    ])("#2990: ignores an untrusted arrival-thread note (%j)", async (identity) => {
+      const first = await repo.create({ ...request, humanIntent: "update" });
+      await deliver(first.qitemId);
+      const inbound = await repo.create({ sourceSession: human, destinationSession: "author@rig", body: "thanks", nudge: false });
+      expect(repo.getById(inbound.qitemId)?.replyTo).toBeNull();
+      repo.update({ ...identity, qitemId: inbound.qitemId, transitionNote: "slack-arrival-thread thread_ts=1.1 channel=C-TEST" });
+
+      const answer = await repo.create({ ...request, humanIntent: "update", replyTo: inbound.qitemId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBe(`root-missing (qitem ${inbound.qitemId})`);
     });
 
     it("falls back when the referenced root lives in a channel other than the configured one", async () => {

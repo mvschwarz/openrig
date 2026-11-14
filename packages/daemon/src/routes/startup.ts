@@ -20,6 +20,8 @@ import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 import { currentRestoreSnapshot } from "../domain/current-restore-snapshot.js";
+import { latestRuntimeHomeRecord, observeRuntimeHome, readRuntimeHomeState, selectedHomePlan, type RuntimeHomeRecordRef } from "../domain/seat-runtime-home-record.js";
+import { transportSenderSession } from "./require-sender-identity.js";
 import { HISTORY_REF_RE, listSharedHistories } from "../domain/shared-history-selection.js";
 import { deriveCanonicalSessionName, deriveSessionName } from "../domain/session-name.js";
 import { observeSolePane } from "../domain/pane-binding-observation.js";
@@ -144,7 +146,13 @@ function selectedState(c: Context, rigId: string, nodeId: string, refs: HistoryR
   let permissionPlan: ReturnType<typeof selectedPermissionFacts>;
   try { permissionPlan = selectedPermissionFacts(c, rigId, nodeId, savedNode.runtime ?? ""); }
   catch { return { permissionUnavailable: true }; }
-  const stable = { rig, node, savedSelection, stableSource, context, permissions, permissionPlan };
+  // A recorded runtime home binds here too, even one recorded with the value the seat already had, and so does which home
+  // this resume uses for the selected original.
+  const runtimeHomeRecord = latestRuntimeHomeRecord(db, nodeId);
+  const homeRuntime = (node as { runtime?: string | null }).runtime;
+  const runtimeHomePlan = homeRuntime === "codex" || homeRuntime === "claude-code"
+    ? selectedHomePlan(db, nodeId, homeRuntime, selectedRows[0]!.resumeToken ?? null) : null;
+  const stable = { rig, node, savedSelection, stableSource, context, permissions, permissionPlan, runtimeHomeRecord, runtimeHomePlan };
   const native = createHash("sha256").update(JSON.stringify(stable)).digest("hex");
   const histories = db.prepare("SELECT id, status, resume_type, resume_token, restore_policy FROM sessions WHERE node_id = ? ORDER BY id").all(nodeId);
   const binding = one("SELECT * FROM bindings WHERE node_id = ?", nodeId);
@@ -152,6 +160,31 @@ function selectedState(c: Context, rigId: string, nodeId: string, refs: HistoryR
   const review = createHash("sha256").update(JSON.stringify({ stable, histories, binding, occupancy,
     snapshotId: snapshot.id, historySessionId: refs.historySessionId })).digest("hex");
   return { review, native };
+}
+
+/** The runtime home the selected resume launches in, and any operator-recorded home beside the one the snapshot
+ *  captured, with whether the current record was made for the selected history's conversation. A record made for
+ *  another conversation, or a correction newer than the snapshot's, is shown here and bound by the review's revision;
+ *  the conversation ids themselves aren't repeated. */
+function selectedRuntimeHome(c: Context, node: Node, snapshot: Snapshot, historySessionId: string) {
+  if (node.runtime !== "codex" && node.runtime !== "claude-code") return null;
+  const state = readRuntimeHomeState(repo(c).db, sessions(c), node.id, node.runtime);
+  const selectedToken = snapshot.data.sessions.find(row => row.id === historySessionId)?.resumeToken ?? null;
+  const shown = (record: RuntimeHomeRecordRef | null | undefined) => record
+    ? { revision: record.revision, home: record.home, slot: record.slot, operationId: record.operationId, recordedAt: record.recordedAt } : null;
+  // Which home this resume uses: the one recorded for the selected original (as it stands, or written back first), or the
+  // seat's home as set, with no record revision for this original. Whether the selected original's record is in that
+  // home is shown as context, never as a stop.
+  const plan = selectedHomePlan(repo(c).db, node.id, node.runtime, selectedToken);
+  const home = plan.kind === "as_set" ? state.home : plan.record.home;
+  const uses = { ...(plan.kind === "as_set"
+    ? { plan: "as_set" as const, home, why: plan.why, ...(plan.otherConversation ? { otherConversationRecord: { revision: plan.otherConversation.revision } } : {}) }
+    : { plan: plan.kind === "apply" ? "apply_recorded_for_selected" as const : "as_recorded" as const, home, revision: plan.record.revision }),
+    ...(home && selectedToken ? { selectedInHome: observeRuntimeHome(home, node.runtime, selectedToken).original } : {}) };
+  return { value: state.home, source: state.source, authentication: "unconfirmed" as const,
+    record: shown(state.record), snapshotRecord: shown(snapshot.data.runtimeHomeRecordsByNode?.[node.id]),
+    recordedFor: state.record ? state.record.original !== null && state.record.original === selectedToken ? "selected_history" : "another_conversation" : null,
+    uses };
 }
 
 async function observeSeat(c: Context, rig: RigWithRelations, node: Node) {
@@ -312,6 +345,7 @@ startupRoutes.get("/:rigId/nodes/:nodeId", async (c) => {
   try { permission = selectedPermissionFacts(c, rigId, nodeId, facts.node.runtime ?? ""); }
   catch { return c.json({ ok: false, code: "permission_unavailable", message: "The selected seat's saved permission choice needs repair before launch." }, 409); }
   const effort = readSeatEffort(repo(c).db, nodeId);
+  const runtimeHome = selectedRuntimeHome(c, facts.node, facts.snapshot, refs.historySessionId);
   return c.json({ ok: true, contract: "startup-history.v1", rigId, nodeId, logicalId: facts.node.logicalId,
     snapshotId: refs.snapshotId, historySessionId: refs.historySessionId, history: selection.histories[0],
     forecast, observed: { state: observed.state, sessionName: observed.sessionName },
@@ -319,7 +353,8 @@ startupRoutes.get("/:rigId/nodes/:nodeId", async (c) => {
       effort: { value: effort?.choice ?? capturedNode?.effort ?? null,
         source: effort?.choice ? "saved_choice" : "snapshot" },
       permission,
-      codexProfile: { value: facts.node.codexConfigProfile ?? null, source: "current_node" } },
+      codexProfile: { value: facts.node.codexConfigProfile ?? null, source: "current_node" },
+      ...(runtimeHome ? { runtimeHome } : {}) },
     revision: state.review, mutated: false });
 });
 
@@ -336,6 +371,11 @@ startupRoutes.post("/:rigId/nodes/:nodeId", async (c) => {
     if (state && "permissionUnavailable" in state) return c.json({ ok: false, code: "permission_unavailable",
       message: "The selected seat's saved permission choice needs repair before launch." }, 409);
     if (!facts || !state || refs.revision !== state.review) return c.json({ ok: false, code: "selection_changed", message: "The selected seat or history changed. Refresh the review." }, 409);
+    // The review's own revision binds which home this resume uses for the selected original.
+    const selectedToken = facts.snapshot.data.sessions.find(row => row.id === refs.historySessionId)?.resumeToken ?? null;
+    const homeRuntime = facts.node.runtime === "codex" || facts.node.runtime === "claude-code" ? facts.node.runtime : null;
+    const homePlan = homeRuntime ? selectedHomePlan(repo(c).db, nodeId, homeRuntime, selectedToken) : null;
+    const bound = { review: state.review, native: state.native };
     const observed = await observeSeat(c, facts.rig, facts.node);
     if (observed.state !== "stopped") return c.json({ ok: false, code: observed.state, message: "The selected seat is running or its terminal state is uncertain. No resume was started." }, 409);
     const prerequisites = await defaultProbeRuntimes();
@@ -344,16 +384,47 @@ startupRoutes.post("/:rigId/nodes/:nodeId", async (c) => {
       const again = listSharedHistories(sharedHistoryDeps(c), rigId, nodeId, refs);
       const current = selectedFacts(c, rigId, nodeId, refs);
       const revision = current && selectedState(c, rigId, nodeId, refs, current.snapshot);
-      return again.ok && !!revision && "review" in revision && revision.review === state.review;
+      return again.ok && !!revision && "review" in revision && revision.review === bound.review;
     };
     if (!beforeEffect()) return c.json({ ok: false, code: "selection_changed", message: "The selected seat or history changed during prerequisites. No resume was started." }, 409);
+    // The selected original's recorded home goes back into the seat's slot before the launch, as a new revision for that
+    // original, so the launch reads it as it reads any home. The rest of the apply is bound to the state after that write.
+    let appliedHome: RuntimeHomeRecordRef | null = null;
+    if (homePlan?.kind === "apply" && homeRuntime && selectedToken) {
+      appliedHome = seatLifecycleService(c).applySelectedRuntimeHome({ nodeId, runtime: homeRuntime, rigId, logicalId: facts.node.logicalId,
+        plan: homePlan, original: selectedToken, operationId: `resume-${bound.review.slice(0, 40)}`, operator: transportSenderSession(c) ?? null });
+      const rebound = appliedHome && selectedState(c, rigId, nodeId, refs, facts.snapshot);
+      if (!appliedHome || !rebound || !("review" in rebound)) {
+        return c.json({ ok: false, code: "selection_changed", message: "The seat's recorded runtime home changed before launch. No resume was started." }, 409);
+      }
+      bound.review = rebound.review;
+      bound.native = rebound.native;
+    }
+    // The home this resume is bound to, fixed before the launch: a record made during the launch's await doesn't change
+    // what's reported. as_set carries no record revision for this original.
+    const attempted = !homeRuntime || !homePlan ? null : appliedHome
+      ? { home: appliedHome.home, revision: appliedHome.revision, recordedFor: "selected_history" as const, appliedBeforeLaunch: true }
+      : homePlan.kind === "as_recorded" ? { home: homePlan.record.home, revision: homePlan.record.revision, recordedFor: "selected_history" as const, appliedBeforeLaunch: false }
+        : { home: readRuntimeHomeState(repo(c).db, sessions(c), nodeId, homeRuntime).home, revision: null, recordedFor: null, appliedBeforeLaunch: false,
+          why: homePlan.kind === "as_set" ? homePlan.why : undefined,
+          ...(homePlan.kind === "as_set" && homePlan.otherConversation ? { otherConversationRecord: { revision: homePlan.otherConversation.revision } } : {}) };
+    // The seat's conversation before the launch: a written-back home is put back only once it's current again.
+    const originalBefore = appliedHome && homeRuntime ? readRuntimeHomeState(repo(c).db, sessions(c), nodeId, homeRuntime).original : null;
+    const diagnosticTokens = () => {
+      const tokens = new Set<string>(facts.snapshot.data.sessions.filter(row => row.nodeId === nodeId)
+        .map(row => row.resumeToken).filter((token): token is string => !!token));
+      for (const row of repo(c).db.prepare("SELECT resume_token FROM sessions WHERE node_id = ?").all(nodeId) as Array<{ resume_token: string | null }>) {
+        if (row.resume_token) tokens.add(row.resume_token);
+      }
+      return [...tokens];
+    };
     let launchedBindingId: string | undefined;
     const beforeNative = (resultSessionId?: string, bindingId?: string) => {
       const rig = repo(c).getRig(rigId);
       if (!rig?.nodes.some(node => node.id === nodeId && node.logicalId === facts.node.logicalId)) return false;
       if (dep<SnapshotRepository>(c, "snapshotRepo").findLatestRestoreUsable(rigId)?.id !== refs.snapshotId) return false;
       const current = selectedState(c, rigId, nodeId, refs, facts.snapshot);
-      if (!current || !("native" in current) || current.native !== state.native) return false;
+      if (!current || !("native" in current) || current.native !== bound.native) return false;
       if (!resultSessionId) return true;
       const result = repo(c).db.prepare("SELECT node_id, session_name, status FROM sessions WHERE id = ?").get(resultSessionId) as
         { node_id: string; session_name: string; status: string } | undefined;
@@ -371,25 +442,51 @@ startupRoutes.post("/:rigId/nodes/:nodeId", async (c) => {
       const running = repo(c).db.prepare("SELECT id FROM sessions WHERE node_id = ? AND status = 'running'").all(nodeId);
       return running.length === 0;
     };
-    const result = await dep<RestoreOrchestrator>(c, "restoreOrchestrator").launchSingleNode(rigId, facts.node.logicalId, {
-      snapshotId: refs.snapshotId, adapters: dep<Record<string, RuntimeAdapter>>(c, "runtimeAdapters"), fsOps: { exists: existsSync },
-      selectedHistory: { nodeId, historySessionId: refs.historySessionId, beforeEffect, beforeRegistration, beforeNative },
-    });
+    let result: Awaited<ReturnType<RestoreOrchestrator["launchSingleNode"]>>;
+    try {
+      result = await dep<RestoreOrchestrator>(c, "restoreOrchestrator").launchSingleNode(rigId, facts.node.logicalId, {
+        snapshotId: refs.snapshotId, adapters: dep<Record<string, RuntimeAdapter>>(c, "runtimeAdapters"), fsOps: { exists: existsSync },
+        selectedHistory: { nodeId, historySessionId: refs.historySessionId, beforeEffect, beforeRegistration, beforeNative },
+      });
+    } catch (error) {
+      // An error out of the launch can come before or after the terminal or the native resume, so what it left is
+      // unknown: a written-back home stays as applied, nothing is put back, and the result names that home.
+      return c.json({ ok: false, rigId, nodeId, snapshotId: refs.snapshotId, historySessionId: refs.historySessionId,
+        code: "launch_error", sourceSessionId: refs.historySessionId, resultSessionId: null,
+        message: "The launch failed with an error, so whether the selected conversation started isn't known. Inspect this seat before retrying.",
+        error: redactDiagnostic(error instanceof Error ? error.message : String(error), diagnosticTokens()),
+        ...(attempted ? { runtimeHome: { attempted, sessionRegistered: null,
+          ...(appliedHome ? { putBack: null, notPutBack: "outcome_unknown" } : {}) } } : {}) }, 500);
+    }
     const outcome = result.launched?.[0];
     const ok = result.ok && outcome?.status === "resumed" && outcome.sourceSessionId === refs.historySessionId
       && !!outcome.resultSessionId && !!launchedBindingId && beforeNative(outcome.resultSessionId, launchedBindingId);
-    const tokens = new Set<string>(facts.snapshot.data.sessions.filter(row => row.nodeId === nodeId)
-      .map(row => row.resumeToken).filter((token): token is string => !!token));
-    for (const row of repo(c).db.prepare("SELECT resume_token FROM sessions WHERE node_id = ?").all(nodeId) as Array<{ resume_token: string | null }>) {
-      if (row.resume_token) tokens.add(row.resume_token);
-    }
-    const diagnosticTokens = [...tokens];
+    // A written-back home is put back only when the launch is known to have been rolled back or never to have started, and
+    // the seat's conversation is the one it had before. Known means one of the orchestrator's positive facts: its
+    // compensation left no terminal (none created, or tmux confirmed the stop) and put the earlier state back, or it
+    // returned before the launch (notStarted, or no outcome for this seat), so no session was registered and no resume
+    // was sent. A terminal registered without a resume, an unconfirmed creation or stop, a thrown launch, a confirmed
+    // resume (a Claude conversation continued under a new id included) and an outcome that isn't known all keep it, and
+    // the result says which.
+    const rolledBack = !!appliedHome && !!homeRuntime && !ok && (!outcome || outcome.compensated === true || outcome.notStarted === true)
+      && readRuntimeHomeState(repo(c).db, sessions(c), nodeId, homeRuntime).original === originalBefore;
+    const putBack = appliedHome && homeRuntime && rolledBack
+      ? seatLifecycleService(c).revertSelectedRuntimeHome({ nodeId, runtime: homeRuntime, rigId, logicalId: facts.node.logicalId,
+        applied: appliedHome, operator: transportSenderSession(c) ?? null })
+      : null;
+    const notPutBack = putBack ? undefined : ok ? "resume_confirmed" : rolledBack ? "changed_since_apply" : "outcome_unknown";
+    const tokens = diagnosticTokens();
     const response = { ok, rigId, nodeId, snapshotId: refs.snapshotId, historySessionId: refs.historySessionId,
       code: !ok && outcome?.status === "resumed" ? "resume_unconfirmed" : outcome?.status ?? result.code ?? "resume_unconfirmed",
       sourceSessionId: refs.historySessionId, resultSessionId: outcome?.resultSessionId ?? null,
-      message: redactDiagnostic(outcome?.error ?? result.message ?? (ok ? "Selected native history resumed and joined." : "Selected resume was not confirmed; inspect this seat before retrying."), diagnosticTokens),
-      warnings: result.warnings?.map(warning => redactDiagnostic(warning, diagnosticTokens)),
-      attentionEvidence: redactDiagnostic(outcome?.attentionEvidence, diagnosticTokens) };
+      message: redactDiagnostic(outcome?.error ?? result.message ?? (ok ? "Selected native history resumed and joined." : "Selected resume was not confirmed; inspect this seat before retrying."), tokens),
+      warnings: result.warnings?.map(warning => redactDiagnostic(warning, tokens)),
+      attentionEvidence: redactDiagnostic(outcome?.attentionEvidence, tokens),
+      // The home this resume was bound to and attempted, and whether OpenRig registered a terminal session for it. That's
+      // not the native resume: whether that ran and took is `ok` and `code`. A written-back home's put-back, or why it
+      // stayed. The conversation id itself isn't repeated.
+      ...(attempted ? { runtimeHome: { attempted, sessionRegistered: !!outcome?.resultSessionId,
+        ...(appliedHome ? { putBack: putBack ? { home: putBack.home, revision: putBack.revision } : null, ...(notPutBack ? { notPutBack } : {}) } : {}) } } : {}) };
     return c.json(response, ok ? 200 : 409);
   });
 });

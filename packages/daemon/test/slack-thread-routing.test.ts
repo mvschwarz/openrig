@@ -210,6 +210,26 @@ describe("inbound routing — the four classes, wrong-seat ABSENCE pinned", () =
     expect(creates[0]!.tags).not.toContain("unrouted-signal");
   });
 
+  it("#2990: a superseded root records the arrival thread without gate correlation; the latest root only correlates", () => {
+    const map = new ThreadSeatMap(mapDb(), clock);
+    const conversation = { channel: "C1", human: "mike@external", seat: "dev-driver@v-openrig-build", conversationId: "q-reparked" };
+    map.open({ ...conversation, threadTs: "1.1" });
+    map.open({ ...conversation, threadTs: "2.1" });
+    const route = makeThreadRouteResolver({ map, unroutedDestination: "orch-lead@v-openrig-build" });
+
+    const oldRoot = route(ev("900.1", "1.1"));
+    expect(oldRoot).not.toHaveProperty("correlationQitemId");
+    expect(oldRoot).toMatchObject({
+      destination: conversation.seat,
+      tags: expect.arrayContaining(["reply-to:q-reparked"]),
+      arrivalThread: { threadTs: "1.1", channel: "C1" },
+    });
+
+    const latestRoot = route(ev("900.2", "2.1"));
+    expect(latestRoot).toMatchObject({ correlationQitemId: conversation.conversationId });
+    expect(latestRoot).not.toHaveProperty("arrivalThread");
+  });
+
   it("CLOSED thread: STILL exactly the mapped seat (closure is not a routing black hole)", async () => {
     const { router, creates } = harness();
     await router.route(ev("2.1", "T-CLOSED"));

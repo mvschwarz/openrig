@@ -199,10 +199,13 @@ export interface InboundDeps {
   /** S10 thread routing (deterministic, zero inference): resolve the destination + tags for an
    *  admitted event. Absent → every event lands on the static `destination` (the pre-routing
    *  shape, and the fallback the tests pin). */
-  resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[]; correlationQitemId?: string; routeClass?: string };
+  resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[]; correlationQitemId?: string; arrivalThread?: { threadTs: string; channel: string }; routeClass?: string };
   /** Open a thread root for a person's top-level message (its own ts), so the seat's
    *  `--reply-to` reply and later updates land under it. Absent: nothing is minted. */
   mintThread?: (m: { threadTs: string; channel: string; human: string; seat: string; conversationId: string }) => void;
+  /** Record the thread a reply arrived in without correlating it to a human gate, so the seat's
+   *  `--reply-to` answer returns there. Absent: nothing is recorded. */
+  recordArrivalThread?: (input: { qitemId: string; threadTs: string; channel: string }) => void;
   /** Continue an exact human gate through the existing Mission Control resolve primitive. */
   /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does. */
   resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
@@ -480,6 +483,9 @@ export class InboundRouter {
           // The row is delivered; only threading its answer is lost, so say so and carry on.
           this.deps.log?.(`thread root not recorded for ${qitemId} (ts=${ts}): ${(e as Error).message}; its reply will post top-level`);
         }
+      }
+      if (!replayedAnswer && route.arrivalThread) {
+        this.deps.recordArrivalThread?.({ qitemId, threadTs: route.arrivalThread.threadTs, channel: route.arrivalThread.channel });
       }
       this.deps.seen.mark(eventId, "landed"); // durable qitem exists → safe to mark
       this.deps.log?.(`qitem ${qitemId} -> ${route.destination} (ts=${ts})`);

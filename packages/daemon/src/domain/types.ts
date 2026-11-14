@@ -1,4 +1,5 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record-types.js";
 
 export interface Rig {
   id: string;
@@ -159,6 +160,9 @@ export type RigEvent =
   | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
   | { type: "node.model_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "seat.runtime_home_recorded"; rigId: string; nodeId: string; logicalId: string; runtime: string; from: string | null; to: string;
+      slot: "account_home" | "member_env"; revision: number; operationId: string; original: string | null; occupantGeneration: string | null;
+      reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -267,11 +271,13 @@ export type RigEvent =
        *  record (not just the command response) carries what primed the successor:
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
-        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
+        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string };
       /** #2456: the required startup files the successor started without (a start would have failed), and that successor's
        *  session. The seat list marks the seat while this session is its current one. */
-      startedWithoutRequired?: string[]; successorSessionId?: string }
+      startedWithoutRequired?: string[]; successorSessionId?: string;
+      /** #2985: the handover adopted the running successor of an earlier failed one (`rig seat handover --recover`). */
+      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string } }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -460,6 +466,10 @@ export interface SnapshotData {
   continuityStates?: ContinuityState[];
   nodeStartupContext?: Record<string, NodeStartupSnapshot | null>;
   envReceipt?: EnvReceipt | null;
+  /** Each seat's latest operator-recorded runtime home at capture: the home, the original conversation and occupant it
+   *  was recorded against, and its revision. A restore review shows it beside the seat's current record, so a later
+   *  correction is a visible choice bound by the review's revision. Absent when no seat has one. */
+  runtimeHomeRecordsByNode?: Record<string, RuntimeHomeRecordRef>;
 }
 
 export type SnapshotOccupantState =
@@ -551,6 +561,12 @@ export interface RestoreNodeResult {
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
   sourceSessionId?: string;
   resultSessionId?: string;
+  /** Set only by an explicit selected-history startup: this launch was rolled back, and the seat's binding and sessions
+   *  as they were before it were put back. */
+  compensated?: true;
+  /** Set only by an explicit selected-history startup: this seat's restore returned before its launch, so no terminal was
+   *  started, no session registered and no resume sent. */
+  notStarted?: true;
   // L3: `attention_required` is set when the post-launch probe detects a
   // Claude resume-selection prompt. `operator_recovered` is the terminal
   // outcome after `restore.outcome_reconciled`; never produced directly by

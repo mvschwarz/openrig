@@ -12,6 +12,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { projectSliceHeader, projectSliceScope, type ScopeFsDeps, type SliceScopeDetail } from "../domain/scope/scope-view-projection.js";
+import { aggregateFleetScopes, type LocalScopesCounts } from "../domain/hosts/fleet-scopes.js";
+import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 
 const realFs: ScopeFsDeps = {
   readBytes: p => { try { return fs.readFileSync(p); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; } },
@@ -28,6 +30,24 @@ function rootOf(c: Parameters<typeof selectedProject>[0]): { root: string } | { 
   if (!indexer) return { error: Response.json({ error: "slices_indexer_unavailable" }, { status: 503 }) };
   if (!indexer.isReady()) return { error: Response.json({ error: "slices_root_not_configured" }, { status: 503 }) };
   return { root: indexer.slicesRoot };
+}
+
+/** One counts row per slice directory — the cheap Projects-list projection.
+ *  Shared by the local list route (`?counts=1`) and the fleet view's local leg,
+ *  so both serve the same row for the same slice. */
+function countsRow(sliceName: string, sliceDir: string, selected: ReturnType<typeof selectedProject>): Record<string, unknown> | null {
+  let sourcePath: string | undefined;
+  try {
+    if (selected) sourcePath = workSource(selected.root, sliceDir, false);
+    if (selected) workSource(selected.root, sliceDir);
+    const header = projectSliceHeader(realFs, sliceDir);
+    if (!header) return null;
+    const { content: _content, fm: _fm, ...row } = header;
+    return { ...row, ...(sourcePath ? { sourcePath } : {}) };
+  } catch (err) {
+    return { dirName: sliceName, id: null, displayName: sliceName, error: (err as Error).message, ...(sourcePath ? { sourcePath } : {}),
+      status: null, stage: null, locks: { spec: null, delivery: null } };
+  }
 }
 
 export function scopesRoutes(): Hono {
@@ -64,21 +84,7 @@ export function scopesRoutes(): Hono {
           intent: "", miniRequirements: [], proofContract: [], progressPath: null, specShaShort: null, prdExists: false, narrative: null };
       }
     };
-    const countsFor = (missionName: string, dirName: string) => {
-      const sliceDir = path.join(r.root, missionName, "slices", dirName);
-      let sourcePath: string | undefined;
-      try {
-        if (selected) sourcePath = workSource(selected.root, sliceDir, false);
-        if (selected) workSource(selected.root, sliceDir);
-        const header = projectSliceHeader(realFs, sliceDir);
-        if (!header) return null;
-        const { content: _content, fm: _fm, ...row } = header;
-        return { ...row, ...(sourcePath ? { sourcePath } : {}) };
-      } catch (err) {
-        return { dirName, id: null, displayName: dirName, error: (err as Error).message, ...(sourcePath ? { sourcePath } : {}),
-          status: null, stage: null, locks: { spec: null, delivery: null } };
-      }
-    };
+    const countsFor = (missionName: string, dirName: string) => countsRow(dirName, path.join(r.root, missionName, "slices", dirName), selected);
     const missionFor = (name: string) => {
       if (selected) projectMission(selected, name);
       const dir = path.join(r.root, name);
@@ -132,6 +138,72 @@ export function scopesRoutes(): Hono {
     const content = realFs.readFile(p);
     // The narrative DISPLAY (plan atom 3): raw artifact bytes; explicitly not a data source.
     return content !== null ? c.json({ path: p, content }) : c.json({ error: "narrative_not_found" }, 404);
+  });
+
+
+  // #3093 first increment — the FLEET PROJECTS READ-VIEW (read-only, additive).
+  // The local leg is the SAME counts projection `?counts=1` serves; each registered
+  // HTTP host contributes its own rows, host-attributed, beside per-host status.
+  // The local routes above are untouched.
+  app.get("/fleet", async (c) => {
+    const selected = selectedProject(c);
+    // The local root is resolved WITHOUT failing the route: an operator-only
+    // machine (no missions root configured) still sees every remote host, with
+    // the local leg labelled unavailable instead of a 503 hiding the fleet.
+    const localRoot = (): { root: string } | { reason: string } => {
+      if (selected) return { root: selected.missionsRoot };
+      const indexer = c.get("sliceIndexer" as never) as SliceIndexer | undefined;
+      if (!indexer) return { reason: "slices indexer unavailable on this daemon" };
+      if (!indexer.isReady()) return { reason: "no local missions root configured" };
+      return { root: indexer.slicesRoot };
+    };
+    const listLocalScopes = (): LocalScopesCounts => {
+      const root = localRoot();
+      if ("reason" in root) return { project: selected?.id ?? null, missions: [], error: root.reason };
+      // The ROOT listing has its own handler: a missing root (ENOENT) is an
+      // empty-but-honest workspace; any other root failure (EACCES, EIO…) is
+      // the local leg's own error state, never an empty list stamped ok.
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(root.root);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return { project: selected?.id ?? null, missions: [] };
+        return { project: selected?.id ?? null, missions: [], error: `local missions read failed: ${(err as Error).message}` };
+      }
+      // Each ENTRY is checked in its own handler: one vanished entry (a dangling
+      // symlink, a folder removed between listing and checking) is skipped, and
+      // any other per-entry failure reports on the leg — one bad entry must not
+      // hide every local mission behind a healthy-looking empty list.
+      const missionNames: string[] = [];
+      for (const e of entries) {
+        try {
+          if (fs.statSync(path.join(root.root, e)).isDirectory()) missionNames.push(e);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+          return { project: selected?.id ?? null, missions: [], error: `local missions read failed at '${e}': ${(err as Error).message}` };
+        }
+      }
+      const missions = missionNames.map((name) => {
+        try {
+          if (selected) projectMission(selected, name);
+          const dir = path.join(root.root, name);
+          const rows: Record<string, unknown>[] = [];
+          for (const s of realFs.listDir(path.join(dir, "slices")).filter((e) => realFs.isDirectory(path.join(dir, "slices", e)))) {
+            const row = countsRow(s, path.join(dir, "slices", s), selected);
+            if (row) rows.push(row);
+          }
+          return { mission: name, slices: rows };
+        } catch (err) { return { mission: name, slices: [], error: (err as Error).message }; }
+      });
+      return { project: selected?.id ?? null, missions };
+    };
+    const registryLoader = (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ?? loadHostRegistry;
+    const payload = await aggregateFleetScopes({
+      listLocalScopes,
+      loadRegistry: registryLoader,
+      fetchImpl: c.get("remoteFetchImpl" as never) as typeof fetch | undefined,
+    });
+    return c.json(payload);
   });
 
   return app;

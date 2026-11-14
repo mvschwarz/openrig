@@ -112,8 +112,9 @@ including its `bwrap` AppArmor profile guidance; changes to AppArmor are the own
 **Choose permissions before starting the team.** Ordinary OpenRig launches use
 Codex's `-s workspace-write`, with approval policy from your native configuration,
 or Claude Code's `acceptEdits`, which still leaves commands subject to native
-rules and prompts. A team seat with no permission policy, per-seat choice or
-(for Codex) named profile also gets a per-launch
+rules and prompts. A team seat with no permission policy (or with `standard` or
+`open`, whose rules aren't applied at launch), per-seat choice or (for Codex)
+named profile also gets a per-launch
 [team default](rig-spec.md#team-launch-defaults): Claude runs ordinary `rig`
 commands, project reads and common tests without prompting, while lifecycle
 commands such as `rig up` and `rig down` still ask; Codex also gets the OpenRig
@@ -208,8 +209,8 @@ curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/i
 
 The same command without `--dry-run`,
 `curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh`, installs the
-latest published `@openrig/cli` with `npm install -g`,
-runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
+latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
+present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
 `FAILED [n/4] <command or check> (exit <code>)` for steps 1–3. If step 4 is not ready, it reports
 `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any Fix, then rerun
@@ -308,11 +309,12 @@ team. `rig daemon start --no-kernel` is for automation or an explicit request to
 omit the kernel; it leaves you without that operator.
 
 On a fresh instance, explicit daemon startup chooses the kernel variant from
-successful native auth probes: Claude alone, Codex alone, or both. It starts the
-kernel in the background without a project starter. An absent unused provider is
-fine; if both accounts are authenticated, the kernel uses both even when your
-later project uses just one. A request to use only one provider for everything
-is a separate choice.
+the providers selected by `rig setup --providers` that pass native auth probes:
+Claude alone, Codex alone, or both. If no choice was recorded, it considers every
+signed-in provider. `OPENRIG_PROVIDER_SELECTED` in the daemon's environment
+overrides the saved choice. It starts the kernel in the background without a
+project starter. An absent unused provider is fine. The kernel choice and a
+later project's provider choice are separate.
 
 `/api/kernel/status` retains the chosen template (`rig.yaml`,
 `rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and
@@ -1287,7 +1289,7 @@ and `off` for ordinary automatic sends (`--enabled false`).
 In the shipped `starter`, `dev-build` runs Claude Code. For a **Claude Code** seat,
 OpenRig normally passes `--permission-mode acceptEdits`: edits can proceed, while
 other actions follow native rules and prompts. For a seat with no permission
-policy or per-seat choice it also passes the per-launch team default (`--settings` allowing ordinary
+policy (or with `standard` or `open`) and no per-seat choice it also passes the per-launch team default (`--settings` allowing ordinary
 `rig` commands, project reads and common tests, with a session hook asking for
 lifecycle commands while allowing literal help forms such as `rig down --help`);
 personal and project rules still apply. Nothing is written to your settings files. To explicitly select the bypass launch flag for that rig:

@@ -62,9 +62,11 @@ function assertDefault(cmd: string, runtime: string) {
   }
 }
 describe("team launch permission defaults", () => {
-  for (const runtime of ["claude-code", "codex"]) for (const mode of ["fresh", "resume", "fork"] as const) {
-    it(`${runtime} ${mode}: default reaches real launch command without permission files`, async () => {
-      const f = fixture(runtime), t = transport(), b = f.store.apply(f.binding, runtime);
+  for (const runtime of ["claude-code", "codex"]) for (const mode of ["fresh", "resume", "fork"] as const) for (const policy of [null, "builtin:standard", "builtin:open"]) {
+    it(`${runtime} ${mode}${policy ? ` with ${policy} recorded` : ""}: default reaches real launch command without permission files`, async () => {
+      const f = fixture(runtime), t = transport();
+      if (policy) f.db.prepare("UPDATE rigs SET permission_policy=? WHERE id=?").run(policy, f.rig.id);
+      const b = f.store.apply(f.binding, runtime);
       const adapter = runtime === "claude-code" ? new ClaudeCodeAdapter(t) : new CodexRuntimeAdapter(t);
       await adapter.launchHarness(b, { name: f.session.sessionName,
         ...(mode === "resume" ? { resumeToken: "original" } : {}),
@@ -77,7 +79,7 @@ describe("team launch permission defaults", () => {
   for (const runtime of ["claude-code", "codex"]) {
     it(`${runtime}: authored rig/member choices including none take precedence`, () => {
       const f = fixture(runtime);
-      for (const policy of ["none", "builtin:locked", "builtin:standard", "builtin:yolo", "policy/custom.md"]) {
+      for (const policy of ["none", "builtin:locked", "builtin:yolo", "builtin:auto", "policy/custom.md"]) {
         for (const table of ["rigs", "nodes"]) {
           f.db.prepare(`UPDATE ${table} SET permission_policy=? WHERE id=?`).run(policy, table === "rigs" ? f.rig.id : f.node.id);
           expect(f.store.apply(f.binding, runtime)).toMatchObject({ teamPermissionDefault: false });
@@ -85,6 +87,30 @@ describe("team launch permission defaults", () => {
         }
       }
       expect(f.store.apply(f.binding, runtime)).toMatchObject({ teamPermissionDefault: true });
+    });
+    it(`${runtime}: a recorded standard or open keeps the team default, and the member's own choice decides over the rig's`, () => {
+      const f = fixture(runtime);
+      const set = (table: "rigs" | "nodes", policy: string | null) =>
+        f.db.prepare(`UPDATE ${table} SET permission_policy=? WHERE id=?`).run(policy, table === "rigs" ? f.rig.id : f.node.id);
+      for (const policy of ["builtin:standard", "builtin:open"]) {
+        for (const table of ["rigs", "nodes"] as const) {
+          set(table, policy);
+          expect(f.store.apply(f.binding, runtime)).toMatchObject({ teamPermissionDefault: true });
+          set(table, null);
+        }
+      }
+      // A member's locked, none or custom policy wins over the rig's standard; a member's standard wins over the rig's locked.
+      set("rigs", "builtin:standard");
+      for (const member of ["builtin:locked", "none", "policy/custom.md"]) {
+        set("nodes", member);
+        expect(f.store.apply(f.binding, runtime)).toMatchObject({ teamPermissionDefault: false });
+      }
+      set("rigs", "builtin:locked");
+      set("nodes", "builtin:open");
+      expect(f.store.apply(f.binding, runtime)).toMatchObject({ teamPermissionDefault: true });
+      // An explicit seat choice still replaces it.
+      f.store.write(f.node.id, { runtime: runtime as "codex" | "claude-code", mode: runtime === "codex" ? "floor" : "plan" }, "person", "selected");
+      expect(f.store.apply(f.binding, runtime)).toMatchObject({ teamPermissionDefault: false });
     });
     it(`${runtime}: an explicit seat choice overrides a stale team marker`, () => {
       const f = fixture(runtime);
@@ -128,6 +154,22 @@ describe("team launch permission defaults", () => {
     for (const runtime of ["pi", "terminal"]) expect(f.store.apply(f.binding, runtime)).toMatchObject({ teamPermissionDefault: false });
     const kernel = fixture("codex", "kernel");
     expect(kernel.store.apply(kernel.binding, "codex")).toMatchObject({ teamPermissionDefault: false, kernelAuthority: true, launchPosture: "full_bypass" });
+  });
+  it("a recorded standard leaves the kernel's seats, a named Codex profile and a Claude seat's own rules as they were", () => {
+    for (const runtime of ["codex", "claude-code"]) {
+      const kernel = fixture(runtime, "kernel");
+      kernel.db.prepare("UPDATE rigs SET permission_policy='builtin:standard' WHERE id=?").run(kernel.rig.id);
+      expect(kernel.store.apply(kernel.binding, runtime)).toMatchObject({ teamPermissionDefault: false, kernelAuthority: false });
+    }
+    const codex = fixture("codex");
+    codex.db.prepare("UPDATE rigs SET permission_policy='builtin:standard' WHERE id=?").run(codex.rig.id);
+    codex.db.prepare("UPDATE nodes SET codex_config_profile='chosen' WHERE id=?").run(codex.node.id);
+    expect(codex.store.apply(codex.binding, "codex")).toMatchObject({ teamPermissionDefault: false });
+    // A seat's own native rules may be the policy applied, so they keep their meaning alone.
+    const claude = fixture("claude-code");
+    claude.db.prepare("UPDATE rigs SET permission_policy='builtin:standard' WHERE id=?").run(claude.rig.id);
+    claude.db.prepare("UPDATE nodes SET claude_permissions_json=? WHERE id=?").run(JSON.stringify({ allow: ["Bash(rig ps *)"], deny: [] }), claude.node.id);
+    expect(claude.store.apply(claude.binding, "claude-code")).toMatchObject({ teamPermissionDefault: false, claudePermissions: { allow: ["Bash(rig ps *)"] } });
   });
   it("an unavailable default lookup keeps existing behavior", () => {
     const f = fixture("codex"), prepare = f.db.prepare.bind(f.db);

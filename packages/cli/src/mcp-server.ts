@@ -4,13 +4,16 @@ import { createHash, randomBytes } from "node:crypto";
 import { statSync } from "node:fs";
 import nodePath from "node:path";
 import type { ToolAnnotations } from "@modelcontextprotocol/server";
-import { DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders, type DaemonClient, type DaemonResponse } from "./client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, remoteDaemonClient, terminalAuthHeaders, type DaemonResponse } from "./client.js";
+import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer, type HostRegistryLoadResult } from "./host-registry.js";
+import { loadHostBindings, type HostBindingsFile } from "./host-bindings.js";
+import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
 import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
 import { CLI_VERSION } from "./version.js";
 import { ConfigStore } from "./config-store.js";
-import { readRosters } from "./commands/roster.js";
+import { readRosters, rosterTeamName, teamPhrase, type RosterMember } from "./commands/roster.js";
 import { mcpPresenceFilePath, readPresence } from "./mcp-presence.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "./queue-artifact.js";
 
@@ -66,14 +69,14 @@ function structured(data: unknown): Record<string, unknown> {
 /** Where a handed-on item went. A cross-host handoff records the remote item as qitem-…@<host> in closureTarget (named, not
  *  fetched); a local successor is the item whose handedOffFrom is this one, the newest when there are several. null when
  *  none is found; { unknown: true, code } when the lookup failed or the daemon can't filter by handedOffFrom. */
-async function successorOf(client: DaemonClient, qitemId: string, closureTarget: unknown,
+async function successorOf(get: (path: string) => Promise<DaemonResponse<unknown>>, qitemId: string, closureTarget: unknown,
   /** For an external caller: which successor rows it may see; a cross-host successor's parties are unknown here, so it
    *  can't. */
   visible?: (row: unknown) => boolean): Promise<Record<string, unknown> | null> {
   const remote = typeof closureTarget === "string" ? /^(qitem-[^@]+)@([^@]+)$/.exec(closureTarget) : null;
   if (remote) return visible ? { unknown: true, code: "out_of_scope" } : { qitemId: remote[1], host: remote[2] };
   try {
-    const res = await client.get(`/api/queue/list?${new URLSearchParams({ handedOffFrom: qitemId, compact: "1", limit: "5" }).toString()}`);
+    const res = await get(`/api/queue/list?${new URLSearchParams({ handedOffFrom: qitemId, compact: "1", limit: "5" }).toString()}`);
     if (res.status >= 400) return { unknown: true, code: (mapResult(res).structuredContent as { code: string }).code };
     if (!Array.isArray(res.data)) return { unknown: true, code: "unexpected_response" };
     if (ignoredFilter(res.data, { handedOffFrom: qitemId })) return { unknown: true, code: "filter_unsupported" };
@@ -150,8 +153,13 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
 /** A rig's hosted member: a tool that lives outside a terminal (an assistant, a bot) and reaches the team over this server
  *  under a grant. Its roster entry authors what it's good at and its limits; it has no node or pane, and OpenRig doesn't
  *  observe it between calls, so its activity is unknown, never idle. */
-type HostedMember = { session: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; pane: null; activity: "unknown";
-  presence: HostedPresence };
+type HostedMember = { session: string; label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string;
+  caveat: string | null; pane: null; activity?: "unknown"; presence?: HostedPresence };
+
+/** A node seat's authored roster entry, merged into its own rig_team entry: how the person knows it, what it's good at,
+ *  its limits, and what OpenRig last saw of it, so an assistant can tell a disconnected seat from its own history. */
+type SeatRosterEntry = { label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null;
+  presence?: HostedPresence };
 
 /** What OpenRig last saw of a hosted member: its last call to this host's MCP server, and the latest ring among its recent
  *  rows. Presence isn't pickup (a claim on a row), and null is unknown, never idle. */
@@ -177,37 +185,53 @@ function newestWake(rows: unknown, seat: string): HostedPresence["lastWake"] {
 }
 
 const ROSTERS_INCOMPLETE = "Some rosters couldn't be read, so hosted members may be missing.";
+/** An external caller's answer also carries the roster entries of the team's seats, and loses those too. */
+const ROSTERS_INCOMPLETE_EXTERNAL = "Some rosters couldn't be read, so hosted members, and the labels, caveats and presence they give the team's seats, may be missing.";
 
-/** The roster members marked hosted, on this host, whose seat is in this rig and isn't one of its nodes. A roster folder that
- *  doesn't exist means none. One that can't be inspected or read, or a host id that isn't known yet, is said, never read as
- *  none. The note stays generic (a scoped caller doesn't see other rosters' names or errors); the detail goes to this
- *  server's log. */
+/** The roster members on this host whose seat is in this rig and marked hosted, that aren't one of its nodes. For an
+ *  external caller, also the entries of its node seats (by seat) and each member's label (or why it isn't used): the names
+ *  a person knows them by. An internal caller's answer is as it was. A roster folder that doesn't exist means none. One
+ *  that can't be inspected or read, or a host id that isn't known yet, is said, never read as none. The note stays generic
+ *  (a scoped caller doesn't see other rosters' names or errors); the detail goes to this server's log. presenceOf gives
+ *  null for a seat whose presence isn't shown (an external caller's own), and that entry has none. */
 async function hostedMembersOf(folder: string, rigName: string, nodeSeats: ReadonlySet<string>,
-  selfHostId: () => Promise<string | null>, presenceOf: (seat: string) => Promise<HostedPresence>): Promise<{ members: HostedMember[]; note?: string }> {
+  selfHostId: () => Promise<string | null>, presenceOf: (seat: string) => Promise<HostedPresence | null>, external: boolean):
+  Promise<{ members: HostedMember[]; seats: Map<string, SeatRosterEntry>; note?: string }> {
+  const incomplete = external ? ROSTERS_INCOMPLETE_EXTERNAL : ROSTERS_INCOMPLETE;
+  const seats = new Map<string, SeatRosterEntry>();
   try {
     statSync(folder);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { members: [] };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { members: [], seats };
     console.error(`rig_team: the roster folder ${folder} can't be inspected: ${(error as Error).message}`);
-    return { members: [], note: ROSTERS_INCOMPLETE };
+    return { members: [], seats, note: incomplete };
   }
   const { rosters, warnings } = readRosters(folder);
   if (warnings.length > 0) console.error(`rig_team: ${warnings.join("; ")}`);
-  const unread = warnings.length > 0 ? { note: ROSTERS_INCOMPLETE } : {};
+  const unread = warnings.length > 0 ? { note: incomplete } : {};
+  const hostedHere = (member: RosterMember) => member.hosted === true && member.seat.endsWith(`@${rigName}`);
   const candidates = rosters.flatMap((roster) => roster.members
-    .filter((member) => member.hosted === true && member.seat.endsWith(`@${rigName}`) && !nodeSeats.has(member.seat))
+    .filter((member) => external ? nodeSeats.has(member.seat) || hostedHere(member) : hostedHere(member) && !nodeSeats.has(member.seat))
     .map((member) => ({ roster: roster.id, member })));
-  if (candidates.length === 0) return { members: [], ...unread };
+  if (candidates.length === 0) return { members: [], seats, ...unread };
   const host = await selfHostId();
-  if (!host) return { members: [], note: "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
+  if (!host) {
+    return { members: [], seats, note: external
+      ? "This daemon's host id isn't known yet, so hosted members on its rosters, and the roster entries of the team's seats, can't be matched to it."
+      : "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
+  }
   // A seat in two rosters is one member: the first roster (by file name) supplies its entry.
   const members = new Map<string, HostedMember>();
   for (const { roster, member } of candidates) {
-    if (member.host !== host || members.has(member.seat)) continue;
-    members.set(member.seat, { session: member.seat, roster, capabilities: member.capabilities, useWhen: member.use_when,
-      caveat: member.caveat ?? null, pane: null, activity: "unknown", presence: await presenceOf(member.seat) });
+    if (member.host !== host || members.has(member.seat) || seats.has(member.seat)) continue;
+    // A label that can't be used says why, so it doesn't read as absent.
+    const named = !external ? {} : member.label ? { label: member.label } : member.label_problem ? { label_problem: member.label_problem } : {};
+    const entry = { ...named, roster, capabilities: member.capabilities, useWhen: member.use_when, caveat: member.caveat ?? null };
+    const presence = await presenceOf(member.seat);
+    if (nodeSeats.has(member.seat)) seats.set(member.seat, { ...entry, ...(presence ? { presence } : {}) });
+    else members.set(member.seat, { session: member.seat, ...entry, pane: null, activity: "unknown", ...(presence ? { presence } : {}) });
   }
-  return { members: [...members.values()], ...unread };
+  return { members: [...members.values()], seats, ...unread };
 }
 
 type SliceEntry = { name?: string; missionId?: string | null; displayName?: string; status?: string; description?: string | null; qitemCount?: number; lastActivityAt?: string | null };
@@ -632,19 +656,54 @@ export const MEMBER_WORKFLOW = [
 
 // Short guidance a client may show the model (the server's MCP instructions). An external caller's connection asks the
 // team for work and isn't one of its members, so it isn't given the member workflow.
-const SHARED_INSTRUCTIONS = [
-  "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
-  "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
-  "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
-  "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
-];
+/** The paragraphs every seat's connection shares, naming a tool only where `has` says the connection offers it. A local or
+ *  authenticated member is offered every tool named here; an external grant is offered only the ones its grant names. */
+function sharedInstructions(has: (tool: string) => boolean): string[] {
+  const finding = [has("rig_whoami") ? "rig_whoami shows which, and whether the caller is authenticated" : "",
+    has("rig_team") ? "rig_team shows a rig's seats and its lead" : ""].filter(Boolean).join("; ");
+  const showing = "rig_queue_show, which names the next item when the work was handed on";
+  const handing = has("rig_queue_create")
+    ? `To hand work to a seat, use rig_queue_create and keep its qitemId${has("rig_queue_show") ? `; read the answer later with ${showing}` : ""}. `
+    : has("rig_queue_show") ? `Read an item's answer with ${showing}. ` : "";
+  return [
+    `This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant${finding ? ` (${finding})` : ""}. The daemon attributes this server's writes to that seat.`,
+    `${handing}${has("rig_queue_handoff") ? "To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. " : ""}Queue items are durable: they outlive this conversation and this server.`,
+    "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
+    `A question reserved for a person is theirs to answer: don't answer it on their behalf.${has("rig_queue_decide") ? " rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one." : ""}`,
+  ];
+}
+const SHARED_INSTRUCTIONS = sharedInstructions(() => true);
 const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
+
+/** For a connection that relays a person's request to another assistant (an external caller, or the front door): which one
+ *  they mean is theirs to say when more than one fits, never inferred from the agent's own history. The listing steps need
+ *  rig_team, so a connection without it is told only to ask. Pickup is said only where it's true: another connected
+ *  assistant waits for its person; on the front door, a running team seat is woken, and one sent to anyway waits until it's
+ *  back. A member, which works items, isn't given it. */
+function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
+  if (!canList) {
+    return "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
+  }
+  return [
+    "Before sending a request to another assistant, list the team's members.",
+    "If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude assistant\"), never reading the address out.",
+    "Don't pick from your own history or memory.",
+    "If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.",
+    "If the list says the chosen one's person was removed from the team, don't send; tell your person and ask whether to send it to someone else.",
+    ...(frontDoor ? ["When you send to a running team seat, tell your person that seat will pick it up on its own."] : []),
+    "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.",
+    ...(frontDoor ? ["If you sent it anyway, tell your person it waits until that one is back."] : []),
+    "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.",
+    "If your person still asks to send to one whose person was removed, tell them it can't be delivered: requests to a removed person's assistant are closed unanswered.",
+  ].join(" ");
+}
 
 /** rig mcp serve --front-door: the seat is a person's agent in their own app, the front door to their team, not a member
  *  that works its inbox. The team's questions to it are the person's to answer. */
-export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v2";
+export const FRONT_DOOR_WORKFLOW_VERSION = "front-door/v3";
 export const FRONT_DOOR_WORKFLOW = [
   `Front door (${FRONT_DOOR_WORKFLOW_VERSION}). This seat is a person's agent in their own app: you hand the team their work and bring back what it produced, and you aren't one of its members.`,
+  askWhichAssistant(true, true),
   "Items addressed to your seat (rig_queue_list with owned set) are usually the team's questions about work you handed it. They're the person's to answer, not yours: show each to the person with the team's draft, and record only what the person tells you.",
   "To record an answer, claim the item (rig_queue_claim), then close it done with closure reason no-follow-on and exactly what the person typed in resolution, with no label, quotation marks or words of your own (rig_queue_update). If the person isn't there, leave the item open and tell them it's waiting. Never choose an answer for them, and don't claim an item you can't close with their words.",
   "Nothing wakes this conversation when the team finishes: check your work and your items when the person asks or comes back.",
@@ -671,16 +730,22 @@ const EXTERNAL_PERSON_INSTRUCTIONS = [
   "To answer one, show the person the question and its options as rig_question_list gives them. Then pass rig_question_answer its qitemId, the revision you showed, and either the options they chose or exactly what they typed, with no label or words of your own. If the question changed, show them the new one; if it was already answered or closed, say so. It's recorded as their answer, given through this connection. A question reserved for a person is theirs to answer, never yours.",
 ].join("\n");
 
-/** For an external grant that names claim and update: how it works the items addressed to it, messages included. */
-const EXTERNAL_INBOX_INSTRUCTIONS = [...SHARED_INSTRUCTIONS,
-  "Items addressed to your seat are yours: rig_queue_list with owned set lists them. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.",
-].join("\n");
+/** For an external grant that names claim and update: how it works the items addressed to it, messages included. It names
+ *  only the tools that grant offers. */
+function externalInboxInstructions(tools: ReadonlySet<string>): string {
+  return [...sharedInstructions((tool) => tools.has(tool)),
+    `Items addressed to your seat are yours${tools.has("rig_queue_list") ? ": rig_queue_list with owned set lists them" : ""}. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.`,
+  ].join("\n");
+}
 
 function instructionsFor(access: McpAccess | undefined, frontDoor = false): string {
   if (!access?.external) return frontDoor ? FRONT_DOOR_INSTRUCTIONS : INSTRUCTIONS;
   const tools = externalTools(access.external);
-  const instructions = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? EXTERNAL_INBOX_INSTRUCTIONS
+  const workflow = tools.has("rig_queue_claim") && tools.has("rig_queue_update") ? externalInboxInstructions(tools)
     : tools.has("rig_question_list") || tools.has("rig_question_answer") ? EXTERNAL_PERSON_INSTRUCTIONS : EXTERNAL_INSTRUCTIONS;
+  // Only a grant with team/list may reach another connected assistant's seat, and it lists the team with rig_team.
+  const instructions = tools.has("rig_queue_create")
+    ? `${workflow}\n${askWhichAssistant(tools.has("rig_team"), false)}` : workflow;
   return tools.has("rig_team") ? `Discover the team this grant connects you to by calling rig_team without rigId. A sole granted rig is selected automatically; with several, it returns the granted names to choose from.\n${instructions}` : instructions;
 }
 
@@ -806,6 +871,11 @@ export function mintUnknownSender(): string {
  * @returns McpServer instance (not yet connected to a transport)
  */
 export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; taskDestination?: string; rostersFolder?: () => string; presenceFile?: () => string; frontDoor?: boolean; unfilledSeat?: UnfilledSeat; unknownSender?: string;
+  /** Builds a client for a registered remote host's daemon URL (a tool's optional host argument). */
+  clientFactory?: (baseUrl: string) => DaemonClient;
+  /** Test seams for the host registry and its learned bindings; production reads ~/.openrig. */
+  hostRegistryLoader?: () => HostRegistryLoadResult;
+  hostBindingsLoader?: () => HostBindingsFile;
   /** For an external grant that names a person: a client acting as that person, used only to record their answers. */
   personClient?: DaemonClient } = {}): McpServer {
   const server = new McpServer({
@@ -813,10 +883,64 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     version: CLI_VERSION,
   }, { instructions: instructionsFor(options.access, options.frontDoor === true) });
   const { access } = options;
-  const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
-  const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
+  const clientFactory = options.clientFactory ?? ((url: string) => new DaemonClient(url));
+  const hostRegistryLoader = options.hostRegistryLoader ?? loadHostRegistry;
+  const hostBindingsLoader = options.hostBindingsLoader ?? loadHostBindings;
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+  /** A tool's optional `host`: that registered http host's client and bearer, or this server's own client when none is
+   *  named. A granted connection (an authenticated non-owner) reaches only the daemon serving it, so it can't name one.
+   *  The remote client is bound to this server's seat, so a write it makes there names the calling agent as its sender
+   *  (principal headers stay local: only this host's daemon trusts them). */
+  const hostTarget = (host: string | undefined): { client: DaemonClient; headers: Record<string, string>; remote: boolean; name?: string } | TextResult => {
+    const name = host?.trim();
+    if (host !== undefined && !name) {
+      const message = "A host name can't be blank: omit host to act on this daemon, or name a registered host (rig host list shows them).";
+      return errorResult(message, "invalid_host", message);
+    }
+    if (!name || name === "local") return { client, headers: {}, remote: false };
+    if (access && !access.owner) {
+      const message = "Naming a host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant; a granted connection reaches only the daemon serving it.";
+      return errorResult(message, "host_not_available", message);
+    }
+    const registry = hostRegistryLoader();
+    if (!registry.ok) {
+      const message = `Host ${name} can't be reached: this CLI's host registry can't be read (${registry.error}).`;
+      return errorResult(message, "host_registry_unreadable", message);
+    }
+    const learned = hostBindingsLoader();
+    // Queue forwarding's one policy: a learned self-id routes only through a binding admitted by
+    // `eligibleQueueBindings`, so a stale, conflicted or SSH-declared binding never sends this call elsewhere.
+    const match = resolveHost(registry.registry, name, eligibleQueueBindings(registry.registry, learned));
+    if (!match.ok) {
+      const unused = ineligibleBindingDetail(registry.registry, learned, name);
+      const message = `Host ${name} isn't in this CLI's host registry. rig host list shows the registered hosts.${unused ? ` ${unused}` : ""}`;
+      return errorResult(message, "unknown_host", message);
+    }
+    if (match.host.transport !== "http") {
+      const message = `Host ${name} is registered over SSH, not as a daemon URL; MCP reaches http hosts only. Use rig <verb> --host ${name} for an SSH host.`;
+      return errorResult(message, "host_not_http", message);
+    }
+    const bearer = resolveRemoteBearer(match.host);
+    if (!bearer.ok) return errorResult(bearer.error, "host_bearer_unavailable", bearer.error);
+    return { client: remoteDaemonClient(clientFactory, match.host.url, undefined, seatOf()), headers: bearerAuthHeaders(bearer.token), remote: true, name: match.host.id };
+  };
+  /** Request options for a host target: a remote call carries that host's bearer; a local one keeps the terminal token. */
+  const hostOptions = (target: { headers: Record<string, string>; remote: boolean }, timeout?: { timeoutMs: number }) =>
+    target.remote
+      ? { ...(timeout ?? {}), ...(Object.keys(target.headers).length > 0 ? { headers: target.headers } : {}) }
+      : transportRequestOptions(timeout);
+  /** A call with no options stays a one-argument call (the request shape existing callers and tests expect). */
+  const hostGet = <T = unknown>(target: { client: DaemonClient; headers: Record<string, string>; remote: boolean }, path: string, timeout?: { timeoutMs: number }) => {
+    const options = hostOptions(target, timeout);
+    return options === undefined ? target.client.get<T>(path) : target.client.get<T>(path, options);
+  };
+  const hostPost = <T = unknown>(target: { client: DaemonClient; headers: Record<string, string>; remote: boolean }, path: string, body?: unknown, timeout?: { timeoutMs: number }) => {
+    const options = hostOptions(target, timeout);
+    return options === undefined ? target.client.post<T>(path, body) : target.client.post<T>(path, body, options);
+  };
+  const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
+  const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
   // With no seat (none configured, or one an app left unfilled), messages, new tasks and chat still go through, as an
   // unknown sender. Its label is this server's own and no seat's, so two unknown callers never count as one author (a
   // delegated decision compares authors). Its note says only what is known: why there's no seat, and how the client
@@ -947,13 +1071,17 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_ps")) server.registerTool(
     "rig_ps",
     {
-      description: "List rigs and their status",
-      inputSchema: z.object({}),
+      description: "List rigs and their status. host reads a registered remote host instead of this daemon; it needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
+      inputSchema: z.object({
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
+      }),
       annotations: READ_ONLY,
     },
-    async () => {
+    async ({ host }) => {
       try {
-        const res = await client.get("/api/ps");
+        const target = hostTarget(host);
+        if ("content" in target) return target;
+        const res = await hostGet(target, "/api/ps");
         if (scope && res.status < 400 && Array.isArray(res.data)) return mapResult({ ...res, data: res.data.filter((entry) => scope.rig((entry as { name?: unknown }).name)) });
         return mapResult(res);
       } catch (err) {
@@ -1216,18 +1344,21 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_send")) server.registerTool(
     "rig_send",
     {
-      description: "Send a message to an agent's terminal using reliable two-step send",
+      description: "Send a message to an agent's terminal using reliable two-step send. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         session: z.string().describe("Target session name (e.g. dev-impl@my-rig)"),
         text: z.string().describe("Message text to send"),
         verify: z.boolean().optional().describe("Verify delivery by checking pane content"),
         force: z.boolean().optional().describe("Send even if target appears mid-task"),
         waitForIdleSeconds: z.number().positive().optional().describe("Wait until explicit idle evidence before sending. If the seat is still busy or its activity is unknown when the wait ends, nothing is sent and nothing is kept; separate work belongs in a queue row"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: DESTRUCTIVE,
     },
-    async ({ session, text, verify, force, waitForIdleSeconds }) => {
+    async ({ session, text, verify, force, waitForIdleSeconds, host }) => {
       try {
+        const target = hostTarget(host);
+        if ("content" in target) return target;
         if (force && waitForIdleSeconds !== undefined) {
           const message = "waitForIdleSeconds cannot be combined with force";
           return errorResult(JSON.stringify({ ok: false, error: message }), "invalid_arguments", message);
@@ -1236,13 +1367,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const waitForIdleMs = waitForIdleSeconds === undefined ? undefined : Math.ceil(waitForIdleSeconds * 1000);
         // Unsigned, as before (the transport names it "<unknown sender>"); the note tells the recipient what is known.
         const note = unknownSenderNote("message");
-        const res = await client.post("/api/transport/send", {
+        const res = await hostPost(target, "/api/transport/send", {
           session,
           text: note ? `${note}\n${text}` : text,
           verify,
           force,
           waitForIdleMs,
-        }, transportRequestOptions(waitForIdleRequestOptions(waitForIdleMs)));
+        }, waitForIdleRequestOptions(waitForIdleMs));
         return mapResult(res);
       } catch (err) {
         return caught(err);
@@ -1254,17 +1385,20 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_capture")) server.registerTool(
     "rig_capture",
     {
-      description: "Capture terminal output from an agent session",
+      description: "Capture terminal output from an agent session. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         session: z.string().optional().describe("Session name (omit for multi-target with rig/pod)"),
         rig: z.string().optional().describe("Capture all sessions in a rig"),
         pod: z.string().optional().describe("Capture all sessions in a pod"),
         lines: z.number().optional().describe("Number of lines to capture (default: 20)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: READ_ONLY,
     },
-    async ({ session, rig, pod, lines }) => {
+    async ({ session, rig, pod, lines, host }) => {
       try {
+        const target = hostTarget(host);
+        if ("content" in target) return target;
         let rigName = rig;
         if (scope) {
           if (session && !scope.session(session)) return outOfScope(`Session ${session}`);
@@ -1283,7 +1417,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (pod) body.pod = pod;
         if (lines) body.lines = lines;
         body.inputBox = true; // what the live input box holds, in the result's inputBox
-        const res = await client.post("/api/transport/capture", body, transportRequestOptions());
+        const res = await hostPost(target, "/api/transport/capture", body);
         return mapResult(res);
       } catch (err) {
         return caught(err);
@@ -1398,7 +1532,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_create")) server.registerTool(
     "rig_queue_create",
     {
-      ...worded("rig_queue_create", "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord.", ADDITIVE),
+      ...worded("rig_queue_create", "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", ADDITIVE),
       inputSchema: z.object({
         destination: access?.external
           ? z.string().optional().describe("Destination seat: member@rig, or its name alone as the team shows it (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver")
@@ -1411,9 +1545,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         qitemId: z.string().optional().describe("Request id to reuse when retrying the same create (default: a new id)"),
         revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
         alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
     },
-    async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert }) => {
+    async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert, host }) => {
+      const target = hostTarget(host);
+      if ("content" in target) return target;
       // The server's one receiver counts for this connection only when its grant reaches it. Then a refused destination
       // says how to reach it, so the assistant retries instead of telling the person the connection lacks access. It
       // never names the receiver.
@@ -1473,7 +1610,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       let lineage: { chainOfRecord: string[]; body: string } | undefined;
       if (revises) {
         try {
-          const original = await client.get(`/api/queue/${encodeURIComponent(revises)}`);
+          const original = await hostGet(target, `/api/queue/${encodeURIComponent(revises)}`);
           if (original.status >= 400) return mapResult(original);
           if (scope && !scope.item(original.data)) return outOfScope(`Item ${revises}`);
           const prior = (original.data ?? {}) as { qitemId?: unknown; chainOfRecord?: unknown };
@@ -1501,7 +1638,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       // With no seat, the task goes to its destination as from the unknown sender, with the note at the top of its body.
       const note = unknownSenderNote("task");
       try {
-        const res = await client.post("/api/queue/create", {
+        const res = await hostPost(target, "/api/queue/create", {
           qitemId: id, destinationSession: destination, body: note ? `${note}\n\n${lineage?.body ?? body}` : lineage?.body ?? body,
           ...(note ? { sourceSession: unknownSender } : {}), summary, priority, tier,
           tags: access?.external ? tags?.filter((tag) => !OPENRIG_PROVENANCE_TAG.test(tag)) : tags,
@@ -1519,12 +1656,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const view = externalView(scope);
         // An unknown sender has no return address, so it says how to follow the task.
         const sent = note && res.status < 400 && res.data && typeof res.data === "object" ? { ...res, data: { ...res.data,
-          unknownSender: { label: unknownSender, followUp: `No return address: read this task with rig_queue_show and qitemId ${id}.` } } } : res;
+          unknownSender: { label: unknownSender, followUp: `No return address: read this task with rig_queue_show and qitemId ${id}${target.remote && target.name ? ` and host ${target.name}` : ""}.` } } } : res;
         return mapResult(view && sent.status < 400 ? { ...sent, data: projectForExternal(sent.data, view) } : sent, undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
-        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id} before retrying, and retry only with that same qitemId.`;
-        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId: id, outcome: "unknown" } };
+        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id}${target.remote && target.name ? ` and host ${target.name}` : ""} before retrying, and retry only with that same qitemId.`;
+        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId: id, outcome: "unknown", ...(target.remote && target.name ? { host: target.name } : {}) } };
       }
     },
   );
@@ -1533,23 +1670,26 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_show")) server.registerTool(
     "rig_queue_show",
     {
-      ...worded("rig_queue_show", "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord.", READ_ONLY),
+      ...worded("rig_queue_show", "Read one queue item and its transitions. For a task you handed off, this is where its answer is: the state, the closure reason and target, the notes the assignee recorded, and evidenceRef when it names an artifact (read it with rig_artifact_read). When the item was handed on, successor names the next item (on another host: its id and host); follow it with rig_queue_show. null means none was found. A revision names the work it revises in chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", READ_ONLY),
       inputSchema: z.object({
         qitemId: z.string().describe("The qitemId returned by rig_queue_create (or any queue item)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
     },
-    async ({ qitemId }) => {
+    async ({ qitemId, host }) => {
       try {
+        const target = hostTarget(host);
+        if ("content" in target) return target;
         const id = encodeURIComponent(qitemId);
-        const item = await client.get(`/api/queue/${id}`);
+        const item = await hostGet(target, `/api/queue/${id}`);
         if (item.status >= 400) return mapResult(item);
         if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
-        const transitions = await client.get(`/api/queue/${id}/transitions`);
+        const transitions = await hostGet(target, `/api/queue/${id}/transitions`);
         if (transitions.status >= 400) return mapResult(transitions);
         const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
         const handedOn = row.state === "handed-off" || row.closureReason === "handed_off_to";
         const view = externalView(scope);
-        let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
+        let successor = handedOn ? await successorOf((path) => hostGet(target, path), qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
         if (scope && !view && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
         const shownItem = scope ? withoutDaemonLinkedRows(item.data) : item.data;
         const data = view
@@ -1566,7 +1706,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_list")) server.registerTool(
     "rig_queue_list",
     {
-      ...worded("rig_queue_list", "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went. tags are exact, case-sensitive AND filters; mission and slice add their corresponding exact tags.", READ_ONLY),
+      ...worded("rig_queue_list", "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included. since finds work updated after a time; handedOffFrom finds where a handed-off item went. tags are exact, case-sensitive AND filters; mission and slice add their corresponding exact tags. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", READ_ONLY),
       inputSchema: z.object({
         owned: z.boolean().optional().describe("Only items assigned to this seat: its whole inbox (overrides destination)"),
         mine: z.boolean().optional().describe("Items this seat sent or owns"),
@@ -1580,10 +1720,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         since: z.string().optional().describe("Only items updated at or after this ISO-8601 time, e.g. done work since Monday: state done, since 2026-10-19"),
         handedOffFrom: z.string().optional().describe("The items handed on from this qitemId, in any state and any rig"),
         limit: z.number().int().positive().optional().describe("Result limit (default 100)"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
     },
-    async ({ owned, mine: mineAsked, destination, source, state, tags: requestedTags, mission, slice, all, since, handedOffFrom, limit }) => {
+    async ({ owned, mine: mineAsked, destination, source, state, tags: requestedTags, mission, slice, all, since, handedOffFrom, limit, host }) => {
       try {
+        const target = hostTarget(host);
+        if ("content" in target) return target;
         if ([...(requestedTags ?? []), ...(mission === undefined ? [] : [mission]), ...(slice === undefined ? [] : [slice])]
           .some((value) => value.trim().length === 0)) {
           const message = "tag filters cannot be blank";
@@ -1621,7 +1764,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (since) params.set("updatedSince", since);
         if (handedOffFrom) params.set("handedOffFrom", handedOffFrom);
         params.set("limit", String(limit ?? 100));
-        const res = await client.get(`/api/queue/list?${params.toString()}`);
+        const res = await hostGet(target, `/api/queue/list?${params.toString()}`);
         const ignored = res.status < 400 ? ignoredFilter(res.data, { since, handedOffFrom, tags }) : null;
         if (ignored) {
           const message = `The daemon didn't apply ${ignored}, so this list isn't filtered by it; it needs a newer daemon.`;
@@ -1631,7 +1774,15 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (scope && res.status < 400 && Array.isArray(res.data)) {
           const view = externalView(scope);
           const rows = res.data.filter((row) => scope.item(row));
-          return mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
+          const result = mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
+          // An external caller's empty inbox says so in a line its assistant can repeat, naming the team as the person
+          // knows it. The rows keep their shape; the line rides beside them, only when nothing narrowed the list. The
+          // default list holds open items only, so its empty answer says no open requests, never none at all.
+          const inbox = access?.external && (owned || mine) && !destination && !source && !state && tags.length === 0 && !since && !handedOffFrom;
+          if (!inbox || rows.length > 0) return result;
+          const team = teamPhrase(rosterTeamName(rostersFolder(), sessionName!.split("@")[1] ?? "").name);
+          const message = `No ${all ? "" : "open "}requests are addressed to you on ${team}.`;
+          return { ...result, content: [...result.content, { type: "text", text: message }], structuredContent: { ...result.structuredContent, message } };
         }
         return mapResult(res, undefined, { structured: true });
       } catch (err) {
@@ -1665,7 +1816,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_update")) server.registerTool(
     "rig_queue_update",
     {
-      ...worded("rig_queue_update", "Update a queue item: add a note, block it, close it, or reopen a closed one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps; note records why this transition happened.", DESTRUCTIVE),
+      ...worded("rig_queue_update", "Update a queue item: add a note, block it, close it, or reopen a closed one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps; note records why this transition happened. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", DESTRUCTIVE),
       inputSchema: z.object({
         qitemId: z.string().describe("The queue item to update"),
         state: z.string().optional().describe("New state (e.g. in-progress, blocked, done)"),
@@ -1675,13 +1826,16 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         resolution: z.string().optional().describe("The outcome the item keeps, stored only by the update that closes an open item (as rig queue update --resolution)"),
         reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
         summary: z.string().optional().describe("Replace the one-line summary"),
-        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it. For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
+        evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item with a state change (a park, a done close; a blank one isn't stored). For a code result, a JSON file of kind openrig.code-result/v1 with repo, base and revision (full commit ids) and paths lets a reader diff it exactly"),
         blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
     },
-    async ({ qitemId, state, closureReason, closureTarget, note, resolution, reopen, summary, evidenceRef, blockedOn, wakeAfterSeconds }) => {
+    async ({ qitemId, state, closureReason, closureTarget, note, resolution, reopen, summary, evidenceRef, blockedOn, wakeAfterSeconds, host }) => {
       try {
+        const target = hostTarget(host);
+        if ("content" in target) return target;
         const denied = await itemOutOfScope(qitemId, "owner");
         if (denied) return denied;
         // An external caller waits only on an item it names and can read: parking on a person would ask them, parking on
@@ -1690,7 +1844,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const blocker = blockedOn?.startsWith("qitem-") ? await client.get(`/api/queue/${encodeURIComponent(blockedOn)}`) : null;
           if (!blocker || blocker.status >= 400 || !scope?.item(blocker.data)) return outOfScope(`Blocker ${blockedOn ?? "(none named)"}`);
         }
-        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+        const res = await hostPost(target, `/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
         });
         // An external caller's updated item goes through the same projection as show and list.
@@ -1822,7 +1976,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_team")) server.registerTool(
     "rig_team",
     {
-      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown.", READ_ONLY),
+      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by.", READ_ONLY),
       inputSchema: z.object({
         rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
@@ -1858,8 +2012,15 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const rigName = ((detail.data ?? {}) as RigDetail).rig?.name ?? "";
         const inventory = Array.isArray(nodes.data) ? nodes.data as Array<{ logicalId?: string; canonicalSessionName?: string | null; hostSelfId?: string | null }> : [];
         // A node is a seat whether or not it has a session yet: its address derives from its logical id (pod.member).
-        const nodeSeats = new Set(inventory.flatMap((seat) => [seat.canonicalSessionName,
-          typeof seat.logicalId === "string" ? `${seat.logicalId.replace(".", "-")}@${rigName}` : null]).filter((name): name is string => typeof name === "string"));
+        const logicalAddress = (logicalId: unknown) => typeof logicalId === "string" ? `${logicalId.replace(".", "-")}@${rigName}` : null;
+        const nodeSeats = new Set(inventory.flatMap((seat) => [seat.canonicalSessionName, logicalAddress(seat.logicalId)])
+          .filter((name): name is string => typeof name === "string"));
+        // An external caller's own seat, under any name it's matched by: its session's name or its logical address, the
+        // same mapping the roster match uses. Its node's other name is its too.
+        const caller = access?.external ? seatOf() : undefined;
+        const callerNode = caller ? inventory.find((seat) => seat.canonicalSessionName === caller || logicalAddress(seat.logicalId) === caller) : undefined;
+        const ownNames = new Set([caller, callerNode?.canonicalSessionName, logicalAddress(callerNode?.logicalId)]
+          .filter((name): name is string => typeof name === "string"));
         // One read of the daemon's check-ins serves every member in this answer.
         let checkIns: Promise<Array<Record<string, unknown>> | null> | undefined;
         const checkInOf = async (seat: string): Promise<HostedCheckIn> => {
@@ -1879,14 +2040,40 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           async () => inventory.find((seat) => typeof seat.hostSelfId === "string")?.hostSelfId
             ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null),
           async (seat) => {
+            // An external caller's own seat is listed so it can see its address, without a line about its own activity.
+            if (ownNames.has(seat)) return null;
             const rows = await client.get(`/api/queue/list?${new URLSearchParams({ destinationSession: seat, compact: "1", limit: String(PRESENCE_ROWS) }).toString()}`)
               .then((res) => (res.status < 400 ? res.data : null), () => null);
             // An external caller sees a ring only on an item it may read, so another pair's item isn't named.
             const visible = access?.external && Array.isArray(rows) ? rows.filter((row) => scope?.item(row)) : rows;
             return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(visible, seat),
               lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows`, checkIn: await checkInOf(seat) };
-          });
-        return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });
+          }, !!access?.external);
+        const note = hosted.note ? { hostedMembersNote: hosted.note } : {};
+        // The names a person knows the team by are for a person's assistant on an external grant; an internal caller's
+        // answer is as it was.
+        if (!access?.external) return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...note } }, undefined, { structured: true });
+        // The caller's own entry keeps its address and identity, with no line about its own activity.
+        // A node seat on a roster carries its authored entry and presence; a seat on none is as the daemon reports it.
+        const seats = (view.seats as Array<Record<string, unknown>>).map((seat) => {
+          const address = logicalAddress(seat.logicalId);
+          const entry = hosted.seats.get(seat.session as string) ?? (address ? hosted.seats.get(address) : undefined);
+          const merged = entry ? { ...seat, ...entry } : seat;
+          if (!ownNames.has(merged.session as string) && !(address && ownNames.has(address))) return merged;
+          const { activity: _activity, sessionStatus: _status, ...identity } = merged;
+          return identity;
+        });
+        const hostedMembers = hosted.members.map((member) => {
+          if (!ownNames.has(member.session)) return member;
+          const { activity: _activity, ...identity } = member;
+          return identity;
+        });
+        // The name the person knows the team by, where its network roster names it; otherwise the rig's own fields, and why
+        // an authored name isn't shown.
+        const team = rosterTeamName(rostersFolder(), rigName);
+        const rigView = { ...(view.rig as Record<string, unknown>), ...(team.name ? { displayName: team.name } : {}),
+          ...(team.problem ? { displayNameProblem: team.problem } : {}) };
+        return mapResult({ status: 200, data: { ...view, rig: rigView, seats, hostedMembers, ...note } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -2325,7 +2512,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_handoff")) server.registerTool(
     "rig_queue_handoff",
     {
-      description: "Pass a queue item this seat holds on to the next seat in one step: the item closes as handed off and a new item opens for that seat, carrying the work's lineage in chainOfRecord, so whoever follows the work reaches the new item from rig_queue_show. Without body the new item keeps the task's text. If the call times out, check rig_queue_show on this qitemId before retrying: when it reads handed off, its successor is the new item, so don't hand it off again.",
+      description: "Pass a queue item this seat holds on to the next seat in one step: the item closes as handed off and a new item opens for that seat, carrying the work's lineage in chainOfRecord, so whoever follows the work reaches the new item from rig_queue_show. Without body the new item keeps the task's text. If the call times out, check rig_queue_show on this qitemId before retrying: when it reads handed off, its successor is the new item, so don't hand it off again. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.",
       inputSchema: z.object({
         qitemId: z.string().describe("The queue item to pass on"),
         to: z.string().describe("The next seat (e.g. qa@my-rig)"),
@@ -2335,10 +2522,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         tags: z.array(z.string()).optional().describe("Tags for the new item (default: the item's own)"),
         priority: z.string().optional().describe("Priority for the new item (default: the item's own)"),
         evidenceRef: z.string().optional().describe("Pointer to the durable artifact, which a new item for a person needs"),
+        host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
       }),
       annotations: DESTRUCTIVE,
     },
-    async ({ qitemId, to, body, note, summary, tags, priority, evidenceRef }) => {
+    async ({ qitemId, to, body, note, summary, tags, priority, evidenceRef, host }) => {
+      const target = hostTarget(host);
+      if ("content" in target) return target;
       if (scope && !scope.session(to)) return outOfScope(`Destination ${to}`);
       try {
         const denied = await itemOutOfScope(qitemId, "owner");
@@ -2347,13 +2537,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         return caught(err);
       }
       try {
-        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
+        return mapResult(await hostPost(target, `/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
           toSession: to, body, transitionNote: note, summary, tags, priority, evidenceRef,
         }), undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
-        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${qitemId} before retrying. If it reads handed off, its successor is the new item, so don't hand it off again.`;
-        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId, outcome: "unknown" } };
+        const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${qitemId}${target.remote && target.name ? ` and host ${target.name}` : ""} before retrying. If it reads handed off, its successor is the new item, so don't hand it off again.`;
+        return { ...failure, content: [{ type: "text", text }], structuredContent: { ...failure.structuredContent, qitemId, outcome: "unknown", ...(target.remote && target.name ? { host: target.name } : {}) } };
       }
     },
   );

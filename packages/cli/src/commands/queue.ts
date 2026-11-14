@@ -1252,6 +1252,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const advisory = value as { code?: unknown; message?: unknown };
             if (typeof advisory.message !== "string") continue;
             switch (advisory.code) {
+              case "unmatched_destination_seat":
+              case "destination_status":
+                console.error(`Destination status: ${advisory.message}`);
+                break;
               case "scope_check_skipped":
                 console.error(`Note: ${advisory.message}`);
                 break;
@@ -1402,8 +1406,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
-    .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
-    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
+    .option("--summary <text>", "Summary persisted onto the item, with or without a state change (a blank one isn't stored)")
+    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item with a state change (a park, a done close; a blank one isn't stored). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
     .addHelpText("after", `
 After reading an existing remote successor, record its exact closure target, including the host:

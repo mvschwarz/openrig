@@ -61,6 +61,8 @@ export interface SlackConnectorConfig {
    * "off" = reactions are ignored, so an acknowledging emoji costs no agent turn. Not in DEFAULT_CONFIG, like `channelMap`.
    */
   reactions?: SlackReactionsMode;
+  /** Link and media previews on human-row posts; absent defaults to off. */
+  unfurl?: "on" | "off";
 }
 
 export const SLACK_REACTIONS_MODES = ["route", "off"] as const;
@@ -119,6 +121,9 @@ function validateConfig(cfg: SlackConnectorConfig, opts: { reading?: boolean } =
   if (!opts.reading && cfg.reactions !== undefined && !SLACK_REACTIONS_MODES.includes(cfg.reactions)) {
     throw new Error(`reactions must be one of ${SLACK_REACTIONS_MODES.join(", ")} (got ${String(cfg.reactions)})`);
   }
+  if (!opts.reading && cfg.unfurl !== undefined && cfg.unfurl !== "on" && cfg.unfurl !== "off") {
+    throw new Error(`unfurl must be on or off (got ${String(cfg.unfurl)})`);
+  }
 }
 
 export function configPathFor(home?: string): string {
@@ -176,6 +181,7 @@ export function staticReadiness(cfg: SlackConnectorConfig, hasBotToken: boolean,
     { ok: Boolean(cfg.inboundDestination), label: "inbound-destination",
       detail: cfg.inboundDestination === INHERIT_INBOUND_DESTINATION ? `${INHERIT_INBOUND_DESTINATION} (the host's default receiving agent)` : cfg.inboundDestination },
     { ok: cfg.enabled, label: "enabled", detail: cfg.enabled ? "yes" : "no (run `rig slack enable`)" },
+    { ok: true, label: "human-row previews", detail: cfg.unfurl === "on" ? "on" : "off" },
     ...channelMapReadiness(cfg),
     ...botInboxReadiness(cfg),
     ...forwardReadiness(cfg),
