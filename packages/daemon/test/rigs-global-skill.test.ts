@@ -55,6 +55,24 @@ describe("the rigs skill installed globally", () => {
     expect(readFileSync(join(PACKAGED, "SKILL.md"), "utf8")).toContain("(references/installing-for-someone.md)");
   });
 
+  it("keeps one procedure: the reference gives the same handoff commands as step 2 of the skill (PR #3238 review)", () => {
+    const skill = readFileSync(join(PACKAGED, "SKILL.md"), "utf8");
+    const reference = readFileSync(join(PACKAGED, "references/installing-for-someone.md"), "utf8");
+    // The exact handoff message and the attach-command rule must read the same in both, so the two can't drift apart again.
+    const handoff = "This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.";
+    expect(skill).toContain(handoff);
+    expect(reference).toContain(handoff);
+    expect(skill).toContain("Relay it exactly rather than composing one");
+    expect(reference).toContain("relay the command OpenRig printed, exactly, rather than composing one");
+    expect(reference).not.toContain("one complete connection and attachment command using the current Herdr endpoint");
+    for (const attach of ["`env -u TMUX` followed by", "`tmuxAttachCommand`", "`operator.agent`"]) {
+      expect(skill, attach).toContain(attach);
+      expect(reference, attach).toContain(attach);
+    }
+    // The note in SKILL.md doesn't call step 2 a different audience's version.
+    expect(skill).not.toContain("person-facing version");
+  });
+
   it("is not an openrig-core plugin skill", () => {
     expect(existsSync(resolve(import.meta.dirname, "../assets/plugins/openrig-core/skills/rigs"))).toBe(false);
   });

@@ -1,7 +1,8 @@
 # Installing OpenRig for someone
 
-The procedure for an agent that has installed OpenRig for a person: starting it, opening the TUI and operator for them, and
-handing them to the operator. The `rigs` skill sends you here from its step 2; a seat's startup text carries only a pointer to it.
+The agent that installed OpenRig for a person follows step 2 of the `rigs` skill. This note adds what that step does not spell out
+(starting the daemon and kernel, what counts as ready and as finished) and relays the same commands; if the two ever differ, step 2 is
+right. A seat's startup text carries only a pointer to it.
 
 After setup and a working selected login, use `rig daemon start` if stopped. On a fresh instance it also starts the
 kernel, including the operator and advisor. They are part of installation; choosing a project team comes later.
@@ -23,17 +24,17 @@ to `:terminals` does not open that terminal. A window request or CLI success alo
 desktop, do not finish by showing a table or suggesting a command instead of opening the requested view.
 Only if the window cannot open, `rig tui --shared` is the named dashboard-only fallback, not the operator's
 conversation. Explain the failure and help with the chosen fallback; do not attach in your own terminal.
-Over headless SSH, explain that no visible terminal opened; tell the person to open a new terminal window or
-tab and give one complete connection and attachment command using the current Herdr endpoint, as in the guide.
-No, SSH and headless use are valid background outcomes. If the person chooses a manual operator attachment after
-a failure, find the `operator.agent` row with
+Over headless SSH, explain that no visible terminal opened; ask the person to open a new terminal window or tab on the
+daemon's host (over SSH, a new SSH session to it) and relay the command OpenRig printed, exactly, rather than composing one.
+No, SSH and headless use are valid background outcomes. If OpenRig printed no command, find the `operator.agent` row with
 `rig ps --nodes --rig kernel --json --fields logicalId,canonicalSessionName,tmuxAttachCommand`. Give `env -u TMUX` followed by
 that row's `tmuxAttachCommand`, exactly as listed (it names the daemon's tmux server when that isn't the default
 one), for a new terminal on the same host and user (over SSH, connect there first). Ctrl-b, then d detaches without stopping it.
-Ask the person's goal and project folder, then hand them to the ready operator; do not implement the project yourself.
+Ask the person's goal, project folder and branch unless they've said, then hand them to the ready operator; do not implement the project yourself.
 Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
-`rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'`,
-or have the person type the goal and folder in the operator's pane. Show where the operator answers and let it
+`rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`,
+or have the person type the goal and folder in the operator's pane. (If the person stays with you, the skill's step 2 hands the goal over
+as a queue task from your own address instead.) Show where the operator answers and let it
 help them choose a team before any starter launch.
 If the person gives you a goal later, forward it, the folder and constraints with `rig send`; leave implementation
 with the operator's team instead of taking over the work yourself.

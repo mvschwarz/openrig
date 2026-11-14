@@ -114,6 +114,16 @@ describe("default onboarding pack", () => {
     const [, skill, reference] = pointer!;
     expect(skill).toBe("rigs");
     expect(existsSync(resolve(DAEMON_ROOT, "assets/skills", skill!, reference!)), `${skill}/${reference} must ship in the package`).toBe(true);
+    // An older install may lack the skill or the reference: the pointer names the guide's two sections and both ways to read it
+    // (PR #3238 review), and those sections exist in the guide the package ships.
+    expect(stepTwo).toContain("If the skill or that reference is missing");
+    expect(stepTwo).toContain('"Start the kernel and check its state"');
+    expect(stepTwo).toContain('"Open the kernel conversations"');
+    expect(stepTwo).toContain("`rig context get reference/getting-started.md`");
+    expect(stepTwo).toContain("`daemon/docs/reference/getting-started.md` in the installed `@openrig/cli` package");
+    const guide = readFileSync(resolve(REPO_ROOT, "docs/reference/getting-started.md"), "utf8");
+    expect(guide).toMatch(/^## Start the kernel and check its state$/m);
+    expect(guide).toMatch(/^## Open the kernel conversations$/m);
     expect(readFileSync(PACK_PATHS[0]!, "utf8")).not.toContain("rig terminal open");
     expect(stepTwo.length, "the section is a pointer, not the procedure").toBeLessThan(5_000);
   });

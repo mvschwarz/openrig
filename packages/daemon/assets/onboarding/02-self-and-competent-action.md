@@ -46,6 +46,9 @@ than printing a summary and disappearing.
 
 Use the `rigs` skill and read its `references/installing-for-someone.md` before you start the daemon or open anything for the
 person. It holds the whole installation, startup and operator-handoff procedure, and a seat's startup text does not repeat it.
+If the skill or that reference is missing (an older install), read the getting-started guide's "Start the kernel and check its state" and
+"Open the kernel conversations" sections: `rig context get reference/getting-started.md`, or, without a working daemon,
+`daemon/docs/reference/getting-started.md` in the installed `@openrig/cli` package.
 
 ## When you need more
 
