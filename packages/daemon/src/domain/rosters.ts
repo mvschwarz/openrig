@@ -71,16 +71,18 @@ function parseWake(value: unknown): RosterWake {
 export const MEMBER_LABEL_MAX = 200;
 
 // What changes how the text around it shows: C0 and C1 controls, the line and paragraph separators, and the bidirectional
-// embeddings, overrides and isolates. Joiners and the implicit direction marks are ordinary in names, and stay allowed.
+// embeddings, overrides and isolates. Also the invisible characters that let two names that look the same differ: the word
+// joiner and invisible operators (U+2060-2064) and the byte-order mark (U+FEFF). The zero-width space (it breaks words in
+// Thai, Khmer and Burmese names), the joiners and the implicit direction marks are ordinary in names, and stay allowed.
 // eslint-disable-next-line no-control-regex
-const LAYOUT_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+const LAYOUT_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 
 /** Why text an assistant repeats to a person (a member's label, a team's name) can't be shown as authored, or null: plain
  *  text of at most 200 characters, with no markup and nothing that breaks or reorders what's shown. */
 function shownTextProblem(field: string, value: unknown): string | null {
   if (typeof value !== "string" || !value.trim()) return `${field} isn't non-empty text`;
   if ([...value].length > MEMBER_LABEL_MAX) return `${field} is longer than ${MEMBER_LABEL_MAX} characters`;
-  if (LAYOUT_CONTROLS.test(value)) return `${field} holds a control character (a line break, a separator or a bidirectional control)`;
+  if (LAYOUT_CONTROLS.test(value)) return `${field} holds a control character (a line break, a separator, a bidirectional control or an invisible character)`;
   if (/[<>]/.test(value)) return `${field} holds an angle bracket`;
   return null;
 }
@@ -141,13 +143,20 @@ export function readRosters(folder: string): { rosters: Roster[]; warnings: stri
   return { rosters, warnings };
 }
 
-/** The name a person knows a rig's team by: its network roster's (`network-<rig>.json`) authored `name`, which is
- *  "Your OpenRig team" when its owner hasn't named it. Null when there's no such roster or it can't be read, and null with
- *  the reason when its name can't be shown as authored (the label rule): the roster itself still loads. */
+/** The name a person knows a rig's team by: its network roster's (`network-<rig>.json`) authored `name`, or, when there's
+ *  no network roster, the name of the roster that declares the rig as its `id` (the `<rig>.json` the starter and factory
+ *  leads write; the first by file name if several do). It's "Your OpenRig team" when its owner hasn't named it. Null when
+ *  there's no such roster or it can't be read, and null with the reason when its name can't be shown as authored (the
+ *  label rule): the roster itself still loads. */
 export function rosterTeamName(folder: string, rig: string): { name: string | null; problem?: string } {
   if (!rig || /[\\/\0]|^\.\.?$/.test(rig)) return { name: null };
-  let name: string;
-  try { name = readRosterFile(join(folder, `network-${rig}.json`)).name; } catch { return { name: null }; }
+  let name: string | undefined;
+  try { name = readRosterFile(join(folder, `network-${rig}.json`)).name; } catch (error) {
+    // Only a missing network roster falls back; one that's there but can't be read leaves the team unnamed, as before.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { name: null };
+    name = readRosters(folder).rosters.find((roster) => roster.id === rig)?.name;
+  }
+  if (name === undefined) return { name: null };
   const problem = shownTextProblem("name", name);
   return problem ? { name: null, problem } : { name };
 }

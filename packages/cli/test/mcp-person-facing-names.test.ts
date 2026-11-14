@@ -96,6 +96,42 @@ describe("a member's label", () => {
     expect(teamPhrase("Your OpenRig team")).toBe("your OpenRig team");
     expect(teamPhrase(null)).toBe("your OpenRig team");
   });
+
+  it("refuses the word joiner, the invisible operators and a byte-order mark, and keeps the zero-width space", () => {
+    // Each makes a label that looks the same differ. U+200B breaks words in Thai, Khmer and Burmese names, so it stays allowed.
+    const thai = "สม​ชาย";
+    const parsed = parseRoster(roster("Sam's team", [
+      member("a@team", { label: "claude⁠assistant" }),
+      member("b@team", { label: "claude⁢assistant" }),
+      member("c@team", { label: "claude⁤assistant" }),
+      member("d@team", { label: "claude﻿assistant" }),
+      member("e@team", { label: thai }),
+    ])).members;
+    expect(parsed.map((m) => m.label ?? null)).toEqual([null, null, null, null, thai]);
+    expect(parsed.map((m) => m.label_problem ?? null)).toEqual([...Array(4).fill(expect.stringContaining("invisible character")), null]);
+  });
+
+  it("names the team from the roster that declares the rig as its id when there's no network roster", () => {
+    const folder = rosters(null);
+    const declared = (file: string, id: string, name: string) =>
+      fs.writeFileSync(path.join(folder, file), JSON.stringify({ ...roster(name, []), id }));
+    // A starter or factory lead writes `<rig>.json` with the rig as its id; the file's name doesn't decide it.
+    declared("sams-team.json", "team", "Sam's team");
+    expect(rosterTeamName(folder, "team")).toEqual({ name: "Sam's team" });
+    expect(rosterTeamName(folder, "elsewhere")).toEqual({ name: null });
+    // When two rosters declare the same rig, the first by file name names it.
+    declared("a.json", "pair", "First");
+    declared("b.json", "pair", "Second");
+    expect(rosterTeamName(folder, "pair")).toEqual({ name: "First" });
+    // The declared roster's name follows the label rule.
+    declared("c.json", "hidden", "Sam﻿'s team");
+    expect(rosterTeamName(folder, "hidden")).toEqual({ name: null, problem: expect.stringContaining("invisible character") });
+    // The network roster still comes first, and one that's there but can't be read leaves the team unnamed.
+    fs.writeFileSync(path.join(folder, "network-team.json"), JSON.stringify(roster("The network's name", [])));
+    expect(rosterTeamName(folder, "team")).toEqual({ name: "The network's name" });
+    fs.writeFileSync(path.join(folder, "network-team.json"), "{");
+    expect(rosterTeamName(folder, "team")).toEqual({ name: null });
+  });
 });
 
 describe("rig_team for a person's assistant", () => {
