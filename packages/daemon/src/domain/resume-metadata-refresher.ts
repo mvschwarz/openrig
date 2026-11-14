@@ -566,3 +566,25 @@ function resolveProbeCwd(cwd: string | null | undefined, homeDir: string): strin
   }
   return cwd;
 }
+
+/** The conversation a Claude process holds now, from Claude's own `<configDir>/sessions/<pid>.json` (read only): its
+ *  session id when the file is a regular file of at most 64 KiB written after the process started (a leftover for a
+ *  reused PID is not evidence) and names the seat's session; else undefined. /clear rotates it without replacing the
+ *  process, so the launch argv can't tell it. Callers bracket it with two equal process observations. */
+export function readClaudePidSessionId(input: { configDir: string; pid: number; startedAt: string | null | undefined; sessionName: string }): string | undefined {
+  try {
+    const started = Date.parse(input.startedAt ?? "");
+    if (!Number.isFinite(started)) return undefined;
+    const file = nodePath.join(input.configDir, "sessions", `${input.pid}.json`);
+    const fd = fs.openSync(file, "r");
+    let record: { name?: unknown; sessionId?: unknown };
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size > 64 * 1024 || stat.mtimeMs < started) return undefined;
+      record = JSON.parse(fs.readFileSync(fd, "utf8"));
+    } finally { fs.closeSync(fd); }
+    if (record?.name !== input.sessionName) return undefined;
+    const valid = validateResumeToken("claude-code", record.sessionId);
+    return valid.ok ? valid.token : undefined;
+  } catch { return undefined; }
+}

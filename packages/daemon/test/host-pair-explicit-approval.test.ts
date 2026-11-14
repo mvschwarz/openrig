@@ -14,7 +14,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
+import { makeQueueRecordingCheck, makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
@@ -46,7 +46,7 @@ async function fixture({ kernel = true, operator, ownershipUnreadable = false, r
   const rigs = kernel ? ["kernel", "fixture-rig"] : ["fixture-rig"];
   const validateRig = makeTopologyDestinationCheck({ findRigsByName: (name) => rigs.filter((rig) => rig === name),
     loadHumanRegistry: () => registry, sharedChannels: () => [] });
-  const repo = new QueueRepository(db, bus, { validateRig, loadHumanRegistry: () => registry,
+  const repo = new QueueRepository(db, bus, { validateRig, canRecordDestination: makeQueueRecordingCheck(validateRig), loadHumanRegistry: () => registry,
     transport: { send: async () => ({ ok: true, verified: true, sent: true }) } });
   const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
   const app = new Hono();

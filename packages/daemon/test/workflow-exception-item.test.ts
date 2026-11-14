@@ -18,6 +18,8 @@ import { migrate } from "../src/db/migrate.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { makeTopologyDestinationCheck, makeQueueRecordingCheck } from "../src/domain/queue-destination-check.js";
+import { loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { isHumanSeatSession } from "../src/domain/human-route-enforcer.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -82,8 +84,11 @@ describe("WF-5 FR-2 class (a): born-in-txn exception item", () => {
     migrate(db, ALL_MIGRATIONS);
     const bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    const topology = opts?.validateRig ?? makeTopologyDestinationCheck({
+      findRigsByName: name => db.prepare("SELECT id FROM rigs WHERE name = ?").all(name), loadHumanRegistry,
+    });
     queueRepo = new QueueRepository(db, bus, {
-      validateRig: opts?.validateRig ?? (() => true),
+      validateRig: topology, canRecordDestination: makeQueueRecordingCheck(topology),
     });
     // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
     // close needs a SAME-DB intent store to make its wake durable.
@@ -218,6 +223,16 @@ describe("WF-5 FR-2 class (a): born-in-txn exception item", () => {
     const rows = exceptionRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.tier).toBe("human-gate");
+  });
+
+  it("production recording keeps a failed-step exception on the person when its concrete agent rig is absent", async () => {
+    build();
+    expect(queueRepo.acceptsDestination("orch-lead@absent-rig")).toBe(false);
+    const { instanceId } = await failEntryStep(seed(SPEC_WITH_ORCH
+      .replace("wf5-exc-pipeline", "wf5-absent-concrete").replace("orch-lead@rig", "orch-lead@absent-rig")));
+    expect(exceptionRows(db)).toMatchObject([{ destination_session: "human@host", tier: "human-gate" }]);
+    expect(db.prepare("SELECT 1 FROM queue_items WHERE destination_session = ?").get("orch-lead@absent-rig")).toBeUndefined();
+    expect(db.prepare("SELECT status FROM workflow_instances WHERE instance_id = ?").get(instanceId)).toEqual({ status: "failed" });
   });
 
   it("WRITE-GATE FALLBACK: a routed destination the queue gate rejects re-routes human@host instead of losing the exception or failing the close", async () => {
