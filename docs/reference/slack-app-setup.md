@@ -54,9 +54,10 @@ not fill in; if so, follow the form.
    `rig slack verify` reports NOT ready until the app is a member.
 9. Register yourself as the human the connector delivers to, with a Slack binding that names
    your Slack user ID (`rig gateway human add`; its `--help` shows the binding format).
-   Messages from Slack users who are not registered are not delivered. `rig slack enable`
-   needs a readable human registry: on a fresh install with no registry, or with an invalid
-   one, it is refused.
+   If the shared channel is registered, messages from otherwise unregistered Slack users
+   can be admitted as that channel participant; the envelope preserves the actual Slack
+   sender. `rig slack enable` needs a readable human registry: on a fresh install with no
+   registry, or with an invalid one, it is refused.
 10. Run `rig slack setup --channel <channel-id> --secrets-env-file <path>`, then
     `rig slack verify`, then `rig slack enable`.
 11. Enabling treats the asks already open as seen, so none of them post. To see them in Slack, run
