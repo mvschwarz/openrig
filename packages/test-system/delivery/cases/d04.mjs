@@ -61,7 +61,20 @@ export async function runArm(ctx, arm, empty) {
   const since = ctx.nowNs();
   const sent = await ctx.send(body);
   const json = sent.json;
-  if (!json) return `the send gave no JSON result (exit ${sent.exit}): ${String(sent.stderr || sent.stdout || "").slice(0, 300)}`;
+  if (!json) {
+    // No record of the send. A paste that never arrived, or a message that arrived twice, is still a failure; otherwise
+    // there is nothing to judge.
+    await ctx.sleep(3000);
+    const pastes = ctx.paneWrites(since).filter((w) => w.argv[0] === "paste-buffer" && w.argv.some((a) => a.startsWith("openrig_")));
+    const turns = ctx.deliveries(marker).turns;
+    const missing = `the send gave no JSON result (exit ${sent.exit}): ${String(sent.stderr || sent.stdout || "").slice(0, 300)}`;
+    if ((pastes.length > 0 && turns.length === 0) || pastes.length > 1 || turns.length > 1) {
+      verdict.check(`${arm.label}: no forbidden effect without a record of the send (${missing})`, false, { pastes: pastes.length, delivered: turns.length,
+        input: await ctx.readComposer().catch(() => null) });
+      return null;
+    }
+    return missing;
+  }
   const delivered = json.ok === true && json.sent !== false && json.outcome !== "retained";
   verdict.check(`${arm.label}: not held, and sent (an empty input box is not a draft, whatever the footer says)`, sent.exit === 0 && delivered,
     { exit: sent.exit, json, stderr: sent.stderr?.slice(0, 300) });

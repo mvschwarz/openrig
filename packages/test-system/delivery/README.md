@@ -72,14 +72,18 @@ This is the real TUI with timing injected at the wrapper boundary, after the gua
 
 `cases/d18.mjs` walks each mode through idle, draft, copy mode, busy and the model picker, each with a deliberate send, an urgent one and a watchdog reminder. It judges every attempt from OpenRig's own record of it, never from silence:
 
-- **A `rig send`** is judged by its JSON result. A send with no JSON result is NOT RUN.
-- **A reminder** is judged by its occurrence's entry in the watchdog's history (`rig watchdog status <job> --json`): sent, retained with its held ids, or refused with its input phase. No occurrence within 40 seconds is NOT RUN.
+- **A `rig send`** is judged by its JSON result.
+- **A reminder** is judged by its occurrence's entry in the watchdog's history (`rig watchdog status <job> --json`): sent, retained with its held ids, or refused with its input phase.
+- **No record** (a send with no JSON result, or no occurrence within 40 seconds) is NOT RUN, unless an effect the matrix forbids was observed anyway: a write to the pane or a delivery where nothing may arrive, or a paste that never arrived. That's FAIL.
+- **Pane writes** are read after the 3-second no-arrival observation, so a late paste is seen.
+- **A held result's** returned outboxIds must name exactly its held messages; a reminder's may also name its own occurrence.
+- **Each fixture** (draft, copy mode, busy, the picker) starts from an input box positively read as clean. Otherwise that combination is NOT RUN.
 
 **Reasons.** Where the matrix names a reason, the recorded one must match. Where the version records none, the combination is NOT RUN. OpenRig 0.7.12 records none for a reminder held by its mode or refused at a dialog.
 
 **Deliveries** are judged as the first cases' are: the complete body, exactly once after a final re-read. A merge must carry the draft in the very turn that carried the message.
 
-**Busy.** A busy turn's answer is held on a stand-in gate named after its marker until the attempt is over. So the attempt meets a running turn by construction, not by a longer wait. The input box read at that moment picks the matrix's row: empty (deliver) or unreadable (held, `draft_input_unknown`).
+**Busy.** A busy turn's answer is held on a stand-in gate named after its marker until the attempt is over. So the attempt meets a running turn by construction, not by a longer wait. The input box read at that moment picks the matrix's row: empty (deliver) or unreadable (held, `draft_input_unknown`). A join must show OpenRig's paste and Enter before the gate opened: OpenRig wrote into the running turn instead of waiting for idle. That doesn't pin how the program then places the text in its conversation, whether in the same request or a following item.
 
 **Never replayed.** One held message stays active through an observed effective change to off (pending:false), and the cell watches 15 seconds for a replay before retiring it. Every other held message is retired after its combination, and a retire that fails is a failed check, since the later combinations rely on the freed quota.
 
@@ -102,7 +106,9 @@ A refused reminder's occurrence stays owed and can retry after the cell ends. Th
 
 ### What a result is bound to
 
-A run's `RESULT.json` pins the programs, OpenRig, `expected.yaml` and the containment. From this version it also pins the suite itself: its git commit, whether the tree was clean, and a digest of `cases/`, `harness/` and `stand-ins/`. A run made before that binds to a suite revision only by the worktree it ran from: that's testimony, not a record. The unit tests' result is evidence only when its JSON report is kept with the run (`vitest --reporter=json --outputFile=…`), named with the commit it ran on.
+A run's `RESULT.json` pins the programs, OpenRig, `expected.yaml` and the containment. From this version it also pins the suite itself: its git commit, whether the tree was clean, and a digest of `cases/`, `harness/` and `stand-ins/`. Those digests are in-band hashes of the suite code that ran. `clean` is `git status` of the delivery folder, so it covers that subtree only. A run made before that binds to a suite revision only by the worktree it ran from: that's testimony, not a record.
+
+The unit tests' result is evidence only when its JSON report is kept with the run (`vitest --reporter=json --outputFile=…`), named with the commit it ran on. The report carries no hash of the sources, so its binding to that commit is run-order testimony, unless the sources' hashes are recorded beside it.
 
 
 ## Stand-in model servers

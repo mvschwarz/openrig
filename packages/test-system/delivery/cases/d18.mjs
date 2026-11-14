@@ -69,12 +69,11 @@ function composerCondition(ctx, screen, empty) {
   return { condition: input.trim() === (empty ?? "").trim() ? "empty" : "text", input };
 }
 
-async function enterState(ctx, state, label, empty) {
-  if (state === "idle") {
-    const { condition, input } = composerCondition(ctx, (await ctx.observe()).screen, empty);
-    if (condition !== "empty") throw new NotRun(`the input box wasn't empty at the idle attempt (${condition}: ${JSON.stringify(input)})`);
-    return {};
-  }
+export async function enterState(ctx, state, label, empty) {
+  // Every fixture starts from a positively read clean input box: an earlier combination's residue can't enter it.
+  const { condition, input } = composerCondition(ctx, (await ctx.observe()).screen, empty);
+  if (condition !== "empty") throw new NotRun(`the input box wasn't verified clean before the ${state} fixture (${condition}: ${JSON.stringify(input)})`);
+  if (state === "idle") return {};
   if (state === "draft") {
     const draft = `PERSONDRAFT${label}`;
     await ctx.typeDraft(draft);
@@ -127,12 +126,16 @@ async function heldFor(ctx, marker) {
  *  a person would clear it. `empty` is the input box as read at the cell's start (a program's placeholder). */
 async function clearResidue(ctx, label, empty) {
   const input = await ctx.readComposer().catch(() => null);
-  if (input === null || input.trim() === (empty ?? "").trim()) return null;
-  await ctx.eraseDraft(Buffer.byteLength(input) + 400);
-  await ctx.settle({ timeoutMs: 20_000, optional: true });
+  if (input !== null && input.trim() === (empty ?? "").trim()) return true;
+  if (input !== null) {
+    await ctx.eraseDraft(Buffer.byteLength(input) + 400);
+    await ctx.settle({ timeoutMs: 20_000, optional: true });
+  }
   const after = await ctx.readComposer().catch(() => null);
-  ctx.verdict.info(`${label}: left in the input box afterwards, then cleared`, { input, after });
-  return input;
+  const clean = after !== null && after.trim() === (empty ?? "").trim();
+  // An unclean or unreadable box isn't trusted: the next fixture reads it again and is NOT RUN if it isn't clean.
+  ctx.verdict.info(`${label}: left in the input box afterwards, then ${clean ? "cleared" : "not verified clean"}`, { input, after });
+  return clean;
 }
 
 async function leaveState(ctx, state, entered) {
@@ -160,7 +163,7 @@ export function occurrenceResult(entry) {
 }
 
 /** One sender's attempt, and OpenRig's own record of what it did: the send's JSON result, or the reminder occurrence's
- *  evaluation. NOT RUN when there's no such record. */
+ *  evaluation. Without such a record, `json` is null and `missing` says why: judge() then looks for observed effects. */
 export async function attempt(ctx, sender, marker, { occurrenceTimeoutMs = 40_000, pollMs = 1000 } = {}) {
   const since = ctx.nowNs();
   if (sender === "automatic") {
@@ -174,12 +177,25 @@ export async function attempt(ctx, sender, marker, { occurrenceTimeoutMs = 40_00
         if (!entry) await ctx.sleep(pollMs);
       }
     } finally { await ctx.stopWatchdog(jobId); }
-    if (!entry) throw new NotRun(`no occurrence of the reminder was evaluated within ${occurrenceTimeoutMs / 1000} s, so there is no attempt to judge`);
+    if (!entry) return { since, source: "watchdog", json: null, missing: `no occurrence of the reminder was evaluated within ${occurrenceTimeoutMs / 1000} s` };
     return { since, source: "watchdog", json: occurrenceResult(entry), occurrence: entry };
   }
   const sent = await ctx.send(bodyFor(sender, marker), sender === "deliberate_urgent" ? ["--urgent"] : []);
-  if (!sent.json) throw new NotRun(`the send gave no JSON result (exit ${sent.exit}): ${String(sent.stderr || sent.stdout || "").slice(0, 300)}`);
+  if (!sent.json) return { since, source: "send", json: null, exit: sent.exit, missing: `the send gave no JSON result (exit ${sent.exit}): ${String(sent.stderr || sent.stdout || "").slice(0, 300)}` };
   return { since, source: "send", json: sent.json, exit: sent.exit };
+}
+
+/** OpenRig's own writes among the pane writes: its pastes (from its own buffers) and the Enter keys it sent. */
+const openrigPastes = (writes) => writes.filter((w) => w.argv[0] === "paste-buffer" && w.argv.some((a) => a.startsWith("openrig_")));
+const enterKeys = (writes) => writes.filter((w) => w.argv[0] === "send-keys" && w.argv.some((a) => a === "Enter" || a === "C-m"));
+
+/** Whether a held result's returned outboxIds name exactly its held rows: every retained row for the marker, plus (for a
+ *  reminder) its own occurrence and nothing else. */
+export function idsCorrelate(json, heldIds, source) {
+  const returned = Array.isArray(json?.outboxIds) ? json.outboxIds : [];
+  if (!returned.length || !heldIds.every((id) => returned.includes(id))) return false;
+  const extra = returned.filter((id) => !heldIds.includes(id));
+  return extra.length === 0 || (source === "watchdog" && extra.length === 1 && extra[0].startsWith("watchdog-occurrence-"));
 }
 
 /** Judge one attempt against its expected outcome. Returns the held outboxIds to retire, whether it was refused, and
@@ -188,30 +204,53 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
   const { verdict } = ctx;
   const label = `${mode}: ${state} · ${sender}`;
   const body = bodyFor(sender, marker);
-  const json = at.json;
-  const writes = ctx.paneWrites(at.since);
   const held = await heldFor(ctx, marker);
-  const retained = json.outcome === "retained" && json.sent === false;
-  // An automatic hold's reason is on its held row's own delivery record, where the version keeps one.
-  const reason = json.reason ?? held.map((i) => i.delivery?.reason).find(Boolean) ?? null;
   // The held messages are the ones held-messages lists as retained. An occurrence's outboxIds also name the occurrence
   // itself, which is no held message and can't be retired.
   const heldIds = held.filter((i) => i.deliveryState === "retained").map((i) => i.outboxId);
+  // Pane writes and deliveries are read after the bounded observation, so a paste made while it ran is seen.
+  const observe = async () => { await ctx.sleep(3000); return { writes: ctx.paneWrites(at.since), turns: ctx.deliveries(marker).turns }; };
+  const json = at.json;
+
+  if (!json) {
+    // No record of the attempt. An effect the matrix forbids, observed independently, is still a failure; otherwise
+    // there is nothing to judge.
+    const { writes, turns } = await observe();
+    const forbidden = expect.type === "refuse" || expect.type === "held" ? writes.length > 0 || turns.length > 0
+      : ["deliver", "merge", "copy-then-deliver", "deliver-or-held"].includes(expect.type) ? (openrigPastes(writes).length > 0 && turns.length === 0) || turns.length > 1
+        : false;
+    const seen = { source: at.source, missing: at.missing, exit: at.exit ?? null, writes: writes.length, delivered: turns.length };
+    if (forbidden) { verdict.check(`${label}: no forbidden effect without a record of the attempt (${at.missing})`, false, seen); return { heldIds, notRun: null, refused: false }; }
+    verdict.info(`${label}: no record of the attempt, and no forbidden effect observed`, seen);
+    return { heldIds, notRun: at.missing, refused: false };
+  }
+
+  const retained = json.outcome === "retained" && json.sent === false;
+  // An automatic hold's reason is on its held row's own delivery record, where the version keeps one.
+  const reason = json.reason ?? held.map((i) => i.delivery?.reason).find(Boolean) ?? null;
   const delivered = json.ok === true && !retained;
-  const seen = { source: at.source, json, reason, held: held.map((h) => ({ outboxId: h.outboxId, state: h.deliveryState, reason: h.delivery?.reason ?? null })), writes: writes.length };
+  const correlated = idsCorrelate(json, heldIds, at.source);
+  const seenWith = (writes) => ({ source: at.source, json, reason, held: held.map((h) => ({ outboxId: h.outboxId, state: h.deliveryState, reason: h.delivery?.reason ?? null })), writes: writes.length });
   // A named reason must be the one recorded; where the version records none, the combination can't be confirmed.
   const reasonFits = (reasons) => !reasons || reason === null || reasons.includes(reason);
   const reasonShort = (reasons) => reasons && reason === null ? `the outcome's reason isn't recorded by this version, so ${reasons.join(" or ")} can't be confirmed` : null;
-  const nothingArrived = async () => { await ctx.sleep(3000); return ctx.deliveries(marker).turns.length === 0; };
   let notRun = null;
 
   switch (expect.type) {
     case "deliver":
     case "copy-then-deliver":
     case "merge": {
-      if (!delivered) { verdict.check(`${label}: delivered once (the attempt's own result says it was sent)`, false, seen); break; }
+      const writes = ctx.paneWrites(at.since);
+      if (!delivered) { verdict.check(`${label}: delivered once (the attempt's own result says it was sent)`, false, seenWith(writes)); break; }
+      if (expect.joins && entered?.releasedNs) {
+        // Joined the running turn: OpenRig's paste and Enter happened before the busy answer was released. How the program
+        // then places the text in its conversation is its own queueing, which this doesn't pin.
+        const during = writes.filter((w) => w.timeNs < entered.releasedNs);
+        verdict.check(`${label}: written into the running turn (OpenRig's paste and Enter before the busy answer was released)`,
+          openrigPastes(during).length > 0 && enterKeys(during).length > 0, { releasedNs: entered.releasedNs, writes: writes.map((w) => ({ timeNs: w.timeNs, op: w.argv[0] })) });
+      }
       const turn = await deliveredOnce(ctx, marker, body, { label, alone: !expect.joins });
-      if (expect.type === "copy-then-deliver") verdict.check(`${label}: copy mode left through the seat's address`, !(await ctx.inMode()), seen);
+      if (expect.type === "copy-then-deliver") verdict.check(`${label}: copy mode left through the seat's address`, !(await ctx.inMode()), seenWith(writes));
       if (expect.type === "merge") {
         // Merged and submitted: the draft is in the very turn that carried the message, and no longer in the input box.
         const merged = !!turn && turn.parts.some((p) => p.source === "text" && p.text.includes(entered.draft));
@@ -221,27 +260,34 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
       break;
     }
     case "refuse": {
-      const refused = json.sent === false && writes.length === 0 && (retained || json.ok === false);
-      const quiet = await nothingArrived();
+      const { writes, turns } = await observe();
+      const refused = json.sent === false && writes.length === 0 && (retained ? correlated : json.ok === false);
+      const quiet = turns.length === 0;
       verdict.check(`${label}: refused before input (${expect.reasons ? expect.reasons.join(" or ") : "any no-input reason"}), nothing written or delivered`,
-        refused && quiet && reasonFits(expect.reasons), seen);
+        refused && quiet && reasonFits(expect.reasons), seenWith(writes));
       if (refused && quiet) notRun = reasonShort(expect.reasons);
       break;
     }
     case "held": {
-      const quiet = await nothingArrived();
-      const isHeld = retained && heldIds.length > 0 && writes.length === 0 && quiet;
-      verdict.check(`${label}: held (${expect.reasons ? expect.reasons.join(" or ") : "any reason"}), retained, no write, not delivered`, isHeld && reasonFits(expect.reasons), seen);
-      if (retained) verdict.check(`${label}: readable with rig seat held-messages`, held.length > 0, seen.held);
-      if (isHeld) notRun = reasonShort(expect.reasons);
+      const { writes, turns } = await observe();
+      const isHeld = retained && heldIds.length > 0 && writes.length === 0 && turns.length === 0;
+      verdict.check(`${label}: held (${expect.reasons ? expect.reasons.join(" or ") : "any reason"}), retained, no write, not delivered`, isHeld && reasonFits(expect.reasons), seenWith(writes));
+      if (retained) {
+        verdict.check(`${label}: readable with rig seat held-messages`, held.length > 0, seenWith(writes).held);
+        verdict.check(`${label}: the result's outboxIds name its held messages`, correlated, { returned: json.outboxIds ?? null, held: heldIds });
+      }
+      if (isHeld && correlated) notRun = reasonShort(expect.reasons);
       break;
     }
-    case "deliver-or-held":
-      verdict.check(`${label}: delivered once, or held (${expect.reasons.join(" or ")}) with no write`, delivered || (retained && writes.length === 0 && reasonFits(expect.reasons)), seen);
+    case "deliver-or-held": {
+      const { writes } = await observe();
+      verdict.check(`${label}: delivered once, or held (${expect.reasons.join(" or ")}) with no write`,
+        delivered || (retained && correlated && writes.length === 0 && reasonFits(expect.reasons)), seenWith(writes));
       if (delivered) await deliveredOnce(ctx, marker, body, { label, alone: false });
       break;
+    }
     default:
-      verdict.info(`${label}: not stated by the expected matrix; recorded`, seen);
+      verdict.info(`${label}: not stated by the expected matrix; recorded`, seenWith(ctx.paneWrites(at.since)));
   }
   if (entered?.condition) verdict.info(`${label}: the input box during the busy turn, at the attempt`, entered.condition);
   return { heldIds, notRun, refused: json.ok === false && json.sent === false };
@@ -310,6 +356,7 @@ function modeCase(mode) {
             if (entered.gate) {
               // The attempt is over and the busy turn's answer is still held: the attempt met a running turn.
               verdict.info(`${mode}: ${name}: the busy turn was still running when the attempt ended (its answer held until now)`, { screen: entered.screenAtAttempt });
+              entered.releasedNs = ctx.nowNs();
               ctx.releaseGate(entered.gate);
               entered.released = true;
             }

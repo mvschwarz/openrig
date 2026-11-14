@@ -16,7 +16,7 @@ import { composerText } from "../../test-system/delivery/harness/screen.mjs";
 import { ownsEnviron, parseStat, reapByIdentity } from "../../test-system/delivery/harness/world.mjs";
 import { caseContext } from "../../test-system/delivery/harness/case-context.mjs";
 import { isRefusal } from "../../test-system/delivery/cases/s3.mjs";
-import { attempt, expectFor, judge, modeChangeControl, occurrenceResult } from "../../test-system/delivery/cases/d18.mjs";
+import { attempt, enterState, expectFor, idsCorrelate, judge, modeChangeControl, occurrenceResult } from "../../test-system/delivery/cases/d18.mjs";
 import { runArm } from "../../test-system/delivery/cases/d04.mjs";
 import { recordScreen } from "../../test-system/delivery/harness/screen.mjs";
 import { bankCell } from "../../test-system/delivery/harness/evidence.mjs";
@@ -215,14 +215,23 @@ const userTurn = (index: number, text: string) => ({ index, seq: index, kind: "u
 const sendBody = (m: string) => `Delivery check ${m}: deliberate message.`;
 
 describe("delivery harness: D18's attempt evidence (X-F1)", () => {
-  it("makes an automatic attempt with no evaluated occurrence NOT RUN, never a refusal", async () => {
-    const { ctx } = fakeCtx({ registerReminder: async () => "job", watchdogStatus: async () => ({ recentHistory: [] }), stopWatchdog: async () => {} });
-    await expect(attempt(ctx, "automatic", "DLV-a-1", { occurrenceTimeoutMs: 30, pollMs: 1 })).rejects.toMatchObject({ notRun: true, message: expect.stringMatching(/no occurrence/) });
+  it("makes an automatic attempt with no evaluated occurrence NOT RUN, never a refusal, when nothing was observed", async () => {
+    const { ctx, verdict } = fakeCtx({ registerReminder: async () => "job", watchdogStatus: async () => ({ recentHistory: [] }), stopWatchdog: async () => {} });
+    const at = await attempt(ctx, "automatic", "DLV-a-1", { occurrenceTimeoutMs: 30, pollMs: 1 });
+    expect(at).toMatchObject({ json: null, missing: expect.stringMatching(/no occurrence/) });
+    const judged = await judge(ctx, { mode: "off", state: "dialog", sender: "automatic", marker: "DLV-a-1", attempt: at, expect: { type: "refuse", reasons: ["target_needs_input"] } });
+    expect(judged.notRun).toMatch(/no occurrence/);
+    expect(verdict.result).toBe("PASS"); // the cell then reads NOT RUN: see run()
   });
 
-  it("makes a send with no JSON result NOT RUN, with its exit and stderr", async () => {
-    const { ctx } = fakeCtx({ send: async () => ({ exit: 1, json: null, stderr: "daemon unreachable" }) });
-    await expect(attempt(ctx, "deliberate", "DLV-a-2")).rejects.toMatchObject({ notRun: true, message: expect.stringMatching(/no JSON result \(exit 1\): daemon unreachable/) });
+  it("fails a send with no JSON result when a forbidden effect was observed anyway (Q1)", async () => {
+    const paste = { timeNs: 5, argv: ["paste-buffer", "-t", "%0", "-b", "openrig_1", "-d", "-r", "-p"] };
+    const { ctx, verdict } = fakeCtx({ send: async () => ({ exit: 1, json: null, stderr: "daemon unreachable" }), paneWrites: () => [paste] });
+    const at = await attempt(ctx, "deliberate", "DLV-a-2");
+    expect(at).toMatchObject({ json: null, missing: expect.stringMatching(/no JSON result \(exit 1\): daemon unreachable/) });
+    const judged = await judge(ctx, { mode: "off", state: "dialog", sender: "deliberate", marker: "DLV-a-2", attempt: at, expect: { type: "refuse", reasons: ["target_needs_input"] } });
+    expect(judged.notRun).toBeNull();
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/no forbidden effect without a record/);
   });
 
   it("reads an occurrence's own evaluation as its result: sent, retained with its held ids, or refused before input", () => {
@@ -253,6 +262,57 @@ describe("delivery harness: D18's attempt evidence (X-F1)", () => {
     const at = { since: 0, source: "watchdog", json: occurrenceResult({ deliveryStatus: "retained", evaluationNotes: { outboxIds: ["watchdog-occurrence-1", "guard-send-1"] } }) };
     const judged = await judge(ctx, { mode: "hold", state: "idle", sender: "automatic", marker: "DLV-h-2", attempt: at, expect: { type: "held", reasons: null } });
     expect(judged.heldIds).toEqual(["guard-send-1"]);
+  });
+});
+
+describe("delivery harness: D18's round-2 controls (Q2 to Q5)", () => {
+  const paste = (timeNs: number) => ({ timeNs, argv: ["paste-buffer", "-t", "%0", "-b", "openrig_1", "-d", "-r", "-p"] });
+  const enter = (timeNs: number) => ({ timeNs, argv: ["send-keys", "-t", "%0", "Enter"] });
+
+  it("doesn't type a fixture over an input box that wasn't verified clean (Q2)", async () => {
+    let typed = 0;
+    const residue = fakeCtx({ observe: async () => ({ screen: "x" }), composerOf: () => "From: a\nleft over", typeDraft: async () => { typed++; } });
+    await expect(enterState(residue.ctx, "draft", "x1", "")).rejects.toMatchObject({ notRun: true, message: expect.stringMatching(/wasn't verified clean before the draft fixture/) });
+    const unreadable = fakeCtx({ observe: async () => ({ screen: "x" }), composerOf: () => null, enterCopyMode: async () => { typed++; } });
+    await expect(enterState(unreadable.ctx, "copy_mode", "x2", "")).rejects.toMatchObject({ notRun: true });
+    expect(typed).toBe(0);
+  });
+
+  it("fails a held result whose returned outboxIds miss or misname its held messages (Q3)", async () => {
+    expect(idsCorrelate({ outboxIds: ["g1"] }, ["g1"], "send")).toBe(true);
+    expect(idsCorrelate({ outboxIds: ["watchdog-occurrence-1", "g1"] }, ["g1"], "watchdog")).toBe(true);
+    expect(idsCorrelate({ outboxIds: [] }, ["g1"], "send")).toBe(false);
+    expect(idsCorrelate({ outboxIds: ["g2"] }, ["g1"], "send")).toBe(false);
+    expect(idsCorrelate({ outboxIds: ["watchdog-occurrence-1", "g1"] }, ["g1"], "send")).toBe(false);
+    const { ctx, verdict } = fakeCtx({ heldMessages: async () => ({ items: [{ outboxId: "g1", deliveryState: "retained", body: "Delivery check DLV-q3-1: deliberate message." }] }) });
+    const at = { since: 0, source: "send", json: { ok: true, outcome: "retained", sent: false, reason: "typing_guard_enabled", outboxIds: ["g2"] } };
+    await judge(ctx, { mode: "hold", state: "idle", sender: "deliberate", marker: "DLV-q3-1", attempt: at, expect: { type: "held", reasons: ["typing_guard_enabled"] } });
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/outboxIds name its held messages/);
+  });
+
+  it("fails a busy join whose paste and Enter came only after the busy answer was released (Q4)", async () => {
+    const m = "DLV-q4-1";
+    const join = (writes: unknown[]) => {
+      const f = fakeCtx({ paneWrites: () => writes });
+      f.turns[m] = [userTurn(1, sendBody(m))];
+      return f;
+    };
+    const args = { mode: "off", state: "busy", sender: "deliberate", marker: m, attempt: { since: 0, source: "send", json: { ok: true, sessionName: "s" } },
+      expect: { type: "deliver", joins: true }, entered: { releasedNs: 100 } };
+    const late = join([paste(150), enter(160)]);
+    await judge(late.ctx, args);
+    expect(late.verdict.toJSON().failed.join(" ")).toMatch(/written into the running turn/);
+    const during = join([paste(50), enter(60)]);
+    await judge(during.ctx, args);
+    expect(during.verdict.result).toBe("PASS");
+  });
+
+  it("sees a paste made during the no-arrival observation, and fails the refusal (Q5)", async () => {
+    let waited = false;
+    const { ctx, verdict } = fakeCtx({ sleep: async () => { waited = true; }, paneWrites: () => waited ? [paste(5)] : [] });
+    const at = { since: 0, source: "send", json: { ok: false, sent: false, reason: "target_needs_input", inputPhase: "not_reached" } };
+    await judge(ctx, { mode: "off", state: "dialog", sender: "deliberate", marker: "DLV-q5-1", attempt: at, expect: { type: "refuse", reasons: ["target_needs_input"] } });
+    expect(verdict.result).toBe("FAIL");
   });
 });
 
@@ -338,6 +398,14 @@ describe("delivery harness: D04's state at each arm's attempt (X-F4)", () => {
     expect(await runArm(ctx, clipped, "")).toMatch(/isn't the width-clipped form/);
     expect(verdict.result).toBe("FAIL"); // the earlier failure stands
     expect(verdict.checks.filter((c) => c.ok !== null)).toHaveLength(1);
+  });
+
+  it("fails an arm whose send left no record but whose paste was observed with nothing delivered (Q1)", async () => {
+    const paste = { timeNs: 5, argv: ["paste-buffer", "-t", "%0", "-b", "openrig_1", "-d", "-r", "-p"] };
+    const { ctx, verdict } = armCtx(screenWith("✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…"), {
+      mark: () => "DLV-d04-1", send: async () => ({ exit: 1, json: null, stderr: "lost" }), paneWrites: () => [paste], eraseDraft: async () => {} });
+    expect(await runArm(ctx, clipped, "")).toBeNull();
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/no forbidden effect without a record of the send/);
   });
 
   it("clears an earlier arm's residue first, and is NOT RUN if the input box still isn't empty", async () => {
