@@ -470,7 +470,7 @@ export function assessNativeResumeProbe(
         detail: "Codex reported that the requested saved session does not exist.",
       };
     }
-    if (looksLikeCodexAuthRefusal(paneContent)) {
+    if (currentCodexAuthRefusal(paneContent, paneCommand)) {
       return {
         status: "attention_required",
         code: "codex_auth_refusal",
@@ -874,12 +874,42 @@ function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): 
 //    logged out or signed in to another account. Please sign in again."
 //   "Your access token could not be refreshed. Please log out and sign
 //    in again."
-function looksLikeCodexAuthRefusal(paneContent: string): boolean {
-  if (!paneContent.includes("access token could not be refreshed")) return false;
-  return (
-    paneContent.includes("Please sign in again")
-    || paneContent.includes("Please log out and sign in again")
-  );
+// codex-cli 0.162.1 has those two and three more ("... because your refresh token has expired / was already used / was
+// revoked. Please log out and sign in again."), all starting the same way.
+//
+// The message starts its own row: printed by the CLI, perhaps after `Error:`, or drawn as a TUI error cell (`■`). A row
+// that starts any other way (a reply, a prompt, an indented quote) or sits in a fenced block isn't Codex's message.
+const CODEX_AUTH_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )?Your access token could not be refreshed\b/;
+const CODEX_AUTH_INSTRUCTIONS = ["Please sign in again", "Please log out and sign in again"];
+const CODEX_INPUT_ROW = /^\s*[›»](?:\s|$)/;
+const CODEX_MESSAGE_ROW = /^(?:[›»•■]|Error: |ERROR: )/;
+
+// A refusal blocks only as the newest thing Codex printed, as Claude's counts only as its latest response
+// (`currentClaudeLoginRefusal`). After the message (its instruction can wrap onto the next two rows) only blank rows, the
+// composer with its footer, or, for a pane back at its shell, the shell's prompt row may follow. So an old refusal in a
+// resumed conversation's history, a quoted one, or one followed by a newer reply, prompt or error doesn't count.
+function currentCodexAuthRefusal(paneContent: string, paneCommand: string): boolean {
+  const lines = paneContent.split(/\r?\n/);
+  let at = -1;
+  let fenced = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*```/.test(lines[i]!)) fenced = !fenced;
+    else if (!fenced && CODEX_AUTH_REFUSAL_ROW.test(lines[i]!)) at = i;
+  }
+  if (at < 0) return false;
+  let end = -1;
+  for (let i = at; i < Math.min(at + 3, lines.length) && end < 0; i++) {
+    const message = lines.slice(at, i + 1).join(" ").replace(/\s+/g, " ");
+    if (CODEX_AUTH_INSTRUCTIONS.some((instruction) => message.includes(instruction))) end = i;
+  }
+  if (end < 0) return false;
+  const after = lines.slice(end + 1);
+  // The composer is the last input row with no message after it; its footer rows don't start messages.
+  let inputAt = after.length - 1;
+  while (inputAt >= 0 && !CODEX_INPUT_ROW.test(after[inputAt]!)) inputAt--;
+  if (inputAt >= 0 && after.slice(inputAt + 1).some((line) => CODEX_MESSAGE_ROW.test(line))) inputAt = -1;
+  const rows = (inputAt < 0 ? after : after.slice(0, inputAt)).filter((line) => line.trim() !== "");
+  return rows.length === 0 || (rows.length === 1 && inputAt < 0 && SHELL_COMMANDS.has(paneCommand) && !CODEX_MESSAGE_ROW.test(rows[0]!));
 }
 
 function looksLikeCodexLoginPrompt(paneContent: string): boolean {

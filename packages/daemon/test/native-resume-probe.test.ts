@@ -1338,6 +1338,65 @@ describe("native resume probe", () => {
       expect(result.code).toBe("trust_gate");
     });
 
+    // A refusal counts only as the newest thing Codex printed, as Claude's login refusal counts only as its latest
+    // response. A resumed conversation replays its history, so an old refusal there isn't a current sign-in problem.
+    describe("only the current attempt's refusal counts", () => {
+      const header = "OpenAI Codex (v0.162.1)";
+      const composer = ["› Ask Codex to do anything", "  gpt-5.1 high · 100% context left · ~/project"];
+      const oldRefusal = "■ Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.";
+      const probe = (paneCommand: string, lines: string[]) =>
+        assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent: lines.join("\n") });
+      const authRefusal = {
+        status: "attention_required",
+        code: "codex_auth_refusal",
+        detail: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.",
+      };
+
+      it("old refusals followed by later turns and a healthy composer read as the working conversation", () => {
+        expect(probe("codex", [header, oldRefusal, "› Please continue the task", "• Continued; the tests pass.", "", ...composer]))
+          .toMatchObject({ status: "resumed", code: "active_runtime" });
+        // An earlier launch's CLI refusal, then a launch that came up.
+        expect(probe("codex", ["$ codex resume 019d-token", "Error: Your access token could not be refreshed. Please log out and sign in again.",
+          "$ codex resume 019d-token", header, ...composer])).toMatchObject({ status: "resumed", code: "active_runtime" });
+      });
+
+      it("a working conversation that quotes the refusal stays working", () => {
+        expect(probe("codex", [header,
+          "› Why did my seat print \"Your access token could not be refreshed. Please log out and sign in again.\"?",
+          "• That message is from an earlier sign-in. It read:",
+          "  Your access token could not be refreshed. Please log out and sign in again.",
+          "```text",
+          "Your access token could not be refreshed. Please sign in again.",
+          "```",
+          ...composer])).toMatchObject({ status: "resumed", code: "active_runtime" });
+      });
+
+      it("a fresh refusal still asks for sign-in: the CLI's, before the shell prompt, and the TUI's, above the composer", () => {
+        expect(probe("zsh", ["$ codex resume 019d-token",
+          "Error: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+          "user@example.test ~/project %"])).toEqual(authRefusal);
+        expect(probe("codex", [header, "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer]))
+          .toEqual(authRefusal);
+      });
+
+      it("old refusal text followed by a new model refusal reports what the pane shows without it", () => {
+        const modelRefusal = "■ The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.";
+        const tui = ["› Run the check", modelRefusal, ...composer];
+        expect(probe("codex", [header, oldRefusal, ...tui])).toEqual(probe("codex", [header, ...tui]));
+        const shell = ["$ codex -m gpt-5.5 resume 019d-token",
+          "Error: unexpected status 400 Bad Request: The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+          "user@example.test ~/project %"];
+        const withOld = probe("zsh", ["Error: Your access token could not be refreshed. Please log out and sign in again.", ...shell]);
+        expect(withOld).toEqual(probe("zsh", shell));
+        expect(withOld.code).not.toBe("codex_auth_refusal");
+      });
+
+      it("an old refusal before a turn still running stays unknown", () => {
+        expect(probe("codex", [oldRefusal, "› Please retry", "• Working (3s • esc to interrupt)"]))
+          .toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+      });
+    });
+
     it("classifies the Codex hook review prompt as hook_trust_gate", () => {
       const result = assessNativeResumeProbe({
         runtime: "codex",
