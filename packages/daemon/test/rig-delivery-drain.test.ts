@@ -196,7 +196,7 @@ describe("per-rig delivery drain control", () => {
       expect(deliver).not.toHaveBeenCalled();
       await engine.evaluate(unrelated);
       expect(deliver).toHaveBeenCalledTimes(1);
-      vi.setSystemTime(new Date("2026-11-14T00:00:31Z"));
+      vi.setSystemTime(new Date("2026-11-14T00:05:01Z"));
       const review = jobs.getByIdOrThrow(drain.reviewJobId);
       expect(nextDueAt(review)).toBeLessThanOrEqual(Date.now());
       await engine.evaluate(review);

@@ -13,6 +13,7 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
 import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
+import { WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
 import { RESERVE_PREFIX, REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
@@ -36,7 +37,8 @@ async function baton(t: ReturnType<typeof fixture>, dest = "worker@target", sour
     .run(new Date(Date.now()-3600_000).toISOString(), created.qitemId);
   return created;
 }
-it.each(["source", "target"])("preserves ladder position across due ticks and reopen when %s rig is drained", async held => {
+it("preserves ladder position across due ticks and reopen when the destination rig is drained", async () => {
+  const held = "target";
   const dir = mkdtempSync(join(tmpdir(), "drain-ladder-")); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   let t = fixture(join(dir, "db.sqlite"));
   const row = await baton(t); const other = await baton(t, "worker@other", "relay@other");
@@ -53,6 +55,14 @@ it.each(["source", "target"])("preserves ladder position across due ticks and re
   await runWakeLadderTick({db:t.db,queueRepo:t.queue,attemptWake,now:new Date(base+2100_000),resolveOrchestrator:()=>null});
   expect(calls.filter(id=>id===row.qitemId)).toHaveLength(1);
   expect(t.queue.listTransitions(row.qitemId).filter(x=>x.transitionNote?.startsWith("wake-attempt:"))).toHaveLength(1);
+});
+it("a source-only drain leaves a different destination's ladder and counts unchanged", async () => {
+  const t = fixture(); cleanup.push(() => t.db.close()); const row = await baton(t);
+  const drain = t.begin("source"); const attemptWake = vi.fn(async () => "verified");
+  await runWakeLadderTick({ db: t.db, queueRepo: t.queue, attemptWake, now: new Date(Date.now() + 301_000) });
+  expect(attemptWake).toHaveBeenCalledWith(row.qitemId, row.destinationSession);
+  expect(t.queue.listTransitions(row.qitemId).filter(x => x.transitionNote?.startsWith("wake-attempt:"))).toHaveLength(1);
+  expect(t.queue.deliveryDrains.status(drain.rigId, t.jobs).retainedWorkCount).toBe(0);
 });
 it("rechecks a drain beginning across an async ladder boundary", async () => {
   const t=fixture(); cleanup.push(()=>t.db.close()); const row=await baton(t); const before=t.queue.listTransitions(row.qitemId);
@@ -85,14 +95,25 @@ it("delivers and reports a drain-only read failure, while control reads remain e
   const rig=t.rigs.listRigs().find(r=>r.name==="target")!;
   expect((await app.request(`/api/rigs/${rig.id}/delivery-drain`)).status).toBe(500);
 });
-it("a past review deadline prompts once then waits at least five minutes before repeating", async () => {
-  vi.useFakeTimers({toFake:["Date"]});vi.setSystemTime(new Date("2026-11-15T00:00:00Z"));
-  const t=fixture();cleanup.push(()=>t.db.close());const rig=t.rigs.listRigs().find(r=>r.name==="target")!;
-  const drain=t.queue.deliveryDrains.begin(rig.id,{drainId:"window",owner:"owner@target",reviewAt:"2026-11-14T23:59:00Z"},t.jobs);
-  const deliver=vi.fn(async()=>({status:"ok" as const}));const engine=new WatchdogPolicyEngine({jobsRepo:t.jobs,historyLog:new WatchdogHistoryLog(t.db),eventBus:t.bus,deliver,deliveryDeferred:(id,seat)=>t.queue.deliveryDrains.holds(seat,id)});
-  const evaluate=()=>engine.evaluate(t.jobs.getByIdOrThrow(drain.reviewJobId));await evaluate();expect(deliver).toHaveBeenCalledTimes(1);
-  vi.setSystemTime(new Date("2026-11-15T00:00:01Z"));await evaluate();expect(deliver).toHaveBeenCalledTimes(1);
-  vi.setSystemTime(new Date("2026-11-15T00:05:00Z"));await evaluate();expect(deliver).toHaveBeenCalledTimes(2);expect(t.queue.deliveryDrains.get(rig.id)?.endedAt).toBeNull();
+it("a past review deadline has a five-minute scan floor without per-second evaluation writes", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-15T00:00:00Z"));
+  const t = fixture(); cleanup.push(() => t.db.close());
+  const rig = t.rigs.listRigs().find(r => r.name === "target")!;
+  const drain = t.queue.deliveryDrains.begin(rig.id, { drainId: "window", owner: "owner@target",
+    reviewAt: "2026-11-14T23:59:00Z" }, t.jobs);
+  const deliver = vi.fn(async () => ({ status: "ok" as const }));
+  const engine = new WatchdogPolicyEngine({ jobsRepo: t.jobs, historyLog: new WatchdogHistoryLog(t.db), eventBus: t.bus,
+    deliver, deliveryDeferred: (id, seat) => t.queue.deliveryDrains.holds(seat, id) });
+  const scheduler = new WatchdogScheduler({ jobsRepo: t.jobs, policyEngine: engine });
+  const before = t.jobs.getByIdOrThrow(drain.reviewJobId);
+  vi.setSystemTime(new Date("2026-11-15T00:00:01Z")); await scheduler.runTickNow();
+  expect(deliver).not.toHaveBeenCalled(); expect(t.jobs.getByIdOrThrow(drain.reviewJobId)).toEqual(before);
+  vi.setSystemTime(new Date("2026-11-15T00:05:00Z")); await scheduler.runTickNow();
+  expect(deliver).toHaveBeenCalledTimes(1); const after = t.jobs.getByIdOrThrow(drain.reviewJobId);
+  vi.setSystemTime(new Date("2026-11-15T00:05:01Z")); await scheduler.runTickNow();
+  expect(t.jobs.getByIdOrThrow(drain.reviewJobId)).toEqual(after);
+  vi.setSystemTime(new Date("2026-11-15T00:10:00Z")); await scheduler.runTickNow();
+  expect(deliver).toHaveBeenCalledTimes(2); expect(t.queue.deliveryDrains.get(rig.id)?.endedAt).toBeNull();
 });
 it("an explicit resolve notifies its owner even during the owner's delivery drain", async()=>{
   const t=fixture();cleanup.push(()=>t.db.close());const send=vi.fn(async()=>({ok:true,verified:true}));t.queue.attachTransport({send});

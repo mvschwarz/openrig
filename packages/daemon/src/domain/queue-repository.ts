@@ -1935,7 +1935,7 @@ export class QueueRepository {
 
   /** The following startup intent drain owns durable pending wakes. Legacy packets
    * and overdue claimed work (not eligible for that drain) still use the nudge path. */
-  // Legacy rows without an intent remain owed during a drain; the existing sweep retries them after END.
+  // Held workflow boot packets remain owed: their keepalive resumes after END; the sweep reports unclaimed work.
   async recoverLostNudge(qitemId: string, destinationSession: string, sourceSession?: string): Promise<void> {
     const outboxId = `${WAKE_INTENT_PREFIX}${qitemId}`;
     if (this.outbox?.getById(outboxId) && this.getById(qitemId)?.state === "pending") return;

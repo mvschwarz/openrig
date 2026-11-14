@@ -75,7 +75,7 @@ export class RigDeliveryDrainStore {
       const startedAt = known?.startedAt ?? this.now().toISOString();
       const job = jobs.register({
         policy: "periodic-reminder", targetSession: input.owner, registeredBySession: input.owner,
-        intervalSeconds: Math.max(1, Math.ceil((Date.parse(reviewAt) - this.now().getTime()) / 1000)),
+        intervalSeconds: Math.max(300, Math.ceil((Date.parse(reviewAt) - this.now().getTime()) / 1000)),
         activeWakeIntervalSeconds: 300,
         specYaml: JSON.stringify({ target: { session: input.owner }, message:
           `Review delivery drain ${input.drainId} for rig ${rigId}. END it explicitly or renew its review deadline through /api/rigs/${rigId}/delivery-drain. A deadline never resumes delivery. Automatic native starts are NOT deferred.` }),

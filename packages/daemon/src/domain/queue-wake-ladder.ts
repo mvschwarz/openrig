@@ -578,7 +578,7 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string, a
 }
 
 function deliveryHeld(repo: QueueRepository, row: QueueItem): boolean {
-  return repo.deliveryDrains.holds(row.sourceSession) || repo.deliveryDrains.holds(row.destinationSession);
+  return repo.deliveryDrains.holds(row.destinationSession);
 }
 
 function appendMarker(repo: QueueRepository, row: QueueItem, note: string): void {
@@ -1312,7 +1312,7 @@ async function advancePromptRefusals(
     return clearedAlerts.get(dest)!;
   };
   for (const job of refusedWatchdogJobs(deps.db, clearedAlert, readAt)) {
-    if (deps.queueRepo.deliveryDrains.holds(job.dest, job.jobId) || deps.queueRepo.deliveryDrains.holds(job.registeredBy)) continue;
+    if (deps.queueRepo.deliveryDrains.holds(job.dest, job.jobId)) continue;
     const tag = `${PROMPT_EPISODE_TAG}${job.key}`;
     if (closedEpisode(tag)) continue;
     let group = groups.get(job.dest);
@@ -1495,7 +1495,8 @@ async function advancePromptRefusals(
           members.splice(i, 1);
           continue;
         }
-        if (await operatorRung(deps, operatorRow, reason, actions, operatorView, choiceOnly)) {
+        if (await operatorRung(deps, operatorRow, reason, actions, operatorView, choiceOnly,
+          () => deps.queueRepo.deliveryDrains.holds(dest) || deliveryHeld(deps.queueRepo, member.row))) {
           // Choice custody stays on the alert until it closes; exhausting its source now would retire the alert next tick.
           if (!choiceOnly) appendExhausted(deps.queueRepo, member.row, "consumed escalation hop reached operator fallback");
           if (choiceOnly) appendExhausted(deps.queueRepo, operatorRow, "operator rung resolved");
@@ -1591,7 +1592,8 @@ async function advancePromptRefusals(
     // limit, posts once. Each other choice alert stays open, names the alert it waits on, and posts after that one retires.
     // A permission prompt, which only a person can approve, never waits behind it.
     if (waitsOnPostedPromptAlert(deps, row, choiceOnly)) continue;
-    if (await operatorRung(deps, row, reason, actions, view, choiceOnly)) {
+    if (await operatorRung(deps, row, reason, actions, view, choiceOnly,
+      () => deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row)))) {
       const floor = deps.queueRepo.listTransitions(row.qitemId).at(-1)?.transitionNote?.includes("human rung explicit-only");
       appendExhausted(deps.queueRepo, row, floor ? PROMPT_FLOOR_EXHAUSTED : "operator rung resolved");
     }
@@ -1625,9 +1627,11 @@ async function operatorRung(
   view: LadderView,
   /** False for a seat at a permission prompt, which only a person can approve. A choice-prompt alert follows the setting. */
   humanRungSettingApplies = true,
+  originatingDeliveryDeferred?: () => boolean,
 ): Promise<boolean> {
   const repo = deps.queueRepo;
-  if (deliveryHeld(repo, row)) return false;
+  const deliveryDeferred = () => deliveryHeld(repo, row) || originatingDeliveryDeferred?.() === true;
+  if (deliveryDeferred()) return false;
   if (!deps.deliveryEngine) {
     appendMarker(
       repo,
@@ -1657,7 +1661,8 @@ async function operatorRung(
     // Exactly-once per episode: never re-dispatch; the resolution pass decides advance.
     return view.opOutcomeResolved;
   }
-  const outcome = await deps.deliveryEngine.dispatchEscalation(row, reason);
+  const outcome = await deps.deliveryEngine.dispatchEscalation(row, reason, deliveryDeferred);
+  if (outcome.decision === "deferred:rig_delivery_drain") return false;
   if (outcome.dispatched === false) {
     // A real policy change: no route used to exhaust. Re-resolution is silent
     // while the reason is unchanged; the scheduler supplies the retry cadence.

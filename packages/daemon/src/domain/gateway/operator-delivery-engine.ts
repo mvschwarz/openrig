@@ -30,6 +30,8 @@ export interface OperatorDeliveryEngine {
   dispatchEscalation: (
     row: QueueItem,
     reason: string,
+    /** Fresh admission for the originating work, checked after readiness and before a new dispatch. */
+    deliveryDeferred?: () => boolean,
   ) => Promise<{ decision: string; resolved: boolean; notificationKey?: string; dispatched?: boolean; decisionId?: string }>;
 }
 
@@ -105,7 +107,7 @@ export function makeOperatorDeliveryEngine(deps: {
       return resolvedFor(row, key) !== null || new DispatchBuffer(deps.home).pending()
         .some(d => d.decisionId === `operator:${key}`);
     },
-    async dispatchEscalation(row: QueueItem, _reason: string) {
+    async dispatchEscalation(row: QueueItem, _reason: string, deliveryDeferred?: () => boolean) {
       // The episode identity the receipt must carry (Slice 14's ledger accepts
       // the current qitemId:transitionId key; an ordinary row without an owner
       // transition uses its meaningful-progress episode in the synthetic key).
@@ -176,6 +178,12 @@ export function makeOperatorDeliveryEngine(deps: {
         ownerNotificationKind: "human-required",
         tags: [...new Set([...(row.tags ?? []), "escalation"])],
       };
+      // Readiness can yield. An already accepted decision still belongs to the gateway;
+      // a new dispatch must recheck the original destination as well as its carrier.
+      if (deliveryDeferred?.()) {
+        if (accepted()) return { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId };
+        return { decision: "deferred:rig_delivery_drain", resolved: false, dispatched: false };
+      }
       let res: DispatchResult;
       try {
         res = deps.dispatch(OUTBOUND_OP, human.address, payload, { decisionId });
