@@ -685,10 +685,12 @@ not have to tear one down to change it, and you rarely have to start from nothin
   what OpenRig wrote or that another seat shares by a link. Any other guidance block goes even if
   someone edited it.
   **Since 0.7.12 it stops only a tmux session that carries the seat's own `OPENRIG_NODE_ID`**, on the
-  server and session it read. A terminal OpenRig didn't create, a mismarked or replaced one, or a seat
-  joined with `rig attach --self` from a tmux pane is left running, and `rig down` exits 2 naming it and the manual way
-  to stop it. Teardown is incomplete for those terminals: if one is yours, look at it and stop it
-  yourself, then run `rig down` again.
+  server and session it read. A seat whose session OpenRig didn't create for it, joined with
+  `rig attach --self` or adopted without that marker, is released as `rig unclaim` does: its session keeps
+  running as its owner's, and `rig down` names it (`Released, not stopped`; `released` in `--json`). Adopting
+  sets the marker, so an adopted session is stopped like the rest. Any other unmarked, mismarked or replaced
+  terminal is left running, and `rig down` exits 2 naming it and the manual way to stop it; if one is yours,
+  look at it and stop it yourself, then run `rig down` again.
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
   rest. It takes the rig's name or ID; a name shared by more than one active rig stops and lists their IDs. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
   daemon older than 0.5.9, which would ignore it and launch. A seat whose agent exited to a shell in
@@ -749,8 +751,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
   conversation continuity stays unverified. Both refuse while typing protection is on.
 - **`rig unclaim` / `rig release`** — stop managing one adopted session, or all of them,
   **without killing the process or the agent inside it**. Handing something back to its human is a
-  first-class move, not an abandonment. To stop an adopted session after unclaiming it, end its
-  process and its tmux session; closing only the viewing window detaches it. Since 0.7.13 a fresh
+  first-class move, not an abandonment. `rig down` stops an adopted session that carries its seat's
+  marker; to stop one after unclaiming it, end its process and its tmux session yourself (closing only
+  the viewing window detaches it). Since 0.7.13 a fresh
   `rig launch` after `rig unclaim` ended the server's last session reopens the server (a released
   session that's still running blocks it, as before).
 

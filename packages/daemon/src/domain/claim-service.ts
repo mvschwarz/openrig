@@ -217,7 +217,8 @@ export class ClaimService {
     }
   }
 
-  /** Best-effort: set OpenRig-owned tmux metadata on an adopted session. */
+  /** Best-effort: set OpenRig-owned tmux metadata on an adopted session, and the seat's OPENRIG_NODE_ID marker, which
+   *  makes it positively this seat's for a stop (`rig down`). Without the marker a stop releases the seat instead. */
   private async setRiggedMetadata(tmuxSession: string, meta: {
     nodeId: string; sessionName: string; rigId: string; rigName: string; logicalId: string;
   }): Promise<void> {
@@ -232,6 +233,7 @@ export class ClaimService {
     for (const [key, value] of entries) {
       await this.tmuxAdapter.setSessionOption(tmuxSession, key, value);
     }
+    await this.tmuxAdapter.setSessionEnv(tmuxSession, "OPENRIG_NODE_ID", meta.nodeId);
   }
 
   /**

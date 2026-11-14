@@ -1647,6 +1647,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     teardownOrchestrator: new RigTeardownOrchestrator({
       db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus, resumeMetadataRefresher, serviceOrchestrator,
       claudeCollectorAssetPath,
+      releaseClaimedSession: async (sessionId) => {
+        const released = await rigLifecycleService.unclaimSession(sessionId);
+        return released.ok ? { ok: true } : { ok: false, error: released.error };
+      },
     }),
     podInstantiator,
     podBundleSourceResolver,
