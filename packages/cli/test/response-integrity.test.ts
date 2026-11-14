@@ -62,12 +62,12 @@ function depsThrowing(err: Error): { queueDeps: QueueDeps } {
 async function runCli(args: string[], deps?: Parameters<typeof createProgram>[0]) {
   const out: string[] = [];
   const err: string[] = [];
-  let exitCode = 0;
   const program = createProgram(deps);
-  await runProgram(program, ["node", "rig", ...args], {
+  // The run's status is what runProgram returns; it calls exit only on its own error paths, with the same code.
+  const exitCode = await runProgram(program, ["node", "rig", ...args], {
     out: (l) => out.push(l),
     err: (l) => err.push(l),
-    exit: (c) => { exitCode = c; },
+    exit: () => undefined,
   });
   return { out: out.join("\n"), err: err.join("\n"), exitCode };
 }
@@ -121,6 +121,17 @@ describe("render response integrity — 3-part error + honest exit, never daemon
   // env-less harness. Unstubbed per test (singleFork shares the process).
   beforeEach(() => { vi.stubEnv("OPENRIG_SESSION_NAME", "harness@rig"); process.exitCode = undefined; });
   afterEach(() => { vi.unstubAllEnvs(); });
+
+  it("an unresolved queue actor stays nonzero when a wrapper pipes stdout", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    vi.stubEnv("TMUX_PANE", "");
+    const { exitCode } = await runCli(
+      ["queue", "update", "qitem-x", "--state", "in-progress", "--json"],
+      depsThrowing(new Error("daemon must not be contacted")),
+    );
+    expect(exitCode).toBe(1);
+  });
 
   it("bad-response renders fact/consequence/action JSON with nonzero exit (json)", async () => {
     const err = new DaemonResponseError(502, "<html>502 Bad Gateway</html>");
