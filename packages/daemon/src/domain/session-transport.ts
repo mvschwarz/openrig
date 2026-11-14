@@ -274,10 +274,19 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
   // Preserve columns so indented draft/quoted text does not gain new authority.
   const lines = paneContent.split("\n").map(line => line.trimEnd()).filter(line => line.length > 0);
   if (!CLAUDE_QUESTION_FOOTER.test(lines.at(-1) ?? "")) return null;
+  // The preview layout (Claude Code 2.1.282's bundle) adds an unnumbered "Chat about this" row before the footer, which
+  // can hold the pointer itself, and rows under the options that carry only the preview column: options are 30 wide,
+  // then a 4-column gap. A pointer on that row still needs the numbered choices adjoining it.
+  let chat: string | null = null;
   for (let i = lines.length - 2; i >= 0; i--) {
     const line = lines[i]!;
     if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
-    if (!/^(?: {2}\d+\.\s+\S| {5}\S|─{3,}$)/.test(line)) break;
+    if (/^(?:❯ | {2})Chat about this$/.test(line)) {
+      if (line.startsWith("❯")) chat = line;
+      continue;
+    }
+    if (chat && /^ {2}\d+\.\s+\S/.test(line)) return truncateEvidence(chat);
+    if (!/^(?: {2}\d+\.\s+\S| {5}\S| {34,}\S|─{3,}$)/.test(line)) break;
   }
   return null;
 }
