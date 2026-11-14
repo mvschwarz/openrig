@@ -215,11 +215,13 @@ person needs in their project or home folder and name that path.
   `rig send <seat>@<rig> "<key>" --dangerously-interact --reason "<their choice, in their words>"`, where `<key>` is
   the digit or letter that capture shows for their choice, never their words: the text is typed as keys, and a letter
   can pick a menu's shortcut. If the screen shows no key for their choice, ask them
-  (`rig send --help` says how to send Escape to a prompt). A yes to one prompt isn't a
+  (`rig send --help` says how to send Escape to a prompt). Never answer a prompt on your own and record it as theirs,
+  even one that only reads: ask them, and send their answer. A yes to one prompt isn't a
   yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
   kind of future prompt (say, "approve prompts that only write inside my project"), you may decide each one: read its
   whole action, answer only when it's clearly inside what they said, and tell them you answered under that instruction,
-  not that they said yes. Bring anything unclear or outside it back to them; a command's name or a path that looks like
+  not that they said yes. Say the same in `--reason`: your call under their instruction, not their approval. Bring
+  anything unclear or outside it back to them; a command's name or a path that looks like
   their project doesn't show what the action touches. Their instruction changes no permission setting.
   Don't send them to a bare `tmux attach` to answer: relay their choice this way, or point them to that seat in the
   team's terminals the operator opened. If they want fewer prompts, the operator offers once to allow the commands
