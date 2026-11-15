@@ -29,7 +29,7 @@ beforeEach(() => {
   vi.stubEnv("OPENRIG_HOME", home);
   errors = [];
   logs = [];
-  vi.mocked(checkKernelAttention).mockResolvedValue({ attention: [], unknown: [] });
+  vi.mocked(checkKernelAttention).mockReset().mockResolvedValue({ attention: [], unknown: [] });
   vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logs.push(args.join(" ")); });
   vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { errors.push(args.join(" ")); });
 });

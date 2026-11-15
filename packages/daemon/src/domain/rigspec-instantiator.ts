@@ -339,7 +339,7 @@ import type {
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
 import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
-import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, type SeatSkillPaths, type SeatSkillSelection } from "./seat-skill-storage.js";
+import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migrateLegacyProjectSkills, refusedSeatSkillsRootForNode, seatSkillLocation, seatSkillPaths, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, type SeatSkillPaths, type SeatSkillSelection, packagedSeatSkills } from "./seat-skill-storage.js";
 import { carrySeatLaunchAdditions, prepareSeatLaunchAdditions, type SeatLaunchAdditionsCarry } from "./seat-launch-additions.js";
 import type { SystemWorldResolution } from "./system-world.js";
 import type { SeatEnv } from "./seat-env.js";
@@ -2268,12 +2268,16 @@ export class PodRigInstantiator {
       skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() }).catch(failedLaunchResolution);
     if (!config.ok) return { ok: false, reason: config.errors.join("; ") };
     const skills = config.config.selectedResources.skills;
+    const selected = new Set(skills.map((skill) => skill.effectiveId));
     return { ok: true, selection: {
-      selected: new Set(skills.map((skill) => skill.effectiveId)),
+      selected,
       following: skills.filter((skill) => (skill.resource as SkillResource).onRestore === "follow_source").map((skill) => ({
         id: skill.effectiveId,
         source: nodePath.resolve(skill.sourcePath, (skill.resource as SkillResource).path),
       })),
+      // OpenRig's own packaged plugin skills follow the packaged source by default, so an upgrade's copy comes back.
+      packaged: packagedSeatSkills(config.config.skillLoadout?.entries ?? [], selected),
+      warnings: config.config.skillWarnings ?? [],
     } };
   }
 

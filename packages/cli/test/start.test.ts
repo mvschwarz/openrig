@@ -1020,7 +1020,7 @@ describe("S20 — start auto-start: routing env never becomes bind intent", () =
     const { default: net } = await import("node:net");
     const { EventEmitter } = await import("node:events");
     const socket = Object.assign(new EventEmitter(), { setTimeout: vi.fn(), destroy: vi.fn(), connect() { queueMicrotask(() => socket.emit("error", Object.assign(new Error("refused"), { code: "ECONNREFUSED" }))); } });
-    const socketSpy = vi.spyOn(net, "Socket").mockImplementation(() => socket as unknown as import("node:net").Socket);
+    const socketSpy = vi.spyOn(net, "Socket").mockImplementation(function () { return socket as unknown as import("node:net").Socket; });
     const savedHost = process.env["OPENRIG_HOST"];
     process.env["OPENRIG_HOST"] = "100.64.55.66"; // the distinct-value discriminator
     let spawnedEnv: Record<string, string> = {};

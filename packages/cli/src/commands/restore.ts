@@ -145,7 +145,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         originalResult?: { rigResult: string; warnings?: string[] };
         currentIntendedSetVerdict?: string;
         intendedRoster?: unknown[];
-        excludedNodes?: unknown[];
+        excludedNodes?: Array<{ logicalId?: string; reason?: string }>;
         unresolvedIntendedSeats?: Array<{ logicalId: string; status: string }>;
       }>(`/api/rigs/${encodeURIComponent(target.id)}/restore/status/${encodeURIComponent(attemptId)}`);
       if (res.status >= 400 || !res.data.ok) {
@@ -165,7 +165,11 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       console.log(`Original verdict: ${res.data.originalResult?.rigResult ?? "unknown"}`);
       for (const warning of res.data.originalResult?.warnings ?? []) console.warn(`Original attempt warning: ${warning}`);
       console.log(`Current intended-set verdict: ${res.data.currentIntendedSetVerdict ?? "unknown"}`);
-      console.log(`Intended: ${res.data.intendedRoster?.length ?? 0}; excluded historical: ${res.data.excludedNodes?.length ?? 0}; unresolved: ${res.data.unresolvedIntendedSeats?.length ?? 0}`);
+      // A current seat outside the snapshot's roster (claimed after the topology was recorded) was skipped, not historical.
+      const excluded = res.data.excludedNodes ?? [];
+      const skipped = excluded.filter((node) => node.reason === "current_seat_not_in_intended_roster");
+      console.log(`Intended: ${res.data.intendedRoster?.length ?? 0}; excluded historical: ${excluded.length - skipped.length}; skipped current seats: ${skipped.length}; unresolved: ${res.data.unresolvedIntendedSeats?.length ?? 0}`);
+      for (const node of skipped) console.log(`  ${node.logicalId ?? "unknown"}: skipped — not in this restore's roster`);
       for (const node of res.data.unresolvedIntendedSeats ?? []) console.log(`  ${node.logicalId}: ${node.status}`);
     });
 

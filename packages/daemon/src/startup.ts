@@ -1,3 +1,4 @@
+import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
 import { runnerGrantIssuer } from "./domain/runner-grant-launch.js";
 import { piAccountStateRoot } from "./domain/pi-account-state.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
@@ -37,8 +38,10 @@ import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
 import { deriveCanonicalSessionName, isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
 import { resolveExternal } from "./domain/gateway/external-admission.js";
-import { makeTopologyDestinationCheck } from "./domain/queue-destination-check.js";
-import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
+import { makeQueueRecordingCheck, makeTopologyDestinationCheck } from "./domain/queue-destination-check.js";
+import { loadHumanRegistry, resolveRegisteredHumanAddress } from "./domain/gateway/human-registry.js";
+import { readRosters } from "./domain/rosters.js";
+import { recordedSuccessorNotice } from "./domain/destination-successor.js";
 import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
@@ -132,7 +135,7 @@ import { StreamIntakeCoordinator } from "./domain/stream-intake.js";
 import { SlowOpRecorder, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import { configureSyncSiteRecorder } from "./domain/sync-site-wrap.js";
 import { RequestPhaseObserver } from "./domain/request-phase-observer.js";
-import { QueueRepository, isBlockerLive } from "./domain/queue-repository.js";
+import { QueueRepository, isBlockerLive, type QueueDestinationAdvisory } from "./domain/queue-repository.js";
 import { describeDefaultReceiver, permissionDeciderFor } from "./domain/default-receiver.js";
 import { createWorkflowFrontierPredicate } from "./domain/workflow-frontier-guard.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
@@ -356,7 +359,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       allowConflict: allowDbConflict });
   for (const warning of databaseWarnings) console.warn(`Warning: ${warning}`);
   const db = createDb(dbPath);
+  const endMigrations = beginStartupPhase("migrations");
   migrate(db, ALL_MIGRATIONS);
+  const migrationsTiming = endMigrations();
 
   // 51-09 increment 1 — establish the daemon's durable self-host identity at
   // boot (mint on first boot, reconcile thereafter). host.name is a display-only
@@ -396,6 +401,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     : new SlowOpRecorder({
         logPath: nodePath.join(OPENRIG_HOME, "logs", "slow-operations.jsonl"),
       }));
+  // The migration interval ends before recorder setup; submit it only once the
+  // normal nonblocking sink exists. A failed pre-recorder boot has no record.
+  recordStartupPhase(slowOpRecorder, migrationsTiming);
   configureSyncSiteRecorder(slowOpRecorder);
   // Instrumentation wiring is observe-only: neither a throwing registration
   // call nor a throwing callback body (streamStore.emit) may abort createDaemon
@@ -424,43 +432,94 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   // Seat absence in positively known local topology is advice, never admission
   // authority. Keep every typed destination intact, including adopted aliases.
-  const topologyDestinationAdvisory = (sessionRef: string) => {
+  const topologyDestinationAdvisory = (sessionRef: string): QueueDestinationAdvisory | null => {
     const parsed = parseSessionName(sessionRef);
     if (isHumanSeatSessionRef(sessionRef) || parsed.kind !== "canonical") return null;
-    const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
-    if (rigs.length === 0) return null;
-    // Membership needs only registered names and logical seat coordinates,
-    // not the full ps projection (snapshots, activity and lifecycle history).
-    for (const rig of rigs) {
-      if (db.prepare(`SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id
-        WHERE n.rig_id = ? AND s.session_name = ? LIMIT 1`).get(rig.id, sessionRef)) return null;
-      if (db.prepare(`SELECT 1 FROM nodes WHERE rig_id = ? AND
-        CASE WHEN instr(logical_id, '.') = 0 THEN logical_id
-          WHEN instr(logical_id, '.') > 1 AND instr(logical_id, '.') < length(logical_id)
-          THEN substr(logical_id, 1, instr(logical_id, '.') - 1) || '-' || substr(logical_id, instr(logical_id, '.') + 1)
-        END = ? LIMIT 1`).get(rig.id, parsed.member)) return null;
+    const withSuccessor = (advisory: QueueDestinationAdvisory): QueueDestinationAdvisory => {
+      if (advisory.status === "hosted") return advisory;
+      let notice = "Recorded successor unknown: the topology root is unavailable.";
+      try {
+        const root = new ContextPackSettingsStore().resolveOne("topology.root").value;
+        if (typeof root === "string" && root) notice = recordedSuccessorNotice(root, sessionRef);
+      } catch { /* Keep the destination status and durable write when the ledger cannot be read. */ }
+      return { ...advisory, message: `${advisory.message} ${notice}` };
+    };
+    const status = (value: "missing" | "archived" | "hosted" | "unknown", message: string) => withSuccessor({
+      code: "destination_status" as const, status: value, destinationSession: sessionRef,
+      availableDestinations: [] as string[], message,
+    });
+    // Absence is only positive when the hosted roster surface was readable.
+    const rosterUnavailable = () => {
+      const root = new ContextPackSettingsStore().resolveOne("workspace.root").value;
+      if (typeof root !== "string" || !root) return true;
+      const folder = nodePath.join(root, "rosters");
+      try { fs.statSync(folder); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+      return readRosters(folder).warnings.length > 0;
+    };
+    try {
+      // Physical spelling can belong to a different rig from its suffix (restore
+      // preserves pinned names). Check registered and current binding names first.
+      const exact = db.prepare(`SELECT DISTINCT node_id FROM (
+        SELECT s.node_id FROM sessions s JOIN nodes n ON n.id = s.node_id
+          JOIN rigs r ON r.id = n.rig_id WHERE s.session_name = ? AND r.archived_at IS NULL
+        UNION ALL
+        SELECT b.node_id FROM bindings b JOIN nodes n ON n.id = b.node_id
+          JOIN rigs r ON r.id = n.rig_id WHERE b.tmux_session = ? AND r.archived_at IS NULL
+      ) LIMIT 2`).all(sessionRef, sessionRef) as Array<{ node_id: string }>;
+      if (exact.length === 1) return null;
+      if (exact.length > 1) return status("unknown", `${sessionRef}: destination status unknown; multiple local seats have this exact address.`);
+      const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
+      // Logical membership is also a cheap local query. Known seats need no
+      // synchronous hosted-roster or human-registry reads.
+      for (const rig of rigs) {
+        if (db.prepare(`SELECT 1 FROM nodes WHERE rig_id = ? AND
+          CASE WHEN instr(logical_id, '.') = 0 THEN logical_id
+            WHEN instr(logical_id, '.') > 1 AND instr(logical_id, '.') < length(logical_id)
+            THEN substr(logical_id, 1, instr(logical_id, '.') - 1) || '-' || substr(logical_id, instr(logical_id, '.') + 1)
+          END = ? LIMIT 1`).get(rig.id, parsed.member)) return null;
+      }
+      // The callback runs after QueueRepository construction. A hosted member is
+      // a valid queue reader even when it has no pane or wake trigger.
+      if (queueRepoInstance.isHostedMember(sessionRef)) {
+        return status("hosted", `${sessionRef} is a hosted member; it reads the queue when its owner starts a session. No pane is required. Send work as a queue item.`);
+      }
+      const humans = loadHumanRegistry();
+      if (humans.ok && resolveRegisteredHumanAddress(sessionRef, humans.entities)) return null;
+      if (rigs.length === 0) {
+        if ((!humans.ok && humans.noHumans !== true) || rosterUnavailable()) return status("unknown", `${sessionRef}: destination status unknown; a destination registry is unavailable.`);
+        const archived = db.prepare(`SELECT archived_at FROM rigs WHERE name = ? AND archived_at IS NOT NULL
+          ORDER BY created_at DESC LIMIT 1`).get(parsed.rig) as { archived_at: string } | undefined;
+        return archived
+          ? status("archived", `Rig ${parsed.rig} is archived since ${archived.archived_at}; no live seat by this name on this daemon. The row keeps the exact destination.`)
+          : status("missing", `No local rig ${parsed.rig}; no live seat by this name on this daemon. The row keeps the exact destination. If this names another host, pass --host.`);
+      }
+      const names = rigs.flatMap((rig) => db.prepare(`SELECT n.logical_id, s.session_name
+        FROM nodes n LEFT JOIN sessions s ON s.id =
+          (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
+        WHERE n.rig_id = ?`).all(rig.id) as Array<{ logical_id: string; session_name: string | null }>);
+      const canonicalName = (logicalId: string) => {
+        const dot = logicalId.indexOf(".");
+        if (dot < 0) return `${logicalId}@${parsed.rig}`;
+        return dot > 0 && dot < logicalId.length - 1
+          ? deriveCanonicalSessionName(logicalId.slice(0, dot), logicalId.slice(dot + 1), parsed.rig) : null;
+      };
+      const availableDestinations = [...new Set(names.flatMap((entry) => [
+        entry.session_name, canonicalName(entry.logical_id),
+      ]).filter((destination): destination is string => !!destination && parseSessionName(destination).kind === "canonical"))].sort();
+      if ((!humans.ok && humans.noHumans !== true) || rosterUnavailable()) return status("unknown", `${sessionRef}: destination status unknown; a destination registry is unavailable.`);
+      return withSuccessor({
+        code: "unmatched_destination_seat" as const,
+        status: "missing" as const,
+        destinationSession: sessionRef,
+        availableDestinations,
+        message: `No live seat by this name: '${sessionRef}' matches no session address of locally known rig '${parsed.rig}'. `
+          + `Available destinations: ${availableDestinations.join(", ") || "(none)"}. `
+          + "The row keeps the exact destination as typed; this warning does not guarantee pickup or delivery.",
+      });
+    } catch {
+      return status("unknown", `${sessionRef}: destination status unknown; the topology or registry lookup is unavailable. The row keeps the exact destination.`);
     }
-    const names = rigs.flatMap((rig) => db.prepare(`SELECT n.logical_id, s.session_name
-      FROM nodes n LEFT JOIN sessions s ON s.id =
-        (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
-      WHERE n.rig_id = ?`).all(rig.id) as Array<{ logical_id: string; session_name: string | null }>);
-    const canonicalName = (logicalId: string) => {
-      const dot = logicalId.indexOf(".");
-      if (dot < 0) return `${logicalId}@${parsed.rig}`;
-      return dot > 0 && dot < logicalId.length - 1
-        ? deriveCanonicalSessionName(logicalId.slice(0, dot), logicalId.slice(dot + 1), parsed.rig) : null;
-    };
-    const availableDestinations = [...new Set(names.flatMap((entry) => [
-      entry.session_name, canonicalName(entry.logical_id),
-    ]).filter((destination): destination is string => !!destination && parseSessionName(destination).kind === "canonical"))].sort();
-    return {
-      code: "unmatched_destination_seat" as const,
-      destinationSession: sessionRef,
-      availableDestinations,
-      message: `Suspected seat typo: '${sessionRef}' matches no session address of locally known rig '${parsed.rig}'. `
-        + `Available destinations: ${availableDestinations.join(", ") || "(none)"}. `
-        + "The row keeps the exact destination as typed; this warning does not guarantee pickup or delivery.",
-    };
   };
   // PL-004 Phase A — shared coordination services. Constructed early so
   // both the queueRepo dep slot and inboxHandler can share one instance.
@@ -468,6 +527,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // attachTransport().
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
+    canRecordDestination: makeQueueRecordingCheck(topologyValidateRig),
     destinationAdvisory: topologyDestinationAdvisory,
     // OPR.0.4.6.WF3 FR-6 — the frontier close-path guard's predicate,
     // INJECTED here (arch layering pin: the queue never imports the
@@ -877,6 +937,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Reconcile all managed rigs — marks stale sessions as detached.
   // Capture aggregate counts and log a compact summary so cold-start truth
   // repair is visible in daemon output instead of silently swallowed.
+  const endReconciliation = beginStartupPhase("reconciliation");
   const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter });
   const rigs = rigRepo.listRigs();
   let reconcileChecked = 0;
@@ -920,6 +981,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // eslint-disable-next-line no-console
     console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} unseen=${reconcileUnseen} errors=${reconcileErrors}`);
   } catch { /* logging must never throw */ }
+
+  recordStartupPhase(slowOpRecorder, endReconciliation());
 
   // Transcript rotators are process-local. Reattach them after lifecycle
   // reconciliation so surviving tmux sessions keep ingesting across daemon
@@ -1061,6 +1124,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
 
+  const endManagedPlugins = beginStartupPhase("managed_plugins");
   // plugin-primitive Phase 3a slice 3.2 — vendor openrig-core plugin to
   // ~/.openrig/plugins/openrig-core/ on first launch. Auto-fetch from
   // github.com/mvschwarz/openrig-plugins is best-effort + 404-tolerant
@@ -1123,6 +1187,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } catch (err) {
     console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
+
+  recordStartupPhase(slowOpRecorder, endManagedPlugins());
 
   // PL-014: one daemon-scoped ContextPackLibraryService backs the
   // delivery-free /api/context-packs list/sync/compose/read/delete/preview/pieces
@@ -1354,6 +1420,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // GHOST-STAGE (c-id): reject context readings from before the live occupant booted (prior
     // generation) so a frozen pre-handover sample can't drive the threshold. null = UNKNOWN (inert).
     resolveOccupantBootAt: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.bootAt ?? null,
+    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
   });
   // Shared, read-only current-occupant record path: reporting does not depend on a pin or transport.
   const { CurrentModelReader } = await import("./domain/model-divergence/current-model-reader.js");
@@ -1593,6 +1660,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     teardownOrchestrator: new RigTeardownOrchestrator({
       db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus, resumeMetadataRefresher, serviceOrchestrator,
       claudeCollectorAssetPath,
+      releaseClaimedSession: async (sessionId) => {
+        const released = await rigLifecycleService.unclaimSession(sessionId);
+        return released.ok ? { ok: true } : { ok: false, error: released.error };
+      },
     }),
     podInstantiator,
     podBundleSourceResolver,
@@ -2376,6 +2447,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return since == null ? null : new Date(since).toISOString();
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
+      deliveryDeferred: (jobId, session) => queueRepoInstance.deliveryDrains.holds(session, jobId),
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
       eventBus,

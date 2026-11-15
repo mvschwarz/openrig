@@ -4,7 +4,7 @@ import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { currentClaudeThemeMenu } from "./claude-theme-menu.js";
-import { currentClaudeModelMenu, currentCodexModelPicker } from "./native-model-picker.js";
+import { currentClaudeModelMenu, currentCodexModelPicker, isModelPickerHeader } from "./native-model-picker.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
@@ -150,7 +150,10 @@ const PERMISSION_PROMPT_PATTERNS = [
 // after hitting this. Erring toward "prompt detected" is the SAFE direction for this guard: a false
 // refusal is overridable; a false-idle lets a message land on a prompt. (EXA: ntm e28763e; AgentDeck.)
 const PROMPT_SCAN_LINES = 12;
-const CLAUDE_QUESTION_FOOTER = "Enter to select · ↑/↓ to navigate · Esc to cancel";
+// AskUserQuestion's footer. One question draws "Enter to select · ↑/↓ to navigate · Esc to cancel"; Claude Code 2.1.282's
+// bundle also draws "Tab/Arrow keys to navigate" for several questions and adds chords such as "ctrl+g to edit in <editor>",
+// always from "Enter to select" to "Esc to cancel".
+const CLAUDE_QUESTION_FOOTER = /^Enter to select · .+ · Esc to cancel$/;
 
 export interface PaneActivityClassification {
   state: "agent_active" | "agent_idle" | "attention" | "unknown";
@@ -270,11 +273,20 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
   // Anchor at its terminal footer, then follow only the adjoining choice block.
   // Preserve columns so indented draft/quoted text does not gain new authority.
   const lines = paneContent.split("\n").map(line => line.trimEnd()).filter(line => line.length > 0);
-  if (lines.at(-1) !== CLAUDE_QUESTION_FOOTER) return null;
+  if (!CLAUDE_QUESTION_FOOTER.test(lines.at(-1) ?? "")) return null;
+  // The preview layout (Claude Code 2.1.282's bundle) adds an unnumbered "Chat about this" row before the footer, which
+  // can hold the pointer itself, and rows under the options that carry only the preview column: options are 30 wide,
+  // then a 4-column gap. A pointer on that row still needs the numbered choices adjoining it.
+  let chat: string | null = null;
   for (let i = lines.length - 2; i >= 0; i--) {
     const line = lines[i]!;
     if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
-    if (!/^(?: {2}\d+\.\s+\S| {5}\S|─{3,}$)/.test(line)) break;
+    if (/^(?:❯ | {2})Chat about this$/.test(line)) {
+      if (line.startsWith("❯")) chat = line;
+      continue;
+    }
+    if (chat && /^ {2}\d+\.\s+\S/.test(line)) return truncateEvidence(chat);
+    if (!/^(?: {2}\d+\.\s+\S| {5}\S| {34,}\S|─{3,}$)/.test(line)) break;
   }
   return null;
 }
@@ -810,7 +822,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
+  const oldQuestionEnd = promptScanLines.map(line => CLAUDE_QUESTION_FOOTER.test(line)).lastIndexOf(true);
   // Above Claude's complete, empty input box with its mode bar, a permission question counts only with its numbered
   // choices after it, as every native menu draws them: a bare question there is a finished reply quoting one, and
   // refusing on it held wakes until the line scrolled out of the scan. Without that box, or on another runtime, any
@@ -1477,9 +1489,11 @@ function currentMenuKeyHint(lines: string[]): boolean {
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
 // of at most two rows: the `<model> · <~ or /path>` status line, optionally followed by one known hint row.
+// While a turn runs and the box holds text, Codex 0.167 draws its queue hint on that row instead ("tab to queue
+// message", or "tab to queue" when narrow, optionally followed by a mode label or the right-side context).
 const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
 const CODEX_NATIVE_STATUS_LINE = /^ {2}[^\s·][^·]* · [A-Za-z]:[\\/]/;
-const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$/;
+const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$|^\s*tab to queue(?: message)?(?:\s*$|\s{2,}| · )/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
@@ -1909,16 +1923,21 @@ function codexSeatIdle(pane: string): boolean {
 // (`Update available! 0.160.0 -> 0.162.1`). These are only what the frames show; nothing here discovers a version. A frame where one of them names another version is not read as these
 // layouts. Most frames name no version (the banner and header scroll away), and then a matching layout is evidence
 // about the layout only, not proof of the client version: another version that draws the same rows reads the same.
-const RECORDED_CLIENT_VERSION: Record<"claude-code" | "codex", string> = { "claude-code": "2.1.296", codex: "0.160.0" };
+// Codex 0.167.1 and 0.167.2 count as 0.167.0: they changed no TUI code from it (openai/codex
+// rust-v0.167.0...rust-v0.167.2). A later patch, a prerelease or a later minor is another version until it's checked.
+const RECORDED_CLIENT_VERSIONS: Record<"claude-code" | "codex", RegExp> = {
+  "claude-code": /^2\.1\.296$/,
+  codex: /^(?:0\.160\.0|0\.167\.[0-2])$/,
+};
 const VISIBLE_CLIENT_VERSION: Record<"claude-code" | "codex", RegExp[]> = {
   "claude-code": [/Claude Code v(\d[\w.+-]*)/g],
   codex: [/OpenAI Codex \(v(\d[\w.+-]*)\)/g, /Update available! (\d[\w.+-]*) -> /g],
 };
 
-/** Whether a frame visibly names a client version other than the recorded one (see RECORDED_CLIENT_VERSION). */
+/** Whether a frame visibly names a client version other than the recorded ones (see RECORDED_CLIENT_VERSIONS). */
 export function namesAnotherClientVersion(pane: string, runtime: "claude-code" | "codex"): boolean {
   return VISIBLE_CLIENT_VERSION[runtime].some((pattern) =>
-    [...pane.matchAll(pattern)].some((match) => match[1] !== RECORDED_CLIENT_VERSION[runtime]));
+    [...pane.matchAll(pattern)].some((match) => !RECORDED_CLIENT_VERSIONS[runtime].test(match[1]!)));
 }
 
 /** The seat before the paste (see SeatReading), read from the capture the transport already takes before it.
@@ -1936,7 +1955,7 @@ export function readSeatBeforePaste(pane: string | null, runtime: "claude-code" 
  *  placeholders (Claude's queued label and Try suggestion, collapsed pastes, Codex's empty-box placeholder) are
  *  checked before the sent text, so none of them can read as `exact`. The sent text is `exact` only with its word
  *  boundaries kept, and `ambiguous` where the box's row breaks leave them uncertain (boxHoldsText). A frame that
- *  names another client version reads `unrecognized` (RECORDED_CLIENT_VERSION).
+ *  names another client version reads `unrecognized` (RECORDED_CLIENT_VERSIONS).
  *
  *  An empty box also reads `queued` where the frames say the message may wait behind a turn: Codex's
  *  pending-input rows above the box, rows between Codex's running-turn status row and the box, or
@@ -2084,6 +2103,13 @@ function clearAttentionHint(sessionName: string, reason: string): string {
   return reason.endsWith(LATEST_HOOK_ONLY) || reason === "permission_request_unverified"
     ? ` Look first: rig capture ${sessionName}. If that prompt is gone (declined or answered), clear it: rig seat clear-attention ${sessionName} --reason "<what you saw>".`
     : "";
+}
+
+/** The way past a refused prompt. A program's own /model picker is closed, not driven: text typed there picks a model. */
+function promptRoute(sessionName: string, prompt: Pick<AgentActivity, "reason" | "evidence">): string {
+  return prompt.reason === "selection_prompt" && isModelPickerHeader(prompt.evidence)
+    ? ` A model picker is open (${prompt.evidence}): close it (Esc) in that pane, then send again.`
+    : ` To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".`;
 }
 
 /** The caller's cancellation signal, or none for sends no caller owns (queue wakes, committed outbox deliveries). */
@@ -3477,7 +3503,7 @@ export class SessionTransport {
             recheck.state === "needs_input"
               ? {
                   reason: "target_needs_input",
-                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, recheck.reason)} No text was sent.`,
+                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it.${promptRoute(sessionName, recheck)}${clearAttentionHint(sessionName, recheck.reason)} No text was sent.`,
                 }
               : recheck.state === "unknown"
                 ? {
@@ -3597,7 +3623,7 @@ export class SessionTransport {
             reason: "target_needs_input",
             sent: false, inputPhase: "not_reached",
             activity: readiness,
-            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
+            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it.${promptRoute(sessionName, readiness)}${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
           };
         }
       } else if (readiness.state === "unknown") {
@@ -3930,12 +3956,13 @@ export class SessionTransport {
 
   /** Wait on the existing classifier without occupying the input/lifecycle lease. With `singleObservation`, one
    *  observation within `timeoutMs` and no wait after it: a busy reading returns at once. */
-  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal, opts?: { singleObservation?: boolean; allowDraft?: true }) {
+  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal, opts?: { singleObservation?: boolean; allowDraft?: true; onObservation?: (activity: AgentActivity) => void }) {
     const meta = this.getSessionMeta(sessionName);
     return this.waitForIdle({ sessionName, runtime: meta.runtime, attachmentType: meta.attachmentType, timeoutMs, signal,
       binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
       ...(opts?.allowDraft ? { allowDraft: true } : {}),
-      ...(opts?.singleObservation ? { singleObservation: true } : {}) });
+      ...(opts?.singleObservation ? { singleObservation: true } : {}),
+      ...(opts?.onObservation ? { onObservation: opts.onObservation } : {}) });
   }
 
   private async waitForIdle(input: {
@@ -3954,6 +3981,8 @@ export class SessionTransport {
     allowUnknown?: boolean;
     /** One observation only: a reading that isn't idle ends the wait at once. */
     singleObservation?: boolean;
+    /** Called with each observation that completes in time, so a caller can report the seat's state while it waits. */
+    onObservation?: (activity: AgentActivity) => void;
     // Optional display value for timeout messages. The deadline always comes
     // from timeoutMs; when set, expiry reports this value instead, so a
     // re-wait running on a leftover budget still names the configured wait.
@@ -4024,6 +4053,7 @@ export class SessionTransport {
         return expire();
       }
       last = activity;
+      input.onObservation?.(activity);
       const waitedMs = input.timeoutMs - (deadline - Date.now());
 
       if (activity.state === "idle" || (input.allowUnknown && activity.state === "unknown") || (input.allowDraft && this.deliversOverDraft(activity))) {
