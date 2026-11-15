@@ -709,6 +709,56 @@ describe("context-usage-threshold registration", () => {
     expect(await response.json()).toMatchObject({ watchedFilePath: explicit });
   });
 
+  // --spec naming one file plus --watched-file naming another (the CLI posts both as given, as can any API caller): the
+  // file named for this registration wins at registration, and the engine keeps watching it afterwards.
+  it("a watched file named at registration wins over the spec's, and stays bound across evaluations and an occupant change", async () => {
+    const specFile = join(tmp, "spec-named.jsonl");
+    const named = join(tmp, "registration-named.jsonl");
+    const successor = join(tmp, "successor.jsonl");
+    for (const file of [specFile, named, successor]) writeFileSync(file, "1");
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-1', 'rig-1', 'target')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-1', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-1', 'node-1', 1, 'gen-1', 'initial', '2026-08-28T09:00:00.000Z')`,
+    ).run();
+
+    const response = await app().request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body({
+        specYaml: `policy: context-usage-threshold\ncontext:\n  threshold_bytes: 8\n  watched_file: ${JSON.stringify(specFile)}\n`,
+        watchedFilePath: named,
+      })),
+    });
+    expect(response.status).toBe(201);
+    const { jobId } = await response.json() as { jobId: string };
+
+    let generation = "gen-1";
+    const repo = () => new WatchdogJobsRepository(db, undefined, () => generation);
+    const evaluate = () => new WatchdogPolicyEngine({ jobsRepo: repo(), historyLog: new WatchdogHistoryLog(db), eventBus: new EventBus(db),
+      deliver: async () => ({ status: "ok" as const }), resolveTargetGeneration: () => generation }).evaluate(repo().getByIdOrThrow(jobId));
+    await evaluate();
+    expect(repo().getByIdOrThrow(jobId).watchedFilePath).toBe(named);
+
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-2', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-2', 'node-1', 2, 'gen-2', 'handover', '2026-08-28T10:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'successor-native-session', 'target@rig', 'known', ?, '2026-08-28T10:00:01.000Z')`,
+    ).run(successor);
+    generation = "gen-2";
+    await evaluate();
+    expect(repo().getByIdOrThrow(jobId).watchedFilePath).toBe(named);
+  });
+
   it("fails registration loudly when neither resolution path exists", async () => {
     const response = await app().request("/api/watchdog/register", {
       method: "POST",

@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
 import { Hono } from "hono";
+import { parseDocument } from "yaml";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { WatchdogHistoryLog } from "../domain/watchdog-history-log.js";
@@ -144,9 +145,15 @@ export function watchdogRoutes(): Hono {
           );
         }
       }
+      // A file named for this registration (`--watched-file`, or `watchedFilePath` on the API) wins over the spec's own
+      // `context.watched_file`, as the binding above already does. The stored spec names it too, so the engine keeps
+      // watching the file this registration bound.
+      const specYaml = isContextUsageThreshold && body.watchedFilePath && body.watchedFilePath !== specWatchedFile
+        ? withWatchedFile(body.specYaml, body.watchedFilePath)
+        : body.specYaml;
       const job = jobsRepo.register({
         policy: body.policy,
-        specYaml: body.specYaml,
+        specYaml,
         targetSession: body.targetSession,
         intervalSeconds: body.intervalSeconds,
         activeWakeIntervalSeconds: body.activeWakeIntervalSeconds,
@@ -270,4 +277,11 @@ export function watchdogRoutes(): Hono {
   });
 
   return app;
+}
+
+/** The spec with `context.watched_file` set to the named file; everything else in it is kept as written. */
+function withWatchedFile(specYaml: string, watchedFile: string): string {
+  const doc = parseDocument(specYaml);
+  doc.setIn(["context", "watched_file"], watchedFile);
+  return doc.toString();
 }
