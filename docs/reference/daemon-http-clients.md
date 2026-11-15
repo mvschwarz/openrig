@@ -268,3 +268,71 @@ With `needs-me.read` supported:
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+
+
+## Resume one banked original conversation
+
+The opt-in original-only operation reuses `startup-history.v1`. It targets one exact rig and node,
+with a retained snapshot and captured history. Platform boot enrollment remains an operator step.
+These routes use the existing terminal bearer token.
+
+1. Read `GET /api/startup/<rigId>/nodes/<nodeId>/original?snapshotId=<id>&historySessionId=<id>`.
+   The preview uses that explicitly retained usable snapshot, even when a newer snapshot exists.
+   It returns `revision`, the selected history and current model, effort, cwd, permission and runtime-home
+   provenance. `accountHome.authentication: "unconfirmed"` means that the home selection is configuration,
+   not proof of an authenticated account. A `daemon_environment` home is the daemon fallback, not a seat setting;
+   `native_default` means the runtime default.
+2. POST to the same `/original` path, without query fields, with `action: "resume"`, `snapshotId`,
+   `historySessionId`, that `revision`, an `operationId` UUID, and `expectedOriginal` containing the banked
+   `nodeId`, `sessionName`, `runtime` (`claude-code` or `codex`) and `nativeId`.
+   Keep native conversation IDs in the private bank and request body. They are not returned in diagnostics.
+
+The operation keeps the current selected launch choices. Its original-only native effect uses the retained
+history and existing selected-history ownership checks. A positively established matching original already
+running returns `code: "already_running_original"` and `nativeEffect: false`. A confirmed resume returns
+`code: "resumed"`, with `sourceSessionId`, `resultSessionId` and `operationId`.
+
+An unavailable source, changed selection, different occupant, restoring-only result or unconfirmed native
+identity returns a partial result. Existing occupants stay in place. This selected operation never substitutes
+a fresh conversation. Its current-original check needs the existing qualified occupant, pane and native-record
+evidence; a stored resume token by itself is insufficient. A legacy named history that cannot establish the
+banked native identity remains partial. For Codex, the PID/start-time log and transcript are resolved in the
+current selected runtime home used for launch. With no explicit home, the existing default-home and PID-bound
+process-HOME reader supplies the home; the transcript lookup uses that same positively resolved home. Another
+home's copy of the same thread UUID is not selected. These checks also serve conditional sends and record reads.
+If a recorded explicit home changes before its running process is relaunched, its record may be unavailable;
+the check does not borrow another home's copy or change the running process's account.
+
+Retain the operation ID after a timeout. Repeating that same request first reconciles current native identity;
+it reports a matching running original or `operation_unconfirmed`, and never dispatches that operation again.
+The correlation survives daemon restart. An operation ID reused with different input returns
+`operation_conflict`. Inspect the recorded operation and seat before selecting any new attempt.
+
+A source-level fixture pass establishes the tested ownership, selection and reporting paths. Actual native
+conversation usefulness and authenticated-account continuity need a qualified runtime observation.
+
+## Per-rig delivery drain
+
+A maintenance owner can hold automatic queue wakes, watchdog delivery and stuck-sweep findings directed to one rig:
+
+- `GET /api/rigs/:rigId/delivery-drain` reads its current control and retained-notice counts.
+- `POST /api/rigs/:rigId/delivery-drain` begins a window, or renews the same window's review deadline:
+
+  ```json
+  {"drainId":"maintenance-window-1","owner":"maintainer@example","reviewAt":"2026-12-01T12:30:00Z"}
+  ```
+
+- `POST /api/rigs/:rigId/delivery-drain/end` with `{"drainId":"maintenance-window-1"}` explicitly ends that window.
+
+Status includes the owner, start, review deadline and drain ID, `retainedWorkCount`, and `nativeStartsDeferred: false`.
+The retained count is pending queue-wake intents plus due watchdog jobs, excluding maintenance review jobs; it is a count of notifications, not unique tasks. Work keeps its existing queue/outbox/job identities. Other destination rigs continue normally; a row's source rig and a watchdog's registering rig are provenance, not drain admission criteria.
+
+A deadline prompts the recorded owner through the existing watchdog; it never ends a drain automatically. Review checks and repeat prompts have a five-minute minimum interval, including a past or near deadline. Its review job remains usable even if its owner's rig also has a delivery drain. Repeating BEGIN with the same ID and settings keeps the same window and job; renewal preserves the start. An active window is returned as status if a different ID is requested. A completed window's ID never starts it again.
+
+END changes only the named current window and schedules one existing recovery pass for its pending queue notices. Repeating END does not schedule another pass. A delayed END for an earlier window cannot end a later one. `releaseScheduled` reports scheduling, not successful delivery: notices still use current queue state, recipient checks and normal receipts. The END pass adds no retry of failed, uncertain, in-flight, delivered or manually retained input. Completed work reconciles normally; existing failed or uncertain outcomes keep their ordinary recovery and visibility.
+
+This is delivery-only maintenance. Direct sends, control/END requests and ordinary reads stay usable. Automatic native starts are **not deferred**, and input already in flight can finish. Coordinate native or daemon lifecycle work separately; this control does not promise all-activity quiet or graceful stop.
+
+The automatic wake ladder also waits before attempt budgets, rung markers and escalation for work whose destination rig is drained, including a held escalation target. It resumes at the retained rung after END. Legacy workflow packets without outbox intents remain owed: their existing keepalive resumes after END, and the sweep reports them if they stay unclaimed. END's scoped recovery pass covers pending intents. Diagnosis re-presentations wait before spending their presentation receipt. An explicit resolve notification remains an explicit action and can pass through the delivery hold.
+
+All watchdog evaluation for the held rig waits, including the context-usage watchdog's managed-compaction action. This does not add a native-start hold. If a drain admission read fails, automatic delivery proceeds and reports the uncertainty. Control/status failures remain errors, and failed BEGIN/END writes never report success.

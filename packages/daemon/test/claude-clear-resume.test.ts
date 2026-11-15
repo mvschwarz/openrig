@@ -152,6 +152,25 @@ describe("Claude current conversation at shutdown", () => {
     expect(f.probe).not.toHaveBeenCalled();
   });
 
+  it.each(["recorded", "sole"])("does not capture when the %s pane leaves the seat's session between the process observations", async kind => {
+    const f = fixture();
+    if (kind === "sole") db.prepare("UPDATE bindings SET tmux_pane=NULL WHERE node_id=?").run(f.node.id);
+    // The session holds %1 when the pane is chosen and no longer after the second observation; the process is unchanged.
+    vi.mocked(f.tmux.listPanes).mockResolvedValueOnce([{ id: "%1" }] as never).mockResolvedValue([] as never);
+    expect(await f.refresher.captureClaudeSessionId(f.name, { nodeId: f.node.id })).toBeUndefined();
+    expect(f.tmux.getPanePid).toHaveBeenCalledTimes(2);
+    expect(f.tmux.listPanes).toHaveBeenCalledTimes(2);
+    expect(f.tmux.listPanes).toHaveBeenLastCalledWith(f.name, true);
+  });
+
+  it("resolves a relative Claude config directory against the seat's directory, not the daemon's", async () => {
+    // The PID file is under the seat's directory; the daemon names its config dir relatively and runs elsewhere.
+    const f = fixture("scrape", path.join(root, ".claude"), { daemonConfigDir: ".claude" });
+    expect(process.cwd()).not.toBe(root);
+    expect(await f.refresher.captureClaudeSessionId(f.name, { nodeId: f.node.id })).toBeUndefined();
+    expect(await f.refresher.captureClaudeSessionId(f.name, { nodeId: f.node.id, cwd: root })).toBe(newId);
+  });
+
   it("captures the post-clear conversation in the actual auto-pre-down snapshot", async () => {
     const f = fixture();
     // Another seat has the same name; a name scan must not select its old conversation.

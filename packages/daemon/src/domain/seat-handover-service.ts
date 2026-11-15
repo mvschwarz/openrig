@@ -1363,6 +1363,7 @@ export class SeatHandoverService {
         sessionId: committed.result.newSessionId,
         sessionName: discovered.tmuxSession,
         runtime: input.node.runtime,
+        cwd: input.node.cwd,
       });
     }
     // Held messages are never replayed, so every source's result names them, as a started seat is told (#2431). The
@@ -1390,11 +1391,12 @@ export class SeatHandoverService {
    * nothing + a redacted skip event. NEVER throws, never logs the token.
    */
   private async captureDiscoveredResumeToken(input: {
-    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null;
+    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null; cwd: string | null;
   }): Promise<void> {
     try {
+      // The seat's own directory, as adoption passes it: a relative Claude config dir resolves there, not in the daemon's.
       const derived = await deriveResumeToken(
-        { runtime: input.runtime, sessionName: input.sessionName, nodeId: input.nodeId },
+        { runtime: input.runtime, sessionName: input.sessionName, nodeId: input.nodeId, cwd: input.cwd ?? undefined },
         this.captureDeps,
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return;
@@ -1839,10 +1841,13 @@ export class SeatHandoverService {
       // cutover the successor reuses the seat name, so retiring === successor here — Class-A is safe by
       // TIMING (runs before the successor writes) and Class-B is gen-scoped via retiringGeneration (the
       // retiree's generation, captured above pre-mint). Optional dep: absent → skipped, never blocks.
+      // #3044 C3: a recovery's successor has already run, so the timing doesn't cover its sidecar; the successor's
+      // generation keeps a sidecar it wrote itself, best effort (the collector writes from another process).
       this.occupantInvalidator?.invalidateRetiringOccupant({
         retiringSessionName: input.latestSession.session_name,
         successorSessionName: input.discovered.tmuxSession,
         retiringGeneration,
+        ...(input.occupantGeneration ? { successorGeneration: input.occupantGeneration } : {}),
       });
 
       const event = this.eventBus.persistWithinTransaction({

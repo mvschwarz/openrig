@@ -377,7 +377,7 @@ export type RigEvent =
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string }
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string; actorSession?: string; reason?: string; oldPacketId?: string; newPacketId?: string }
   // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
   // deletion path. Emitted once per workflow_specs cache row removed
   // because its source file disappeared from the scanned workflows folder.
@@ -499,7 +499,9 @@ export interface RestoreSnapshotSelection extends RestoreSnapshotSummary {
 export interface RestoreExcludedNode {
   nodeId: string;
   logicalId: string;
-  reason: "historical_not_in_intended_roster";
+  /** Historical: no longer a node of the rig. Current: still a node of the rig (a seat claimed after the rig's topology was
+   *  recorded), which this restore skipped. */
+  reason: "historical_not_in_intended_roster" | "current_seat_not_in_intended_roster";
 }
 
 export interface Snapshot {
@@ -1700,4 +1702,6 @@ export interface ContextUsage {
   fresh: boolean;
   /** Claude only: the statusline's cumulative client-side cost estimate for `sessionId` (USD); null when not reported. */
   clientCostEstimateUsd?: number | null;
+  /** Claude only: the occupant generation the status-line collector recorded with this sample; null when none. */
+  occupantGeneration?: string | null;
 }

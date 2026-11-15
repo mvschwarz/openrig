@@ -232,9 +232,11 @@ export interface PreflightSpecContext {
  */
 export function permissionPolicyDiscoveryWarnings(
   rigSpec: PodRigSpec,
-  preflightCtx: Pick<PreflightSpecContext, "rigRoot" | "fsOps" | "inheritedPermissionPolicy">,
+  preflightCtx: Pick<PreflightSpecContext, "rigRoot" | "fsOps" | "inheritedPermissionPolicy" | "rigNameOverride">,
 ): string[] {
   const warnings: string[] = [];
+  // The rig these seats launch in: an append names its stored target, whatever the template is called.
+  const kernel = (preflightCtx.rigNameOverride ?? rigSpec.name) === "kernel";
   for (const pod of rigSpec.pods) {
     for (const member of pod.members) {
       const logicalId = `${pod.id}.${member.id}`;
@@ -246,6 +248,9 @@ export function permissionPolicyDiscoveryWarnings(
         : preflightCtx.inheritedPermissionPolicy;
       if (!attachment) {
         warnings.push(`${logicalId}: permission_policy absent; launch_posture=floor`);
+        // The absent line stays as ruled (5f37e40f); a separate line says what the seat launches with.
+        const teamDefault = absentPolicyTeamDefault(logicalId, member.runtime, kernel);
+        if (teamDefault) warnings.push(teamDefault);
         continue;
       }
       if (attachment.origin === "deliberate_none") {
@@ -256,10 +261,19 @@ export function permissionPolicyDiscoveryWarnings(
         continue;
       }
       warnings.push(`${logicalId}: permission_policy ref="${attachment.ref}" origin=${attachment.origin} launch_posture=${attachment.launchPosture}`
-        + configPolicyNote(attachment, member.runtime, rigSpec.name === "kernel"));
+        + configPolicyNote(attachment, member.runtime, kernel));
     }
   }
   return warnings;
+}
+
+/** A team Claude Code or Codex seat with no policy launches at the floor with the team default's allowances, which the
+ *  bare absent line doesn't say. The plan can't see a seat's own permission mode, Codex envelope or named Codex profile,
+ *  any of which replaces the default, so the line says that too. Kernel, Pi and terminal seats get no line. */
+function absentPolicyTeamDefault(logicalId: string, runtime: string, kernel: boolean): string | null {
+  if (kernel || (runtime !== "claude-code" && runtime !== "codex")) return null;
+  return `${logicalId}: no permission policy, so this seat launches at the floor with the team default's allowances,`
+    + " unless it has its own permission mode, Codex envelope or named Codex profile";
 }
 
 /** A config-surface policy (a built-in such as standard, open or locked, or a custom one) is recorded, but its rules

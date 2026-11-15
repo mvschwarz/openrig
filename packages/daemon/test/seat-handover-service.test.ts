@@ -57,6 +57,7 @@ describe("SeatHandoverService", () => {
   let checkReady: ReturnType<typeof vi.fn>;
   let readSidecar: ReturnType<typeof vi.fn>;
   let captureCodexThreadId: ReturnType<typeof vi.fn>;
+  let captureClaudeSessionId: ReturnType<typeof vi.fn>;
   let claudeProcessStartedAt: ((sessionName: string) => Promise<string | null>) | undefined;
   let invalidateRetiringOccupant: ReturnType<typeof vi.fn>;
   let declareOccupantSwap: ReturnType<typeof vi.fn>;
@@ -95,6 +96,7 @@ describe("SeatHandoverService", () => {
     // B2 — discovered-mode derive-helper deps (Codex thread-id capturer by default).
     readSidecar = vi.fn(() => ({ ok: true, data: { session_id: "claude-sid-123" } }));
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
+    captureClaudeSessionId = vi.fn(async () => undefined);
     claudeProcessStartedAt = undefined;
     invalidateRetiringOccupant = vi.fn();
     declareOccupantSwap = vi.fn();
@@ -131,7 +133,7 @@ describe("SeatHandoverService", () => {
       newSuccessorId: () => "01SUCCID0",
       runtimeAdapters: { [runtime]: { ...codexAdapter(), runtime } },
       contextUsageStore: { readSidecar } as never,
-      resumeTokenCapturer: { captureCodexThreadId } as never,
+      resumeTokenCapturer: { captureCodexThreadId, captureClaudeSessionId } as never,
       ...(claudeProcessStartedAt ? { claudeProcessStartedAt } : {}),
       occupantInvalidator,
       activityOracle: { declareOccupantSwap },
@@ -959,16 +961,17 @@ describe("SeatHandoverService", () => {
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
     expect(result.ok).toBe(true);
+    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
+    // the reused name, so the node's live generation now DIFFERS from the retiring one it received.
+    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
+    expect(successorGen).not.toBe(retiringGen);
     expect(invalidateRetiringOccupant).toHaveBeenCalledTimes(1);
     expect(invalidateRetiringOccupant).toHaveBeenCalledWith({
       retiringSessionName: "dev-impl@seat-rig",
       successorSessionName: "dev-impl@seat-rig",
       retiringGeneration: retiringGen, // captured pre-mint = the RETIREE's gen, not the successor's
+      successorGeneration: successorGen, // #3044 C3: the generation the commit registered, so a sample it wrote is kept
     });
-    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
-    // the reused name, so the node's live generation now DIFFERS from what the invalidator received.
-    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
-    expect(successorGen).not.toBe(retiringGen);
   });
 
   it("does NOT invalidate the retiring occupant when the handover fails before commit (no re-key on a non-committed handover)", async () => {
@@ -1571,6 +1574,23 @@ describe("SeatHandoverService", () => {
     const { resume_token: _token, ...payload } = expected;
     expect(JSON.parse(event.payload)).toMatchObject(payload);
     expect(startedAt).toHaveBeenCalledWith("successor-session");
+  });
+
+  it("B2 (claude-code): with no status-line sidecar, reads the current process's file from the seat's own directory", async () => {
+    readSidecar.mockReturnValue({ ok: false, reason: "missing_sidecar" });
+    captureClaudeSessionId.mockResolvedValue("44444444-4444-4444-8444-444444444444");
+    const { node } = seedSeat({ runtime: "claude-code" });
+    const discovered = seedDiscovery({ runtimeHint: "claude-code" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "mvp-proof", source: `discovered:${discovered.id}` });
+
+    expect(result.ok).toBe(true);
+    // The seat's directory goes with it, as adoption's does, so a relative CLAUDE_CONFIG_DIR resolves where the seat runs.
+    expect(captureClaudeSessionId).toHaveBeenCalledWith("successor-session", { nodeId: node.id, cwd: "/project" });
+    const newSession = db.prepare(
+      "SELECT resume_token, resume_provenance FROM sessions WHERE node_id = ? AND session_name = ?"
+    ).get(node.id, "successor-session") as Record<string, string | null>;
+    expect(newSession).toMatchObject({ resume_token: "44444444-4444-4444-8444-444444444444", resume_provenance: "adoption" });
   });
 
   it("B2: honest redacted skip when the discovered token cannot be derived", async () => {

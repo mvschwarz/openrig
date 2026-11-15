@@ -197,6 +197,58 @@ describe("restore-check current-state eligibility correction", () => {
     expect(ctx.remediation).toContain("No startup-context repair is needed to restore it.");
   });
 
+  // A member outside the restore roster (joined later with `rig attach --self`, say) is left as it is, so its saved
+  // conversation isn't tried: from the selected snapshot's roster, or, on a current-state rehydrate, from the rig's
+  // recorded roster. With no recorded roster everyone is restored, as the eligible case above shows.
+  function seedOutside(name: string) {
+    const rig = seedMoved(name, true);
+    const lead = setup.rigRepo.addNode(rig.id, "dev.lead", { runtime: "codex", cwd: home, podId: `pod-${name}` });
+    return { rig, lead };
+  }
+  async function expectLeftAttached(rigName: string) {
+    const ctx = (await check(rigName)).checks.find((c: { check: string }) => c.check === `seat.dev-moved@${rigName}.startup-context`) as
+      { status: string; evidence: string; remediation: string };
+    expect(ctx).toMatchObject({ status: "yellow",
+      evidence: expect.stringContaining(`Restore leaves dev-moved@${rigName} attached and doesn't restore it: it isn't in this rig's restore roster.`) });
+    expect(ctx.evidence).not.toContain("Restore tries");
+    expect(ctx.remediation).toBe("No startup-context repair is needed: restore doesn't touch this member.");
+  }
+
+  it("a member outside the selected snapshot's roster reads as left attached and not restored, not as a resume", async () => {
+    const { rig, lead } = seedOutside("outside");
+    const live = setup.rigRepo.getRig(rig.id)!;
+    const sessions = setup.sessionRegistry.getSessionsForRig(rig.id);
+    // The snapshot holds both members and their current occupants, so restore uses it; its roster names only the lead.
+    setup.snapshotRepo.createSnapshot(rig.id, "auto-pre-down", {
+      rig: live.rig, nodes: live.nodes, edges: live.edges, sessions, checkpoints: {},
+      activeSessionIdByNode: Object.fromEntries(sessions.map((s) => [s.nodeId, s.id])),
+      topologyRoster: { version: 1, source: "materialized_topology", intendedNodeIds: [lead.id] },
+    });
+    await expectLeftAttached(rig.name);
+  });
+
+  it("a member the selected snapshot doesn't hold at all (it joined later and its session exited) reads as left attached", async () => {
+    const { rig, lead } = seedOutside("joined-after");
+    // With no fresh-launch record, the occupant match skips an exited session, so restore uses a snapshot that holds
+    // only the lead. Restore acts on that snapshot's roster and leaves the later member as it is.
+    setup.sessionRegistry.updateStatus(setup.sessionRegistry.getSessionsForRig(rig.id)[0]!.id, "exited");
+    const live = setup.rigRepo.getRig(rig.id)!;
+    setup.snapshotRepo.createSnapshot(rig.id, "auto-pre-down", {
+      rig: live.rig, nodes: live.nodes.filter((node) => node.id === lead.id), edges: [], sessions: [], checkpoints: {},
+      activeSessionIdByNode: {},
+      topologyRoster: { version: 1, source: "materialized_topology", intendedNodeIds: [lead.id] },
+    });
+    await expectLeftAttached(rig.name);
+  });
+
+  it("on a current-state rehydrate, a member outside the rig's recorded roster reads as left attached too", async () => {
+    const { rig, lead } = seedOutside("outside-rehydrate");
+    // No usable snapshot, so restore would rehydrate from current state, which takes the rig's recorded roster.
+    setup.db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, ?, ?)")
+      .run(rig.id, "topology.roster_recorded", JSON.stringify({ intendedNodeIds: [lead.id], source: "materialized_topology" }));
+    await expectLeftAttached(rig.name);
+  });
+
   it("without a resume token the seat stays blocked, and restore-check names a supported command instead of 'recreate'", async () => {
     const rig = seedMoved("unmoved", false);
     expect(eligibility.assessCurrentStateRehydrateEligibility(setup.db, setup.rigRepo.getRig(rig.id)!).blockers)
