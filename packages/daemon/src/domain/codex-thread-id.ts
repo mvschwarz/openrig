@@ -303,6 +303,75 @@ export type StartSecondRows =
 /** Whether a read met no detected incompleteness: every database it opened was read, and both discoveries were complete. */
 interface Readability { complete: boolean; unreadable: boolean }
 
+/** The thread ids a process logged after its start second: Codex's `logs` table has no index this can use, so it reads
+ *  every row that names a thread, in every process. */
+const FULL_LOGGED_THREADS = "SELECT DISTINCT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL AND ts > ?";
+
+/** The logs migrations whose writers were read before trusting an incremental read. Codex 0.153.4 and 0.162.1 both ship
+ *  logs migrations 1 and 2, and outside tests their only writes to `logs` are inserts (AUTOINCREMENT ids, so a new row
+ *  always has a higher id) and deletes (10-day retention, per-thread and per-process size limits, a deleted thread).
+ *  No supported writer changes an existing row's thread_id, ts or process_uuid. A database with any other migration
+ *  set, or none, reads in full. */
+const INCREMENTAL_LOGS_MIGRATIONS = "1,2";
+const MAX_INCREMENTAL_READS = 512;
+
+/** One database's earlier read for one process: the highest id it covered, that row's content (rows don't change in
+ *  place, so a different row there means a different database), and the threads it found. */
+type IncrementalRead = { highWater: number; highWaterRow: string; threads: Set<string> };
+const incrementalReads = new Map<string, IncrementalRead>();
+
+/** How often the default read was answered cold, warm or in full. For tests and measurement. */
+export const incrementalLogReadCounts = { cold: 0, warm: 0, full: 0 };
+/** Forget every earlier read, so the next read of each database is cold. */
+export function clearIncrementalLogReads(): void { incrementalReads.clear(); }
+
+/**
+ * {@link FULL_LOGGED_THREADS} for one database, answered from the rows added since this process's last read there.
+ * Each read runs in one read transaction: it takes the current highest id, keeps each earlier thread only while a
+ * qualifying row still names it (Codex deletes rows), and adds the threads in rows past the earlier high-water id. The
+ * set is the full query's. A cold read (no earlier read, a replaced file, or a high-water row that changed or went) is
+ * the full query itself. Returns null when this database isn't a verified schema, or when the read throws, so the
+ * caller runs the full query and reports what it reports today. A read that throws is never remembered.
+ */
+function readLoggedThreadsIncrementally(db: Database.Database, dbPath: string, pid: number, minTs: number | undefined): string[] | null {
+  let applied: string | null | undefined;
+  try {
+    applied = (db.prepare("SELECT group_concat(version) AS applied FROM (SELECT version FROM _sqlx_migrations WHERE success = 1 ORDER BY version)")
+      .get() as { applied: string | null } | undefined)?.applied;
+  } catch { applied = null; }
+  if (applied !== INCREMENTAL_LOGS_MIGRATIONS) { incrementalLogReadCounts.full++; return null; }
+  const pattern = `pid:${pid}:%`, since = minTs ?? 0;
+  let key: string, read: { warm: boolean; entry: IncrementalRead };
+  try {
+    const file = fs.statSync(dbPath);
+    key = [dbPath, file.dev, file.ino, file.birthtimeMs, pid, minTs ?? 0].join("|");
+    const rowAt = db.prepare("SELECT ts, ts_nanos, process_uuid, thread_id FROM logs WHERE id = ?");
+    const content = (id: number) => { const row = rowAt.get(id); return row ? JSON.stringify(row) : null; };
+    read = db.transaction(() => {
+      const highWater = (db.prepare("SELECT max(id) AS hi FROM logs").get() as { hi: number | null }).hi ?? 0;
+      const earlier = incrementalReads.get(key);
+      const warm = earlier !== undefined && highWater >= earlier.highWater
+        && (earlier.highWater === 0 || content(earlier.highWater) === earlier.highWaterRow);
+      const threads = new Set<string>();
+      if (warm) {
+        const stillLogged = db.prepare("SELECT 1 FROM logs WHERE thread_id = ? AND ts > ? AND process_uuid LIKE ? LIMIT 1");
+        for (const thread of earlier.threads) if (stillLogged.get(thread, since, pattern)) threads.add(thread);
+        const added = db.prepare("SELECT DISTINCT thread_id FROM logs WHERE id > ? AND id <= ? AND process_uuid LIKE ? AND thread_id IS NOT NULL AND ts > ?")
+          .all(earlier.highWater, highWater, pattern, since) as Array<{ thread_id: string }>;
+        for (const row of added) threads.add(row.thread_id);
+      } else {
+        for (const row of db.prepare(FULL_LOGGED_THREADS).all(pattern, since) as Array<{ thread_id: string }>) threads.add(row.thread_id);
+      }
+      return { warm, entry: { highWater, highWaterRow: highWater === 0 ? "" : content(highWater) ?? "", threads } };
+    })();
+  } catch { incrementalLogReadCounts.full++; return null; }
+  if (read.warm) incrementalLogReadCounts.warm++; else incrementalLogReadCounts.cold++;
+  incrementalReads.delete(key);
+  if (incrementalReads.size >= MAX_INCREMENTAL_READS) incrementalReads.delete(incrementalReads.keys().next().value!);
+  incrementalReads.set(key, read.entry);
+  return [...read.entry.threads];
+}
+
 function readCodexThreadIdFromLogs(
   pid: number,
   homeDir: string,
@@ -329,10 +398,11 @@ function readCodexThreadIdFromLogs(
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
+        // The default read can be incremental; a readability or by-process read always reads in full.
+        const incremental = startSecond === "exclude" && !readability ? readLoggedThreadsIncrementally(db, dbPath, pid, minTs) : null;
         // Strict start-second gate preserves the existing PID reuse boundary.
-        const rows = db.prepare(
-          "SELECT DISTINCT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL AND ts > ?"
-        ).all(`pid:${pid}:%`, minTs ?? 0) as Array<{ thread_id: string }>;
+        const rows = incremental ? [] : db.prepare(FULL_LOGGED_THREADS).all(`pid:${pid}:%`, minTs ?? 0) as Array<{ thread_id: string }>;
+        for (const id of incremental ?? []) loggedIds.add(id);
         for (const row of rows) loggedIds.add(row.thread_id);
         if (startSecond === "by-process" && minTs !== undefined) {
           const inSecond = db.prepare(
