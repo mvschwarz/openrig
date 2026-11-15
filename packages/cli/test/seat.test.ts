@@ -460,10 +460,22 @@ describe("rig seat status", () => {
     });
     const output = logs.join("\n");
     expect(output).toContain("  Claude auto mode block (saved): environment 2 (with $defaults), soft_deny 1, classifyAllShell true");
-    expect(output).toContain("  Claude auto mode block (last launch, observed): unknown (that launch predates this record)");
+    expect(output).toContain("  Claude auto mode block (last launch, observed): unknown; unknown whether it matches saved");
     expect(output).toContain(`  ${claudeAutoMode.notes[0]}`);
     expect(output).toContain(`  Warning: ${claudeAutoMode.advisories[0]}`);
     expect(output).toContain("  Effective lists where you run it: claude --settings '{}' auto-mode config");
+  });
+
+  it("prints a saved auto mode block that can't be read as unavailable, with an unknown comparison", async () => {
+    const claudeAutoMode = { saved: { state: "unavailable", error: "Seat n1: the saved claude_auto_mode can't be read" },
+      lastLaunch: { state: "none" }, matchesLastLaunch: null, notes: [], advisories: [] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", claudeAutoMode } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("  Claude auto mode block (saved): unavailable: Seat n1: the saved claude_auto_mode can't be read");
+    expect(output).toContain("  Claude auto mode block (last launch, observed): none; unknown whether it matches saved");
   });
 
   it("prints each advisory the account carries, after the summary", async () => {

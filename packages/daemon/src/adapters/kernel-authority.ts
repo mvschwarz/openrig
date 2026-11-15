@@ -1,5 +1,5 @@
 import { validateClaudePermissionRules } from "../domain/claude-permission-rules.js";
-import { validateClaudeAutoMode } from "../domain/claude-auto-mode.js";
+import { claudeAutoModeForLaunch, validateClaudeAutoMode } from "../domain/claude-auto-mode.js";
 import type { NodeBinding } from "../domain/runtime-adapter.js";
 import { nonInterruptiveArgs } from "./non-interruptive.js";
 import { isValidThresholdPercent } from "../domain/claude-compaction-enforcer.js";
@@ -70,8 +70,9 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
           allow: [...(permissions.allow ?? []), ...rules.allow], deny: [...(permissions.deny ?? []), ...rules.deny] } };
       });
     }
-    if (choice.claudeAutoMode !== undefined) {
-      const autoMode = validateClaudeAutoMode(choice.claudeAutoMode);
+    const { block } = claudeAutoModeForLaunch(choice.claudeAutoMode);
+    if (block !== undefined) {
+      const autoMode = validateClaudeAutoMode(block);
       args = withSettings(args, settings => ({ ...settings, autoMode }));
     }
     return args;

@@ -36,12 +36,12 @@ describe("claude_auto_mode advisories", () => {
     const advisories = claudeAutoModeAdvisories({ soft_deny: ["Only this"], environment: ["$defaults", "x"] }, "m.claude_auto_mode");
     expect(advisories).toHaveLength(1);
     expect(advisories[0]).toMatch(/^m\.claude_auto_mode\.soft_deny: .*\$defaults.*built-in soft_deny entries/);
-    expect(advisories[0]).toMatch(/user or managed settings/);
+    expect(advisories[0]).toMatch(/may replace .*unless another scope \(user or managed settings\) keeps "\$defaults".*claude auto-mode config/);
   });
 
-  it("says an empty list adds nothing and never claims it removes entries", () => {
+  it("warns that an empty list may replace the built-ins, and never claims it removes user or managed entries", () => {
     const advisories = claudeAutoModeAdvisories({ hard_deny: [], allow: ["$defaults"] });
-    expect(advisories.join("\n")).toMatch(/hard_deny: an empty list adds no entries/);
+    expect(advisories.join("\n")).toMatch(/hard_deny: without "\$defaults", this list may replace Claude's built-in hard_deny entries/);
     expect(advisories.join("\n")).toMatch(/allow: only "\$defaults" adds no entries of its own; it keeps Claude's built-in allow entries/);
     expect(advisories.join("\n")).not.toMatch(/remov|clear/i);
   });

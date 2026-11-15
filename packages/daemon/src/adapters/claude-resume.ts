@@ -1,6 +1,6 @@
 import { continuationChoiceNotes, resumedClaudeArguments, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
-import type { ClaudeAutoMode } from "../domain/claude-auto-mode.js";
+import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
@@ -86,7 +86,7 @@ export class ClaudeResumeAdapter {
     claudeMcp?: ClaudeMcp,
     launchWrapper?: readonly string[],
     continuation?: ClaudeContinuationLaunch,
-    claudeAutoMode?: ClaudeAutoMode,
+    claudeAutoMode?: ClaudeAutoModeChoice,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -122,7 +122,9 @@ export class ClaudeResumeAdapter {
     if (seatToken) tokenWarnings.push(...(await this.options.claudeManagedLaunch?.tokenPrecedenceWarnings?.(nodeId!, seatToken.ref) ?? []));
     const choice = { claudePermissions, claudeAutoMode, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
-    const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: claudeAutoMode ?? null };
+    const autoMode = claudeAutoModeForLaunch(claudeAutoMode);
+    if (autoMode.warning) tokenWarnings.push(autoMode.warning);
+    const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: autoMode.block ?? null };
     const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
       ...(this.options.restoreReadPolicy?.() ?? {}),

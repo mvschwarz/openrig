@@ -332,13 +332,17 @@ message.
 How Claude combines the block with your other settings:
 
 - **Scopes add up.** Claude adds the seat's entries to the entries from your user and managed
-  settings. The seat block can't remove those entries.
+  settings. The seat block can't remove those entries. It's additive, not a hard boundary, though:
+  Claude treats `allow` entries as exceptions to `soft_deny` entries from any scope, so the seat's
+  `allow` can override a user or managed `soft_deny`.
 - **`$defaults` decides the built-in entries.** Claude puts its built-in entries for a section
   where any scope lists `"$defaults"`. A non-empty list without `"$defaults"` drops the built-in
   entries for that section, unless another scope keeps `"$defaults"` there. The built-in
   `soft_deny` entries include force-push protection.
-- **An empty list changes nothing**, and `--clear-auto-mode` only stops OpenRig passing a block.
-  Neither removes user or managed entries.
+- **An empty list adds no entries.** Claude's docs say a list without `"$defaults"` replaces the
+  built-in entries, but Claude Code 2.1.322 kept them for an empty list, so OpenRig warns that it
+  may replace them. `--clear-auto-mode` only stops OpenRig passing a block. Neither removes user or
+  managed entries.
 
 OpenRig warns when a list leaves out `"$defaults"`, or when an entry looks like a tool rule, in
 `rig spec validate`, `rig up --plan`, the `set-permissions` output and `rig seat status`. It never
@@ -347,6 +351,10 @@ block the current occupant's launch sent, and notes when the next launch isn't p
 mode. To see the classifier's effective lists for a block, run the `claude --settings '…'
 auto-mode config` command that status prints. It shows the lists as they would be where you
 run it, so your user and managed settings are included.
+
+If the saved block can't be read, the seat still launches, resumes, forks and exports without it.
+The launch result, `rig seat status`, the fork result and the exported file say the block wasn't
+sent or carried. Set it again with `--auto-mode`, or clear it with `--clear-auto-mode`.
 
 ### Per-member Codex permissions
 

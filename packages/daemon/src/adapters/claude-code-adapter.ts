@@ -29,6 +29,7 @@ import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { claudeStrictTrustRoot } from "../domain/claude-git-trust-root.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
+import { claudeAutoModeForLaunch } from "../domain/claude-auto-mode.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
@@ -403,7 +404,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     };
     const launchNotes = () => (tokenWarnings.length ? { warnings: [...tokenWarnings] } : {});
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
-    const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: binding.claudeAutoMode ?? null };
+    const autoMode = claudeAutoModeForLaunch(binding.claudeAutoMode);
+    if (autoMode.warning) tokenWarnings.push(autoMode.warning);
+    const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: autoMode.block ?? null };
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });

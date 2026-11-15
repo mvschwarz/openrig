@@ -54,7 +54,7 @@ export interface SuccessorNode {
   kernelAuthority?: boolean;
   teamPermissionDefault?: boolean;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
-  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoModeChoice;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   permissionMode?: string;

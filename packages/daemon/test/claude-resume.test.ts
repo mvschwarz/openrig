@@ -229,6 +229,28 @@ describe("ClaudeResumeAdapter", () => {
       expect(launch.replace(/'"'"'/g, "'")).toContain(`"autoMode":${JSON.stringify(block)}`);
     });
 
+    it("resumes without a saved block that can't be read, warns, and records that none was sent", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const unreadable = "Seat n1: the saved claude_auto_mode can't be read (broken), so launches don't send it.";
+      const result = await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(12).fill(undefined), { unreadable });
+      expect(result).toMatchObject({ ok: true, warnings: [unreadable], appliedLaunch: { claudeAutoMode: null } });
+      expect(String(sendText.mock.calls[0]![1])).not.toContain("autoMode");
+    });
+
+    it("composes member rules and the auto mode block into one --settings on resume", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const block = { soft_deny: ["$defaults", "Pushing to main"] };
+      await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(6).fill(undefined), { allow: [], deny: ["Read(../peer/**)"] }, ...Array(5).fill(undefined), block);
+      const launch = String(sendText.mock.calls[0]![1]);
+      expect(launch.match(/'--settings'/g)).toHaveLength(1);
+      expect(launch).toContain('"deny":["Read(../peer/**)"]');
+      expect(launch).toContain(`"autoMode":${JSON.stringify(block)}`);
+    });
+
     it("returns { ok: true } on success", async () => {
       const adapter = new ClaudeResumeAdapter(mockTmux());
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");

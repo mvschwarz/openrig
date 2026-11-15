@@ -6,6 +6,17 @@ export type ClaudeAutoModeList = typeof CLAUDE_AUTO_MODE_LISTS[number];
 /** A seat's Claude `autoMode` settings block, passed to the classifier verbatim through the launch's --settings. */
 export type ClaudeAutoMode = Partial<Record<ClaudeAutoModeList, string[]>> & { classifyAllShell?: boolean };
 
+/** A saved block that can't be read. The launch goes ahead without it and warns with `unreadable`. */
+export interface UnreadableClaudeAutoMode { unreadable: string }
+export type ClaudeAutoModeChoice = ClaudeAutoMode | UnreadableClaudeAutoMode;
+
+/** The block a launch sends (undefined for none), and the warning when the saved one can't be read. */
+export function claudeAutoModeForLaunch(choice: ClaudeAutoModeChoice | undefined): { block?: ClaudeAutoMode; warning?: string } {
+  if (choice === undefined) return {};
+  if ("unreadable" in choice) return { warning: choice.unreadable };
+  return { block: choice };
+}
+
 export function validateClaudeAutoMode(value: unknown, label = "claude_auto_mode"): ClaudeAutoMode {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label}: expected a mapping of environment, allow, soft_deny, hard_deny and classifyAllShell`);
@@ -30,15 +41,15 @@ export function validateClaudeAutoMode(value: unknown, label = "claude_auto_mode
   return result;
 }
 
-/** Warnings, never refusals. Claude combines entries from user, managed and --settings scopes. Its built-in entries
- *  join a section when any scope keeps `$defaults`, and drop out when a scope sets a non-empty list and none keeps it. */
+/** Warnings, never refusals. Claude combines entries from user, managed and --settings scopes. Its docs say a list
+ *  without `$defaults` replaces the built-ins, and 2.1.322 keeps them when another scope keeps `$defaults` or the list
+ *  is empty. The wording says "may", so it stays true either way. */
 export function claudeAutoModeAdvisories(block: ClaudeAutoMode, label = "claude_auto_mode"): string[] {
   const advisories: string[] = [];
   for (const key of CLAUDE_AUTO_MODE_LISTS) {
     const list = block[key];
     if (list === undefined) continue;
-    if (list.length === 0) advisories.push(`${label}.${key}: an empty list adds no entries and changes nothing; your user and managed settings for this section still decide it.`);
-    else if (!list.includes("$defaults")) advisories.push(`${label}.${key}: without "$defaults", this list replaces Claude's built-in ${key} entries for this seat, unless your user or managed settings keep "$defaults" there. Add "$defaults" to keep them.`);
+    if (!list.includes("$defaults")) advisories.push(`${label}.${key}: without "$defaults", this list may replace Claude's built-in ${key} entries for this seat, unless another scope (user or managed settings) keeps "$defaults" there. Add "$defaults" to keep them; claude auto-mode config shows the effective lists.`);
     else if (list.every(entry => entry === "$defaults")) advisories.push(`${label}.${key}: only "$defaults" adds no entries of its own; it keeps Claude's built-in ${key} entries for this seat even where your user settings leave them out.`);
     list.forEach((entry, index) => {
       if (/^[A-Za-z_][A-Za-z0-9_*-]*\(.*\)$/.test(entry.trim())) {
@@ -51,8 +62,8 @@ export function claudeAutoModeAdvisories(block: ClaudeAutoMode, label = "claude_
 
 export interface ClaudeAutoModeStatus {
   /** The seat's record: what its next managed launch or resume composes. */
-  saved: { state: "recorded"; block: ClaudeAutoMode } | { state: "none" } | { state: "invalid"; error: string };
-  /** The block the current occupant's launch composed; unknown when that launch predates the record. */
+  saved: { state: "recorded"; block: ClaudeAutoMode } | { state: "none" } | { state: "unavailable"; error: string };
+  /** The block the current occupant's launch sent; unknown when it wasn't recorded. */
   lastLaunch: { state: "sent"; block: ClaudeAutoMode } | { state: "none" } | { state: "unknown" };
   /** Whether the next launch would compose what the last one did; null when either side can't be read. */
   matchesLastLaunch: boolean | null;
@@ -62,13 +73,13 @@ export interface ClaudeAutoModeStatus {
   inspect?: string;
 }
 
-/** Saved against applied, for seat status. `applied` is the observation's field: absent when not recorded. */
-export function claudeAutoModeStatus(db: Database.Database, nodeId: string, applied: ClaudeAutoMode | null | undefined, plannedAuto: boolean): ClaudeAutoModeStatus | undefined {
+/** Saved against applied, for seat status. `applied` is the observation's field: absent when not recorded. `plannedAuto` is undefined when the plan can't be read. */
+export function claudeAutoModeStatus(db: Database.Database, nodeId: string, applied: ClaudeAutoMode | null | undefined, plannedAuto: boolean | undefined): ClaudeAutoModeStatus | undefined {
   let saved: ClaudeAutoModeStatus["saved"];
   try {
     const block = readClaudeAutoMode(db, nodeId);
     saved = block === undefined ? { state: "none" } : { state: "recorded", block };
-  } catch (error) { saved = { state: "invalid", error: (error as Error).message }; }
+  } catch (error) { saved = { state: "unavailable", error: (error as Error).message }; }
   const lastLaunch: ClaudeAutoModeStatus["lastLaunch"] = applied === undefined ? { state: "unknown" }
     : applied === null ? { state: "none" } : { state: "sent", block: applied };
   if (saved.state === "none" && lastLaunch.state !== "sent") return undefined;
@@ -77,7 +88,7 @@ export function claudeAutoModeStatus(db: Database.Database, nodeId: string, appl
   const matchesLastLaunch = savedJson === undefined || appliedJson === undefined ? null : savedJson === appliedJson;
   const notes = ["Claude adds these entries to your user and managed auto mode settings; OpenRig doesn't read or change those."];
   if (matchesLastLaunch === false) notes.push("The saved block differs from the last launch's; it applies at the next managed launch or resume.");
-  if (saved.state === "recorded" && !plannedAuto) notes.push("The next launch isn't planned in auto mode, so the classifier won't read this block unless the session switches to auto mode.");
+  if (saved.state === "recorded" && plannedAuto === false) notes.push("The next launch isn't planned in auto mode, so the classifier won't read this block unless the session switches to auto mode.");
   return { saved, lastLaunch, matchesLastLaunch, notes,
     advisories: saved.state === "recorded" ? claudeAutoModeAdvisories(saved.block) : [],
     ...(saved.state === "recorded" ? { inspect: `claude --settings '${JSON.stringify({ autoMode: saved.block }).replace(/'/g, "'\\''")}' auto-mode config` } : {}) };
@@ -92,6 +103,11 @@ export function readClaudeAutoMode(db: Database.Database, nodeId: string): Claud
     if (row.logical_id) seat += ` (${row.logical_id})`;
     return validateClaudeAutoMode(JSON.parse(row.claude_auto_mode_json));
   } catch (error) {
-    throw new Error(`Seat ${seat}: cannot read claude_auto_mode (${(error as Error).message}). Replace it with rig seat set-permissions <seat> --auto-mode <file> --reason <reason>, or clear it with --clear-auto-mode, before launching.`);
+    throw new Error(`Seat ${seat}: the saved claude_auto_mode can't be read (${(error as Error).message}), so launches don't send it. Set it again with rig seat set-permissions <seat> --auto-mode <file> --reason <reason>, or clear it with --clear-auto-mode.`);
   }
+}
+
+/** For launches: a block that can't be read comes back as unreadable instead of stopping the launch. */
+export function readClaudeAutoModeForLaunch(db: Database.Database, nodeId: string): ClaudeAutoModeChoice | undefined {
+  try { return readClaudeAutoMode(db, nodeId); } catch (error) { return { unreadable: (error as Error).message }; }
 }

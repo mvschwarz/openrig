@@ -278,18 +278,24 @@ export class SeatStatusService {
 
   private permissionStatus(nodeId: string, runtime: string | null | undefined, seat: string): SeatStatus["permissions"] {
     const lastLaunchArguments = new AppliedLaunchObservationStore(this.rigRepo.db).readCurrent(nodeId);
-    try {
-      const store = new NativePermissionStore(this.rigRepo.db);
-      const desired = store.read(nodeId);
-      const effective = runtime ? store.resolve(nodeId, runtime) : undefined;
-      const account = planPermissionAccount(this.rigRepo.db, nodeId, seat, runtime ?? null);
-      const autoMode = runtime === "claude-code"
-        ? claudeAutoModeStatus(this.rigRepo.db, nodeId, lastLaunchArguments?.claudeAutoMode, /--permission-mode auto\b/.test(account.nativeArgument ?? ""))
-        : undefined;
-      return { selectionState: desired ? "explicit" : "inherit", desired, lastLaunchArguments, nativeEffect: "unverified", ...(effective ? { effective } : {}), account,
-        ...(autoMode ? { claudeAutoMode: autoMode } : {}) };
-    } catch (error) {
-      return { selectionState: "unknown", desired: null, lastLaunchArguments, nativeEffect: "unverified", error: (error as Error).message };
-    }
+    // Without a plan, whether the next launch is in auto mode is unknown, not false.
+    const autoModeStatus = (account?: PermissionAccount) => {
+      const status = runtime === "claude-code" ? claudeAutoModeStatus(this.rigRepo.db, nodeId, lastLaunchArguments?.claudeAutoMode,
+        account ? /--permission-mode auto\b/.test(account.nativeArgument ?? "") : undefined) : undefined;
+      return status ? { claudeAutoMode: status } : {};
+    };
+    // Each fact is read on its own, so one that can't be read doesn't hide the others.
+    const store = new NativePermissionStore(this.rigRepo.db);
+    let desired: ReturnType<NativePermissionStore["read"]> | undefined;
+    let effective: ReturnType<NativePermissionStore["resolve"]> | undefined;
+    let account: PermissionAccount | undefined;
+    const errors: string[] = [];
+    try { desired = store.read(nodeId); } catch (error) { errors.push((error as Error).message); }
+    try { if (runtime) effective = store.resolve(nodeId, runtime); } catch (error) { errors.push((error as Error).message); }
+    try { account = planPermissionAccount(this.rigRepo.db, nodeId, seat, runtime ?? null); } catch (error) { errors.push((error as Error).message); }
+    return { selectionState: desired === undefined ? "unknown" : desired ? "explicit" : "inherit", desired: desired ?? null, lastLaunchArguments,
+      nativeEffect: "unverified", ...(effective ? { effective } : {}), ...(account ? { account } : {}),
+      ...(errors.length ? { error: errors.join("; ") } : {}), ...autoModeStatus(account) };
   }
+
 }

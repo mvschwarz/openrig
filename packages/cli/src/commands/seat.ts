@@ -53,7 +53,7 @@ interface SeatStatusResponse {
     lastLaunchArguments: { value: string | null; approvalPolicy?: string } | null;
     nativeEffect: "unverified";
     claudeAutoMode?: {
-      saved: { state: "recorded"; block: Record<string, unknown> } | { state: "none" } | { state: "invalid"; error: string };
+      saved: { state: "recorded"; block: Record<string, unknown> } | { state: "none" } | { state: "unavailable"; error: string };
       lastLaunch: { state: "sent" | "none" | "unknown"; block?: Record<string, unknown> };
       matchesLastLaunch: boolean | null; advisories: string[]; notes: string[]; inspect?: string;
     };
@@ -244,11 +244,12 @@ function autoModeCounts(block: Record<string, unknown>): string {
 }
 
 function printClaudeAutoMode(m: SeatAutoModeStatus): void {
-  const saved = m.saved.state === "recorded" ? autoModeCounts(m.saved.block) : m.saved.state === "none" ? "none" : `unreadable (${m.saved.error})`;
+  const saved = m.saved.state === "recorded" ? autoModeCounts(m.saved.block) : m.saved.state === "none" ? "none" : `unavailable: ${m.saved.error}`;
   const last = m.lastLaunch.state === "sent" && m.lastLaunch.block ? autoModeCounts(m.lastLaunch.block)
-    : m.lastLaunch.state === "none" ? "none" : "unknown (that launch predates this record)";
+    : m.lastLaunch.state === "none" ? "none" : "unknown";
+  const match = m.matchesLastLaunch === true ? "same as saved" : m.matchesLastLaunch === false ? "differs from saved" : "unknown whether it matches saved";
   console.log(`  Claude auto mode block (saved): ${saved}`);
-  console.log(`  Claude auto mode block (last launch, observed): ${last}${m.matchesLastLaunch === true ? "; same as saved" : ""}`);
+  console.log(`  Claude auto mode block (last launch, observed): ${last}; ${match}`);
   for (const note of m.notes) console.log(`  ${note}`);
   for (const advisory of m.advisories) console.log(`  Warning: ${advisory}`);
   if (m.inspect) console.log(`  Effective lists where you run it: ${m.inspect}`);
@@ -348,6 +349,7 @@ function printHuman(status: SeatStatusResponse): void {
     console.log(`Last launch arguments: ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
     console.log("Native permission effect: unverified by this status read");
     if (p.error) console.log(`Permission selection unavailable: ${p.error}`);
+    if (p.claudeAutoMode) printClaudeAutoMode(p.claudeAutoMode);
   }
   if (status.terminalPolicy) {
     const p = status.terminalPolicy;
@@ -930,7 +932,7 @@ identity remains unverified; a version number alone cannot clear it.
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")
-    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--auto-mode takes a JSON object with Claude's environment, allow, soft_deny and hard_deny lists of prose entries, and optionally classifyAllShell. Claude adds them to your user and managed auto mode settings. A list without \"$defaults\" replaces Claude's built-in entries for that section; OpenRig warns but doesn't add it. --clear-auto-mode stops OpenRig passing a block; user and managed settings are unaffected.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
+    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--auto-mode takes a JSON object with Claude's environment, allow, soft_deny and hard_deny lists of prose entries, and optionally classifyAllShell. Claude adds them to your user and managed auto mode settings. A list without \"$defaults\" replaces Claude's built-in entries for that section only when no other scope keeps \"$defaults\" there; OpenRig warns but doesn't add it. claude auto-mode config shows the effective lists. --clear-auto-mode stops OpenRig passing a block; user and managed settings are unaffected.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
     .action(async (seat: string, opts: { mode?: string; rules?: string; autoMode?: string; clearAutoMode?: boolean; codexPermissions?: string; codexProfile?: string; reason: string; operator?: string; json?: boolean }) => {
       if ([opts.mode, opts.rules, opts.autoMode, opts.clearAutoMode, opts.codexPermissions, opts.codexProfile].filter(value => value !== undefined).length !== 1) {
         console.error("Choose exactly one of --mode, --rules <file>, --auto-mode <file>, --clear-auto-mode, --codex-permissions <file> or --codex-profile <name>."); process.exitCode = 1; return;

@@ -1,5 +1,5 @@
 import { readClaudePermissionRules, type ClaudePermissionRules } from "./claude-permission-rules.js";
-import { readClaudeAutoMode, type ClaudeAutoMode } from "./claude-auto-mode.js";
+import { readClaudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "./claude-auto-mode.js";
 import { parseStoredCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import type { NodeBinding } from "./runtime-adapter.js";
@@ -42,7 +42,7 @@ export interface LaunchOverrideFacts {
   codexEnvelopeReadError?: unknown;
   codexPermissions?: CodexMemberPermissions;
   claudePermissions?: ClaudePermissionRules;
-  claudeAutoMode?: ClaudeAutoMode;
+  claudeAutoMode?: ClaudeAutoModeChoice;
   launchDefaultMetadata?: LaunchDefaultMetadata | null;
   target?: { selection: NativePermissionSelection | null; codexProfile: string | null };
 }
@@ -159,7 +159,7 @@ export class NativePermissionStore {
    *  whenever it runs Codex, until an explicit mode replaces it. */
   launchOverride(nodeId: string, runtime: string, target?: { selection: NativePermissionSelection | null; codexProfile: string | null }): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault" | "claudePermissions" | "claudeAutoMode" | "codexPermissions"> {
     const claudePermissions = runtime === "claude-code" ? readClaudePermissionRules(this.db, nodeId) : undefined;
-    const claudeAutoMode = runtime === "claude-code" ? readClaudeAutoMode(this.db, nodeId) : undefined;
+    const claudeAutoMode = runtime === "claude-code" ? readClaudeAutoModeForLaunch(this.db, nodeId) : undefined;
     let selection: LaunchOverrideSelectionFact;
     if (target) {
       selection = { state: "available", value: target.selection };

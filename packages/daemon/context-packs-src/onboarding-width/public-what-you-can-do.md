@@ -926,8 +926,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   aren't claimed to hold in bypass mode. `--auto-mode <file>` (JSON `autoMode` block: `environment`,
   `allow`, `soft_deny`, `hard_deny`, `classifyAllShell`) gives one Claude seat its own auto mode classifier
   settings, added to user and managed settings; `--clear-auto-mode` clears it, and `claude_auto_mode` on
-  the member declares it. A list without `"$defaults"` drops Claude's built-in entries for that section;
-  OpenRig warns but doesn't add it. `--codex-permissions <file>` gives one Codex seat its own
+  the member declares it. A list without `"$defaults"` drops Claude's built-in entries for that section
+  only when no other scope keeps `"$defaults"` there; OpenRig warns but doesn't add it, and
+  `claude auto-mode config` shows the effective lists. `--codex-permissions <file>` gives one Codex seat its own
   sandbox and approval settings (`sandbox`, `approval`, and for `workspace-write` also
   `network_access`, `writable_roots`, `exclude_tmpdir_env_var` and `exclude_slash_tmp`), passed as
   flags on every managed launch, resume, restore and handover; `codex_permissions` on the member

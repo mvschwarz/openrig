@@ -992,7 +992,6 @@ export class SeatLifecycleService {
     }
   }
 
-  /** A Codex seat's envelope: its explicit permission choice, which replaces a recorded mode in the same write. */
   /** Replaces the seat's Claude autoMode block, or clears it when `value` is null. */
   private setClaudeAutoMode(seat: SeatDescriptor, runtime: string, value: unknown, actor: string, reason: string):
     { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; advisories: string[] } | SeatRefusal {
@@ -1021,6 +1020,7 @@ export class SeatLifecycleService {
     } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
   }
 
+  /** A Codex seat's envelope: its explicit permission choice, which replaces a recorded mode in the same write. */
   private setCodexPermissions(seat: SeatDescriptor, runtime: string, value: unknown, actor: string, reason: string):
     { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown } | SeatRefusal {
     if (runtime !== "codex") return { ok: false, code: "permission_selection_refused", message: "codex_permissions is only supported for codex seats." };

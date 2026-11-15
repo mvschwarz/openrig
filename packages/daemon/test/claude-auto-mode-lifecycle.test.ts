@@ -101,9 +101,18 @@ describe("a seat's Claude autoMode block", () => {
     expect(readClaudeAutoMode(f.db, f.a.id)).toBeUndefined();
   });
 
-  it("refuses to launch on a malformed record instead of dropping it, and takes an audited repair", async () => {
+  it("launches without a malformed record, says so, keeps the rest of status, and takes an audited repair", async () => {
     const f = fixture(); f.db.prepare("UPDATE nodes SET claude_auto_mode_json='broken' WHERE id=?").run(f.a.id);
-    expect(() => new NativePermissionStore(f.db).launchOverride(f.a.id, "claude-code")).toThrow(new RegExp(`Seat ${f.a.id}.*--clear-auto-mode`));
+    const override = new NativePermissionStore(f.db).launchOverride(f.a.id, "claude-code");
+    expect(override.claudeAutoMode).toEqual({ unreadable: expect.stringMatching(new RegExp(`Seat ${f.a.id}.*don't send it.*--clear-auto-mode`)) });
+    expect(operationalLaunchArgs("claude-code", override).join(" ")).not.toContain("autoMode");
+    const status = new SeatStatusService({ rigRepo: f.rigRepo }).getStatus("dev-a@team") as { ok: true; status: { permissions: Record<string, unknown> & { claudeAutoMode?: Record<string, unknown> } } };
+    expect(status.status.permissions).toMatchObject({ selectionState: "inherit", account: expect.any(Object), effective: expect.any(Object),
+      claudeAutoMode: { saved: { state: "unavailable" }, matchesLastLaunch: null } });
+    expect(status.status.permissions).not.toHaveProperty("error");
+    const exporter = new RigSpecExporter({ rigRepo: f.rigRepo, sessionRegistry: f.registry });
+    expect(JSON.stringify(exporter.exportRig(f.a.rigId))).not.toContain("claudeAutoMode");
+    expect(exporter.claudeAutoModeNotCarried(f.a.rigId)).toEqual([f.a.logicalId]);
     expect(await f.service.setPermissions(update)).toMatchObject({ ok: true, from: { state: "invalid", stored: "broken" } });
     expect(readClaudeAutoMode(f.db, f.a.id)).toEqual(block);
   });
@@ -144,6 +153,27 @@ describe("a seat's Claude autoMode block", () => {
     expect(launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: block })).toBe(true);
     expect(launches.readCurrent(f.a.id)).toMatchObject({ value: "auto" });
     expect(launches.readCurrent(f.a.id)?.claudeAutoMode).toBeUndefined();
+  });
+
+  it("records the block as unknown, never an older one, when its write fails", () => {
+    const f = fixture(), launches = new AppliedLaunchObservationStore(f.db), generation = f.registry.currentOccupantTenure(f.a.id)!.generationUuid;
+    launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: block });
+    const prepare = f.db.prepare.bind(f.db);
+    vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.startsWith("UPDATE applied_launch_observations SET claude_auto_mode_json")) throw new Error("database is locked");
+      return prepare(sql);
+    }) as typeof f.db.prepare);
+    expect(launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode acceptEdits"), claudeAutoMode: null })).toBe(true);
+    expect(launches.readCurrent(f.a.id)).toMatchObject({ value: "acceptEdits" });
+    expect(launches.readCurrent(f.a.id)).not.toHaveProperty("claudeAutoMode");
+  });
+
+  it("replaces the applied block with each re-recorded observation of the generation", () => {
+    const f = fixture(), launches = new AppliedLaunchObservationStore(f.db), generation = f.registry.currentOccupantTenure(f.a.id)!.generationUuid;
+    launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: block });
+    expect(launches.readCurrent(f.a.id)).toMatchObject({ value: "auto", claudeAutoMode: block });
+    launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: null });
+    expect(launches.readCurrent(f.a.id)?.claudeAutoMode).toBeNull();
   });
 
   it("takes the block over HTTP as autoMode, with null to clear, and audits the sender", async () => {

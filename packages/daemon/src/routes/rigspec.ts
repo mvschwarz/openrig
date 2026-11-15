@@ -45,6 +45,8 @@ export function handleExportYaml(c: Context): Response {
       .map((seat) => `# Not carried: ${seat}'s launch additions (agent_file, append_system_prompt_file, plugin_dirs); add them back by hand.\n`);
     notCarried.push(...exporter.claudeMcpNotCarried(rigId)
       .map((seat) => `# Not carried: ${seat}'s claude_mcp: none; add it again if this exported copy is switched back to Claude.\n`));
+    notCarried.push(...exporter.claudeAutoModeNotCarried(rigId)
+      .map((seat) => `# Not carried: ${seat}'s claude_auto_mode, because the saved block can't be read; set it again with rig seat set-permissions --auto-mode.\n`));
     const memberStartupOmissions = isPodAware ? exporter.memberStartupNotCarried(rigId)
       .map(({ logicalId, reason }) => `# Member startup not carried for ${JSON.stringify(logicalId)} (${reason}); inspect the source before importing.\n`) : [];
     const yaml = notCarried.join("") + memberStartupOmissions.join("") + serialized;
