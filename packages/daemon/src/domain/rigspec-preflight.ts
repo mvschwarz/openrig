@@ -246,6 +246,9 @@ export function permissionPolicyDiscoveryWarnings(
         : preflightCtx.inheritedPermissionPolicy;
       if (!attachment) {
         warnings.push(`${logicalId}: permission_policy absent; launch_posture=floor`);
+        // The absent line stays as ruled (5f37e40f); a separate line says what the seat launches with.
+        const teamDefault = absentPolicyTeamDefault(logicalId, member.runtime, rigSpec.name === "kernel");
+        if (teamDefault) warnings.push(teamDefault);
         continue;
       }
       if (attachment.origin === "deliberate_none") {
@@ -260,6 +263,15 @@ export function permissionPolicyDiscoveryWarnings(
     }
   }
   return warnings;
+}
+
+/** A team Claude Code or Codex seat with no policy launches at the floor with the team default's allowances, which the
+ *  bare absent line doesn't say. The plan can't see a seat's own permission mode, Codex envelope or named Codex profile,
+ *  any of which replaces the default, so the line says that too. Kernel, Pi and terminal seats get no line. */
+function absentPolicyTeamDefault(logicalId: string, runtime: string, kernel: boolean): string | null {
+  if (kernel || (runtime !== "claude-code" && runtime !== "codex")) return null;
+  return `${logicalId}: no permission policy, so this seat launches at the floor with the team default's allowances,`
+    + " unless it has its own permission mode, Codex envelope or named Codex profile";
 }
 
 /** A config-surface policy (a built-in such as standard, open or locked, or a custom one) is recorded, but its rules
