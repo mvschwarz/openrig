@@ -241,6 +241,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "inProgressWorkCount",
   "blockedWorkCount",
   "agentActivity",
+  "activityState",
   "needsAttention",
   "arbitratedNeedsInput",
   "needsInputEvidence",
@@ -961,7 +962,7 @@ podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarn
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
-agentActivity, needsAttention, arbitratedNeedsInput, needsInputEvidence,
+agentActivity, activityState, needsAttention, arbitratedNeedsInput, needsInputEvidence,
 contextUsage, heldReason, startedWithoutRequired, storedSessionStatus, identityVerdict.
 
 --host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
@@ -1166,14 +1167,19 @@ Exit codes:
       }
 
       if (limited.length === 0) {
+        // The daemon identity rides on every empty-fleet line: with more than
+        // one daemon in a house (OPENRIG_URL, hosts.yaml), a targetless "No rigs"
+        // invites reading another daemon's answer as this one's — an empty fleet
+        // read from the wrong daemon reads as a dead fleet.
+        const daemonLabel = ` · daemon ${client.baseUrl}`;
         if (parsedFilter) {
-          console.log(`No rigs match --filter ${parsedFilter.key}=${parsedFilter.value}`);
+          console.log(`No rigs match --filter ${parsedFilter.key}=${parsedFilter.value}${daemonLabel}`);
         } else if (archivedCount > 0 && !opts.includeArchived) {
           // Proven-empty with the history pointer, never a bare "No rigs"
           // while archived history exists.
-          console.log(`No active rigs · ${archivedCount} archived (rig ps --include-archived)`);
+          console.log(`No active rigs · ${archivedCount} archived (rig ps --include-archived)${daemonLabel}`);
         } else {
-          console.log("No rigs");
+          console.log(`No rigs${daemonLabel}`);
         }
         // A host can have connected assistants and no terminal rigs at all.
         await printConnectedAssistants(client, opts.rig);
@@ -1192,7 +1198,7 @@ Exit codes:
       // FR-1 display element 1: the host rollup line.
       const rollupSeats = tableRows.reduce((n, e) => n + e.nodeCount, 0);
       const rollupAttention = tableRows.reduce((n, e) => n + (e.attentionCount ?? 0), 0);
-      console.log(`${tableRows.length} rig${tableRows.length === 1 ? "" : "s"} · ${rollupSeats} seat${rollupSeats === 1 ? "" : "s"} · ${rollupAttention} need${rollupAttention === 1 ? "s" : ""} attention`);
+      console.log(`${tableRows.length} rig${tableRows.length === 1 ? "" : "s"} · ${rollupSeats} seat${rollupSeats === 1 ? "" : "s"} · ${rollupAttention} need${rollupAttention === 1 ? "s" : ""} attention · daemon ${client.baseUrl}`);
 
       // Human output: apply default truncation budget unless --full.
       const humanList = (opts.full || limit !== null) ? tableRows : tableRows.slice(0, HUMAN_RIG_BUDGET);
