@@ -711,7 +711,7 @@ describe("PM dogfood #1 — authored README sections vs pristine scaffold PRD", 
   });
 });
 
-// Lab's planning pilot writes one `## Requirements` list: bullets that start `R<n>.`, plain or bold, each with its proof
+// A planning pilot writes one `## Requirements` list: bullets that start `R<n>.`, plain or bold, each with its proof
 // after `Observable:`, plain or italic. The audit takes it in place of `## Mini-requirements` and `## Proof contract`.
 describe("a single `## Requirements` R list", () => {
   const LISTS = ["mini_requirements_missing_or_malformed", "proof_contract_missing_or_malformed"];

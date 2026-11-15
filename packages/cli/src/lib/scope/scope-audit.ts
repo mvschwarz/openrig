@@ -253,10 +253,10 @@ function h2Body(content: string, heading: string): string | null {
   return next === -1 ? rest : rest.slice(0, next);
 }
 
-// A pilot slice's single `## Requirements` R list (Lab's planning experiment, draft contract, 2026-11-15): bullets that
-// start `R<n>.`, plain or bold, each with its proof after `Observable:`, plain or italic, in the same item. It's known
-// only by its R ids, so a `## Requirements` of unnumbered lines (the contract's "not numbered yet", and older slices'
-// own lists) reads as before.
+// A pilot slice's single `## Requirements` R list (a planning pilot's draft format, 2026-11-15): bullets that start
+// `R<n>.`, plain or bold, each with its proof after `Observable:`, plain or italic, in the same item. It's known only
+// by its R ids, so a `## Requirements` of unnumbered lines (the format's "not numbered yet", and older slices' own
+// lists) reads as before.
 const R_ITEM_START = /^\s*[-*+]\s+(?:\*{1,2}|_{1,2})?(R\d+)[.:]/;
 const R_ITEM_OBSERVABLE = /\bObservable\b(?:\*{1,2}|_{1,2})?\s*:\s*(?:\*{1,2}|_{1,2})?\s*[^\s*_]/i;
 
