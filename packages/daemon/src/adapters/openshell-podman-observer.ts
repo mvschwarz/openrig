@@ -71,7 +71,7 @@ export class OpenShellPodmanObserver {
   async observeEndpoint(binding: EnvironmentBinding, selected?: PodmanCleanupSelection): Promise<RecreationCleanup> {
     const retained = this.retained(binding, selected), now = this.socket(retained.socket);
     if (now.host !== retained.host || now.uid !== retained.uid)
-      throw new EnvironmentError("environment_cleanup_unconfirmed", "The selected engine socket now belongs to another host or user than the predecessor's. No successor was created; recreate from the predecessor's own provider host and user");
+      throw new EnvironmentError("environment_cleanup_unconfirmed", "The selected engine socket now belongs to another host or user than the predecessor's, so the predecessor's cleanup can't be read there; select the predecessor's own provider host and user");
     const endpointChanged = now.socketDevice !== retained.socketDevice || now.socketInode !== retained.socketInode;
     return { remaining: await this.inventory(retained), endpoint: now, endpointChanged };
   }

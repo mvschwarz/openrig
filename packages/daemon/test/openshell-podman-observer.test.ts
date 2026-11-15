@@ -143,6 +143,6 @@ it("reads recreation's cleanup on a replaced socket object and reports the chang
 it.each([["host", { host: "another.test" }], ["user", { uid: 4242 }]] as const)("still refuses recreation's read when the socket belongs to another %s", async (_name, change) => {
   const f = await httpFixture(), selected = await f.observer.capture(f.binding, f.socket), before = f.requests.length;
   f.replaceSocket(change);
-  await expect(f.observer.observeEndpoint(f.binding, selected)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed", message: expect.stringContaining("No successor was created") });
+  await expect(f.observer.observeEndpoint(f.binding, selected)).rejects.toMatchObject({ code: "environment_cleanup_unconfirmed", message: expect.stringContaining("another host or user") });
   expect(f.requests).toHaveLength(before);
 });

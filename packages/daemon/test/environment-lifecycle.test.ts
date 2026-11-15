@@ -329,10 +329,11 @@ describe("recreation after a restart replaces the engine socket", () => {
     const { version: _version, resourceId: _resourceId, workspace: _workspace, workloadId: _workloadId, supervisorId: _supervisorId, volumes: _volumes, ...unchanged } = previous;
     let engine = changed ? { ...replaced } : { ...unchanged };
     const reads: unknown[] = [];
+    let remaining = { workload: false, supervisor: false, volumes: false, ...options.remaining };
     Object.assign(f.driver, {
       recreationCleanupState: async (_binding: unknown, selection: unknown) => {
         reads.push(selection);
-        return { remaining: { workload: false, supervisor: false, volumes: false, ...options.remaining }, endpoint: changed ? replaced : unchanged, endpointChanged: changed };
+        return { remaining: { ...remaining }, endpoint: changed ? replaced : unchanged, endpointChanged: changed };
       },
       captureCleanup: async (binding: { resource: { id: string } }, socket: string) => ({ version: 1, ...engine, socket, resourceId: binding.resource.id, workspace: "workspace",
         workloadId: "c".repeat(64), supervisorId: "d".repeat(64), volumes: [] }),
@@ -342,7 +343,8 @@ describe("recreation after a restart replaces the engine socket", () => {
     const recreate = () => f.request("/binding-one/recreate", { operationId: "recreate-one", generation: "generation-one", checkpointId: "checkpoint-one", resumeType: "community:openshell-claude",
       resumeToken: f.native.nativeId, placement: { gateway: "gateway", workspace: "workspace", name: "worker-two", image: `image@sha256:${"a".repeat(64)}`, provider: "provider", policy: join(f.root, "policy.yaml") } });
     const inventory = (id: string) => JSON.parse((f.db.prepare("SELECT receipt_json FROM environment_operations WHERE operation_id=?").get(`inventory-${id}`) as { receipt_json: string }).receipt_json);
-    return { ...f, recreate, reads, inventory, moveEngine: (change: Partial<typeof replaced>) => { engine = { ...engine, ...change }; } };
+    return { ...f, recreate, reads, inventory, moveEngine: (change: Partial<typeof replaced>) => { engine = { ...engine, ...change }; },
+      reappear: (change: Record<string, boolean>) => { remaining = { ...remaining, ...change }; } };
   }
 
   it("recreates from the checkpoint and reports the predecessor's cleanup as unknown, keeping its inventory", async () => {
@@ -362,7 +364,7 @@ describe("recreation after a restart replaces the engine socket", () => {
     const f = await recreation({ remaining: { volumes: true } }), result = await f.recreate();
     expect(result.status).toBe(409);
     expect(result.body.code).toBe("environment_cleanup_unconfirmed");
-    expect(result.body.message ?? result.body.error).toContain("No successor was created");
+    expect(result.body.message ?? result.body.error).toContain("This attempt didn't create a successor");
     expect(f.counts().creates).toBe(1);
   });
 
@@ -380,13 +382,30 @@ describe("recreation after a restart replaces the engine socket", () => {
     const refused = await f.recreate();
     expect(refused.status).toBe(409); expect(refused.body.code).toBe("environment_restore_host_changed");
     expect(refused.body.message ?? refused.body.error).toContain("kept unbound");
-    expect(refused.body.message ?? refused.body.error).not.toContain("No successor was created");
+    expect(refused.body.message ?? refused.body.error).not.toContain("didn't create a successor");
     expect(f.counts().creates).toBe(2);
     expect(new EnvironmentPlatform(f.db, f.driver).get("binding-one")!.resource!.id).toBe("compute-one");
     f.moveEngine({ socketInode: 61 });
     const retried = await f.recreate();
     expect(retried.status, JSON.stringify(retried.body)).toBe(200);
     expect(retried.body).toMatchObject({ state: "confirmed", successorResourceId: "compute-two", predecessorCleanup: "unknown" });
+    expect(f.counts().creates).toBe(2);
+  });
+
+  it("doesn't deny an earlier attempt's successor when its retry refuses before reconciling it", async () => {
+    const f = await recreation();
+    f.moveEngine({ socketInode: 62 });
+    expect((await f.recreate()).body.code).toBe("environment_restore_host_changed");
+    expect(f.counts().creates).toBe(2);
+    // The retry reads the predecessor again before it finds the successor, and now sees one of its volumes.
+    f.reappear({ volumes: true });
+    const retried = await f.recreate();
+    expect(retried.status).toBe(409); expect(retried.body.code).toBe("environment_cleanup_unconfirmed");
+    expect(retried.body.error).toContain("an earlier attempt of this operation may have");
+    expect(retried.body.error).not.toMatch(/No successor was created/);
+    // The earlier successor is still there and still unbound, and nothing was created again.
+    expect((await f.driver.list()).resources).toEqual([expect.objectContaining({ id: "compute-two", name: "worker-two" })]);
+    expect(new EnvironmentPlatform(f.db, f.driver).get("binding-one")!.resource!.id).toBe("compute-one");
     expect(f.counts().creates).toBe(2);
   });
 

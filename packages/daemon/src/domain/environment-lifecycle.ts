@@ -278,7 +278,7 @@ export class EnvironmentLifecycle {
     let replaced: EngineEndpoint | undefined;
     if (this.driver.recreationCleanupState) {
       const observed = await this.driver.recreationCleanupState(predecessorBinding, retained);
-      if (Object.values(observed.remaining).some(value => value !== false)) refuse("environment_cleanup_unconfirmed", "The predecessor's workload, supervisor or volumes are still on the engine. No successor was created; remove them from the engine, then retry this recreation");
+      if (Object.values(observed.remaining).some(value => value !== false)) refuse("environment_cleanup_unconfirmed", "The predecessor's workload, supervisor or volumes are still on the engine. This attempt didn't create a successor, though an earlier attempt of this operation may have; remove them from the engine, then retry with the same operation ID and request");
       if (observed.endpointChanged) replaced = observed.endpoint;
     } else if (!this.driver.cleanupState || Object.values(await this.driver.cleanupState(predecessorBinding, retained)).some(value => value !== false)) refuse("environment_cleanup_unconfirmed", "Predecessor workload/supervisor/volume absence is unconfirmed");
     const matches = listing.resources.filter(row => row.operationId === op.effect_id);
@@ -299,7 +299,7 @@ export class EnvironmentLifecycle {
       // The successor must be on the endpoint the predecessor was just read on: the retained one, or its replacement.
       const expected = replaced ?? previous;
       if (captured.host !== expected.host || captured.uid !== expected.uid || captured.socketDevice !== expected.socketDevice || captured.socketInode !== expected.socketInode)
-        refuse("environment_restore_host_changed", "The successor was created but isn't on the engine selected for it, so it is kept unbound. Retry this recreation to reconcile it; no second successor is created");
+        refuse("environment_restore_host_changed", "The successor was created but isn't on the engine selected for it, so it is kept unbound. Retry with the same operation ID and request to reconcile it; no second successor is created");
       const inventoryId = `inventory-${resource.id}`;
       this.intent(binding, inventoryId, "cleanup-inventory", { resourceId: resource.id, engineSocket: previous.socket }); this.save(inventoryId, captured);
     }
