@@ -172,6 +172,8 @@ async function renderExistingRestore(
     snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
+    // Seats this restore didn't start, with why; rig up names the ones still in the rig.
+    excludedNodes: result.result.excludedNodes,
     warnings: [...joinedWarning, ...(capturedCurrentState
       ? [staleSnapshot
           ? "The selected restore snapshot did not match current occupant state; captured current DB state as auto-rehydrate snapshot for reboot recovery."

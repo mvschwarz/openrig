@@ -63,8 +63,8 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     // Read the KNOWN context-usage projection BEFORE triggering. When usage is
-    // absent / stale / unknown we pass null (never invent a value); the enforcer
-    // returns an honest `no_usage_data` reason for a Claude seat.
+    // absent / stale / unknown we pass null (never invent a value); an explicit
+    // manual request doesn't depend on the threshold, so it proceeds without it.
     const usage = usageStore.getForNode(row.node_id, sessionName);
     const outcome = await enforcer.triggerManualCompact(
       {
@@ -170,7 +170,8 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
   const prep = outcome.preparation;
   if (!prep || prep.delivery === "not_sent") return manualReasonMessage(sessionName, outcome.reason);
   const effect = prep.delivery === "delivered" ? "Preparation was sent" : "Preparation may have reached the seat (delivery is unconfirmed)";
-  const detail = (outcome.reason === "preparation_incomplete" || outcome.reason === "map_complete_seat_never_idle")
+  const detail = (outcome.reason === "preparation_incomplete" || outcome.reason === "map_complete_seat_never_idle"
+    || outcome.reason === "preparation_needs_input")
     ? manualReasonMessage(sessionName, outcome.reason)
     : outcome.restoreOwed
       ? `/compact was not confirmed (${outcome.reason}) and is never sent again. Its restore steps follow in case it ran; the restore request tells the seat to say so and skip if it didn't compact.`
@@ -202,6 +203,8 @@ function manualReasonMessage(sessionName: string, reason: string): string {
       return `The occupant generation could not be resolved for '${sessionName}'; no preparation or compact was sent. For the confirmed live seat, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then explicitly retry rig compact ${shellQuote(sessionName)}. Reconciliation does not restart this attempt.`;
     case "map_complete_seat_never_idle":
       return `Compaction for '${sessionName}': map complete, seat never idle within the bounded wait; managed compaction is disarmed. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
+    case "preparation_needs_input":
+      return `Compaction for '${sessionName}' waited for the seat to answer a prompt (a permission request in its preparation turn, say) and it didn't become idle within the bounded wait; managed compaction is disarmed. Answer the prompt in the seat, then retry explicitly: rig compact ${shellQuote(sessionName)}. Inspect rig compact ${shellQuote(sessionName)} --state first.`;
     case "preparation_incomplete":
       return `The restore map was not completed in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
     case "pane_unknown_protected":

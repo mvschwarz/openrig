@@ -247,6 +247,22 @@ describe("A4 — origin-triple carry (senderIdentityHeaders + remoteDaemonClient
     expect(box.headers[SENDER_IDENTITY_HEADER]).toBe("dev50@v-rig"); // unchanged — no triple on the local path
   });
 
+  // The MCP host router builds a registered remote host's client from its URL, before it knows the caller; binding it then
+  // must stamp THAT caller, not the server process's env seat.
+  it("remoteDaemonClient binds a client to the calling seat it is given, over the process env seat", async () => {
+    process.env.OPENRIG_SESSION_NAME = "env-seat@v-rig";
+    const box: { headers: Record<string, string> } = { headers: {} };
+    const client = new DaemonClient("http://vps-b:7433", {
+      fetchImpl: (async (_u: string, init: RequestInit) => {
+        box.headers = Object.fromEntries(Object.entries((init.headers ?? {}) as Record<string, string>));
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    remoteDaemonClient(() => client, "http://vps-b:7433", "mm2-openrig1", "caller@v-rig");
+    await client.post("/api/queue/create", {});
+    expect(box.headers[SENDER_IDENTITY_HEADER]).toBe("caller@v-rig@mm2-openrig1");
+  });
+
   // ── A4 GREP-GUARD — the two structural laws, asserted as EFFECTS (canonicity, not comments). ──
   describe("grep-guard (structural properties, not conventions)", () => {
     it("clause 1 — NO remote client is constructed directly: zero clientFactory(<registry host>.url) in src (all 5 route through remoteDaemonClient)", () => {

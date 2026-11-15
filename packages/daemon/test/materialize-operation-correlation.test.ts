@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
+import { makeQueueRecordingCheck, makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
 
 const databases: Array<ReturnType<typeof createFullTestDb>> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const db of databases.splice(0)) db.close(); });
@@ -71,13 +71,16 @@ describe("no-launch materialization operation correlation", () => {
 
   it("recovers the exact rig and node ids after a lost response, with real destination admission and no sessions", async () => {
     const { db, rigRepo, eventBus, call, operationId, launch } = fixture();
-    const queue = new QueueRepository(db, eventBus, { validateRig: makeTopologyDestinationCheck({
+    const validateRig = makeTopologyDestinationCheck({
       findRigsByName: name => rigRepo.findRigsByName(name),
-      loadHumanRegistry: () => ({ ok: true, entities: [] }), sharedChannels: () => [],
-    }) });
+      loadHumanRegistry: () => ({ ok: true as const, entities: [] }), sharedChannels: () => [],
+    });
+    const queue = new QueueRepository(db, eventBus, { validateRig, canRecordDestination: makeQueueRecordingCheck(validateRig) });
     const task = { qitemId: "qitem-prepared-team-day", sourceSession: "setup@system", destinationSession: "core-shell@prepared-team",
       tier: "task" as const, summary: "Start the day", tags: ["start-of-day"], body: "Own-team daily recipe", nudge: false };
-    await expect(queue.create(task)).rejects.toMatchObject({ code: "unknown_destination_rig" });
+    expect(queue.acceptsDestination(task.destinationSession)).toBe(false);
+    const recorded = await queue.create(task);
+    expect(queue.getById(recorded.qitemId)).toMatchObject({ destinationSession: task.destinationSession, body: task.body });
     // Commit, then discard the response: the next request must recover ids from native state.
     expect((await call()).status).toBe(201);
     const rig = rigRepo.findRigsByName("prepared-team")[0]!;
@@ -92,6 +95,7 @@ describe("no-launch materialization operation correlation", () => {
     expect(db.prepare("SELECT count(*) AS n FROM nodes").get()).toEqual({ n: 1 });
     expect(db.prepare("SELECT count(*) AS n FROM sessions").get()).toEqual({ n: 0 });
     expect(launch).not.toHaveBeenCalled();
+    expect(queue.acceptsDestination(task.destinationSession)).toBe(true);
     await expect(queue.create(task)).resolves.toMatchObject({ qitemId: task.qitemId });
     const parked = queue.update({ qitemId: task.qitemId, actorSession: task.sourceSession, state: "blocked",
       blockedOn: "external:new-day", wakeAfterSeconds: 86400 });

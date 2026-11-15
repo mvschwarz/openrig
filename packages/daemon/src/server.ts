@@ -37,6 +37,7 @@ import type { DiscoveryRepository } from "./domain/discovery-repository.js";
 import type { ClaimService } from "./domain/claim-service.js";
 import type { SelfAttachService } from "./domain/self-attach-service.js";
 import { rigsRoutes } from "./routes/rigs.js";
+import { rigDeliveryDrainRoutes } from "./routes/rig-delivery-drain.js";
 import { OPERATION_CONTRACT, OPERATION_KINDS } from "./domain/operation-correlation.js";
 import { teamOperationsCapabilities } from "./domain/team-operations.js";
 import { MEMBER_CONNECTION_CONTRACT, ROUTE_DECLARATIONS } from "./domain/connection-contract.js";
@@ -798,6 +799,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.route("/api/rigs", rigsRoutes);
+  app.route("/api/rigs/:rigId/delivery-drain", rigDeliveryDrainRoutes);
   app.get("/api/operations/capabilities", (c) => c.json({ contract: OPERATION_CONTRACT, kinds: OPERATION_KINDS }));
   app.get("/api/team-operations/capabilities", (c) => c.json(teamOperationsCapabilities()));
   // What each delivery route declares it supports, and with ?session=, the route and declaration of the member that
