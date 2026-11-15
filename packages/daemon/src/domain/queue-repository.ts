@@ -3441,7 +3441,8 @@ export class QueueRepository {
         qitemId: input.qitemId,
         state: qitem.state,
         actorSession: input.actorSession,
-        transitionNote: `tags added: ${added.join(", ")}`,
+        // The values as a JSON array, so a tag holding a comma reads apart from two tags.
+        transitionNote: `tags added: ${JSON.stringify(added)}`,
         // Like a note append, this keeps a claim's retained park gate for a later state write to end.
         closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
         identityProvenance: input.identityProvenance ?? null,

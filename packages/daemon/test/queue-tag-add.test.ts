@@ -18,6 +18,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { belongsToProject } from "../src/domain/workspace/project-catalog.js";
 import { queueRoutes } from "../src/routes/queue.js";
+import { trackJsonBodyParseErrors } from "../src/middleware/json-body-error.js";
 
 describe("adding a tag to an existing queue row", () => {
   let db: Database.Database;
@@ -31,6 +32,7 @@ describe("adding a tag to an existing queue row", () => {
     const bus = new EventBus(db);
     repo = new QueueRepository(db, bus);
     app = new Hono();
+    app.use("*", trackJsonBodyParseErrors); // as the daemon installs it (server.ts)
     app.use("*", async (c, next) => { c.set("eventBus" as never, bus); c.set("queueRepo" as never, repo); await next(); });
     app.route("/api/queue", queueRoutes());
   });
@@ -55,7 +57,7 @@ describe("adding a tag to an existing queue row", () => {
       expect(body).toMatchObject({ qitemId: item.qitemId, state, added: ["ref:LPX-0142"], tags: ["mission:release-0.7.17", "ref:LPX-0142"] });
       const after = history(item.qitemId);
       expect(after).toHaveLength(before + 1);
-      expect(after.at(-1)).toMatchObject({ state, actorSession: "studio@rig", transitionNote: "tags added: ref:LPX-0142", closureReason: null });
+      expect(after.at(-1)).toMatchObject({ state, actorSession: "studio@rig", transitionNote: 'tags added: ["ref:LPX-0142"]', closureReason: null });
     }
     expect(repo.getById(closed.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
   });
@@ -71,28 +73,42 @@ describe("adding a tag to an existing queue row", () => {
     const more = await (await addTags(item.qitemId, ["pr-3279", "ref:LPX-0142", "pr-3279", "project:openrig"])).json();
     expect(more.added).toEqual(["pr-3279", "project:openrig"]);
     expect(repo.getById(item.qitemId)?.tags).toEqual(["mission:release-0.7.17", "ref:LPX-0142", "pr-3279", "project:openrig"]);
-    expect(history(item.qitemId).at(-1)?.transitionNote).toBe("tags added: pr-3279, project:openrig");
+    expect(history(item.qitemId).at(-1)?.transitionNote).toBe('tags added: ["pr-3279","project:openrig"]');
+  });
+
+  it("records one tag holding a comma apart from two tags", async () => {
+    const one = await row();
+    const two = await row();
+    await addTags(one.qitemId, ["ref:a, pr-9"]);
+    await addTags(two.qitemId, ["ref:a", "pr-9"]);
+    expect(history(one.qitemId).at(-1)?.transitionNote).toBe('tags added: ["ref:a, pr-9"]');
+    expect(history(two.qitemId).at(-1)?.transitionNote).toBe('tags added: ["ref:a","pr-9"]');
+    expect(repo.getById(one.qitemId)?.tags).toEqual(["mission:release-0.7.17", "ref:a, pr-9"]);
   });
 
   it("keeps a claimed row's claim as it is", async () => {
     const item = await row();
     const claimed = repo.claim({ qitemId: item.qitemId, destinationSession: "builder@rig" });
-    await addTags(item.qitemId, ["pr-3279"]);
+    const res = await addTags(item.qitemId, ["pr-3279"]);
+    expect(res.status).toBe(200);
+    expect((await res.json()).added).toEqual(["pr-3279"]);
     expect(repo.getById(item.qitemId)).toMatchObject({ state: "in-progress", destinationSession: "builder@rig", claimedAt: claimed.claimedAt });
   });
 
   it("gives a row an added project tag the same membership a create-time tag gives it", async () => {
     const late = await row([]);
     const early = await row(["project:demo"]);
+    const other = await row([]);
     expect(belongsToProject(db.prepare("SELECT tags FROM queue_items WHERE qitem_id = ?").pluck().get(late.qitemId) as string, "demo")).toBe(false);
     await addTags(late.qitemId, ["project:demo"]);
     for (const item of [late, early]) {
       expect(belongsToProject(db.prepare("SELECT tags FROM queue_items WHERE qitem_id = ?").pluck().get(item.qitemId) as string, "demo")).toBe(true);
     }
-    expect(repo.list({ tags: ["project:demo"] }).map((r) => r.qitemId).sort()).toEqual([late.qitemId, early.qitemId].sort());
+    expect(repo.list({ tag: "project:demo" }).map((r) => r.qitemId).sort()).toEqual([late.qitemId, early.qitemId].sort());
+    expect(repo.list({ tag: "project:demo" }).map((r) => r.qitemId)).not.toContain(other.qitemId);
   });
 
-  it("asks for at least one non-blank tag, names a row it can't find, and writes nothing either way", async () => {
+  it("asks for at least one non-blank tag (a null body included), names a row it can't find, and writes nothing either way", async () => {
     const item = await row();
     const count = history(item.qitemId).length;
     for (const add of [[], [" "], "pr-1", undefined]) {
@@ -100,6 +116,10 @@ describe("adding a tag to an existing queue row", () => {
       expect(res.status).toBe(400);
       expect((await res.json()).error).toBe("tags_required");
     }
+    const nullBody = await app.request(`/api/queue/${item.qitemId}/tags`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "studio@rig" }, body: "null" });
+    expect(nullBody.status).toBe(400);
+    expect((await nullBody.json()).error).toBe("tags_required");
     const missing = await addTags("qitem-nowhere", ["pr-1"]);
     expect(missing.status).toBe(404);
     expect(history(item.qitemId)).toHaveLength(count);
