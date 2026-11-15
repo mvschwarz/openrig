@@ -43,6 +43,8 @@ host, use the host's normal operator ceremony. On a recovery-friendly build VM,
 the orchestrator may adopt a tested runtime directly, but still observes each
 step and stops on unexplained drift.
 
+For opt-in **delivery-only** maintenance, read `rig context get reference/daemon-http-clients.md#per-rig-delivery-drain`: `/api/rigs/:rigId/delivery-drain` requires an explicit END; **automatic native starts are NOT deferred**.
+
 ## When recovery crosses an instance boundary
 
 Before either lane changes runtime state, record one host-qualified executor and

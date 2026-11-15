@@ -21,7 +21,7 @@ import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { CheckpointStore } from "./checkpoint-store.js";
-import { NOTHING_STOPPED_LAUNCH_CODES, type NodeLauncher } from "./node-launcher.js";
+import { NO_TERMINAL_LAUNCH_CODES, NOTHING_STOPPED_LAUNCH_CODES, type NodeLauncher } from "./node-launcher.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
@@ -114,6 +114,8 @@ export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 export interface SelectedRestoreHistory {
   nodeId: string;
   historySessionId: string;
+  /** Only the banked-original operation uses current cwd/effort instead of snapshot defaults. */
+  currentChoices?: true;
   beforeEffect: () => boolean;
   beforeRegistration: () => boolean;
   beforeNative: (resultSessionId?: string, bindingId?: string) => boolean;
@@ -717,10 +719,14 @@ export class RestoreOrchestrator {
       ? allNodes.filter((node) => !targetNodes.some((target) => target.id === node.id))
       : [];
 
+    // Targets are written to, so they take lifecycle leases. A non-target is only recorded (a dead session marked
+    // detached, node.held), so it takes a custody lease in the same sorted pass: a paused or draft-aware seat isn't
+    // refused, and its pane, draft, mode and binding stay as they are.
     const guard = this.tmuxAdapter.deliveryGuard;
-    const guardedIds = [...targetNodes, ...nonTargetNodes].map(node => node.id);
-    if (guard && guardedIds.some(id => !guard.ownsLifecycle(id))) {
-      return guard.lifecycle(guardedIds, () => this.launchNodeTargets(rigId, logicalIds, opts));
+    const targetIds = targetNodes.map(node => node.id);
+    const recordedIds = nonTargetNodes.map(node => node.id);
+    if (guard && (targetIds.some(id => !guard.ownsLifecycle(id)) || recordedIds.some(id => !guard.ownsCustody(id)))) {
+      return guard.lifecycle(targetIds, () => this.launchNodeTargets(rigId, logicalIds, opts), recordedIds);
     }
 
     // Per-target tmux-liveness classification (runtime truth, fail-closed)
@@ -833,7 +839,11 @@ export class RestoreOrchestrator {
       if (opts.selectedHistory && !opts.selectedHistory.beforeEffect()) {
         return { ok: false, code: "selection_changed", message: "The selected history or seat changed during terminal verification. No resume was started." };
       }
-      const planEntry = { node };
+      const liveChoice = opts.selectedHistory?.currentChoices
+        ? this.rigRepo.getRig(rigId)?.nodes.find(current => current.id === node.id) : undefined;
+      const currentEffort = liveChoice ? readSeatEffort(this.db, liveChoice.id) : null;
+      const planEntry = { node: liveChoice ? { ...node, cwd: liveChoice.cwd, model: liveChoice.model,
+        effort: currentEffort?.effective ?? null, effortChoice: currentEffort?.choice ?? null } : node };
       const result = await this.restoreNodeWithCompensation(
         planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory, resumePeriodicCarry }, subsetWarnings,
       );
@@ -1135,13 +1145,15 @@ export class RestoreOrchestrator {
     const nodeId = node.id;
     const selectedHistory = opts?.selectedHistory;
     if (selectedHistory && (!liveNode || selectedHistory.nodeId !== nodeId || !selectedHistory.beforeEffect())) {
-      return { nodeId, logicalId: node.logicalId, status: "failed", error: "The selected seat or history changed before launch." };
+      return { nodeId, logicalId: node.logicalId, status: "failed", error: "The selected seat or history changed before launch.", notStarted: true };
     }
+    // A selected restore that returns before its launch says so, as a known fact for the startup that selected it.
+    const notStarted = selectedHistory ? { notStarted: true as const } : {};
 
     // A seat joined with `rig attach` as an external CLI keeps its attachment: launching here would replace it.
     const external = this.sessionRegistry.getBindingForNode(nodeId);
     if (external && seatProcessOwner(resolveSeatKind(external.attachmentType)) === "external") {
-      return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId) };
+      return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId), ...notStarted };
     }
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
@@ -1152,7 +1164,7 @@ export class RestoreOrchestrator {
     // fall through to absent-history classification and the continuity check.
     const selectedRows = selectedHistory ? data.sessions.filter(row => row.nodeId === nodeId && row.id === selectedHistory.historySessionId) : [];
     if (selectedHistory && selectedRows.length !== 1) {
-      return { nodeId, logicalId: node.logicalId, status: "failed", error: "The selected history is no longer in this snapshot." };
+      return { nodeId, logicalId: node.logicalId, status: "failed", error: "The selected history is no longer in this snapshot.", notStarted: true };
     }
     const occupantResolution = selectedHistory
       ? { kind: "resolved" as const, session: selectedRows[0]! }
@@ -1189,7 +1201,7 @@ export class RestoreOrchestrator {
     const runtimeError = restoreRuntimeCompatibilityError(liveNode ? liveNode.runtime : node.runtime,
       data.nodeStartupContext?.[nodeId]?.runtime);
     if (runtimeError) {
-      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: runtimeError };
+      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: runtimeError, ...notStarted };
     }
 
     // Classify absent-seat history before the continuity short-circuit: a
@@ -1208,7 +1220,7 @@ export class RestoreOrchestrator {
       ).get(node.podId, nodeId) as { status: string } | undefined;
       if (continuityRow) {
         if (continuityRow.status === "restoring") {
-          if (selectedHistory) return { nodeId, logicalId: node.logicalId, status: "failed", error: "Continuity recovery already owns this seat." };
+          if (selectedHistory) return { nodeId, logicalId: node.logicalId, status: "failed", error: "Continuity recovery already owns this seat.", notStarted: true };
           if (opts?.automaticReplacements?.some(target => target.nodeId === nodeId)) {
             return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: "Continuity recovery owns this seat; its startup occupant was left unchanged." };
           }
@@ -1284,14 +1296,14 @@ export class RestoreOrchestrator {
     // Clear stale state so NodeLauncher doesn't see already_bound. A kept pane keeps its binding through the takeover: the
     // delivery guard resolves the pane through it.
     if (selectedHistory && !selectedHistory.beforeEffect()) {
-      return { nodeId, logicalId: node.logicalId, status: "failed", error: "The selected seat or history changed before launch." };
+      return { nodeId, logicalId: node.logicalId, status: "failed", error: "The selected seat or history changed before launch.", notStarted: true };
     }
     this.clearStaleState(nodeId, rigId, { keepBinding: keptPane !== null });
     this.tmuxAdapter.deliveryGuard?.rebindLifecycle(nodeId);
 
     // Derive canonical session name for pod-aware nodes
     const rig = this.rigRepo.getRig(rigId);
-    let launchOpts: { sessionName?: string; cwd?: string; keepPane?: string } | undefined = node.cwd
+    let launchOpts: { sessionName?: string; cwd?: string; keepPane?: string; keepsBoundSessionName?: boolean } | undefined = node.cwd
       ? { cwd: node.cwd }
       : undefined;
     if (keptPane) launchOpts = { ...launchOpts, keepPane: keptPane };
@@ -1310,15 +1322,21 @@ export class RestoreOrchestrator {
     // derive (below) is observable, never a silent divergence.
     const pinnedTarget = priorState.binding?.tmuxSession ?? null;
     let pinnedTargetUsed = false;
+    let unusablePin: { name: string; problem: string } | null = null;
     if (pinnedTarget) {
-      const { validateSessionName } = await import("./session-name.js");
-      if (validateSessionName(pinnedTarget)) {
+      const { boundSessionNameProblem, validateSessionName } = await import("./session-name.js");
+      // An adopted seat is bound to its own tmux session's name, which need not follow OpenRig's pattern. It is kept
+      // when tmux and OpenRig's addressing both keep it as given, so the seat comes back at the address its peers use.
+      const conventional = validateSessionName(pinnedTarget);
+      const problem = conventional ? null : boundSessionNameProblem(pinnedTarget);
+      if (!problem) {
         expectedSessionName = pinnedTarget;
-        launchOpts = { ...launchOpts, sessionName: expectedSessionName };
+        launchOpts = { ...launchOpts, sessionName: expectedSessionName, ...(conventional ? {} : { keepsBoundSessionName: true }) };
         pinnedTargetUsed = true;
       } else {
-        // Binding present but the bound name is malformed → observable fallback.
-        warnings?.push(`FR-5: durably-bound session name "${pinnedTarget}" for ${node.logicalId} is invalid; falling back to a derived name.`);
+        // Binding present but the bound name can't be launched again as given: the seat gets a derived address, said
+        // old to new below.
+        unusablePin = { name: pinnedTarget, problem };
       }
     } else {
       // A supported stop deliberately removes the binding after recording an intentional exit.
@@ -1349,6 +1367,11 @@ export class RestoreOrchestrator {
         const { deriveSessionName } = await import("./session-name.js");
         expectedSessionName = deriveSessionName(rig.rig.name, node.logicalId);
       }
+    }
+    if (unusablePin) {
+      // Said before the launch, so it names the attempt: the launch below may still fail and put the prior state back.
+      const planned = expectedSessionName ? `"${expectedSessionName}"` : "a derived session name";
+      warnings?.push(`FR-5: restore starts ${node.logicalId} as ${planned}, not "${unusablePin.name}", the session name it was bound to: ${unusablePin.problem}. Once it runs there, peers that address "${unusablePin.name}" need ${planned}.`);
     }
 
     // Write transcript boundary marker BEFORE launch (before pipe-pane attaches)
@@ -1432,13 +1455,18 @@ export class RestoreOrchestrator {
     });
     if (!launchResult.ok) {
       // Launch failed — restore prior state (compensating action)
-      if (!selectedHistory || (launchResult.code !== "selection_changed_after_creation" && selectedHistory.beforeRegistration())) this.restoreNodeState(nodeId, priorState);
+      const compensate = !selectedHistory || (launchResult.code !== "selection_changed_after_creation" && selectedHistory.beforeRegistration());
+      if (compensate) this.restoreNodeState(nodeId, priorState);
+      // Known compensation needs a failure that left no terminal: one before its creation, or tmux reporting none was
+      // created. An unconfirmed creation, a failed write or a later failure isn't known to have left nothing.
+      const compensated = compensate && NO_TERMINAL_LAUNCH_CODES.has(launchResult.code);
       return {
         nodeId,
         logicalId: node.logicalId,
         status: selectedHistory && launchResult.code === "selection_changed_after_creation" ? "attention_required" : "failed",
         error: launchResult.message,
         ...(keptPane && NOTHING_STOPPED_LAUNCH_CODES.has(launchResult.code) ? { nothingStopped: true as const } : {}),
+        ...(selectedHistory && compensated ? { compensated: true as const } : {}),
       };
     }
 
@@ -1450,12 +1478,15 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
+    // A selected launch's own blank rolled back after the shell started (postLaunchRestore has many return points).
+    const compensation = { ran: false };
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
-      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
+      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
-    return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
+    return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id,
+      ...(compensation.ran ? { compensated: true as const } : {}) } : checked;
   }
 
   private async claudeContinuationExecutable(pane: string, keepLaunch = false, session?: string): Promise<{ executable: string; launch?: ClaudeContinuationLaunch } | undefined> {
@@ -1665,14 +1696,16 @@ export class RestoreOrchestrator {
     priorState: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] } | undefined,
     assertCurrent?: () => boolean,
     keepPane = false,
-  ): Promise<boolean> {
-    if (assertCurrent && !assertCurrent()) return false;
+  ): Promise<{ rolledBack: boolean; terminalStopped: boolean }> {
+    if (assertCurrent && !assertCurrent()) return { rolledBack: false, terminalStopped: false };
+    // Whether tmux confirmed the stop: best effort here, and a fact for a caller that needs a known compensation.
+    let terminalStopped = false;
     if (!keepPane) {
       try {
-        await this.tmuxAdapter.killSession(sessionName);
+        terminalStopped = (await this.tmuxAdapter.killSession(sessionName)).ok === true;
       } catch { /* best-effort — the row + projection rollback below is the source of truth */ }
     }
-    if (assertCurrent && !assertCurrent()) return false;
+    if (assertCurrent && !assertCurrent()) return { rolledBack: false, terminalStopped };
     if (launchedSessionId) {
       try { this.sessionRegistry.updateStatus(launchedSessionId, "superseded"); } catch { /* best-effort */ }
     }
@@ -1680,7 +1713,7 @@ export class RestoreOrchestrator {
       // Pane takeover already ended the predecessor; keep its retired status.
       this.restoreNodeState(nodeId, keepPane ? { ...priorState, sessions: [] } : priorState);
     }
-    return true;
+    return { rolledBack: true, terminalStopped };
   }
 
   /** Restore left this pane as a bare shell, which the launcher registered as a running session. Mark that session, with
@@ -1732,7 +1765,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1780,11 +1813,16 @@ export class RestoreOrchestrator {
     // row ordering (cite site 2 of 2; "latest = max id" was the incident's
     // defect: a superseded row with a newer ULID defeated the real occupant).
     const selected = opts?.selectedHistory;
-    const rollbackOwnBlank = async (): Promise<boolean> => this.rollbackToZeroSession(
-      node.id, sessionName, launchResult?.session.id, priorState,
-      selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
-      opts?.keepPane,
-    );
+    const rollbackOwnBlank = async (): Promise<boolean> => {
+      const { rolledBack, terminalStopped } = await this.rollbackToZeroSession(
+        node.id, sessionName, launchResult?.session.id, priorState,
+        selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
+        opts?.keepPane,
+      );
+      // Known compensation: tmux confirmed the terminal stopped, and the earlier state was put back.
+      if (rolledBack && terminalStopped && priorState && !opts?.keepPane && opts?.compensation) opts.compensation.ran = true;
+      return rolledBack;
+    };
     const changedDuringRollback = (): RestoreNodeResult => ({ nodeId: node.id, logicalId: node.logicalId,
       status: "attention_required", error: "The selected terminal or source changed during cleanup. Its current owner was preserved; inspect the partial launch before retrying." });
     const selectedRows = selected ? data.sessions.filter(row => row.nodeId === node.id && row.id === selected.historySessionId) : [];

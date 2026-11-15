@@ -4,7 +4,7 @@ import type { Database as DatabaseType } from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
-import { observeClaudePermission } from "../src/domain/permission-drift.js";
+import { diagnoseRuntimePosture, observeClaudePermission, renderPermissionDriftSummary } from "../src/domain/permission-drift.js";
 
 describe("AppliedLaunchObservationStore", () => {
   let db: DatabaseType;
@@ -45,6 +45,23 @@ describe("AppliedLaunchObservationStore", () => {
     expect(registry.currentOccupantTenure("node-1")!.generationUuid).not.toBe(first.generationUuid);
     expect(store.readCurrent("node-1")).toBeNull();
     expect(db.prepare("SELECT COUNT(*) AS n FROM applied_launch_observations").get()).toEqual({ n: 1 });
+  });
+
+  it("preserves an inconclusive Codex policy reason through storage and rendered status", () => {
+    db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = 'node-1'").run();
+    registry.registerSession("node-1", "dev-impl@r1");
+    const generation = registry.currentOccupantTenure("node-1")!.generationUuid;
+    const reason = "policy not verified: native read timed out";
+    expect(store.recordGeneration(generation, { runtime: "codex", axis: "sandbox", state: "observed",
+      value: "permissions:openrig-seat", reason })).toBe(true);
+    const applied = store.readCurrent("node-1");
+    expect(applied?.reason).toBe(reason);
+    const diagnostic = diagnoseRuntimePosture({ runtime: "codex", cwd: "/work", applied,
+      fs: { readFile: () => "", cwdReadable: () => true, commandAvailable: () => true, claudePermissionModes: () => null } });
+    expect(diagnostic.enforcement).toMatchObject({ state: "unknown", reason });
+    expect(renderPermissionDriftSummary(diagnostic)).toContain(reason);
+    registry.mintOccupantTenure("node-1", "handover");
+    expect(store.readCurrent("node-1")).toBeNull();
   });
 
   it("never rebinds a delayed launch write onto a successor generation", () => {

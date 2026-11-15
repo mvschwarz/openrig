@@ -254,27 +254,83 @@ export function inspectWorkNodeDirs(
   return { ok: true, matches: out, incomplete };
 }
 
+const SPEC_SETTLED_NS = 2_000_000_000n;
+const SPEC_ID_CACHE_ROOTS = 256;
+
+/** A SPEC.md's signature, as `CurrentModelReader.readFact` takes one: device, inode, size and nanosecond times. A file
+ *  changed in the last couple of seconds gets none, because a same-size edit within one coarse timestamp tick wouldn't
+ *  change it; that file is read every time until it settles. Anything but a regular file throws. */
+function specSignature(file: string): string | null {
+  const st = fs.statSync(file, { bigint: true });
+  if (!st.isFile()) throw new Error("not a regular file");
+  const changed = st.mtimeNs > st.ctimeNs ? st.mtimeNs : st.ctimeNs;
+  if (BigInt(Date.now()) * 1_000_000n - changed < SPEC_SETTLED_NS) return null;
+  return [st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].join(":");
+}
+
+/** Each root's SPEC.md frontmatter ids by directory, reused only while that file's signature is unchanged. Every call
+ *  still lists the root and stats each SPEC.md, so an edit, add, remove or rename shows on the next call. A root keeps
+ *  entries only for directories its last listing had, and the oldest root goes past the cap. */
+const specIds = new Map<string, Map<string, { signature: string; id: unknown }>>();
+
+/** How much the id cache holds (one root's entries when it's named), for tests of its bound. */
+export function workNodeIdCacheSizeForTests(root?: string): { roots: number; entries: number } {
+  let entries = 0;
+  for (const [cachedRoot, ids] of specIds) if (root === undefined || cachedRoot === root) entries += ids.size;
+  return { roots: specIds.size, entries };
+}
+
 export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
   } catch {
+    specIds.delete(root);
     return [];
   }
+  const previous = specIds.get(root);
+  const next = new Map<string, { signature: string; id: unknown }>();
   const out: Match[] = [];
   for (const dir of entries.sort()) {
+    const cached = previous?.get(dir);
     if (dir === wanted) {
       out.push({ dir, form: "directory name" });
+      if (cached) next.set(dir, cached);
       continue;
     }
-    let raw: string;
+    const file = path.join(root, dir, "SPEC.md");
+    let before: string | null = null;
     try {
-      raw = fs.readFileSync(path.join(root, dir, "SPEC.md"), "utf8");
+      before = specSignature(file);
     } catch {
-      continue;
+      // Gone, not a regular file or not statable: the read below decides, exactly as without the cache.
     }
-    if (parseFrontmatter(raw)["id"] === wanted) out.push({ dir, form: "frontmatter id" });
+    let id: unknown;
+    if (before !== null && cached?.signature === before) {
+      id = cached.id;
+      next.set(dir, cached);
+    } else {
+      let raw: string;
+      try {
+        raw = fs.readFileSync(file, "utf8");
+      } catch {
+        continue;
+      }
+      id = parseFrontmatter(raw)["id"];
+      // Keep it only if the file didn't change while it was read.
+      if (before !== null) {
+        try {
+          if (specSignature(file) === before) next.set(dir, { signature: before, id });
+        } catch {
+          // Changed under the read: don't keep it.
+        }
+      }
+    }
+    if (id === wanted) out.push({ dir, form: "frontmatter id" });
   }
+  specIds.delete(root);
+  if (specIds.size >= SPEC_ID_CACHE_ROOTS) specIds.delete(specIds.keys().next().value!);
+  specIds.set(root, next);
   return out;
 }
 

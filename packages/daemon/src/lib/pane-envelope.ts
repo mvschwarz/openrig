@@ -100,6 +100,10 @@ export function appendDeliveredSegment(envelope: string, deltaMs: number): strin
   return lines.join("\n") + rest;
 }
 
+/** The address OpenRig records an answer typed at this machine under (the daemon's UNATTRIBUTED_ACTOR). It names nobody,
+ *  and a row there asks no one (it waits on Steering and in the Feed, and OpenRig reports it as undeliverable), so a reply hint never points at it. */
+const UNATTRIBUTED_PERSON = "human@host";
+
 /** Wrap a tmux-pane body with the canonical From/To envelope. The
  *  recipient pane sees both the sender's identity and a reply hint.
  *  Cross-host nudges should NOT double-wrap: the remote rig wraps
@@ -134,6 +138,8 @@ export function wrapPaneEnvelope(
   }
   const reply = senderLabel.endsWith("@external")
     ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
+    : personAddress === UNATTRIBUTED_PERSON
+      ? `↩ ${senderLabel} names no person: a reply there asks no one. It waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To ask the person back, use their registered address (rig gateway human list lists who's registered).`
     : isHumanSeatSessionRef(personAddress)
       ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`
       : isOpenRigSender(senderLabel)
