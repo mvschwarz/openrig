@@ -959,16 +959,17 @@ describe("SeatHandoverService", () => {
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
     expect(result.ok).toBe(true);
+    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
+    // the reused name, so the node's live generation now DIFFERS from the retiring one it received.
+    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
+    expect(successorGen).not.toBe(retiringGen);
     expect(invalidateRetiringOccupant).toHaveBeenCalledTimes(1);
     expect(invalidateRetiringOccupant).toHaveBeenCalledWith({
       retiringSessionName: "dev-impl@seat-rig",
       successorSessionName: "dev-impl@seat-rig",
       retiringGeneration: retiringGen, // captured pre-mint = the RETIREE's gen, not the successor's
+      successorGeneration: successorGen, // #3044 C3: the generation the commit registered, so a sample it wrote is kept
     });
-    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
-    // the reused name, so the node's live generation now DIFFERS from what the invalidator received.
-    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
-    expect(successorGen).not.toBe(retiringGen);
   });
 
   it("does NOT invalidate the retiring occupant when the handover fails before commit (no re-key on a non-committed handover)", async () => {

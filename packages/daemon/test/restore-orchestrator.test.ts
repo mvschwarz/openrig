@@ -553,6 +553,61 @@ describe("RestoreOrchestrator", () => {
     ]);
   });
 
+  // A seat claimed after the rig's topology was recorded is still a node of the rig but isn't in a snapshot's recorded
+  // roster: restore doesn't start it, names it as skipped, and the rig isn't fully restored. A roster the operator
+  // narrowed on purpose, and a node no longer in the rig, read as before.
+  it.each([
+    ["recorded", "materialized_topology", true, "current_seat_not_in_intended_roster", "partially_restored"],
+    ["operator-narrowed", "operator_explicit", true, "historical_not_in_intended_roster", "fully_restored"],
+    ["recorded, node since removed", "materialized_topology", false, "historical_not_in_intended_roster", "fully_restored"],
+  ] as const)("a seat outside a %s roster", async (_label, source, stillInRig, reason, rigResult) => {
+    const snap = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "shell", role: "worker", runtime: "terminal" },
+        { logicalId: "claimed", role: "worker", runtime: "claude-code" },
+      ],
+      edges: [],
+    });
+    const claimed = snap.data.nodes.find((node) => node.logicalId === "claimed")!;
+    const fixed = updateSnapshotData(snap, (data) => {
+      data.topologyRoster = { version: 1, source, intendedNodeIds: data.nodes.filter((node) => node.logicalId !== "claimed").map((node) => node.id) };
+    });
+    if (!stillInRig) rigRepo.deleteNode(claimed.id);
+
+    const result = await createOrchestrator().restore(fixed.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.map((node) => node.logicalId)).toEqual(["shell"]);
+    expect(result.result.excludedNodes).toEqual([expect.objectContaining({ logicalId: "claimed", reason })]);
+    const skippedWarning = "Restore: claimed was skipped: it's a seat of this rig but not in this snapshot's intended roster (it was added or claimed after that roster was recorded), so restore didn't start it.";
+    expect(result.result.warnings.includes(skippedWarning)).toBe(reason === "current_seat_not_in_intended_roster");
+    expect(result.result.rigResult).toBe(rigResult);
+  });
+
+  // A seat added or claimed after the selected snapshot was taken isn't in it at all. Restore doesn't start it either, so
+  // it's named as skipped the same way; a roster the operator narrowed on purpose still keeps it out without a skip.
+  it.each([
+    ["a recorded", "materialized_topology", true],
+    ["an operator-narrowed", "operator_explicit", false],
+  ] as const)("a seat added after the snapshot, restored from %s roster", async (_label, source, named) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "shell", role: "worker", runtime: "terminal" }], edges: [] });
+    const fixed = updateSnapshotData(snap, (data) => {
+      data.topologyRoster = { version: 1, source, intendedNodeIds: data.nodes.map((node) => node.id) };
+    });
+    const late = rigRepo.addNode(snap.rigId, "late", { role: "worker", runtime: "claude-code" });
+
+    const result = await createOrchestrator().restore(fixed.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.map((node) => node.logicalId)).toEqual(["shell"]);
+    expect(result.result.excludedNodes).toEqual(named ? [{ nodeId: late.id, logicalId: "late", reason: "current_seat_not_in_intended_roster" }] : []);
+    const skippedWarning = "Restore: late was skipped: it's a seat of this rig but not in this snapshot's intended roster (it was added or claimed after that roster was recorded), so restore didn't start it.";
+    expect(result.result.warnings.includes(skippedWarning)).toBe(named);
+    expect(result.result.rigResult).toBe(named ? "partially_restored" : "fully_restored");
+  });
+
   it("rejects an explicitly selected unusable snapshot before mutation", async () => {
     const snap = seedRigAndSnapshot({ edges: [] });
     const broken = updateSnapshotData(snap, (data) => {
@@ -1128,11 +1183,11 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes.find((n) => n.logicalId === "desk")).toMatchObject({
       status: "left_attached", error: expect.stringContaining("rig unclaim desk-app@r99"),
     });
-    // A seat left attached doesn't count against the rig.
+    // A seat left attached wasn't restored here, so the rig isn't fully restored.
     expect(rollupRestoreRigResult([
       { nodeId: "a", logicalId: "a", status: "resumed" },
       { nodeId: "b", logicalId: "b", status: "left_attached" },
-    ])).toBe("fully_restored");
+    ])).toBe("partially_restored");
   });
 
   it("a full restore launches a seat whose stored kind is neither tmux nor external CLI on OpenRig's own path, as it does today", async () => {
@@ -1177,7 +1232,8 @@ describe("RestoreOrchestrator", () => {
     if (!result.ok) return;
     expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
     expect(result.result.nodes).toEqual([expect.objectContaining({ logicalId: "desk", status: "left_attached" })]);
-    expect(result.result.rigResult).toBe("fully_restored");
+    // A seat left in its external attachment wasn't restored here, so the rig isn't fully restored.
+    expect(result.result.rigResult).toBe("partially_restored");
   });
 
   it("still blocks restore when tmux sessions are genuinely alive (inverse invariant)", async () => {
@@ -5832,15 +5888,62 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
     });
 
-    it("invalid pinned name: falls back to the derived name with an observable invalid-pin warning", async () => {
-      const { snapId } = seedSeat({ logicalId: "worker-a", boundName: "bad name!" }); // fails validateSessionName
+    // An adopted seat is bound to its own tmux session's name (`rig adopt` registers it as found), which need not follow
+    // OpenRig's pattern. Restore keeps it when tmux creates and finds the session under exactly that name and OpenRig's
+    // address readers read it back unchanged, so the seat's peers still reach it by that name.
+    it.each(["c42a-lead", "bad name!", "c42a+lead", "c42a#lead", "c42a#[x]", "%c42a", "=c42a", "c42a+lead@main"])("an adopted seat's own session name %s: restore keeps it, so the seat's address doesn't change", async (bound) => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "main.lead", podAware: true, boundName: bound });
       const tmux = mockTmux();
-      const orch = createOrchestrator({ tmux });
+      const result = await createOrchestrator({ tmux }).restore(snapId);
+      expect(result.ok).toBe(true);
+      expect(createdSessionNames(tmux)).toContain(bound);
+      expect(createdSessionNames(tmux)).not.toContain("main-lead@r99");
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe(bound);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE node_id = ? AND session_name = ?").get(nodeId, bound)).toEqual({ n: 1 });
+      expect(result.result.warnings.some((w) => w.includes("FR-5"))).toBe(false);
+    });
 
-      const result = await orch.restore(snapId);
+    it.each([
+      ["c42a.lead", 'tmux turns "." into "_" in a session name'],
+      ["c42a#Slead", 'tmux replaces "#S" with a value in a new session\'s name'],
+      ["c42a#{x}", 'tmux expands "#{…}" in a new session\'s name'],
+      ["c42a##lead", 'tmux reads "##" as "#" in a new session\'s name'],
+      ["$c42a", 'tmux reads a name starting with "$" as a session id, even in an exact target'],
+      ["%3", 'tmux reads "%3" as a pane id'],
+      ["a b@c@d", 'it contains more than one "@", so OpenRig reads its last part as a host'],
+      ["c42a,lead", 'it contains ",", which `rig send --to` reads as a list separator'],
+      [" c42a-lead", "it starts or ends with whitespace, which `rig send --to` trims"],
+    ])("a bound name that can't be launched again as given (%s): the derived name, with the change and its reason said", async (bound, problem) => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: bound });
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(snapId);
       expect(result.ok).toBe(true);
       expect(createdSessionNames(tmux)).toContain("r99-worker-a");
-      expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("is invalid"))).toBe(true);
+      expect(createdSessionNames(tmux)).not.toContain(bound);
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("r99-worker-a");
+      expect(result.result.warnings).toContain(`FR-5: restore starts worker-a as "r99-worker-a", not "${bound}", the session name it was bound to: ${problem}. Once it runs there, peers that address "${bound}" need "r99-worker-a".`);
+    });
+
+    it("a failed launch under the derived name: the line names only the attempt, the node fails and keeps its bound name", async () => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: "c42a.lead" });
+      const tmux = mockTmux();
+      (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false as const, code: "duplicate_session", message: "err" });
+      const result = await createOrchestrator({ tmux }).restore(snapId);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes.find((n) => n.logicalId === "worker-a")?.status).toBe("failed");
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("c42a.lead");
+      const line = result.result.warnings.find((w) => w.startsWith("FR-5: restore starts worker-a"));
+      expect(line).toContain('as "r99-worker-a", not "c42a.lead"');
+      expect(result.result.warnings.some((w) => /comes back as|now answers at|has moved to/.test(w))).toBe(false);
+    });
+
+    it("only a launch that keeps the seat's bound name accepts one outside the naming pattern, and only one it can reuse", () => {
+      const { nodeId } = seedSeat({ logicalId: "worker-a", boundName: null });
+      expect(() => sessionRegistry.registerSession(nodeId, "c42a-lead")).toThrow(/Invalid session name "c42a-lead"/);
+      expect(() => sessionRegistry.registerSession(nodeId, "c42a.lead", "initial", null, { keptBoundName: true }))
+        .toThrow(/Invalid session name "c42a.lead"/);
+      expect(sessionRegistry.registerSession(nodeId, "c42a-lead", "initial", null, { keptBoundName: true }).sessionName).toBe("c42a-lead");
     });
 
     it("subset launch surfaces the FR-5 fallback warning (not discarded) — API result + restore.subset_completed event", async () => {
