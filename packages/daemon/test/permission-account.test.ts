@@ -198,6 +198,28 @@ describe("a seat's planned permission on restore", () => {
     expect(restored.summary).not.toContain("On restore");
   });
 
+  // A custom policy file can move between auto and full_bypass after its posture was cached; restore re-reads it, so the
+  // note on Codex's missing auto mode must agree with the flags restore plans, for a member's policy and a rig's.
+  it.each([
+    ["member", "auto", "full_bypass", "-s danger-full-access -a never", false],
+    ["member", "full_bypass", "auto", "-s workspace-write", true],
+    ["rig", "auto", "full_bypass", "-s danger-full-access -a never", false],
+    ["rig", "full_bypass", "auto", "-s workspace-write", true],
+  ] as const)("explains a Codex %s policy's floor fallback from the posture restore plans (cached %s, now %s)", (level, cached, now, argument, floor) => {
+    const { db, rigRepo, rig, node } = seat("codex");
+    const provenance = { origin: "custom" as const, resolvedTarget: "/policies/team.yaml", declaringDir: "/policies", launchPosture: cached };
+    if (level === "member") {
+      db.prepare("UPDATE nodes SET permission_policy = ? WHERE id = ?").run("./team.yaml", node.id);
+      rigRepo.setNodePolicyProvenance(node.id, provenance);
+    } else {
+      db.prepare("UPDATE rigs SET permission_policy = ? WHERE id = ?").run("./team.yaml", rig.id);
+      rigRepo.setRigPolicyProvenance(rig.id, provenance);
+    }
+    const restored = planRestorePermission(db, { ...inputs(node.id, () => now), runtime: "codex" }, env);
+    expect(restored).toMatchObject({ basis: "planned", source: `${level}_policy`, nativeArgument: argument });
+    expect(restored.summary.includes("Codex has no auto mode and launches at the floor")).toBe(floor);
+  });
+
   it("plans only the path restore's posture is exact for: a pod seat with saved startup context", () => {
     const { db, node } = seat("claude-code");
     const restored = planRestorePermission(db, inputs(node.id, () => "floor"), env);

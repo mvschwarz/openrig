@@ -2,7 +2,7 @@
 // (NativePermissionStore, the posture flags, the team and kernel lists). Planned, not observed: nothing here runs a
 // harness, probes Codex or reads native settings files, so what only a launch or the harness knows is listed as unknown.
 import type Database from "better-sqlite3";
-import { NativePermissionStore, type StoredNativePermissionSelection } from "./native-permission-store.js";
+import { NativePermissionStore, noAutoModeFallback, type StoredNativePermissionSelection } from "./native-permission-store.js";
 import { claudePostureFlag, codexPostureArg, planModelAliasNotice, yoloEnabled } from "../adapters/yolo-mode.js";
 import { codexMemberLaunch } from "./codex-member-permissions.js";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../adapters/kernel-authority.js";
@@ -164,9 +164,12 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   const replacedPosture = envelope ? [bindingPosture !== "floor" ? `the policy's ${bindingPosture} posture` : null,
     yoloEnabled(env, undefined) ? "the ambient OPENRIG_YOLO setting" : null].filter((v): v is string => !!v) : [];
   // The resolver's own fallback (Codex has no auto mode), and a named Codex profile that supplies the argument under a
-  // policy or seat choice; the floor's own wording already names its profile.
+  // policy or seat choice; the floor's own wording already names its profile. A restore plans the posture it re-read,
+  // which a custom policy can have moved off the cached one the resolver explains, so its note follows the planned posture.
+  const fallbackReason = !restore ? resolved.fallbackReason
+    : runtime !== "claude-code" && posture === "auto" ? noAutoModeFallback(runtime) : undefined;
   const notes = [
-    (source === "member_policy" || source === "rig_policy") && resolved.fallbackReason ? resolved.fallbackReason : null,
+    (source === "member_policy" || source === "rig_policy") && fallbackReason ? fallbackReason : null,
     profile && source !== "floor" && nativeArgument === `-p ${profile}` ? `the named Codex profile ${profile} governs its sandbox and approvals` : null,
     replacedPosture.length ? `the envelope replaces ${replacedPosture.join(" and ")} for this seat` : null,
     envelope && profile ? `the named Codex profile ${profile} supplies only the settings the envelope doesn't state` : null,
@@ -201,8 +204,11 @@ export function planRestorePermission(db: Database.Database, input: {
   nodeId: string; seat: string; runtime: string | null;
   restorePosture: () => NonNullable<NodeBinding["launchPosture"]>;
   podAware?: boolean; startupContext?: boolean; runtimeError?: string;
+  /** The launch's own seat check (selection_changed): set, the current seat isn't the saved one, and it isn't read. */
+  seatChanged?: string;
 }, env: NodeJS.ProcessEnv = process.env): RestorePermissionPreview {
   const unknown = (reason: string): RestorePermissionPreview => ({ basis: "unknown", runtime: input.runtime, summary: `Unknown: ${reason}` });
+  if (input.seatChanged) return unknown(`restore stops before it starts this seat. ${input.seatChanged}`);
   if (input.runtimeError) return unknown(`restore stops for a runtime decision before it starts this seat. ${input.runtimeError}`);
   if (input.podAware === undefined) return unknown("no saved snapshot names this seat yet, so which launch path restore takes for it isn't known.");
   if (!input.podAware) return unknown("restore takes this seat's runtime from its resume token, which this read doesn't know.");

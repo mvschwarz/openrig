@@ -15,6 +15,7 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -157,6 +158,20 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(permission).toMatchObject({ basis: "unknown" });
     expect(permission?.summary).toContain("restore stops for a runtime decision before it starts this seat. No session was started for this seat.");
     expect(permission?.summary).not.toContain("On restore");
+  });
+
+  it("plans a seat recreated under the saved name as unknown with the launch's own refusal, never the replacement's account", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    // The snapshot saved dev.driver as another node; the current dev.driver has the same runtime and its own choice.
+    const snapshotId = seedSnapshot(rigId, ["saved-driver", nodeIds[1]!], { "saved-driver": emptyStartupContext("claude-code") });
+    new NativePermissionStore(db).write(nodeIds[0]!, { runtime: "claude-code", mode: "plan" }, "person@host", "the replacement's own choice");
+    const target = orchestrator.planNodeSubset(rigId, ["dev.driver"], { snapshotId }).targetNodes?.[0];
+    expect(target).toEqual({ nodeId: "saved-driver", logicalId: "dev.driver", permission: { basis: "unknown", runtime: "claude-code",
+      summary: "Unknown: restore stops before it starts this seat. A snapshot seat was removed or recreated. Select history for the current seat." } });
+    // Execution keeps its existing refusal for the same seat.
+    const launched = await orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    expect(launched).toMatchObject({ ok: false, code: "selection_changed", message: "A snapshot seat was removed or recreated. Select history for the current seat." });
+    expect(tmux.createSession).not.toHaveBeenCalled();
   });
 
   it("returns rig_not_found for unknown rig", async () => {

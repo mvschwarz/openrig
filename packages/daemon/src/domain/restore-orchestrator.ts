@@ -94,6 +94,8 @@ export type ReconcileNodeResult =
 
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
+/** A subset launch's refusal (selection_changed) for a saved seat no current seat matches by both id and logical id. */
+const SNAPSHOT_SEAT_CHANGED = "A snapshot seat was removed or recreated. Select history for the current seat.";
 
 // OPR.0.5.7.1 consumer alignment: the four-way active-occupant ladder lives
 // in the pure leaf module active-occupant.ts, shared with preview, snapshot
@@ -655,14 +657,17 @@ export class RestoreOrchestrator {
         .filter((node) => targetIds.has(node.logicalId))
         .map((node) => {
           // The permission this launch will start the seat with: restore's own posture rule through the launch's resolver.
-          const live = rig.nodes.find((candidate) => candidate.logicalId === node.logicalId);
+          // Only the saved seat itself is read, matched as the launch matches it; a seat recreated under the same name
+          // (or none) reads unknown with the launch's own refusal, never the replacement's account.
+          const live = rig.nodes.find((candidate) => candidate.id === node.id && candidate.logicalId === node.logicalId);
           if (live && seatProcessOwner(resolveSeatKind(live.binding?.attachmentType)) === "external") {
             return { nodeId: node.id, logicalId: node.logicalId };
           }
           const seat = restorePermissionSeat(rig.rig.name, live ?? { id: node.id, logicalId: node.logicalId, runtime: node.runtime ?? null },
             selected.snapshot, node.id);
           return { nodeId: node.id, logicalId: node.logicalId,
-            permission: planRestorePermission(this.db, { ...seat, restorePosture: () => this.resolveRestorePosture(seat.nodeId, rigId) }) };
+            permission: planRestorePermission(this.db, { ...seat, ...(live ? {} : { seatChanged: SNAPSHOT_SEAT_CHANGED }),
+              restorePosture: () => this.resolveRestorePosture(seat.nodeId, rigId) }) };
         }),
       unmatchedIds: logicalIds.filter((id) => !targetIds.has(id) && !targetNodeIds.has(id)),
       nonTargetEffects,
@@ -720,7 +725,7 @@ export class RestoreOrchestrator {
     const unmatchedIds = logicalIds.filter((id) => !matchedIds.has(id));
     if (targetNodes.length === 0) return { ok: false, code: "no_matching_nodes", message: `No nodes match logical ids: ${logicalIds.join(", ")}` };
     if (targetNodes.some(saved => !allNodes.some(current => current.id === saved.id && current.logicalId === saved.logicalId))) {
-      return { ok: false, code: "selection_changed", message: "A snapshot seat was removed or recreated. Select history for the current seat." };
+      return { ok: false, code: "selection_changed", message: SNAPSHOT_SEAT_CHANGED };
     }
     if (opts.selectedHistory && (targetNodes.length !== 1 || targetNodes[0]!.id !== opts.selectedHistory.nodeId
       || !allNodes.some(node => node.id === opts.selectedHistory!.nodeId && node.logicalId === logicalIds[0]))) {
