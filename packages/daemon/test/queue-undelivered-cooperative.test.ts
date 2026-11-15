@@ -74,7 +74,8 @@ describe.each(["file", "memory"] as const)("the stuck sweep's undelivered candid
       expect(outcomes(derived)).toEqual(outcomes(repo.findUndelivered({ ...opts, waiting: false })));
     }
     expect(outcomes(repo.findUndelivered({ waiting: false })).length).toBeGreaterThan(2);
-    expect(await repo.undeliveredCandidateIds({ rig: "other" })).toEqual(["qitem-other-rig", "qitem-other-rig-blocked"]);
+    // A legacy failed wake is a candidate only on a pending row, as in findUndelivered's filter: the blocked one isn't.
+    expect(await repo.undeliveredCandidateIds({ rig: "other" })).toEqual(["qitem-other-rig"]);
   });
 
   it("finds every candidate of a long set, and on a file database lets other work run while it reads", async () => {
