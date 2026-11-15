@@ -201,6 +201,29 @@ describe("an opt-in decision revision on the settling verbs (#2446)", () => {
     expect(await f.act({ verb: "approve", qitemId: id, expectedRevision: read })).toMatchObject({ status: 200, body: { closedQitem: { state: "done" } } });
   });
 
+  it("a new evidence pointer on an open ask is a new decision: an answer read under the earlier pointer conflicts, with nothing written", async () => {
+    const f = fixture();
+    const id = (await f.repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Approve the release notes", summary: "Notes?",
+      humanIntent: "decision", evidenceRef: "/proof/notes-v1.md", nudge: false })).qitemId;
+    const read = await f.revision(id);
+    f.repo.update({ qitemId: id, actorSession: ASKER, state: "pending", evidenceRef: "/proof/notes-v2.md" });
+    expect(f.repo.getById(id)).toMatchObject({ state: "pending", evidenceRef: "/proof/notes-v2.md" });
+    expect(await f.revision(id)).not.toBe(read);
+    const before = f.written(id);
+    expect(await f.act({ verb: "approve", qitemId: id, expectedRevision: read }))
+      .toMatchObject({ status: 409, body: { error: "decision_revision_changed", currentRevision: await f.revision(id) } });
+    expect(f.written(id)).toEqual(before);
+  });
+
+  it("a row with no evidence keeps the revision it had before evidence counted", async () => {
+    // A fixed id, so the revision (which names the row's park episode) is the same on every run; the value is the one
+    // this ask had before evidence counted.
+    const f = fixture();
+    const id = (await f.repo.create({ qitemId: "qitem-revision-control", sourceSession: ASKER, destinationSession: PERSON,
+      body: "Synthetic two-question ask", summary: "Ship?", humanIntent: "decision", humanQuestions: QUESTIONS, nudge: false })).qitemId;
+    expect(await f.revision(id)).toBe("dr1-bed30769297c81fe419c3520");
+  });
+
   it("repairs a direct-answer partial commit on retry without duplicating the reply row, then reconciles subsequent retries", async () => {
     const f = fixture();
     const row = await f.repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Ship the relay?", summary: "Ship?", humanIntent: "decision", nudge: false });

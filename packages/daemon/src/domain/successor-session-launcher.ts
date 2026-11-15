@@ -101,6 +101,8 @@ export type SuccessorLaunchResult =
       resumeToken?: string;
       resumeType?: string;
       appliedLaunch?: AppliedLaunchObservation;
+      /** The launch's frozen executable and whether it is a #! script (Claude managed launches, #2341). */
+      launchedExecutable?: { path: string; isScript: boolean };
       /** How the departing occupant's process ended at the cutover: it exited on TERM, or was killed after the TERM window. */
       retireeExit: "graceful" | "forced";
       /**
@@ -123,6 +125,14 @@ export type SuccessorLaunchResult =
       /** True when the harness launch was sent into the pane and only readiness failed (#2985): the successor may
        * still come up there, and it is not adopted. */
       successorLaunched?: boolean;
+      /** #2985: with successorLaunched, the resume token the launch generated (never logged), so a recovery can prove the
+       *  pane's process is exactly this launch, and how the retiree ended before it. */
+      resumeToken?: string;
+      resumeType?: string;
+      retireeExit?: "graceful" | "forced";
+      launchedExecutable?: { path: string; isScript: boolean };
+      /** With successorLaunched, what the launch applied, so a recovery commits it with the successor's generation. */
+      appliedLaunch?: AppliedLaunchObservation;
     };
 
 export class SuccessorSessionLauncher {
@@ -322,7 +332,10 @@ export class SuccessorSessionLauncher {
     const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration, undefined, binding);
     if (!started.ok) {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true,
-        tmuxPane: pane.id, ...(started.launched ? { successorLaunched: true } : {}) };
+        tmuxPane: pane.id, ...(started.launched ? { successorLaunched: true, retireeExit: terminated.path,
+          ...(started.resumeToken ? { resumeToken: started.resumeToken, resumeType: started.resumeType } : {}),
+          ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}),
+          ...(started.appliedLaunch ? { appliedLaunch: started.appliedLaunch } : {}) } : {}) };
     }
 
     const discovered = this.discoveryRepo.upsertDiscoveredSession({
@@ -344,6 +357,7 @@ export class SuccessorSessionLauncher {
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
       appliedLaunch: started.appliedLaunch,
+      ...(started.launchedExecutable ? { launchedExecutable: started.launchedExecutable } : {}),
       ...(started.activityGrantId ? { activityGrantId: started.activityGrantId } : {}),
       retireeExit: terminated.path,
       ...(warnings.length ? { warnings } : {}),
@@ -414,7 +428,8 @@ export class SuccessorSessionLauncher {
     launchGeneration?: string | null,
     staged?: StagedLaunch,
     preparedBinding?: NodeBinding,
-  ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] } | { ok: false; code: string; message: string; launched?: true }> {
+  ): Promise<{ ok: true; activityGrantId?: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[]; launchedExecutable?: { path: string; isScript: boolean } }
+    | { ok: false; code: string; message: string; launched?: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; launchedExecutable?: { path: string; isScript: boolean } }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
       return {
@@ -463,6 +478,8 @@ export class SuccessorSessionLauncher {
       resumeToken = trimmed;
       resumeType = launch.resumeType;
     }
+    const launchedExecutable = launch.launchedExecutable ? { launchedExecutable: launch.launchedExecutable } : {};
+    const appliedLaunch = launch.appliedLaunch ? { appliedLaunch: launch.appliedLaunch } : {};
 
     // OPR.0.4.3.04 rev2 code-review fix — checkReady/waitForReady can THROW after
     // createSession already succeeded (adapter/socket/permission errors rethrow).
@@ -484,6 +501,9 @@ export class SuccessorSessionLauncher {
         code: "successor_readiness_failed",
         message: `Successor readiness probe threw: ${err instanceof Error ? err.message : String(err)}`,
         launched: true,
+        ...(resumeToken ? { resumeToken, resumeType } : {}),
+        ...appliedLaunch,
+        ...launchedExecutable,
       };
     }
     if (!readiness.ready) {
@@ -493,10 +513,13 @@ export class SuccessorSessionLauncher {
         code: isAttentionRequiredReadinessCode(readiness.code) ? "successor_attention_required" : "successor_not_ready",
         message: `Successor did not become a ready agent: ${readiness.reason ?? "readiness timeout"}`,
         launched: true,
+        ...(resumeToken ? { resumeToken, resumeType } : {}),
+        ...appliedLaunch,
+        ...launchedExecutable,
       };
     }
 
-    return { ok: true, resumeToken, resumeType, ...(launch.activityGrantId ? { activityGrantId: launch.activityGrantId } : {}), appliedLaunch: launch.appliedLaunch, ...(notes?.length ? { notes } : {}) };
+    return { ok: true, resumeToken, resumeType, ...(launch.activityGrantId ? { activityGrantId: launch.activityGrantId } : {}), appliedLaunch: launch.appliedLaunch, ...launchedExecutable, ...(notes?.length ? { notes } : {}) };
   }
 
   /**

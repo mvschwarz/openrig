@@ -383,7 +383,7 @@ function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
  * avoids re-reading every spec every refresh; the key rolls when the library
  * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
 export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
-export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen" | "attentionView" | "pendingDrill">;
+export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen" | "attentionView" | "pendingDrill" | "fleetSelected">;
 
 export async function hydrateSnapshot(
   client: DaemonClient,
@@ -451,6 +451,17 @@ export async function hydrateSnapshot(
   if (viewContext?.section === "terminals") {
     const terminals = await readTerminals(client, viewContext.terminalView);
     return { ...emptySnapshot(), terminals, hydratedAt: new Date().toISOString(), readErrors: terminals.error ? [terminals.error] : [] };
+  }
+
+  // FLEET PROJECTS (#3093): one GET of the daemon's view across registered hosts, plus — when a fleet slice is open —
+  // that slice's detail from its ORIGIN host through the read-through. Both are bounded reads; the pane never writes.
+  if (viewContext?.section === "fleet") {
+    const status = await client.fleetScopes();
+    if (!("view" in status)) readErrors.push(`fleet projects: ${status.error}`);
+    const sel = viewContext.fleetSelected;
+    const detail = sel ? await client.fleetSliceDetail(sel.hostId, sel.mission, sel.slice) : null;
+    if (detail && "error" in detail) readErrors.push(`fleet slice detail (${sel!.hostId}): ${detail.error}`);
+    return { ...emptySnapshot(), fleetScopes: { status }, fleetSliceDetail: detail, readErrors, hydratedAt: new Date().toISOString() };
   }
 
   // USAGE ACROSS HOSTS: one GET of the daemon's view across registered hosts, answered from memory there and on every
