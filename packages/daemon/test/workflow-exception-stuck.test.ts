@@ -14,6 +14,8 @@ import { migrate } from "../src/db/migrate.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { makeTopologyDestinationCheck, makeQueueRecordingCheck } from "../src/domain/queue-destination-check.js";
+import { loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { runWorkflowBootSweep } from "../src/domain/workflow-boot-sweep.js";
@@ -63,7 +65,10 @@ describe("WF-5 FR-2 class (b): detection-time stuck exception items", () => {
     migrate(db, ALL_MIGRATIONS);
     const bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
-    const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    const topology = makeTopologyDestinationCheck({
+      findRigsByName: name => db.prepare("SELECT id FROM rigs WHERE name = ?").all(name), loadHumanRegistry,
+    });
+    const queueRepo = new QueueRepository(db, bus, { validateRig: topology, canRecordDestination: makeQueueRecordingCheck(topology) });
     queueRepo.attachOutbox(new OutboxHandler(db));
     const runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
     const watchdogJobsRepo = new WatchdogJobsRepository(db);
@@ -102,6 +107,18 @@ describe("WF-5 FR-2 class (b): detection-time stuck exception items", () => {
   afterEach(() => {
     db.close();
     rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it.each(["orch-lead@absent-rig", "ops-rescue@{rig}"])("production recording sends a stuck exception to the person before creating for %s", async destination => {
+    const f = await build(SPEC.replace("wf5-stuck-pipeline", "wf5-stuck-unavailable").replace("orch-lead@rig", destination));
+    expect(f.queueRepo.acceptsDestination(destination)).toBe(false);
+    const create = vi.spyOn(f.queueRepo, "create");
+    const result = await sweep(f);
+    expect(result.exceptionItemsCreated).toBe(1);
+    expect(exceptionRows(db)).toMatchObject([{ destination_session: "human@host", tier: "human-gate" }]);
+    expect(create.mock.calls.map(([input]) => input.destinationSession)).toEqual(["human@host"]);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ humanAlert: true }));
+    expect(db.prepare("SELECT 1 FROM queue_items WHERE destination_session = ?").get(destination)).toBeUndefined();
   });
 
   it("the sweep creates ONE item for an overdue instance, routed per the dial with the ordinary tier and the occurrence tag", async () => {

@@ -49,7 +49,7 @@ async function fixture(attached = false, automatic = true, beforeGeneration = fa
   }
   const effect = (name: string, operationId = "effect-one") => request("/binding-one/effect", { operationId, generation: "generation-one", effect: name });
   const lifecycle = new EnvironmentLifecycle(new EnvironmentPlatform(db, driver), queue, join(root, "retained"));
-  return { root, db, driver, queue, lifecycle, request, effect, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
+  return { root, db, driver, queue, lifecycle, request, effect, app: f.app, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
 }
 describe("owned and attached environment effects", () => {
   async function failedProjection(attached = false) {
@@ -104,6 +104,30 @@ describe("owned and attached environment effects", () => {
     const result = await f.request("/binding-one/effect", { operationId: "bad-selection", effect: "delete-owned", generation: null, resourceId: f.resource.id });
     expect(result.status).toBe(409); expect(result.body.code).toBe("environment_generation_changed");
     expect(f.counts().deleteCalls).toBe(0);
+  });
+  it("records the effect's requester from the transport header, superseding a body claim", async () => {
+    const f = await fixture();
+    const res = await f.app.request("/api/environments/binding-one/effect", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-openrig-session": "coordinator@lifecycle" },
+      body: JSON.stringify({ operationId: "effect-requester", generation: "generation-one", effect: "stop-native", requestedBy: "body-claim@lifecycle" }),
+    });
+    expect(res.status, JSON.stringify(await res.json())).toBe(200);
+
+    const row = f.db.prepare("SELECT state, receipt_json FROM environment_operations WHERE operation_id='effect-requester'").get() as { state: string; receipt_json: string | null } | undefined;
+    expect(row?.state).toBe("confirmed");
+    expect(JSON.parse(row!.receipt_json!).requestedBy).toBe("coordinator@lifecycle");
+  });
+  it("keeps asking for a sender when an effect request carries no session header", async () => {
+    const f = await fixture();
+    const res = await f.app.request("/api/environments/binding-one/effect", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ operationId: "effect-no-sender", generation: "generation-one", effect: "stop-native" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toBe("actor_required");
+    expect(f.counts().stopCalls).toBe(0);
   });
   it("does not dispatch pre-generation deletion if projection establishes a generation during observation", async () => {
     const f = await failedProjection(), list = f.driver.list;
