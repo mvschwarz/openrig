@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,7 +27,7 @@ function lstart(seconds: number): string {
 
 let home: string;
 beforeEach(() => { home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codex-incremental-"))); clearIncrementalLogReads(); });
-afterEach(() => { fs.rmSync(home, { recursive: true, force: true }); clearIncrementalLogReads(); });
+afterEach(() => { vi.restoreAllMocks(); fs.rmSync(home, { recursive: true, force: true }); clearIncrementalLogReads(); });
 
 function logsDb(name = "logs_2.sqlite", migrations: number[] = [1, 2]) {
   const db = new Database(path.join(home, name));
@@ -219,6 +219,53 @@ describe("the incremental Codex-log read", () => {
     expect((await resolver().resolveWithReadability(PID, IDENTITY)).thread).toBe("thread-a");
     expect(await resolver().resolveForkChild(PID, IDENTITY)).toBe("thread-a");
     expect(counts()).toEqual(before);
+    logs.close();
+  });
+
+  it("doesn't remember a read whose file was replaced between taking its identity and opening it", async () => {
+    // The original and its replacement end on the same row (id 2, thread-a); only the replacement has an older
+    // qualifying thread (id 1, thread-z), so a replacement read under the original's earlier answer would miss it.
+    stateDb([["thread-a", "cli"], ["thread-x", "cli"], ["thread-z", "cli"]]);
+    let logs = logsDb();
+    logs.log(START + 1, 99, "other", "thread-x");
+    logs.log(START + 2, PID, "current", "thread-a");
+    logs.close();
+    const replacement = path.join(home, "replacement.sqlite");
+    fs.renameSync(path.join(home, "logs_2.sqlite"), path.join(home, "original.sqlite"));
+    logs = logsDb();
+    logs.log(START + 1, PID, "current", "thread-z");
+    logs.log(START + 2, PID, "current", "thread-a");
+    logs.close();
+    fs.renameSync(path.join(home, "logs_2.sqlite"), replacement);
+    fs.renameSync(path.join(home, "original.sqlite"), path.join(home, "logs_2.sqlite"));
+    const logsPath = path.join(home, "logs_2.sqlite"), statSync = fs.statSync;
+    let swapped = false;
+    vi.spyOn(fs, "statSync").mockImplementation(((file: fs.PathLike, options?: fs.StatSyncOptions) => {
+      const result = statSync(file, options);
+      if (!swapped && String(file) === logsPath) { swapped = true; fs.renameSync(replacement, logsPath); }
+      return result;
+    }) as typeof fs.statSync);
+    const before = counts();
+    let step = await compare();
+    expect(swapped).toBe(true);
+    expect(step.incremental).toEqual(step.full); expect(step.incremental).toEqual({ thread: undefined, reason: "ambiguous_threads" });
+    expect(counts()).toEqual({ ...before, full: before.full + 1 });
+    // Nothing was remembered under either identity: the next read is cold, and still the full read's answer.
+    step = await compare();
+    expect(step.incremental).toEqual(step.full);
+    expect(counts().cold).toBe(before.cold + 1);
+  });
+
+  it("returns a read with more threads than it may remember whole, and doesn't remember it", async () => {
+    const logs = logsDb();
+    stateDb([["thread-0", "cli"], ...Array.from({ length: 64 }, (_, i) => [`thread-${i + 1}`, "exec"] as [string, "exec"])]);
+    for (let i = 0; i <= 64; i++) logs.log(START + 1 + i, PID, "current", `thread-${i}`);
+    const before = counts();
+    for (let call = 0; call < 2; call++) {
+      const step = await compare();
+      expect(step.incremental).toEqual(step.full); expect(step.incremental.thread).toBe("thread-0");
+    }
+    expect(counts()).toEqual({ ...before, cold: before.cold + 2 });
     logs.close();
   });
 

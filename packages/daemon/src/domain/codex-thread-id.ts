@@ -314,6 +314,14 @@ const FULL_LOGGED_THREADS = "SELECT DISTINCT thread_id FROM logs WHERE process_u
  *  set, or none, reads in full. */
 const INCREMENTAL_LOGS_MIGRATIONS = "1,2";
 const MAX_INCREMENTAL_READS = 512;
+/** Codex bounds rows per thread, not threads per process, so an entry keeps at most this many; past it the read's own
+ *  answer is returned and nothing is remembered. */
+const MAX_REMEMBERED_THREADS = 64;
+
+/** A file's identity as stat reports it, or null when it can't be read. */
+function fileIdentity(file: string): string | null {
+  try { const st = fs.statSync(file); return [st.dev, st.ino, st.birthtimeMs].join(":"); } catch { return null; }
+}
 
 /** One database's earlier read for one process: the highest id it covered, that row's content (rows don't change in
  *  place, so a different row there means a different database), and the threads it found. */
@@ -330,10 +338,12 @@ export function clearIncrementalLogReads(): void { incrementalReads.clear(); }
  * Each read runs in one read transaction: it takes the current highest id, keeps each earlier thread only while a
  * qualifying row still names it (Codex deletes rows), and adds the threads in rows past the earlier high-water id. The
  * set is the full query's. A cold read (no earlier read, a replaced file, or a high-water row that changed or went) is
- * the full query itself. Returns null when this database isn't a verified schema, or when the read throws, so the
- * caller runs the full query and reports what it reports today. A read that throws is never remembered.
+ * the full query itself. Returns null when this database isn't a verified schema, when the read throws, or when the
+ * file's identity after the read isn't the one taken before the open (it was replaced meanwhile), so the caller runs
+ * the full query on the same handle and reports what it reports today. Such a read is never remembered, nor is one that
+ * found more than {@link MAX_REMEMBERED_THREADS} threads, whose answer is still returned whole.
  */
-function readLoggedThreadsIncrementally(db: Database.Database, dbPath: string, pid: number, minTs: number | undefined): string[] | null {
+function readLoggedThreadsIncrementally(db: Database.Database, dbPath: string, opened: string, pid: number, minTs: number | undefined): string[] | null {
   let applied: string | null | undefined;
   try {
     applied = (db.prepare("SELECT group_concat(version) AS applied FROM (SELECT version FROM _sqlx_migrations WHERE success = 1 ORDER BY version)")
@@ -343,8 +353,7 @@ function readLoggedThreadsIncrementally(db: Database.Database, dbPath: string, p
   const pattern = `pid:${pid}:%`, since = minTs ?? 0;
   let key: string, read: { warm: boolean; entry: IncrementalRead };
   try {
-    const file = fs.statSync(dbPath);
-    key = [dbPath, file.dev, file.ino, file.birthtimeMs, pid, minTs ?? 0].join("|");
+    key = [dbPath, opened, pid, minTs ?? 0].join("|");
     const rowAt = db.prepare("SELECT ts, ts_nanos, process_uuid, thread_id FROM logs WHERE id = ?");
     const content = (id: number) => { const row = rowAt.get(id); return row ? JSON.stringify(row) : null; };
     read = db.transaction(() => {
@@ -365,8 +374,10 @@ function readLoggedThreadsIncrementally(db: Database.Database, dbPath: string, p
       return { warm, entry: { highWater, highWaterRow: highWater === 0 ? "" : content(highWater) ?? "", threads } };
     })();
   } catch { incrementalLogReadCounts.full++; return null; }
+  if (fileIdentity(dbPath) !== opened) { incrementalReads.delete(key); incrementalLogReadCounts.full++; return null; }
   if (read.warm) incrementalLogReadCounts.warm++; else incrementalLogReadCounts.cold++;
   incrementalReads.delete(key);
+  if (read.entry.threads.size > MAX_REMEMBERED_THREADS) return [...read.entry.threads];
   if (incrementalReads.size >= MAX_INCREMENTAL_READS) incrementalReads.delete(incrementalReads.keys().next().value!);
   incrementalReads.set(key, read.entry);
   return [...read.entry.threads];
@@ -396,10 +407,12 @@ function readCodexThreadIdFromLogs(
   const loggedBefore = new Set<string>(); // process_uuids with a row before the start second
   for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome, logsDiscovery)) {
     try {
+      // The default read can be incremental; a readability or by-process read always reads in full. The file's identity
+      // is taken before the open, so the read it labels is the opened handle's.
+      const opened = startSecond === "exclude" && !readability ? fileIdentity(dbPath) : null;
       const db = new Database(dbPath, { readonly: true });
       try {
-        // The default read can be incremental; a readability or by-process read always reads in full.
-        const incremental = startSecond === "exclude" && !readability ? readLoggedThreadsIncrementally(db, dbPath, pid, minTs) : null;
+        const incremental = opened ? readLoggedThreadsIncrementally(db, dbPath, opened, pid, minTs) : null;
         // Strict start-second gate preserves the existing PID reuse boundary.
         const rows = incremental ? [] : db.prepare(FULL_LOGGED_THREADS).all(`pid:${pid}:%`, minTs ?? 0) as Array<{ thread_id: string }>;
         for (const id of incremental ?? []) loggedIds.add(id);
