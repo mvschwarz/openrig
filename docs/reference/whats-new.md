@@ -1,12 +1,13 @@
 # What changed in OpenRig 0.7.17
 
 This note is for an agent on an install that was just upgraded to 0.7.17.
-OpenRig 0.7.17 brings a team's questions to the conversation your person started
-it from: when they stay in their own Claude Code conversation, a seat's prompt
-comes back there as a task, and only their recorded words go back to the seat.
-Restore and `rig down` report more honestly what they did, a rig's automatic
-delivery can be held during maintenance, and three stall paths in a busy daemon
-are shorter. It adds two database migrations. If you upgraded from 0.7.15 or
+OpenRig 0.7.17 teaches the installer, the kernel operator and the `rigs` skill
+to bring a team's questions to the conversation your person started it from:
+when they stay in their own Claude Code conversation, a seat's prompt is to go
+there as a task, and only their recorded words back to the seat. Restore and
+`rig down` report more of what they did, a rig's automatic delivery can be held
+during maintenance, and three daemon read paths changed. It adds two database
+migrations. If you upgraded from 0.7.15 or
 earlier, also read "What changed in OpenRig 0.7.16" below, and so on back. For
 the full capability map, read
 `rig context get onboarding-width/public-what-you-can-do.md`. After the upgraded
@@ -28,17 +29,17 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 ## Your person's own conversation
 
 - **If your person installed OpenRig from their own Claude Code conversation and
-  stays there,** the installer hands their goal to the team as a task from that
-  conversation's address, and no longer says they'll answer in the operator's
-  pane. Ask where they'll answer only when that's genuinely unclear.
-- **The kernel operator brings a seat's prompt to that address as a task,** with
-  the prompt and its choices verbatim, the seat, what it was doing and the
-  escalation's id. It relays only the person's recorded words: the key comes
-  from a fresh capture, the reason starts with `task <id>:`, and it checks the
-  effect. It tells the person the lead has their goal and that questions and
-  the result come to that conversation, and offers the team's space or a seat's
-  terminal only if they choose to watch or answer in the pane. A person who
-  chose the panes gets the earlier instructions unchanged.
+  stays there,** the installer is instructed to hand their goal to the team as a
+  task from that conversation's address, and no longer says they'll answer in
+  the operator's pane. Ask where they'll answer only when that's genuinely unclear.
+- **The kernel operator is instructed to bring a seat's prompt to that address
+  as a task,** with the prompt and its choices verbatim, the seat, what it was
+  doing and the escalation's id, and to relay only the person's recorded words:
+  the key from a fresh capture, the reason starting `task <id>:`, and the effect
+  checked. It is to tell the person the lead has their goal and that questions
+  and the result come to that conversation, and to offer the team's space or a
+  seat's terminal only if they choose to watch or answer in the pane. A person
+  who chose the panes gets the earlier instructions unchanged.
 - **If you're the person's agent,** check your address while work is open, show
   a forwarded prompt whole, and read the newest review before saying the work is
   done (the `rigs` skill and `working-with-an-openrig-team`).
@@ -54,7 +55,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 
 - **Restore** reads `partially_restored`, and names the seat, when it skipped a
   seat that isn't in the snapshot's roster or left one attached. Which seats
-  launch is unchanged, and an adopted seat keeps its session name.
+  launch is unchanged. An adopted seat keeps its recorded session name when tmux
+  and OpenRig's addressing keep it as given; otherwise restore names the old and
+  new address.
 - **Resume one banked original conversation** (opt-in): read
   `GET /api/startup/<rigId>/nodes/<nodeId>/original?snapshotId=<id>&historySessionId=<id>`,
   then POST `action: "resume"` with that `revision`, an `operationId` and the
@@ -67,12 +70,14 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   `POST /api/rigs/<rigId>/delivery-drain/end` ends it. A review deadline prompts
   the owner and never ends the drain. Direct sends and native starts aren't
   held, and unknown delivery isn't replayed.
-- **A restore that can't confirm it stopped a blank session** leaves it in place:
-  the seat reads `attention_required` and says it may still be running. Check
-  with `rig capture`, stop it with `rig seat stop`, then retry.
-- **`rig down` releases a seat whose session OpenRig didn't start** (attached,
+- **A restore that can't confirm it stopped a blank session** keeps that
+  session's record and binding: the seat reads `attention_required` and says the
+  session may still be running. Check with `rig capture`, stop it with
+  `rig seat stop`, then retry.
+- **`rig down` releases a claimed tmux session** (self-attached inside tmux,
   adopted, bound or reconciled), prints `Released, not stopped: <session>`, and
-  exits 0; the session keeps running. Removing a member that joined with
+  exits 0; the session keeps running. An external CLI attachment is unchanged on
+  `down`. Separately, `rig remove` or `shrink` of a member that joined with
   `rig attach --self` outside tmux no longer fails with `409 kill_failed`.
 - **Claude resume and handover:** a pane that moves during resume-token capture
   leaves the token unknown; discovered handover resolves a relative
@@ -80,37 +85,50 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 
 ## Delivery, workflows and tools
 
-- **Shorter stall paths:** the stuck sweep reads undelivered work without
-  blocking, Codex thread lookup reads only new log rows, and a work node's
-  `SPEC.md` is reread only when it changed. These bound measured paths only.
+- **Three daemon read paths changed:** the stuck sweep reads undelivered ids in
+  windows and yields between them (a window and one row's derivation are still
+  synchronous); Codex thread lookup reads only new log rows after its first full
+  read per process and Codex home (a cold or fallback read is still full); a work
+  node's `SPEC.md` is reread when its file metadata changed, within a two-second
+  settle window, or when that metadata can't be read. No speed claim is made for
+  this release.
 - **Draft-aware delivery** reads an empty input box under Claude Code 2.1.322 or
   2.1.323's wide paste hint and auto-update failure as empty and sends once.
   `rig send --dangerously-interact` without `--type-without-checking` now stops
   on a person's text there.
-- **Claude's question dialog** with several questions, an editor shortcut or the
-  preview layout refuses an ordinary send with `target_needs_input`.
+- **Claude's question dialog,** in the several-question, editor-shortcut and
+  preview layouts OpenRig recognizes, refuses an ordinary send with
+  `target_needs_input`.
 - **A send at a model picker** says to close it with Esc; don't use
   `--dangerously-interact` there. A Claude seat that won't start under managed
   `disableSideloadFlags` names the setting.
-- **A resumed Codex conversation** with an old token-refresh failure in its
-  history isn't told to sign in again; a current refusal still is.
-- **`rig provider switch --token-file`** applies the token unless the pane reads
-  as fish.
+- **A resumed Codex conversation** isn't told to sign in again because of an old
+  token-refresh failure that newer output follows. A refusal that is still the
+  latest thing Codex printed, or a marked one quoted in an unfinished code
+  block, still reads as current.
+- **`rig provider switch --token-file`:** the Claude token step is now kept for
+  pane readings it used to drop (Claude itself, nothing, another POSIX shell);
+  after a failed environment correction it's kept only for a session proven to
+  be this seat's, and never for fish or Nushell. An account-home or wrapped
+  launch in a non-POSIX pane still refuses. A command carrying the step doesn't
+  prove the token was applied; check the seat's account.
 - **A hosted member with no wake trigger** gets an `awaiting-pickup:` record: its
   work waits in its queue until it reads it. Don't read that as a failure.
 - **A `rig queue handoff` whose answer was lost** names the source row to read
   (`rig queue show '<id>' --full --json`) before any retry.
 - **`rig workflow revise`** can remove an obsolete required order from unstarted
-  work and projects the newly ready work once. Repeating `rig workflow route`
-  without `--packet` selects the adopted successor and writes nothing.
+  work and projects the newly ready work once. Replaying a `rig workflow route`
+  that adopted a queue handoff's sole successor, without `--packet`, selects that
+  successor and writes nothing.
 - **An external connection's `rig_queue_show`** adds `viewer`, `item.createdBy`
   and actor labels, with `you` true only for this connection.
 - **Also:** `rig bundle check` reports schema-invalid configuration names;
   `rig queue erase --members <empty file> --rig <id>` erases an account rig that
   never had a member; a Pi or OMP runner pane names its model and state;
   `rig environment recreate` handles a replaced Podman socket (not run against a
-  live engine); `rig network status` hides a hub URL's query string; `rig setup`
-  prints the harness login line.
+  live engine); the text output of `rig network status` and the connect
+  confirmation hide a hub URL's query string (`--json` keeps the full URL);
+  `rig setup` prints the harness login line.
 
 ## Limits to keep in view
 
@@ -130,6 +148,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   (`unrecognized_client_version`).
 - **Draft-aware delivery beside the wide footer** accepts only Claude Code's two
   known failure wordings; a new one reads unknown and holds.
+- **Claude's preview question dialog** in a pane too narrow for its 30-column
+  option column plus 4-column gap can render differently and read unknown, so
+  an ordinary send isn't refused there.
 - **`rig scope` and `rig proof` can't be limited to a rig's own project.**
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
@@ -137,7 +158,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   in this release, and such a seat may be asked to review hooks again. With a
   linked `config.toml`, OpenRig can also miss a setting stored for it that
   turns OpenRig's hooks off, and set those hooks up anyway when it moves them
-  into `hooks.json`.
+  into `hooks.json`. ([#3078](https://github.com/mvschwarz/openrig/issues/3078))
 - **"Person approved" entries** an agent recorded for its own approvals don't
   establish the person's approval; check the conversation.
 - **Managed compaction with Claude Code 2.1.322:** typed text in the input box

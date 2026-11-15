@@ -611,11 +611,12 @@ approval. Its setup path teaches an installing assistant the person stays with t
 return address, so the team's questions come back to it. In 0.7.16, OpenRig's own question about a
 seat's prompt doesn't reach a person who isn't registered; it waits with the kernel operator, and
 registering wasn't tested as a fix for this. Since 0.7.17, when the person stays in their own
-conversation, the installer hands their goal over as a task from that conversation's address, and
-the kernel operator brings a seat's prompt there as a task, with its choices verbatim, and relays only
-the person's recorded words; it offers a pane only as their choice. Nothing wakes that conversation,
-so a question waits until the person returns, and this route isn't yet confirmed with a person using
-it end to end. The skill also follows a task handed on to another
+conversation, the installer is instructed to hand their goal over as a task from that conversation's
+address, and the kernel operator to bring a seat's prompt there as a task, with its choices verbatim,
+to relay only the person's recorded words, and to offer a pane only as their choice. Nothing wakes
+that conversation, so a question waits until the person returns; a prompt that changes between its
+capture and the key can take the key; and this guidance isn't yet confirmed with a person using it end
+to end. The skill also follows a task handed on to another
 host with `rig queue show <id> --host <host>`.
 
 `starter` and `factory` are built in: preview the team, inspect `rig up <team> --cwd . --plan`,
@@ -746,8 +747,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
   someone edited it.
   **Since 0.7.12 it stops only a tmux session that carries the seat's own `OPENRIG_NODE_ID`**, on the
   server and session it read. A seat whose session OpenRig didn't start (adopted, bound, reconciled, or
-  joined with `rig attach --self`) is released as `rig unclaim` does, whatever marker it carries: its session
+  joined with `rig attach --self` inside tmux) is released as `rig unclaim` does, whatever marker it carries: its session
   keeps running as its owner's, and `rig down` names it (`Released, not stopped`; `released` in `--json`).
+  A seat joined as an external CLI (outside tmux) keeps its claim on `rig down`.
   A later `rig down` or `rig down --delete` leaves that seat's guidance and Claude settings alone until tmux
   shows its session is gone. Any other unmarked, mismarked or replaced terminal is left running, and
   `rig down` exits 2 naming it and the manual way to stop it; if one is yours, look at it and stop it
@@ -1160,6 +1162,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   cached hook keeps that trust, as with any hook trusted in Codex; the trust covers that
   `CODEX_HOME`, so your own Codex sessions there load the plugin too, and its hooks do nothing
   outside an OpenRig seat; adding your own Codex hook can trigger a re-review of one OpenRig hook.
+  On 0.7.17, when a Codex seat's `config.toml` or `hooks.json` is a symbolic link, OpenRig records
+  its hook trust under the link's target, as in 0.7.14, and such a seat may be asked to review hooks
+  again. With a linked `config.toml`, OpenRig can also miss a setting stored for it that turns
+  OpenRig's hooks off, and set those hooks up anyway when it moves them into `hooks.json` (#3078).
   Since 0.7.15, when a new openrig-core changes one of those six hook declarations, the boot or
   launch that installs it renews OpenRig's approvals from its own record, in the daemon's Codex
   home at boot and in a seat's own Codex home at its launch, instead of stopping at Codex's review.
@@ -1763,8 +1769,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   with secret names, never values): OpenRig then POSTs a pointer to the row when work lands, and a
   2xx records only that the ring was accepted, not that anything woke. When work waits for a
   member nothing can wake, or a rung member doesn't claim it in time, its person is told. Since
-  0.7.17 such work's delivery record reads `awaiting-pickup:` (it waits in its queue until the member
-  reads it), not `unroutable:`.
+  0.7.17, work for a member with no wake trigger has a delivery record reading `awaiting-pickup:` (it
+  waits in its queue until the member reads it), not `unroutable:`.
   A hosted member's roster entry shows whether it's checking in: its expected cadence and its last
   check-in, read as checking in, overdue, not yet checked in or checking in on request, and unknown
   when that can't be read. It's a status, never a gate on delivery. Since 0.7.14 `rig ps`,
