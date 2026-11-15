@@ -517,8 +517,10 @@ relay is a reason to inspect the available routing, not to surrender judgment to
   inputs before changing a progressed run. Ordinary show and TUI inspection distinguish
   source-only edits (such as a catalog address) from executable changes. Preview names
   changed steps, incompatibilities and an exact apply command. Supported revisions preserve
-  completed/live steps, receipts, required obligations and child custody; new work must
-  depend on unfinished work. A changed completed/live contract needs explicit reconsideration:
+  completed/live steps, receipts, required obligations and child custody. An obsolete
+  dependency can be removed from unstarted work: the preview names each removed edge, each
+  loosened required order and each step it makes ready, and applying projects each ready step
+  once. A changed completed/live contract needs explicit reconsideration:
   restore it and revise unstarted successors. Revision does not guess a migration or replay
   accepted consequences. Exception-routing corrections can be adopted for future occurrences;
   existing exception obligations retain custody. Editing source alone does not change the
