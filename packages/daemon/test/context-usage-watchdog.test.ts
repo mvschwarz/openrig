@@ -21,7 +21,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { createContinuityCutoverBaton } from "../src/domain/continuity-policy-materializer.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
-import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { WatchdogPolicyEngine, parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
 import { watchdogRoutes } from "../src/routes/watchdog.js";
 import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
@@ -757,6 +757,51 @@ describe("context-usage-threshold registration", () => {
     generation = "gen-2";
     await evaluate();
     expect(repo().getByIdOrThrow(jobId).watchedFilePath).toBe(named);
+  });
+
+  // A spec whose `context:` is empty or `~` (the threshold on a flag) is valid; naming a file at registration gives it a
+  // context holding that file, rather than failing the registration.
+  it.each([["empty", "context:\n"], ["~", "context: ~\n"]])("a spec whose context is %s still registers a named watched file, and keeps it", async (_shape, contextLine) => {
+    const named = join(tmp, "registration-named.jsonl");
+    const successor = join(tmp, "successor.jsonl");
+    for (const file of [named, successor]) writeFileSync(file, "1");
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-1', 'rig-1', 'target')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-1', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-1', 'node-1', 1, 'gen-1', 'initial', '2026-08-28T09:00:00.000Z')`,
+    ).run();
+
+    const response = await app().request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body({ specYaml: `policy: context-usage-threshold\n${contextLine}`, watchedFilePath: named })),
+    });
+    expect(response.status).toBe(201);
+    const job = await response.json() as { jobId: string; specYaml: string; watchedFilePath: string };
+    expect(job.watchedFilePath).toBe(named);
+    expect(parseWatchdogSpec(job.specYaml).context.watched_file).toBe(named);
+
+    let generation = "gen-1";
+    const repo = () => new WatchdogJobsRepository(db, undefined, () => generation);
+    const evaluate = () => new WatchdogPolicyEngine({ jobsRepo: repo(), historyLog: new WatchdogHistoryLog(db), eventBus: new EventBus(db),
+      deliver: async () => ({ status: "ok" as const }), resolveTargetGeneration: () => generation }).evaluate(repo().getByIdOrThrow(job.jobId));
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-2', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-2', 'node-1', 2, 'gen-2', 'handover', '2026-08-28T10:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'successor-native-session', 'target@rig', 'known', ?, '2026-08-28T10:00:01.000Z')`,
+    ).run(successor);
+    generation = "gen-2";
+    await evaluate();
+    expect(repo().getByIdOrThrow(job.jobId).watchedFilePath).toBe(named);
   });
 
   it("fails registration loudly when neither resolution path exists", async () => {

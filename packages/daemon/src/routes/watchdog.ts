@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { Hono } from "hono";
-import { parseDocument } from "yaml";
+import { isMap, parseDocument } from "yaml";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { WatchdogHistoryLog } from "../domain/watchdog-history-log.js";
@@ -282,6 +282,8 @@ export function watchdogRoutes(): Hono {
 /** The spec with `context.watched_file` set to the named file; everything else in it is kept as written. */
 function withWatchedFile(specYaml: string, watchedFile: string): string {
   const doc = parseDocument(specYaml);
-  doc.setIn(["context", "watched_file"], watchedFile);
+  // A `context:` left empty (or `~`) reads as no context, and a path can't be set inside it: give it one holding the file.
+  if (isMap(doc.get("context", true))) doc.setIn(["context", "watched_file"], watchedFile);
+  else doc.set("context", doc.createNode({ watched_file: watchedFile }));
   return doc.toString();
 }
