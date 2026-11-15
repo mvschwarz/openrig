@@ -17,7 +17,8 @@ choosing nothing. The `rigs` skill tells a person's own agent to bring a seat's
 permission, trust and hook-review prompts to them as questions, then to run the
 `rig seat continue` a seat shows after its startup prompt is answered. A failed
 handover's running successor can be adopted, a seat's runtime home can be
-recorded without a relaunch, and a send to a missing seat is kept and says so.
+recorded without a relaunch, an upgrade keeps OpenRig's packaged recovery
+skills, and a send to a missing seat is kept and says so.
 There are fixes across delivery, workflows and connected assistants, many
 contributed by people using OpenRig.
 
@@ -95,6 +96,17 @@ contributed by people using OpenRig.
 
 ### Recovering the same work
 
+- **An upgrade keeps OpenRig's packaged recovery skills.** After `rig down`, an
+  upgrade and `rig up --existing`, a seat's own unedited copies of OpenRig's
+  packaged skills, such as `claude-compaction-restore` and
+  `seat-continuity-and-handover`, come back at the current packaged contents.
+  Before, a packaged skill whose bytes changed in the upgrade wasn't put back:
+  the restore named it missing, and the seat came back without it. When the
+  upgrade came before `rig down`, the old copy is brought up to date too. An
+  edited copy (its bytes or a file mode), a file OpenRig didn't write, a copy
+  recorded from another source and a skill the seat's profile selects itself
+  stay as they are, and the restore names each. Other plugins' skills aren't
+  changed. It's tested at the unit and source level; see Known limits. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
 - **`rig seat handover <seat> --recover`** adopts the running successor of a
   failed handover, instead of leaving the seat with its retiring occupant.
   Recovery is for Claude seats: it proves the successor's process and identity
@@ -127,7 +139,10 @@ contributed by people using OpenRig.
   bounded wait instead of disarming, and sends `/compact` once the seat is idle.
   Nothing is answered for the person, and a typed draft still stops the
   attempt. `rig compact <seat> --state` shows the prompt; an expiry while it
-  still shows names `preparation_needs_input`. ([#3144](https://github.com/mvschwarz/openrig/pull/3144))
+  still shows names `preparation_needs_input`. A manual compaction also no
+  longer needs a context-usage reading, so `rig compact <seat> --skip-map` now
+  compacts a seat at Claude Code's "Context limit reached" screen even with no
+  usage reading (checked once, in Claude Code's default mode). ([#3144](https://github.com/mvschwarz/openrig/pull/3144))
 - When managed restore or preparation fails for a seat with no independent
   delegation parent, the recovery notice goes to the receiving agent or kernel
   operator, then to a registered person. Existing notices keep their ids and
@@ -279,6 +294,26 @@ contributed by people using OpenRig.
   establish your approval; check the conversation to see who actually decided.
 - **A new Claude agent's startup text can stay unsent in its input box while
   the seat reads ready.** Press Enter in its terminal.
+- **Managed compaction with Claude Code 2.1.322** (other versions weren't run;
+  0.7.15 behaves the same):
+  - If someone has typed text in a Claude seat's input box when managed
+    compaction runs, OpenRig's `/compact` can be sent as part of that text
+    instead of as a command. The seat isn't compacted, but
+    `rig compact --state` reports the compaction, restore and audit as sent.
+    Make sure the input box is empty before compacting, and check that the
+    seat actually compacted.
+  - With the draft-aware typing guard turned on, Claude Code 2.1.322 can leave
+    managed compaction's long preparation prompt unsent (it shows as
+    `[Pasted text #1]`), and the attempt stops as `preparation_incomplete`.
+- **Packaged skills across an upgrade ([#3279](https://github.com/mvschwarz/openrig/pull/3279)):** a Claude seat that loads the
+  vendored openrig-core plugin reads these skills from the plugin, so it keeps
+  no seat copies to follow. A resumed Codex conversation isn't sent its skill
+  catalog again until a fresh start; the files on disk are current. When an
+  upgrade changes only one file's mode and another file's bytes, and
+  `rig down` had already removed the first file, the copy is kept and named
+  rather than followed. If saving a skill's new record fails, files whose
+  source changed are named missing, as before, and a later restore tries
+  again.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.14. A change to key it by the file's own name isn't

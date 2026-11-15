@@ -1059,7 +1059,11 @@ version, from checking the environment to a useful report to the OpenRig team.
   approval, a manual `rig compact` keeps waiting for someone to answer it, within its 180-second
   budget; OpenRig never answers it, and the request times out after 240 seconds. Since 0.7.16 a
   manual attempt whose `/compact` is deferred at such a prompt returns to that wait instead of
-  disarming, and sends once the seat is idle; `--state` shows the prompt. A failed managed restore
+  disarming, and sends once the seat is idle; `--state` shows the prompt. Since 0.7.16 a manual
+  compaction doesn't need a context-usage reading, so `--skip-map` compacts a seat at Claude Code's
+  "Context limit reached" screen. Before compacting, check the seat's input box is empty, and
+  afterwards that it actually compacted: `/compact` sent into typed text isn't a command, though
+  `--state` still reports it sent. A failed managed restore
   or preparation notice for a seat with no independent delegation parent goes to the receiving
   agent or kernel operator, then a registered person. The `claude-compaction-restore`
   skill covers writing and reading the map; `claude-compact-in-place` no longer ships. After a
@@ -1747,7 +1751,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   edited, unrecorded or linked copy is kept and named, and a source that can't be read leaves the saved copy.
   `keep_saved`, the default, keeps the saved copy, but a missing file comes back only from a source that still has the
   bytes OpenRig wrote: a file whose source changed after `rig down` stays missing, named in the restore's warnings,
-  even when the rest of the skill (its `SKILL.md`, say) is unchanged.
+  even when the rest of the skill (its `SKILL.md`, say) is unchanged. Since 0.7.16 OpenRig's own packaged skills
+  (the vendored openrig-core plugin's, in a seat's loadout) follow the current packaged source on restore by default,
+  under the same rule: an edited, unrecorded or linked copy, a copy recorded from another source, and a skill the
+  profile selects itself are kept and named.
 - **`rig startup-proof submit`** — answer an explicitly selected authenticated startup challenge.
   Startup adds no proof exercise by default. Declare `startup_proof` with `authenticated` or
   `none` in the applicable startup layers; see `docs/reference/rig-spec.md#startup-block/startup-proof-selection`.

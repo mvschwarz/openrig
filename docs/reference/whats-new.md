@@ -6,8 +6,9 @@ built-in `standard` or `open`, and the `rigs` skill has you bring a seat's
 permission, trust and hook-review prompts to your person as questions, then
 run the `rig seat continue` a seat shows after its startup prompt is answered.
 A failed handover's running successor can be adopted, a
-seat's runtime home can be recorded, and a send to a missing seat is kept and
-says so. It adds two database migrations. If you upgraded from 0.7.14 or
+seat's runtime home can be recorded, an upgrade keeps OpenRig's packaged
+recovery skills, and a send to a missing seat is kept and says so. It adds two
+database migrations. If you upgraded from 0.7.14 or
 earlier, also read "What changed in OpenRig 0.7.15" below, and so on back. For
 the full capability map, read
 `rig context get onboarding-width/public-what-you-can-do.md`. After the upgraded
@@ -61,6 +62,13 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 
 ## Recovery
 
+- **After an upgrade, a seat's packaged recovery skills come back current:**
+  on `rig up --existing`, a seat's own unedited copies of OpenRig's packaged
+  skills, such as `claude-compaction-restore` and
+  `seat-continuity-and-handover`, follow the current packaged source instead of
+  being named missing. An edited copy (its bytes or a file mode), a file
+  OpenRig didn't write, a copy recorded from another source and a skill the
+  profile selects itself are kept, and the restore names each. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
 - **A handover failed but its successor is running:** for a Claude seat, try
   `rig seat handover <seat> --recover --reason "<why>"`, which adopts the
   running successor, before another handover or a fresh launch. It records the
@@ -78,7 +86,10 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   successor, settles as `abandoned` at daemon start or on
   `rig seat set-runtime <seat> --recover`. ([#3109](https://github.com/mvschwarz/openrig/pull/3109))
 - A manual `rig compact` whose preparation stops at a prompt waits instead of
-  disarming; `rig compact <seat> --state` shows the prompt. ([#3144](https://github.com/mvschwarz/openrig/pull/3144))
+  disarming; `rig compact <seat> --state` shows the prompt. A manual compaction
+  no longer needs a context-usage reading, so `rig compact <seat> --skip-map`
+  compacts a seat at Claude Code's "Context limit reached" screen (checked once,
+  in Claude Code's default mode). ([#3144](https://github.com/mvschwarz/openrig/pull/3144))
 - A failed managed restore or preparation notice for a seat with no
   independent parent goes to the receiving agent or kernel operator, then a
   registered person. ([#3235](https://github.com/mvschwarz/openrig/pull/3235))
@@ -148,6 +159,23 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   establish your approval; check the conversation to see who actually decided.
 - **A new Claude agent's startup text can stay unsent in its input box while
   the seat reads ready.** Press Enter in its terminal.
+- **Managed compaction with Claude Code 2.1.322** (other versions weren't run;
+  0.7.15 behaves the same): if someone has typed text in the seat's input box
+  when managed compaction runs, `/compact` can be sent as part of that text
+  instead of as a command. The seat isn't compacted, but `rig compact --state`
+  reports the compaction, restore and audit as sent. Make sure the input box is
+  empty before compacting, and check that the seat actually compacted. With the
+  draft-aware typing guard on, the long preparation prompt can stay unsent (it
+  shows as `[Pasted text #1]`), and the attempt stops as
+  `preparation_incomplete`.
+- **Packaged skills across an upgrade:** a Claude seat that loads the vendored
+  openrig-core plugin reads these skills from the plugin and keeps no seat
+  copies. A resumed Codex conversation isn't sent its skill catalog again until
+  a fresh start; the files are current. When an upgrade changes only one file's
+  mode and another file's bytes, and `rig down` had already removed the first,
+  the copy is kept and named rather than followed. If saving a skill's new
+  record fails, files whose source changed are named missing, as before, and a
+  later restore tries again.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.14. A change to key it by the file's own name isn't
