@@ -93,7 +93,8 @@ export function parseSkillFrontmatter(content: string): ParseResult {
 
   let parsed: unknown;
   try {
-    parsed = parseYaml(fmText!);
+    // The delimiter's preceding LF is outside the capture; on CRLF files its CR is not.
+    parsed = parseYaml(fmText!.replace(/\r$/, ""));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, reason: `frontmatter YAML parse error: ${msg}` };

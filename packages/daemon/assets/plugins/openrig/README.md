@@ -70,11 +70,24 @@ codex mcp add openrig --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --fr
 
 - **VS Code:** verified on 1.145. Older versions, such as 1.110, don't load Agent Plugins.
 - **Cursor:** verified on 3.27, as a local plugin.
-- **Copilot CLI:** not yet verified; the steps follow its documentation.
+- **Copilot CLI:** verified on 1.0.107. Install from this repository's marketplace, and trust the folder when Copilot
+  CLI asks:
 
-Install the plugin from this folder with the app's own install-from-folder step. In VS Code that's **Chat: Install Plugin
-from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload. The app starts one `openrig`
-server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load the skill.
+  ```bash
+  copilot plugin marketplace add mvschwarz/openrig
+  copilot plugin install openrig@openrig-app
+  ```
+
+  Unlike the other apps, this installs the plugin from this repository's main branch, not from your OpenRig package, so
+  its skill can be newer than the OpenRig you run.
+
+  Copilot CLI also loads the skills in `~/.agents/skills`. Where OpenRig's own skills are installed there, it can choose
+  OpenRig's `openrig-skills` skill before this plugin's `working-with-an-openrig-team`. If it does, it may ask for a
+  skill pack that isn't there and get `pack_not_found`: ask it to use `working-with-an-openrig-team`.
+
+In VS Code and Cursor, install the plugin from this folder with the app's own install-from-folder step. In VS Code
+that's **Chat: Install Plugin from Source**; in Cursor, copy the folder to `~/.cursor/plugins/local/openrig` and reload.
+The app starts one `openrig` server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load the skill.
 
 - **No seat:** these apps can't set a seat for a plugin's server, so it starts with none. An app started from a shell
   where `OPENRIG_SESSION_NAME` (or the older `RIGGED_SESSION_NAME`) is set passes it on, but only for that launch: on
@@ -90,14 +103,20 @@ server, `rig mcp serve --front-door`, from the root `mcp.json`, and should load 
   - Environment export needs an HTTP work grant, which a plugin's local server never has.
 - **To give the app a seat,** add your own MCP server that runs `rig mcp serve --front-door` with
   `OPENRIG_SESSION_NAME=<address>` in its environment, and turn the plugin's `openrig` server off, so the app runs one
-  OpenRig server. The plugin's skill stays installed. Verified on VS Code 1.145 and Cursor 3.27, where the team's
-  questions then reach you and your answers are recorded, across a reopen:
+  OpenRig server. The plugin's skill stays installed. Verified on VS Code 1.145, Cursor 3.27 and Copilot CLI 1.0.107,
+  where the team's questions then reach you and your answers are recorded, across a reopen:
   - **VS Code:** add it to your user `mcp.json` under a name other than `openrig`, such as `openrig-seat`, and disable
     the plugin's `openrig` in **MCP: List Servers**. Two servers named `openrig` are hard to tell apart, and starting
     one can stop the other.
   - **Cursor:** add it to `.cursor/mcp.json` (the project's or your user one), turn it on, and disable
     **openrig · Plugin** in **Customize → MCPs**.
-  - **Copilot CLI:** add it the CLI's own way and turn the plugin's server off; not yet verified.
+  - **Copilot CLI:** add it, then turn the plugin's server off. Copilot CLI saves both, so the seat holds in new
+    sessions:
+
+    ```bash
+    copilot mcp add openrig-seat --env OPENRIG_SESSION_NAME=<address> -- rig mcp serve --front-door
+    copilot mcp disable openrig
+    ```
 
 ## What it doesn't do
 
