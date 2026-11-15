@@ -39,7 +39,7 @@ function fixture() {
     resolveOccupantGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
   const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name), async () => {});
-  const bridge = new HookBridge(db);
+  const bridge = new HookBridge(db, { lease: (id, fn) => guard.exclusive(id, fn) });
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("agentActivityStore" as never, store as never);
@@ -71,7 +71,7 @@ function fixture() {
       .then(async (res) => ({ status: res.status, body: await res.json() as Record<string, unknown> }));
     return { reading, release, response };
   }
-  return { db, seat, other, sessions, bridge, grants, generation, issue, post, heldPost, replace: (reserved?: string) => occupy(seat.id, SEAT, "handover", reserved) };
+  return { db, seat, other, sessions, guard, bridge, grants, generation, issue, post, heldPost, replace: (reserved?: string) => occupy(seat.id, SEAT, "handover", reserved) };
 }
 
 const armBody = (f: ReturnType<typeof fixture>, extra: Record<string, unknown> = {}) => ({ sessionName: SEAT, generation: f.generation(f.seat.id), hookEvent: "Stop", ...extra });
@@ -126,5 +126,63 @@ describe("the hook bridge's routes (slice 13, #3270 round 1)", () => {
     const res = await f.post("arm", INSTALL_TOKEN, null);
     expect(res.status).toBeLessThan(500);
     expect(res.body).toMatchObject({ ok: false });
+  });
+  // #3270 round 3, R3-F1: a poll waiting for the seat's lease is checked again once it has it.
+  const holdLease = (f: ReturnType<typeof fixture>) => {
+    let release!: () => void;
+    const held = f.guard.exclusive(f.seat.id, () => new Promise<void>((r) => { release = r; }));
+    return { release: async () => { release(); await held; } };
+  };
+  const queueOne = (f: ReturnType<typeof fixture>, id: string) => f.bridge.deposit({ nodeId: f.seat.id, session: SEAT, occupant: f.generation(f.seat.id), pane: "%1" },
+    SEAT, "From: peer@team\n---\nhello\n---", { actorSession: "peer@team" }, [id]);
+
+  it("refuses a poll whose grant was revoked while it waited for the seat's lease, and claims nothing", async () => {
+    const f = fixture();
+    f.bridge.setPreference(f.seat.id, true, "human@team", "on");
+    const grant = f.issue();
+    const armed = await f.post("arm", grant.token, armBody(f));
+    queueOne(f, "m1");
+    const lease = holdLease(f);
+    const polling = f.post("poll", grant.token, armBody(f, { armId: armed.body.armId }));
+    await new Promise((r) => setTimeout(r, 30));
+    f.grants.revoke({ grantId: grant.grantId }, "test");
+    await lease.release();
+    expect(await polling).toMatchObject({ status: 401, body: { code: "activity_grant_revoked" } });
+    expect(f.bridge.queued(f.seat.id).map((r) => r.outboxId)).toEqual(["m1"]);
+  });
+
+  it("refuses a poll whose occupant was replaced while it waited for the seat's lease, and claims nothing", async () => {
+    const f = fixture();
+    f.bridge.setPreference(f.seat.id, true, "human@team", "on");
+    const armed = await f.post("arm", INSTALL_TOKEN, armBody(f));
+    queueOne(f, "m1");
+    const lease = holdLease(f);
+    const polling = f.post("poll", INSTALL_TOKEN, armBody(f, { armId: armed.body.armId }));
+    await new Promise((r) => setTimeout(r, 30));
+    f.replace();
+    await lease.release();
+    expect(await polling).toMatchObject({ status: 409, body: { code: "hook_bridge_stale_occupant" } });
+    expect(f.bridge.queued(f.seat.id).map((r) => r.outboxId)).toEqual(["m1"]);
+  });
+
+  it("still delivers once to a poll whose authority didn't change while it waited", async () => {
+    const f = fixture();
+    f.bridge.setPreference(f.seat.id, true, "human@team", "on");
+    const grant = f.issue();
+    const armed = await f.post("arm", grant.token, armBody(f));
+    queueOne(f, "m1");
+    const lease = holdLease(f);
+    const polling = f.post("poll", grant.token, armBody(f, { armId: armed.body.armId }));
+    await new Promise((r) => setTimeout(r, 30));
+    await lease.release();
+    const answer = await polling;
+    expect(answer).toMatchObject({ status: 200, body: { action: "deliver" } });
+    expect((answer.body.messages as Array<{ outboxId: string }>).map((m) => m.outboxId)).toEqual(["m1"]);
+  });
+
+  it("answers the opt-in route's JSON null body as a refusal, not a server error (optional)", async () => {
+    const f = fixture();
+    const res = await f.post(`seat/${SEAT}`, null, null);
+    expect(res.status).toBe(400);
   });
 });

@@ -39,7 +39,8 @@ hookBridgeRoutes.post("/seat/:seatRef", async (c) => {
   const bridge = bridgeOf(c);
   const guard = guardOf(c);
   if (!bridge || !guard) return unavailable(c);
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const parsed = await c.req.json<unknown>().catch(() => null);
+  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
   const actor = transportSenderSession(c) ?? UNATTRIBUTED_ACTOR;
   if (typeof body.enabled !== "boolean") return c.json({ ok: false, code: "invalid_hook_bridge", error: "enabled must be true or false." }, 400);
   if (typeof body.reason !== "string" || !body.reason.trim()) return c.json({ ok: false, code: "hook_bridge_reason_required", error: "A reason is required." }, 400);
@@ -55,8 +56,10 @@ hookBridgeRoutes.post("/seat/:seatRef", async (c) => {
   }
 });
 
-/** The waiter's seat: authenticated like an activity hook, and naming the seat's current occupant. */
-async function waiter(c: Context): Promise<{ bridge: HookBridge; nodeId: string; sessionName: string; generation: string | null; body: Record<string, unknown> } | Response> {
+/** The waiter's seat: authenticated like an activity hook, and naming the seat's current occupant. `recheck` runs the same
+ *  checks again (the grant read afresh, the occupant), for a route that waits before it acts. */
+async function waiter(c: Context): Promise<{ bridge: HookBridge; nodeId: string; sessionName: string; generation: string | null; body: Record<string, unknown>;
+  recheck: () => Response | null } | Response> {
   const bridge = bridgeOf(c);
   const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
   const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
@@ -66,22 +69,35 @@ async function waiter(c: Context): Promise<{ bridge: HookBridge; nodeId: string;
   if ("refused" in principal) return principal.refused;
   // A body that isn't a JSON object (null, an array, a number) names no seat: it's refused below, never a crash.
   const parsed = await c.req.json<unknown>().catch(() => null);
-  let body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  if (principal.grant) {
-    const bound = bindToGrant(c, store, principal.grant, body);
-    if ("refused" in bound) return bound.refused;
-    body = bound.body;
-  }
-  const sessionName = typeof body.sessionName === "string" ? body.sessionName : "";
-  let target;
-  try { target = guard.target(sessionName); } catch { return c.json({ ok: false, code: "hook_bridge_seat_unknown", error: "This seat isn't known here." }, 404); }
-  if ((principal.grant && principal.grant.nodeId !== target.nodeId) || (typeof body.nodeId === "string" && body.nodeId !== target.nodeId)) {
-    return c.json({ ok: false, code: "hook_bridge_seat_mismatch", error: "This waiter speaks for another seat." }, 403);
-  }
-  const generation = typeof body.generation === "string" ? body.generation : null;
-  const current = registry.currentOccupantTenure(target.nodeId)?.generationUuid ?? null;
-  if (generation !== current) return c.json({ ok: false, code: "hook_bridge_stale_occupant", stop: true, error: "This waiter's occupant was replaced." }, 409);
-  return { bridge, nodeId: target.nodeId, sessionName: target.session, generation, body };
+  const raw = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  // Synchronous: nothing is awaited between these checks and what the route does next.
+  const authorize = (): Response | { nodeId: string; sessionName: string; generation: string | null; body: Record<string, unknown> } => {
+    let body = raw;
+    if (principal.grant) {
+      const bound = bindToGrant(c, store, principal.grant, body);
+      if ("refused" in bound) return bound.refused;
+      body = bound.body;
+    }
+    const sessionName = typeof body.sessionName === "string" ? body.sessionName : "";
+    let target;
+    try { target = guard.target(sessionName); } catch { return c.json({ ok: false, code: "hook_bridge_seat_unknown", error: "This seat isn't known here." }, 404); }
+    if ((principal.grant && principal.grant.nodeId !== target.nodeId) || (typeof body.nodeId === "string" && body.nodeId !== target.nodeId)) {
+      return c.json({ ok: false, code: "hook_bridge_seat_mismatch", error: "This waiter speaks for another seat." }, 403);
+    }
+    const generation = typeof body.generation === "string" ? body.generation : null;
+    const current = registry.currentOccupantTenure(target.nodeId)?.generationUuid ?? null;
+    if (generation !== current) return c.json({ ok: false, code: "hook_bridge_stale_occupant", stop: true, error: "This waiter's occupant was replaced." }, 409);
+    return { nodeId: target.nodeId, sessionName: target.session, generation, body };
+  };
+  const admitted = authorize();
+  if (admitted instanceof Response) return admitted;
+  const recheck = () => {
+    const again = authorize();
+    if (again instanceof Response) return again;
+    return again.nodeId === admitted.nodeId && again.generation === admitted.generation ? null
+      : c.json({ ok: false, code: "hook_bridge_stale_occupant", stop: true, error: "This waiter's occupant was replaced." }, 409);
+  };
+  return { bridge, ...admitted, recheck };
 }
 
 hookBridgeRoutes.post("/arm", async (c) => {
@@ -100,7 +116,10 @@ hookBridgeRoutes.post("/poll", async (c) => {
   if (w instanceof Response) return w;
   if (typeof w.body.armId !== "string") return c.json({ ok: false, code: "invalid_hook_bridge", error: "armId required." }, 400);
   // Under the seat's delivery lease: a typed send to the seat finishes before this poll can take what's queued behind it.
-  return c.json({ ok: true, ...await w.bridge.pollUnderLease(w.nodeId, w.body.armId) });
+  // The waiter's checks run again once the lease is held, right before the claim.
+  const answer = await w.bridge.pollUnderLease(w.nodeId, w.body.armId, w.recheck);
+  if ("refused" in answer) return answer.refused;
+  return c.json({ ok: true, ...answer });
 });
 
 hookBridgeRoutes.post("/ack", async (c) => {

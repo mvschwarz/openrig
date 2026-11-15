@@ -73,6 +73,16 @@ interface QueuedRow { outboxId: string; body: string; senderSession: string; que
 
 export type HookBridgeEvent = Extract<RigEvent, { type: `transport.hook_bridge_${string}` }>;
 
+/** How a queued message ended at the bridge, for the row that sent it (a queue wake's nudge record reads it). `typed`
+ *  carries the typed fallback's own result. */
+export interface HookBridgeEnd {
+  outboxId: string;
+  auditPointer: string | null;
+  kind: "handed-to-hook" | "typed" | "not-delivered" | "claimed-unacked";
+  result?: { ok: boolean; outcome?: string; verified?: boolean; sent?: boolean; inputPhase?: string; reason?: string; error?: string };
+  reason?: string;
+}
+
 export class HookBridgeError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
@@ -108,6 +118,8 @@ export class HookBridge {
   private readonly versions = new Map<string, Promise<string | null>>();
   private readonly launchNotes = new Map<string, string>();
   private readonly now: () => number;
+  /** Told how each queued message ended at the bridge; startup points a queue wake's end at its queue row. */
+  onEnd?: (end: HookBridgeEnd) => void;
 
   constructor(readonly db: Database.Database, private readonly deps: {
     now?: () => number;
@@ -157,6 +169,8 @@ export class HookBridge {
     const key = `${executable}\0${(this.deps.stamp ?? executableStamp)(executable) ?? ""}`;
     if (!this.versions.has(key)) this.versions.set(key, Promise.resolve((this.deps.version ?? claudeVersion)(executable)).catch(() => null));
     const version = await this.versions.get(key)!;
+    // An unreadable version (a timed-out probe under load, say) is read again at the next launch.
+    if (version === null) this.versions.delete(key);
     if (version && atLeast(version, HOOK_BRIDGE_MIN_CLAUDE)) return true;
     this.launchNotes.set(nodeId, version
       ? `Claude Code ${version} is older than ${HOOK_BRIDGE_MIN_CLAUDE}, the first with the bridge's asyncRewake hooks: launched without them, delivery stays typed.`
@@ -203,6 +217,10 @@ export class HookBridge {
     const outbox = new OutboxHandler(this.db);
     const queuedAt = new Date(this.now()).toISOString();
     const receipt: BridgeReceipt = { channel: HOOK_BRIDGE_CHANNEL, state: "queued", queuedAt, ...(opts.admission ? { admission: opts.admission } : {}) };
+    // An id already settled (delivered, failed, held elsewhere) isn't queued again, and isn't reported queued: null, and
+    // nothing changed, so the send takes the path a reused id takes without the bridge.
+    const settled = this.db.prepare("SELECT 1 FROM outbox_entries WHERE outbox_id = ? AND delivery_state NOT IN ('pending', 'sending')");
+    if (ids.some((id) => settled.get(id))) return null;
     this.db.transaction(() => {
       for (const id of ids) {
         outbox.record({ outboxId: id, senderSession: opts.actorSession ?? "unknown", destinationSession: sessionName, body: text,
@@ -280,8 +298,22 @@ export class HookBridge {
       guard_delivery = json_set(guard_delivery, '$.state', 'not-delivered', '$.reason', ?)
       WHERE outbox_id = ? AND delivery_state = 'sending' AND json_extract(guard_delivery, '$.channel') = ? AND json_extract(guard_delivery, '$.state') = 'queued'`)
       .run(reason, outboxId, HOOK_BRIDGE_CHANNEL).changes === 1;
-    if (ended) this.deps.emit?.({ type: "transport.hook_bridge_fallback", nodeId, sessionName, outboxIds: [outboxId], reason: `not delivered: ${reason}` });
+    if (ended) {
+      this.deps.emit?.({ type: "transport.hook_bridge_fallback", nodeId, sessionName, outboxIds: [outboxId], reason: `not delivered: ${reason}` });
+      this.ended({ outboxId, kind: "not-delivered", reason });
+    }
     return ended;
+  }
+
+  /** The typed fallback's result for a message the bridge handed back. */
+  typedEnd(outboxId: string, result: NonNullable<HookBridgeEnd["result"]>): void {
+    this.ended({ outboxId, kind: "typed", result });
+  }
+
+  private ended(end: Omit<HookBridgeEnd, "auditPointer">): void {
+    if (!this.onEnd) return;
+    const row = this.db.prepare("SELECT audit_pointer FROM outbox_entries WHERE outbox_id = ?").get(end.outboxId) as { audit_pointer: string | null } | undefined;
+    try { this.onEnd({ ...end, auditPointer: row?.audit_pointer ?? null }); } catch { /* recording an end never fails delivery */ }
   }
 
   // -- The waiter's side --------------------------------------------------------------------------------------------
@@ -329,7 +361,7 @@ export class HookBridge {
       const heldNow = again.rows.filter((r) => r.admission && this.deps.holds?.(nodeId, r.admission));
       if (!heldNow.length) return { action: "deliver", batchId: again.batchId, messages: again.messages };
       this.markUncertain(nodeId, again.sessionName, again.rows.map((r) => r.outboxId),
-        "the seat's typing guard held it after its waiter took it; it may or may not have reached the seat, and isn't resent");
+        "the seat's typing guard held it after its waiter took it; it may or may not have reached the seat, and the bridge doesn't resend it");
       return { action: "wait" };
     }
     if (seat.turn !== "idle") return { action: "wait" };
@@ -372,8 +404,11 @@ export class HookBridge {
 
   /** A waiter's poll, under the seat's delivery lease: it can't take a message while a typed send to the seat is under
    *  way, so a later message never reaches the seat before an earlier typed one. */
-  pollUnderLease(nodeId: string, armId: string): Promise<ReturnType<HookBridge["poll"]>> {
-    return this.deps.lease ? this.deps.lease(nodeId, () => this.poll(nodeId, armId)) : Promise.resolve(this.poll(nodeId, armId));
+  pollUnderLease<R>(nodeId: string, armId: string, authorize?: () => R | null): Promise<ReturnType<HookBridge["poll"]> | { refused: R }> {
+    // The caller's checks (its grant, the seat's occupant) are run again once the lease is held, right before the claim,
+    // with nothing awaited in between: a poll that waited can't claim on authority it lost meanwhile.
+    const claim = () => { const refused = authorize?.() ?? null; return refused !== null ? { refused } : this.poll(nodeId, armId); };
+    return this.deps.lease ? this.deps.lease(nodeId, claim) : Promise.resolve(claim());
   }
 
   /** The waiter wrote a batch to its hook's output and is about to exit 2: each message was handed to Claude's hook. That
@@ -398,6 +433,7 @@ export class HookBridge {
     seat.wakes += 1;
     const outboxIds = rows.map((r) => r.outbox_id);
     if (outboxIds.length) this.deps.emit?.({ type: "transport.hook_bridge_wake", nodeId, sessionName, armId, outboxIds, hookEvent });
+    for (const id of outboxIds) this.ended({ outboxId: id, kind: "handed-to-hook" });
     return { outboxIds };
   }
 
@@ -411,7 +447,8 @@ export class HookBridge {
   }
 
   /** Claimed messages whose waiter is gone without an ack (its arm replaced, or not polled within the bound) may or may
-   *  not have reached Claude: indeterminate, never resent, and named in the seat's status and an event. Run by the sweep. */
+   *  not have reached Claude: indeterminate, never resent by the bridge, and named in the seat's status and an event. Run
+   *  by the sweep. */
   reconcileUnacked(): string[] {
     const rows = this.db.prepare(`SELECT outbox_id, destination_session, json_extract(guard_binding, '$.nodeId') AS node_id,
       json_extract(guard_delivery, '$.armId') AS arm_id, json_extract(guard_delivery, '$.claimedAt') AS claimed_at
@@ -423,17 +460,19 @@ export class HookBridge {
       return arm?.armId !== r.arm_id || now - Math.max(arm.lastPollAt, Date.parse(r.claimed_at ?? "") || 0) >= HOOK_BRIDGE_LIVE_BOUND_MS;
     });
     for (const r of stale) this.markUncertain(r.node_id, r.destination_session, [r.outbox_id],
-      "its waiter took it and stopped without saying it handed it to Claude's hook; it may or may not have reached the seat, and isn't resent");
+      "its waiter took it and stopped without saying it handed it to Claude's hook; it may or may not have reached the seat, and the bridge doesn't resend it");
     return stale.map((r) => r.outbox_id);
   }
 
-  /** Claimed messages that may or may not have reached the seat: indeterminate (claimed-unacked), never resent, named in
-   *  the seat's status and an event. */
+  /** Claimed messages that may or may not have reached the seat: indeterminate (claimed-unacked), never resent by the
+   *  bridge, named in the seat's status and an event. A queue wake's own recovery may still send it again, saying
+   *  delivery may repeat: that's the queue's rule for an uncertain wake. */
   private markUncertain(nodeId: string, sessionName: string, outboxIds: string[], reason: string): void {
     const mark = this.db.prepare(`UPDATE outbox_entries SET delivery_state = 'indeterminate', guard_delivery = json_set(guard_delivery, '$.state', 'claimed-unacked')
       WHERE outbox_id = ? AND delivery_state = 'sending' AND json_extract(guard_delivery, '$.state') = 'claimed'`);
     const marked = this.db.transaction(() => outboxIds.filter((id) => mark.run(id).changes === 1))();
     if (marked.length) this.deps.emit?.({ type: "transport.hook_bridge_uncertain", nodeId, sessionName, outboxIds: marked, reason });
+    for (const id of marked) this.ended({ outboxId: id, kind: "claimed-unacked", reason });
   }
 
   /** What `rig seat hook-bridge` shows. */
@@ -443,6 +482,9 @@ export class HookBridge {
     const uncertain = this.db.prepare(`SELECT outbox_id FROM outbox_entries WHERE delivery_state = 'indeterminate' AND guard_binding IS NOT NULL
       AND json_extract(guard_binding, '$.nodeId') = ? AND json_extract(guard_delivery, '$.channel') = ? AND json_extract(guard_delivery, '$.state') = 'claimed-unacked'
       ORDER BY ts_dispatched DESC LIMIT 20`).all(nodeId, HOOK_BRIDGE_CHANNEL) as Array<{ outbox_id: string }>;
+    const notDelivered = this.db.prepare(`SELECT outbox_id, json_extract(guard_delivery, '$.reason') AS reason FROM outbox_entries WHERE delivery_state = 'failed'
+      AND guard_binding IS NOT NULL AND json_extract(guard_binding, '$.nodeId') = ? AND json_extract(guard_delivery, '$.channel') = ?
+      AND json_extract(guard_delivery, '$.state') = 'not-delivered' ORDER BY ts_dispatched DESC LIMIT 20`).all(nodeId, HOOK_BRIDGE_CHANNEL) as Array<{ outbox_id: string; reason: string | null }>;
     return {
       preference: pref,
       effective: pref ? this.routes({ nodeId, session: "", occupant, pane: null }) : false,
@@ -454,7 +496,9 @@ export class HookBridge {
       turn: seat ? { state: seat.turn, since: new Date(seat.turnSince).toISOString() } : null,
       expiredAt: seat?.expiredAt ? new Date(seat.expiredAt).toISOString() : null,
       queued: this.queued(nodeId).length,
-      uncertain: { outboxIds: uncertain.map((r) => r.outbox_id), note: "Taken by a waiter that stopped without saying it handed them to Claude's hook: they may or may not have reached the seat, and aren't resent." },
+      uncertain: { outboxIds: uncertain.map((r) => r.outbox_id), note: "Taken by a waiter that stopped without saying it handed them to Claude's hook: they may or may not have reached the seat. The bridge never resends them; a queue wake's own recovery may, saying delivery may repeat." },
+      notDelivered: { outboxIds: notDelivered.map((r) => r.outbox_id), reasons: Object.fromEntries(notDelivered.map((r) => [r.outbox_id, r.reason ?? ""])),
+        note: "Queued for an occupant of the seat who has gone: not typed into the seat's current occupant. Their sender isn't told; a fresh send reaches the current occupant." },
       wakesSinceDaemonStart: seat?.wakes ?? 0,
       cost: "Each wake is one model turn on the seat's own login; a burst of messages to an idle seat can cost several.",
       bounds: { liveSeconds: HOOK_BRIDGE_LIVE_BOUND_MS / 1000, turnSeconds: HOOK_BRIDGE_TURN_BOUND_MS / 1000, hookTimeoutSeconds: HOOK_BRIDGE_TIMEOUT_SECONDS, minClaude: HOOK_BRIDGE_MIN_CLAUDE },

@@ -14,10 +14,11 @@ import { SessionTransport } from "../src/domain/session-transport.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
-import { HOOK_BRIDGE_LIVE_BOUND_MS, HookBridge } from "../src/domain/hook-bridge.js";
+import { HOOK_BRIDGE_LIVE_BOUND_MS, HOOK_BRIDGE_TURN_BOUND_MS, HookBridge } from "../src/domain/hook-bridge.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
 
 // A send bound to an original conversation: the native record check is the expected-identity suite's; here it passes,
 // so the only question is whether the bridge takes the send.
@@ -50,7 +51,8 @@ async function seat() {
   vi.spyOn(tmux, "listPanes").mockResolvedValue([{ id: "%1", index: 0, cwd: root, width: 120, height: 40, active: true }]);
   vi.spyOn(tmux, "probeSession").mockResolvedValue({ state: "present" } as never);
   vi.spyOn(tmux, "isPaneInMode").mockResolvedValue(false);
-  vi.spyOn(tmux, "capturePaneContent").mockResolvedValue("● ready\n────────\n❯ \n────────");
+  const screen = { text: "● ready\n────────\n❯ \n────────" };
+  vi.spyOn(tmux, "capturePaneContent").mockImplementation(async () => screen.text);
   vi.spyOn(ProcessCensus.prototype, "list").mockResolvedValue([{ pid: 10, ppid: 1, command: "zsh" }, { pid: 20, ppid: 10, command: "claude" }] as never);
   const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name), async () => {});
   tmux.deliveryGuard = guard;
@@ -65,7 +67,7 @@ async function seat() {
   /** A new occupant in the same seat and pane, as a handover leaves it. */
   const replaceOccupant = () => { const next = registry.registerSession(node.id, sessionName, "handover"); registry.updateStatus(next.id, "running");
     registry.updateBinding(node.id, { tmuxSession: sessionName, tmuxPane: "%1" }); return registry.currentOccupantTenure(node.id)?.generationUuid ?? null; };
-  return { db, guard, bridge, transport, writes, hooks, occupant, nodeId: node.id, sessionName, optInAndArm, replaceOccupant, advance: (ms: number) => { now += ms; } };
+  return { db, guard, bridge, transport, writes, hooks, screen, occupant, nodeId: node.id, sessionName, optInAndArm, replaceOccupant, advance: (ms: number) => { now += ms; } };
 }
 
 describe("the transport's hook-bridge branch (slice 13)", () => {
@@ -244,5 +246,70 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect((await newer).outcome).toBe("bridged");
     expect(order).toEqual(["poll", "newer"]);
     expect(s.writes.filter((w) => w === "paste")).toHaveLength(1);
+  });
+  // #3270 round 3.
+  it("doesn't bridge a send that carries a write-time check, such as managed compaction's /compact: it's typed, and its check runs (F5)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    let checked = 0;
+    const compact = await s.transport.send(s.sessionName, "/compact OpenRig managed compaction", { actorSession: "openrig@system", openrigNotice: true, beforeWrite: () => { checked++; } });
+    expect(compact.outcome).not.toBe("bridged");
+    expect(checked).toBeGreaterThan(0);
+    expect(s.writes).toContain("paste");
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+  });
+
+  it("doesn't bridge a slash command even without a check: Claude runs those only from typed input (F5)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const result = await s.transport.send(s.sessionName, "/clear", { actorSession: "peer@team" });
+    expect(result.outcome).not.toBe("bridged");
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+  });
+
+  it("types the watchdog's periodic reminders and parked-owner wakes to an armed seat, never queuing them (R3-F2, interim)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const deliver = makeWatchdogDeliver({ sessionTransport: s.transport, outbox: new OutboxHandler(s.db) });
+    const periodic = await deliver({ targetSession: s.sessionName, message: "periodic check" }, { jobId: "job-p", policy: "periodic-reminder", occurrenceId: "occ-1" });
+    const parked = await deliver({ targetSession: s.sessionName, message: "you hold an open row" }, { jobId: "job-q", policy: "parked-owner-consumer" });
+    expect([periodic.status, parked.status]).toEqual(["ok", "ok"]);
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+    expect(s.writes.filter((w) => w === "paste")).toHaveLength(2);
+  });
+
+  it("doesn't claim a send is queued when its id is already settled: it takes today's path for a reused id, and a new id still queues (R3-F3)", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const first = await s.transport.send(s.sessionName, "From: peer@team\n---\none\n---", { actorSession: "peer@team", deliveryId: "reused-1" });
+    expect(first.outcome).toBe("bridged");
+    const polled = s.bridge.poll(s.nodeId, armId) as { batchId: string };
+    s.bridge.ack(s.nodeId, s.sessionName, s.occupant, armId, polled.batchId);
+    s.bridge.arm({ nodeId: s.nodeId, sessionName: s.sessionName, generation: s.occupant, hookEvent: "Stop" });
+    const again = await s.transport.send(s.sessionName, "From: peer@team\n---\none again\n---", { actorSession: "peer@team", deliveryId: "reused-1" });
+    expect(again.outcome).not.toBe("bridged");
+    expect(again.warning ?? "").not.toMatch(/Queued for/);
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+    expect((await s.transport.send(s.sessionName, "From: peer@team\n---\nnew\n---", { actorSession: "peer@team", deliveryId: "fresh-1" })).outcome).toBe("bridged");
+  });
+
+  it("writes a queue wake's end at the bridge back to its row: a refused fallback reads as the refusal, so prompt-clear recovery sees it (R3)", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const repo = queueOn(s);
+    s.bridge.onEnd = (end) => { if (end.auditPointer) repo.recordBridgedWakeEnd(end.auditPointer, end); };
+    // Handed to the hook.
+    const handed = await handoffTo(s, repo);
+    const polled = s.bridge.poll(s.nodeId, armId) as { batchId: string };
+    s.bridge.ack(s.nodeId, s.sessionName, s.occupant, armId, polled.batchId);
+    expect(repo.getById(handed.qitemId)?.lastNudgeResult).toBe("bridged:handed-to-hook");
+    // Typed by the fallback into a seat at a permission prompt: refused, as typed delivery records it.
+    const refused = await handoffTo(s, repo);
+    // The woken turn never ends with a Stop: past the turn bound, the queued wake is typed.
+    s.advance(HOOK_BRIDGE_TURN_BOUND_MS + 1);
+    s.screen.text = "Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell Claude what to do differently (esc)";
+    const typed = await s.transport.sweepHookBridge();
+    expect(typed.map((t) => t.outboxId)).toEqual([refused.id]);
+    expect(repo.getById(refused.qitemId)?.lastNudgeResult).toMatch(/^failed:(target_needs_input|Refused:.*interactive prompt)/);
   });
 });

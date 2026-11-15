@@ -41,7 +41,9 @@ export function makeWatchdogDeliver(deps: {
         if (deps.hasPendingPostCompactStage?.(targetSession)) throw new DeliveryGuardError("managed_compaction_pending", PARKED_OWNER_COMPACTION_PENDING);
       } : undefined;
       const result = await deps.sessionTransport.send(targetSession, payload,
-        { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, ...(beforeWrite ? { beforeWrite } : {}) });
+        // Typed, never queued for a seat's hook bridge: the watchdog's receipts and accounting read only a typed outcome,
+        // so a queued reminder would read delivered before anything took it (#3270).
+        { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, noHookBridge: true, ...(beforeWrite ? { beforeWrite } : {}) });
       if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
       return result.ok
         ? { status: "ok", continuityActionCompleted }

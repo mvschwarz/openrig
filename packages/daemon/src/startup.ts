@@ -527,6 +527,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // both the queueRepo dep slot and inboxHandler can share one instance.
   // Transport is wired after SessionTransport instantiation below via
   // attachTransport().
+  // A queue wake's end at the hook bridge goes on its own row's nudge record (#3270).
+  hookBridge.onEnd = (end) => {
+    if (end.auditPointer && /^(wake-intent-|guard-nudge-)/.test(end.outboxId)) queueRepoInstance.recordBridgedWakeEnd(end.auditPointer, end);
+  };
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
     canRecordDestination: makeQueueRecordingCheck(topologyValidateRig),

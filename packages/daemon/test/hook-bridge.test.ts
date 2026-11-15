@@ -133,7 +133,7 @@ describe("the hook bridge (slice 13)", () => {
     expect(events.at(-1)).toMatchObject({ type: "transport.hook_bridge_expired", armId });
   });
 
-  it("marks a claimed batch indeterminate, never resent, when its waiter is gone without an ack", () => {
+  it("marks a claimed batch indeterminate, never resent by the bridge, when its waiter is gone without an ack", () => {
     optIn();
     const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
     queue("claimed", "m1");
@@ -174,7 +174,7 @@ describe("the hook bridge (slice 13)", () => {
     expect(again.messages.map((x) => x.outboxId)).toEqual(["m1"]);
   });
 
-  it("marks a batch uncertain, never resent, when its own arm stops polling without an ack, and names it in the status", () => {
+  it("marks a batch uncertain, never resent by the bridge, when its own arm stops polling without an ack, and names it in the status", () => {
     optIn();
     const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
     queue("taken", "m1");
@@ -322,5 +322,34 @@ describe("the hook bridge (slice 13)", () => {
     stamp = "replaced"; version = "2.1.200"; // a downgrade under a running daemon
     expect(await probing.launchWanted(nodeId, "/opt/claude")).toBe(false);
     expect(probes).toBe(2);
+  });
+  // #3270 round 3.
+  it("queues nothing, and says so, for an id that's already settled; a new id queues as before (R3-F3)", () => {
+    optIn();
+    const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    queue("once", "m1");
+    const polled = bridge.poll(nodeId, armId) as { batchId: string };
+    bridge.ack(nodeId, session, occupant, armId, polled.batchId);
+    expect(queue("once again", "m1")).toBeNull();
+    expect(state("m1")).toBe("delivered");
+    expect(queue("new", "m2")).toMatchObject({ outcome: "bridged", outboxIds: ["m2"] });
+  });
+
+  it("names what it didn't deliver in the seat's status, with the reason (R4)", () => {
+    optIn();
+    bridge.deposit({ ...target(), occupant: "gen-0" }, session, "for the occupant who left", { actorSession: "peer@team" }, ["o1"]);
+    expect(bridge.abandon(nodeId, session, "o1", "it was queued for an earlier occupant of the seat, which is gone")).toBe(true);
+    expect(bridge.status(nodeId, occupant).notDelivered).toEqual({ outboxIds: ["o1"], reasons: { o1: "it was queued for an earlier occupant of the seat, which is gone" },
+      note: expect.stringMatching(/not typed into the seat's current occupant.*sender isn't told/) });
+    expect(bridge.status(nodeId, occupant).uncertain.note).toMatch(/[Tt]he bridge never resends them; a queue wake's own recovery may, saying delivery may repeat/);
+  });
+
+  it("reads an unreadable Claude version again at the next launch (optional)", async () => {
+    optIn();
+    let version: string | null = null;
+    const probing = new HookBridge(db, { now: () => now, version: async () => version, stamp: () => "same" });
+    expect(await probing.launchWanted(nodeId, "/opt/claude")).toBe(false);
+    version = "2.1.322";
+    expect(await probing.launchWanted(nodeId, "/opt/claude")).toBe(true);
   });
 });

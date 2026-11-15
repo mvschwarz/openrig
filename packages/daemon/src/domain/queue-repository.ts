@@ -5686,6 +5686,17 @@ export class QueueRepository {
   static readonly PULL_OUTBOX_NEVER_POSTED_WINDOW_MS = 24 * 60 * 60 * 1000;
 
   /** Record one wake attempt. */
+  /** How a wake queued for the seat's hook bridge ended there, on the row's nudge record, so the queue's own rules (such
+   *  as prompt-clear recovery of a refused wake) read the real end and not `bridged:queued` (#3270). A typed fallback's
+   *  result is recorded as a typed wake's is. */
+  recordBridgedWakeEnd(qitemId: string, end: import("./hook-bridge.js").HookBridgeEnd): void {
+    const result = end.kind === "typed" && end.result ? this.classifyWakeResult(end.result as Awaited<ReturnType<QueueNudgeTransport["send"]>>).nudgeResult
+      : end.kind === "handed-to-hook" ? "bridged:handed-to-hook"
+      : end.kind === "not-delivered" ? "failed:hook_bridge_not_delivered"
+      : "indeterminate:hook_bridge_claimed_unacked";
+    this.recordNudgeAttempt(qitemId, result);
+  }
+
   recordNudgeAttempt(qitemId: string, result: string): void {
     const ts = new Date().toISOString();
     this.db

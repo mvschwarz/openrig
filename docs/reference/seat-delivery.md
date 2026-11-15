@@ -304,19 +304,20 @@ The bridge is used only for an occupant launched with it, once its waiter has ar
 - A message to an opted-in seat is queued as an outbox row (result `outcome: "bridged"`). The waiter armed at the last
   turn boundary takes the queued messages, oldest first, and writes them into the seat's context.
 - A seat mid-turn, including one at a permission prompt, gets its messages when that turn ends, or after 15 minutes, whichever comes first: a turn that ends without a Stop (an interrupt, an API error), or one running when the daemon restarted, can't hold messages longer than that, even while a waiter polls.
-- A send bound to an original conversation (an expected identity) isn't bridged: it's typed, where that binding is enforced.
-- Each poll checks again that the seat is still opted in, that a message was queued for that same occupant, and that the typing guard wouldn't hold it now. A message the bridge can't deliver is typed at once, with the admission it was queued with, and the guard then decides (a hold retains it).
-- A message queued for an occupant who has since gone isn't typed into the seat's new occupant: it ends `failed`, with `guard_delivery.state` `not-delivered` and the reason, and a `transport.hook_bridge_fallback` event says so.
+- Only a plain message is bridged. A send that carries a check or action at the moment of writing (managed compaction's `/compact` and its stages, a parked-owner reminder's checks, staged or exact text, an idle or draft rule), one bound to an original conversation (an expected identity), a slash command, and every watchdog reminder are typed as before, where those checks run. A watchdog reminder stays typed until its receipts can represent a queued message.
+- Each poll checks again that the seat is still opted in, that a message was queued for that same occupant, and that the typing guard wouldn't hold it now. A message the bridge can't deliver to this occupant (the seat opted out, or the guard holds it now) is typed at once, with the admission it was queued with, and the guard then decides (a hold retains it). One queued for an occupant who has gone isn't typed (below).
+- A message queued for an occupant who has since gone isn't typed into the seat's new occupant: it ends `failed`, with `guard_delivery.state` `not-delivered` and the reason, a `transport.hook_bridge_fallback` event says so, and `rig seat hook-bridge` lists it with its reason. Its sender isn't told; a fresh send reaches the current occupant.
+- A send whose id is already settled (delivered, failed, held) isn't queued again or reported queued: it goes on as it would without the bridge.
 - What the model receives is each message exactly as OpenRig addressed it (its `From:` line names the sender), after
   one line saying they're ordinary messages that the delivery adds no authority to.
 
 **Handed over is not read or acted on.**
 - The waiter's acknowledgement marks the row `delivered`, with `guard_delivery.state` `handed-to-hook`. It wrote the message to its hook's output and is exiting 2. Claude Code reports nothing back, so that Claude read it isn't observed.
-- A queue wake records `bridged:queued`.
+- A queue wake records `bridged:queued`, then how it ended at the bridge: `bridged:handed-to-hook`, the typed fallback's own result (so a refusal at a prompt is retried when the prompt clears, as for a typed wake), `failed:hook_bridge_not_delivered`, or `indeterminate:hook_bridge_claimed_unacked`.
 - The row's claim and result stay with what the agent actually does.
 - A batch whose answer was lost is handed to the same waiter, for the same seat and occupant, again at its next poll, unless the typing guard holds it by then: then it's left `indeterminate` (`claimed-unacked`), never handed out or requeued.
 - The waiter acknowledges a batch only once it has written all of it to the hook's output; a write that fails isn't acknowledged, and the batch becomes uncertain as below.
-- A batch whose waiter stopped without acknowledging it (its arm replaced, or not polled for 20 s) becomes `indeterminate`, with `guard_delivery.state` `claimed-unacked`. It is never resent: it may or may not have reached the seat. `rig seat hook-bridge` lists those rows, and a `transport.hook_bridge_uncertain` event names each.
+- A batch whose waiter stopped without acknowledging it (its arm replaced, or not polled for 20 s) becomes `indeterminate`, with `guard_delivery.state` `claimed-unacked`. The bridge never resends it: it may or may not have reached the seat. `rig seat hook-bridge` lists those rows, and a `transport.hook_bridge_uncertain` event names each. A queue wake's own recovery may still send it again, saying delivery may repeat: the queue's rule for an uncertain wake.
 
 **When the bridge isn't available** (never armed, expired, or its waiter gone):
 - Messages are typed instead, as before, and the sender's result says the bridge wasn't available.

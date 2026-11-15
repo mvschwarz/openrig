@@ -1981,6 +1981,9 @@ export interface SendOpts {
    *  id) with the admission it was queued with, taken back from the bridge under the seat's lease. Never accepted from the
    *  public transport route. */
   hookBridgeFallback?: { nodeId: string; reason: string; admission: AdmissionInput | null };
+  /** Internal: this caller can't yet represent a message queued for the seat's hook bridge (the watchdog's receipts
+   *  and accounting read only typed outcomes), so its send is typed. */
+  noHookBridge?: true;
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */
@@ -2077,6 +2080,20 @@ export interface SendOpts {
   /** Internal: send() is typing `exactText` to a terminal seat, so its bytes stay exactly as given: no urgent line, which
    *  the shell would run. An urgent mark still admits the input and stays in the result. Never accepted from HTTP. */
   typedExactly?: true;
+}
+
+/** Whether the seat's hook bridge may take this send in place of typing it. Only a plain message: the bridge hands text
+ *  to the model at a turn boundary, so it can't run what is checked or done at the moment of writing (a write-time
+ *  check, an input-effect callback, staged or exact text, an idle or draft rule), it can't hold a send to an original
+ *  conversation, and Claude runs a slash command only from typed input. Those, and a caller that can't represent a
+ *  queued message, are typed as today. */
+function bridgeable(text: string, opts?: SendOpts): boolean {
+  if (!opts) return !/^\s*\/[A-Za-z]/.test(text);
+  return !opts.hookBridgeFallback && !opts.noHookBridge && !opts.expectedIdentity && !opts.submitOnly && !opts.dangerouslyInteract
+    && !opts.beforeWrite && !opts.onInputEffect && !opts.postCompactTurnBoundary && !opts.readinessFromPaneOnly && !opts.preserveInput
+    && !opts.allowDraftWhileIdle && !opts.allowUnknownWhileIdle && !opts.typeWithoutChecking && opts.exactText === undefined && !opts.typedExactly
+    && opts.expectedStagedText === undefined && !opts.requireFullStagedText && !opts.onStartupMismatch
+    && !/^\s*\/[A-Za-z]/.test(text);
 }
 
 const CALLER_CANCELLED = "caller_cancelled";
@@ -2900,6 +2917,8 @@ export class SessionTransport {
           outbox.finalizeDelivery(outboxId, result.ok && result.outcome !== "rendered-unconfirmed" ? "delivered"
             : result.ok || result.inputPhase === "attempted" || result.inputPhase === "written" ? "indeterminate" : "failed");
         }
+        // Its sender's record (a queue wake's nudge result) reads how it actually ended.
+        bridge.typedEnd(outboxId, result);
         typed.push({ outboxId, result });
       }
     }
@@ -3002,20 +3021,26 @@ export class SessionTransport {
         // Admission (hold, the levels) has already decided above. With no live arm, it's typed, with a warning; messages
         // already queued go first, so a send never overtakes them.
         const bridge = this.hookBridge;
-        // A send bound to an original conversation isn't bridged: the typed path enforces that binding.
-        if (bridge && !memberOpts?.hookBridgeFallback && !memberOpts?.expectedIdentity && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract) {
+        // Only a plain message is bridged (see bridgeable): everything else is typed, where its checks run.
+        if (bridge && bridgeable(memberText, memberOpts)) {
           const target = guard.target(sessionName);
           if (bridge.routes(target)) {
             const bridgeIds = memberOpts?.committedOutboxIds ?? ids;
             const queueOpts = { ...(memberOpts ?? {}), admission };
-            if (bridge.live(target.nodeId)) return bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds);
-            const reason = bridge.unavailable(target.nodeId);
-            if (bridge.queued(target.nodeId).length) {
+            // A deposit that queued nothing (an id already settled) isn't reported queued: the send goes on as it would
+            // without the bridge.
+            if (bridge.live(target.nodeId)) {
               const queued = bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds);
-              setImmediate(() => { void this.sweepHookBridge({ nodeId: target.nodeId }).catch(() => {}); });
-              return { ...queued, warning: `${sessionName}'s hook bridge isn't available (${reason}): this message is typed after the ones already queued for it.` };
+              if (queued) return queued;
+            } else {
+              const reason = bridge.unavailable(target.nodeId);
+              const queued = bridge.queued(target.nodeId).length ? bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds) : null;
+              if (queued) {
+                setImmediate(() => { void this.sweepHookBridge({ nodeId: target.nodeId }).catch(() => {}); });
+                return { ...queued, warning: `${sessionName}'s hook bridge isn't available (${reason}): this message is typed after the ones already queued for it.` };
+              }
+              bridgeWarning = `${sessionName}'s hook bridge isn't available (${reason}): delivered by typing instead.`;
             }
-            bridgeWarning = `${sessionName}'s hook bridge isn't available (${reason}): delivered by typing instead.`;
           }
         }
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
