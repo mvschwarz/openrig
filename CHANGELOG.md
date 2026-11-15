@@ -75,9 +75,11 @@ contributions from people using OpenRig.
   its file changed, within a two-second settle window, or when that can't be
   read. This release makes no speed claim. ([#3285](https://github.com/mvschwarz/openrig/pull/3285), [#3295](https://github.com/mvschwarz/openrig/pull/3295), [#3296](https://github.com/mvschwarz/openrig/pull/3296))
 - **Draft-aware delivery** reads an empty input box under Claude Code 2.1.322 or
-  2.1.323's wide paste hint and auto-update failure as empty. ([#3231](https://github.com/mvschwarz/openrig/pull/3231))
+  2.1.323's wide paste hint and auto-update failure as empty (shown by its
+  tests; not yet checked with Claude Code itself). ([#3231](https://github.com/mvschwarz/openrig/pull/3231))
 - **Claude's question dialog,** in the several-question, editor-shortcut and
-  preview layouts OpenRig recognizes, refuses an ordinary send. ([#3256](https://github.com/mvschwarz/openrig/pull/3256))
+  preview layouts OpenRig recognizes, refuses an ordinary send (shown by its
+  tests; not yet checked with Claude Code itself). ([#3256](https://github.com/mvschwarz/openrig/pull/3256))
 - **Clearer refusals** at a model picker (close it with Esc) and under managed
   `disableSideloadFlags`. ([#3207](https://github.com/mvschwarz/openrig/pull/3207), [#3247](https://github.com/mvschwarz/openrig/pull/3247))
 - **A resumed Codex conversation** isn't told to sign in again because of an old
@@ -103,7 +105,8 @@ contributions from people using OpenRig.
 
 - **An empty person registry reads `undeliverable:no-registered-human`.** ([#3288](https://github.com/mvschwarz/openrig/pull/3288))
 - **`rig send --dangerously-interact` without `--type-without-checking`** stops
-  on a person's text under Claude Code's wide footer row. ([#3231](https://github.com/mvschwarz/openrig/pull/3231))
+  on a person's text under Claude Code's wide footer row (shown by its tests;
+  not yet checked with Claude Code itself). ([#3231](https://github.com/mvschwarz/openrig/pull/3231))
 
 ### Known limits
 

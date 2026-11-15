@@ -93,12 +93,14 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   settle window, or when that metadata can't be read. No speed claim is made for
   this release.
 - **Draft-aware delivery** reads an empty input box under Claude Code 2.1.322 or
-  2.1.323's wide paste hint and auto-update failure as empty and sends once.
-  `rig send --dangerously-interact` without `--type-without-checking` now stops
-  on a person's text there.
+  2.1.323's wide paste hint and auto-update failure as empty and sends once,
+  and `rig send --dangerously-interact` without `--type-without-checking` now
+  stops on a person's text there (shown by its tests; not yet checked with
+  Claude Code itself).
 - **Claude's question dialog,** in the several-question, editor-shortcut and
   preview layouts OpenRig recognizes, refuses an ordinary send with
-  `target_needs_input`.
+  `target_needs_input` (shown by its tests; not yet checked with Claude Code
+  itself).
 - **A send at a model picker** says to close it with Esc; don't use
   `--dangerously-interact` there. A Claude seat that won't start under managed
   `disableSideloadFlags` names the setting.
