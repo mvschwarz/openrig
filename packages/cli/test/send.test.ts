@@ -241,6 +241,8 @@ describe("Send CLI", () => {
     // (Hermetic-gate default is env-UNSET, so without this env-less delivery would render the unknown
     // marker.) Nested describes that stub their own envs re-run after this; the block afterEach restores.
     vi.stubEnv("OPENRIG_SESSION_NAME", "sender@my-rig");
+    // A runner inside tmux would otherwise let the managed-pane fallback recover the runner's own seat.
+    vi.stubEnv("TMUX_PANE", "");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
   });
   afterEach(() => { vi.unstubAllEnvs(); });

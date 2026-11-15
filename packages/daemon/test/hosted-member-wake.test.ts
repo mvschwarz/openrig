@@ -121,8 +121,11 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     // teaching too: it says how the member gets work, not to fix the address or register a person.
     trigger = null;
     const noTrigger = repo.classifyDestinationOf("grok@lab");
-    expect(noTrigger).toEqual({ class: "unroutable", teaching: "unroutable: 'grok@lab' is a hosted member with no wake trigger, "
-      + "so nothing can push work to it. It picks up its work when its person asks it to, or on a schedule they set." });
+    // A requester's assistant repeats it, so it says the work waits, and never "unroutable".
+    expect(noTrigger).toEqual({ class: "unroutable", teaching: "awaiting-pickup: 'grok@lab' is a hosted member with no wake trigger, "
+      + "so no wake is sent. The work waits in its queue until the member reads it: when its person asks it to, on a schedule "
+      + "they set, or through a local seat connected to it." });
+    expect(noTrigger.class === "unroutable" && noTrigger.teaching).not.toMatch(/unroutable/);
     // An address no roster lists keeps the general teaching.
     expect(repo.classifyDestinationOf("nobody@lab")).toMatchObject({ class: "unroutable",
       teaching: expect.stringContaining("Fix the address, or register the human with `rig gateway human add`.") });

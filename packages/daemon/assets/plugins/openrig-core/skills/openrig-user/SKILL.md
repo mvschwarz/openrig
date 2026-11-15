@@ -95,6 +95,17 @@ rig queue handoff <qitem-id> \
 A queue write (`create`, `claim`, `update`, `handoff`, `handoff-and-complete`) answers with the row it wrote; a
 handoff answers with the closed row and its successor. When that answer shows what you need to establish, use it.
 
+`queue update` is stricter: before it reports success, the CLI reads the row back from the canonical queue and checks
+every requested row field using daemon semantics (including normalized deadlines and appended closing resolutions).
+When `--note` is present, it first records the transition cursor and then requires a newer canonical transition,
+recorded under the actor the write was sent as, that carries those note bytes as written or with only what the daemon
+adds for that request (the reopen prefix, the summary suffix, a revised deadline's receipt). Another writer's note, or
+a note that only starts the same way, doesn't count. If that cursor can't be read, the write is still sent, and the
+note can't be shown to be new: the command says so and exits non-zero. A failed post-write check exits non-zero and
+says the write may have committed. Reconcile with `rig queue show <id> --full --json` before retrying. Preserve that
+exit status in wrappers, and use `set -o pipefail` when piping its output so a downstream formatter cannot turn
+failure into success.
+
 `create` also prints `Queue create request ID: <id> (not proof of persistence)` on stderr *before* it sends the write,
 so an interrupted create can be reconciled. That ID names a request, not a row. The row is the `qitemId` on stdout
 when the command exits 0. A non-zero exit means no row was confirmed, even when stdout carries a `qitemId`: an

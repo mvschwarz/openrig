@@ -278,18 +278,23 @@ These routes use the existing terminal bearer token.
 
 1. Read `GET /api/startup/<rigId>/nodes/<nodeId>/original?snapshotId=<id>&historySessionId=<id>`.
    The preview uses that explicitly retained usable snapshot, even when a newer snapshot exists.
-   It returns `revision`, the selected history and current model, effort, cwd, permission and runtime-home
-   provenance. `accountHome.authentication: "unconfirmed"` means that the home selection is configuration,
-   not proof of an authenticated account. A `daemon_environment` home is the daemon fallback, not a seat setting;
+   It returns `revision`, the selected history and current model, effort, cwd and permission.
+   `settingsSource.accountHome` describes the seat's current effective home configuration;
+   `settingsSource.runtimeHome.uses` describes the home bound to this reviewed attempt, which can differ.
+   Neither home selection proves an authenticated account; `accountHome.authentication` remains
+   `"unconfirmed"`. A `daemon_environment` home is the daemon fallback, not a seat setting;
    `native_default` means the runtime default.
 2. POST to the same `/original` path, without query fields, with `action: "resume"`, `snapshotId`,
    `historySessionId`, that `revision`, an `operationId` UUID, and `expectedOriginal` containing the banked
    `nodeId`, `sessionName`, `runtime` (`claude-code` or `codex`) and `nativeId`.
    Keep native conversation IDs in the private bank and request body. They are not returned in diagnostics.
 
-The operation keeps the current selected launch choices. Its original-only native effect uses the retained
-history and existing selected-history ownership checks. A positively established matching original already
-running returns `code: "already_running_original"` and `nativeEffect: false`. A confirmed resume returns
+The operation keeps the current model, cwd, effort and permission choices. The reviewed
+`settingsSource.runtimeHome.uses` plan can first apply the selected original's recorded home as a new
+revision before launch, rather than using the current home reported by `settingsSource.accountHome`.
+Its original-only native effect uses the retained history and existing selected-history ownership checks.
+A positively established matching original already running returns `code: "already_running_original"`
+and `nativeEffect: false`. A confirmed resume returns
 `code: "resumed"`, with `sourceSessionId`, `resultSessionId` and `operationId`.
 
 An unavailable source, changed selection, different occupant, restoring-only result or unconfirmed native
