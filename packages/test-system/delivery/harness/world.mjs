@@ -61,9 +61,10 @@ function cellEnv({ root, home, sockets, binDirs, realTmux, arm, tmuxLog }) {
 
 /** What the seat's program is given through its rig spec: the stand-in, a dummy token, and no update or telemetry
  *  traffic. Claude Code's model settings reach a seat only this way (or through the daemon's provider allowlist). */
-function seatEnv(kind, standInUrl) {
+/** The seat's environment. A case's `claudeEnv(standInUrl, { home })` may override a variable or remove one (null). */
+function seatEnv(kind, standInUrl, claudeEnv = null, home = null) {
   if (kind === "claude") {
-    return {
+    const env = {
       ANTHROPIC_BASE_URL: standInUrl,
       ANTHROPIC_AUTH_TOKEN: DUMMY_TOKEN,
       DISABLE_AUTOUPDATER: "1",
@@ -71,6 +72,11 @@ function seatEnv(kind, standInUrl) {
       DISABLE_TELEMETRY: "1",
       DISABLE_ERROR_REPORTING: "1",
     };
+    for (const [key, value] of Object.entries(claudeEnv?.(standInUrl, { home }) ?? {})) {
+      if (value === null) delete env[key];
+      else env[key] = value;
+    }
+    return env;
   }
   return {};
 }
@@ -131,7 +137,7 @@ function sharedSpecs(openrig) {
  * Open a cell. `program` is { kind: "claude" | "codex", bin } with bin the installed binary's absolute path; `openrig`
  * is the absolute path of the `rig` entry under test (its bin-wrapper.js). `script` is the stand-in's script.
  */
-export async function openCell({ dir, arm, program, openrig, script, realTmux, readyTimeoutMs = 120_000, claudeSettings = null }) {
+export async function openCell({ dir, arm, program, openrig, script, realTmux, readyTimeoutMs = 120_000, claudeSettings = null, claudeEnv = null }) {
   const root = resolve(dir);
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -165,9 +171,10 @@ export async function openCell({ dir, arm, program, openrig, script, realTmux, r
   // A case's own Claude settings, such as allowing one harmless command, so a busy case isn't a permission case.
   if (program.kind === "claude" && claudeSettings) writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify(claudeSettings, null, 2), { mode: 0o600 });
 
-  const rig = async (args, { timeout = 60_000, allowFail = false } = {}) => {
+  const rig = async (args, { timeout = 60_000, allowFail = false, as = null } = {}) => {
     try {
-      const { stdout, stderr } = await run(process.execPath, [openrig, ...args], { env, cwd: work, timeout, maxBuffer: 16 << 20 });
+      // `as` names the sender a command is attributed to, for a route that requires one.
+      const { stdout, stderr } = await run(process.execPath, [openrig, ...args], { env: as ? { ...env, OPENRIG_SESSION_NAME: as } : env, cwd: work, timeout, maxBuffer: 16 << 20 });
       record({ step: "rig", args, exit: 0 });
       return { exit: 0, stdout, stderr };
     } catch (error) {
@@ -190,7 +197,7 @@ export async function openCell({ dir, arm, program, openrig, script, realTmux, r
     writeFileSync(join(root, "rig", "agents", "worker", "agent.yaml"), WORKER);
     record({ step: "seat-profile", plugins: ["shared:openrig-core"], runtimeResources: ["shared:claude-activity-hooks"], sharedFrom: shared });
     const specPath = join(root, "rig", "rig.yaml");
-    writeFileSync(specPath, rigSpec(program.kind, seatEnv(program.kind, standIn.url)));
+    writeFileSync(specPath, rigSpec(program.kind, seatEnv(program.kind, standIn.url, claudeEnv, home)));
     await rig(["up", specPath, "--json", "--yes", "--cwd", work], { timeout: 180_000 });
     cell.session = await waitReady(cell, program.kind, readyTimeoutMs);
     return cell;
