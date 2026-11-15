@@ -72,6 +72,10 @@ person needs in their project or home folder and name that path.
 
 ## 2. Open OpenRig and give its operator the goal
 
+A seat's startup text points an installing agent here. [references/installing-for-someone.md](references/installing-for-someone.md)
+adds what this step does not spell out (starting the daemon and kernel, what counts as ready and as finished) and relays the same
+commands; if the two ever differ, this step is right.
+
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it. If its output says no person is registered, make the offer it names before you go on, and register only on
@@ -103,7 +107,8 @@ person needs in their project or home folder and name that path.
   dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal
   the person can see; switching the shared TUI to `:terminals` does not open one. No and headless/SSH use are valid
   background outcomes. Provider-only `--provider herdr`, `--provider cmux` or `--provider rex` is for a provider that's
-  already running, not the first desktop window, and each such open adds a new workspace. `--provider herdr-app` opens
+  already running, not the first desktop window. Each `cmux` or `rex` open adds a new workspace; `herdr` focuses one
+  that still shows the view live, else adds one. `--provider herdr-app` opens
   the view in the herdr-app window you run it in (it adds OpenRig's mods there first). Inside a herdr-app
   terminal, plain `rig terminal open <view>` does the same when that window is answering. `--window` always asks for a
   new desktop window.
