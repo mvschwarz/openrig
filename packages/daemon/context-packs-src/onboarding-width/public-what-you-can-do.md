@@ -1072,8 +1072,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   client activity or when tmux can't be read; typing after that last check still isn't seen. On 0.7.16,
   with Claude Code's full-width auto-update-failure footer on screen, an empty `draft-aware` seat
   could hold an ordinary send; since 0.7.17 an empty box under Claude Code 2.1.322 or 2.1.323's wide
-  paste hint and auto-update failure reads as empty and the send goes once, while another wording
-  still holds (`rig seat held-messages` shows it). On OpenRig 0.7.15, with Codex 0.167.1
+  paste hint and auto-update failure reads as empty and the send goes once (shown by its tests;
+  not yet checked with Claude Code itself), while another wording still holds
+  (`rig seat held-messages` shows it). On OpenRig 0.7.15, with Codex 0.167.1
   and 0.167.2, a send to a busy `draft-aware` seat could be pasted without Enter, neither delivered
   nor held, with its text left in the input. Since OpenRig 0.7.16, OpenRig reads Codex's "tab to
   queue" hint row, so a send to a busy Codex seat with an empty input
