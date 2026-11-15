@@ -180,7 +180,8 @@ With `needs-me.read` supported:
   `revision` and `about`. `revision` is the request's opaque decision revision: the same value as that row's
   `decisionRevision`, and what an answer can name as `expectedRevision` so it applies only to the version the person
   read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
-  about the open rows blocked on it (at most 100; empty when none are recorded).
+  about the open rows blocked on it (the newest 100, with `aboutTruncated: true` when there are more). An empty `about`
+  isn't proof that it's about nothing: a request that names it only in its text isn't counted.
 - **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
   `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
   already reflected in it. A click that records or changes an answer emits `queue.answer_recorded` even while the set
@@ -192,7 +193,37 @@ With `needs-me.read` supported:
   footer. `episode` names the park an answer belongs to, or is null. `recordedIdentity` is the identity provenance
   recorded when the answer row was created. An answer row's own read has `replyTo`, the request it answers. A partial
   set of choices stays on the request's `humanAnswers` until the whole set is returned. A runner's permission request
-  or a host pairing request is answered in place, with no answer row.
+  or a host pairing request is answered in place, with no answer row. `answersFrom: "this-daemon"` says where they were
+  read: an answer another host holds isn't among them, so an empty list isn't proof that nobody answered.
+
+### What a connection supports, and what happened to a delivery (`member-connection.v1`)
+
+`GET /api/member-connection/capabilities` lists each delivery route this daemon declares, with what it supports in four
+groups: `observe` (`dialog`, `turnStart`), `control` (`submit`), `nativeIdentity` (`sessionId`, `resume`) and
+`continuity` (`managedCompaction`, `restorePacketConfirmation`, `fork`). The routes are `typed` (OpenRig types into the
+member's terminal; capabilities by runtime, with `*` for any other), `codex-queue` (Codex's own queue command), a hosted
+member's `hosted-trigger`, and a person's `gateway`. A route with `armed: false` is declared but not used: nothing is
+delivered on it until a setting arms it.
+
+Each capability reads `supported`, `not-supported`, `unavailable` (the route has it, but this member can't use it now,
+such as a seat with no session recorded as current), `not-applicable` (it means nothing on this route) or `unknown`. A
+missing key means `unknown`. None of them means idle or success, and a declaration isn't readiness: whether a seat has a
+current session comes from what OpenRig has recorded, not from looking at its pane or process. A daemon without the route (HTTP 404) predates the contract: treat
+every capability as unknown and keep using what works today.
+
+`?session=<address>` adds `member`: `{ member, route, runtime, capabilities, reason? }` for the member that address
+names: a person the human registry resolves (or the terminal person's own `human@host`), a hosted member, or a seat. An
+address shaped like a person's, such as `<id>@external`, is a person only when the registry resolves it. A person is
+resolved first, so when the registry can't be read, any address it could resolve to a person (`<id>@external`, or any
+`member@rig`, since a person's id can be spelled that way) comes back unknown, even if a seat or hosted member has that name. That
+answer, and an address none of them has, comes back with `route: null`, every capability `unknown`, and the reason.
+
+Each typed send also records what happened to it, in the daemon's `transport.delivery_evidence` event, as
+`outcome: { fact, reporter, route }`. `fact` is `accepted` (typed and submitted, with `renderVerified: true` when
+the screen showed it), `held`, `not-delivered`, `failed-effect-unknown` or `unknown`. A prompt answer typed without Enter on a send that
+succeeded is `unknown`: whether the prompt took it isn't known; if the send failed after typing, it's
+`failed-effect-unknown`. `reporter` says who established it.
+None of them means the member read the work: picking it up is a claim on the row.
 
 ## Route details
 
