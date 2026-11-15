@@ -560,6 +560,9 @@ describe("runner → authenticated route → SQLite → cost view", () => {
       // promise callbacks only, so one timer turn runs them all.
       await expect(reads[0]).resolves.toBeNull();
       await settle();
+      // Answered with nothing, the tie is still unknown and uncharged.
+      expect(p.view()).toMatchObject({ entries: { own: 2, unknownOrigin: { count: 2 } } });
+      expect(p.view().costUsd).toBeCloseTo(0.05, 10);
       await p.refresh(forkEntries);
       // The parent read is real file I/O; wait for its outcome to reach the store, not for a number of ticks.
       await eventually(() => expect(p.view()).toMatchObject({ entries: { own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } } }));
