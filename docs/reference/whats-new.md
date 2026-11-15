@@ -67,8 +67,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   skills, such as `claude-compaction-restore` and
   `seat-continuity-and-handover`, follow the current packaged source instead of
   being named missing. An edited copy (its bytes or a file mode), a file
-  OpenRig didn't write, a copy recorded from another source and a skill the
-  profile selects itself are kept, and the restore names each. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
+  OpenRig didn't write and a copy recorded from another source are kept, and
+  the restore names each. A skill the seat's profile selects itself keeps its
+  own restore policy. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
 - **A handover failed but its successor is running:** for a Claude seat, try
   `rig seat handover <seat> --recover --reason "<why>"`, which adopts the
   running successor, before another handover or a fresh launch. It records the

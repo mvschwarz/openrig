@@ -103,10 +103,11 @@ contributed by people using OpenRig.
   Before, a packaged skill whose bytes changed in the upgrade wasn't put back:
   the restore named it missing, and the seat came back without it. When the
   upgrade came before `rig down`, the old copy is brought up to date too. An
-  edited copy (its bytes or a file mode), a file OpenRig didn't write, a copy
-  recorded from another source and a skill the seat's profile selects itself
-  stay as they are, and the restore names each. Other plugins' skills aren't
-  changed. It's tested at the unit and source level; see Known limits. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
+  edited copy (its bytes or a file mode), a file OpenRig didn't write and a
+  copy recorded from another source stay as they are, and the restore names
+  each. A skill the seat's profile selects itself keeps its own restore policy.
+  Other plugins' skills aren't changed. It's tested at the unit and source
+  level; see Known limits. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
 - **`rig seat handover <seat> --recover`** adopts the running successor of a
   failed handover, instead of leaving the seat with its retiring occupant.
   Recovery is for Claude seats: it proves the successor's process and identity
