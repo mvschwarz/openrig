@@ -1768,10 +1768,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (deps.queueRepo.deliveryDrains.holds(seat)) {
         // A hold is not completion. Keep the standing notice unless every named source has positively closed.
         const sources = last ? backlogRowsOf(last.body) : null;
-        const unresolved = !sources || [...sources].some(id => {
-          const row = deps.queueRepo.getById(id, { waiting: false });
-          return !row || ["pending", "in-progress", "blocked"].includes(row.state);
-        });
+        const unresolved = !sources || deps.db.prepare(`SELECT 1 FROM json_each(?) source
+          LEFT JOIN queue_items q ON q.qitem_id = source.value
+          WHERE q.qitem_id IS NULL OR q.state IN ('pending', 'in-progress', 'blocked') LIMIT 1`)
+          .get(JSON.stringify([...sources])) !== undefined;
         if (unresolved) continue;
       }
       if (last && ["pending", "in-progress", "blocked"].includes(last.state)) {
