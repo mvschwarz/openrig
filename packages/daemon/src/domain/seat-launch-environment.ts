@@ -155,6 +155,8 @@ export class SeatLaunchEnvironment {
     const program = (target.launcherPrefix ?? "") + command;
     const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${program}` : program;
     let shell = "";
+    // Set once the session proves it's this seat's; only then does a failed correction keep the seat's token step.
+    let identityProven = false;
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
       shell = path.basename(target.launchShell ?? await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
@@ -173,6 +175,7 @@ export class SeatLaunchEnvironment {
       if (target.nodeId !== undefined && identity.OPENRIG_NODE_ID !== target.nodeId) {
         throw new Error("Seat launch identity differs from the intended node.");
       }
+      identityProven = true;
       // Handover respawns an existing pane with -e; tmux's session environment
       // still names the predecessor. The caller owns the reserved generation.
       if (target.runtime !== undefined) identity.OPENRIG_RUNTIME = target.runtime;
@@ -244,8 +247,10 @@ export class SeatLaunchEnvironment {
         : accountHome || clearing ? "[seat launch] Isolated account launch unavailable; no agent started."
         : "[seat launch] Environment correction unavailable; using the previous launch command.");
       if (target.launchShell !== undefined || target.failClosed) throw new Error("launch_wrapper unavailable; no agent started.");
-      // The seat's token step doesn't depend on the correction that failed, so the previous command keeps it.
-      const token = target.runtime === "claude-code" && target.claudeTokenStep && !["fish", "nu", "nu.exe"].includes(shell)
+      // The seat's token step doesn't depend on a correction that failed once the session proved it's this seat's, so
+      // the previous command keeps it. A session that didn't prove that (no OpenRig identity, or another node's) gets
+      // the previous command without it, as before.
+      const token = identityProven && target.runtime === "claude-code" && target.claudeTokenStep && !["fish", "nu", "nu.exe"].includes(shell)
         ? `${target.claudeTokenStep}\n` : "";
       return wrapped ? "printf '%s\\n' 'OpenRig: launch_wrapper unavailable; no agent started.' >&2; false"
         : accountHome || clearing ? "printf '%s\\n' 'OpenRig: isolated account launch unavailable; no agent started.' >&2; false"

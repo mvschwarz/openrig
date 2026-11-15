@@ -280,10 +280,11 @@ printf '%s|%s' "\${CLAUDE_CONFIG_DIR-}" "\${CLAUDE_CODE_OAUTH_TOKEN+set}"
       reason: `the token file ${tokenFile} doesn't exist` }));
   });
 
-  const classicLaunch = (shell: string | null, identity: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat@rig" }) => {
+  const classicLaunch = (shell: string | null, identity: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat@rig" }, missingCli = false) => {
     const root = mkdtempSync(path.join(tmpdir(), "claude-seat-token-classic-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
     const cli = path.join(root, "rig");
-    writeFileSync(cli, "#!/bin/sh\n", { mode: 0o700 });
+    // A missing paired CLI fails the PATH correction after the identity checks.
+    if (!missingCli) writeFileSync(cli, "#!/bin/sh\n", { mode: 0o700 });
     const tmux = { getPaneCommand: async () => shell, getSessionEnv: async (_session: string, key: string) => identity[key] } as unknown as TmuxAdapter;
     return new SeatLaunchEnvironment(tmux, { PATH: "/usr/bin:/bin", HOME: root, OPENRIG_HOME: path.join(root, "instance") }, root, cli);
   };
@@ -309,16 +310,32 @@ printf '%s|%s' "\${CLAUDE_CONFIG_DIR-}" "\${CLAUDE_CODE_OAUTH_TOKEN+set}"
     }
   });
 
-  it("when the environment correction fails, the previous command still runs the token step first, except in a fish pane", async () => {
+  it("a session that doesn't prove it's this seat's gets the previous command without the token step", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // No OpenRig identity in the session, and another node's identity: neither is proven to be this seat's.
+      const unproven: Array<Record<string, string>> = [{}, { OPENRIG_NODE_ID: "other-node", OPENRIG_SESSION_NAME: "seat@rig" }];
+      for (const identity of unproven) {
+        for (const shell of ["zsh", "claude.exe"]) {
+          const command = await classicLaunch(shell, identity).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
+          expect(command).toBe("claude --resume abc");
+        }
+      }
+      expect(warn.mock.calls.flat().join("\n")).not.toContain(fixtureStep);
+    } finally { warn.mockRestore(); }
+  });
+
+  it("when a correction fails after the session proved it's this seat's, the previous command still runs the token step first, except in a fish pane", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       for (const shell of ["zsh", "claude.exe"]) {
-        // No OpenRig identity in the session: the correction can't be built, so the previous command is used.
-        const command = await classicLaunch(shell, {}).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
+        const command = await classicLaunch(shell, undefined, true).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep });
         expect(command).toBe(`${fixtureStep}\nclaude --resume abc`);
       }
-      expect(await classicLaunch("fish", {}).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep }))
+      expect(await classicLaunch("fish", undefined, true).command("seat@rig", "claude --resume abc", { runtime: "claude-code", nodeId: "node", claudeTokenStep: fixtureStep }))
         .toBe("claude --resume abc");
+      expect(warn).toHaveBeenCalledWith("[seat launch] Environment correction unavailable; using the previous launch command.");
+      expect(warn.mock.calls.flat().join("\n")).not.toContain(fixtureStep);
     } finally { warn.mockRestore(); }
   });
 
