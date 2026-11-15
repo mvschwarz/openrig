@@ -926,13 +926,13 @@ identity remains unverified; a version number alone cannot clear it.
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
     .option("--rules <file>", "JSON allow/deny lists for this Claude seat; replaces its recorded rules without changing its mode")
-    .option("--codex-permissions <file>", "JSON sandbox/approval envelope for this Codex seat; replaces its recorded mode")
+    .option("--codex-permissions <file>", "JSON sandbox/approval envelope, or filesystem policy, for this Codex seat; replaces its recorded mode")
     .option("--codex-profile <name>", "Codex config profile for this seat, or inherit to clear it; approval stays with the envelope or session")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")
-    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
+    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. Or, in place of sandbox and those fields, filesystem: a nonempty mapping of absolute paths, ~/paths or native special paths such as :minimal and :workspace_roots to read, write or deny, with approval never or on-request and an optional network_access. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
     .action(async (seat: string, opts: { mode?: string; rules?: string; codexPermissions?: string; codexProfile?: string; reason: string; operator?: string; json?: boolean }) => {
       if ([opts.mode, opts.rules, opts.codexPermissions, opts.codexProfile].filter(value => value !== undefined).length !== 1) {
         console.error("Choose exactly one of --mode, --rules <file>, --codex-permissions <file> or --codex-profile <name>."); process.exitCode = 1; return;
@@ -945,7 +945,7 @@ identity remains unverified; a version number alone cannot clear it.
       let codexPermissions: unknown;
       if (opts.codexPermissions !== undefined) {
         try { codexPermissions = JSON.parse(readFileSync(opts.codexPermissions, "utf8")); }
-        catch { console.error(`Cannot read JSON from ${opts.codexPermissions}; provide a sandbox/approval mapping.`); process.exitCode = 1; return; }
+        catch { console.error(`Cannot read JSON from ${opts.codexPermissions}; provide a sandbox/approval or filesystem mapping.`); process.exitCode = 1; return; }
       }
       const choice = opts.rules !== undefined ? { rules } : codexPermissions !== undefined ? { codexPermissions }
         : opts.codexProfile !== undefined ? { codexProfile: opts.codexProfile } : { mode: opts.mode };
