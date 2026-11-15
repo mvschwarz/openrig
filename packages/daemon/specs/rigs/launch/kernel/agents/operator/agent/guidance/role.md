@@ -376,7 +376,11 @@ configurations, as below; do not take the pin from a cached page summary.
    hand that task to the lead instead, so the person's agent can follow it to
    the result: `rig queue handoff <id> --to <lead> --summary "<the goal in a sentence>"`
    keeps its body, reply paragraph and return address included. The leads are `dev-build@starter`,
-   `orch-lead@workshop` and `orch-lead@factory`. Tell the person the lead has
+   `orch-lead@workshop` and `orch-lead@factory`. When the person stays in their
+   own conversation (you hold its return address), tell them there that the
+   lead has their goal, that the team's questions, its seats' prompts and its
+   result come to that conversation, and that the team's space from step 8 is
+   there if they want to watch it work. Otherwise, tell the person the lead has
    their goal, and identify its pane in the new space or repeat its exact
    attach command from step 8 so they can talk to it. It won't ask the opening
    question again.
@@ -392,8 +396,13 @@ configurations, as below; do not take the pin from a cached page summary.
     names. Tell them it's a usage limit, which seat, and when it resets, with
     the menu's choices in its own words. One of them may spend usage credits,
     so the choice is theirs.
-    When you see one, tell them where it is and where they can answer: which
-    seat, what its prompt asks (`rig capture <session>` with the seat's
+    When you see one and you hold the return address of the conversation the
+    person stays in, take the prompt there as a task first (below). Offer the
+    team's space or that seat's terminal only when they choose to watch, or to
+    answer in the pane themselves, and never present an attach command as the
+    way to answer.
+    Otherwise, when you see one, tell them where it is and where they can
+    answer: which seat, what its prompt asks (`rig capture <session>` with the seat's
     `canonicalSessionName` shows it), and that seat's terminal, or through
     you. A team seat's terminal is in the team's space from step 8. A kernel
     seat's is in the kernel's view (`rig terminal open saved:kernel --window`;

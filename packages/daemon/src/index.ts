@@ -1,3 +1,4 @@
+import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
 import { makeKernelHookReviewReader } from "./domain/kernel-hook-review.js";
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
@@ -368,12 +369,17 @@ export async function startServer(port?: number) {
   const servers: ServerType[] = [];
   if (guestPort !== undefined) {
     const guest = createGuestActivityApp(deps);
-    const guestServer = serve({ fetch: guest.fetch, port: guestPort, hostname: process.env.OPENRIG_GUEST_ACTIVITY_HOST ?? "127.0.0.1" });
+    const endGuestBind = beginStartupPhase("bind", "guest");
+    const guestServer = serve({ fetch: guest.fetch, port: guestPort, hostname: process.env.OPENRIG_GUEST_ACTIVITY_HOST ?? "127.0.0.1" }, () => {
+      recordStartupPhase(deps.slowOpRecorder, endGuestBind());
+    });
     trackHttpServerResponses(guestServer);
     servers.push(guestServer);
   }
   for (const host of bindHosts) {
+    const endBind = beginStartupPhase("bind", host === bindHosts[0] ? "primary" : "secondary");
     const srv = serve({ fetch: app.fetch, port: p, hostname: host }, (info) => {
+      recordStartupPhase(deps.slowOpRecorder, endBind());
       console.log(`OpenRig daemon listening on http://${host}:${info.port}`);
       if (!monitorsStarted) {
         monitorsStarted = true;
