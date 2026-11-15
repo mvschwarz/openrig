@@ -165,14 +165,15 @@ cases above applies, and `--verify` reports it the same way. A message the
 human started at the top level of the channel has no thread yet, so the answer
 posts as a new message.
 
-Send a person what changed, not your standing state. Before an update, check
-what you last sent them about that work: if nothing changed, send nothing,
-however many times you wake; if something did, say what changed rather than
-re-sending the earlier brief. When their answer arrives, close the ask it
-answers. A reply in the ask's own thread resolves it, but an answer that reaches
-you another way (in another of your threads, or as a new message) doesn't: close
-the ask yourself, noting which reply answered it, so their answer isn't left
-reading as ignored.
+For unsolicited status updates, send a person what changed, not your standing
+state. After the first notice, check what you last sent them about that work:
+if nothing changed, send nothing, however many times you wake; if something did,
+say what changed rather than re-sending the earlier brief. Answer the person's
+questions even when the work has not changed. When their answer arrives, close
+the ask it answers. A reply in the ask's own thread resolves it, but an answer
+that reaches you another way (in another of your threads, or as a new message)
+doesn't: close the ask yourself, noting which reply answered it, so their answer
+isn't left reading as ignored.
 
 A **decision** with a few clear choices can carry `--human-questions-file <path>`:
 a JSON array of 1–4 questions, each
