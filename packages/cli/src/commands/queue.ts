@@ -347,9 +347,7 @@ async function withClient<T>(
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
-  if (status >= 400 && body && typeof body === "object"
-    && (body as { error?: unknown }).error === "remote_queue_write_failed"
-    && (body as { outcome?: unknown }).outcome === "indeterminate") {
+  if (isIndeterminateRemoteWrite(status, body)) {
     console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
   }
   if (json) {
@@ -461,6 +459,34 @@ export function printCurrentWorkChoice(data: unknown): void {
  *  output). Error responses always print whole, whatever this returns. */
 function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptContext | null {
   return !full && compactOutputEnabled() ? ctx : null;
+}
+
+/** A handoff whose outcome is unknown may have committed. This names the source row to read before any retry, on the
+ *  daemon the command used, and where a successor would be. It never says the handoff failed, names a successor id, or
+ *  asks for the handoff to be repeated. */
+function handoffRecoveryHint(qitemId: string, hostId: string | undefined): string {
+  const remote = remoteHostOf(hostId);
+  return `Before any retry, read source row ${qitemId} at the same endpoint and OPENRIG_HOME: `
+    + `rig queue show ${shellQuote(qitemId)} --full --json. Read its recorded outcome: a handed-off row names its successor`
+    + (remote ? ` on host ${shellQuote(remote)}` : "")
+    + ", or says why it can't. A row that still reads open doesn't show the handoff failed: it may still commit.";
+}
+
+/** A handoff whose answer was lost (no answer in time, a lost connection, or an unreadable response) carries the hint in
+ *  its error. A pre-header disconnect can follow a committed handoff, as it can a create, so the shared renderer must not
+ *  call it undelivered. */
+function withHandoffRecovery(error: unknown, qitemId: string, hostId: string | undefined): unknown {
+  if (!(error instanceof DaemonConnectionError || error instanceof DaemonResponseError)) return error;
+  if (error instanceof DaemonConnectionError) error.writeOutcome = "unknown";
+  error.message += ` ${handoffRecoveryHint(qitemId, hostId)}`;
+  return error;
+}
+
+/** The selected daemon's forward to another host lost the remote's answer: the write was sent and may still commit. */
+function isIndeterminateRemoteWrite(status: number, body: unknown): boolean {
+  return status >= 400 && !!body && typeof body === "object"
+    && (body as { error?: unknown }).error === "remote_queue_write_failed"
+    && (body as { outcome?: unknown }).outcome === "indeterminate";
 }
 
 /** A `--host` id that may name another daemon. Empty and `local` never do; one that
@@ -1252,6 +1278,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const advisory = value as { code?: unknown; message?: unknown };
             if (typeof advisory.message !== "string") continue;
             switch (advisory.code) {
+              case "unmatched_destination_seat":
+              case "destination_status":
+                console.error(`Destination status: ${advisory.message}`);
+                break;
               case "scope_check_skipped":
                 console.error(`Note: ${advisory.message}`);
                 break;
@@ -1687,12 +1717,13 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId));
+        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
+        if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
       });
     });
 
@@ -1789,12 +1820,13 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId));
+        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
+        if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
       });
     });
 
@@ -2176,7 +2208,7 @@ Examples:
   cmd
     .command("erase")
     .description("Erase queue rows in one exact scope: an account's rows, a list of ids, or the closed-work retention windows; a dry run unless --apply")
-    .option("--members <file>", "Account deletion: the account's recorded session names (exact, departed seats included), one per line or a JSON array")
+    .option("--members <file>", "Account deletion: the account's recorded session names (exact, departed seats included), one per line or a JSON array. Empty, with --rig, for an account rig that never had a session")
     .option("--rig <id>", "With --members: the account rig's id. Also erases the rig's own records that outlive it (events, snapshots, node and seat records); refused unless every member is a session of it")
     .option("--ids <file>", "These qitem ids, one per line or a JSON array; a report's qitems entries, or an erasure ledger's JSON lines, keep each one's action")
     .option("--action <action>", "With --ids: delete (default) removes each row and keeps only its id; scrub removes its content and keeps the row", enumArg(["delete", "scrub"]))
@@ -2199,8 +2231,9 @@ Examples:
       "A deleted row keeps only its id, and a create that reuses that id is refused (qitem_erased). A row a workflow still",
       "references is reported under gaps and left. Output is JSON: clean (true only when nothing was left), complete,",
       "qitems, mixed, gaps, alreadyAbsent, linked, unlinked and rig. Refusals: erase_scope_required, erase_scope_conflict,",
-      "erase_members_invalid, erase_rig_invalid, erase_rig_mismatch, erase_ids_invalid, erase_action_invalid,",
-      "erase_routine_off. A run that stops on an error returns what it committed, with error.stage, and exits 2.",
+      "erase_members_invalid, erase_rig_invalid, erase_rig_mismatch, erase_rig_had_sessions, erase_rig_history_unknown,",
+      "erase_ids_invalid, erase_action_invalid, erase_routine_off. A run that stops on an error returns what it",
+      "committed, with error.stage, and exits 2.",
       "Reference: docs/reference/queue-erasure.md",
     ].join("\n"))
     .action(async (opts: { members?: string; rig?: string; ids?: string; action?: string; routine?: boolean; apply?: boolean; actor?: string; json?: boolean }) => {

@@ -959,16 +959,17 @@ describe("SeatHandoverService", () => {
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
     expect(result.ok).toBe(true);
+    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
+    // the reused name, so the node's live generation now DIFFERS from the retiring one it received.
+    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
+    expect(successorGen).not.toBe(retiringGen);
     expect(invalidateRetiringOccupant).toHaveBeenCalledTimes(1);
     expect(invalidateRetiringOccupant).toHaveBeenCalledWith({
       retiringSessionName: "dev-impl@seat-rig",
       successorSessionName: "dev-impl@seat-rig",
       retiringGeneration: retiringGen, // captured pre-mint = the RETIREE's gen, not the successor's
+      successorGeneration: successorGen, // #3044 C3: the generation the commit registered, so a sample it wrote is kept
     });
-    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
-    // the reused name, so the node's live generation now DIFFERS from what the invalidator received.
-    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
-    expect(successorGen).not.toBe(retiringGen);
   });
 
   it("does NOT invalidate the retiring occupant when the handover fails before commit (no re-key on a non-committed handover)", async () => {
@@ -1975,6 +1976,22 @@ describe("SeatHandoverService", () => {
       currentOccupant: "route-successor",
       currentStatus: { handoverResult: "complete" },
     });
+  });
+
+  it("wires the recover route: a seat with no failed handover has nothing to adopt, and a reason is required (#2985)", async () => {
+    const setup = createTestApp(db, { tmux: { hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter });
+    const rig = setup.rigRepo.createRig("seat-rig");
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = setup.sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+    setup.sessionRegistry.updateStatus(session.id, "running");
+    const post = (body: unknown) => setup.app.request("/api/seat/handover/dev-impl%40seat-rig/recover", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const none = await post({ reason: "adopt" });
+    expect(none.status).toBe(404);
+    expect(await none.json()).toMatchObject({ ok: false, code: "no_handover_to_recover" });
+    const noReason = await post({});
+    expect(noReason.status).toBe(400);
+    expect(await noReason.json()).toMatchObject({ ok: false, code: "missing_reason" });
   });
 
   it.each([undefined, "none"] as const)("carries current rules, model, Advisor and MCP selection (%s) to the successor", async claudeMcp => {
