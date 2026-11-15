@@ -622,6 +622,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     const failedAt = new Date(Date.now() - 10 * 60_000);
     setNudgeResult(row.qitemId, "Unroutable: no pane yet", failedAt);
     // Offer the row to the sweep as undelivered, whatever the listing's own prefix filter says.
+    vi.spyOn(repo, "undeliveredCandidateIds").mockResolvedValue([row.qitemId]);
     vi.spyOn(repo, "findUndelivered").mockImplementation(((opts?: { qitemId?: string }) =>
       !opts?.qitemId || opts.qitemId === row.qitemId ? [repo.getById(row.qitemId)!] : []) as typeof repo.findUndelivered);
     db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
