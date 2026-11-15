@@ -216,7 +216,9 @@ Examples:
     .option("--json", "Complete comparison or receipt")
     .addHelpText("after", `
 Start with: rig workflow revise <instance>
-Inspection returns the exact apply command and recovery key. Compatible revisions preserve completed/live steps, required obligations and child custody. Restore a changed completed/live step and revise its unstarted successors; no blind abort/replay is required. Exception-routing changes apply to future occurrences only; existing exception obligations keep their owners. Ordinary roles and routing remain protected. After a timeout use rig workflow operation <key> or repeat the identical apply command.
+Inspection returns the exact apply command and recovery key. Compatible revisions preserve completed/live steps, required obligations and child custody. Restore a changed completed/live step and revise its unstarted successors; no blind abort/replay is required. Exception-routing changes apply to future occurrences only; existing exception obligations keep their owners. Ordinary roles and routing remain protected. After a timeout use rig workflow operation <key> or repeat the identical apply command: the recovered receipt lists any packets the revision projected, and a repeat projects nothing more.
+
+An obsolete dependency can be removed from work that hasn't started: the preview lists each removed edge (dependency-removed), each required step whose required order it loosens (required-order-removed), and each unstarted step it makes ready (step-projected). The required steps themselves stay required. Applying projects each ready step once, through the same path as a closing prerequisite, and wakes its owner. A step with completed, live or failed work keeps its required order.
 
 Examples:
   $ rig workflow revise WF01ABC
@@ -231,8 +233,8 @@ outstanding step ship:
     step-changed: review (objective)
     step-added: docs
     Step review already has completed, live or failed work. ...
-Put review back as it was bound (likewise any removed required step or required
-order), keep docs, and inspect again. When it reads compatible, run the apply
+Put review back as it was bound (likewise any removed required step, or a required
+order removed from started work), keep docs, and inspect again. When it reads compatible, run the apply
 line it prints, then rig workflow show WF01ABC to confirm the adoption.
 `)
     .action(async (instanceId: string, opts: { apply?: boolean; expectedVersion?: string; expectedDigest?: string; operationKey?: string; actorSession?: string; reason?: string; json?: boolean }) => {

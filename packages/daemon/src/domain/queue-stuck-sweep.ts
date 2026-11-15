@@ -1197,7 +1197,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
 
     // The rows each rule looks at. The id lists are judged on a fresh getById per row; the two finders return whole
     // rows, which are read again by id once other code may have run since the list was read.
-    let listedAt = othersRan;
+    const listedAt = othersRan;
     for (const listed of indexed(() => deps.queueRepo.findOverdue({ now: nowIso, waiting: false }))) {
       if (dueToYield()) await yieldLoop();
       const row = listedAt !== othersRan ? indexed(() => deps.queueRepo.findOverdue({ now: nowIso, qitemId: listed.qitemId, waiting: false }))[0] : listed;
@@ -1234,10 +1234,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (c && !deliveryHeld(c.row)) candidates.push(c);
     }
 
-    listedAt = othersRan;
-    for (const listed of indexed(() => deps.queueRepo.findUndelivered({ waiting: false }))) {
+    // The candidate ids are read without deriving any row (in yielding windows on a file database), and each row is
+    // derived by id between this pass's yields, so a long candidate set never runs as one synchronous read.
+    const undeliveredIds = await deps.queueRepo.undeliveredCandidateIds();
+    othersMayHaveRun();
+    for (const qitemId of undeliveredIds) {
       if (dueToYield()) await yieldLoop();
-      let row = listedAt !== othersRan ? undeliveredNow(listed.qitemId) : listed;
+      let row = undeliveredNow(qitemId);
       if (!row || isFindingRow(row) || deliveryHeld(row)) continue;
       if (wakeToRetry(row)) {
         await deps.queueRepo.deliverWakeForSuccessor(row.qitemId, row.destinationSession, true, row.sourceSession);

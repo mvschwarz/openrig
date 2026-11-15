@@ -72,6 +72,10 @@ person needs in their project or home folder and name that path.
 
 ## 2. Open OpenRig and give its operator the goal
 
+A seat's startup text points an installing agent here. [references/installing-for-someone.md](references/installing-for-someone.md)
+adds what this step does not spell out (starting the daemon and kernel, what counts as ready and as finished) and relays the same
+commands; if the two ever differ, this step is right.
+
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it. If its output says no person is registered, make the offer it names before you go on, and register only on
@@ -103,7 +107,8 @@ person needs in their project or home folder and name that path.
   dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal
   the person can see; switching the shared TUI to `:terminals` does not open one. No and headless/SSH use are valid
   background outcomes. Provider-only `--provider herdr`, `--provider cmux` or `--provider rex` is for a provider that's
-  already running, not the first desktop window, and each such open adds a new workspace. `--provider herdr-app` opens
+  already running, not the first desktop window. Each `cmux` or `rex` open adds a new workspace; `herdr` focuses one
+  that still shows the view live, else adds one. `--provider herdr-app` opens
   the view in the herdr-app window you run it in (it adds OpenRig's mods there first). Inside a herdr-app
   terminal, plain `rig terminal open <view>` does the same when that window is answering. `--window` always asks for a
   new desktop window.
@@ -253,14 +258,17 @@ person needs in their project or home folder and name that path.
   the operator started it, and whether or not they joined. This is the default, not a fallback. A permission prompt
   is the person's to answer: they decide, which doesn't mean they type it into the seat's pane, so don't decline to
   relay it. After each step you hand off, and before you report progress, check `rig ps --nodes --rig <rig>` for a
-  seat stopped at a prompt. Show the person each one, with any others waiting, one line each (seat, exact action,
-  the choices offered), and the whole prompt when they ask. For a commit, also say whether the team's
+  seat stopped at a prompt, and repeat that check while you wait for a seat's result, so a prompt that appears after
+  your last check still reaches them. Show the person each one, with any others waiting, one line each (seat,
+  exact action, the choices offered), and the whole prompt when they ask. For a commit, also say whether the team's
   review has run; they may be expecting one. Before sending their choice, capture that
   seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
   `rig send <seat>@<rig> "<key>" --dangerously-interact --reason "<their choice, in their words>"`, where `<key>` is
   the digit or letter that capture shows for their choice, never their words: the text is typed as keys, and a letter
-  can pick a menu's shortcut. If the screen shows no key for their choice, ask them
-  (`rig send --help` says how to send Escape to a prompt). Never answer a prompt on your own and record it as theirs,
+  can pick a menu's shortcut. If the screen shows no key for their choice, ask them. When their choice is Escape,
+  send the key itself, written with bash or zsh quoting:
+  `rig send <seat>@<rig> $'\e' --dangerously-interact --reason "<their choice, in their words>"`. It's sent once, with
+  no Enter added. Never answer a prompt on your own and record it as theirs,
   even one that only reads: ask them, and send their answer. A yes to one prompt isn't a
   yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
   kind of future prompt (say, "approve prompts that only write inside my project"), you may decide each one: read its
@@ -271,7 +279,10 @@ person needs in their project or home folder and name that path.
   Don't send them to a bare `tmux attach` to answer: relay their choice this way, or point them to that seat in the
   team's terminals the operator opened. If they want fewer prompts, the operator offers once to allow the commands
   that keep asking, for their project only (`applying-a-permission-policy`); tell it what they chose.
-  Trust and hook-review prompts are the person's to answer, as permission prompts are.
+  Trust and hook-review prompts are the person's to answer, as permission prompts are. Once you've sent their answer
+  to a prompt a seat stopped at while starting, check `rig ps --nodes --rig <rig>` again: if it shows
+  `Startup details (<seat>)` ending in `rig seat continue <seat>`, run that command: it delivers the seat's startup
+  instructions in the same conversation.
   Another kind of menu you can answer with
   the key that screen shows, or ask the person. Capture it again before sending anything more.
 - **Replies:** in a plain shell, other agents can't type into this session. Their questions and work for you arrive
