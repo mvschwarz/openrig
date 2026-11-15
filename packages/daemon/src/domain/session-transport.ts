@@ -3084,8 +3084,13 @@ export class SessionTransport {
               const outbox = new OutboxHandler(this.db);
               const facts = memberOpts.committedOutboxIds ? bridgeIds.map((id) => outbox.getById(id)).filter((e): e is NonNullable<typeof e> => !!e)
                 : [{ outboxId: bridgeIds[0]!, auditPointer: memberOpts.auditPointer ?? null, destinationSession: sessionName }];
-              if (!this.queueWakeApplicable(facts)) return { ok: false, sessionName, outcome: "failed" as const, sent: false, inputPhase: "not_reached" as const,
-                reason: "draft_wake_superseded", error: "The queue wake is no longer applicable; nothing was queued or typed." };
+              let applicable = true;
+              try { applicable = this.queueWakeApplicable(facts); } catch (error) {
+                console.error(`[hook-bridge] ${sessionName}'s queue wake couldn't be read; delivering:`, error);
+              }
+              if (!applicable) return { ok: true, sessionName, outcome: "retained" as const, sent: false, verified: false, inputPhase: "not_reached" as const,
+                reason: "draft_wake_superseded", error: "The queue wake is no longer applicable; nothing was queued or typed.",
+                warning: "Held, not delivered. Retry the current request when the input is free; no saved callback or message is replayed automatically." };
             }
             const queueOpts = { ...(memberOpts ?? {}), admission };
             // A deposit that queued nothing (an id already settled) isn't reported queued: the send goes on as it would

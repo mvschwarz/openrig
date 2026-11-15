@@ -481,4 +481,68 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     const typed = await s.transport.sweepHookBridge();
     expect(typed.map((t) => t.outboxId)).toEqual([first.outboxIds![0], second.outboxIds![0]]);
   });
+
+  it("delivers and reports when the wake check throws before deposit (R8)", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const error = new Error("wake read unavailable");
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    s.transport.configureGuardedWakes(() => { throw error; });
+    const result = await s.transport.send(s.sessionName, "automatic wake", { actorSession: "peer@team", queueWake: true });
+    expect(result).toMatchObject({ ok: true, outcome: "bridged" });
+    expect(report).toHaveBeenCalledWith(expect.stringMatching(/queue wake.*couldn't be read; delivering/), error);
+    expect(s.bridge.poll(s.nodeId, armId)).toMatchObject({ action: "deliver", messages: [{ text: "automatic wake" }] });
+    expect(s.writes).toEqual([]);
+  });
+
+  it.each(["poll", "handback"] as const)("delivers and reports when the wake check throws at %s (R8)", async (stage) => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    s.transport.configureGuardedWakes(() => true);
+    const queued = await s.transport.send(s.sessionName, "automatic wake", { actorSession: "peer@team", queueWake: true });
+    expect(queued.outcome).toBe("bridged");
+    const error = new Error("later wake read unavailable");
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    s.transport.configureGuardedWakes(() => { throw error; });
+    if (stage === "poll") {
+      expect(s.bridge.poll(s.nodeId, armId)).toMatchObject({ action: "deliver", messages: [{ text: "automatic wake" }] });
+    } else {
+      s.advance(HOOK_BRIDGE_TURN_BOUND_MS + 1);
+      const handedBack = await s.transport.sweepHookBridge({ nodeId: s.nodeId });
+      expect(handedBack).toHaveLength(1);
+      expect(handedBack[0]!.result).toMatchObject({ ok: true });
+      expect(s.writes).toContain("paste");
+    }
+    expect(report).toHaveBeenCalledWith(expect.stringMatching(/queue wake.*couldn't be read; delivering/), error);
+  });
+
+  it.each([false, true])("keeps the known wake decision %s at deposit (R8)", async (applicable) => {
+    const s = await seat();
+    s.optInAndArm();
+    const check = vi.fn(() => applicable);
+    s.transport.configureGuardedWakes(check);
+    const result = await s.transport.send(s.sessionName, "automatic wake", { actorSession: "peer@team", queueWake: true });
+    expect(check).toHaveBeenCalled();
+    if (applicable) {
+      expect(result).toMatchObject({ ok: true, outcome: "bridged" });
+      expect(s.bridge.queued(s.nodeId)).toHaveLength(1);
+    } else {
+      expect(result).toMatchObject({ ok: true, sent: false, verified: false, outcome: "retained", reason: "draft_wake_superseded" });
+      expect(result.warning).toMatch(/Held, not delivered/);
+      expect(s.bridge.queued(s.nodeId)).toEqual([]);
+    }
+    expect(s.writes).toEqual([]);
+  });
+
+  it.each([false, true])("exempts a direct or explicit send from the wake check: explicit=%s (R8)", async (explicit) => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const check = vi.fn(() => { throw new Error("must not check an exempt send"); });
+    s.transport.configureGuardedWakes(check);
+    const result = await s.transport.send(s.sessionName, "exempt message", { actorSession: "peer@team", ...(explicit ? { queueWake: true, drainExempt: true } : {}) });
+    expect(result.outcome).toBe("bridged");
+    expect(s.bridge.poll(s.nodeId, armId)).toMatchObject({ action: "deliver" });
+    expect(check).not.toHaveBeenCalled();
+  });
+
 });

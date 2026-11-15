@@ -277,7 +277,10 @@ export class HookBridge {
   private superseded(row: QueuedRow): boolean {
     if (!row.automatic || !this.wakeApplicable) return false;
     try { return !this.wakeApplicable([{ outboxId: row.outboxId, auditPointer: row.auditPointer, destinationSession: row.sessionName }]); }
-    catch { return false; }
+    catch (error) {
+      console.error(`[hook-bridge] ${row.sessionName}'s queue wake couldn't be read; delivering:`, error);
+      return false;
+    }
   }
 
   /** The seat's queued rows, oldest first, with superseded wakes ended (not delivered) and left out. */
