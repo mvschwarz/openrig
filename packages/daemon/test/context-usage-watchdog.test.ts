@@ -536,6 +536,28 @@ describe("context-usage-threshold watchdog", () => {
     });
   }
 
+  // A watch registered before this rule, which an earlier rebind moved onto the target's transcript, goes back to the
+  // file its spec names, visibly, and fires on that file's growth.
+  it("a named watch an earlier rebind moved onto the target's transcript goes back to its named file", async () => {
+    const watched = join(tmp, "another-seat.jsonl");
+    writeFileSync(watched, "1");
+    const successorTranscript = join(tmp, "successor.jsonl");
+    writeFileSync(successorTranscript, "1");
+    const job = registerNamed(watched);
+    repo.recordWatchedFileBinding(job.jobId, transcript, "gen-1");
+    targetChangesOccupant(successorTranscript);
+
+    await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({ watchedFilePath: watched, watchedFileGeneration: "gen-2" });
+    expect(history.listForJob(job.jobId).find((entry) => entry.skipReason === "watched_file_bound")?.evaluationNotes)
+      .toMatchObject({ occupantGeneration: "gen-2", watchedFilePath: watched });
+
+    writeFileSync(watched, "1234567890");
+    const grown = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(grown.outcome.action).toBe("send");
+    expect(deliveries).toHaveLength(1);
+  });
+
   it("a named watched file removed after the target's generation change is reported unresolved, never swapped", async () => {
     const watched = join(tmp, "another-seat.jsonl");
     writeFileSync(watched, "1");
