@@ -895,10 +895,10 @@ const CODEX_MESSAGE_ROW = /^(?:[›»•■]|Error: |ERROR: )/;
 // A shell's own prompt row ends like one. Other prompt endings aren't recognized.
 const SHELL_PROMPT_END = /[$%#>❯]\s?$/;
 const squeeze = (text: string): string => text.replace(/\s+/g, "");
-// A turn boundary ends any fenced block: the user's own input row at column 0, or Codex's session header. So a block the
-// pane leaves open (a reply cut off mid-block, or one whose opening marker scrolled above the probe's window, which makes
-// its closer read as an opener) can't hide a refusal printed after it.
-const CODEX_TURN_BOUNDARY = /^[›»](?:\s|$)|OpenAI Codex \(v/;
+// Codex's own marks on its message, at column 0: a TUI error cell or the CLI's error label. A row carrying one is Codex's
+// message even inside a fenced block the pane leaves open (a reply cut off mid-block, or one whose opening marker
+// scrolled above the probe's window, which makes its closer read as an opener). An unmarked row there stays a quote.
+const CODEX_MARKED_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )Your access token could not be refreshed\b/;
 // Character wrap at a shell can leave the message's closing period alone on the next row.
 const CLOSING_PUNCTUATION_ROW = /^\.\s*$/;
 
@@ -923,10 +923,9 @@ function currentCodexAuthRefusal(paneContent: string, paneCommand: string): bool
   let at = -1;
   let fence = "";
   for (let i = 0; i < lines.length; i++) {
-    if (CODEX_TURN_BOUNDARY.test(lines[i]!)) { fence = ""; continue; }
     const next = codexFenceAfter(fence, lines[i]!);
     if (next !== undefined) fence = next;
-    else if (!fence && CODEX_AUTH_REFUSAL_ROW.test(lines[i]!)) at = i;
+    else if (fence ? CODEX_MARKED_REFUSAL_ROW.test(lines[i]!) : CODEX_AUTH_REFUSAL_ROW.test(lines[i]!)) at = i;
   }
   if (at < 0) return false;
   let end = -1;
@@ -937,7 +936,7 @@ function currentCodexAuthRefusal(paneContent: string, paneCommand: string): bool
     if (CODEX_AUTH_INSTRUCTIONS.some((instruction) => message.includes(squeeze(instruction)))) end = i;
   }
   if (end < 0) return false;
-  if (CLOSING_PUNCTUATION_ROW.test(lines[end + 1] ?? "")) end++;
+  if (!lines[end]!.trimEnd().endsWith(".") && CLOSING_PUNCTUATION_ROW.test(lines[end + 1] ?? "")) end++;
   const after = lines.slice(end + 1);
   let inputAt = -1;
   for (let i = after.length - 1; i >= 0 && inputAt < 0; i--) if (CODEX_INPUT_ROW.test(after[i]!)) inputAt = i;

@@ -1429,15 +1429,25 @@ describe("native resume probe", () => {
         const message = "Error: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again";
         expect(message).toHaveLength(120);
         expect(probe("zsh", ["$ codex resume 019d-token", message, ".", "user@example.test ~/project %"])).toEqual(authRefusal);
+        // A message that already ends in its period, then a newer "." row: that row is other output, as before.
+        expect(probe("zsh", ["$ codex resume 019d-token", `${message}.`, ".", "user@example.test ~/project %"]))
+          .toMatchObject({ code: "returned_to_shell" });
       });
 
-      it("a block left open before the user's next turn doesn't hide a fresh refusal", () => {
+      it("a block left open doesn't hide a fresh refusal Codex marks as its own, and still hides an unmarked quote", () => {
         // A reply cut off inside its block, then the user's turn and a current refusal.
         expect(probe("codex", [header, "• Here's the start of it:", "```text", "partial output", "› Continue",
           "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer])).toEqual(authRefusal);
         // The probe's window starts below a block's opener, so its closer is the first marker it sees.
         expect(probe("codex", ["```", "• That's the whole file.", "› Continue",
           "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer])).toEqual(authRefusal);
+        // The same closer, with the refusal straight after the reply and no turn between.
+        expect(probe("codex", ["```", "• That's the whole file.",
+          "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer])).toEqual(authRefusal);
+        // A quote left open that shows a transcript's prompt row, then an unmarked refusal: still a quote.
+        expect(probe("codex", [header, "• Here's what the other session showed:", "```text", "› Continue",
+          "Your access token could not be refreshed. Please sign in again.", "", ...composer]))
+          .toMatchObject({ status: "resumed", code: "active_runtime" });
       });
 
       it("a refusal wrapped past three rows is read to its instruction, and stops at a boundary", () => {
