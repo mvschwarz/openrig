@@ -639,7 +639,7 @@ describe("selected-history startup", () => {
     vi.spyOn(CodexResumeAdapter.prototype, "resume").mockResolvedValue({ ok: false, code: "resume_failed", message: "fixture native failed" });
     vi.spyOn(setup.tmuxAdapter, "killSession").mockResolvedValue({ ok: false, code: "kill_failed", message: "fixture: stop unconfirmed" });
     const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
-    expect(result).toMatchObject({ code: "awaiting-decision", runtimeHome: { attempted: { revision: 4 }, putBack: null, notPutBack: "outcome_unknown" } });
+    expect(result).toMatchObject({ code: "attention_required", runtimeHome: { attempted: { revision: 4 }, putBack: null, notPutBack: "outcome_unknown" } });
     expect(codexHomeOf(f.node.id)).toBe("/homes/codex-a2");
   });
 
