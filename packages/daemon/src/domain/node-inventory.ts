@@ -10,6 +10,7 @@ import { identityVerdictConfirmsSessionMissing, identityVerdictConfirmsExecutorS
 import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
+import { getLatestStartupFailedEvent } from "./startup-orchestrator.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { TranscriptStore } from "./transcript-store.js";
@@ -1082,6 +1083,10 @@ function buildInventoryItem(
     // /api/rigs/:rigId/nodes/:logicalId) — relocation, not loss.
     recoveryGuidance: null,
     latestError: row.startup_status === "ready" ? null : getLatestError(db, row.rig_id, row.node_id),
+    // The stage of this session's own startup failure, when it is the node's newest startup event: a later launch's
+    // attention never inherits an earlier session's stage.
+    latestErrorStage: row.startup_status === "attention_required" && row.session_id
+      ? getLatestStartupFailedEvent(db, row.node_id, row.session_id)?.stage ?? null : null,
     // Extended fields
     model: row.model,
     // Configured launch effort only; an observed level is reported by the
