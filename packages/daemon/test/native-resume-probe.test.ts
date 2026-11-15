@@ -1424,6 +1424,22 @@ describe("native resume probe", () => {
           .toMatchObject({ status: "resumed", code: "active_runtime" });
       });
 
+      it("a refusal whose closing period wraps alone onto the next row still asks for sign-in", () => {
+        // 120 characters through "again" at a 120-column pane: the shell wraps the period onto its own row.
+        const message = "Error: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again";
+        expect(message).toHaveLength(120);
+        expect(probe("zsh", ["$ codex resume 019d-token", message, ".", "user@example.test ~/project %"])).toEqual(authRefusal);
+      });
+
+      it("a block left open before the user's next turn doesn't hide a fresh refusal", () => {
+        // A reply cut off inside its block, then the user's turn and a current refusal.
+        expect(probe("codex", [header, "• Here's the start of it:", "```text", "partial output", "› Continue",
+          "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer])).toEqual(authRefusal);
+        // The probe's window starts below a block's opener, so its closer is the first marker it sees.
+        expect(probe("codex", ["```", "• That's the whole file.", "› Continue",
+          "■ Your access token could not be refreshed. Please log out and sign in again.", "", ...composer])).toEqual(authRefusal);
+      });
+
       it("a refusal wrapped past three rows is read to its instruction, and stops at a boundary", () => {
         expect(probe("zsh", ["$ codex resume 019d-token",
           "Error: Your access token could not be refreshed because",

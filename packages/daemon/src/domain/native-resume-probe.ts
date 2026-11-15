@@ -895,6 +895,12 @@ const CODEX_MESSAGE_ROW = /^(?:[›»•■]|Error: |ERROR: )/;
 // A shell's own prompt row ends like one. Other prompt endings aren't recognized.
 const SHELL_PROMPT_END = /[$%#>❯]\s?$/;
 const squeeze = (text: string): string => text.replace(/\s+/g, "");
+// A turn boundary ends any fenced block: the user's own input row at column 0, or Codex's session header. So a block the
+// pane leaves open (a reply cut off mid-block, or one whose opening marker scrolled above the probe's window, which makes
+// its closer read as an opener) can't hide a refusal printed after it.
+const CODEX_TURN_BOUNDARY = /^[›»](?:\s|$)|OpenAI Codex \(v/;
+// Character wrap at a shell can leave the message's closing period alone on the next row.
+const CLOSING_PUNCTUATION_ROW = /^\.\s*$/;
 
 /** A fence marker row moves fenced-block state: three or more backticks or tildes open a block, and only the same family,
  *  at least as long, with nothing after it closes it. The state after the row, or undefined when it isn't a marker. */
@@ -917,6 +923,7 @@ function currentCodexAuthRefusal(paneContent: string, paneCommand: string): bool
   let at = -1;
   let fence = "";
   for (let i = 0; i < lines.length; i++) {
+    if (CODEX_TURN_BOUNDARY.test(lines[i]!)) { fence = ""; continue; }
     const next = codexFenceAfter(fence, lines[i]!);
     if (next !== undefined) fence = next;
     else if (!fence && CODEX_AUTH_REFUSAL_ROW.test(lines[i]!)) at = i;
@@ -930,6 +937,7 @@ function currentCodexAuthRefusal(paneContent: string, paneCommand: string): bool
     if (CODEX_AUTH_INSTRUCTIONS.some((instruction) => message.includes(squeeze(instruction)))) end = i;
   }
   if (end < 0) return false;
+  if (CLOSING_PUNCTUATION_ROW.test(lines[end + 1] ?? "")) end++;
   const after = lines.slice(end + 1);
   let inputAt = -1;
   for (let i = after.length - 1; i >= 0 && inputAt < 0; i--) if (CODEX_INPUT_ROW.test(after[i]!)) inputAt = i;
