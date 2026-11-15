@@ -244,7 +244,7 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
   it.each([
     ["no saved snapshot names this seat yet, so which launch path restore takes for it isn't known."],
     ["restore takes this seat's runtime from its resume token, which this read doesn't know."],
-    ["this seat has no saved startup context, so restore starts it fresh and re-reads its policy then."],
+    ["this seat has no saved startup context, so this read can't settle whether restore resumes its saved conversation or starts it fresh, or which permission that path uses."],
   ])("--plan prints an unsettled seat's permission as unknown with the reason: %s", async (reason) => {
     respond = () => ({ status: "plan", mode: "restore", rigId: "rig-1", rigName: "myrig", snapshot: null, wouldCaptureCurrentState: true,
       nodes: [{ logicalId: "dev.impl", intendedAction: "fresh-primed", permission: { basis: "unknown", runtime: "claude-code", summary: `Unknown: ${reason}` } }],
