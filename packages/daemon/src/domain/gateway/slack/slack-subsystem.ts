@@ -638,6 +638,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         },
         pinChannel: Boolean(cfg.channelMap?.length),
         sourceLabel: cfg.sourceLabel,
+        unfurl: cfg.unfurl === "on" ? "on" : "off",
         // P6: each post names the machine it comes from, the daemon's own host id.
         machine: () => getSelfHostId(),
         fetchImpl: opts.fetchImpl,

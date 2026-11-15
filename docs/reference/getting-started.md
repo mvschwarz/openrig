@@ -112,8 +112,9 @@ including its `bwrap` AppArmor profile guidance; changes to AppArmor are the own
 **Choose permissions before starting the team.** Ordinary OpenRig launches use
 Codex's `-s workspace-write`, with approval policy from your native configuration,
 or Claude Code's `acceptEdits`, which still leaves commands subject to native
-rules and prompts. A team seat with no permission policy, per-seat choice or
-(for Codex) named profile also gets a per-launch
+rules and prompts. A team seat with no permission policy (or with `standard` or
+`open`, whose rules aren't applied at launch), per-seat choice or (for Codex)
+named profile also gets a per-launch
 [team default](rig-spec.md#team-launch-defaults): Claude runs ordinary `rig`
 commands, project reads and common tests without prompting, while lifecycle
 commands such as `rig up` and `rig down` still ask; Codex also gets the OpenRig
@@ -185,10 +186,10 @@ agent doing the setup. Both use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.15/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.15/skills/rigs" --skill rigs --agent codex
 ```
 
 If OpenRig is already installed, use the release tag matching your installed `rig --version` instead: replace the tag
@@ -203,13 +204,13 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.15/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh`, installs the
-latest published `@openrig/cli` with `npm install -g`,
-runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.15/scripts/install.sh | sh`, installs the
+latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
+present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
 `FAILED [n/4] <command or check> (exit <code>)` for steps 1–3. If step 4 is not ready, it reports
 `INSTALLED, SETUP NOT COMPLETE` and points to the details from `rig setup` above. Follow that output and any Fix, then rerun
@@ -308,11 +309,12 @@ team. `rig daemon start --no-kernel` is for automation or an explicit request to
 omit the kernel; it leaves you without that operator.
 
 On a fresh instance, explicit daemon startup chooses the kernel variant from
-successful native auth probes: Claude alone, Codex alone, or both. It starts the
-kernel in the background without a project starter. An absent unused provider is
-fine; if both accounts are authenticated, the kernel uses both even when your
-later project uses just one. A request to use only one provider for everything
-is a separate choice.
+the providers selected by `rig setup --providers` that pass native auth probes:
+Claude alone, Codex alone, or both. If no choice was recorded, it considers every
+signed-in provider. `OPENRIG_PROVIDER_SELECTED` in the daemon's environment
+overrides the saved choice. It starts the kernel in the background without a
+project starter. An absent unused provider is fine. The kernel choice and a
+later project's provider choice are separate.
 
 `/api/kernel/status` retains the chosen template (`rig.yaml`,
 `rig-claude-only.yaml` or `rig-codex-only.yaml`) across daemon restarts and
@@ -670,7 +672,7 @@ rig ps --nodes --rig starter
 Preview the selected seats, models and resources. Plan checks resolution and
 preflight for the working directory. The kernel is already your entry point; this step starts the chosen project
 team. Read readiness for the project seats, not only daemon health. Have the person answer a named authentication, trust, hook-review or
-permission prompt before giving that seat work; a launch default, or their answer for another seat, isn't their answer to this one. When a seat stops at such a prompt, `rig up` reports
+permission prompt before giving that seat work; a launch default, or their answer for another seat, isn't their answer to this one. When the person works through their own agent, the agent brings each trust, hook-review or permission prompt to them as a question and sends their choice, so they don't need to open that seat's terminal; a sign-in still needs the person. When a seat stops at such a prompt, `rig up` reports
 `Status: partial`, prints `Startup attention (<seat>): <reason>` and exits 1;
 `rig ps --nodes` repeats it as "Startup details". The reason ends with the command
 to run once the prompt is answered: `rig seat continue <seat>`, which delivers the
@@ -756,9 +758,9 @@ Herdr, use `rig terminal open starter --provider herdr`; for the shared
 dashboard together with the kernel conversations, use the
 [saved first view](#open-the-kernel-conversations). The equivalent
 cmux provider is also available. Read the opened/absent/degraded result: a
-partial terminal view is not a healthy team. Each `--provider herdr` open adds
-a new workspace, numbered when the name is taken; return to the one already open
-when you want to preserve it. From inside Herdr, `rig terminal open <view> --window`
+partial terminal view is not a healthy team. A `--provider herdr` open focuses a
+workspace that still shows this view live instead of adding a copy; otherwise it
+adds a new workspace, numbered when the name is taken. From inside Herdr, `rig terminal open <view> --window`
 focuses a matching space instead of adding one. Herdr's own status for a seat can
 read idle or unknown while OpenRig shows it waiting (`needs-input`), for example in
 a narrow tile that wraps Claude's footer, or in a tile that shows the inner tmux
@@ -1287,7 +1289,7 @@ and `off` for ordinary automatic sends (`--enabled false`).
 In the shipped `starter`, `dev-build` runs Claude Code. For a **Claude Code** seat,
 OpenRig normally passes `--permission-mode acceptEdits`: edits can proceed, while
 other actions follow native rules and prompts. For a seat with no permission
-policy or per-seat choice it also passes the per-launch team default (`--settings` allowing ordinary
+policy (or with `standard` or `open`) and no per-seat choice it also passes the per-launch team default (`--settings` allowing ordinary
 `rig` commands, project reads and common tests, with a session hook asking for
 lifecycle commands while allowing literal help forms such as `rig down --help`);
 personal and project rules still apply. Nothing is written to your settings files. To explicitly select the bypass launch flag for that rig:

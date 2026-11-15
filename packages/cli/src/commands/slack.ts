@@ -188,6 +188,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .option("--secrets-env-file <path>", "path to the 0600 env file with SLACK_BOT_TOKEN / SLACK_APP_TOKEN")
     .option("--required-scopes <csv>", "comma-separated bot scopes to require at verify time")
     .option("--reactions <mode>", "what a person's emoji reaction on an OpenRig post does: route (default) makes a row for the seat that asked; off ignores reactions, so an acknowledging emoji costs no agent turn")
+    .option("--unfurl <mode>", "link and media previews on human-row posts: off (default) or on; takes effect when the connector rewires")
     .option("--reason <reason>", "Reason recorded with the configuration change", "configure human delivery")
     .option("--actor <actor>", "Named operator when outside a managed seat")
     .action(async (opts) => {
@@ -203,6 +204,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         secretsEnvFile: opts.secretsEnvFile ?? cur.secretsEnvFile,
         requiredScopes: opts.requiredScopes ? String(opts.requiredScopes).split(",").map((s: string) => s.trim()).filter(Boolean) : cur.requiredScopes,
         ...(opts.reactions !== undefined ? { reactions: opts.reactions } : {}),
+        ...(opts.unfurl !== undefined ? { unfurl: opts.unfurl } : {}),
       };
       const { runChannelOperation, channelStateDigest } = await import("@openrig/daemon/gateway-slack");
       const result = await runChannelOperation({

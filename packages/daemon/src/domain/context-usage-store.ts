@@ -25,6 +25,9 @@ export interface ContextUsageStoreOpts {
   // reading sampled BEFORE the current occupant booted (a prior generation) is rejected instead of
   // driving the threshold. null = UNKNOWN → the gate is inert (note-2).
   resolveOccupantBootAt?: (nodeId: string) => string | null;
+  /** #3044 C3: the LIVE occupant's generation for a node. A reading that recorded it is that occupant's own, whatever
+   *  its time: a recovered successor sampled before the commit registered it. null = UNKNOWN → the time gate decides. */
+  resolveOccupantGeneration?: (nodeId: string) => string | null;
 }
 
 interface SidecarRaw {
@@ -62,6 +65,7 @@ interface ContextUsageRow {
   current_usage: string | null;
   transcript_path: string | null;
   sampled_at: string | null;
+  occupant_generation?: string | null;
   updated_at: string;
 }
 
@@ -95,12 +99,14 @@ export class ContextUsageStore {
   private codexHome?: string;
 
   private readonly resolveOccupantBootAt?: (nodeId: string) => string | null;
+  private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
     this.db = db;
     this.stateDir = opts.stateDir;
     this.codexHomeDir = opts.codexHomeDir ?? safeHomeDir();
     this.codexHome = opts.codexHome;
     this.resolveOccupantBootAt = opts.resolveOccupantBootAt;
+    this.resolveOccupantGeneration = opts.resolveOccupantGeneration;
   }
 
   /**
@@ -111,8 +117,11 @@ export class ContextUsageStore {
    * no sampled_at — the gate is inert (note-2: never treat unknown as stale), leaving
    * session_mismatch + freshness as the remaining guards. boot_at is SQLite datetime('now') (UTC,
    * no zone marker), so it is parsed as UTC; a bare Date.parse would read it as local time.
+   * #3044 C3: a reading recorded with the live occupant's generation is its own, so the time doesn't apply.
    */
-  private isPriorGenerationReading(nodeId: string, sampledAt: string | null): boolean {
+  private isPriorGenerationReading(nodeId: string, row: ContextUsageRow): boolean {
+    if (row.occupant_generation && row.occupant_generation === this.resolveOccupantGeneration?.(nodeId)) return false;
+    const sampledAt = row.sampled_at;
     if (!sampledAt) return false;
     const bootAt = this.resolveOccupantBootAt?.(nodeId) ?? null;
     if (!bootAt) return false;
@@ -135,10 +144,18 @@ export class ContextUsageStore {
    * writes its own sidecar. Missing file = no-op; best-effort (a leftover is caught downstream by
    * the freshness gate). NOTE: this is the DISK sidecar (name-keyed); the context_usage DB table is
    * node_id-keyed + already session_mismatch-gated, so it needs no invalidation here.
+   * #3044 C3: a recovery adopts a successor that has already run under the same name, so its own sample may be the
+   * file. `keepGeneration` names that successor's generation: a sidecar the cleanup reads recording it is kept, anything
+   * else is removed. Best effort: the collector replaces the file from another process, so a sample written between
+   * this read and the delete can still be removed, until the successor's next write.
    */
-  invalidateOccupantSidecar(sessionName: string): void {
+  invalidateOccupantSidecar(sessionName: string, keepGeneration?: string): void {
     const filePath = this.getSidecarPath(sessionName);
     try {
+      if (keepGeneration !== undefined) {
+        const sidecar = this.readSidecarAt(filePath);
+        if (sidecar.ok && sidecar.data?.occupant_generation === keepGeneration) return;
+      }
       if (existsSync(filePath)) unlinkSync(filePath);
     } catch {
       /* best-effort — a stale leftover is still gated by isFresh downstream */
@@ -192,8 +209,8 @@ export class ContextUsageStore {
   }
 
   /** Resolve an explicitly selected native thread, even before its first token count. */
-  readCodexTranscriptPath(threadId: string): string | null {
-    return this.readCodexThread(threadId)?.rollout_path ?? null;
+  readCodexTranscriptPath(threadId: string, codexHome?: string): string | null {
+    return this.readCodexThread(threadId, codexHome)?.rollout_path ?? null;
   }
 
   /** Normalize raw sidecar data into a ContextUsage record. */
@@ -235,6 +252,7 @@ export class ContextUsageStore {
       sampledAt,
       fresh,
       clientCostEstimateUsd: typeof raw.cost?.total_cost_usd === "number" && Number.isFinite(raw.cost.total_cost_usd) ? raw.cost.total_cost_usd : null,
+      occupantGeneration: typeof raw.occupant_generation === "string" ? raw.occupant_generation : null,
     };
   }
 
@@ -290,8 +308,8 @@ export class ContextUsageStore {
         node_id, session_id, session_name, availability, reason, source,
         used_percentage, remaining_percentage, context_window_size,
         total_input_tokens, total_output_tokens, current_usage,
-        transcript_path, sampled_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        transcript_path, sampled_at, occupant_generation, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(node_id) DO UPDATE SET
         session_id = excluded.session_id,
         session_name = excluded.session_name,
@@ -306,6 +324,7 @@ export class ContextUsageStore {
         current_usage = excluded.current_usage,
         transcript_path = excluded.transcript_path,
         sampled_at = excluded.sampled_at,
+        occupant_generation = excluded.occupant_generation,
         updated_at = datetime('now')
     `).run(
       nodeId,
@@ -322,6 +341,7 @@ export class ContextUsageStore {
       usage.currentUsage,
       usage.transcriptPath,
       usage.sampledAt,
+      usage.occupantGeneration ?? null,
     );
   }
 
@@ -341,7 +361,7 @@ export class ContextUsageStore {
     // GHOST-STAGE (c-id): generation guard. Under handover the name is REUSED, so session_mismatch
     // passes while the table still holds the retiree's pre-boot reading (the mixed-gen window).
     // Reject readings from before the live occupant booted → insufficient-data, evaluate current-gen only.
-    if (this.isPriorGenerationReading(nodeId, row.sampled_at)) {
+    if (this.isPriorGenerationReading(nodeId, row)) {
       return this.unknownUsage("stale_generation");
     }
 
@@ -381,7 +401,7 @@ export class ContextUsageStore {
       }
 
       // GHOST-STAGE (c-id): generation guard — see getForNode. Reject pre-boot (prior-gen) readings.
-      if (this.isPriorGenerationReading(entry.nodeId, row.sampled_at)) {
+      if (this.isPriorGenerationReading(entry.nodeId, row)) {
         result.set(entry.nodeId, this.unknownUsage("stale_generation"));
         continue;
       }
@@ -453,8 +473,11 @@ export class ContextUsageStore {
     }
   }
 
-  private readCodexThread(threadId: string): CodexThreadRow | null {
-    for (const dbPath of this.resolveCodexStateDbPaths()) {
+  private readCodexThread(threadId: string, codexHome?: string): CodexThreadRow | null {
+    // A qualified seat read is confined to the same home as its PID/start-time evidence.
+    // Unqualified telemetry readers keep their existing multi-home discovery.
+    const paths = codexHome ? resolveCodexDbPaths("", "state", undefined, codexHome) : this.resolveCodexStateDbPaths();
+    for (const dbPath of paths) {
       try {
         const codexDb = new Database(dbPath, { readonly: true });
         try {
@@ -474,8 +497,8 @@ export class ContextUsageStore {
 
   private resolveCodexStateDbPaths(): string[] {
     const daemon = this.codexHome || this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir ?? "", "state", undefined, this.codexHome) : [];
-    // A seat with its own CODEX_HOME keeps its threads there. A thread id is unique across homes, so each declared home is
-    // searched after the daemon's.
+    // Unqualified telemetry discovery searches declared homes after the daemon's.
+    // Qualified native-identity reads supply one explicit home instead (copies may share a UUID).
     const seats = declaredRuntimeHomes(this.db, "codex").flatMap(home => resolveCodexDbPaths("", "state", undefined, home));
     return [...new Set([...daemon, ...seats])];
   }
