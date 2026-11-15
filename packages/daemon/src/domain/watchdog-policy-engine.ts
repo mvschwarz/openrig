@@ -380,9 +380,13 @@ export class WatchdogPolicyEngine {
     // Issue #1180 — token/percent jobs measure the seat's sampled context use,
     // so only byte-gated jobs need a transcript-file binding.
     const byteGated = job.thresholdBytes != null;
+    // A file the person named (`--watched-file`, the spec's `context.watched_file`) stays the watched file when the
+    // target's occupant changes; only a binding resolved from the target's own transcript follows its new occupant.
+    const explicitWatchedFile = typeof parsed.context.watched_file === "string" && parsed.context.watched_file !== "";
     if (
       isContextUsageThreshold &&
       byteGated &&
+      !explicitWatchedFile &&
       occupantGeneration &&
       job.watchedFileGeneration !== occupantGeneration
     ) {
