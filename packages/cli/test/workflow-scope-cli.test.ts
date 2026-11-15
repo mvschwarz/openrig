@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { WorkflowDeps } from "../src/commands/workflow.js";
 import { createProgram } from "../src/index.js";
 
@@ -67,6 +67,8 @@ function makeDeps(opts?: { routes?: Record<string, StubResponse> }): {
 }
 
 describe("workflow scope flags", () => {
+  afterEach(() => { vi.restoreAllMocks(); process.exitCode = undefined; });
+
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
