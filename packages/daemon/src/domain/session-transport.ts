@@ -1977,9 +1977,10 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 
 export interface SendOpts {
   expectedIdentity?: ExpectedConversation;
-  /** Internal: a message the seat's hook bridge couldn't deliver, handed back for typed delivery under its own outbox id.
-   *  Never accepted from the public transport route. */
-  hookBridgeFallback?: boolean;
+  /** Internal: a message the seat's hook bridge couldn't deliver, typed under its own outbox id (sent as its committed
+   *  id) with the admission it was queued with, taken back from the bridge under the seat's lease. Never accepted from the
+   *  public transport route. */
+  hookBridgeFallback?: { nodeId: string; reason: string; admission: AdmissionInput | null };
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */
@@ -2877,17 +2878,27 @@ export class SessionTransport {
     const outbox = new OutboxHandler(this.db);
     const typed: Array<{ outboxId: string; result: SendResult }> = [];
     for (const { nodeId, outboxIds, reason } of due) {
-      // Oldest first, each released only just before it's typed: a row the bridge took meanwhile isn't released, and
-      // the seat's loop stops there, so nothing is typed twice and nothing behind it overtakes it.
+      const saved = new Map(bridge.queued(nodeId).map((row) => [row.outboxId, row]));
+      // Oldest first. Each is taken back from the bridge only under the seat's lease, just before it's typed: one the
+      // bridge took first isn't typed, and the seat's loop stops there, so nothing is typed twice and nothing behind it
+      // overtakes it. Each keeps its own delivery contract: its admission, and the occupant it was queued for.
       for (const outboxId of outboxIds) {
         const entry = outbox.getById(outboxId);
-        if (!entry || !bridge.releaseForTyping(nodeId, entry.destinationSession, outboxId, reason)) break;
-        const result = await this.send(entry.destinationSession, entry.body, { deliveryId: outboxId, hookBridgeFallback: true,
-          actorSession: entry.senderSession, ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}), ...(entry.urgency === "urgent" ? { urgent: { by: entry.senderSession } } : {}) });
+        const row = saved.get(outboxId);
+        if (!entry || !row) break;
+        // Its body already carries any urgent line; its admission says how the guard admits it.
+        const result = await this.send(entry.destinationSession, entry.body, { committedOutboxIds: [outboxId],
+          hookBridgeFallback: { nodeId, reason, admission: row.admission }, actorSession: entry.senderSession,
+          ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}) });
+        if (result.reason === "hook_bridge_claimed") break;
+        if (result.reason === "guard_target_changed" && result.sent === false) {
+          bridge.abandon(nodeId, entry.destinationSession, outboxId, "it was queued for an earlier occupant of the seat, which is gone");
+          typed.push({ outboxId, result });
+          continue;
+        }
         if (result.outcome !== "retained") {
-          if (result.ok && result.outcome !== "rendered-unconfirmed") outbox.markDelivered(outboxId);
-          else if (result.ok || result.inputPhase === "attempted" || result.inputPhase === "written") outbox.markIndeterminate(outboxId);
-          else outbox.markFailed(outboxId);
+          outbox.finalizeDelivery(outboxId, result.ok && result.outcome !== "rendered-unconfirmed" ? "delivered"
+            : result.ok || result.inputPhase === "attempted" || result.inputPhase === "written" ? "indeterminate" : "failed");
         }
         typed.push({ outboxId, result });
       }
@@ -2895,9 +2906,29 @@ export class SessionTransport {
     return typed;
   }
 
+  /** A hook-bridge fallback takes its row back from the bridge under the seat's lease, just before typing it. Null when
+   *  it may type; otherwise why it doesn't: the row was queued for an occupant who's gone (it isn't typed into the new
+   *  one), or the bridge's waiter took it first. */
+  private takeFromHookBridge(sessionName: string, ids: string[], opts?: SendOpts): SendResult | null {
+    const fallback = opts?.hookBridgeFallback;
+    if (!fallback) return null;
+    const outboxId = ids[0]!;
+    const entry = new OutboxHandler(this.db).getById(outboxId);
+    const target = this.tmuxAdapter.deliveryGuard!.target(sessionName);
+    if (entry?.guardBinding && JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "guard_target_changed", error: "This message was queued for another occupant of the seat; no input written." };
+    }
+    if (!this.hookBridge?.releaseForTyping(fallback.nodeId, sessionName, outboxId, fallback.reason)) {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "hook_bridge_claimed", error: "The seat's hook bridge took this message first; nothing typed." };
+    }
+    return null;
+  }
+
   private async sendClassifiedInput(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
-    const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
+    const saved = opts?.hookBridgeFallback?.admission;
+    const admission: AdmissionInput = saved ? { source: saved.source, urgent: saved.urgent, override: false }
+      : { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
       if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
@@ -2962,6 +2993,8 @@ export class SessionTransport {
       }
       let bridgeWarning: string | undefined;
       const result = await guard.operation(sessionName, async () => {
+        const taken = this.takeFromHookBridge(sessionName, ids, opts);
+        if (taken) return taken;
         const members = recheck(false);
         const memberText = members?.text ?? text;
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
@@ -2969,7 +3002,8 @@ export class SessionTransport {
         // Admission (hold, the levels) has already decided above. With no live arm, it's typed, with a warning; messages
         // already queued go first, so a send never overtakes them.
         const bridge = this.hookBridge;
-        if (bridge && !memberOpts?.hookBridgeFallback && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract) {
+        // A send bound to an original conversation isn't bridged: the typed path enforces that binding.
+        if (bridge && !memberOpts?.hookBridgeFallback && !memberOpts?.expectedIdentity && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract) {
           const target = guard.target(sessionName);
           if (bridge.routes(target)) {
             const bridgeIds = memberOpts?.committedOutboxIds ?? ids;
@@ -2994,6 +3028,8 @@ export class SessionTransport {
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         // Nothing is retained yet: a caller that went away while this send waited for the lease ends it here.
         if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
+        const taken = this.takeFromHookBridge(sessionName, ids, opts);
+        if (taken) return taken;
         const members = recheck(true);
         if (members) ids = members.outboxIds;
         this.db.transaction(() => {

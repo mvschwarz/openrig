@@ -64,7 +64,9 @@ async function waiter(c: Context): Promise<{ bridge: HookBridge; nodeId: string;
   if (!bridge || !store || !registry || !guard) return unavailable(c);
   const principal = activityPrincipal(c, store, c.get("activityHookToken" as never) as string | undefined);
   if ("refused" in principal) return principal.refused;
-  let body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  // A body that isn't a JSON object (null, an array, a number) names no seat: it's refused below, never a crash.
+  const parsed = await c.req.json<unknown>().catch(() => null);
+  let body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
   if (principal.grant) {
     const bound = bindToGrant(c, store, principal.grant, body);
     if ("refused" in bound) return bound.refused;
@@ -97,14 +99,15 @@ hookBridgeRoutes.post("/poll", async (c) => {
   const w = await waiter(c);
   if (w instanceof Response) return w;
   if (typeof w.body.armId !== "string") return c.json({ ok: false, code: "invalid_hook_bridge", error: "armId required." }, 400);
-  return c.json({ ok: true, ...w.bridge.poll(w.nodeId, w.body.armId) });
+  // Under the seat's delivery lease: a typed send to the seat finishes before this poll can take what's queued behind it.
+  return c.json({ ok: true, ...await w.bridge.pollUnderLease(w.nodeId, w.body.armId) });
 });
 
 hookBridgeRoutes.post("/ack", async (c) => {
   const w = await waiter(c);
   if (w instanceof Response) return w;
   if (typeof w.body.armId !== "string" || typeof w.body.batchId !== "string") return c.json({ ok: false, code: "invalid_hook_bridge", error: "armId and batchId required." }, 400);
-  return c.json({ ok: true, ...w.bridge.ack(w.nodeId, w.sessionName, w.body.armId, w.body.batchId) });
+  return c.json({ ok: true, ...w.bridge.ack(w.nodeId, w.sessionName, w.generation, w.body.armId, w.body.batchId) });
 });
 
 hookBridgeRoutes.post("/turn", async (c) => {

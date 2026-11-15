@@ -16,6 +16,15 @@ import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delive
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { HOOK_BRIDGE_LIVE_BOUND_MS, HookBridge } from "../src/domain/hook-bridge.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+
+// A send bound to an original conversation: the native record check is the expected-identity suite's; here it passes,
+// so the only question is whether the bridge takes the send.
+vi.mock("../src/domain/expected-conversation.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/domain/expected-conversation.js")>()),
+  resolveExpectedConversation: async (identity: unknown) => ({ identity, path: "/dev/null", generation: "g", pane: "%1", assertCurrent: () => {} }),
+}));
 
 const cleanup: Array<() => unknown> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) close(); });
@@ -30,10 +39,10 @@ async function seat() {
   const occupant = registry.currentOccupantTenure(node.id)?.generationUuid ?? null;
 
   const writes: string[] = [];
-  const hooks: { onPaste: (() => void) | null } = { onPaste: null };
+  const hooks: { onPaste: (() => unknown) | null } = { onPaste: null };
   const tmux = new TmuxAdapter(async (command) => {
     if (command.includes("paste-buffer") || command.includes("send-keys")) writes.push(command.includes("paste-buffer") ? "paste" : "keys");
-    if (command.includes("paste-buffer")) { const hook = hooks.onPaste; hooks.onPaste = null; hook?.(); }
+    if (command.includes("paste-buffer")) { const hook = hooks.onPaste; hooks.onPaste = null; await hook?.(); }
     return "";
   }, { writeFile: async () => {}, unlink: async () => {}, tmpName: () => join(root, "paste"), bufferName: () => "bridge-test" });
   vi.spyOn(tmux, "getPanePid").mockResolvedValue(10);
@@ -46,14 +55,17 @@ async function seat() {
   const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name), async () => {});
   tmux.deliveryGuard = guard;
   let now = Date.parse("2026-11-14T18:00:00Z");
-  const bridge = new HookBridge(db, { now: () => now });
+  const bridge = new HookBridge(db, { now: () => now, lease: (id, fn) => guard.exclusive(id, fn) });
   const transport = new SessionTransport({ db, rigRepo: repo, sessionRegistry: registry, tmuxAdapter: tmux, hookBridge: bridge, sleep: async () => {},
     listProcesses: async () => [] } as never);
   const optInAndArm = () => {
     bridge.setPreference(node.id, true, "human@team", "wake at turn boundaries");
     return bridge.arm({ nodeId: node.id, sessionName, generation: occupant, hookEvent: "SessionStart" });
   };
-  return { db, guard, bridge, transport, writes, hooks, occupant, nodeId: node.id, sessionName, optInAndArm, advance: (ms: number) => { now += ms; } };
+  /** A new occupant in the same seat and pane, as a handover leaves it. */
+  const replaceOccupant = () => { const next = registry.registerSession(node.id, sessionName, "handover"); registry.updateStatus(next.id, "running");
+    registry.updateBinding(node.id, { tmuxSession: sessionName, tmuxPane: "%1" }); return registry.currentOccupantTenure(node.id)?.generationUuid ?? null; };
+  return { db, guard, bridge, transport, writes, hooks, occupant, nodeId: node.id, sessionName, optInAndArm, replaceOccupant, advance: (ms: number) => { now += ms; } };
 }
 
 describe("the transport's hook-bridge branch (slice 13)", () => {
@@ -126,5 +138,111 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect(typed).toHaveLength(1);
     expect(s.writes.filter((w) => w === "paste")).toHaveLength(1);
     expect(new OutboxHandler(s.db).getById(second.outboxIds![0]!)?.deliveryState).toBe("sending"); // the bridge's, claimed
+  });
+  // #3270 round 2.
+  /** A queue whose wakes go through this seat's real transport, as startup wires it. */
+  const queueOn = (s: Awaited<ReturnType<typeof seat>>) => {
+    const repo = new QueueRepository(s.db, new EventBus(s.db), { validateRig: () => true });
+    repo.attachTransport(s.transport as never);
+    repo.attachOutbox(new OutboxHandler(s.db));
+    return repo;
+  };
+  const handoffTo = async (s: Awaited<ReturnType<typeof seat>>, repo: QueueRepository) => {
+    const source = await repo.create({ nudge: false, sourceSession: "planner@team", destinationSession: "driver@team", body: "x" });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "driver@team", toSession: s.sessionName, body: "your turn" });
+    const id = `wake-intent-${created.qitemId}`;
+    await vi.waitFor(() => expect(repo.getById(created.qitemId)?.lastNudgeResult).toBe("bridged:queued"));
+    return { qitemId: created.qitemId, id };
+  };
+
+  it("hands a queue handoff's wake to an armed seat's waiter once, and leaves it to the bridge (R2-F2)", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const repo = queueOn(s);
+    const { id } = await handoffTo(s, repo);
+    expect(s.writes).toEqual([]);
+    expect(new OutboxHandler(s.db).getById(id)?.deliveryState).toBe("sending");
+    const polled = s.bridge.poll(s.nodeId, armId) as { action: string; batchId: string; messages: Array<{ outboxId: string }> };
+    expect(polled.messages.map((m) => m.outboxId)).toEqual([id]);
+    s.bridge.ack(s.nodeId, s.sessionName, s.occupant, armId, polled.batchId);
+    expect(new OutboxHandler(s.db).getById(id)?.deliveryState).toBe("delivered");
+    await repo.drainPendingWakeIntents();
+    expect(await s.transport.sweepHookBridge()).toEqual([]);
+    expect(s.writes).toEqual([]);
+  });
+
+  it("types a queue handoff's wake once when its waiter is gone, and the queue's own drain doesn't type it again (R2-F2)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const repo = queueOn(s);
+    const { id } = await handoffTo(s, repo);
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS + 1);
+    expect((await s.transport.sweepHookBridge()).map((t) => t.outboxId)).toEqual([id]);
+    await repo.drainPendingWakeIntents();
+    expect(await s.transport.sweepHookBridge()).toEqual([]);
+    expect(s.writes.filter((w) => w === "paste")).toHaveLength(1);
+    expect(new OutboxHandler(s.db).getById(id)?.deliveryState).not.toBe("sending");
+  });
+
+  it("doesn't type a message queued for an earlier occupant into the seat's new one (R2-F3)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const queued = await s.transport.send(s.sessionName, "From: peer@team\n---\nfor the first occupant\n---", { actorSession: "peer@team" });
+    // The new occupant's own launch arms its waiter.
+    const next = s.replaceOccupant();
+    s.bridge.arm({ nodeId: s.nodeId, sessionName: s.sessionName, generation: next, hookEvent: "SessionStart" });
+    const typed = await s.transport.sweepHookBridge();
+    expect(s.writes).toEqual([]);
+    expect(typed.map((t) => t.result.reason)).toEqual(["guard_target_changed"]);
+    expect(new OutboxHandler(s.db).getById(queued.outboxIds![0]!)?.deliveryState).toBe("failed");
+    expect(await s.transport.sweepHookBridge()).toEqual([]);
+  });
+
+  it("keeps an OpenRig notice's own admission through the fallback: a seat that admits only OpenRig's notices lets it through (R2-F3)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    await s.transport.send(s.sessionName, "From: openrig\n---\nnotice\n---", { actorSession: "queue@system", openrigNotice: true });
+    await s.guard.set(s.nodeId, { mode: "openrig-urgent" }, "human@team", "only OpenRig's notices");
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS + 1);
+    const [typed] = await s.transport.sweepHookBridge();
+    // Admitted as OpenRig's notice, not held by the level as an agent's send would be. The level delivers what it admits
+    // as draft-aware, which reads the input box; this scripted terminal reports no cursor, so draft-aware holds it there.
+    expect(typed!.result.reason).not.toBe("typing_guard_enabled");
+    expect(typed!.result.reason).toBe("draft_input_unknown");
+  });
+
+  it("doesn't bridge a send bound to an original conversation: it takes the typed path, where that's enforced (R2-F3)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const result = await s.transport.send(s.sessionName, "From: peer@team\n---\nfor that conversation\n---", { actorSession: "peer@team",
+      expectedIdentity: { nodeId: s.nodeId, sessionName: s.sessionName, runtime: "claude-code", nativeId: "native-1" } } as never);
+    expect(result.outcome).not.toBe("bridged");
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+  });
+
+  it("doesn't let a poll take the next message while the first one's typed fallback is unfinished, nor a newer send overtake (R2-F5)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const first = await s.transport.send(s.sessionName, "From: peer@team\n---\none\n---", { actorSession: "peer@team" });
+    const second = await s.transport.send(s.sessionName, "From: peer@team\n---\ntwo\n---", { actorSession: "peer@team" });
+    s.advance(HOOK_BRIDGE_LIVE_BOUND_MS + 1);
+    let resume!: () => void;
+    s.hooks.onPaste = () => new Promise<void>((r) => { resume = r; }); // the first typed write pauses inside the seat's lease
+    const sweeping = s.transport.sweepHookBridge();
+    await vi.waitFor(() => expect(s.writes).toContain("paste"));
+    // Meanwhile a turn boundary arms a new waiter, which polls, and a newer message arrives.
+    const { armId } = s.bridge.arm({ nodeId: s.nodeId, sessionName: s.sessionName, generation: s.occupant, hookEvent: "Stop" });
+    const order: string[] = [];
+    const polled = s.bridge.pollUnderLease(s.nodeId, armId).then((r) => { order.push("poll"); return r; });
+    const newer = s.transport.send(s.sessionName, "From: peer@team\n---\nthree\n---", { actorSession: "peer@team" }).then((r) => { order.push("newer"); return r; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(order).toEqual([]);
+    resume();
+    const typed = await sweeping;
+    expect(typed.map((t) => t.outboxId)).toEqual([first.outboxIds![0]]);
+    expect(((await polled) as { messages: Array<{ outboxId: string }> }).messages.map((m) => m.outboxId)).toEqual([second.outboxIds![0]]);
+    expect((await newer).outcome).toBe("bridged");
+    expect(order).toEqual(["poll", "newer"]);
+    expect(s.writes.filter((w) => w === "paste")).toHaveLength(1);
   });
 });

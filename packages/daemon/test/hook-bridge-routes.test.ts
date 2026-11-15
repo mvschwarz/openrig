@@ -120,4 +120,11 @@ describe("the hook bridge's routes (slice 13, #3270 round 1)", () => {
     expect(await held.response).toMatchObject({ status: 401, body: { code: "activity_grant_revoked" } });
     expect(f.bridge.queued(f.seat.id).map((r) => r.outboxId)).toEqual(["m1"]);
   });
+  // #3270 round 2 (optional): a JSON null body is a bad request, never a crash.
+  it("answers a waiter route whose body is JSON null as a refusal, not a server error", async () => {
+    const f = fixture();
+    const res = await f.post("arm", INSTALL_TOKEN, null);
+    expect(res.status).toBeLessThan(500);
+    expect(res.body).toMatchObject({ ok: false });
+  });
 });

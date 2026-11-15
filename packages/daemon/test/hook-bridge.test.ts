@@ -16,6 +16,7 @@ describe("the hook bridge (slice 13)", () => {
   let events: HookBridgeEvent[];
   let bridge: HookBridge;
   let nodeId: string;
+  let rigId: string;
   let held = false;
   const session = "dev-impl@team";
   const occupant = "gen-1";
@@ -25,7 +26,8 @@ describe("the hook bridge (slice 13)", () => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
     const repo = new RigRepository(db);
-    nodeId = repo.addNode(repo.createRig("team").id, "dev.impl", { runtime: "claude-code" }).id;
+    rigId = repo.createRig("team").id;
+    nodeId = repo.addNode(rigId, "dev.impl", { runtime: "claude-code" }).id;
     now = Date.parse("2026-11-14T18:00:00Z");
     events = [];
     bridge = new HookBridge(db, { now: () => now, emit: (e) => events.push(e), version: () => "2.1.322", holds: () => held });
@@ -37,13 +39,13 @@ describe("the hook bridge (slice 13)", () => {
   const queue = (text: string, id: string) => bridge.deposit(target(), session, text, { actorSession: "peer@team" }, [id]);
   const state = (id: string) => new OutboxHandler(db).getById(id)?.deliveryState;
 
-  it("records who opted a seat in and why, and routes only an occupant whose own waiter armed", () => {
+  it("records who opted a seat in and why, and routes only an occupant whose own waiter armed", async () => {
     expect(() => bridge.setPreference(nodeId, true, "human@team", " ")).toThrow(/reason is required/);
     // A person's terminal with no seat identity can opt in; the change is recorded as unattributed.
     expect(bridge.setPreference(nodeId, false, null, "from a plain terminal").actor).toBe(UNATTRIBUTED_ACTOR);
-    expect(bridge.launchWanted(nodeId)).toBe(false);
+    expect(await bridge.launchWanted(nodeId)).toBe(false);
     optIn();
-    expect(bridge.launchWanted(nodeId)).toBe(true);
+    expect(await bridge.launchWanted(nodeId)).toBe(true);
     expect(bridge.preference(nodeId)).toMatchObject({ desired: true, actor: "human@team", reason: "wake at turn boundaries", armedGeneration: null });
     // Opted in, but this occupant was launched before it: no waiter has armed, so delivery stays typed.
     expect(bridge.routes(target())).toBe(false);
@@ -71,7 +73,7 @@ describe("the hook bridge (slice 13)", () => {
     const again = bridge.poll(nodeId, armId);
     expect(again).toMatchObject({ action: "deliver", batchId: (polled as { batchId: string }).batchId });
     expect(again.action === "deliver" && again.messages.map((m) => m.outboxId)).toEqual(["m1", "m2"]);
-    const acked = bridge.ack(nodeId, session, armId, (polled as { batchId: string }).batchId);
+    const acked = bridge.ack(nodeId, session, occupant, armId, (polled as { batchId: string }).batchId);
     expect(acked.outboxIds).toEqual(["m1", "m2"]);
     expect(state("m1")).toBe("delivered");
     const receipt = JSON.parse((db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id = 'm1'").get() as { guard_delivery: string }).guard_delivery);
@@ -102,7 +104,9 @@ describe("the hook bridge (slice 13)", () => {
     const due = bridge.dueForFallback();
     expect(due).toEqual([{ nodeId, outboxIds: ["m1"], reason: expect.stringMatching(/hasn't polled for 20 s/) }]);
     expect(bridge.releaseForTyping(nodeId, session, "m1", due[0]!.reason)).toBe(true);
-    expect(state("m1")).toBe("pending");
+    // The typed send that released it owns it now: still sending, no longer the bridge's.
+    expect(state("m1")).toBe("sending");
+    expect(bridge.queued(nodeId)).toEqual([]);
     expect(events.at(-1)).toMatchObject({ type: "transport.hook_bridge_fallback", outboxIds: ["m1"] });
   });
 
@@ -111,7 +115,7 @@ describe("the hook bridge (slice 13)", () => {
     const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
     queue("first", "m1");
     const polled = bridge.poll(nodeId, armId) as { batchId: string };
-    bridge.ack(nodeId, session, armId, polled.batchId);
+    bridge.ack(nodeId, session, occupant, armId, polled.batchId);
     queue("during the woken turn", "m2");
     now += HOOK_BRIDGE_LIVE_BOUND_MS * 3;
     expect(bridge.live(nodeId)).toBe(true);
@@ -215,18 +219,18 @@ describe("the hook bridge (slice 13)", () => {
     queue("still queued", "m2");
     now += 1;
     expect(bridge.releaseForTyping(nodeId, session, "m2", "test")).toBe(true);
-    expect(state("m2")).toBe("pending");
+    expect(state("m2")).toBe("sending");
   });
 
-  it("adds the hooks only on a Claude with asyncRewake, and says why otherwise", () => {
+  it("adds the hooks only on a Claude with asyncRewake, and says why otherwise", async () => {
     optIn();
     const old = new HookBridge(db, { now: () => now, version: () => "2.1.200" });
-    expect(old.launchWanted(nodeId, "/opt/claude")).toBe(false);
+    expect(await old.launchWanted(nodeId, "/opt/claude")).toBe(false);
     expect(old.status(nodeId, occupant).launch).toMatch(/2\.1\.200 is older than 2\.1\.287/);
     const unknown = new HookBridge(db, { now: () => now, version: () => null });
-    expect(unknown.launchWanted(nodeId)).toBe(false);
+    expect(await unknown.launchWanted(nodeId)).toBe(false);
     expect(unknown.status(nodeId, occupant).launch).toMatch(/version couldn't be read/);
-    expect(bridge.launchWanted(nodeId)).toBe(true);
+    expect(await bridge.launchWanted(nodeId)).toBe(true);
   });
 
   it("leaves a row only queued for the bridge out of the restart's indeterminate marking", () => {
@@ -235,5 +239,88 @@ describe("the hook bridge (slice 13)", () => {
     expect(new OutboxHandler(db).reconcileAbandonedSending("wake-intent-")).toBe(0);
     expect(state("wake-intent-q1")).toBe("sending");
     expect(bridge.queued(nodeId).map((r) => r.outboxId)).toEqual(["wake-intent-q1"]);
+  });
+  // #3270 round 2.
+  it("names a wake its waiter had claimed uncertain after a restart, in the status and an event, and never resends it (R2-F2)", () => {
+    optIn();
+    const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    bridge.deposit(target(), session, "claimed wake", { actorSession: "peer@team" }, ["wake-intent-c1"]);
+    bridge.poll(nodeId, armId);
+    // The restart: startup's reconcile of abandoned claims, then a bridge with no arms.
+    expect(new OutboxHandler(db).reconcileAbandonedSending("wake-intent-")).toBe(0);
+    const after = new HookBridge(db, { now: () => now, emit: (e) => events.push(e) });
+    expect(after.reconcileUnacked()).toEqual(["wake-intent-c1"]);
+    expect(state("wake-intent-c1")).toBe("indeterminate");
+    expect(after.status(nodeId, occupant).uncertain.outboxIds).toEqual(["wake-intent-c1"]);
+    expect(events.at(-1)).toMatchObject({ type: "transport.hook_bridge_uncertain", outboxIds: ["wake-intent-c1"] });
+  });
+
+  it("reconciles every abandoned send at a restart whatever its receipt, with no bridge in use, and leaves only the bridge's own rows to it (R2-F1)", () => {
+    const outbox = new OutboxHandler(db);
+    const add = (id: string, receipt: string | null) => {
+      outbox.record({ outboxId: id, senderSession: "peer@team", destinationSession: session, body: id });
+      db.prepare("UPDATE outbox_entries SET delivery_state = 'sending', guard_delivery = ? WHERE outbox_id = ?").run(receipt, id);
+    };
+    add("wake-intent-none", null);
+    add("wake-intent-ordinary", JSON.stringify({ expectedIdentity: { nodeId, sessionName: session, runtime: "claude-code", nativeId: "n1" } }));
+    add("wake-intent-garbled", "not json");
+    add("wake-intent-queued", JSON.stringify({ channel: "hook-bridge", state: "queued" }));
+    add("wake-intent-claimed", JSON.stringify({ channel: "hook-bridge", state: "claimed", armId: "a", batchId: "b" }));
+    expect(outbox.reconcileAbandonedSending("wake-intent-")).toBe(3);
+    expect(["none", "ordinary", "garbled", "queued", "claimed"].map((k) => state(`wake-intent-${k}`)))
+      .toEqual(["indeterminate", "indeterminate", "indeterminate", "sending", "sending"]);
+  });
+
+  it("scopes a claimed batch's retry and ack to the waiter's own seat and occupant, even when two seats name the same arm (R2-F4)", () => {
+    optIn();
+    const otherId = new RigRepository(db).addNode(rigId, "dev.other", { runtime: "claude-code" }).id;
+    bridge.setPreference(otherId, true, "human@team", "on");
+    bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop", armId: "arm-shared" });
+    queue("for the first seat", "a1");
+    const first = bridge.poll(nodeId, "arm-shared") as { batchId: string }; // this answer is lost
+    bridge.arm({ nodeId: otherId, sessionName: "dev-other@team", generation: "gen-b", hookEvent: "Stop", armId: "arm-shared" });
+    expect(bridge.poll(otherId, "arm-shared")).toEqual({ action: "wait" });
+    expect(bridge.ack(otherId, "dev-other@team", "gen-b", "arm-shared", first.batchId).outboxIds).toEqual([]);
+    expect(state("a1")).toBe("sending");
+    // The first seat's own retry and ack still work.
+    expect(bridge.poll(nodeId, "arm-shared")).toMatchObject({ action: "deliver", batchId: first.batchId });
+    expect(bridge.ack(nodeId, session, occupant, "arm-shared", first.batchId).outboxIds).toEqual(["a1"]);
+    expect(state("a1")).toBe("delivered");
+  });
+
+  it("doesn't hand a claimed batch out again once the guard holds it: it stays uncertain, never requeued (R2-F4)", () => {
+    optIn();
+    const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    bridge.deposit(target(), session, "taken, then held", { actorSession: "peer@team", admission: { source: "agent", urgent: false } }, ["h1"]);
+    expect(bridge.poll(nodeId, armId)).toMatchObject({ action: "deliver" }); // this answer is lost
+    held = true; // an operator's hold since the claim
+    expect(bridge.poll(nodeId, armId)).toEqual({ action: "wait" });
+    expect(state("h1")).toBe("indeterminate");
+    expect(bridge.queued(nodeId)).toEqual([]);
+    expect(bridge.status(nodeId, occupant).uncertain.outboxIds).toEqual(["h1"]);
+    expect(events.at(-1)).toMatchObject({ type: "transport.hook_bridge_uncertain", outboxIds: ["h1"] });
+  });
+
+  it("never queues a row again once it was delivered (N3)", () => {
+    optIn();
+    const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    queue("once", "m1");
+    const polled = bridge.poll(nodeId, armId) as { batchId: string };
+    bridge.ack(nodeId, session, occupant, armId, polled.batchId);
+    queue("once", "m1");
+    expect(state("m1")).toBe("delivered");
+    expect(bridge.queued(nodeId)).toEqual([]);
+  });
+
+  it("reads Claude's version without blocking, once per executable until the executable changes (N6)", async () => {
+    optIn();
+    let probes = 0, version = "2.1.322", stamp = "first";
+    const probing = new HookBridge(db, { now: () => now, version: async () => { probes++; return version; }, stamp: () => stamp });
+    expect(await probing.launchWanted(nodeId, "/opt/claude")).toBe(true);
+    expect(await probing.launchWanted(nodeId, "/opt/claude")).toBe(true);
+    expect(probes).toBe(1);
+    stamp = "replaced"; version = "2.1.200"; // a downgrade under a running daemon
+    expect(await probing.launchWanted(nodeId, "/opt/claude")).toBe(false);
+    expect(probes).toBe(2);
   });
 });

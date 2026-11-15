@@ -39,7 +39,7 @@ interface ClaudeResumeOptions {
   /** The compaction settings the restore reads from, so the launch grants those files too. */
   restoreReadPolicy?: () => RestoreReadPolicy | null;
   /** Slice 13: whether this restore adds a seat's hook bridge (opted in, on a Claude with asyncRewake). */
-  hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean;
+  hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;
@@ -121,7 +121,8 @@ export class ClaudeResumeAdapter {
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
     if (seatToken) tokenWarnings.push(...(await this.options.claudeManagedLaunch?.tokenPrecedenceWarnings?.(nodeId!, seatToken.ref) ?? []));
     const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode,
-      hookBridge: nodeId ? this.options.hookBridgeLaunch?.(nodeId) === true : false };
+      // The version gate reads the Claude this resume runs, not PATH's.
+      hookBridge: nodeId ? (await this.options.hookBridgeLaunch?.(nodeId, executable ?? undefined)) === true : false };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);
     const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {

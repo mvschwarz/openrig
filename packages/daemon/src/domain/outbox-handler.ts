@@ -522,16 +522,19 @@ export class OutboxHandler {
    * ambiguous (the external send may or may not have landed after the claim), so
    * it records `indeterminate`, never a forever-transient claim and never a blind
    * re-send. EXACT-CASE prefix, matching the executable selector. Returns the
-   * count reconciled. A row only queued for a seat's hook bridge (slice 13) was never claimed: it stays queued, and the
-   * bridge's own sweep delivers or types it.
+   * count reconciled. A row the seat's hook bridge (slice 13) still owns stays as it is: one only queued is delivered or
+   * typed by the bridge's sweep, and one its waiter claimed is named uncertain by the bridge, never resent. Every other
+   * receipt, including none, an ordinary one and one that isn't JSON, is reconciled as before.
    */
   reconcileAbandonedSending(idPrefix: string): number {
+    // A CASE, not NOT(...): a receipt without these fields reads NULL there, and NOT NULL would skip the row.
     const result = this.db
       .prepare(
         `UPDATE outbox_entries SET delivery_state = 'indeterminate'
           WHERE delivery_state = 'sending' AND substr(outbox_id, 1, ?) = ?
-            AND NOT (guard_delivery IS NOT NULL AND json_valid(guard_delivery)
-              AND json_extract(guard_delivery, '$.channel') = 'hook-bridge' AND json_extract(guard_delivery, '$.state') = 'queued')`
+            AND CASE WHEN guard_delivery IS NOT NULL AND json_valid(guard_delivery)
+              THEN COALESCE(json_extract(guard_delivery, '$.channel') = 'hook-bridge' AND json_extract(guard_delivery, '$.state') IN ('queued', 'claimed'), 0)
+              ELSE 0 END = 0`
       )
       .run(idPrefix.length, idPrefix);
     return result.changes;

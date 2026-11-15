@@ -304,7 +304,9 @@ The bridge is used only for an occupant launched with it, once its waiter has ar
 - A message to an opted-in seat is queued as an outbox row (result `outcome: "bridged"`). The waiter armed at the last
   turn boundary takes the queued messages, oldest first, and writes them into the seat's context.
 - A seat mid-turn, including one at a permission prompt, gets its messages when that turn ends, or after 15 minutes, whichever comes first: a turn that ends without a Stop (an interrupt, an API error), or one running when the daemon restarted, can't hold messages longer than that, even while a waiter polls.
-- Each poll checks again that the seat is still opted in, that a message was queued for that same occupant, and that the typing guard wouldn't hold it now. A message the bridge can't deliver is typed at once, and the guard then decides (a hold retains it).
+- A send bound to an original conversation (an expected identity) isn't bridged: it's typed, where that binding is enforced.
+- Each poll checks again that the seat is still opted in, that a message was queued for that same occupant, and that the typing guard wouldn't hold it now. A message the bridge can't deliver is typed at once, with the admission it was queued with, and the guard then decides (a hold retains it).
+- A message queued for an occupant who has since gone isn't typed into the seat's new occupant: it ends `failed`, with `guard_delivery.state` `not-delivered` and the reason, and a `transport.hook_bridge_fallback` event says so.
 - What the model receives is each message exactly as OpenRig addressed it (its `From:` line names the sender), after
   one line saying they're ordinary messages that the delivery adds no authority to.
 
@@ -312,14 +314,15 @@ The bridge is used only for an occupant launched with it, once its waiter has ar
 - The waiter's acknowledgement marks the row `delivered`, with `guard_delivery.state` `handed-to-hook`. It wrote the message to its hook's output and is exiting 2. Claude Code reports nothing back, so that Claude read it isn't observed.
 - A queue wake records `bridged:queued`.
 - The row's claim and result stay with what the agent actually does.
-- A batch whose answer was lost is handed to the same waiter again at its next poll.
+- A batch whose answer was lost is handed to the same waiter, for the same seat and occupant, again at its next poll, unless the typing guard holds it by then: then it's left `indeterminate` (`claimed-unacked`), never handed out or requeued.
+- The waiter acknowledges a batch only once it has written all of it to the hook's output; a write that fails isn't acknowledged, and the batch becomes uncertain as below.
 - A batch whose waiter stopped without acknowledging it (its arm replaced, or not polled for 20 s) becomes `indeterminate`, with `guard_delivery.state` `claimed-unacked`. It is never resent: it may or may not have reached the seat. `rig seat hook-bridge` lists those rows, and a `transport.hook_bridge_uncertain` event names each.
 
 **When the bridge isn't available** (never armed, expired, or its waiter gone):
 - Messages are typed instead, as before, and the sender's result says the bridge wasn't available.
 - A waiter is live while it has polled within 20 s and its seat is idle or within 15 minutes of its turn's start; with no waiter polling, while the seat is in a turn the bridge waits on, for at most 15 minutes.
-- Messages already queued are typed in order, by one sweep at a time (every 5 s) once they've waited 20 s without a live waiter. The sweep takes back each message just before typing it; one the bridge took first isn't typed, and nothing behind it overtakes it.
-- A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate.
+- Messages already queued are typed in order, by one sweep at a time (every 5 s) once they've waited 20 s without a live waiter. The sweep takes back each message under the seat's delivery lease, just before typing it; one the bridge took first isn't typed, and nothing behind it overtakes it. A waiter's poll takes the same lease, so it can't take the next message while an earlier one is being typed.
+- A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate. A batch a waiter had taken before the restart is named uncertain by the bridge after it, as above.
 - A waiter exits by itself shortly before its hook timeout and reports that it expired. The next turn re-arms it.
 
 **What still decides first.** The typing guard: hold and the interruption levels hold or refuse as for typed delivery.

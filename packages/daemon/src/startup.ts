@@ -395,7 +395,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // A poll asks the seat's typing guard again whether it holds a queued message (the guard is attached below, before any
   // poll can arrive).
   const hookBridge = new HookBridge(db, { emit: (event) => { try { eventBus.emit(event); } catch { /* an unrecorded bridge event never fails delivery */ } },
-    holds: (nodeId, admission) => tmuxAdapter.deliveryGuard?.holdsInput(nodeId, admission) ?? false });
+    holds: (nodeId, admission) => tmuxAdapter.deliveryGuard?.holdsInput(nodeId, admission) ?? false,
+    // A poll claims under the seat's delivery lease, the owner typed sends take, so it can't overtake a typed send.
+    lease: (nodeId, fn) => tmuxAdapter.deliveryGuard ? tmuxAdapter.deliveryGuard.exclusive(nodeId, fn) : Promise.resolve(fn()) });
   const streamStore = new StreamStore(db, eventBus);
   // Explicit source opt-in only. No sink I/O until a separate drain request.
   const shadow = configureShadowCapture(process.env.OPENRIG_SHADOW_CAPTURE);

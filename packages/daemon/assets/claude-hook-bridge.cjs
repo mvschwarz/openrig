@@ -65,6 +65,9 @@ async function readHookInput(stream = process.stdin) {
     stream.on("end", done);
     stream.on("error", done);
     setTimeout(done, 1000).unref();
+  }).finally(() => {
+    // Nothing more is read: an open stdin mustn't keep the hook running once it has its answer.
+    try { stream.removeAllListeners("data"); stream.pause(); stream.unref?.(); } catch { /* best effort */ }
   });
 }
 
@@ -77,6 +80,22 @@ function render(sessionName, messages) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Write the batch and wait until the stream has taken all of it: a pipe write is asynchronous, so writing isn't
+ *  flushing. True once written, false when the write failed. */
+function writeAll(out, text) {
+  return new Promise((resolve) => {
+    try { out.write(text, (error) => resolve(!error)); } catch { resolve(false); }
+  });
+}
+
+/** An ack the daemon took (true), refused for good (false: its waiter or occupant is gone), or couldn't answer now
+ *  (null: unreachable, or a server error), which is retried. */
+function acked(answer) {
+  if (!answer) return null;
+  if (answer.ok === true) return true;
+  return answer.status >= 400 && answer.status < 500 ? false : null;
+}
 
 /** Returns the exit code: 2 after delivering a batch, 0 otherwise. */
 async function waiter({ hookEvent, out = process.stderr, deps = {} } = {}) {
@@ -93,10 +112,16 @@ async function waiter({ hookEvent, out = process.stderr, deps = {} } = {}) {
     if (answer.stop || answer.action === "superseded" || answer.action === "stop") return 0;
     if (answer.action === "rearm") { await call("arm", { hookEvent: "rearm", armId }); continue; }
     if (answer.action === "deliver" && Array.isArray(answer.messages) && answer.messages.length) {
-      out.write(render(seat(deps.env).sessionName, answer.messages));
-      // The ack says the batch was handed to the hook's output; a lost ack is retried, and if it never lands the daemon
-      // marks the batch uncertain rather than resending it.
-      for (let tries = 0; tries < 3 && !(await call("ack", { armId, batchId: answer.batchId })); tries++) await wait(UNREACHABLE_MS);
+      // Only a batch fully written to the hook's output is acked. A failed write isn't: the daemon then names the batch
+      // uncertain, never resent, and this waiter doesn't wake Claude.
+      if (!(await writeAll(out, render(seat(deps.env).sessionName, answer.messages)))) return 0;
+      // The ack says the batch was handed to the hook's output. One the daemon couldn't take now is retried, three tries
+      // in all; if none lands, the daemon marks the batch uncertain rather than resending it.
+      for (let tries = 0; tries < 3; tries++) {
+        const result = acked(await call("ack", { armId, batchId: answer.batchId }));
+        if (result !== null) break;
+        if (tries < 2) await wait(UNREACHABLE_MS);
+      }
       return 2;
     }
     await wait(POLL_MS);
@@ -108,10 +133,13 @@ async function waiter({ hookEvent, out = process.stderr, deps = {} } = {}) {
 async function main() {
   const mode = process.argv[2];
   const input = await readHookInput();
-  if (mode === "turn") { await post("turn", { hookEvent: "UserPromptSubmit" }); process.exit(0); }
-  if (mode !== "waiter") process.exit(0);
+  if (mode === "turn") { await post("turn", { hookEvent: "UserPromptSubmit" }); process.exitCode = 0; return; }
+  if (mode !== "waiter") { process.exitCode = 0; return; }
   const code = await waiter({ hookEvent: typeof input.hook_event_name === "string" ? input.hook_event_name : "unknown" }).catch(() => 0);
-  process.exit(code);
+  // exitCode, not exit(): the process ends once its output is flushed. The batch was already written in full above; if
+  // an idle connection still holds the loop open, end it shortly after, with the same code.
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), 2000).unref();
 }
 
 if (require.main === module) void main();

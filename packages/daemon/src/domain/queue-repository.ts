@@ -400,7 +400,8 @@ export interface QueueNudgeTransport {
 
 /** The result of one wake attempt: its classification and its recorded result. */
 type WakeAttemptOutcome = {
-  classified: "verified" | "indeterminate" | "failed" | "retained";
+  /** `bridged`: queued for the seat's hook bridge, which owns the outbox row from then on (#3270). */
+  classified: "verified" | "indeterminate" | "failed" | "retained" | "bridged";
   nudgeResult: string;
 };
 
@@ -1332,7 +1333,8 @@ export class QueueRepository {
     if (res.outcome === "retained") return { classified: "retained", nudgeResult: res.reason === "typing_guard_enabled"
       ? "retained:typing_guard" : "retained:draft_aware" };
     // Queued for the seat's hook bridge: it reaches the seat's context at the next turn boundary, which isn't a claim.
-    if (res.outcome === "bridged") return { classified: "indeterminate", nudgeResult: "bridged:queued" };
+    // The bridge owns the row now (handed to the hook, typed by its fallback, or named uncertain), so it isn't finalized.
+    if (res.outcome === "bridged") return { classified: "bridged", nudgeResult: "bridged:queued" };
     if (res.ok) return res.verified ? { classified: "verified", nudgeResult: "verified" } : { classified: "indeterminate", nudgeResult: "delivered-ack-pending" };
     const detail = res.error ?? res.reason ?? "unknown";
     // Input evidence survives receipt removal: an issued paste or uncertain Enter is never an unsent failure.
@@ -1725,12 +1727,14 @@ export class QueueRepository {
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
       trigger, recheckMembers,
     );
-    let reportedState: "delivered" | "indeterminate" | "failed" | "retained" = outcome.classified === "verified" ? "delivered" : outcome.classified;
+    // A bridged wake isn't confirmed, so the pass counts it as unconfirmed; its row is the bridge's to settle.
+    let reportedState: "delivered" | "indeterminate" | "failed" | "retained" = outcome.classified === "verified" ? "delivered"
+      : outcome.classified === "bridged" ? "indeterminate" : outcome.classified;
     for (const intent of group) {
       if (released.includes(intent)) continue;
       // A no-write retry cannot settle whether an earlier attempt landed.
       const earlierUnknown = intent.deliveryState === "indeterminate" && outcome.classified === "failed";
-      const finalState = earlierUnknown ? "indeterminate" : outcome.classified === "verified" ? "delivered" : outcome.classified;
+      const finalState = earlierUnknown ? "indeterminate" : outcome.classified === "verified" ? "delivered" : outcome.classified === "bridged" ? null : outcome.classified;
       const nudgeResult = earlierUnknown ? `indeterminate:earlier delivery unconfirmed; retry ${outcome.nudgeResult}` : outcome.nudgeResult;
       if (earlierUnknown) reportedState = "indeterminate";
       const qitemId = intent.auditPointer!;
@@ -1741,7 +1745,7 @@ export class QueueRepository {
         : undefined;
       const wakeEvent = this.db.transaction(() => {
         this.recordNudgeAttempt(qitemId, nudgeResult);
-        this.outbox!.finalizeDelivery(intent.outboxId, finalState);
+        if (finalState) this.outbox!.finalizeDelivery(intent.outboxId, finalState);
         // The acceptance (or a ring that may have arrived) belongs to this intent, so recovery can tell this wake already rang.
         if (hostedRingMayHaveArrived(outcome.nudgeResult)) {
           this.db.prepare(`UPDATE outbox_entries SET tags = json_insert(COALESCE(tags, '[]'), '$[#]', ?)

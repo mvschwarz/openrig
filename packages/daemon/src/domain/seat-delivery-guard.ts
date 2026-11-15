@@ -220,6 +220,12 @@ export class SeatDeliveryGuard {
     return a.nodeId === b.nodeId && a.session === b.session && a.occupant === b.occupant && a.pane === b.pane;
   }
 
+  /** Runs `fn` under the seat's delivery lease, after every send already waiting for it: the same owner typed sends take,
+   *  with no admission of its own. The hook bridge's poll claims messages under it (#3270). */
+  exclusive<T>(nodeId: string, fn: () => T | Promise<T>): Promise<T> {
+    return this.serial(nodeId, async () => fn());
+  }
+
   private async serial<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
     const before = this.tails.get(nodeId) ?? Promise.resolve();
     let release!: () => void;
