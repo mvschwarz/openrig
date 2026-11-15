@@ -783,4 +783,30 @@ describe("a single `## Requirements` R list", () => {
   it("leaves a legacy two-list slice unchanged", () => {
     expect(sectionFindings("## Mini-requirements\n\n1. one\n\n## Proof contract\n\n- [ ] a deliverable — captured\n")).toEqual([]);
   });
+
+  // An R item's proof must be in the same item: a sibling bullet, or text back at the margin after a blank line, isn't it.
+  it("reads an R item as ending at the next sibling bullet or a paragraph after it, so neither lends it proof", () => {
+    const findings = sectionFindings([
+      "## Requirements",
+      "- R1. Show the panel.",
+      "- Reviewer note. Observable: inspect the review log.",
+      "- R2. Keep the order.",
+      "",
+      "Observable: a paragraph after the list, not R2's.",
+      "- R3. Say what changed.",
+      "  - Observable: a deeper bullet inside R3 is R3's own proof.",
+    ].join("\n"));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.message).toBe("`## Requirements` has R items with no observable proof (R1, R2), so proof has nothing to pair against for them.");
+  });
+
+  // A UI slice whose mockup reference sits in an R item has its mockup; the R list stands in for the proof contract.
+  it("counts a mockup reference inside an accepted R list for a UI slice", () => {
+    const visual = "## Intent visual\n\nThe review panel, as drawn.\n\n";
+    const mockups = (body: string) => classifyScopeItem(specSlice(`${visual}${body}`)).findings.filter((f) => f.kind === "ui_slice_missing_mockup");
+    expect(mockups("## Requirements\n- R1. Show the panel. *Observable:* it matches plannedRef: mockups/panel.png.\n")).toEqual([]);
+    expect(mockups("## Requirements\n- R1. Show the panel. Observable: ![panel](mockups/panel.png)\n")).toEqual([]);
+    // Without a reference anywhere, a UI slice still gets the advisory.
+    expect(mockups("## Requirements\n- R1. Show the panel. Observable: the panel shows.\n")).toHaveLength(1);
+  });
 });
