@@ -253,6 +253,26 @@ function h2Body(content: string, heading: string): string | null {
   return next === -1 ? rest : rest.slice(0, next);
 }
 
+// A pilot slice's single `## Requirements` R list (Lab's planning experiment, draft contract, 2026-11-15): bullets that
+// start `R<n>.`, plain or bold, each with its proof after `Observable:`, plain or italic, in the same item. It's known
+// only by its R ids, so a `## Requirements` of unnumbered lines (the contract's "not numbered yet", and older slices'
+// own lists) reads as before.
+const R_ITEM_START = /^\s*[-*+]\s+(?:\*{1,2}|_{1,2})?(R\d+)[.:]/;
+const R_ITEM_OBSERVABLE = /\bObservable\b(?:\*{1,2}|_{1,2})?\s*:\s*(?:\*{1,2}|_{1,2})?\s*[^\s*_]/i;
+
+/** The R items in a `## Requirements` body that carry no observable proof, or null when it names no R item. */
+function requirementsRList(body: string | null): { withoutProof: string[] } | null {
+  if (body === null) return null;
+  const items: Array<{ id: string; text: string }> = [];
+  for (const line of body.split("\n")) {
+    const start = R_ITEM_START.exec(line);
+    if (start) items.push({ id: start[1]!, text: line });
+    else if (items.length > 0) items[items.length - 1]!.text += `\n${line}`;
+  }
+  if (items.length === 0) return null;
+  return { withoutProof: items.filter((item) => !R_ITEM_OBSERVABLE.test(item.text)).map((item) => item.id) };
+}
+
 // A mission is ACTIVE unless its status names a terminal / archived state.
 // The SOP wants missing_mission_notes to fire for an ACTIVE mission only — a
 // shipped/archived mission no longer needs a live continuity file. No status
@@ -461,6 +481,10 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
     };
     const miniSource = pickSectionSource("Mini-requirements");
     const contractSource = pickSectionSource("Proof contract");
+    // The pilot's R list stands in for both lists. An R item without its observable proof gets the proof finding below,
+    // naming it, instead of a request to add the two lists back.
+    const requirementsSource = pickSectionSource("Requirements");
+    const rList = requirementsSource ? requirementsRList(requirementsSource.body) : null;
     if (miniSource) {
       // OPR.0.4.4.23 rev1-r2 B1 (PRD L34 guard F-3): well-formed
       // `## Mini-requirements` — the PLAN leg of the Living Notes
@@ -474,7 +498,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       // blindness in one predicate; the finding message below already reads
       // honestly for both and stays unchanged).
       const hasNumberedItem = hasAuthoredNumberedItem(miniBody);
-      if (!hasNumberedItem) {
+      if (!hasNumberedItem && !rList) {
         findings.push({
           kind: "mini_requirements_missing_or_malformed",
           severity: "low",
@@ -500,7 +524,16 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
         [...contractBody.matchAll(/^\s*-\s*\[[ xX]\]\s*(.*)$/gm)].some(
           (m) => !isScaffoldPlaceholderText((m[1] ?? "").trim()),
         );
-      if (!hasAuthoredCheckboxItem) {
+      if (rList && rList.withoutProof.length > 0) {
+        findings.push({
+          kind: "proof_contract_missing_or_malformed",
+          severity: "low",
+          path: requirementsSource?.path ?? contractSource.path,
+          message: `\`## Requirements\` has R items with no observable proof (${rList.withoutProof.join(", ")}), so proof has nothing to pair against for them.`,
+          remediation: `Add each one's observable proof to the same item, after \`Observable:\`. The R list stands in for \`## Mini-requirements\` and \`## Proof contract\`.`,
+        });
+      }
+      if (!hasAuthoredCheckboxItem && !rList) {
         findings.push({
           kind: "proof_contract_missing_or_malformed",
           severity: "low",
