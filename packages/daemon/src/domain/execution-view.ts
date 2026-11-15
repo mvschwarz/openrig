@@ -1354,7 +1354,12 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     const derived = readiness?.slices.find(s => s.scope === sequenced.dir);
     if (!derived?.readiness.configured) continue;
     sequenced.next_up = derived.eligible === null ? INDETERMINATE : derived.eligible && derived.readiness.state !== "ready" && sequenced.work_rows.length === 0;
-    sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`;
+    sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`
+      + (derived.dependsOnBasis === "not-recorded"
+        ? "; no order recorded (depends_on INDETERMINATE, EC-1), so eligibility assumed no recorded edges"
+        : derived.dependsOnBasis === "frontmatter-advisory"
+          ? "; only the SPEC frontmatter lists depends_on, which readiness treats as advisory, so eligibility assumed no recorded edges"
+          : "");
   }
   const q6 = {
     lanes_live: lanes.filter((l) => l.waiting === null).length,

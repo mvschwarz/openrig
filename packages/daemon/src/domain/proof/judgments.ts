@@ -38,9 +38,13 @@ export interface ScopeReadiness {
   /** Input for S04 attention consumers; no timer or delivery is implied. */
   attention: { scope: string; revision: string };
 }
+export type DependsOnBasis = "slice.yaml" | "frontmatter-advisory" | "not-recorded";
 export interface MissionReadiness {
   revision: string; state: ScopeReadiness["state"]; issues: string[];
-  slices: Array<{ scope: string; id: string; readiness: ScopeReadiness; dependsOn: string[]; eligible: boolean | null }>;
+  /** `dependsOnBasis` says where `dependsOn` came from (EC-1): `slice.yaml` is its recorded list, `[]` included;
+   *  `frontmatter-advisory` means only the SPEC frontmatter lists edges, which readiness treats as advisory build order;
+   *  `not-recorded` means no order is recorded (INDETERMINATE). In the last two, eligibility assumes no recorded edges. */
+  slices: Array<{ scope: string; id: string; readiness: ScopeReadiness; dependsOn: string[]; dependsOnBasis: DependsOnBasis; eligible: boolean | null }>;
   historicalStatus: string | null;
 }
 export class JudgmentError extends Error {
@@ -338,7 +342,9 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
       if (!Array.isArray(depends) || depends.some(x => typeof x !== "string")) throw new JudgmentError("dependencies_invalid", `${member.path}: execution.depends_on must be a list`);
       const id = (data?.metadata as { id?: unknown } | undefined)?.id ?? path.basename(dir);
       if (typeof id !== "string" || !id || slices.some(s => s.id === id)) throw new JudgmentError("dependency_identity", `${member.path}: missing or repeated slice identity`);
-      const slice = { scope: path.basename(dir), id, readiness: readSliceReadiness(dir, io, readPolicy, root, observe), dependsOn: depends as string[], eligible: null };
+      const dependsOnBasis: DependsOnBasis = execution?.depends_on != null ? "slice.yaml"
+        : frontmatterListsDependsOn(dir, io) ? "frontmatter-advisory" : "not-recorded";
+      const slice = { scope: path.basename(dir), id, readiness: readSliceReadiness(dir, io, readPolicy, root, observe), dependsOn: depends as string[], dependsOnBasis, eligible: null };
       slices.push(slice);
       dirs.set(slice, dir);
     }
@@ -372,6 +378,17 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
   } catch (e) { issues.push(e instanceof Error ? e.message : String(e)); for (const s of slices) s.eligible = null; }
   const state = issues.length || slices.some(s => ["unknown", "legacy"].includes(s.readiness.state)) ? "unknown" : slices.length && slices.every(s => s.readiness.state === "ready") ? "ready" : "not-ready";
   return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus };
+}
+
+/** Whether a work node's authored file lists `depends_on:` as an inline JSON array (EC-1), `[]` included. */
+function frontmatterListsDependsOn(dir: string, io: ScopeFsDeps): boolean {
+  try {
+    const node = resolveNodeFileVia(dir, p => io.readFile(p));
+    const raw = node ? parseFrontmatter(node.content)["depends_on"] : undefined;
+    return typeof raw === "string" && Array.isArray(JSON.parse(raw));
+  } catch {
+    return false;
+  }
 }
 
 /** The `id:` a work node's authored file declares, or null when it declares none or can't be read. */
