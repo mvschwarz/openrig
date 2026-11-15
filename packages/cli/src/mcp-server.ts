@@ -724,12 +724,12 @@ function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
     "If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude assistant\"), never reading the address out.",
     "Don't pick from your own history or memory.",
     "If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.",
-    "If the list says the chosen one's person was removed from the team, don't send; tell your person and ask whether to send it to someone else.",
+    "If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else.",
     ...(frontDoor ? ["When you send to a running team seat, tell your person that seat will pick it up on its own."] : []),
     "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.",
     ...(frontDoor ? ["If you sent it anyway, tell your person it waits until that one is back."] : []),
     "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.",
-    "If your person still asks to send to one whose person was removed, tell them it can't be delivered: requests to a removed person's assistant are closed unanswered.",
+    "If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered.",
   ].join(" ");
 }
 
@@ -803,10 +803,14 @@ async function namedSeats(client: DaemonClient, rigName: string, name: string, a
     const { logicalId, rigName: inRig, canonicalSessionName } = (entry ?? {}) as Record<string, unknown>;
     if (typeof logicalId !== "string" || inRig !== rigName) throw new Error(`the node list for ${rigName} has a malformed entry`);
     const dot = logicalId.indexOf(".");
-    if (dot <= 0 || dot === logicalId.length - 1) throw new Error(`the node list for ${rigName} has a malformed entry`);
-    const podMember = `${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}`;
-    const session = typeof canonicalSessionName === "string" && canonicalSessionName.endsWith(`@${rigName}`)
-      && canonicalSessionName.length > rigName.length + 1 ? canonicalSessionName : `${podMember}@${rigName}`;
+    if (dot === 0 || dot === logicalId.length - 1) throw new Error(`the node list for ${rigName} has a malformed entry`);
+    const recorded = typeof canonicalSessionName === "string" && canonicalSessionName.endsWith(`@${rigName}`)
+      && canonicalSessionName.length > rigName.length + 1 ? canonicalSessionName : null;
+    // A seat of a rig without pods has no pod in its logical id: it's named only by its recorded session, and one with
+    // none yet can't be named, so it's left out rather than read as a broken team.
+    if (dot === -1 && !recorded) continue;
+    const podMember = dot === -1 ? null : `${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}`;
+    const session = recorded ?? `${podMember}@${rigName}`;
     const own = session.slice(0, -(rigName.length + 1));
     if (!addressable(session)) continue;
     if (name === own) byOwn.add(session);

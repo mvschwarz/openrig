@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
 
-const runner = fileURLToPath(new URL("../../../node_modules/vite-node/vite-node.mjs", import.meta.url));
+const tsxLoader = new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url).href;
 const source = (name: string) => fileURLToPath(new URL(`../src/${name}`, import.meta.url));
 
 async function fixture() {
@@ -57,7 +57,7 @@ async function run() {
 }
 void run();
 `);
-    const { stdout } = await promisify(execFile)(process.execPath, [runner, "--script", probe], { env: f.env, timeout: 15_000 });
+    const { stdout } = await promisify(execFile)(process.execPath, ["--import", tsxLoader, probe], { env: f.env, timeout: 15_000 });
     const result = JSON.parse(stdout.split("RESULT:")[1]!);
     const expected = deleted ? f.home : f.cwd;
     expect(result.read).toEqual({ source: expected });
@@ -82,7 +82,7 @@ it("the running TUI can repeat its startup helper after its start folder is dele
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("fixture did not bind");
-  const child = spawn(process.execPath, [runner, "--script", source("main.ts"), "--no-color", "--url", `http://127.0.0.1:${address.port}`],
+  const child = spawn(process.execPath, ["--import", tsxLoader, source("main.ts"), "--no-color", "--url", `http://127.0.0.1:${address.port}`],
     { cwd: f.cwd, env: f.env, stdio: ["pipe", "pipe", "pipe"] });
   const ended = new Promise(resolve => child.once("exit", resolve));
   let output = "", errors = "";
