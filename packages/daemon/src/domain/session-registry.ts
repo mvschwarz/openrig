@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 
 const ulid = monotonicFactory();
 import type { Session, Binding } from "./types.js";
-import { validateSessionName } from "./session-name.js";
+import { boundSessionNameProblem, validateSessionName } from "./session-name.js";
 import { formatWatchdogRegistrationError } from "./watchdog-auto-registration.js";
 import type { ClaudeLaunchedProcess, ClaudeResumeRotation } from "./native-process-lineage.js";
 
@@ -291,8 +291,10 @@ export class SessionRegistry {
     sessionName: string,
     kind: OccupantKind = "initial",
     reservedGeneration?: string | null,
+    /** The launch keeps the name the seat was bound to (an adopted seat's own name): accepted when boundSessionNameProblem finds none. */
+    opts?: { keptBoundName?: boolean },
   ): Session {
-    if (!validateSessionName(sessionName)) {
+    if (!validateSessionName(sessionName) && !(opts?.keptBoundName === true && boundSessionNameProblem(sessionName) === null)) {
       throw new Error(
         `Invalid session name "${sessionName}": must match legacy r{NN}-{suffix} or canonical {pod}-{member}@{rig} format with allowed characters (a-z, A-Z, 0-9, -, _, ., @)`
       );

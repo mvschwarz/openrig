@@ -27,6 +27,8 @@ export interface ResumeTokenCaptureDeps {
   resumeTokenCapturer?: {
     /** `nodeId` lets the capture search the seat's own CODEX_HOME when it declares one. */
     captureCodexThreadId(sessionName: string, opts?: { nodeId?: string }): Promise<string | undefined>;
+    /** Read the existing current-process session file when Claude's title-keyed sidecar cannot name the seat. */
+    captureClaudeSessionId?(sessionName: string, opts?: { nodeId?: string; cwd?: string }): Promise<string | undefined>;
   } | null;
   /** OPR.0.4.6.PI1 FR-6 — reads the pi-runner's session-state sidecar (the
    *  runner persists sessionFile/sessionId from RPC get_state; a file read,
@@ -82,7 +84,7 @@ export async function isClaudeSidecarFromEarlierProcess(
  * caller's to swallow (capture must never fail or block its lifecycle op).
  */
 export async function deriveResumeToken(
-  input: { runtime: string | null; sessionName: string; nodeId?: string },
+  input: { runtime: string | null; sessionName: string; nodeId?: string; cwd?: string },
   deps: ResumeTokenCaptureDeps,
 ): Promise<ResumeTokenDeriveResult> {
   const resumeType = resumeTypeForRuntime(input.runtime);
@@ -95,13 +97,17 @@ export async function deriveResumeToken(
     if (!deps.contextUsageStore) return { outcome: "noop" }; // dep absent — silent no-op
     const sidecar = deps.contextUsageStore.readSidecar(input.sessionName);
     if (!sidecar.ok) {
-      return { outcome: "skipped", reason: sidecar.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
-    }
-    const sid = sidecar.data.session_id;
-    if (typeof sid === "string" && sid.trim().length > 0) token = sid.trim();
-    else return { outcome: "skipped", reason: "missing_sidecar" };
-    if (await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, input.sessionName, deps.claudeProcessStartedAt)) {
-      return { outcome: "skipped", reason: "stale_sidecar" };
+      if (sidecar.reason === "missing_sidecar") {
+        token = await deps.resumeTokenCapturer?.captureClaudeSessionId?.(input.sessionName, { nodeId: input.nodeId, cwd: input.cwd });
+      }
+      if (!token) return { outcome: "skipped", reason: sidecar.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
+    } else {
+      const sid = sidecar.data.session_id;
+      if (typeof sid === "string" && sid.trim().length > 0) token = sid.trim();
+      else return { outcome: "skipped", reason: "missing_sidecar" };
+      if (await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, input.sessionName, deps.claudeProcessStartedAt)) {
+        return { outcome: "skipped", reason: "stale_sidecar" };
+      }
     }
   } else if (runtime === "codex") {
     if (!deps.resumeTokenCapturer) return { outcome: "noop" }; // dep absent — silent no-op

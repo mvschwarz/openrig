@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { networkCommand, type NetworkDeps } from "../src/commands/network.js";
+import { networkCommand, shownHubUrl, type NetworkDeps } from "../src/commands/network.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { migrate } from "../../daemon/src/db/migrate.js";
@@ -177,4 +177,12 @@ it("sends the operator bearer on its writes, so a daemon with one configured tak
   await cli().parseAsync(["node", "rig", "network", "disconnect", "dev-impl@lab"]);
   expect(process.exitCode).toBeUndefined();
   expect(String(out.mock.calls.at(-1)?.[0])).toMatch(/^Disconnected netb-/);
+});
+
+// Only a user name or password in a hub URL is refused, so a query string can carry a pasted credential: status doesn't print it.
+it("status hides a hub URL's query string and leaves a plain URL as it is", () => {
+  expect(shownHubUrl("https://hub.example.test/rig?token=s3cret&x=1")).toBe("https://hub.example.test/rig (query hidden)");
+  expect(shownHubUrl("https://hub.example.test/rig?token=s3cret")).not.toContain("s3cret");
+  expect(shownHubUrl("https://hub.example.test/rig")).toBe("https://hub.example.test/rig");
+  expect(shownHubUrl("not a url")).toBe("not a url");
 });

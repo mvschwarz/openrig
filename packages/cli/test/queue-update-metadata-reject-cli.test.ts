@@ -1,9 +1,7 @@
-// 51-06 D2 — REAL CLI acceptance boundary (Guard implementation-verdict correction). A genuine
-// `queueCommand` invocation talks over LOOPBACK HTTP to the real candidate queueRoutes +
-// QueueRepository, backed by a migration-faithful test DB (incl. 044 summary + 048 evidence_ref).
-// No pre-baked response: if the daemon route/repo stopped rejecting (or mutated before responding),
-// these tests would fail. Proves normal + --json reject, UNCHANGED item/transition/event state after
-// the HTTP call, and the successful human-park control — all end to end.
+// 51-06 D2, narrowed — REAL CLI acceptance boundary. A genuine `queueCommand` invocation talks over
+// LOOPBACK HTTP to the real candidate queueRoutes + QueueRepository, backed by a migration-faithful test DB
+// (incl. 044 summary + 048 evidence_ref). No pre-baked response. A state change that carries --summary or
+// --evidence-ref is applied and stores them; a blank --summary is reported as not stored, never dropped silently.
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
@@ -107,27 +105,29 @@ describe("51-06 D2 — real CLI->loopback HTTP->queueRoutes/QueueRepository acce
   });
   afterEach(() => { vi.unstubAllEnvs(); });
 
-  it("normal: --summary on a non-park update -> real 400, nonzero exit, item/transition/event UNCHANGED", async () => {
-    const beforeTxns = txnCount(id), beforeEvents = eventCount();
-    const { out, exit } = await runCli(["update", id, "--actor", "dev-x@rig", "--state", "in-progress", "--summary", "DROPME"]);
-    expect(exit).toBe(1);
-    expect(out).toContain("summary_evidence_not_persistable");
-    expect(out).toContain("invalidFields");
-    // unchanged item/metadata/transition/event state AFTER the real HTTP call
-    const item = repo.getByIdOrThrow(id);
-    expect(item.state).toBe("pending");
-    expect(item.summary).toBeNull();
-    expect(txnCount(id)).toBe(beforeTxns);
-    expect(eventCount()).toBe(beforeEvents);
+  it("normal: --summary and --evidence-ref on a state change are applied and stored (exit 0)", async () => {
+    const beforeTxns = txnCount(id);
+    const { exit } = await runCli(["update", id, "--state", "in-progress", "--summary", "KEEP", "--evidence-ref", "/proof/e.md"]);
+    expect(exit).toBeFalsy();
+    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "in-progress", summary: "KEEP", evidenceRef: "/proof/e.md" });
+    expect(txnCount(id)).toBe(beforeTxns + 1);
   });
 
-  it("--json: same reject as structured JSON with nonzero exit, state UNCHANGED", async () => {
-    const { out, exit } = await runCli(["update", id, "--actor", "dev-x@rig", "--state", "in-progress", "--evidence-ref", "/e.md", "--json"]);
-    expect(exit).toBe(1);
-    const body = JSON.parse(out) as { error: string; invalidFields?: string[] };
-    expect(body.error).toBe("summary_evidence_not_persistable");
-    expect(body.invalidFields).toEqual(["evidenceRef"]);
-    expect(repo.getByIdOrThrow(id).evidenceRef).toBeNull();
+  it("a finished seat's park on a typed gate with --summary and --evidence-ref parks and stores both (--json)", async () => {
+    await runCli(["update", id, "--state", "in-progress"]);
+    const { out, exit } = await runCli(["block", id, "--on", "external:relay-reply", "--summary", "Relayed; waiting on the reply", "--evidence-ref", "/proof/relay.md", "--json"]);
+    expect(exit).toBeFalsy();
+    expect(JSON.parse(out)).toMatchObject({ state: "blocked", summary: "Relayed; waiting on the reply", evidenceRef: "/proof/relay.md" });
+    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "blocked", blockedOn: "external:relay-reply", summary: "Relayed; waiting on the reply", evidenceRef: "/proof/relay.md" });
+  });
+
+  it.each([false, true])("a blank --summary is applied without it and reported as not stored (json=%s)", async (json) => {
+    db.prepare("UPDATE queue_items SET summary = ? WHERE qitem_id = ?").run("Original subject", id);
+    const { out, exit } = await runCli(["update", id, "--state", "in-progress", "--summary", " ", ...(json ? ["--json"] : [])]);
+    expect(exit).toBeFalsy();
+    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "in-progress", summary: "Original subject" });
+    if (json) expect(JSON.parse(out).advisories).toEqual([expect.objectContaining({ code: "summary_not_stored", field: "summary" })]);
+    else expect(out).toContain(`The summary was blank, so it wasn't stored: ${id} keeps its summary`);
   });
 
   it("CONTROL: real-CLI human-seat park PERSISTS summary + evidence (exit 0)", async () => {

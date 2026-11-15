@@ -232,7 +232,9 @@ export interface RestoreCheckDeps {
   getMaterializedRoster?: (rigId: string) => string[] | null;
   getRestoreInputs: (rigId: string) =>
     | { snapshot: Pick<Snapshot, "id" | "kind" | "data">; servicesRecord: RigServicesRecord | null }
-    | { currentStateRehydrate: CurrentStateRehydrateEligibility; reason: string }
+    | { currentStateRehydrate: CurrentStateRehydrateEligibility; reason: string;
+      /** The members outside the rig's recorded roster, which a current-state rehydrate leaves as they are. */
+      notRestoredNodeIds?: string[] }
     | { unavailable: string };
   /** Probe daemon health: returns { healthy: boolean; evidence: string } */
   probeDaemonHealth: () => { healthy: boolean; evidence: string };
@@ -363,6 +365,7 @@ export class RestoreCheckService {
       // No added snapshot/history read on a routine status poll for an all-ready rig.
       // Explicit restore-check still assesses its next restore, even while it is running.
       let preconditionError: string | undefined;
+      let notRestored: ReadonlySet<string> | undefined;
       let restoreRoster: Set<string> | null | undefined;
       const allReady = nodes.length > 0 && nodes.every((node) =>
         Boolean(node.canonicalSessionName) && node.sessionStatus === "running" && node.startupStatus === "ready"
@@ -372,6 +375,7 @@ export class RestoreCheckService {
         checks.push(preconditions.check);
         rigChecks.push(preconditions.check);
         preconditionError = preconditions.error;
+        notRestored = preconditions.notRestored;
         restoreRoster = preconditions.roster;
         restoreInputsByRig.set(rig.rigId, { snapshot: preconditions.snapshot, error: preconditions.error });
       }
@@ -391,7 +395,7 @@ export class RestoreCheckService {
         // are not skipping (full, --ready/includeReady, or a non-ready seat).
         const omitReadyDetail = opts.compact && !opts.includeReady && readinessCheck.status === "green";
 
-        const startupContextCheck = this.checkStartupContext(node, rig.name);
+        const startupContextCheck = this.checkStartupContext(node, rig.name, notRestored);
         if ("unknownChecks" in startupContextCheck) {
           return this.buildUnknown([
             ...checks,
@@ -461,6 +465,8 @@ export class RestoreCheckService {
   private checkRestorePreconditions(rig: { rigId: string; name: string }, inventory: NodeInventoryEntry[]): {
     check: CheckEntry;
     snapshot: { id: string; kind: string } | null;
+    /** The members outside the snapshot's roster: restore leaves them as they are. */
+    notRestored?: ReadonlySet<string>;
     /** The node ids restore would start from (its intended roster); null when every current seat is in it, or unknown. */
     roster?: Set<string> | null;
     error?: string;
@@ -474,6 +480,7 @@ export class RestoreCheckService {
         const recorded = this.deps.getMaterializedRoster?.(rig.rigId) ?? null;
         return {
           snapshot: null,
+          ...(input.notRestoredNodeIds ? { notRestored: new Set(input.notRestoredNodeIds) } : {}),
           roster: recorded ? new Set(recorded) : null,
           check: {
             check,
@@ -506,6 +513,7 @@ export class RestoreCheckService {
       return {
         snapshot: { id: input.snapshot.id, kind: input.snapshot.kind },
         roster,
+        notRestored: new Set(inventory.flatMap((current) => current.nodeId && !roster.has(current.nodeId) ? [current.nodeId] : [])),
         check: {
           check,
           status: blockers.length > 0 ? "red" : warnings.length > 0 ? "yellow" : "green",
@@ -1010,7 +1018,8 @@ export class RestoreCheckService {
     };
   }
 
-  private checkStartupContext(node: NodeInventoryEntry, rigName: string): { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
+  private checkStartupContext(node: NodeInventoryEntry, rigName: string, notRestored?: ReadonlySet<string>):
+    { check: CheckEntry } | { unknownChecks: CheckEntry[] } {
     const session = node.canonicalSessionName ?? node.logicalId;
     const check = `seat.${session}.startup-context`;
     const runningReady = node.sessionStatus === "running" && node.startupStatus === "ready";
@@ -1042,6 +1051,19 @@ export class RestoreCheckService {
         // A seat that only ever resumed or was attached has a resume token and no saved startup context. Restore tries its
         // saved conversation without replaying a saved startup plan, as on any resume (a resume replays no startup context).
         // A pod-aware seat's restore names the gap; a legacy seat's resume path is unchanged and names none.
+        // A member outside the restore snapshot's roster (joined later with `rig attach --self`, say) isn't restored:
+        // restore leaves it attached as it is, so its saved conversation isn't tried.
+        if (seatResumes(node) && notRestored?.has(node.nodeId)) {
+          return {
+            check: {
+              check,
+              status: "yellow",
+              evidence: `${probe.evidence}. Restore leaves ${session} attached and doesn't restore it: it isn't in this rig's restore roster.`,
+              remediation: "No startup-context repair is needed: restore doesn't touch this member.",
+              remediationSafe: false,
+            },
+          };
+        }
         if (seatResumes(node)) {
           return {
             check: {
