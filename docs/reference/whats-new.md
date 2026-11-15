@@ -104,8 +104,8 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   `disableSideloadFlags` names the setting.
 - **A resumed Codex conversation** isn't told to sign in again because of an old
   token-refresh failure that newer output follows. A refusal that is still the
-  latest thing Codex printed, or a marked one quoted in an unfinished code
-  block, still reads as current.
+  latest thing Codex printed, or a marked quote in an unfinished code block with
+  nothing newer above the composer, can still read current.
 - **`rig provider switch --token-file`:** the Claude token step is now kept for
   pane readings it used to drop (Claude itself, nothing, another POSIX shell);
   after a failed environment correction it's kept only for a session proven to

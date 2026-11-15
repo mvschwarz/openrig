@@ -33,8 +33,7 @@ contributions from people using OpenRig.
 
 - **Two migrations run before the daemon listens** (168 and 170). Going back to
   0.7.16 after them isn't established; keep the backup. ([#3260](https://github.com/mvschwarz/openrig/pull/3260))
-- **The plugins:** the `openrig` plugin carries 0.7.17, because one of its
-  skills changed. openrig-core stays 0.1.31.
+- **The plugins:** `openrig` carries 0.7.17; openrig-core stays 0.1.31.
 
 ### Your team's questions, in your own conversation
 
@@ -71,16 +70,16 @@ contributions from people using OpenRig.
 ### Delivery, workflows and tools
 
 - **Three daemon read paths changed:** the stuck sweep yields between windows of
-  undelivered work, Codex thread lookup reads only new log rows after its first
-  full read, and a work node's `SPEC.md` is reread only when its file changed,
-  within a two-second settle window, or when that can't be read. This release
-  makes no speed claim. ([#3285](https://github.com/mvschwarz/openrig/pull/3285), [#3295](https://github.com/mvschwarz/openrig/pull/3295), [#3296](https://github.com/mvschwarz/openrig/pull/3296))
+  undelivered work, Codex thread lookup reuses new log rows on warm reads, with
+  full cold and fallback reads, and a work node's `SPEC.md` is reread only when
+  its file changed, within a two-second settle window, or when that can't be
+  read. This release makes no speed claim. ([#3285](https://github.com/mvschwarz/openrig/pull/3285), [#3295](https://github.com/mvschwarz/openrig/pull/3295), [#3296](https://github.com/mvschwarz/openrig/pull/3296))
 - **Draft-aware delivery** reads an empty input box under Claude Code 2.1.322 or
   2.1.323's wide paste hint and auto-update failure as empty. ([#3231](https://github.com/mvschwarz/openrig/pull/3231))
 - **Claude's question dialog,** in the several-question, editor-shortcut and
   preview layouts OpenRig recognizes, refuses an ordinary send. ([#3256](https://github.com/mvschwarz/openrig/pull/3256))
-- **Clearer refusals** at a model picker (close it with Esc) and for a Claude
-  seat stopped by managed `disableSideloadFlags`. ([#3207](https://github.com/mvschwarz/openrig/pull/3207), [#3247](https://github.com/mvschwarz/openrig/pull/3247))
+- **Clearer refusals** at a model picker (close it with Esc) and under managed
+  `disableSideloadFlags`. ([#3207](https://github.com/mvschwarz/openrig/pull/3207), [#3247](https://github.com/mvschwarz/openrig/pull/3247))
 - **A resumed Codex conversation** isn't told to sign in again because of an old
   token-refresh failure that newer output follows. ([#3248](https://github.com/mvschwarz/openrig/pull/3248))
 - **`rig provider switch --token-file`** keeps the Claude token step for pane
@@ -88,8 +87,8 @@ contributions from people using OpenRig.
   proven to be this seat's. ([#3278](https://github.com/mvschwarz/openrig/pull/3278))
 - **Work for a hosted member with no wake trigger** reads `awaiting-pickup:`
   instead of `unroutable:`: it waits in its queue until the member reads it. ([#3222](https://github.com/mvschwarz/openrig/pull/3222))
-- **Workflows:** `rig workflow revise` can remove an obsolete required order from
-  unstarted work, and replaying a route's adoption without `--packet` writes
+- **Workflows:** `rig workflow revise` can drop an obsolete required order from
+  unstarted work, and a replayed route adoption without `--packet` writes
   nothing. ([#3276](https://github.com/mvschwarz/openrig/pull/3276), [#3266](https://github.com/mvschwarz/openrig/pull/3266))
 - **Assistants and tools:** an external connection's `rig_queue_show` labels who
   acted apart from the reader; the TUI can read a remote rig's seats with
@@ -97,8 +96,8 @@ contributions from people using OpenRig.
   model and state; `rig bundle check` reports schema-invalid configuration
   names; and the text output of `rig network status` hides a hub URL's query
   (`--json` is unchanged). ([#3234](https://github.com/mvschwarz/openrig/pull/3234), [#2922](https://github.com/mvschwarz/openrig/pull/2922), [#3212](https://github.com/mvschwarz/openrig/pull/3212), [#3160](https://github.com/mvschwarz/openrig/pull/3160), [#3207](https://github.com/mvschwarz/openrig/pull/3207))
-- **Also:** account-rig erasure, OpenShell recreation after a socket change,
-  handoff reconciliation hints, and the test suite on Vitest 4.1.12. ([#3190](https://github.com/mvschwarz/openrig/pull/3190), [#3291](https://github.com/mvschwarz/openrig/pull/3291), [#3217](https://github.com/mvschwarz/openrig/pull/3217), [#3292](https://github.com/mvschwarz/openrig/pull/3292))
+- **Also:** account-rig erasure, OpenShell recreation after a socket change, and
+  handoff reconciliation hints. ([#3190](https://github.com/mvschwarz/openrig/pull/3190), [#3291](https://github.com/mvschwarz/openrig/pull/3291), [#3217](https://github.com/mvschwarz/openrig/pull/3217))
 
 ### Behaviour that changed
 
