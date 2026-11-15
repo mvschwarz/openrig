@@ -200,7 +200,7 @@ export function workflowRoutes(): Hono {
 
   app.post("/:instance_id/revision", async (c) => {
     const body = await c.req.json<Parameters<WorkflowRuntime["reviseGraph"]>[0]>().catch(() => ({} as never));
-    try { return c.json(getRuntime(c).reviseGraph({ ...body, instanceId: c.req.param("instance_id") })); }
+    try { return c.json(await getRuntime(c).reviseGraph({ ...body, instanceId: c.req.param("instance_id") })); }
     catch (err) { return errorResponse(c, err); }
   });
 

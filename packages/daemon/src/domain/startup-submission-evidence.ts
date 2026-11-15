@@ -12,8 +12,9 @@ const normalize = (text: string): string => text.replace(/\s+/g, "");
 // so a mode-bar line is also known by its leading marker.
 const VIM_MODE_PREFIX = /^-- INSERT --\s*/;
 const MODE_BAR_START = /^(?:⏵⏵|⏸)(?:\s|$)/;
-// Only a known effort hint or installed-update notice may share the paste-hint row.
-const PASTE_HINT = /^paste again to expand(?:\s{2,}(?:[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort|✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))))?$/;
+// Only a known effort hint, installed-update notice or auto-update failure may share the paste-hint row. A wide pane
+// draws the failure there in full; a narrow one gives it its own row, which is skipped as a status warning.
+const PASTE_HINT = /^paste again to expand(?:\s{2,}(?:[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort|✔ Update installed · (?:\/restart to apply|Restart to (?:apply|update))|✘ Auto-update failed(?:: [^·\r\n]+)? · Run claude doctor|✘ Auto-update failed · Try claude doctor or (?:npm i -g @anthropic-ai\/claude-code|cd ~\/\.claude\/local && npm update @anthropic-ai\/claude-code)))?$/;
 export const isClaudePasteHint = (line: string): boolean => PASTE_HINT.test(line.replace(VIM_MODE_PREFIX, ""));
 export const isComposerFooter = (line: string): boolean => {
   const bar = line.replace(VIM_MODE_PREFIX, "");
