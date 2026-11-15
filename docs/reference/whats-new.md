@@ -66,15 +66,16 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   on `rig up --existing`, a seat's own unedited copies of OpenRig's packaged
   skills, such as `claude-compaction-restore` and
   `seat-continuity-and-handover`, follow the current packaged source instead of
-  being named missing. An edited copy (its bytes or a file mode), a file
-  OpenRig didn't write and a copy recorded from another source are kept, and
-  the restore names each. A skill the seat's profile selects itself keeps its
-  own restore policy. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
+  staying at the earlier version or being named missing. An edited copy (its
+  bytes or a file mode), a file OpenRig didn't write and a copy recorded from
+  another source are kept, and the restore names each. A skill the seat's
+  profile selects itself keeps its own restore policy. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
 - **A handover failed but its successor is running:** for a Claude seat, try
   `rig seat handover <seat> --recover --reason "<why>"`, which adopts the
   running successor, before another handover or a fresh launch. It records the
   conversation the successor holds now, or the one its launch named with a
-  warning when that can't be read. ([#3044](https://github.com/mvschwarz/openrig/pull/3044))
+  warning when that can't be read. Recovery from a real failed handover wasn't
+  checked when this release was tested. ([#3044](https://github.com/mvschwarz/openrig/pull/3044))
 - **A seat's conversation lives under a home OpenRig doesn't know:**
   `rig seat runtime-home <seat>` shows the home the next launch uses, and
   `rig seat record-runtime-home <seat> --home <abs> --expect-occupant <gen>
@@ -116,7 +117,8 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - A draft typed while a conditional Enter's own checks wait makes the guard
   refuse with `draft_input_changed`. ([#3176](https://github.com/mvschwarz/openrig/pull/3176))
 - A send to a busy Codex seat (0.167.1 and 0.167.2) with an empty input is
-  delivered once. ([#3232](https://github.com/mvschwarz/openrig/pull/3232))
+  delivered once. That's shown by the change's own tests; it wasn't checked
+  with the real programs when this release was tested. ([#3232](https://github.com/mvschwarz/openrig/pull/3232))
 - **A workflow whose frontier packet someone handed off:** `rig workflow route`
   to the same target adopts the handoff's successor, and `rig workflow project`
   records the exit on the closed packet. Replay with the original `--packet`. ([#3252](https://github.com/mvschwarz/openrig/pull/3252), [#3255](https://github.com/mvschwarz/openrig/pull/3255))
@@ -127,8 +129,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   with no grace window. ([#3010](https://github.com/mvschwarz/openrig/pull/3010), [#3200](https://github.com/mvschwarz/openrig/pull/3200))
 - Per-seat Codex filesystem policies (`codex_permissions` filesystem form) are
   carried through managed launch, resume, restore and rebuild, and the resume
-  command `rig ps` shows carries their flags. Enforcement on macOS and Windows
-  is unverified. ([#3108](https://github.com/mvschwarz/openrig/pull/3108), [#3239](https://github.com/mvschwarz/openrig/pull/3239))
+  command `rig ps` shows carries their flags. When this release was tested,
+  enforcement wasn't checked with a real Codex seat, and neither were a manual
+  resume with that command nor two seats keeping their policies apart. ([#3108](https://github.com/mvschwarz/openrig/pull/3108), [#3239](https://github.com/mvschwarz/openrig/pull/3239))
 - `rig ps` names the daemon it answered from, and `--fields activityState`
   works with `--nodes --json`. The TUI's Projects view can span registered
   hosts. ([#3107](https://github.com/mvschwarz/openrig/pull/3107), [#3240](https://github.com/mvschwarz/openrig/pull/3240), [#3191](https://github.com/mvschwarz/openrig/pull/3191))
@@ -153,8 +156,17 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - **Seats at the edit floor can stop for approval, OpenRig's own commands
   included.** A Claude seat at the harness's edit floor can ask before shell
   commands, including read-only `rig` commands. A `standard` or `open` seat now
-  keeps the team default; other recorded choices keep their meaning. Each prompt
-  waits until someone approves it, so a team can stall while nobody answers.
+  keeps the team default; other recorded choices keep their meaning. A seat that
+  keeps the team default can still ask before the project's own commands, such
+  as running its tests or `git add` and `git commit`. Each prompt waits until
+  someone approves it, so a team can stall while nobody answers.
+- **A question about a seat's prompt can wait with the kernel operator.** If
+  you aren't registered as the team's person, OpenRig's question about a seat's
+  prompt doesn't reach you; it waits with the kernel operator. The kernel
+  operator's offer to register you mentions pairing, but seat questions need a
+  registered person too. Registering wasn't tested as a fix for this. This is
+  OpenRig's own question, separate from your agent reading a seat's screen and
+  bringing its prompt to you.
 - **Approvals your agent recorded:** In one Claude setup, your agent recorded
   approvals it made itself as "Person approved". Those entries alone do not
   establish your approval; check the conversation to see who actually decided.

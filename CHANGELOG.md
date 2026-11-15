@@ -52,7 +52,8 @@ contributed by people using OpenRig.
   choice, a Codex envelope or named Codex profile, a Claude seat's own rules,
   `none`, `locked`, custom, `auto` and `yolo`, and kernel, Pi and terminal seats
   keep their meaning. This keeps the team default; it doesn't apply the whole
-  policy. The Claude team default includes ask rules for lifecycle commands
+  policy, and a seat that keeps it can still ask before the project's own
+  commands (see Known limits). The Claude team default includes ask rules for lifecycle commands
   such as `rig up` and `rig down`. The Codex team default does not add
   equivalent per-command ask rules; native settings and explicit permission
   choices still apply. The launch plan now says whether a seat gets the team default's allowances,
@@ -102,12 +103,12 @@ contributed by people using OpenRig.
   `seat-continuity-and-handover`, come back at the current packaged contents.
   Before, a packaged skill whose bytes changed in the upgrade wasn't put back:
   the restore named it missing, and the seat came back without it. When the
-  upgrade came before `rig down`, the old copy is brought up to date too. An
-  edited copy (its bytes or a file mode), a file OpenRig didn't write and a
-  copy recorded from another source stay as they are, and the restore names
-  each. A skill the seat's profile selects itself keeps its own restore policy.
-  Other plugins' skills aren't changed. It's tested at the unit and source
-  level; see Known limits. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
+  upgrade came before `rig down`, the copy used to stay at the earlier version;
+  it's brought up to date now. An edited copy (its bytes or a file mode), a
+  file OpenRig didn't write and a copy recorded from another source stay as
+  they are, and the restore names each. A skill the seat's profile selects
+  itself keeps its own restore policy. Other plugins' skills aren't changed.
+  It's tested at the unit and source level; see Known limits. ([#3279](https://github.com/mvschwarz/openrig/pull/3279))
 - **`rig seat handover <seat> --recover`** adopts the running successor of a
   failed handover, instead of leaving the seat with its retiring occupant.
   Recovery is for Claude seats: it proves the successor's process and identity
@@ -116,7 +117,8 @@ contributed by people using OpenRig.
   the conversation its launch named is recorded instead, with a warning that a
   `/clear` before the recovery would make it stale. Four results are new, all
   only on `--recover`: `no_handover_to_recover`, `handover_attempt_superseded`,
-  `recover_runtime_unsupported` and `successor_identity_unproven`. ([#3044](https://github.com/mvschwarz/openrig/pull/3044))
+  `recover_runtime_unsupported` and `successor_identity_unproven`. Recovery
+  from a real failed handover wasn't checked when this release was tested. ([#3044](https://github.com/mvschwarz/openrig/pull/3044))
 - **`rig seat runtime-home <seat>`** shows the runtime home (Claude Code's
   config directory or a Codex home) the seat's next launch uses.
   **`rig seat record-runtime-home <seat> --home <abs> --expect-occupant <gen>
@@ -189,7 +191,9 @@ contributed by people using OpenRig.
 - A send to a busy Codex seat (seen with 0.167.1 and 0.167.2) whose input is
   empty is delivered once, instead of being pasted and left in the input,
   neither delivered nor held. OpenRig now reads Codex's "tab to queue" hint row,
-  and a person's draft under that hint is still held. ([#3232](https://github.com/mvschwarz/openrig/pull/3232))
+  and a person's draft under that hint is still held. That's shown by the
+  change's own tests; it wasn't checked with the real programs when this
+  release was tested. ([#3232](https://github.com/mvschwarz/openrig/pull/3232))
 - A notice from `human@host` no longer hints at replying there: the hint says
   that address names no person. ([#3132](https://github.com/mvschwarz/openrig/pull/3132))
 - `rig ps` ends each summary line with the daemon it answered from
@@ -230,9 +234,11 @@ contributed by people using OpenRig.
   concrete conflict in the seat's effective Codex configuration stops the launch
   and names a remedy; a configuration that can't be read keeps the authored
   invocation and reports "policy not verified". The configuration read and the
-  start aren't atomic. Codex enforces the rules; enforcement on macOS and
-  Windows is unverified. A seat's resume command in `rig ps` and node detail
-  carries the policy's flags, but not yet its model and effort. ([#3108](https://github.com/mvschwarz/openrig/pull/3108), [#3239](https://github.com/mvschwarz/openrig/pull/3239))
+  start aren't atomic. Codex enforces the rules. A seat's resume command in
+  `rig ps` and node detail carries the policy's flags, but not yet its model
+  and effort. When this release was tested, enforcement wasn't checked with a
+  real Codex seat, and neither were a manual resume with that command nor two
+  seats keeping their policies apart. ([#3108](https://github.com/mvschwarz/openrig/pull/3108), [#3239](https://github.com/mvschwarz/openrig/pull/3239))
 - The TUI's Projects view can show missions and slices across every registered
   host, each with a status (`ok`, `stale`, `unreachable`, `auth-failed`,
   `unsupported` or `unsupported-transport`). A failed read shows that host's
@@ -288,8 +294,17 @@ contributed by people using OpenRig.
   commands such as `rig whoami` and `rig queue show`. A seat with the built-in
   `standard` or `open` policy now keeps the team default; other recorded
   choices keep their meaning, and the launch plan says whether a seat gets the
-  team default's allowances. Each prompt waits until someone approves it, in
-  the seat or through your own agent, so a team can stall while nobody answers.
+  team default's allowances. A seat that keeps the team default can still ask
+  before the project's own commands, such as running its tests or `git add`
+  and `git commit`. Each prompt waits until someone approves it, in the seat or
+  through your own agent, so a team can stall while nobody answers.
+- **A question about a seat's prompt can wait with the kernel operator.** If
+  you aren't registered as the team's person, OpenRig's question about a seat's
+  prompt doesn't reach you; it waits with the kernel operator. The kernel
+  operator's offer to register you mentions pairing, but seat questions need a
+  registered person too. Registering wasn't tested as a fix for this. This is
+  OpenRig's own question, separate from your agent reading a seat's screen and
+  bringing its prompt to you.
 - **Approvals your agent recorded:** In one Claude setup, your agent recorded
   approvals it made itself as "Person approved". Those entries alone do not
   establish your approval; check the conversation to see who actually decided.
