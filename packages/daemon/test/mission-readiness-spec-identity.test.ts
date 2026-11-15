@@ -167,9 +167,21 @@ describe("mission readiness says where a slice's dependencies came from", () => 
     expect(basis(p, "02-downstream")).toEqual({ dependsOn: [], dependsOnBasis: "frontmatter-advisory", eligible: true });
   });
 
+  // A frontmatter list in a form EC-1 doesn't define (it asks for an inline JSON array) is still a recorded order: it reads
+  // frontmatter-unparsed, never "no order recorded", and isn't read as edges.
+  it.each([
+    ["an unquoted flow list", "[OPR.99.0.1.1]"],
+    ["a block list", "\n  - OPR.99.0.1.1"],
+  ])("a frontmatter-only depends_on written as %s reads frontmatter-unparsed, with eligibility as before", (_form, listed) => {
+    const p = project([upstream, { dir: "02-downstream", specId: "OPR.99.0.1.2", frontmatterDepends: listed }]);
+    expect(p.readiness().issues).toEqual([]);
+    expect(basis(p, "02-downstream")).toEqual({ dependsOn: [], dependsOnBasis: "frontmatter-unparsed", eligible: true });
+  });
+
   it("the execution view says when eligibility assumed no recorded edges", async () => {
     const p = project([upstream, { dir: "02-unrecorded", specId: "OPR.99.0.1.2" },
-      { dir: "03-advisory", specId: "OPR.99.0.1.3", frontmatterDepends: '["OPR.99.0.1.1"]' }, downstreamOn("OPR.99.0.1.1")]);
+      { dir: "03-advisory", specId: "OPR.99.0.1.3", frontmatterDepends: '["OPR.99.0.1.1"]' },
+      { dir: "04-unparsed", specId: "OPR.99.0.1.4", frontmatterDepends: "\n  - OPR.99.0.1.1" }, downstreamOn("OPR.99.0.1.1")]);
     const db = createDb(); migrate(db, ALL_MIGRATIONS);
     try {
       const view = await buildExecutionView({ db, slicesRoot: () => p.missions, buildInfo: { semver: null, commit: null, dirty: null, builtAt: null } }, { mission: MISSION });
@@ -177,10 +189,12 @@ describe("mission readiness says where a slice's dependencies came from", () => 
       const basisOf = (dir: string) => q2.find(s => s.dir === dir)!.next_up_basis;
       expect(basisOf("02-unrecorded")).toContain("no order recorded (depends_on INDETERMINATE, EC-1), so eligibility assumed no recorded edges");
       expect(basisOf("03-advisory")).toContain("only the SPEC frontmatter lists depends_on, which readiness treats as advisory");
+      expect(basisOf("04-unparsed")).toContain("in a form EC-1 doesn't define (not an inline JSON array)");
       expect(basisOf("02-downstream")).not.toContain("assumed no recorded edges");
       const readiness = view["readiness"] as { slices: Array<{ scope: string; dependsOnBasis: string }> };
       expect(readiness.slices.map(s => [s.scope, s.dependsOnBasis])).toEqual([
-        ["01-upstream", "not-recorded"], ["02-unrecorded", "not-recorded"], ["03-advisory", "frontmatter-advisory"], ["02-downstream", "slice.yaml"],
+        ["01-upstream", "not-recorded"], ["02-unrecorded", "not-recorded"], ["03-advisory", "frontmatter-advisory"],
+        ["04-unparsed", "frontmatter-unparsed"], ["02-downstream", "slice.yaml"],
       ]);
     } finally { db.close(); }
   });

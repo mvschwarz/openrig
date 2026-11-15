@@ -38,12 +38,14 @@ export interface ScopeReadiness {
   /** Input for S04 attention consumers; no timer or delivery is implied. */
   attention: { scope: string; revision: string };
 }
-export type DependsOnBasis = "slice.yaml" | "frontmatter-advisory" | "not-recorded";
+export type DependsOnBasis = "slice.yaml" | "frontmatter-advisory" | "frontmatter-unparsed" | "not-recorded";
 export interface MissionReadiness {
   revision: string; state: ScopeReadiness["state"]; issues: string[];
   /** `dependsOnBasis` says where `dependsOn` came from (EC-1): `slice.yaml` is its recorded list, `[]` included;
    *  `frontmatter-advisory` means only the SPEC frontmatter lists edges, which readiness treats as advisory build order;
-   *  `not-recorded` means no order is recorded (INDETERMINATE). In the last two, eligibility assumes no recorded edges. */
+   *  `frontmatter-unparsed` means only the SPEC frontmatter lists them, in a form EC-1 doesn't define (not an inline JSON
+   *  array); `not-recorded` means no order is recorded (INDETERMINATE). In the last three, eligibility assumes no recorded
+   *  edges. */
   slices: Array<{ scope: string; id: string; readiness: ScopeReadiness; dependsOn: string[]; dependsOnBasis: DependsOnBasis; eligible: boolean | null }>;
   historicalStatus: string | null;
 }
@@ -342,8 +344,9 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
       if (!Array.isArray(depends) || depends.some(x => typeof x !== "string")) throw new JudgmentError("dependencies_invalid", `${member.path}: execution.depends_on must be a list`);
       const id = (data?.metadata as { id?: unknown } | undefined)?.id ?? path.basename(dir);
       if (typeof id !== "string" || !id || slices.some(s => s.id === id)) throw new JudgmentError("dependency_identity", `${member.path}: missing or repeated slice identity`);
+      const listed = execution?.depends_on != null ? null : frontmatterDependsOn(dir, io);
       const dependsOnBasis: DependsOnBasis = execution?.depends_on != null ? "slice.yaml"
-        : frontmatterListsDependsOn(dir, io) ? "frontmatter-advisory" : "not-recorded";
+        : listed === "json" ? "frontmatter-advisory" : listed === "other" ? "frontmatter-unparsed" : "not-recorded";
       const slice = { scope: path.basename(dir), id, readiness: readSliceReadiness(dir, io, readPolicy, root, observe), dependsOn: depends as string[], dependsOnBasis, eligible: null };
       slices.push(slice);
       dirs.set(slice, dir);
@@ -380,14 +383,20 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
   return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus };
 }
 
-/** Whether a work node's authored file lists `depends_on:` as an inline JSON array (EC-1), `[]` included. */
-function frontmatterListsDependsOn(dir: string, io: ScopeFsDeps): boolean {
+/** How a work node's authored file lists `depends_on:`: as EC-1's inline JSON array (`[]` included), in another form (a
+ *  non-empty value that isn't a JSON array, or `- item` lines under an empty value), or not at all. Only reports the
+ *  form; nothing here reads it as edges. */
+function frontmatterDependsOn(dir: string, io: ScopeFsDeps): "json" | "other" | null {
   try {
     const node = resolveNodeFileVia(dir, p => io.readFile(p));
     const raw = node ? parseFrontmatter(node.content)["depends_on"] : undefined;
-    return typeof raw === "string" && Array.isArray(JSON.parse(raw));
+    if (typeof raw !== "string") return null;
+    try { if (Array.isArray(JSON.parse(raw))) return "json"; } catch { /* not JSON */ }
+    if (raw.trim() !== "") return "other";
+    const frontmatter = node!.content.split(/\n---/)[0] ?? "";
+    return /^[ \t]*depends_on:[ \t]*\r?\n[ \t]*-[ \t]*\S/m.test(frontmatter) ? "other" : null;
   } catch {
-    return false;
+    return null;
   }
 }
 

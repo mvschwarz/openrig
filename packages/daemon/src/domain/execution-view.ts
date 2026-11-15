@@ -1359,7 +1359,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         ? "; no order recorded (depends_on INDETERMINATE, EC-1), so eligibility assumed no recorded edges"
         : derived.dependsOnBasis === "frontmatter-advisory"
           ? "; only the SPEC frontmatter lists depends_on, which readiness treats as advisory, so eligibility assumed no recorded edges"
-          : "");
+          : derived.dependsOnBasis === "frontmatter-unparsed"
+            ? "; only the SPEC frontmatter lists depends_on, in a form EC-1 doesn't define (not an inline JSON array), so eligibility assumed no recorded edges"
+            : "");
   }
   const q6 = {
     lanes_live: lanes.filter((l) => l.waiting === null).length,
