@@ -397,7 +397,7 @@ export type RigEvent =
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string }
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string; actorSession?: string; reason?: string; oldPacketId?: string; newPacketId?: string }
   // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
   // deletion path. Emitted once per workflow_specs cache row removed
   // because its source file disappeared from the scanned workflows folder.
@@ -857,6 +857,8 @@ export interface NodeInventoryEntry {
   resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
+  /** The stage of this session's own startup failure, read only while startup needs attention (`harness_not_started`: no harness). */
+  latestErrorStage?: string | null;
   // Extended fields
   model: string | null;
   /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
@@ -1099,6 +1101,8 @@ export interface StartupBlock {
 }
 
 export type StartupFailureStage =
+  /** Restore didn't start the harness at all (no startup context or no adapter): the pane holds only a shell. */
+  | "harness_not_started"
   | "permission_selection"
   | "proof_selection"
   | "projection"

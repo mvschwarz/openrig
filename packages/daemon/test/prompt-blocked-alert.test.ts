@@ -27,7 +27,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
-import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
+import { NO_HUMAN_CONFIGURED, resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 
 const seat = "worker@fixture";
 const registry = { ok: true as const, entities: [{
@@ -35,6 +35,12 @@ const registry = { ok: true as const, entities: [{
   connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFIXTURE" }],
   prefs: { deliveryClass: "B" as const, availability: "available" as const },
 }] };
+// Nobody registered, in both shapes a read takes: an empty projection, and the registry's own refusal when nothing
+// was ever projected, which is what a fresh install reads.
+const nobodyRegistered: Array<[string, LoadResult]> = [
+  ["an empty list", { ok: true, entities: [] }],
+  ["the registry's nobody-registered refusal", { ok: false, error: NO_HUMAN_CONFIGURED, noHumans: true }],
+];
 
 // Real policy -> durable queue -> real ladder -> production operator port -> real
 // gateway dispatcher/Slack formatter. Only the external HTTP sink is replaced.
@@ -537,9 +543,9 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(repo.listTransitions(row.qitemId).some(t => t.transitionNote?.startsWith("slack-owner-notification-posted "))).toBe(true);
   });
 
-  it("missing human is unresolved, never a delivered or resolved outcome", async () => {
+  it.each(nobodyRegistered)("missing human is unresolved, never a delivered or resolved outcome (%s)", async (_shape, empty) => {
     const row = await refusal(); const posts: unknown[] = [];
-    const result = await engine(posts, false).dispatchEscalation(row, "interactive prompt blocks outstanding work");
+    const result = await engine(posts, () => empty).dispatchEscalation(row, "interactive prompt blocks outstanding work");
     expect(result.decision).toBe("undeliverable:no-registered-human");
     expect(result.resolved).toBe(false);
     expect(posts).toEqual([]);
@@ -818,8 +824,8 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual(["lead@fixture"]);
   });
 
-  it("no binding stays silent through repeated ticks, then uses a newly bound human once", async () => {
-    await refusal(); let reg: LoadResult = { ok: true, entities: [] }; const posts: unknown[] = []; const port = engine(posts, () => reg);
+  it.each(nobodyRegistered)("no binding stays silent through repeated ticks, then uses a newly bound human once (%s)", async (_shape, empty) => {
+    await refusal(); let reg: LoadResult = empty; const posts: unknown[] = []; const port = engine(posts, () => reg);
     await tick(port);
     const alert = alerts()[0]!; const before = repo.listTransitions(alert.qitemId);
     for (let i = 0; i < 4; i++) expect((await tick(port)).outcome).toBe("clean");
