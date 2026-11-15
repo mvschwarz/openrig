@@ -640,7 +640,7 @@ const realOrResolved = (path: string): string => { try { return fs.realpathSync(
  * that is still as OpenRig wrote it (or was removed by `rig down` for being so) is replaced. Every state saved on the way
  * is one rehydration and the reconciler already read: the old files go first under the old record (as `rig down` leaves
  * them), then the new tree is recorded, then written, so an interrupted write leaves recorded files the rehydration that
- * follows puts back. Anything else is kept and named; a source that can't be read leaves the saved copy to the usual
+ * follows tries to put back. Anything else is kept and named; a source that can't be read leaves the saved copy to the usual
  * rehydration. Returns the warnings to report, one per skill not followed.
  */
 function followPackagedSeatSkills(paths: SeatSkillPaths, packaged: ReadonlyArray<PackagedSeatSkill>): string[] {
@@ -730,10 +730,10 @@ function followPackagedSeatSkills(paths: SeatSkillPaths, packaged: ReadonlyArray
       writeInsideSeatStorage(paths.root, paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     } catch (error) {
       Object.assign(skill, before);
-      warnings.push(`Restore: ${id}: OpenRig's packaged copy couldn't be recorded in ${paths.manifestPath} (${(error as Error).message}); nothing new was written, and its saved record stands`);
+      warnings.push(`Restore: ${id}: OpenRig's packaged copy couldn't be recorded in ${paths.manifestPath} (${(error as Error).message}): ${removed} saved file(s) removed and nothing new written; its saved record stands`);
       continue;
     }
-    // 3. The files are written. One that isn't stays recorded and absent, for the rehydration that follows.
+    // 3. The files are written. One that isn't stays recorded and absent, for the rehydration that follows to try.
     let written = 0;
     try {
       for (const { rel, bytes, mode } of tree.files) {
@@ -742,7 +742,7 @@ function followPackagedSeatSkills(paths: SeatSkillPaths, packaged: ReadonlyArray
       }
       refreshed.push(id);
     } catch (error) {
-      warnings.push(`Restore: ${id} stopped part way to OpenRig's packaged source (${(error as Error).message}): ${written} of ${tree.files.length} files written; the new copy is recorded, and rehydration puts back the rest from the packaged source`);
+      warnings.push(`Restore: ${id} stopped part way to OpenRig's packaged source (${(error as Error).message}): ${written} of ${tree.files.length} files written; the new copy is recorded, and rehydration tries the rest from the packaged source and reports any it can't restore`);
     }
   }
   if (refreshed.length > 0) warnings.unshift(`Restore: brought OpenRig's packaged skills up to the current packaged source: ${refreshed.join(", ")}`);

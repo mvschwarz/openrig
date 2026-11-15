@@ -190,10 +190,10 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     try { followed = followSeatSkills(s.paths, { selected: new Set(), following: [], packaged: packagedSeatSkills(today, new Set(), s.pluginsDir) }); }
     finally { failing.mockRestore(); }
     expect(followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: seat-continuity-and-handover");
-    expect(followed.warnings).toContain("Restore: claude-compaction-restore stopped part way to OpenRig's packaged source (ENOSPC: no space left on device): 1 of 2 files written; the new copy is recorded, and rehydration puts back the rest from the packaged source");
+    expect(followed.warnings).toContain("Restore: claude-compaction-restore stopped part way to OpenRig's packaged source (ENOSPC: no space left on device): 1 of 2 files written; the new copy is recorded, and rehydration tries the rest from the packaged source and reports any it can't restore");
     expect(followed.warnings.join("\n")).not.toContain("kept");
     expect(existsSync(join(s.paths.skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs"))).toBe(false);
-    // The rehydration that follows in the same restore fills the gap from the recorded packaged source.
+    // The rehydration that follows in the same restore tries the gap from the recorded packaged source; here it can write.
     const rehydrated = rehydrateSeatSkills(s.paths);
     expect(rehydrated.restored).toContain(join(s.paths.skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs"));
     expect(rehydrated.kept).toEqual([]);
