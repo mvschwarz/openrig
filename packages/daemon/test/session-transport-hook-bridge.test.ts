@@ -30,7 +30,8 @@ vi.mock("../src/domain/expected-conversation.js", async (importOriginal) => ({
 const cleanup: Array<() => unknown> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) close(); });
 
-async function seat() {
+/** `withEvents`: wired with an event bus, as startup wires the transport, so its delivery-evidence observer runs. */
+async function seat({ withEvents = false }: { withEvents?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "hook-bridge-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
   const repo = new RigRepository(db), rig = repo.createRig("team"), node = repo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
@@ -58,8 +59,11 @@ async function seat() {
   tmux.deliveryGuard = guard;
   let now = Date.parse("2026-11-14T18:00:00Z");
   const bridge = new HookBridge(db, { now: () => now, lease: (id, fn) => guard.exclusive(id, fn) });
+  const eventBus = withEvents ? new EventBus(db) : undefined;
+  const evidence: Array<Record<string, unknown>> = [];
+  if (eventBus) { const emit = eventBus.emit.bind(eventBus); vi.spyOn(eventBus, "emit").mockImplementation(((e: Record<string, unknown>) => { if (e.type === "transport.delivery_evidence") evidence.push(e); return emit(e as never); }) as never); }
   const transport = new SessionTransport({ db, rigRepo: repo, sessionRegistry: registry, tmuxAdapter: tmux, hookBridge: bridge, sleep: async () => {},
-    listProcesses: async () => [] } as never);
+    listProcesses: async () => [], ...(eventBus ? { eventBus } : {}) } as never);
   const optInAndArm = () => {
     bridge.setPreference(node.id, true, "human@team", "wake at turn boundaries");
     return bridge.arm({ nodeId: node.id, sessionName, generation: occupant, hookEvent: "SessionStart" });
@@ -67,7 +71,7 @@ async function seat() {
   /** A new occupant in the same seat and pane, as a handover leaves it. */
   const replaceOccupant = () => { const next = registry.registerSession(node.id, sessionName, "handover"); registry.updateStatus(next.id, "running");
     registry.updateBinding(node.id, { tmuxSession: sessionName, tmuxPane: "%1" }); return registry.currentOccupantTenure(node.id)?.generationUuid ?? null; };
-  return { db, guard, bridge, transport, writes, hooks, screen, occupant, nodeId: node.id, sessionName, optInAndArm, replaceOccupant, advance: (ms: number) => { now += ms; } };
+  return { db, guard, bridge, transport, writes, hooks, screen, evidence, occupant, nodeId: node.id, sessionName, optInAndArm, replaceOccupant, advance: (ms: number) => { now += ms; } };
 }
 
 describe("the transport's hook-bridge branch (slice 13)", () => {
@@ -311,5 +315,38 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     const typed = await s.transport.sweepHookBridge();
     expect(typed.map((t) => t.outboxId)).toEqual([refused.id]);
     expect(repo.getById(refused.qitemId)?.lastNudgeResult).toMatch(/^failed:(target_needs_input|Refused:.*interactive prompt)/);
+  });
+  // #3270 round 4, R4-F1: wired as startup wires it, with the delivery-evidence observer running.
+  it("bridges a plain message to an armed seat when the transport records delivery evidence, as in production, and the evidence says nothing was typed (R4-F1)", async () => {
+    const s = await seat({ withEvents: true });
+    s.optInAndArm();
+    const result = await s.transport.send(s.sessionName, "From: peer@team\n---\nhello\n---", { actorSession: "peer@team" });
+    expect(result).toMatchObject({ ok: true, outcome: "bridged", sent: false });
+    expect(s.writes).toEqual([]);
+    expect(s.bridge.queued(s.nodeId)).toHaveLength(1);
+    expect(s.evidence.at(-1)).toMatchObject({ written: "none", terminalObserved: { outcome: "bridged" }, admitted: { outboxIds: result.outboxIds } });
+  });
+
+  it("still types a send whose caller watches its input effect, and a plain-text send with a write-time check, with the evidence observer running (R4-F1)", async () => {
+    const s = await seat({ withEvents: true });
+    s.optInAndArm();
+    const effects: string[] = [];
+    const watched = await s.transport.send(s.sessionName, "From: peer@team\n---\nwatched\n---", { actorSession: "peer@team", onInputEffect: (phase) => { effects.push(phase); } });
+    expect(watched.outcome).not.toBe("bridged");
+    expect(effects).toContain("pasted");
+    let checked = 0;
+    const checkedSend = await s.transport.send(s.sessionName, "From: peer@team\n---\nchecked\n---", { actorSession: "peer@team", beforeWrite: () => { checked++; } });
+    expect(checkedSend.outcome).not.toBe("bridged");
+    expect(checked).toBeGreaterThan(0);
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+  });
+
+  it("types the watchdog's reminders to an armed seat with the evidence observer running too (R4-F1)", async () => {
+    const s = await seat({ withEvents: true });
+    s.optInAndArm();
+    const deliver = makeWatchdogDeliver({ sessionTransport: s.transport, outbox: new OutboxHandler(s.db) });
+    expect((await deliver({ targetSession: s.sessionName, message: "periodic check" }, { jobId: "job-p", policy: "periodic-reminder", occurrenceId: "occ-1" })).status).toBe("ok");
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+    expect(s.writes).toContain("paste");
   });
 });

@@ -179,6 +179,8 @@ function enterWithheld(reason: string | undefined): boolean {
  *  Enter, and otherwise text with the submission unknown, since Enter may have been attempted. A send that wrote
  *  nothing says so. Anything else the result doesn't establish is unknown, never a guess. */
 export function writtenFact(result: SendResult): "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown" {
+  // Queued for the seat's hook bridge: nothing was typed; the result's outcome says it was deposited for the hook.
+  if (result.outcome === "bridged") return "none";
   if (result.ok && result.outcome !== "retained") {
     if (result.submitOnly) return "submit_only";
     return result.promptInteraction === "unverified" ? "text_only" : "submitted";
@@ -2082,6 +2084,10 @@ export interface SendOpts {
   typedExactly?: true;
 }
 
+/** OpenRig's own delivery-evidence observers, added to a send whose caller watches no input effect. They only record
+ *  what a typed write did; they ask nothing of the write, so they don't make a send ineligible for the hook bridge. */
+const evidenceOnlyObservers = new WeakSet<NonNullable<SendOpts["onInputEffect"]>>();
+
 /** Whether the seat's hook bridge may take this send in place of typing it. Only a plain message: the bridge hands text
  *  to the model at a turn boundary, so it can't run what is checked or done at the moment of writing (a write-time
  *  check, an input-effect callback, staged or exact text, an idle or draft rule), it can't hold a send to an original
@@ -2090,7 +2096,7 @@ export interface SendOpts {
 function bridgeable(text: string, opts?: SendOpts): boolean {
   if (!opts) return !/^\s*\/[A-Za-z]/.test(text);
   return !opts.hookBridgeFallback && !opts.noHookBridge && !opts.expectedIdentity && !opts.submitOnly && !opts.dangerouslyInteract
-    && !opts.beforeWrite && !opts.onInputEffect && !opts.postCompactTurnBoundary && !opts.readinessFromPaneOnly && !opts.preserveInput
+    && !opts.beforeWrite && (!opts.onInputEffect || evidenceOnlyObservers.has(opts.onInputEffect)) && !opts.postCompactTurnBoundary && !opts.readinessFromPaneOnly && !opts.preserveInput
     && !opts.allowDraftWhileIdle && !opts.allowUnknownWhileIdle && !opts.typeWithoutChecking && opts.exactText === undefined && !opts.typedExactly
     && opts.expectedStagedText === undefined && !opts.requireFullStagedText && !opts.onStartupMismatch
     && !/^\s*\/[A-Za-z]/.test(text);
@@ -2735,10 +2741,13 @@ export class SessionTransport {
     const seat = this.evidenceSeat(sessionName);
     // The text the paste actually wrote (a terminal seat's exact text, a combined wake), not the text asked for.
     let wire: { text: string; at: string } | null = null;
-    const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: (phase, written) => {
+    const observer: NonNullable<SendOpts["onInputEffect"]> = (phase, written) => {
       if (phase === "pasted" && written) wire = { text: written.text, at: this.now().toISOString() };
       opts?.onInputEffect?.(phase, written);
-    } } : opts;
+    };
+    // Only the caller's own input-effect callback is a write-time contract; this observer alone isn't (bridgeable).
+    if (!opts?.onInputEffect) evidenceOnlyObservers.add(observer);
+    const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: observer } : opts;
     const result = await this.sendMarkingUrgent(sessionName, text, observed);
     this.recordDeliveryEvidence(sessionName, seat, opts, result, wire);
     return result;
