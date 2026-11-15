@@ -28,6 +28,9 @@ import { replaceFile } from "../src/adapters/replace-file.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { claudeActivityRelayPath } from "../src/domain/claude-activity-hooks.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { RigLifecycleService } from "../src/domain/rig-lifecycle-service.js";
+import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 
 
@@ -201,7 +204,8 @@ describe("RigTeardownOrchestrator", () => {
     tmux.probeSession = vi.fn(async () => ({ state: live ? "present" : "absent" }));
     const prepare = db.prepare.bind(db);
     const fault = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
-      if (sql.includes("s.intentionally_stopped = 0")) throw new Error("fixture eligibility query failed");
+      // recordAlreadyStoppedIntent's eligibility query, not the file-use reads.
+      if (sql.includes("s.status IN ('exited', 'detached', 'superseded')")) throw new Error("fixture eligibility query failed");
       return prepare(sql);
     });
     try {
@@ -1378,11 +1382,24 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
       sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: NAME, tmuxPane: pane });
       return session;
     };
-    const teardown = () => new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: adapter,
-      snapshotCapture: mockSnapshotCapture(db) }).teardown(rig.id, { snapshot: false });
+    // A session OpenRig didn't launch: one joined with rig attach --self, or adopted (origin claimed).
+    const claim = async () => {
+      const pane = (await tmux("list-panes", "-t", `=${NAME}:`, "-F", "#{pane_id}")).split("\n")[0]!;
+      sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: NAME, tmuxPane: pane });
+      return sessionRegistry.registerClaimedSession(node.id, NAME);
+    };
+    // rig unclaim's own path, as the daemon wires it for down.
+    const lifecycle = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo: new DiscoveryRepository(db), eventBus,
+      queueRepo: new QueueRepository(db, eventBus, { validateRig: () => true }), tmuxAdapter: adapter });
+    const releaseClaimedSession = async (sessionId: string) => {
+      const released = await lifecycle.unclaimSession(sessionId);
+      return released.ok ? { ok: true as const } : { ok: false as const, error: released.error };
+    };
+    const teardown = (opts: { delete?: boolean } = {}) => new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus,
+      tmuxAdapter: adapter, snapshotCapture: mockSnapshotCapture(db), releaseClaimedSession }).teardown(rig.id, { snapshot: false, ...opts });
     const alive = (name: string) => tmux("has-session", "-t", `=${name}`).then(() => true, () => false);
     const close = async () => { await tmux("kill-server").catch(() => {}); db.close(); fs.rmSync(home, { recursive: true, force: true }); };
-    return { tmux, node, bind, teardown, alive, close, sessionRegistry, db };
+    return { tmux, home, node, bind, claim, teardown, alive, close, sessionRegistry, db };
   }
 
   // What's left after a refusal: the session row still running and its binding intact, so nothing reads as stopped.
@@ -1460,6 +1477,106 @@ describe.skipIf(process.platform === "win32")("rig down leaves a terminal it can
       expect(result.errors[0]).toMatch(/Managed pane identity unavailable or changed; no input written/);
       expect(await h.alive(NAME)).toBe(true);
       expect(h.db.prepare("SELECT status FROM sessions WHERE id=?").get(session.id)).toEqual({ status: "running" });
+    } finally { await h.close(); }
+  });
+
+  // A session OpenRig didn't launch (joined with rig attach --self, adopted, bound or reconciled) is its owner's: down
+  // releases the seat as rig unclaim does, says so, and never ends the session.
+  it("a claimed session without the seat's marker is released, not stopped, and keeps running", async () => {
+    const h = await harness();
+    try {
+      await h.tmux("new-session", "-d", "-s", NAME, "sleep 300");
+      const session = await h.claim();
+      const result = await h.teardown();
+      expect(result).toMatchObject({ sessionsKilled: 0, errors: [], released: [NAME] });
+      expect(await h.alive(NAME)).toBe(true);
+      expect(h.sessionRegistry.getBindingForNode(h.node.id)).toBeNull();
+      expect(h.db.prepare("SELECT status FROM sessions WHERE id=?").get(session.id)).toEqual({ status: "detached" });
+    } finally { await h.close(); }
+  });
+
+  // Whatever marker it carries (an earlier claim's, or one a best-effort removal left), a claimed session isn't stopped.
+  it("a claimed session that carries the seat's marker is released too, and keeps running", async () => {
+    const h = await harness();
+    try {
+      await h.tmux("new-session", "-d", "-s", "keepalive", "sleep 300");
+      await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, "sleep 300");
+      await h.claim();
+      const result = await h.teardown();
+      expect(result).toMatchObject({ sessionsKilled: 0, errors: [], released: [NAME] });
+      expect(await h.alive(NAME)).toBe(true);
+    } finally { await h.close(); }
+  });
+
+  // A released session is still its owner's: a later down, or down --delete, counts its cwd as in use and leaves the
+  // seat's guidance and OpenRig's Claude hooks there alone, until tmux reports the session gone.
+  it.each([["still running", true], ["gone", false]] as const)(
+    "a later down --delete keeps a released seat's files while its session is %s", async (_label, running) => {
+      const h = await harness();
+      try {
+        const guidance = path.join(h.home, "CLAUDE.md");
+        const managed = "Operator notes\n<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nworking guidance\n<!-- END OpenRig MANAGED BLOCK: role -->\n";
+        fs.writeFileSync(guidance, managed);
+        const relay = claudeActivityRelayPath(path.join(h.home, "state"));
+        const settings = path.join(h.home, ".claude", "settings.local.json");
+        const hooks = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `${shellQuote(process.execPath)} ${shellQuote(relay)}` }] }] } }, null, 2);
+        fs.mkdirSync(path.dirname(settings), { recursive: true });
+        fs.writeFileSync(settings, hooks);
+        await h.tmux("new-session", "-d", "-s", "keepalive", "sleep 300");
+        await h.tmux("new-session", "-d", "-s", NAME, "sleep 300");
+        await h.claim();
+        expect(await h.teardown()).toMatchObject({ sessionsKilled: 0, errors: [], released: [NAME] });
+        expect(fs.readFileSync(guidance, "utf-8")).toBe(managed);
+        expect(fs.readFileSync(settings, "utf-8")).toBe(hooks);
+
+        if (!running) await h.tmux("kill-session", "-t", `=${NAME}`);
+        expect(await h.teardown({ delete: true })).toMatchObject({ alreadyStopped: true, deleted: true });
+        expect(await h.alive(NAME)).toBe(running);
+        if (running) {
+          expect(fs.readFileSync(guidance, "utf-8")).toBe(managed);
+          expect(fs.readFileSync(settings, "utf-8")).toBe(hooks);
+        } else {
+          expect(fs.readFileSync(guidance, "utf-8")).toBe("Operator notes\n");
+          expect(fs.readFileSync(settings, "utf-8")).not.toContain(relay);
+        }
+      } finally { await h.close(); }
+    });
+
+  // An earlier released session stays its owner's after the seat binds or launches another: once that one ends or is
+  // stopped, down still keeps the shared cwd's files while the released session runs, and drops them when tmux reports
+  // it gone, recording its stop without touching the row's status.
+  it.each([
+    ["another claimed session that has ended", "claimed", true], ["another claimed session that has ended", "claimed", false],
+    ["a launched session it stops", "launched", true], ["a launched session it stops", "launched", false],
+  ] as const)("after %s (%s successor), down keeps an earlier released seat's files while it runs: %s", async (_label, successor, running) => {
+    const h = await harness();
+    try {
+      const guidance = path.join(h.home, "CLAUDE.md");
+      const managed = "Operator notes\n<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nworking guidance\n<!-- END OpenRig MANAGED BLOCK: role -->\n";
+      fs.writeFileSync(guidance, managed);
+      await h.tmux("new-session", "-d", "-s", "keepalive", "sleep 300");
+      await h.tmux("new-session", "-d", "-s", "person-a", "sleep 300");
+      const paneA = (await h.tmux("list-panes", "-t", "=person-a:", "-F", "#{pane_id}")).split("\n")[0]!;
+      h.sessionRegistry.updateBinding(h.node.id, { attachmentType: "tmux", tmuxSession: "person-a", tmuxPane: paneA });
+      const a = h.sessionRegistry.registerClaimedSession(h.node.id, "person-a");
+      expect(await h.teardown()).toMatchObject({ released: ["person-a"], errors: [] });
+
+      if (successor === "claimed") {
+        await h.tmux("new-session", "-d", "-s", NAME, "sleep 300");
+        await h.claim();
+        await h.tmux("kill-session", "-t", `=${NAME}`);
+      } else {
+        await h.tmux("new-session", "-d", "-s", NAME, "-e", `OPENRIG_NODE_ID=${h.node.id}`, "sleep 300");
+        await h.bind();
+      }
+      if (!running) await h.tmux("kill-session", "-t", "=person-a");
+      expect(await h.teardown()).toMatchObject({ sessionsKilled: successor === "launched" ? 1 : 0, errors: [] });
+
+      expect(await h.alive(NAME)).toBe(false);
+      expect(await h.alive("person-a")).toBe(running);
+      expect(fs.readFileSync(guidance, "utf-8")).toBe(running ? managed : "Operator notes\n");
+      expect(h.db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id=?").get(a.id))
+        .toEqual({ status: "detached", intentionally_stopped: running ? 0 : 1 });
     } finally { await h.close(); }
   });
 
