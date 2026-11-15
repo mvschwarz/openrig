@@ -19,6 +19,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 
 // A send bound to an original conversation: the native record check is the expected-identity suite's; here it passes,
 // so the only question is whether the bridge takes the send.
@@ -58,7 +59,9 @@ async function seat({ withEvents = false }: { withEvents?: boolean } = {}) {
   const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name), async () => {});
   tmux.deliveryGuard = guard;
   let now = Date.parse("2026-11-14T18:00:00Z");
-  const bridge = new HookBridge(db, { now: () => now, lease: (id, fn) => guard.exclusive(id, fn) });
+  // The rig's delivery drain, as startup reads it (the queue's deliveryDrains.holds); a test points it at its queue.
+  let drained: (sessionName: string) => boolean = () => false;
+  const bridge = new HookBridge(db, { now: () => now, lease: (id, fn) => guard.exclusive(id, fn), drained: (name) => drained(name) });
   const eventBus = withEvents ? new EventBus(db) : undefined;
   const evidence: Array<Record<string, unknown>> = [];
   if (eventBus) { const emit = eventBus.emit.bind(eventBus); vi.spyOn(eventBus, "emit").mockImplementation(((e: Record<string, unknown>) => { if (e.type === "transport.delivery_evidence") evidence.push(e); return emit(e as never); }) as never); }
@@ -71,7 +74,8 @@ async function seat({ withEvents = false }: { withEvents?: boolean } = {}) {
   /** A new occupant in the same seat and pane, as a handover leaves it. */
   const replaceOccupant = () => { const next = registry.registerSession(node.id, sessionName, "handover"); registry.updateStatus(next.id, "running");
     registry.updateBinding(node.id, { tmuxSession: sessionName, tmuxPane: "%1" }); return registry.currentOccupantTenure(node.id)?.generationUuid ?? null; };
-  return { db, guard, bridge, transport, writes, hooks, screen, evidence, occupant, nodeId: node.id, sessionName, optInAndArm, replaceOccupant, advance: (ms: number) => { now += ms; } };
+  return { db, rigId: rig.id, drainWith: (read: (sessionName: string) => boolean) => { drained = read; },
+    guard, bridge, transport, writes, hooks, screen, evidence, occupant, nodeId: node.id, sessionName, optInAndArm, replaceOccupant, advance: (ms: number) => { now += ms; } };
 }
 
 describe("the transport's hook-bridge branch (slice 13)", () => {
@@ -348,5 +352,38 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect((await deliver({ targetSession: s.sessionName, message: "periodic check" }, { jobId: "job-p", policy: "periodic-reminder", occurrenceId: "occ-1" })).status).toBe("ok");
     expect(s.bridge.queued(s.nodeId)).toEqual([]);
     expect(s.writes).toContain("paste");
+  });
+  // #3270 round 6, F1: a rig's delivery drain holds the bridge's automatic deliveries as it holds typed ones.
+  it("holds a bridged queue wake while the seat's rig is drained: the poll waits and the sweep types nothing; once the drain ends, the poll delivers in order (F1)", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const repo = queueOn(s);
+    s.drainWith((name) => repo.deliveryDrains.holds(name));
+    const first = await handoffTo(s, repo);
+    const second = await handoffTo(s, repo);
+    expect(s.bridge.queued(s.nodeId).map((r) => r.outboxId)).toEqual([first.id, second.id]);
+    const jobs = new WatchdogJobsRepository(s.db);
+    repo.deliveryDrains.begin(s.rigId, { drainId: "maintenance-1", owner: "owner@team", reviewAt: new Date(Date.now() + 3_600_000).toISOString() }, jobs);
+    expect(s.bridge.poll(s.nodeId, armId)).toEqual({ action: "wait" });
+    s.advance(HOOK_BRIDGE_TURN_BOUND_MS + 1);
+    expect(await s.transport.sweepHookBridge()).toEqual([]);
+    expect(s.writes).toEqual([]);
+    expect(s.bridge.queued(s.nodeId).map((r) => r.outboxId)).toEqual([first.id, second.id]);
+    repo.deliveryDrains.end(s.rigId, "maintenance-1", jobs);
+    const polled = s.bridge.poll(s.nodeId, armId) as { action: string; messages: Array<{ outboxId: string }> };
+    expect(polled.action).toBe("deliver");
+    expect(polled.messages.map((m) => m.outboxId)).toEqual([first.id, second.id]);
+    expect(s.writes).toEqual([]);
+  });
+
+  it("lets a direct send through the bridge during a drain, as typed direct sends pass it (F1)", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const repo = queueOn(s);
+    s.drainWith((name) => repo.deliveryDrains.holds(name));
+    repo.deliveryDrains.begin(s.rigId, { drainId: "maintenance-2", owner: "owner@team", reviewAt: new Date(Date.now() + 3_600_000).toISOString() }, new WatchdogJobsRepository(s.db));
+    const direct = await s.transport.send(s.sessionName, "From: peer@team\n---\ndirect\n---", { actorSession: "peer@team" });
+    expect(direct.outcome).toBe("bridged");
+    expect((s.bridge.poll(s.nodeId, armId) as { messages: Array<{ outboxId: string }> }).messages.map((m) => m.outboxId)).toEqual(direct.outboxIds);
   });
 });

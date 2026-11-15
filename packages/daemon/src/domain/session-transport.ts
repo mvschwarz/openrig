@@ -1998,6 +1998,9 @@ export interface SendOpts {
   /** Internal: this caller can't yet represent a message queued for the seat's hook bridge (the watchdog's receipts
    *  and accounting read only typed outcomes), so its send is typed. */
   noHookBridge?: true;
+  /** Internal: an explicit queue notification (a resolve's), which passes a rig's delivery drain as on the typed path;
+   *  the hook bridge then queues it as a direct send, not an automatic one. */
+  drainExempt?: true;
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */

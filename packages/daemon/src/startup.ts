@@ -397,7 +397,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const hookBridge = new HookBridge(db, { emit: (event) => { try { eventBus.emit(event); } catch { /* an unrecorded bridge event never fails delivery */ } },
     holds: (nodeId, admission) => tmuxAdapter.deliveryGuard?.holdsInput(nodeId, admission) ?? false,
     // A poll claims under the seat's delivery lease, the owner typed sends take, so it can't overtake a typed send.
-    lease: (nodeId, fn) => tmuxAdapter.deliveryGuard ? tmuxAdapter.deliveryGuard.exclusive(nodeId, fn) : Promise.resolve(fn()) });
+    lease: (nodeId, fn) => tmuxAdapter.deliveryGuard ? tmuxAdapter.deliveryGuard.exclusive(nodeId, fn) : Promise.resolve(fn()),
+    // A rig's delivery drain holds the bridge's automatic deliveries as it holds typed ones (#3270). Read only after
+    // startup, by which time the queue below exists.
+    drained: (sessionName) => queueRepoInstance.deliveryDrains.holds(sessionName) });
   const streamStore = new StreamStore(db, eventBus);
   // Explicit source opt-in only. No sink I/O until a separate drain request.
   const shadow = configureShadowCapture(process.env.OPENRIG_SHADOW_CAPTURE);

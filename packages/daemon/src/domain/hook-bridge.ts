@@ -63,13 +63,17 @@ interface BridgeReceipt {
   state: "queued" | "claimed" | "handed-to-hook" | "claimed-unacked" | "not-delivered";
   queuedAt: string;
   admission?: HookBridgeAdmission;
+  /** An automatic delivery (a queue wake that wasn't sent explicitly): a rig's delivery drain holds it, as it holds the
+   *  typed path's. A direct send isn't automatic, and passes a drain as a typed direct send does. */
+  automatic?: boolean;
   armId?: string;
   batchId?: string;
   claimedAt?: string;
   hookEvent?: string;
   ackedAt?: string;
 }
-interface QueuedRow { outboxId: string; body: string; senderSession: string; queuedAt: string; occupant: string | null; admission: HookBridgeAdmission | null }
+interface QueuedRow { outboxId: string; body: string; senderSession: string; sessionName: string; queuedAt: string; occupant: string | null;
+  admission: HookBridgeAdmission | null; automatic: boolean }
 
 export type HookBridgeEvent = Extract<RigEvent, { type: `transport.hook_bridge_${string}` }>;
 
@@ -132,6 +136,8 @@ export class HookBridge {
     stamp?: (executable: string) => string | null;
     /** Runs `fn` under the seat's delivery lease (SeatDeliveryGuard.exclusive), the same owner typed sends take. */
     lease?: <T>(nodeId: string, fn: () => T) => Promise<T>;
+    /** Whether the seat's rig is in a delivery drain (the queue's deliveryDrains.holds). */
+    drained?: (sessionName: string) => boolean;
   } = {}) {
     this.now = deps.now ?? Date.now;
   }
@@ -213,10 +219,11 @@ export class HookBridge {
   /** Queue a send for the seat's bridge: outbox rows in send order, bound to the occupant, with the admission the guard
    *  decided on, delivered at its next turn boundary. Called under the seat's guard lease. */
   deposit(target: HookBridgeTarget, sessionName: string, text: string, opts: { actorSession?: string | null; auditPointer?: string; urgent?: unknown;
-    identityProvenance?: string | null; identityPrincipal?: string | null; admission?: HookBridgeAdmission }, ids: string[]) {
+    identityProvenance?: string | null; identityPrincipal?: string | null; admission?: HookBridgeAdmission; queueWake?: boolean; drainExempt?: boolean }, ids: string[]) {
     const outbox = new OutboxHandler(this.db);
     const queuedAt = new Date(this.now()).toISOString();
-    const receipt: BridgeReceipt = { channel: HOOK_BRIDGE_CHANNEL, state: "queued", queuedAt, ...(opts.admission ? { admission: opts.admission } : {}) };
+    const receipt: BridgeReceipt = { channel: HOOK_BRIDGE_CHANNEL, state: "queued", queuedAt, ...(opts.admission ? { admission: opts.admission } : {}),
+      ...(opts.queueWake && !opts.drainExempt ? { automatic: true } : {}) };
     // An id already settled (delivered, failed, held elsewhere) isn't queued again, and isn't reported queued: null, and
     // nothing changed, so the send takes the path a reused id takes without the bridge.
     const settled = this.db.prepare("SELECT 1 FROM outbox_entries WHERE outbox_id = ? AND delivery_state NOT IN ('pending', 'sending')");
@@ -238,15 +245,26 @@ export class HookBridge {
 
   /** The seat's queued messages, oldest first. */
   queued(nodeId: string): QueuedRow[] {
-    const rows = this.db.prepare(`SELECT outbox_id, body, sender_session, guard_binding, guard_delivery FROM outbox_entries
+    const rows = this.db.prepare(`SELECT outbox_id, body, sender_session, destination_session, guard_binding, guard_delivery FROM outbox_entries
       WHERE delivery_state = 'sending' AND guard_binding IS NOT NULL AND json_extract(guard_binding, '$.nodeId') = ?
         AND json_extract(guard_delivery, '$.channel') = ? AND json_extract(guard_delivery, '$.state') = 'queued'
-      ORDER BY ts_dispatched, rowid`).all(nodeId, HOOK_BRIDGE_CHANNEL) as Array<{ outbox_id: string; body: string; sender_session: string; guard_binding: string; guard_delivery: string }>;
+      ORDER BY ts_dispatched, rowid`).all(nodeId, HOOK_BRIDGE_CHANNEL) as Array<{ outbox_id: string; body: string; sender_session: string; destination_session: string;
+        guard_binding: string; guard_delivery: string }>;
     return rows.map((r) => {
       const receipt = JSON.parse(r.guard_delivery) as BridgeReceipt;
-      return { outboxId: r.outbox_id, body: r.body, senderSession: r.sender_session, queuedAt: receipt.queuedAt,
-        occupant: (JSON.parse(r.guard_binding) as HookBridgeTarget).occupant ?? null, admission: receipt.admission ?? null };
+      return { outboxId: r.outbox_id, body: r.body, senderSession: r.sender_session, sessionName: r.destination_session, queuedAt: receipt.queuedAt,
+        occupant: (JSON.parse(r.guard_binding) as HookBridgeTarget).occupant ?? null, admission: receipt.admission ?? null, automatic: receipt.automatic === true };
     });
+  }
+
+  /** Whether a rig's delivery drain holds this queued row now: an automatic delivery to a seat whose rig is drained. A
+   *  drain read that fails delivers and says so, as the drain's own admission does. */
+  private drainHolds(row: QueuedRow): boolean {
+    if (!row.automatic || !this.deps.drained) return false;
+    try { return this.deps.drained(row.sessionName); } catch (error) {
+      console.error(`[hook-bridge] ${row.sessionName}'s delivery drain couldn't be read; delivering:`, error);
+      return false;
+    }
   }
 
   /** Why the bridge can't deliver this queued row to `generation` now, or null when it can. */
@@ -270,6 +288,8 @@ export class HookBridge {
       const ids: string[] = [];
       let reason: string | null = null;
       for (const row of this.queued(nodeId)) {
+        // Held by the rig's delivery drain: not due, so not typed, and nothing behind it overtakes it.
+        if (this.drainHolds(row)) break;
         const why = this.undeliverable(nodeId, row, generation);
         const stale = !live && this.now() - Date.parse(row.queuedAt) >= HOOK_BRIDGE_LIVE_BOUND_MS;
         if (!why && !stale) break; // keep send order: what's behind a deliverable row waits with it
@@ -367,7 +387,9 @@ export class HookBridge {
     if (seat.turn !== "idle") return { action: "wait" };
     const deliverable: QueuedRow[] = [];
     for (const row of this.queued(nodeId)) {
-      if (this.undeliverable(nodeId, row, seat.arm.generation)) break;
+      // A row the rig's delivery drain holds waits here, with everything behind it; one the bridge can't deliver goes
+      // to typed delivery.
+      if (this.drainHolds(row) || this.undeliverable(nodeId, row, seat.arm.generation)) break;
       deliverable.push(row);
     }
     if (!deliverable.length) return { action: "wait" };

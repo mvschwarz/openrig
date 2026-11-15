@@ -3,7 +3,7 @@
 // fallback, expiry, and a claimed batch whose waiter vanished. The launch hooks and the waiter script have their own
 // tests (kernel-authority, claude-hook-bridge-script); the transport's branch has session-transport-hook-bridge.
 import Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -351,5 +351,28 @@ describe("the hook bridge (slice 13)", () => {
     expect(await probing.launchWanted(nodeId, "/opt/claude")).toBe(false);
     version = "2.1.322";
     expect(await probing.launchWanted(nodeId, "/opt/claude")).toBe(true);
+  });
+  // #3270 round 6, F1: the drain read fails open, as the drain's own admission does.
+  it("delivers when the rig's drain can't be read, and says so (F1)", () => {
+    optIn();
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args); });
+    const unread = new HookBridge(db, { now: () => now, drained: () => { throw new Error("drain table unreadable"); } });
+    const { armId } = unread.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    unread.deposit(target(), session, "queued wake", { actorSession: "peer@team", queueWake: true }, ["w1"]);
+    expect(unread.poll(nodeId, armId)).toMatchObject({ action: "deliver" });
+    expect(JSON.stringify(errors)).toMatch(/delivery drain.*couldn't be read/);
+    spy.mockRestore();
+  });
+  it("holds only automatic deliveries in a drain: an explicit queue notification and a direct send pass it (F1)", () => {
+    optIn();
+    const drained = new HookBridge(db, { now: () => now, drained: () => true });
+    const { armId } = drained.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    drained.deposit(target(), session, "explicit resolve notice", { actorSession: "peer@team", queueWake: true, drainExempt: true }, ["e1"]);
+    drained.deposit(target(), session, "direct send", { actorSession: "peer@team" }, ["d1"]);
+    expect((drained.poll(nodeId, armId) as { messages: Array<{ outboxId: string }> }).messages.map((m) => m.outboxId)).toEqual(["e1", "d1"]);
+    const { armId: next } = drained.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    drained.deposit(target(), session, "automatic wake", { actorSession: "peer@team", queueWake: true }, ["w1"]);
+    expect(drained.poll(nodeId, next)).toEqual({ action: "wait" });
   });
 });

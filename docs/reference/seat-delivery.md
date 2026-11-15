@@ -326,7 +326,7 @@ The bridge is used only for an occupant launched with it, once its waiter has ar
 - A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate. A batch a waiter had taken before the restart is named uncertain by the bridge after it, as above.
 - A waiter exits by itself shortly before its hook timeout and reports that it expired. The next turn re-arms it.
 
-**What still decides first.** The typing guard: hold and the interruption levels hold or refuse as for typed delivery.
+**What still decides first.** The typing guard: hold and the interruption levels hold or refuse as for typed delivery. A rig's delivery drain holds the bridge's automatic deliveries (queue wakes) as it holds typed ones: while the seat's rig is drained, a waiter's poll takes none and the fallback types none, and they're delivered in order once the drain ends. A direct send and an explicit queue notification pass a drain, as on the typed path. If the drain can't be read, delivery goes ahead and the daemon log says so.
 The bridge only replaces how an admitted message reaches the seat. Watchdog reminders and queue wakes take the same path.
 
 **Cost.** Each wake is one model turn on the seat's own login. A burst of messages to an idle seat can cost several.
