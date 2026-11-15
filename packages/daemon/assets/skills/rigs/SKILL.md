@@ -183,7 +183,7 @@ person needs in their project or home folder and name that path.
   Carry their constraints, which logins they have (an installed provider that isn't signed in doesn't count), and any
   permission choice they made, chosen or declined, in either handoff.
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
-  way. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
+  way, by the route they chose. The operator helps them pick a team that fits their logins, starts it (`rig up`) only on their yes to the plan it
   shows, and gives the goal to the team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
   that with the question. Show them where the operator answers, and don't build the project yourself.
 - **If you start a team yourself** instead of through the operator, do its fit check first. A built-in team can need a
@@ -214,11 +214,15 @@ person needs in their project or home folder and name that path.
     > block this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I
     > check it whenever the person talks to me. Don't ask in your own terminal: the person isn't there. A seat's
     > permission prompt in this work is their question too: send me its own text and choices, the seat, what it was
-    > doing and any escalation's id. To pass their answer on, capture that seat again (a changed prompt needs a new
-    > answer), then `rig send <seat> "<key>" --dangerously-interact --reason "<question id>: <their answer>"` with the
-    > key the prompt shows for it, and check the effect. If you hand this item on or give this work to another seat,
-    > copy this paragraph into the new item. When you finish, put the outcome in this item's resolution, with what the
-    > latest review found, and any file in its evidence ref.
+    > doing and any escalation's id, unless a question about that prompt is already open at my address. Whoever sent
+    > the question passes on the answer, and no one else does. Capture that seat again first (a changed prompt needs a
+    > new answer), then `rig send <seat> "<key>" --dangerously-interact --reason "task <question id>: <their answer>"`
+    > with the key the prompt shows for their choice. A no stays a no. If they gave no answer, or their words don't
+    > clearly pick one choice (a condition the action doesn't plainly meet, say), ask me again before sending anything,
+    > and never pick a "don't ask again" choice they didn't pick. Check the effect, and never send again while it's
+    > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
+    > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
+    > evidence ref.
 
     Then run
     `OPENRIG_SESSION_NAME=<address> rig queue create --destination <canonicalSessionName> --summary "<the goal in a sentence>" --body-file <file> --verify`.
@@ -258,7 +262,8 @@ person needs in their project or home folder and name that path.
   seat a model their account can run with `rig seat set-model`, then start it again with
   `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports. Either way the operator starts a
   new conversation without your handoff, so send it again: the goal, folder, branch, constraints and permission choices.
-- **Installation is finished** when the operator is ready and the person is talking to it; a healthy daemon alone isn't
+- **Installation is finished** when the operator is ready and the person is talking to it or, when they stay with you,
+  once the goal has reached it as a task from your address (read its wake outcome); a healthy daemon alone isn't
   that. If they'd rather talk later, keep that choice, leave them the exact connection step and say the handoff to the
   operator is still pending.
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
@@ -271,17 +276,20 @@ person needs in their project or home folder and name that path.
   relay it. After each step you hand off, and before you report progress, check `rig ps --nodes --rig <rig>` for a
   seat stopped at a prompt, and repeat that check while you wait for a seat's result, so a prompt that appears after
   your last check still reaches them. Show the person each one, with any others waiting, one line each (seat,
-  exact action, the choices offered), and the whole prompt when they ask. For a commit, also say whether the team's
-  review has run; they may be expecting one. Before sending their choice, capture that
+  exact action, the choices offered), and the whole prompt when they ask. If a question about that prompt is already
+  open at your address (the operator or a team seat sent it), use that one: record their words on it, and its sender
+  passes them on, not you. For a commit, also say whether the team's review has run; they may be expecting one. Before sending their choice, capture that
   seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
   `rig send <seat>@<rig> "<key>" --dangerously-interact --reason "task <id>: <their choice, in their words>"`, with
   the goal's task ID (leave out `task <id>:` when there's no task), where `<key>` is the digit or letter that capture
   shows for their choice, never their words: the text is typed as keys, and a letter can pick a menu's shortcut. If
-  the screen shows no key for their choice, ask them. When their choice is Escape,
+  the screen shows no key for their choice, ask them. If they give no answer, or their words don't clearly pick one
+  choice (a condition the action doesn't plainly meet, say), ask them again before sending anything; a no stays a
+  no. When their choice is Escape,
   send the key itself, written with bash or zsh quoting:
   `rig send <seat>@<rig> $'\e' --dangerously-interact --reason "task <id>: <their choice, in their words>"`. It's sent
-  once, with no Enter added. Then capture the seat and check the effect before sending anything more; never resend an
-  answer whose effect you can't see. Never answer a prompt on your own and record it as theirs,
+  once, with no Enter added. Then capture the seat and check the effect before sending anything more; never send or
+  resend an answer while its effect is unknown. Never answer a prompt on your own and record it as theirs,
   even one that only reads: ask them, and send their answer. A yes to one prompt isn't a
   yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
   kind of future prompt (say, "approve prompts that only write inside my project"), you may decide each one: read its

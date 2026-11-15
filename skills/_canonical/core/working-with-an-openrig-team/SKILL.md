@@ -35,11 +35,15 @@ behave; this skill is the loop around them.
   > block this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I
   > check it whenever the person talks to me. Don't ask in your own terminal: the person isn't there. A seat's
   > permission prompt in this work is their question too: send me its own text and choices, the seat, what it was
-  > doing and any escalation's id. To pass their answer on, capture that seat again (a changed prompt needs a new
-  > answer), then `rig send <seat> "<key>" --dangerously-interact --reason "<question id>: <their answer>"` with the
-  > key the prompt shows for it, and check the effect. If you hand this item on or give this work to another seat,
-  > copy this paragraph into the new item. When you finish, put the outcome in this item's resolution, with what the
-  > latest review found, and any file in its evidence ref.
+  > doing and any escalation's id, unless a question about that prompt is already open at my seat. Whoever sent the
+  > question passes on the answer, and no one else does. Capture that seat again first (a changed prompt needs a new
+  > answer), then `rig send <seat> "<key>" --dangerously-interact --reason "task <question id>: <their answer>"` with
+  > the key the prompt shows for their choice. A no stays a no. If they gave no answer, or their words don't clearly
+  > pick one choice (a condition the action doesn't plainly meet, say), ask me again before sending anything, and
+  > never pick a "don't ask again" choice they didn't pick. Check the effect, and never send again while it's
+  > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
+  > you finish, put the outcome in this item's resolution, with what the latest review found, and any file in its
+  > evidence ref.
 - Tell the person the `qitemId` it returns. It's how both of you find this work again.
 - If the call times out, check `rig_queue_show` with that same `qitemId` before trying again. If you retry, pass the same id
   as `qitemId`. Never retry with a new one: that creates the work twice.

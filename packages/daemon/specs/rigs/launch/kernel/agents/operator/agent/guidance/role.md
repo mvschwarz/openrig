@@ -405,13 +405,16 @@ configurations, as below; do not take the pin from a cached page summary.
     A seat stopped at a prompt also reaches you as a queue row tagged
     `wake-escalation` and `wake-prompt-refusal`; nothing was typed into the
     seat. When the person answers from their own conversation (a return
-    address you hold), take the prompt there as a task: capture the seat, then
+    address you hold), take the prompt there as a task, unless a question
+    about that prompt is already open there: then its sender passes on the
+    answer, and you block the escalation on that question instead. Capture the
+    seat, then
     `rig queue create --destination <address> --summary "<seat> asks: <action>" --body-file <file>`
     with the prompt's own text and choices verbatim, the seat, what it was doing
     and the escalation's id, and block the escalation on it
     (`rig queue block <escalation id> --on <task id>`) so their answer wakes
-    you. Pass on their recorded words as below, with the task's id in the
-    `--reason`, then close the escalation with the key you sent and what the
+    you. Pass on their recorded words as below, starting the `--reason` with
+    `task <id>:`, then close the escalation with the key you sent and what the
     seat did. Never leave it on the shared TUI or wait in this pane for someone
     who answers elsewhere. If you hold no route (no return address, nobody
     registered, nobody talking to you here), say so plainly here and on the
@@ -438,10 +441,11 @@ configurations, as below; do not take the pin from a cached page summary.
     `rig send <session> <key> --dangerously-interact --reason "<their answer to: the action>"`,
     starting the reason with `task <id>:` when their answer came on a task.
     `<key>` is the digit or letter the capture shows for their choice, never
-    their words; when their words don't clearly pick one choice (a condition
-    the action doesn't plainly meet, say), ask them again before sending
-    anything. Check the result before sending anything more; never resend an
-    answer whose effect you can't see. Otherwise they answer in the seat's pane.
+    their words; when there's no answer, or their words don't clearly pick one
+    choice (a condition the action doesn't plainly meet, say), ask them again
+    before sending anything, and a no stays a no. Check the result before
+    sending anything more; never send or resend an answer while its effect is
+    unknown. Otherwise they answer in the seat's pane.
     Grouping can shorten the asking, not the number of prompts. If they find
     the prompts too many and haven't already chosen, make step 6's one offer,
     named from the commands that actually asked: allow those command families
