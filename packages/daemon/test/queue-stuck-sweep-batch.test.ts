@@ -24,9 +24,10 @@ function row(id: string, o: { state?: string; tags?: string | null; updated?: st
 
 /** Counts how often a statement whose text satisfies `match` is prepared while `run` executes. */
 async function countPrepared(match: (sql: string) => boolean, run: () => unknown): Promise<number> {
-  const prepare = db.prepare.bind(db); let n = 0;
-  const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => { if (match(sql)) n++; return prepare(sql); });
-  try { await run(); } finally { spy.mockRestore(); }
+  const prepare = db.prepare; let n = 0;
+  // Keep nested counters independent; spying on an existing mock reuses it in Vitest 4.
+  db.prepare = ((sql: string) => { if (match(sql)) n++; return prepare.call(db, sql); }) as typeof db.prepare;
+  try { await run(); } finally { db.prepare = prepare; }
   return n;
 }
 const perRowRecovery = (sql: string) => sql.includes("json_each(tags) WHERE value = ?") && sql.includes("qitem_id DESC LIMIT 1");

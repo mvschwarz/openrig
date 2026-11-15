@@ -207,7 +207,14 @@ export class WorkflowRuntime {
 
   inspectGraph(instanceId: string) { return inspectGraph(this.db, instanceId); }
   recoverOperation(key: string) { return recoverGraphOperation(this.db, key); }
-  reviseGraph(input: Parameters<typeof reviseGraph>[2]) { return reviseGraph(this.db, this.eventBus, input); }
+  /** Applies an inspected revision, then wakes each step it projected, after commit, as ordinary projection does. */
+  async reviseGraph(input: Parameters<typeof reviseGraph>[2]) {
+    const result = reviseGraph(this.db, this.eventBus, input, this.projector);
+    for (const packet of result.projected) {
+      await this.queueRepo.deliverWakeForSuccessor(packet.qitemId, packet.owner, packet.nudge, input.actorSession);
+    }
+    return result;
+  }
 
   compileLifecycle(missionPath: string, operationKey?: string): LifecycleCompilation & { exceptionReadiness?: ExceptionReadiness } {
     const compiled = compileProjectLifecycle({ missionPath, operationKey });
