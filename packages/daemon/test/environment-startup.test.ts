@@ -138,7 +138,8 @@ it("transfers exact retained history onto explicitly recreated compute and reque
   const history = Buffer.from(JSON.stringify({ sessionId: first.resumeToken, type: "user", message: { content: "retained earlier context" } }) + "\n");
   f.files.set(`/sandbox/openrig/${path}`, history);
   Object.assign(f.platform.driver, { checkpointFiles: async () => [{ path, sha256: sha256(history), bytes: history.length }],
-    captureCleanup: undefined, cleanupState: async () => ({ workload: false, supervisor: false, volumes: false }) });
+    captureCleanup: undefined, cleanupState: async () => ({ workload: false, supervisor: false, volumes: false }),
+    recreationCleanupState: async () => ({ remaining: { workload: false, supervisor: false, volumes: false }, endpoint: { socket: "/owned/engine.sock", socketDevice: 1, socketInode: 2, uid: 1000, host: "fixture" }, endpointChanged: false }) });
   const lifecycle = new EnvironmentLifecycle(f.platform, undefined, join(f.root, "retained"));
   const checkpoint = await lifecycle.checkpoint("binding-one", { operationId: "checkpoint-one", generation: "generation-one" });
   f.resource.id = "successor-resource"; f.resource.name = "worker-two"; f.files.clear();
@@ -199,7 +200,8 @@ it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-de
   Object.assign(f.platform.driver, { checkpointFiles: async () => [{ path: nativePath, sha256: sha256(history), bytes: history.length }],
     captureCleanup: async (binding: EnvironmentBinding, socket: string) => ({ version: 1, host: "fixture", uid: 1000, socket, socketDevice: 1, socketInode: 2,
       resourceId: binding.resource!.id, workspace: binding.placement.workspace, workloadId: "a".repeat(64), supervisorId: "b".repeat(64), volumes: [] }),
-    cleanupState: async () => ({ workload: false, supervisor: false, volumes: false }) });
+    cleanupState: async () => ({ workload: false, supervisor: false, volumes: false }),
+    recreationCleanupState: async () => ({ remaining: { workload: false, supervisor: false, volumes: false }, endpoint: { socket: "/owned/engine.sock", socketDevice: 1, socketInode: 2, uid: 1000, host: "fixture" }, endpointChanged: false }) });
   const lifecycle = new EnvironmentLifecycle(f.platform, undefined, join(f.root, "retained"));
   const checkpoint = await lifecycle.checkpoint("binding-one", { operationId: "context-checkpoint", generation: "generation-one" });
   f.db.prepare("INSERT INTO pods(id,rig_id,label) VALUES ('restore-pod',?,'Team')").run(f.rig.id);
