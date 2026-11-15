@@ -44,8 +44,10 @@ the reply route, because your address has no terminal and `rig send` can't reach
 > in this work is their question too: send me its own text and choices, the seat, what it was doing and any
 > escalation's id, unless a question about that prompt is already open at my address. Whoever sent the question
 > passes on the answer, and no one else does. Capture that seat again first (a changed prompt needs a new answer),
-> then `rig send <seat> "<key>" --dangerously-interact --reason "task <question id>: <their answer>"` with the key the
-> prompt shows for their choice. A no stays a no. If they gave no answer, or their words don't clearly pick one choice
+> then `rig send <seat> "<key>" --dangerously-interact --reason 'task <question id>: <their answer>'` with the key the
+> prompt shows for their choice (for Escape, `$'\e'` in place of `"<key>"`, never the word). Keep the reason in single
+> quotes so the shell runs nothing in their words, and write each `'` in them as `'\''`. A no stays a no. If they gave
+> no answer, or their words don't clearly pick one choice
 > (a condition the action doesn't plainly meet, say), ask me again before sending anything, and never pick a "don't
 > ask again" choice they didn't pick. Check the effect, and never send again while it's unknown. If you hand this item
 > on or give this work to another seat, copy this paragraph into the new item. When you finish, put the outcome in

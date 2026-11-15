@@ -438,10 +438,13 @@ configurations, as below; do not take the pin from a cached page summary.
     that seat again and check its prompt still asks the same action with the
     same choices; if it changed, don't reuse the old answer. Then send exactly
     their choice to that seat with
-    `rig send <session> <key> --dangerously-interact --reason "<their answer to: the action>"`,
+    `rig send <session> <key> --dangerously-interact --reason '<their answer to: the action>'`,
     starting the reason with `task <id>:` when their answer came on a task.
+    Keep the reason in single quotes so the shell runs nothing in their
+    words, and write each `'` in them as `'\''`.
     `<key>` is the digit or letter the capture shows for their choice, never
-    their words; when there's no answer, or their words don't clearly pick one
+    their words (for Escape, `$'\e'`, never the word); when there's no
+    answer, or their words don't clearly pick one
     choice (a condition the action doesn't plainly meet, say), ask them again
     before sending anything, and a no stays a no. Check the result before
     sending anything more; never send or resend an answer while its effect is

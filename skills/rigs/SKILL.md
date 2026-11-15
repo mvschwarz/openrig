@@ -220,8 +220,10 @@ commands; if the two ever differ, this step is right.
     > permission prompt in this work is their question too: send me its own text and choices, the seat, what it was
     > doing and any escalation's id, unless a question about that prompt is already open at my address. Whoever sent
     > the question passes on the answer, and no one else does. Capture that seat again first (a changed prompt needs a
-    > new answer), then `rig send <seat> "<key>" --dangerously-interact --reason "task <question id>: <their answer>"`
-    > with the key the prompt shows for their choice. A no stays a no. If they gave no answer, or their words don't
+    > new answer), then `rig send <seat> "<key>" --dangerously-interact --reason 'task <question id>: <their answer>'`
+    > with the key the prompt shows for their choice (for Escape, `$'\e'` in place of `"<key>"`, never the word). Keep
+    > the reason in single quotes so the shell runs nothing in their words, and write each `'` in them as `'\''`. A no
+    > stays a no. If they gave no answer, or their words don't
     > clearly pick one choice (a condition the action doesn't plainly meet, say), ask me again before sending anything,
     > and never pick a "don't ask again" choice they didn't pick. Check the effect, and never send again while it's
     > unknown. If you hand this item on or give this work to another seat, copy this paragraph into the new item. When
@@ -282,16 +284,20 @@ commands; if the two ever differ, this step is right.
   your last check still reaches them. Show the person each one, with any others waiting, one line each (seat,
   exact action, the choices offered), and the whole prompt when they ask. If a question about that prompt is already
   open at your address (the operator or a team seat sent it), use that one: record their words on it, and its sender
-  passes them on, not you. For a commit, also say whether the team's review has run; they may be expecting one. Before sending their choice, capture that
+  passes them on, not you. Once you've recorded them, that prompt stays its sender's to answer even while the seat
+  still shows it: don't ask about it again or send anything for it unless the prompt changes or the sender asks you
+  again. For a commit, also say whether the team's review has run; they may be expecting one. Before sending their choice, capture that
   seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
-  `rig send <seat>@<rig> "<key>" --dangerously-interact --reason "task <id>: <their choice, in their words>"`, with
+  `rig send <seat>@<rig> "<key>" --dangerously-interact --reason 'task <id>: <their choice, in their words>'`, with
   the goal's task ID (leave out `task <id>:` when there's no task), where `<key>` is the digit or letter that capture
-  shows for their choice, never their words: the text is typed as keys, and a letter can pick a menu's shortcut. If
+  shows for their choice, never their words: the text is typed as keys, and a letter can pick a menu's shortcut. Keep
+  the reason in single quotes, so the shell runs nothing in their words and the record keeps them as they wrote them;
+  write each `'` in them as `'\''`. If
   the screen shows no key for their choice, ask them. If they give no answer, or their words don't clearly pick one
   choice (a condition the action doesn't plainly meet, say), ask them again before sending anything; a no stays a
   no. When their choice is Escape,
   send the key itself, written with bash or zsh quoting:
-  `rig send <seat>@<rig> $'\e' --dangerously-interact --reason "task <id>: <their choice, in their words>"`. It's sent
+  `rig send <seat>@<rig> $'\e' --dangerously-interact --reason 'task <id>: <their choice, in their words>'`. It's sent
   once, with no Enter added. Then capture the seat and check the effect before sending anything more; never send or
   resend an answer while its effect is unknown. Never answer a prompt on your own and record it as theirs,
   even one that only reads: ask them, and send their answer. A yes to one prompt isn't a
