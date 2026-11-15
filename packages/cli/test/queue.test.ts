@@ -574,6 +574,16 @@ describe("rig queue CLI", () => {
       expect(reads).toBe(1);
     });
 
+    it("a hosted member's waiting work keeps the failed outcome, and its receipt says no wake is sent", async () => {
+      const wakeResult = "awaiting-pickup: 'helper@hub' is a hosted member with no wake trigger, so no wake is sent.";
+      const { result, reads } = await verify([{ lastNudgeResult: wakeResult }]);
+      expect(result).toMatchObject({ outcome: "failed", wakeResult });
+      expect(result.detail).toMatch(/^The qitem is saved\. No wake is sent \(awaiting-pickup: /);
+      expect(result.detail).toContain("): the work waits in the member's queue until it reads it.");
+      expect(result.detail).not.toContain("The wake failed");
+      expect(reads).toBe(1);
+    });
+
     it("a claimed row's unconfirmed wake reads claimed, not indeterminate, and is never verified", async () => {
       const { result, reads } = await verify([{ lastNudgeResult: "claimed", state: "in-progress", claimedAt: "2026-10-11T20:00:00.000Z", pickup: { state: "working" } }]);
       expect(reads).toBe(1);

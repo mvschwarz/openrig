@@ -84,7 +84,7 @@ import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
 import { parseReplyToChoice, parseArrivalThread, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
-import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
+import { classifyDestination, recordsNoWakeRoute, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { hostedMembersAt, hostedWakeFor, isHostedMemberAt, type RosterMember, type RosterWake } from "./rosters.js";
@@ -2044,7 +2044,7 @@ export class QueueRepository {
    *  gateway, not held or released for quiet hours, and its seat now pane-bound. A handoff's retry ladder is the
    *  caller's to check: the sweep defers to a live ladder, the reachable-seat retry leaves every handed-off row to it. */
   unroutableWakeRetryable(row: QueueItem, now: Date = new Date()): boolean {
-    return row.lastNudgeResult?.startsWith("unroutable:") === true && this.reachableWakeRetryable(row, now);
+    return recordsNoWakeRoute(row.lastNudgeResult) && this.reachableWakeRetryable(row, now);
   }
 
   private reachableWakeRetryable(row: QueueItem, now: Date): boolean {
@@ -2072,7 +2072,7 @@ export class QueueRepository {
     )` : "";
     const rows = this.db.prepare(`SELECT q.qitem_id FROM queue_items q
       WHERE q.destination_session IN (${addresses.map(() => "?").join(",")}) AND q.state = 'pending'
-        AND q.handed_off_from IS NULL AND (q.last_nudge_result LIKE 'unroutable:%' ${provedFailure})
+        AND q.handed_off_from IS NULL AND (q.last_nudge_result LIKE 'unroutable:%' OR q.last_nudge_result LIKE 'awaiting-pickup:%' ${provedFailure})
       ORDER BY q.ts_created, q.qitem_id`)
       .all(...addresses, ...(this.outbox ? [WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, WAKE_PRE_INPUT_FAILURE_TAG] : [])) as Array<{ qitem_id: string }>;
     const now = new Date();
@@ -5275,6 +5275,7 @@ export class QueueRepository {
       "state IN ('pending', 'in-progress', 'blocked')",
       `((state = 'pending' AND (last_nudge_result LIKE 'failed:%'
                              OR last_nudge_result LIKE 'unroutable:%'
+                             OR last_nudge_result LIKE 'awaiting-pickup:%'
                              OR last_nudge_result LIKE 'gateway-owned%'))
          OR ${ownerEpisodeCandidate}
          OR EXISTS (SELECT 1 FROM queue_transitions receipt
@@ -5363,7 +5364,7 @@ export class QueueRepository {
         // undelivered. An active non-human row can still have an old OWNER
         // transition; that historical episode is not a current obligation.
         const lastNudge = item.lastNudgeResult ?? "";
-        if (item.state === "pending" && (lastNudge.startsWith("failed:") || lastNudge.startsWith("unroutable:"))) {
+        if (item.state === "pending" && (lastNudge.startsWith("failed:") || recordsNoWakeRoute(lastNudge))) {
           out.push(item);
         }
       }

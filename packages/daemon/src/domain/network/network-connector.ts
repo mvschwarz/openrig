@@ -261,11 +261,13 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
         result.unknown++;
       };
       if (!local || receipt.outcome === "unknown") {
-        await unknown(`This item's local record (${receipt.local_qitem_id}) is gone, so whether it ran is unknown. It won't be run again.`);
+        // The hub's requester can't see a local id (an outside caller's view hides it), so hub notes leave it out. This
+        // host's receipt keeps it.
+        await unknown("This item's local record is gone, so whether it ran is unknown. It won't be run again.");
         continue;
       }
       if (!receipt.queued_sent_at) {
-        await hub.note(receipt.hub_qitem_id, `Queued for the connected local seat as ${local.qitemId}. Not picked up yet.`);
+        await hub.note(receipt.hub_qitem_id, "Queued for the connected local seat. Not picked up yet.");
         mark("queued_sent_at", receipt);
       }
       if (!receipt.pickup_sent_at && local.claimedAt) {
@@ -275,7 +277,7 @@ async function reportBack(deps: NetworkConnectorDeps, binding: NetworkBinding, h
       }
       const end = local.state === "handed-off" ? finalItem(deps.queueRepo, local) : local;
       if (!end) {
-        await unknown(`This item was handed on from ${local.qitemId} without one successor here, so its outcome is unknown. It won't be run again.`);
+        await unknown("This item was handed on here without one successor, so its outcome is unknown. It won't be run again.");
         continue;
       }
       if (!FINAL.has(end.state)) continue;
