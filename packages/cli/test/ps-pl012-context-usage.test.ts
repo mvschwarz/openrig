@@ -257,7 +257,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--filter", filter]);
     });
     expect(result.exitCode).toBeUndefined();
-    expect(result.logs).toEqual([`No rigs match --filter ${key}=${value}`]);
+    expect(result.logs).toEqual([`No rigs match --filter ${key}=${value} · daemon http://127.0.0.1:${port}`]);
     expect(result.errLogs).toHaveLength(1);
     expect(result.errLogs[0]).toContain(key);
     expect(result.errLogs[0]).toContain("was not applied");

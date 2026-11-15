@@ -84,6 +84,32 @@ describe("parsePaceMs", () => {
 });
 
 describe("rig walk — paced push-delivery (Atom 6)", () => {
+
+  it.each([false, true])("two-piece walk reports recorded nondelivery honestly (recorded=%s)", async recorded => {
+    const sends: RecordedSend[] = [];
+    const deps = testDeps(sends, []);
+    deps.clientFactory = () => ({
+      get: async () => ({ status: 404, data: { error: "No generation record" } }),
+      post: async (url: string, body: unknown) => {
+        sends.push({ path: url, body: body as Record<string, unknown> });
+        return { status: 200, data: recorded
+          ? { outcome: "recorded", sent: false, persisted: true, outboxIds: ["outbox-walk"] }
+          : { outcome: "delivered", sent: true } };
+      },
+    }) as never;
+    const a = tmpFile("a.md", "AAA"); const b = tmpFile("b.md", "BBB");
+    const result = await captureLogs(() => makeCmd(deps).parseAsync([
+      "node", "rig", "walk", "dev@rig", "--through", a, b, "--pace", "0s",
+    ]).then(() => {}));
+    expect(sends).toHaveLength(recorded ? 1 : 2);
+    expect(result.exitCode ?? 0).toBe(recorded ? 1 : 0);
+    if (recorded) {
+      expect(result.errLogs.join("\n")).toMatch(/recorded.*not delivered/i);
+      expect(result.errLogs.join("\n")).toContain("outbox-walk");
+      expect(result.logs.join("\n")).not.toMatch(/sent|Walked/);
+    } else expect(result.logs.join("\n")).toContain("Walked dev@rig through 2 piece(s)");
+  });
+
   for (const flag of ["--pace", "--consume-timeout", "--consume-poll", "--turn-timeout"] as const) {
     it(`S4b RED: ${flag} refuses a bare number and names the required unit suffix`, async () => {
       const sends: RecordedSend[] = [];
