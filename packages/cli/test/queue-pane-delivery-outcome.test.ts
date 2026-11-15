@@ -42,6 +42,8 @@ describe("an agent's pane task: woken, claimed and closed (#165)", () => {
         return { status: response.status, data: await response.json() };
       };
       const client = {
+        // The sender it stamps, as the real client reports it: the update's read-back checks the recorded actor against it.
+        senderIdentity: async () => ({ session: process.env.OPENRIG_SESSION_NAME, originUnknown: false }),
         get: async (url: string) => request(url, { method: "GET" }),
         post: async (url: string, body: unknown) => request(url, { method: "POST", body: JSON.stringify(body) }),
       };
