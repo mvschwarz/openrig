@@ -131,6 +131,13 @@ export class CodexThreadIdResolver {
     } = {},
   ) {}
 
+  /** The home of the positive PID/start-time log read, carried with its thread. No second home search. */
+  async resolveWithHome(pid: number, identity: string): Promise<{ thread?: string; codexHome?: string }> {
+    let codexHome: string | undefined;
+    const thread = await this.resolveWithDiagnostics(pid, identity, undefined, "exclude", home => { codexHome = home; });
+    return thread ? { thread, codexHome } : {};
+  }
+
   /**
    * Resolve a codex thread id for `pid`. IDENTITY IS REQUIRED (S10 follow-on, r1 owed item 3): the
    * identity's start time gates every log read, so a retired occupant's rows never resolve for a
@@ -181,9 +188,9 @@ export class CodexThreadIdResolver {
   }
 
   private async resolveWithDiagnostics(pid: number, identity: string | undefined, report?: CodexCaptureReporter,
-    startSecond: StartSecondRows = "exclude"): Promise<string | undefined> {
+    startSecond: StartSecondRows = "exclude", resolvedHome?: (codexHome: string) => void): Promise<string | undefined> {
     const diagnostics: CodexCaptureDiagnostic[] = [];
-    const token = await this.resolveInternal(pid, identity, diagnostic => diagnostics.push(diagnostic), startSecond);
+    const token = await this.resolveInternal(pid, identity, diagnostic => diagnostics.push(diagnostic), startSecond, resolvedHome);
     if (!token) {
       // A default-home miss followed by a successful alternate-home read is not a failure.
       const priority = { no_log_row: 0, no_cli_thread: 1, ambiguous_threads: 2, sqlite_unreadable: 3 };
@@ -194,11 +201,15 @@ export class CodexThreadIdResolver {
   }
 
   private async resolveInternal(pid: number, identity: string | undefined, report: CodexCaptureReporter,
-    startSecond: StartSecondRows): Promise<string | undefined> {
+    startSecond: StartSecondRows, resolvedHome?: (codexHome: string) => void): Promise<string | undefined> {
     // r2 round-4: the identity's start time gates EVERY log read — a retired
     // occupant's rows predate the current occupant's start and never match.
     const minTs = lstartToMinTs(identity);
-    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome, report, startSecond);
+    if (this.opts.codexHome) {
+      const thread = readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome, report, startSecond);
+      if (thread) resolvedHome?.(this.opts.codexHome);
+      return thread;
+    }
     const injected = this.opts.readFromLogs;
     const readFromLogs = injected
       ? (p: number, home: string, report?: CodexCaptureReporter) => injected(p, home, report, startSecond)
@@ -207,8 +218,13 @@ export class CodexThreadIdResolver {
     const now = this.opts.now ?? Date.now;
     const ttl = this.opts.homeTtlMs ?? 60_000;
 
+    const readAtHome = (home: string) => {
+      const thread = readFromLogs(pid, home, report);
+      if (thread) resolvedHome?.(nodePath.join(home, ".codex"));
+      return thread;
+    };
     // 1. Default home: no subprocess.
-    const fromDefault = readFromLogs(pid, defaultHome, report);
+    const fromDefault = readAtHome(defaultHome);
     if (fromDefault) return fromDefault;
 
     // 2. FRESH cached home for this (pid, identity): no subprocess. A reused
@@ -220,7 +236,7 @@ export class CodexThreadIdResolver {
     const cached = this.homeByKey.get(key);
     if (cached) {
       if (cached.settled || now() - cached.at <= ttl) {
-        return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home, report);
+        return cached.home === defaultHome ? undefined : readAtHome(cached.home);
       }
       this.homeByKey.delete(key);
     }
@@ -258,7 +274,7 @@ export class CodexThreadIdResolver {
     })();
     const home = await homePromise;
     if (!home || home === defaultHome) return undefined;
-    return readFromLogs(pid, home, report);
+    return readAtHome(home);
   }
 
   private cacheHome(key: string, home: string, settled: boolean): void {

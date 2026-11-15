@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { ContextUsageStore, FRESHNESS_THRESHOLD_MS } from "../src/domain/context-usage-store.js";
@@ -349,6 +349,27 @@ describe("ContextUsageStore", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  // #3044 C3: a handover's cleanup keeps the seat's sidecar only when it records the successor's generation; anything
+  // else, including a sample with no generation and a JSON null, is removed as before.
+  it.each([
+    ["the successor's generation", { ...VALID_SIDECAR, occupant_generation: "gen-2" }, true],
+    ["another generation", { ...VALID_SIDECAR, occupant_generation: "gen-1" }, false],
+    ["no generation", VALID_SIDECAR, false],
+    ["JSON null", null, false],
+  ])("#3044 C3: the cleanup given the successor's generation, on a sidecar recording %s", (_label, content, kept) => {
+    const tmpDir = join(tmpdir(), `context-test-c3-${Date.now()}-${Math.random()}`);
+    try {
+      const tmpStore = new ContextUsageStore(db, { stateDir: tmpDir });
+      const file = tmpStore.getSidecarPath("dev-impl@test-rig");
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify(content));
+      tmpStore.invalidateOccupantSidecar("dev-impl@test-rig", "gen-2");
+      expect(existsSync(file)).toBe(kept);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   // T13: getForNodes returns known for matching sessions
   it("getForNodes returns known for matching sessions in batch", () => {
     const { node } = seedNode();
@@ -371,23 +392,27 @@ describe("ContextUsageStore", () => {
   describe("c-id generation guard", () => {
     let genStore: ContextUsageStore;
     let bootAtByNode: Map<string, string | null>;
+    let generationByNode: Map<string, string | null>;
 
     beforeEach(() => {
       bootAtByNode = new Map();
+      generationByNode = new Map();
       genStore = new ContextUsageStore(db, {
         stateDir: "/tmp/openrig-test",
         resolveOccupantBootAt: (nodeId) => bootAtByNode.get(nodeId) ?? null,
+        resolveOccupantGeneration: (nodeId) => generationByNode.get(nodeId) ?? null,
       });
     });
 
     // A reading carrying the frozen 88% from the RETIRED generation, name reused (so it survives
     // session_mismatch). sampledAt lets each test place it relative to the successor's boot.
-    function persistFrozen(nodeId: string, sampledAtIso: string) {
+    function persistFrozen(nodeId: string, sampledAtIso: string, occupantGeneration?: string) {
       genStore.persist(nodeId, genStore.normalizeSample({
         ...VALID_SIDECAR,
         session_name: "dev-impl@test-rig",
         sampled_at: sampledAtIso,
         context_window: { ...VALID_SIDECAR.context_window, used_percentage: 88, remaining_percentage: 12 },
+        ...(occupantGeneration ? { occupant_generation: occupantGeneration } : {}),
       }));
     }
 
@@ -436,6 +461,20 @@ describe("ContextUsageStore", () => {
       bootAtByNode.set(node.id, "2026-08-07T08:05:00.000Z");
       const results = genStore.getForNodes([{ nodeId: node.id, currentSessionName: "dev-impl@test-rig" }]);
       expect(results.get(node.id)?.reason).toBe("stale_generation");
+    });
+
+    // #3044 C3: a recovered successor sampled before the commit registered it, so its own reading predates its boot. The
+    // generation the reading recorded decides: the live one's reads current; any other still faces the time.
+    it.each([
+      ["admits a pre-boot reading recorded with the live occupant's generation", "gen-live", { availability: "known", usedPercentage: 88 }],
+      ["still rejects a pre-boot reading recorded with another generation", "gen-retired", { availability: "unknown", reason: "stale_generation" }],
+    ])("#3044 C3: %s, in both read paths", (_label, recorded, expected) => {
+      const { node } = seedNode();
+      persistFrozen(node.id, "2026-08-07T08:00:00.000Z", recorded);
+      bootAtByNode.set(node.id, "2026-08-07T08:05:00.000Z");
+      generationByNode.set(node.id, "gen-live");
+      expect(genStore.getForNode(node.id, "dev-impl@test-rig")).toMatchObject(expected);
+      expect(genStore.getForNodes([{ nodeId: node.id, currentSessionName: "dev-impl@test-rig" }]).get(node.id)).toMatchObject(expected);
     });
 
     it("never gates when no resolver is wired (opt-in)", () => {
