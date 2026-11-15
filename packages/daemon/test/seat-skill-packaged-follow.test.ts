@@ -33,7 +33,7 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     entries: resolvePluginSkills({ pluginId, pluginRoot: root, runtime }).entries,
   });
 
-  function seatWithLaunch(opts: { otherSkills?: Record<string, Record<string, string>>; launchFrom?: (core: SkillLoadout["entries"], other: SkillLoadout["entries"]) => SkillLoadout["entries"] } = {}) {
+  function seatWithLaunch(opts: { otherSkills?: Record<string, Record<string, string>>; launchFrom?: (core: SkillLoadout["entries"], other: SkillLoadout["entries"]) => SkillLoadout["entries"]; launchThroughAlias?: boolean } = {}) {
     const pluginsDir = join(home, "plugins");
     const core = join(pluginsDir, "openrig-core");
     const other = join(home, "shared", "other-plugin");
@@ -46,7 +46,10 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime }, home);
     if (runtime === "claude-code") ensureSeatSkillPlugin(paths);
     // The launch: one loadout of both plugins' skills, written into the seat's storage and recorded.
-    const coreEntries = loadoutOf("openrig-core", core).entries;
+    // A launch can record the vendored plugin through another spelling of the same folder (a linked alias).
+    const launchRoot = opts.launchThroughAlias ? join(home, "core-alias") : core;
+    if (opts.launchThroughAlias) symlinkSync(core, launchRoot);
+    const coreEntries = loadoutOf("openrig-core", launchRoot).entries;
     const otherEntries = loadoutOf("other-plugin", other).entries;
     const launch = { ...loadoutOf("openrig-core", core), entries: opts.launchFrom ? opts.launchFrom(coreEntries, otherEntries) : [...coreEntries, ...otherEntries] };
     const applied = reconcileSkillLoadout({ loadout: launch, runtime, cwd: home, apply: true, location: seatSkillLocation(paths, runtime) });
@@ -172,28 +175,32 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     expect(s.copy("seat-continuity-and-handover")).toContain("handover v2");
   });
 
-  it("keeps the record true when a write fails part way, says what happened, and finishes on the next restore", () => {
+  it("records the new copy before writing it, so a write that fails part way is put back in the same restore", () => {
     const s = seatWithLaunch();
     cleanSeatSkills(s.paths);
     s.upgrade();
     const write = fs.writeFileSync;
+    // The second file of claude-compaction-restore fails, after its SKILL.md is in.
     const failing = vi.spyOn(fs, "writeFileSync").mockImplementation(((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
-      if (String(file).includes(join("seat-continuity-and-handover", "SKILL.md"))) throw new Error("ENOSPC: no space left on device");
+      if (String(file).includes(join("claude-compaction-restore", "scripts", "precompact-hook.mjs"))) throw new Error("ENOSPC: no space left on device");
       return (write as (...args: unknown[]) => void)(file, ...rest);
     }) as typeof fs.writeFileSync);
-    let first: ReturnType<typeof s.restore>;
-    try { first = s.restore(); } finally { failing.mockRestore(); }
-    expect(first.followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: claude-compaction-restore");
-    expect(first.followed.warnings).toContain("Restore: seat-continuity-and-handover stopped part way to OpenRig's packaged source (ENOSPC: no space left on device): 0 of 1 files written and recorded; a later restore finishes it");
-    expect(first.followed.warnings.join("\n")).not.toContain("kept as saved");
-    // The finished skill is OpenRig's under its new record, so nothing reads it as a person's edit.
+    let followed: ReturnType<typeof followSeatSkills>;
+    const today = [...loadoutOf("openrig-core", s.core).entries, ...loadoutOf("other-plugin", s.other).entries];
+    try { followed = followSeatSkills(s.paths, { selected: new Set(), following: [], packaged: packagedSeatSkills(today, new Set(), s.pluginsDir) }); }
+    finally { failing.mockRestore(); }
+    expect(followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: seat-continuity-and-handover");
+    expect(followed.warnings).toContain("Restore: claude-compaction-restore stopped part way to OpenRig's packaged source (ENOSPC: no space left on device): 1 of 2 files written; the new copy is recorded, and rehydration puts back the rest from the packaged source");
+    expect(followed.warnings.join("\n")).not.toContain("kept");
+    expect(existsSync(join(s.paths.skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs"))).toBe(false);
+    // The rehydration that follows in the same restore fills the gap from the recorded packaged source.
+    const rehydrated = rehydrateSeatSkills(s.paths);
+    expect(rehydrated.restored).toContain(join(s.paths.skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs"));
+    expect(rehydrated.kept).toEqual([]);
     expect(s.copy("claude-compaction-restore")).toContain("restore v2");
-    expect(first.rehydrated.kept).toEqual([]);
-    const record = JSON.parse(readFileSync(s.paths.manifestPath, "utf8")).skills;
-    expect(record.find((e: Record<string, unknown>) => e.id === "seat-continuity-and-handover").files).toEqual({});
-    const second = s.restore();
-    expect(second.followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: seat-continuity-and-handover");
-    expect(s.copy("seat-continuity-and-handover")).toContain("handover v2");
+    expect(s.copy("claude-compaction-restore", "scripts/precompact-hook.mjs")).toBe("hook v1");
+    // A later restore finds nothing left to do, and a later launch reads every packaged copy as current.
+    expect(s.restore().followed.warnings).toEqual([]);
     const later = reconcileSkillLoadout({ loadout: s.loadout(), runtime, cwd: home, apply: false, location: seatSkillLocation(s.paths, runtime) });
     expect(later.receipts.filter((r) => r.id !== "third-party").map((r) => r.status)).toEqual(["current", "current", "current"]);
   });
@@ -205,10 +212,50 @@ describe.each(runtimes)("an upgrade keeps OpenRig's packaged skills on a %s seat
     s.upgrade();
     cleanSeatSkills(s.paths); // the sources moved on, so both changed SKILL.md files stay
     const { followed } = s.restore();
-    expect(followed.warnings).toContain(`Restore: kept ${join(s.paths.skillsRoot, "claude-compaction-restore")} as it is: ${join(s.paths.skillsRoot, "claude-compaction-restore", "SKILL.md")} has a file mode OpenRig didn't write`);
+    expect(followed.warnings).toContain(`Restore: kept ${join(s.paths.skillsRoot, "claude-compaction-restore")} as it is: ${join(s.paths.skillsRoot, "claude-compaction-restore")} has file modes OpenRig didn't write`);
     expect(followed.warnings).toContain(`Restore: kept ${join(s.paths.skillsRoot, "seat-continuity-and-handover")} as it is: ${join(s.paths.skillsRoot, "seat-continuity-and-handover")} has file modes OpenRig didn't write`);
     expect(statSync(join(s.paths.skillsRoot, "seat-continuity-and-handover", "SKILL.md")).mode & 0o777).toBe(0o755);
     expect(s.copy("seat-continuity-and-handover")).toContain("handover v1");
+  });
+
+  it.skipIf(process.platform === "win32")("keeps a seat's mode change on a helper the upgrade removed, and names it", () => {
+    const s = seatWithLaunch();
+    const helper = join(s.paths.skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs");
+    chmodSync(helper, 0o751);
+    rmSync(join(s.core, "skills", "claude-compaction-restore", "scripts"), { recursive: true }); // the upgrade drops the helper
+    cleanSeatSkills(s.paths); // SKILL.md is unchanged, so it goes; the helper's source is gone, so it stays
+    expect(existsSync(join(s.paths.skillsRoot, "claude-compaction-restore", "SKILL.md"))).toBe(false);
+    const { followed } = s.restore();
+    expect(followed.warnings).toContain(`Restore: kept ${join(s.paths.skillsRoot, "claude-compaction-restore")} as it is: ${join(s.paths.skillsRoot, "claude-compaction-restore")} has file modes OpenRig didn't write`);
+    expect(statSync(helper).mode & 0o777).toBe(0o751);
+  });
+
+  it.skipIf(process.platform === "win32")("follows an upgrade that changed one file's bytes and mode, when it came before rig down", () => {
+    const s = seatWithLaunch();
+    const source = join(s.core, "skills", "claude-compaction-restore", "scripts", "precompact-hook.mjs");
+    put(source, "hook v2");
+    chmodSync(source, 0o755);
+    cleanSeatSkills(s.paths); // the helper's source moved on, so it stays as OpenRig wrote it; SKILL.md goes
+    const { followed } = s.restore();
+    expect(followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: claude-compaction-restore");
+    const helper = join(s.paths.skillsRoot, "claude-compaction-restore", "scripts", "precompact-hook.mjs");
+    expect([readFileSync(helper, "utf8"), statSync(helper).mode & 0o777]).toEqual(["hook v2", 0o755]);
+  });
+
+  it.skipIf(process.platform === "win32")("records a copy launched through a linked alias of the packaged folder under today's spelling", () => {
+    const s = seatWithLaunch({ launchThroughAlias: true });
+    const before = JSON.parse(readFileSync(s.paths.manifestPath, "utf8")).skills.find((e: Record<string, unknown>) => e.id === "claude-compaction-restore");
+    expect(before.sourceRoot).toBe(join(home, "core-alias"));
+    cleanSeatSkills(s.paths);
+    s.upgrade();
+    const { followed } = s.restore();
+    expect(followed.warnings).toContain("Restore: brought OpenRig's packaged skills up to the current packaged source: claude-compaction-restore, seat-continuity-and-handover");
+    const after = JSON.parse(readFileSync(s.paths.manifestPath, "utf8")).skills.find((e: Record<string, unknown>) => e.id === "claude-compaction-restore");
+    expect([after.sourceRoot, after.sourceDir]).toEqual([s.core, join(s.core, "skills", "claude-compaction-restore")]);
+    // The reconciler parses the record (its folder is inside its root) and reads the followed copies as current.
+    const later = reconcileSkillLoadout({ loadout: s.loadout(), runtime, cwd: home, apply: false, location: seatSkillLocation(s.paths, runtime) });
+    expect(later.receipts.filter((r) => r.id !== "third-party").map((r) => [r.id, r.status])).toEqual([
+      ["claude-compaction-restore", "current"], ["queue-handoff", "current"], ["seat-continuity-and-handover", "current"]]);
   });
 
   it.skipIf(process.platform === "win32")("follows a packaged change to a file's mode alone", () => {
