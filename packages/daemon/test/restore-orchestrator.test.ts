@@ -950,6 +950,21 @@ describe("RestoreOrchestrator", () => {
     expect((claudeResume.mock.calls[1] as unknown[]).every(arg => !Array.isArray(arg) || !arg.includes("rtk"))).toBe(true);
   });
 
+  it("attemptResume hands a Claude seat's current auto mode block to the resume adapter as its last argument", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter });
+    const rig = rigRepo.createRig("claude-auto-mode-forward");
+    const block = { environment: ["$defaults", "Source control: github.com/acme"] };
+    const seat = rigRepo.addNode(rig.id, "dev.auto", { runtime: "claude-code", cwd: "/work", claudeAutoMode: block });
+    const plain = rigRepo.addNode(rig.id, "dev.plain", { runtime: "claude-code", cwd: "/work" });
+    await (orch as any).attemptResume(seat.id, "s-auto", "claude_id", "tok-1", "/work", null, "sonnet", "floor");
+    await (orch as any).attemptResume(plain.id, "s-plain", "claude_id", "tok-2", "/work", null, "sonnet", "floor");
+    const call = claudeResume.mock.calls[0] as unknown[];
+    expect(call).toHaveLength(21); // 8 base arguments, then the tail up to continuation (index 19); the block is index 20
+    expect(call[20]).toEqual(block);
+    expect(claudeResume.mock.calls[1] as unknown[]).not.toContainEqual(block);
+  });
+
   it("attemptResume fails closed before dispatching Claude when the stored launch_wrapper is corrupt", async () => {
     const claudeResume = vi.fn(async () => ({ ok: true as const }));
     const orch = createOrchestrator({ claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter });

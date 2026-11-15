@@ -153,6 +153,23 @@ describe("agent-images fork composer route (OPR.0.4.3.05)", () => {
     expect(addMember).not.toHaveBeenCalled();
   });
 
+  it("forks the source's current auto mode block, and names an unreadable one before any effect", async () => {
+    seedClaudeSource("dev-impl@src-rig", NATIVE_SECRET);
+    const source = rigRepo.getRig(rigRepo.findRigsByName("src-rig")[0]!.id)!.nodes[0]!;
+    const block = { environment: ["$defaults", "Source control: github.com/acme"], classifyAllShell: true };
+    db.prepare("UPDATE nodes SET claude_auto_mode_json=? WHERE id=?").run(JSON.stringify(block), source.id);
+    const addMember = vi.fn(async () => ({ ok: true, result: { podId: "p1", podNamespace: "dev", node: { logicalId: "dev.child", nodeId: "child", status: "launched" } } }) as AddMemberOutcome);
+    const response = await post(buildApp({ addMember }), { sourceSession: "dev-impl@src-rig", rigId: "dst-rig", pod: "dev", member: "child" });
+    expect(response.status).toBe(201);
+    expect((addMember.mock.calls[0] as unknown[])[2]).toMatchObject({ claude_auto_mode: block });
+    db.prepare("UPDATE nodes SET claude_auto_mode_json='broken' WHERE id=?").run(source.id);
+    const refused = vi.fn();
+    const broken = await post(buildApp({ addMember: refused }), { sourceSession: "dev-impl@src-rig", rigId: "dst-rig", pod: "dev", member: "child2" });
+    expect(broken.status).toBe(409);
+    expect(await broken.json()).toMatchObject({ error: "claude_auto_mode_unavailable", message: expect.stringContaining("--clear-auto-mode") });
+    expect(refused).not.toHaveBeenCalled();
+  });
+
   it("forks a Codex source's current envelope as an independent copy, and names an unreadable one", async () => {
     seedClaudeSource("dev-impl@src-rig", NATIVE_SECRET);
     const source = rigRepo.getRig(rigRepo.findRigsByName("src-rig")[0]!.id)!.nodes[0]!;

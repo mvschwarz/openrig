@@ -923,7 +923,11 @@ version, from checking the environment to a useful report to the OpenRig team.
   seat its own tool rules, audited, from its next managed launch or resume, even in a shared folder;
   `claude_permissions: { allow: [...], deny: [...] }` on the member declares them. They're native tool
   rules, not OS isolation, an allow list doesn't withdraw broader inherited grants, and member denies
-  aren't claimed to hold in bypass mode. `--codex-permissions <file>` gives one Codex seat its own
+  aren't claimed to hold in bypass mode. `--auto-mode <file>` (JSON `autoMode` block: `environment`,
+  `allow`, `soft_deny`, `hard_deny`, `classifyAllShell`) gives one Claude seat its own auto mode classifier
+  settings, added to user and managed settings; `--clear-auto-mode` clears it, and `claude_auto_mode` on
+  the member declares it. A list without `"$defaults"` drops Claude's built-in entries for that section;
+  OpenRig warns but doesn't add it. `--codex-permissions <file>` gives one Codex seat its own
   sandbox and approval settings (`sandbox`, `approval`, and for `workspace-write` also
   `network_access`, `writable_roots`, `exclude_tmpdir_env_var` and `exclude_slash_tmp`), passed as
   flags on every managed launch, resume, restore and handover; `codex_permissions` on the member

@@ -28,6 +28,8 @@ export interface NodeBinding extends Binding {
   accountHome?: string | null;
   accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  /** The seat's Claude `autoMode` block, read live; composed into the launch's one --settings value. */
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   launchWrapper?: readonly string[];
   /** A Codex seat's own permission envelope, read live; emitted instead of the posture decision. */

@@ -403,7 +403,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     };
     const launchNotes = () => (tokenWarnings.length ? { warnings: [...tokenWarnings] } : {});
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
-    const appliedLaunch = observeClaudePermission(posture);
+    const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: binding.claudeAutoMode ?? null };
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });

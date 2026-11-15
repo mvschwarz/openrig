@@ -294,6 +294,60 @@ managed-launch path. Other version pairs and native enforcement need their own c
 The launch still uses inline JSON, subject to the operating system's argument-size
 limits.
 
+### Per-member Claude auto mode settings
+
+A Claude member can carry its own [`autoMode` block](https://code.claude.com/docs/en/auto-mode-config),
+which steers the auto mode classifier. Claude reads `autoMode` from user settings, managed
+settings and `--settings`, but not from a project's `.claude/settings*.json`. OpenRig passes the
+block in the seat's `--settings`, so it applies to this seat only:
+
+```yaml
+claude_auto_mode:
+  environment:
+    - "$defaults"
+    - "Source control: github.com/acme; pushing issue branches and opening PRs is routine for this team"
+  soft_deny: ["$defaults", "Never run database migrations outside the migrations CLI"]
+  classifyAllShell: false   # optional
+```
+
+The field takes Claude's own keys: `environment`, `allow`, `soft_deny` and `hard_deny`, each a
+list of prose entries, and `classifyAllShell` (true or false). It is also supported on legacy
+flat Claude nodes. Other runtimes and other keys are refused. Entries are prose the classifier
+reads, not tool patterns. Use `claude_permissions` for tool rules.
+
+For an existing seat, put the complete replacement block in a JSON file:
+
+```sh
+rig seat set-permissions dev-build@team --auto-mode auto-mode.json --reason "Trust the team's GitHub org"
+rig seat set-permissions dev-build@team --clear-auto-mode --reason "Back to user settings only"
+```
+
+Each change is audited. It applies at the next managed launch or resume, and it leaves the
+permission mode, running process and history unchanged. Restore and same-seat handover read the
+same record. A fork copies the source's current block. Export writes the current record for
+Claude members only. On another runtime, the block stays dormant and applies again if the seat
+switches back to Claude. An unreadable record refuses that seat's launch or fork, with a repair
+message.
+
+How Claude combines the block with your other settings:
+
+- **Scopes add up.** Claude adds the seat's entries to the entries from your user and managed
+  settings. The seat block can't remove those entries.
+- **`$defaults` decides the built-in entries.** Claude puts its built-in entries for a section
+  where any scope lists `"$defaults"`. A non-empty list without `"$defaults"` drops the built-in
+  entries for that section, unless another scope keeps `"$defaults"` there. The built-in
+  `soft_deny` entries include force-push protection.
+- **An empty list changes nothing**, and `--clear-auto-mode` only stops OpenRig passing a block.
+  Neither removes user or managed entries.
+
+OpenRig warns when a list leaves out `"$defaults"`, or when an entry looks like a tool rule, in
+`rig spec validate`, `rig up --plan`, the `set-permissions` output and `rig seat status`. It never
+adds `"$defaults"` for you or refuses the block. `rig seat status` shows the saved block and the
+block the current occupant's launch sent, and notes when the next launch isn't planned in auto
+mode. To see the classifier's effective lists for a block, run the `claude --settings '…'
+auto-mode config` command that status prints. It shows the lists as they would be where you
+run it, so your user and managed settings are included.
+
 ### Per-member Codex permissions
 
 Codex members can record their own sandbox and approval choice, even when they share a project folder:

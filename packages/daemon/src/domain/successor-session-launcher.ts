@@ -54,6 +54,7 @@ export interface SuccessorNode {
   kernelAuthority?: boolean;
   teamPermissionDefault?: boolean;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   permissionMode?: string;
@@ -604,6 +605,7 @@ function successorBinding(node: SuccessorNode, tmuxSession: string, tmuxPane: st
       kernelAuthority: node.kernelAuthority,
       teamPermissionDefault: node.teamPermissionDefault,
       claudePermissions: node.claudePermissions,
+      claudeAutoMode: node.claudeAutoMode,
       claudeMcp: node.runtime === "claude-code" ? node.claudeMcp : undefined,
       codexPermissions: node.codexPermissions,
       // Seam B: continuity — the successor launches at the departing seat's posture.

@@ -5,6 +5,12 @@ import type {
   AppliedLaunchState,
   CodexObservedApprovalPolicy,
 } from "./permission-drift.js";
+import type { ClaudeAutoMode } from "./claude-auto-mode.js";
+
+/** "null" records a launch that sent no block; anything unreadable reads as unknown. */
+function parseAppliedAutoMode(json: string): ClaudeAutoMode | null | undefined {
+  try { return JSON.parse(json) as ClaudeAutoMode | null; } catch { return undefined; }
+}
 
 export interface StoredAppliedLaunchObservation extends AppliedLaunchObservation {
   generationUuid: string;
@@ -20,6 +26,7 @@ interface ObservationRow {
   reason: string | null;
   approval_policy: CodexObservedApprovalPolicy | null;
   daemon_opt_out?: number | null;
+  claude_auto_mode_json?: string | null;
   observed_at: string;
 }
 
@@ -33,6 +40,7 @@ function rowToStoredObservation(row: ObservationRow): StoredAppliedLaunchObserva
     ...(row.reason ? { reason: row.reason } : {}),
     ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
     ...(row.daemon_opt_out === 0 || row.daemon_opt_out === 1 ? { daemonOptOut: row.daemon_opt_out === 1 } : {}),
+    ...(row.claude_auto_mode_json != null ? { claudeAutoMode: parseAppliedAutoMode(row.claude_auto_mode_json) } : {}),
     observedAt: row.observed_at,
   };
 }
@@ -78,10 +86,19 @@ export class AppliedLaunchObservationStore {
         observation.daemonOptOut === undefined ? null : observation.daemonOptOut ? 1 : 0,
         generationUuid,
       );
+      if (result.changes > 0 && observation.claudeAutoMode !== undefined) this.recordClaudeAutoMode(generationUuid, observation.claudeAutoMode);
       return result.changes > 0;
     } catch {
       return false;
     }
+  }
+
+  /** Separate from the insert, so a database without the column still records the permission observation. */
+  private recordClaudeAutoMode(generationUuid: string, block: ClaudeAutoMode | null): void {
+    try {
+      this.db.prepare("UPDATE applied_launch_observations SET claude_auto_mode_json = ? WHERE generation_uuid = ?")
+        .run(JSON.stringify(block), generationUuid);
+    } catch { /* the column predates this database; status reads the block as unknown */ }
   }
 
   invalidateGeneration(generationUuid: string): boolean {

@@ -1,3 +1,4 @@
+import { claudeAutoModeStatus, type ClaudeAutoModeStatus } from "./claude-auto-mode.js";
 import type { ClaudeCompactionEnforcer, ObservedCompaction } from "./claude-compaction-enforcer.js";
 import path from "node:path";
 import { TerminalPolicyStore } from "./terminal-policy.js";
@@ -74,6 +75,8 @@ export interface SeatStatus {
     effective?: ResolvedSeatPermission;
     /** The planned account for the next fresh managed launch (permission-account.ts); absent when it can't be read. */
     account?: PermissionAccount;
+    /** A Claude seat's autoMode block, saved against the last launch's; absent when neither has one. */
+    claudeAutoMode?: ClaudeAutoModeStatus;
   };
 }
 
@@ -280,7 +283,11 @@ export class SeatStatusService {
       const desired = store.read(nodeId);
       const effective = runtime ? store.resolve(nodeId, runtime) : undefined;
       const account = planPermissionAccount(this.rigRepo.db, nodeId, seat, runtime ?? null);
-      return { selectionState: desired ? "explicit" : "inherit", desired, lastLaunchArguments, nativeEffect: "unverified", ...(effective ? { effective } : {}), account };
+      const autoMode = runtime === "claude-code"
+        ? claudeAutoModeStatus(this.rigRepo.db, nodeId, lastLaunchArguments?.claudeAutoMode, /--permission-mode auto\b/.test(account.nativeArgument ?? ""))
+        : undefined;
+      return { selectionState: desired ? "explicit" : "inherit", desired, lastLaunchArguments, nativeEffect: "unverified", ...(effective ? { effective } : {}), account,
+        ...(autoMode ? { claudeAutoMode: autoMode } : {}) };
     } catch (error) {
       return { selectionState: "unknown", desired: null, lastLaunchArguments, nativeEffect: "unverified", error: (error as Error).message };
     }

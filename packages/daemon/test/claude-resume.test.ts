@@ -10,6 +10,7 @@ const CLAUDE_FLOOR_EFFECT = {
   state: "observed",
   value: "acceptEdits",
   reason: "emitted_launch_arguments",
+  claudeAutoMode: null,
 } as const;
 
 function mockTmux(overrides?: {
@@ -214,6 +215,18 @@ describe("ClaudeResumeAdapter", () => {
       expect(launch).toContain(step);
       expect(launch).toContain('"deny":["Read(../peer/**)"]');
       expect(launch).toContain("--resume 'conversation'");
+    });
+
+    it("composes the seat's auto mode block into the resume's --settings and records it as applied", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const block = { environment: ["$defaults", "Source control: github.com/acme's org"] };
+      const result = await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(12).fill(undefined), block);
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { value: "auto", claudeAutoMode: block } });
+      const launch = String(sendText.mock.calls[0]![1]);
+      expect(launch).toContain("--permission-mode auto");
+      expect(launch.replace(/'"'"'/g, "'")).toContain(`"autoMode":${JSON.stringify(block)}`);
     });
 
     it("returns { ok: true } on success", async () => {
