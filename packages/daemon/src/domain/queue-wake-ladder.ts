@@ -1694,6 +1694,7 @@ async function operatorRung(
     repo,
     row,
     `${LADDER_RUNG_PREFIX} operator dispatched-to-engine decision=${outcome.decision} resolved=${outcome.resolved}${outcome.notificationKey ? ` notification_key=${outcome.notificationKey}` : ""}${outcome.decisionId ? ` decision_id=${outcome.decisionId}` : ""} reason=${reason}`,
+    true, // the engine admitted and posted it; a drain that began since doesn't drop the record
   );
   actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
   return outcome.resolved;

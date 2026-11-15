@@ -63,6 +63,47 @@ describe("per-rig delivery drain control", () => {
     } finally { db.close(); }
   });
 
+  /** A drain whose review reminder can't reach its owner for a permanent reason (an external CLI, say), so the engine ended it. */
+  async function drainWithTerminalReview() {
+    const db = createDrainTestDb();
+    const queue = new QueueRepository(db, new EventBus(db));
+    queue.attachOutbox(new OutboxHandler(db));
+    const release = vi.spyOn(queue, "drainPendingWakeIntents").mockResolvedValue({ delivered: 0, failed: 0, indeterminate: 0, retained: 0 });
+    const jobs = new WatchdogJobsRepository(db);
+    const { app, rigRepo } = createTestApp(db, { appDeps: { queueRepo: queue, watchdogJobsRepo: jobs } });
+    const rig = rigRepo.createRig("drain-one");
+    const path = `/api/rigs/${rig.id}/delivery-drain`;
+    const input = { drainId: "maintenance-1", owner: "owner@drain-one", reviewAt: new Date(Date.now() + 60_000).toISOString() };
+    const first = await (await app.request(path, jsonPost(input))).json();
+    jobs.markTerminal(first.drain.reviewJobId, "watchdog_delivery_unavailable");
+    return { db, app, jobs, release, path, input, reviewJobId: first.drain.reviewJobId as string };
+  }
+
+  it("ENDs a drain whose review reminder already went terminal, and releases delivery", async () => {
+    const { db, app, jobs, release, path, input, reviewJobId } = await drainWithTerminalReview();
+    try {
+      const ended = await app.request(path + "/end", jsonPost({ drainId: input.drainId }));
+      expect(ended.status).toBe(200);
+      expect(await ended.json()).toMatchObject({ active: false, ended: true, releaseScheduled: true });
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(await (await app.request(path)).json()).toMatchObject({ active: false });
+      expect(jobs.getByIdOrThrow(reviewJobId).state).toBe("terminal"); // the finished reminder is left as it was
+    } finally { db.close(); }
+  });
+
+  it("renews a drain whose review reminder already went terminal, with a new reminder", async () => {
+    const { db, app, jobs, path, input, reviewJobId } = await drainWithTerminalReview();
+    try {
+      const renewed = await app.request(path, jsonPost({ ...input, reviewAt: new Date(Date.now() + 120_000).toISOString() }));
+      expect(renewed.status).toBe(200);
+      const body = await renewed.json();
+      expect(body).toMatchObject({ active: true });
+      expect(body.drain.reviewJobId).not.toBe(reviewJobId);
+      expect(jobs.listActive().map((j) => j.jobId)).toEqual([body.drain.reviewJobId]);
+      expect(jobs.getByIdOrThrow(reviewJobId).state).toBe("terminal");
+    } finally { db.close(); }
+  });
+
   it("a completed BEGIN or old END cannot reactivate or end a later window", () => {
     const db = createDrainTestDb();
     try {

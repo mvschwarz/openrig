@@ -71,7 +71,7 @@ export class RigDeliveryDrainStore {
       if (known?.endedAt || current?.endedAt === null && current.drainId !== input.drainId) return current!;
       const reviewAt = new Date(input.reviewAt).toISOString();
       if (known && known.owner === input.owner && known.reviewAt === reviewAt) return known;
-      if (known) jobs.stop(known.reviewJobId, "delivery_drain_review_renewed");
+      if (known) stopReview(jobs, known.reviewJobId, "delivery_drain_review_renewed");
       const startedAt = known?.startedAt ?? this.now().toISOString();
       const job = jobs.register({
         policy: "periodic-reminder", targetSession: input.owner, registeredBySession: input.owner,
@@ -93,7 +93,7 @@ export class RigDeliveryDrainStore {
       if (!current || current.drainId !== drainId || current.endedAt) return { fresh: false, drain: current };
       this.db.prepare("UPDATE rig_delivery_drains SET ended_at=? WHERE rig_id=? AND drain_id=? AND ended_at IS NULL")
         .run(this.now().toISOString(), rigId, drainId);
-      jobs.stop(current.reviewJobId, "delivery_drain_ended");
+      stopReview(jobs, current.reviewJobId, "delivery_drain_ended");
       return { fresh: true, drain: this.get(rigId) };
     })();
   }
@@ -114,4 +114,11 @@ export class RigDeliveryDrainStore {
     return { rigId, active, drain, retainedWorkCount: pendingWakeIntents + dueJobs,
       retained: { pendingWakeIntents, dueWatchdogJobs: dueJobs }, nativeStartsDeferred: false as const };
   }
+}
+
+/** Stop a drain's review reminder unless it already ended. A terminal or missing job is stopped already, so a drain's end
+ *  or renewal never depends on its reminder: the drain changes and delivery follows, and the job is left as it was. */
+function stopReview(jobs: WatchdogJobsRepository, jobId: string, reason: string): void {
+  const review = jobs.getById(jobId);
+  if (review && review.state !== "terminal") jobs.stop(jobId, reason);
 }
