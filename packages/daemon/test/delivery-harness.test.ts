@@ -367,6 +367,44 @@ describe("delivery harness: D18's and D04's round-3 controls", () => {
     expect(unread.verdict.result).toBe("PASS");
   });
 
+  it("fails a merge with no record whose one observed turn carries the message intact but lost the draft (round 4, F1)", async () => {
+    const m = "DLV-mg-1";
+    const { ctx, verdict, turns } = fakeCtx({ readComposer: async () => "" });
+    turns[m] = [userTurn(1, sendBody(m))];
+    const judged = await judge(ctx, { mode: "off", state: "draft", sender: "deliberate", marker: m, expect: { type: "merge" }, entered: { draft: "PERSONDRAFTmg" },
+      attempt: { since: 0, source: "send", json: null, exit: 1, missing: "the send gave no JSON result (exit 1): lost" } });
+    expect(judged.notRun).toBeNull();
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/no forbidden effect without a record/);
+  });
+
+  it("fails that merge when the draft is left in a readable input box, and is NOT RUN, saying why, when the box can't be read (round 4, F1)", async () => {
+    const m = "DLV-mg-2";
+    const attempt = { since: 0, source: "send", json: null, exit: 1, missing: "the send gave no JSON result (exit 1): lost" };
+    const judgeWith = async (readComposer: () => Promise<string>) => {
+      const { ctx, verdict, turns } = fakeCtx({ readComposer });
+      turns[m] = [userTurn(1, `PERSONDRAFTmg${sendBody(m)}`)];
+      const judged = await judge(ctx, { mode: "off", state: "draft", sender: "deliberate", marker: m, expect: { type: "merge" }, entered: { draft: "PERSONDRAFTmg" }, attempt });
+      return { judged, failed: verdict.toJSON().failed.join(" ") };
+    };
+    const left = await judgeWith(async () => "PERSONDRAFTmg");
+    expect(left.judged.notRun).toBeNull();
+    expect(left.failed).toMatch(/no forbidden effect without a record/);
+    const unread = await judgeWith(async () => { throw new Error("the input box couldn't be read on screen"); });
+    expect(unread.failed).toBe("");
+    expect(unread.judged.notRun).toMatch(/input box couldn't be read, so whether the draft was left in it is unknown/);
+  });
+
+  it("fails a D04 arm whose send left no record and whose one delivered turn lost part of its body (round 4, N1)", async () => {
+    const m = "DLV-d04-2";
+    const { ctx, verdict, turns } = fakeCtx({ resize: async (w: number, h: number) => `${w}x${h}`, settle: async () => true,
+      observe: async () => ({ screen: "❯ \n  ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-c…" }), composerOf: () => "",
+      mark: () => m, send: async () => ({ exit: 1, json: null, stderr: "lost" }), paneWrites: () => [{ timeNs: 5, argv: ["paste-buffer", "-t", "%0", "-b", "openrig_1", "-d", "-r", "-p"] }] });
+    turns[m] = [userTurn(1, `Delivery check ${m}: draft`)];
+    const arm = { label: "80x24, clipped footer", size: [80, 24], footer: () => true, footerText: "any" };
+    expect(await runArm(ctx, arm, "")).toBeNull();
+    expect(verdict.toJSON().failed.join(" ")).toMatch(/no forbidden effect without a record of the send/);
+  });
+
   it("fails a delivery with no record whose one observed turn lost part of its body (fix 5)", async () => {
     const m = "DLV-t-1";
     const { ctx, verdict, turns } = fakeCtx();

@@ -229,13 +229,22 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
     const delivering = ["deliver", "merge", "copy-then-deliver", "deliver-or-held"].includes(expect.type);
     // One observed delivery is still judged by its bytes: a body that didn't arrive intact is positive evidence.
     const one = delivering && turns.length === 1 ? bodyIntact(ctx, turns[0], marker, body) : null;
+    // A merge also carries the person's draft: the recorded path's comparison, before the missing-record downgrade. A
+    // draft missing from the turn, or left in a readable input box, is a failure; an unreadable input box is unknown.
+    let draft = null;
+    if (expect.type === "merge" && one?.intact) {
+      const inTurn = turns[0].parts.some((p) => p.source === "text" && p.text.includes(entered.draft));
+      const input = await ctx.readComposer().catch(() => null);
+      draft = !inTurn ? "lost: missing from the turn that carried the message" : input === null ? "unknown" : input.includes(entered.draft) ? "left in the input box" : "merged";
+    }
     const forbidden = expect.type === "refuse" || expect.type === "held" ? writes.length > 0 || turns.length > 0
       : delivering ? (openrigPastes(writes).length > 0 && turns.length === 0) || turns.length > 1 || (one !== null && !one.intact)
+        || (draft !== null && draft !== "unknown" && draft !== "merged")
         : false;
-    const seen = { source: at.source, missing: at.missing, exit: at.exit ?? null, writes: writes.length, delivered: turns.length, ...(one ? { body: one } : {}) };
+    const seen = { source: at.source, missing: at.missing, exit: at.exit ?? null, writes: writes.length, delivered: turns.length, ...(one ? { body: one } : {}), ...(draft ? { draft } : {}) };
     if (forbidden) { verdict.check(`${label}: no forbidden effect without a record of the attempt (${at.missing})`, false, seen); return { heldIds, notRun: null, refused: false }; }
     verdict.info(`${label}: no record of the attempt, and no forbidden effect observed`, seen);
-    return { heldIds, notRun: at.missing, refused: false };
+    return { heldIds, notRun: draft === "unknown" ? `${at.missing}; and the input box couldn't be read, so whether the draft was left in it is unknown` : at.missing, refused: false };
   }
 
   const retained = json.outcome === "retained" && json.sent === false;
