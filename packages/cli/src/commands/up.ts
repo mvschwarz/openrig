@@ -685,7 +685,7 @@ as no rig by that name or a failed boot).
         } else if (res.data["wouldCaptureCurrentState"] === true) {
           console.log(`Snapshot: none usable — apply would first capture current DB state as an auto-rehydrate snapshot.`);
         }
-        const planNodes = (res.data["nodes"] as Array<{ logicalId: string; intendedAction: string; reason?: string; tokenState?: string; provenance?: string | null; lastVerified?: string | null; freshRequired?: boolean; runtimePrompt?: string }>) ?? [];
+        const planNodes = (res.data["nodes"] as Array<{ logicalId: string; intendedAction: string; reason?: string; tokenState?: string; provenance?: string | null; lastVerified?: string | null; freshRequired?: boolean; runtimePrompt?: string; permission?: { summary?: string } }>) ?? [];
         for (const n of planNodes) {
           console.log(`  ${n.logicalId}: ${n.intendedAction}${n.reason ? ` — ${n.reason}` : ""}`);
           // OPR.0.4.3.20 FR-6 — per-seat token truth: present/missing/stale/unverified
@@ -698,6 +698,8 @@ as no rig by that name or a failed boot).
             const prompt = n.runtimePrompt ? `; ${n.runtimePrompt}` : "";
             console.log(`      token: ${n.tokenState}${reverify}${prov}${verified}${fresh}${prompt}`);
           }
+          // The permission restore will start the seat with, and where it comes from (--json has the whole account).
+          if (n.permission?.summary) console.log(`      permission: ${n.permission.summary}`);
         }
         console.log("No changes made.");
         return;

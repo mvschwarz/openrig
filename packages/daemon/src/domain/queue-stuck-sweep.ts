@@ -32,6 +32,7 @@ import { nodeExecutorStoppedReason } from "./node-inventory.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import type Database from "better-sqlite3";
 import { createLinkedSuccessorLookup, deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { recordsNoWakeRoute } from "./gateway/destination-resolver.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -944,7 +945,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       }
       return polls;
     };
-    const polledRow = (row: QueueItem): boolean => !!row.lastNudgeResult?.startsWith("unroutable:") && pollsForWork(row.destinationSession);
+    const polledRow = (row: QueueItem): boolean => recordsNoWakeRoute(row.lastNudgeResult) && pollsForWork(row.destinationSession);
     /** `row` comes from findUndelivered (it carries the delivery verdict). Call it after any wake retry the row needs. */
     const undeliveredCandidate = (row: QueueItem, recordSuppression: boolean): Candidate | null => {
       if (isFindingRow(row)) return null;
@@ -1247,7 +1248,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         othersMayHaveRun();
         // judged again on the row as the send (and anyone else during it) left it
         row = undeliveredNow(row.qitemId);
-        if (!row?.lastNudgeResult?.startsWith("unroutable:")) continue;
+        if (!row || !recordsNoWakeRoute(row.lastNudgeResult)) continue;
       }
       const c = undeliveredCandidate(row, true);
       if (c && !deliveryHeld(c.row)) candidates.push(c);
@@ -1368,7 +1369,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const routeAroundNoWake = (c: Candidate): void => {
       if (c.route !== c.row.destinationSession) return;
       const destination = classOf(c.row.destinationSession);
-      const noRoute = destination === "unroutable" && !!c.row.lastNudgeResult?.startsWith("unroutable:");
+      const noRoute = destination === "unroutable" && recordsNoWakeRoute(c.row.lastNudgeResult);
       const terminalSeat = destination === "pane-bound" && isBoundTerminalSeat(deps.db, c.row.destinationSession);
       if (!noRoute && !terminalSeat && !(destination === "hosted" && !c.row.claimedAt)) return;
       c.noWake = true;
@@ -1768,10 +1769,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (deps.queueRepo.deliveryDrains.holds(seat)) {
         // A hold is not completion. Keep the standing notice unless every named source has positively closed.
         const sources = last ? backlogRowsOf(last.body) : null;
-        const unresolved = !sources || [...sources].some(id => {
-          const row = deps.queueRepo.getById(id, { waiting: false });
-          return !row || ["pending", "in-progress", "blocked"].includes(row.state);
-        });
+        const unresolved = !sources || deps.db.prepare(`SELECT 1 FROM json_each(?) source
+          LEFT JOIN queue_items q ON q.qitem_id = source.value
+          WHERE q.qitem_id IS NULL OR q.state IN ('pending', 'in-progress', 'blocked') LIMIT 1`)
+          .get(JSON.stringify([...sources])) !== undefined;
         if (unresolved) continue;
       }
       if (last && ["pending", "in-progress", "blocked"].includes(last.state)) {
