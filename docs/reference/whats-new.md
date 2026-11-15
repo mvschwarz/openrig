@@ -1,4 +1,155 @@
-# What changed in OpenRig 0.7.16
+# What changed in OpenRig 0.7.17
+
+This note is for an agent on an install that was just upgraded to 0.7.17.
+OpenRig 0.7.17 brings a team's questions to the conversation your person started
+it from: when they stay in their own Claude Code conversation, a seat's prompt
+comes back there as a task, and only their recorded words go back to the seat.
+Restore and `rig down` report more honestly what they did, a rig's automatic
+delivery can be held during maintenance, and three stall paths in a busy daemon
+are shorter. It adds two database migrations. If you upgraded from 0.7.15 or
+earlier, also read "What changed in OpenRig 0.7.16" below, and so on back. For
+the full capability map, read
+`rig context get onboarding-width/public-what-you-can-do.md`. After the upgraded
+daemon starts, `rig context get reference/whats-new.md` describes this version.
+Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`.
+
+## After the upgrade
+
+- **Restart the daemon** (`rig daemon stop`, then `rig daemon start`), with a
+  database backup first. Your agents keep running through it; don't use
+  `rig down`. Migration 168 records the occupant generation with each Claude
+  context sample, and migration 170 adds `rig_delivery_drains`. Going back to
+  0.7.16 after them isn't established.
+- **The `openrig` plugin carries 0.7.17,** because its
+  `working-with-an-openrig-team` skill changed. openrig-core stays 0.1.31.
+- **One new setting:** `ui.topology_remote_seats` (off by default) lets the TUI's
+  topology TABLE read a remote rig's seats, read-only.
+
+## Your person's own conversation
+
+- **If your person installed OpenRig from their own Claude Code conversation and
+  stays there,** the installer hands their goal to the team as a task from that
+  conversation's address, and no longer says they'll answer in the operator's
+  pane. Ask where they'll answer only when that's genuinely unclear.
+- **The kernel operator brings a seat's prompt to that address as a task,** with
+  the prompt and its choices verbatim, the seat, what it was doing and the
+  escalation's id. It relays only the person's recorded words: the key comes
+  from a fresh capture, the reason starts with `task <id>:`, and it checks the
+  effect. It tells the person the lead has their goal and that questions and
+  the result come to that conversation, and offers the team's space or a seat's
+  terminal only if they choose to watch or answer in the pane. A person who
+  chose the panes gets the earlier instructions unchanged.
+- **If you're the person's agent,** check your address while work is open, show
+  a forwarded prompt whole, and read the newest review before saying the work is
+  done (the `rigs` skill and `working-with-an-openrig-team`).
+- **The launch plan** now says a team seat with no permission policy gets the
+  team default. An empty person registry reads
+  `undeliverable:no-registered-human`; a registry that failed to load still
+  reads `unavailable:human-registry`.
+- **The installing-for-someone procedure** is no longer in every seat's
+  startup text; read it from the `rigs` skill's
+  `references/installing-for-someone.md` when you need it.
+
+## Recovery
+
+- **Restore** reads `partially_restored`, and names the seat, when it skipped a
+  seat that isn't in the snapshot's roster or left one attached. Which seats
+  launch is unchanged, and an adopted seat keeps its session name.
+- **Resume one banked original conversation** (opt-in): read
+  `GET /api/startup/<rigId>/nodes/<nodeId>/original?snapshotId=<id>&historySessionId=<id>`,
+  then POST `action: "resume"` with that `revision`, an `operationId` and the
+  exact `expectedOriginal`. Keep the operation id after a timeout: repeating the
+  same request reconciles instead of dispatching again. A result that can't be
+  proven stays partial. Details: `docs/reference/daemon-http-clients.md`.
+- **Hold one rig's automatic delivery during maintenance:**
+  `POST /api/rigs/<rigId>/delivery-drain` with a `drainId`, `owner` and
+  `reviewAt` holds its queue wakes, watchdog delivery and stuck-sweep findings;
+  `POST /api/rigs/<rigId>/delivery-drain/end` ends it. A review deadline prompts
+  the owner and never ends the drain. Direct sends and native starts aren't
+  held, and unknown delivery isn't replayed.
+- **A restore that can't confirm it stopped a blank session** leaves it in place:
+  the seat reads `attention_required` and says it may still be running. Check
+  with `rig capture`, stop it with `rig seat stop`, then retry.
+- **`rig down` releases a seat whose session OpenRig didn't start** (attached,
+  adopted, bound or reconciled), prints `Released, not stopped: <session>`, and
+  exits 0; the session keeps running. Removing a member that joined with
+  `rig attach --self` outside tmux no longer fails with `409 kill_failed`.
+- **Claude resume and handover:** a pane that moves during resume-token capture
+  leaves the token unknown; discovered handover resolves a relative
+  `CLAUDE_CONFIG_DIR` against the seat's directory.
+
+## Delivery, workflows and tools
+
+- **Shorter stall paths:** the stuck sweep reads undelivered work without
+  blocking, Codex thread lookup reads only new log rows, and a work node's
+  `SPEC.md` is reread only when it changed. These bound measured paths only.
+- **Draft-aware delivery** reads an empty input box under Claude Code 2.1.322 or
+  2.1.323's wide paste hint and auto-update failure as empty and sends once.
+  `rig send --dangerously-interact` without `--type-without-checking` now stops
+  on a person's text there.
+- **Claude's question dialog** with several questions, an editor shortcut or the
+  preview layout refuses an ordinary send with `target_needs_input`.
+- **A send at a model picker** says to close it with Esc; don't use
+  `--dangerously-interact` there. A Claude seat that won't start under managed
+  `disableSideloadFlags` names the setting.
+- **A resumed Codex conversation** with an old token-refresh failure in its
+  history isn't told to sign in again; a current refusal still is.
+- **`rig provider switch --token-file`** applies the token unless the pane reads
+  as fish.
+- **A hosted member with no wake trigger** gets an `awaiting-pickup:` record: its
+  work waits in its queue until it reads it. Don't read that as a failure.
+- **A `rig queue handoff` whose answer was lost** names the source row to read
+  (`rig queue show '<id>' --full --json`) before any retry.
+- **`rig workflow revise`** can remove an obsolete required order from unstarted
+  work and projects the newly ready work once. Repeating `rig workflow route`
+  without `--packet` selects the adopted successor and writes nothing.
+- **An external connection's `rig_queue_show`** adds `viewer`, `item.createdBy`
+  and actor labels, with `you` true only for this connection.
+- **Also:** `rig bundle check` reports schema-invalid configuration names;
+  `rig queue erase --members <empty file> --rig <id>` erases an account rig that
+  never had a member; a Pi or OMP runner pane names its model and state;
+  `rig environment recreate` handles a replaced Podman socket (not run against a
+  live engine); `rig network status` hides a hub URL's query string; `rig setup`
+  prints the harness login line.
+
+## Limits to keep in view
+
+- **Your person's conversation isn't woken.** A seat's question waits until
+  they return to it, and a prompt that changes between the capture and the key
+  can take the key. This route isn't yet confirmed with a person using it end
+  to end.
+- **Restore's overall result:** `restore-check`'s recovery plan still counts
+  seats restore leaves alone, and says restore tries the conversation for an
+  in-roster external CLI seat. A seat left as a bare shell after "Harness not
+  started" still counts as running in `rig ps`.
+- **A second `rig down`** while a released session runs reports that seat's
+  kept skills as an error and exits 2. After `rig down --delete`, a later
+  `rig down` of another rig in the same working directory may remove OpenRig's
+  shared guidance and Claude additions there while the released session runs.
+- **A Codex seat resumed on 0.167.1 or 0.167.2** can read `unknown`
+  (`unrecognized_client_version`).
+- **Draft-aware delivery beside the wide footer** accepts only Claude Code's two
+  known failure wordings; a new one reads unknown and holds.
+- **`rig scope` and `rig proof` can't be limited to a rig's own project.**
+- **Linked Codex config files:** when a Codex seat's `config.toml` or
+  `hooks.json` is a symbolic link, OpenRig records its hook trust under the
+  link's target, as in 0.7.14. A change to key it by the file's own name isn't
+  in this release, and such a seat may be asked to review hooks again. With a
+  linked `config.toml`, OpenRig can also miss a setting stored for it that
+  turns OpenRig's hooks off, and set those hooks up anyway when it moves them
+  into `hooks.json`.
+- **"Person approved" entries** an agent recorded for its own approvals don't
+  establish the person's approval; check the conversation.
+- **Managed compaction with Claude Code 2.1.322:** typed text in the input box
+  can carry `/compact` along as text while `rig compact --state` reports it
+  sent, and the draft-aware guard can leave the preparation prompt unsent.
+  Empty the box first and check the seat compacted.
+- **No memory claim** is made for this release.
+- **0.7.16's limits** below still apply unless this release changes them (the
+  wide-footer case, where a seat's question goes when the person stays in their
+  own conversation, and restore's overall result).
+
+## What changed in OpenRig 0.7.16
 
 This note is for an agent on an install that was just upgraded to 0.7.16.
 OpenRig 0.7.16 keeps the team's launch default for a seat whose policy is the
@@ -15,7 +166,7 @@ the full capability map, read
 daemon starts, `rig context get reference/whats-new.md` describes this version.
 Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`.
 
-## After the upgrade
+### After the upgrade
 
 - **Stop, back up, install, then start.** `rig daemon stop` (seats keep running,
   so don't use `rig down`), copy the database file (`rig config get db.path`
@@ -27,7 +178,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - **The plugins:** the `openrig` plugin's manifests carry the CLI's version,
   0.7.16. openrig-core moves to 0.1.31, because its skills changed.
 
-## A person's first team
+### A person's first team
 
 - **`standard` and `open` keep the team default.** A seat whose effective policy
   is the built-in `standard` or `open` launches with the team default's
@@ -60,7 +211,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   stays with to keep its own return address, so the team's questions come back
   to it. ([#3134](https://github.com/mvschwarz/openrig/pull/3134))
 
-## Recovery
+### Recovery
 
 - **After an upgrade, a seat's packaged recovery skills come back current:**
   on `rig up --existing`, a seat's own unedited copies of OpenRig's packaged
@@ -104,7 +255,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   its default loopback-plus-Tailscale bind when none is configured. It doesn't
   promise a kernel that isn't listed. ([#3181](https://github.com/mvschwarz/openrig/pull/3181), [#3227](https://github.com/mvschwarz/openrig/pull/3227))
 
-## Delivery, workflows and tools
+### Delivery, workflows and tools
 
 - **A send to a missing seat prints "Recorded, not delivered"**: the message is
   in the sender's outbox, `--verify` exits nonzero, and a queue row keeps its
@@ -136,7 +287,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   works with `--nodes --json`. The TUI's Projects view can span registered
   hosts. ([#3107](https://github.com/mvschwarz/openrig/pull/3107), [#3240](https://github.com/mvschwarz/openrig/pull/3240), [#3191](https://github.com/mvschwarz/openrig/pull/3191))
 
-## Limits to keep in view
+### Limits to keep in view
 
 - **Restore's overall result:** a rig can still read `fully_restored` while a
   seat restore didn't start, or a seat kept in its external CLI attachment,
