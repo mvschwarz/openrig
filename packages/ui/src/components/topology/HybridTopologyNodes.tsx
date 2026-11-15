@@ -18,9 +18,13 @@ import { TerminalPreviewPopover } from "./TerminalPreviewPopover.js";
 import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 import { formatRuntimeModel } from "../../lib/runtime-brand.js";
-import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
+import { ToolMark } from "../graphics/RuntimeMark.js";
+import { ContextBar, SeatEngine, UnitLabel } from "../SeatEngine.js";
 import { useSelectedHostId } from "../../hooks/useHosts.js";
 import { LOCAL_HOST_ID } from "../../lib/host-param.js";
+
+/** Usable width of the model line inside the fixed-size topology card (card width minus padding, with a small margin). */
+const MODEL_LINE_WIDTH_PX = 144;
 
 interface HybridPodGroupNodeData {
   podDisplayName?: string | null;
@@ -249,41 +253,34 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
         ) : null}
         </>
       ) : null}
+      {/* The layout gives this card a fixed box, so there is no session line or footer: the header names
+          the seat and the rig group around it names the rig. Long model names shrink to fit the line. */}
       <div className="space-y-1 px-2 py-1.5">
-        <div className="truncate font-mono text-[8px] leading-tight text-on-surface-variant">
-          {data.canonicalSessionName ?? data.logicalId}
-        </div>
-        <div className="min-w-0">
-          <RuntimeBadge
-            runtime={data.runtime}
-            model={data.model}
-            size="xs"
-            compact
-            variant="inline"
-            className="max-w-full"
-          />
-          {!runtimeTitle && (data.resolvedSpecName || data.profile) ? (
-            <span className="ml-1 font-mono text-[7px] uppercase tracking-[0.12em] text-on-surface-variant">
-              {data.resolvedSpecName || data.profile}
-            </span>
-          ) : null}
-        </div>
+        <SeatEngine runtime={data.runtime} model={data.model} fitWidthPx={MODEL_LINE_WIDTH_PX} />
+        <ContextBar
+          percent={data.contextUsedPercentage}
+          availability={data.contextAvailability ?? undefined}
+          fresh={data.contextFresh}
+        />
         <div className="flex items-end justify-between gap-2 pt-0.5">
-          <div
-            className={cn("font-mono text-[14px] font-bold leading-none", contextClass(data.contextUsedPercentage, data.contextFresh))}
-            data-testid="hybrid-context-badge"
-          >
-            {contextKnown ? `${data.contextUsedPercentage}%` : "--"}
+          <div className="flex items-baseline">
+            <div
+              className={cn("font-mono text-[14px] font-bold leading-none", contextClass(data.contextUsedPercentage, data.contextFresh))}
+              data-testid="hybrid-context-badge"
+            >
+              {contextKnown ? `${data.contextUsedPercentage}%` : "--"}
+            </div>
+            {contextKnown ? <UnitLabel>CTX</UnitLabel> : null}
           </div>
-          <div
-            className={cn(
-              "font-mono text-[13px] font-bold leading-none tracking-[0.02em]",
-              tokenLabel ? "text-on-surface-variant" : "text-on-surface-variant",
-            )}
-            data-testid="hybrid-token-total"
-            title={tokenTitle ?? "Token sample unavailable"}
-          >
-            {tokenLabel ?? "--"}
+          <div className="flex items-baseline">
+            <div
+              className="font-mono text-[13px] font-bold leading-none tracking-[0.02em] text-on-surface-variant"
+              data-testid="hybrid-token-total"
+              title={tokenTitle ?? "Token sample unavailable"}
+            >
+              {tokenLabel ?? "--"}
+            </div>
+            {tokenLabel ? <UnitLabel>TOK</UnitLabel> : null}
           </div>
         </div>
       </div>

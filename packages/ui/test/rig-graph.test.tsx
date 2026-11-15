@@ -1594,11 +1594,11 @@ describe("RigGraph node selection (P5.1-2 navigate)", () => {
   });
 });
 
-// Task 7: RigNode spec hint rendering
-describe("RigNode spec hint", () => {
+// Task 7: RigNode footer (seat, spec and a non-default profile)
+describe("RigNode footer", () => {
   afterEach(() => cleanup());
 
-  it("renders spec hint when resolvedSpecName is set", () => {
+  it("shows the seat and spec in the footer, without the default profile", () => {
     render(
       <ReactFlowProvider>
         <RigNode data={{
@@ -1615,13 +1615,33 @@ describe("RigNode spec hint", () => {
       </ReactFlowProvider>
     );
 
-    const hint = screen.getByTestId("spec-hint");
-    expect(hint).toBeDefined();
-    expect(hint.textContent).toContain("impl-agent");
-    expect(hint.textContent).toContain("default");
+    // The footer names the seat and its spec; the default profile adds nothing, so it is left out.
+    const footer = screen.getByTestId("seat-footer");
+    expect(footer.textContent).toBe("dev.impl · impl-agent");
   });
 
-  it("does not render spec hint when resolvedSpecName is null", () => {
+  it("shows a profile other than the default one in the footer", () => {
+    render(
+      <ReactFlowProvider>
+        <RigNode data={{
+          logicalId: "dev.impl",
+          role: "worker",
+          runtime: "claude-code",
+          model: null,
+          status: "running",
+          binding: null,
+          canonicalSessionName: "dev-impl@test-rig",
+          resolvedSpecName: "impl-agent",
+          profile: "reviewer",
+          edgeCount: 2,
+        }} />
+      </ReactFlowProvider>
+    );
+
+    expect(screen.getByTestId("seat-footer").textContent).toBe("dev-impl · impl-agent · reviewer");
+  });
+
+  it("shows only the seat in the footer when there is no spec", () => {
     render(
       <ReactFlowProvider>
         <RigNode data={{
@@ -1638,7 +1658,7 @@ describe("RigNode spec hint", () => {
       </ReactFlowProvider>
     );
 
-    expect(screen.queryByTestId("spec-hint")).toBeNull();
+    expect(screen.getByTestId("seat-footer").textContent).toBe("dev.impl");
   });
 
   it("exposes hover metadata for runtime inspection", () => {
