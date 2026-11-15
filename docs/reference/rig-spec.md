@@ -398,8 +398,7 @@ read without that wrapper cannot certify the launch.
 
 The filesystem selection replaces permission-mode and team/kernel defaults,
 including ambient YOLO. Fresh launches, both resume paths and restore emit the
-same selection. Hand-resuming from the command shown by `rig ps` does not yet
-carry this filesystem policy. A rebuild uses the saved filesystem policy ahead of an observed
+same selection. A rebuild uses the saved filesystem policy ahead of an observed
 predecessor sandbox; clearing or replacing the policy after a snapshot takes
 effect on restore. Status reports the plan and its limits, not observed native
 enforcement. Handover checks the successor's filesystem selection before
@@ -453,8 +452,12 @@ the Codex version and configuration being used.
 
 A non-kernel Claude or Codex seat with no authored permission policy, explicit
 seat permission selection, or named Codex profile receives the team launch
-default. An explicit policy, including `none` or `builtin:locked`, keeps its
-existing meaning. The default is derived again for fresh launch, resume, fork
+default. So does one whose policy is `builtin:standard` or `builtin:open`, with
+no seat permission selection, Claude rules of its own, or named Codex profile:
+those policies default to allow, and their rules aren't applied at launch, so
+recording one doesn't leave the seat stricter than recording none. The member's
+own policy decides over the rig's. Any other explicit policy, including `none`
+or `builtin:locked`, keeps its existing meaning. The default is derived again for fresh launch, resume, fork
 and handover; it is not saved as a user choice. Kernel, Pi and terminal behavior
 is unchanged.
 
@@ -556,7 +559,8 @@ launches with `-s danger-full-access -a never`, plus per-launch `-c` overrides t
 full-access and GPT-5.1 migration notices, whatever the rig's non-interruptive choice.
 
 **Config-surface policies are recorded, not applied at launch.** The seat still starts at
-the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the
+the floor: with the [team launch default](#team-launch-defaults) for `standard` and `open`,
+and without it for any other. The plan's line for that seat says which. The `allow`, `ask` and `deny` rules take effect once they are translated into the
 runtime's native settings. The `applying-a-permission-policy` skill in `openrig-core` does
 that translation, with per-runtime limits. For example, Claude's prefix rules can't
 reliably tell `git push --force` from `git push`. An `ask` waits for a person, so it pauses
@@ -882,7 +886,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `restore_policy` | string | no | the AgentSpec's | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. The default comes from the AgentSpec's `defaults.lifecycle` (else `resume_if_possible`) as narrowed by its profile; a member value may only narrow it further, in that order. |
 | `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing). |
 | `mechanic` | string | no | — | A canonical `seat@rig` session address, for `apprentice-handover`. |
-| `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. |
+| `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. Rebuild `artifact_set` paths are read as given, relative to the daemon's working directory, so an absolute path is the reliable form. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
 
