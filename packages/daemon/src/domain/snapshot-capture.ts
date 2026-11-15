@@ -15,6 +15,7 @@ import type { CheckpointStore } from "./checkpoint-store.js";
 import type { Snapshot, SnapshotData } from "./types.js";
 import { RigNotFoundError } from "./errors.js";
 import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
+import { runtimeHomeRecordsByNode } from "./seat-runtime-home-record.js";
 
 interface SnapshotCaptureDeps {
   db: Database.Database;
@@ -157,6 +158,10 @@ export class SnapshotCapture {
       },
       checkpoints,
       ...(Object.keys(environmentBindingsByNode).length ? { environmentBindingsByNode } : {}),
+      ...(() => {
+        const records = runtimeHomeRecordsByNode(this.db, rig.nodes.map(node => node.id));
+        return Object.keys(records).length ? { runtimeHomeRecordsByNode: records } : {};
+      })(),
       pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, namespace: p.namespace, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
       continuityStates: continuityRows.map((r) => ({ podId: r.pod_id, nodeId: r.node_id, status: r.status as "healthy" | "degraded" | "restoring", artifactsJson: r.artifacts_json, lastSyncAt: r.last_sync_at, updatedAt: r.updated_at })),
       nodeStartupContext,
