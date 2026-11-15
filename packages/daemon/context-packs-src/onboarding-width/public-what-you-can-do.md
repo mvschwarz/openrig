@@ -602,10 +602,15 @@ install to a team doing the work. The daemon installs it for the person's own ag
 (`~/.claude/skills/rigs` and `~/.agents/skills/rigs`) and refreshes it on every upgrade; a copy
 added with skills.sh is left alone and never refreshed. Since 0.7.16 the skill tells the agent to
 bring these prompts (a seat's permission, trust or hook-review prompt) to the person as questions
-by default, and to send the key the current screen shows for their choice. It may decide a kind of
-prompt only under the person's explicit instruction, and never records its own decision as the
-person's. Its setup path teaches an installing assistant the person stays with to keep its own
-return address, so the team's questions come back to it, and the skill follows a task handed on to another host with `rig queue show <id> --host <host>`.
+by default, and to send the key the current screen shows for their choice. It tells the agent to
+decide a kind of prompt only under the person's explicit instruction, and never to record its own
+decision as the person's. When 0.7.16 was tested, in one Claude setup an agent still recorded
+approvals it made itself as "Person approved", so those entries alone don't establish the person's
+approval. Its setup path teaches an installing assistant the person stays with to keep its own
+return address, so the team's questions come back to it. In 0.7.16, OpenRig's own question about a
+seat's prompt doesn't reach a person who isn't registered; it waits with the kernel operator, and
+registering wasn't tested as a fix for this. The skill also follows a task handed on to another
+host with `rig queue show <id> --host <host>`.
 
 `starter` and `factory` are built in: preview the team, inspect `rig up <team> --cwd . --plan`,
 and follow `docs/reference/getting-started.md`. `first-project` is starter's old name and still
