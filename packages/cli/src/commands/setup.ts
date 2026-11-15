@@ -788,6 +788,7 @@ export function goldenPathNextSteps(): string[] {
     "     Send the goal and folder, or have the person type them in the operator pane; show where it answers",
     "     Include any choice the person made that the operator must keep, such as a trust or hook-review prompt they declined",
     "     In the message, say: This is the agent that installed OpenRig. The person will answer in your pane",
+    "     If the person stays with you instead, hand the goal over as a queue task from your own address, not that message: the rigs skill's \"If the person stays with you\"",
     "     Do not implement the person's project yourself. The operator helps them choose and start a team",
     "     If the person gives you a goal later, forward it and the folder with rig send; leave the work with the operator's team",
     "     Finish installation when the operator is ready and the person is talking to it; daemon health alone is not completion",

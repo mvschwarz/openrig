@@ -76,6 +76,9 @@ Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use 
 `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'`,
 or have the person type the goal and folder in the operator's pane. Show where the operator answers and let it
 help them choose a team before any starter launch.
+If the person stays with you instead, hand the goal over as a queue task from your own address, so the team's
+questions, its seats' prompts and the result come back to you; the `rigs` skill's "If the person stays with you" has
+the steps. Ask where they'll answer only when it's genuinely unclear.
 If the person gives you a goal later, forward it, the folder and constraints with `rig send`; leave implementation
 with the operator's team instead of taking over the work yourself.
 Installation is complete when the operator is ready and the person is talking to it, not merely when the daemon is
