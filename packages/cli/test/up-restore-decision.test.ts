@@ -241,6 +241,22 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
     expect(exitCode).toBe(1);
   });
 
+  it.each([
+    ["no saved snapshot names this seat yet, so which launch path restore takes for it isn't known."],
+    ["restore takes this seat's runtime from its resume token, which this read doesn't know."],
+    ["this seat has no saved startup context, so restore starts it fresh and re-reads its policy then."],
+  ])("--plan prints an unsettled seat's permission as unknown with the reason: %s", async (reason) => {
+    respond = () => ({ status: "plan", mode: "restore", rigId: "rig-1", rigName: "myrig", snapshot: null, wouldCaptureCurrentState: true,
+      nodes: [{ logicalId: "dev.impl", intendedAction: "fresh-primed", permission: { basis: "unknown", runtime: "claude-code", summary: `Unknown: ${reason}` } }],
+      mutated: false });
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "myrig", "--existing", "--plan"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain(`      permission: Unknown: ${reason}`);
+    expect(output).not.toContain("On restore");
+  });
+
   // OPR.0.3.4.4 — plan-restore preview render + honest-async timeout.
   it("--plan restore preview renders per-seat intended actions and 'No changes made.'", async () => {
     respond = () => ({
@@ -251,7 +267,8 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
       snapshot: { id: "snap-9", kind: "auto-pre-down", createdAt: "2026-06-11T00:00:00Z" },
       wouldCaptureCurrentState: false,
       nodes: [
-        { logicalId: "dev.impl", intendedAction: "resume-original" },
+        { logicalId: "dev.impl", intendedAction: "resume-original",
+          permission: { basis: "planned", summary: "On restore: --permission-mode auto, from this seat's own choice (person@host: after the reboot)." } },
         { logicalId: "dev.qa", intendedAction: "awaiting-decision", reason: "resume source 'claude_name' recorded but no token available — apply would stop and ask (zero session)" },
       ],
       mutated: false,
@@ -261,6 +278,9 @@ describe("rig up --existing — resume-original default (OPR.0.3.4.2)", () => {
       await makeCmd().parseAsync(["node", "rig", "up", "myrig", "--existing", "--plan"]);
     });
     const output = logs.join("\n");
+    // Each seat's permission on restore, and where it comes from, before anything launches.
+    expect(output).toContain("      permission: On restore: --permission-mode auto, from this seat's own choice (person@host: after the reboot).");
+    expect(output.match(/permission: /g)).toHaveLength(1);
     expect(output).toContain('Plan: restore rig "myrig"');
     expect(output).toContain("snap-9");
     expect(output).toContain("dev.impl: resume-original");
