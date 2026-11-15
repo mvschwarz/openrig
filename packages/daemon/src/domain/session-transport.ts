@@ -1911,11 +1911,11 @@ function codexSeatIdle(pane: string): boolean {
 // (`Update available! 0.160.0 -> 0.162.1`). These are only what the frames show; nothing here discovers a version. A frame where one of them names another version is not read as these
 // layouts. Most frames name no version (the banner and header scroll away), and then a matching layout is evidence
 // about the layout only, not proof of the client version: another version that draws the same rows reads the same.
-// Codex 0.167's numbered patches count as 0.167: 0.167.1 and 0.167.2 changed no TUI code from 0.167.0
-// (openai/codex rust-v0.167.0...rust-v0.167.2). A prerelease or a later minor is another version.
+// Codex 0.167.1 and 0.167.2 count as 0.167.0: they changed no TUI code from it (openai/codex
+// rust-v0.167.0...rust-v0.167.2). A later patch, a prerelease or a later minor is another version until it's checked.
 const RECORDED_CLIENT_VERSIONS: Record<"claude-code" | "codex", RegExp> = {
   "claude-code": /^2\.1\.296$/,
-  codex: /^(?:0\.160\.0|0\.167\.\d+)$/,
+  codex: /^(?:0\.160\.0|0\.167\.[0-2])$/,
 };
 const VISIBLE_CLIENT_VERSION: Record<"claude-code" | "codex", RegExp[]> = {
   "claude-code": [/Claude Code v(\d[\w.+-]*)/g],

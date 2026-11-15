@@ -132,7 +132,8 @@ describe("issue824 existing strict adapter idle frame (behavioral red-first)", (
       expect((await adapterFold(working, { sourceRuntime: "codex", hook: null, motion: false })).activity.state).toBe("running");
     }
   });
-  it.each(["0.168.0", "0.169.0", "0.167.0-alpha.4.3", "0.167", "0.160.1"])("a Codex %s version over the same layout stays unknown", async (version) => {
+  // 0.167.3 is a later patch nobody has checked, so it stays unknown until it is.
+  it.each(["0.167.3", "0.168.0", "0.169.0", "0.167.0-alpha.4.3", "0.167", "0.160.1"])("a Codex %s version over the same layout stays unknown", async (version) => {
     for (const shown of [codexHeader(version), codexNotice(version)]) {
       const frame = `${shown}${codexCompleted}`;
       expect(readSeatBeforePaste(frame, "codex")).toBe("unknown");
