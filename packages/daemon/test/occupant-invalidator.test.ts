@@ -16,7 +16,11 @@ describe("GHOST-STAGE (e) DefaultOccupantInvalidator", () => {
     inv.invalidateRetiringOccupant({ retiringSessionName: "seat@rig", successorSessionName: "seat@rig" });
 
     expect(enforcer.invalidateOccupant).toHaveBeenCalledWith("seat@rig");
-    expect(contextUsage.invalidateOccupantSidecar).toHaveBeenCalledWith("seat@rig");
+    expect(contextUsage.invalidateOccupantSidecar).toHaveBeenCalledWith("seat@rig", undefined);
+
+    // #3044 C3: the successor's generation goes to the sidecar delete, which keeps a sample it already wrote.
+    inv.invalidateRetiringOccupant({ retiringSessionName: "seat@rig", successorSessionName: "seat@rig", successorGeneration: "gen-2" });
+    expect(contextUsage.invalidateOccupantSidecar).toHaveBeenLastCalledWith("seat@rig", "gen-2");
   });
 
   it("Class-B: with NO retiringGeneration, logs a LOUD atom-B-pending marker and NEVER name-scopes", () => {
