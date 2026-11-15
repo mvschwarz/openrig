@@ -112,6 +112,40 @@ describe("Slice-04 C3 — seat-keyed Claude provider_usage discovery (production
     }
   });
 
+  it("a live seat whose only cache is malformed reports unreadable_cache through real getReadModel", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "provider-c3-unreadable-"));
+    try {
+      const usageDir = nodePath.join(root, "provider-usage");
+      fs.mkdirSync(usageDir, { recursive: true });
+      const seatSession = "dev-impl@test-rig";
+      fs.writeFileSync(nodePath.join(usageDir, `${seatSession}.json`), "{ not json");
+
+      const db = createFullTestDb();
+      seedClaudeSeat(db, seatSession);
+      const svc = new ProviderServiceImpl({
+        db,
+        listRigs: () => [{ id: "rig-1" }],
+        env: emptyCodexHomeEnv(),
+        now: () => ASOF,
+        collectClaudeSignals: () => collectClaudeSignalsFromProviderUsageDirectory(usageDir, () => ASOF),
+      });
+      const model = await svc.getReadModel();
+      const claude = model.signals.filter((signal) => signal.provider === "claude");
+
+      expect(claude).toHaveLength(1);
+      expect(claude[0]).toMatchObject({
+        seatSession,
+        sourceClass: "unknown",
+        authority: "unknown",
+        unknownReason: "claude_statusline_cache_unreadable",
+        automationUse: "do_not_automate",
+      });
+      expect(claude[0]!.usedPercent).toBeUndefined();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("an exited latest Claude session plus matching stale cache emits zero Claude signals", async () => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "provider-c3-exited-"));
     try {

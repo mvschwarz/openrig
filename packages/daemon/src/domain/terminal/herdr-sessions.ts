@@ -4,6 +4,7 @@ import { HerdrAdapter } from "./herdr-adapter.js";
 import { createHerdrSocketRpc, createHerdrSocketTransport, resolveHerdrSocketPath } from "./herdr-transport.js";
 import type { ProviderStatus } from "./terminal-provider.js";
 import { HerdrFollowView, type ReadFollowInput } from "./herdr-follow-view.js";
+import { execArgvCommand } from "../../adapters/tmux-exec.js";
 
 /** Keep the daemon's configured endpoint while selecting explicit sessions per
  * request. No request mutates process.env or another request's transport.
@@ -26,6 +27,8 @@ export function createHerdrProviders(env: NodeJS.ProcessEnv = process.env, input
     following: new HerdrFollowView({ socketPath: endpoint.socketPath, run: createHerdrViewerRun(endpoint, env), transport: transportFactory(), input }),
     launch: endpoint,
     viewer: viewer(endpoint),
+    // The same Herdr CLI and tmux clients the daemon already uses, for an open that may reuse a live view.
+    liveWorkspace: { herdr: createHerdrViewerRun(endpoint, env), exec: (file, args) => execArgvCommand([file, ...args]) },
     newLaunchToken: () => `l${++launch}`,
   }); };
   const sessions = new Map<string, HerdrAdapter>();

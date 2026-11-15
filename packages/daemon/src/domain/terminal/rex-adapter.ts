@@ -80,9 +80,15 @@ export class RexAdapter implements TerminalProvider {
   private readonly now: () => number;
   private launchCounter = 0;
   private lastProbe: ProbeEntry | null = null;
+  private readonly tilesOpened?: (seats: string[]) => Promise<void>;
 
-  constructor(deps: { transport: RexTransport; newLaunchToken?: () => string; sleep?: (ms: number) => Promise<void>; now?: () => number }) {
+  constructor(deps: {
+    transport: RexTransport; newLaunchToken?: () => string; sleep?: (ms: number) => Promise<void>; now?: () => number;
+    /** Called with the local seats whose tiles opened, so their agent and state can be shown on the tiles. */
+    tilesOpened?: (seats: string[]) => Promise<void>;
+  }) {
     this.transport = deps.transport;
+    this.tilesOpened = deps.tilesOpened;
     this.newLaunchToken = deps.newLaunchToken ?? (() => `l${(this.launchCounter += 1)}`);
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = deps.now ?? Date.now;
@@ -216,11 +222,17 @@ export class RexAdapter implements TerminalProvider {
     if (label !== plain) notes.push(`A view named "${plain}" is already open, so this one is "${label}".`);
     await this.sleep(REX_TILE_SETTLE_MS);
     const reasons = await exitedTiles(this.transport, sessionId, tiles, notes);
+    const local: string[] = [];
     tiles.forEach(({ pane }, i) => {
       const reason = reasons[i];
       if (reason) degrade([pane], reason);
-      else opened.push(pane.seat);
+      else {
+        opened.push(pane.seat);
+        if (!pane.host) local.push(pane.seat);
+      }
     });
+    // The tiles' status follows on its own; the view's result doesn't wait for it.
+    if (local.length > 0) void this.tilesOpened?.(local).catch(() => {});
     return {
       ...base,
       ok: opened.length > 0 || view.opened.length === 0,

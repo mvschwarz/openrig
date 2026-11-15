@@ -1,3 +1,4 @@
+import { ObservationPass } from "../src/domain/process-observation-pass.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -594,7 +595,7 @@ describe("ContextMonitor", () => {
       nodeId: session.nodeId,
       tmuxSession: "dev-qa-trust@test",
       cwd: "/project",
-    }));
+    }), { observationPass: expect.any(ObservationPass) });
   });
 
   it.each([false, true])("keeps a ready Codex fork in attention while its role is owed (token available: %s)", async tokenAvailable => {

@@ -61,6 +61,12 @@ Existing OpenRig session options, such as `terminal.status_bar`, still apply.
 An existing server does not reread its configuration merely because the daemon
 restarts. Settings and sessions in a separate personal server are left alone.
 
+When OpenRig creates a tmux server on macOS or Linux, its creating client tries
+to raise the soft open-file limit to 8192, bounded by the inherited hard limit.
+An already higher soft limit is preserved. A failed raise produces an advisory
+and the start continues with the inherited limit. Connecting to an existing
+server does not change that server's limit or restart its sessions.
+
 ## Existing teams and deferred migration
 
 At startup, the daemon checks the previously selected server before switching.
@@ -110,8 +116,8 @@ To move a team that runs on an older server:
    on it, yours included, has ended.
 3. Stop each rig deliberately with `rig down <rig>`. Its seats' sessions end, and a
    turn in progress stops. Queue rows, rigs and seats stay as they are. A session
-   OpenRig didn't start, such as a seat joined with `rig attach --self`, is left
-   running and `rig down` exits 2; stop it with the commands it prints, or it stays on
+   OpenRig didn't start, such as a seat joined with `rig attach --self` from a tmux
+   pane, is left running and `rig down` exits 2; stop it with the commands it prints, or it stays on
    the old server.
 4. Restart the daemon with `OPENRIG_TMUX_CONTROL=1` in its environment.
    `rig terminal status --json` should show `migrationPending: false`. If it's still

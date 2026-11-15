@@ -8,7 +8,7 @@
     "url": "https://github.com/mvschwarz"
   },
   "homepage": "https://github.com/mvschwarz/openrig",
-  "repository": "github:mvschwarz/openrig",
+  "repository": "https://github.com/mvschwarz/openrig",
   "license": "Apache-2.0",
   "keywords": ["openrig", "agents", "team", "delegation", "mcp"]
 }

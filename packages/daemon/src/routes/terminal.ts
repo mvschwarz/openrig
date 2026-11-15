@@ -68,7 +68,7 @@ function readHerdrAppTarget(raw: unknown): { herdrApp?: HerdrAppTarget } | { err
   return { herdrApp: appHome !== undefined ? { appHome } : {} };
 }
 
-function readOpenBody(raw: unknown): { provider?: string; session?: string; view?: string; expectedPlan?: string; viewportColumns?: number; herdrApp?: HerdrAppTarget } | { error: string } {
+function readOpenBody(raw: unknown): { provider?: string; session?: string; view?: string; expectedPlan?: string; viewportColumns?: number; reuseLive?: boolean; herdrApp?: HerdrAppTarget } | { error: string } {
   if (raw === null || typeof raw !== "object") return {};
   const obj = raw as Record<string, unknown>;
   if (obj["session"] !== undefined && typeof obj["session"] !== "string") return { error: "session must be a session name string." };
@@ -78,7 +78,7 @@ function readOpenBody(raw: unknown): { provider?: string; session?: string; view
   const view = typeof obj["view"] === "string" ? (obj["view"] as string) : undefined;
   const expectedPlan = typeof obj["expectedPlan"] === "string" ? obj["expectedPlan"] : undefined;
   const viewportColumns = typeof obj["viewportColumns"] === "number" ? obj["viewportColumns"] : undefined;
-  return { ...(provider !== undefined ? { provider } : {}), ...(obj["session"] !== undefined ? { session: obj["session"] as string } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}), ...target };
+  return { ...(provider !== undefined ? { provider } : {}), ...(obj["session"] !== undefined ? { session: obj["session"] as string } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}), ...(obj["reuseLive"] === true ? { reuseLive: true } : {}), ...target };
 }
 
 /** The same client from query parameters (preview, status). */

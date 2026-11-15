@@ -120,6 +120,8 @@ export interface PolicyContextParser {
 }
 
 interface WatchdogPolicyEngineDeps {
+  /** Opt-in per-rig maintenance: leave held jobs due, before evaluation and accounting. */
+  deliveryDeferred?: (jobId: string, targetSession: string) => boolean;
   jobsRepo: WatchdogJobsRepository;
   historyLog: WatchdogHistoryLog;
   eventBus: EventBus;
@@ -142,6 +144,10 @@ interface WatchdogPolicyEngineDeps {
    * SKIPPING, so an unknown target-generation must never skip a legitimate wake (note-2 inversion).
    */
   resolveTargetGeneration?: (sessionName: string) => string | null;
+  /** Whether an unarchived node still carries this name, even without a recorded tenure. When resolveTargetGeneration is
+   *  unknown, a carried name is unresolved (a context watch skips and measures again); one carried by
+   *  nothing is a seat that's gone (the watch ends). Absent → gone, as before. */
+  targetNameCarried?: (sessionName: string) => boolean;
   /**
    * Issue #1180 — the target seat's latest context-usage sample under its live
    * occupant generation (generation-guarded by the jobs repository). Null = no
@@ -273,8 +279,10 @@ export class WatchdogPolicyEngine {
   private readonly deliver: DeliveryFn;
   private readonly parseSpec: PolicyContextParser;
   private readonly now: () => Date;
+  private readonly deliveryDeferred?: WatchdogPolicyEngineDeps["deliveryDeferred"];
   private readonly policies: Map<string, Policy>;
   private readonly resolveTargetGeneration?: (sessionName: string) => string | null;
+  private readonly targetNameCarried?: (sessionName: string) => boolean;
   private readonly resolveContextUsage?: WatchdogPolicyEngineDeps["resolveContextUsage"];
   private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
   private readonly resolveQueueWait?: WatchdogPolicyEngineDeps["resolveQueueWait"];
@@ -287,6 +295,7 @@ export class WatchdogPolicyEngine {
     this.eventBus = deps.eventBus;
     this.deliver = deps.deliver;
     this.resolveTargetGeneration = deps.resolveTargetGeneration;
+    this.targetNameCarried = deps.targetNameCarried;
     this.resolveContextUsage = deps.resolveContextUsage;
     this.resolvePreDeliveryTerminalReason = deps.resolvePreDeliveryTerminalReason;
     this.onWakeAttempt = deps.onWakeAttempt;
@@ -294,6 +303,7 @@ export class WatchdogPolicyEngine {
     this.resolveDigestEntry = deps.resolveDigestEntry;
     this.parseSpec = deps.parseSpec ?? parseWatchdogSpec;
     this.now = deps.now ?? (() => new Date());
+    this.deliveryDeferred = deps.deliveryDeferred;
     this.policies = new Map();
     for (const p of PHASE_C_BUILTIN_POLICIES) this.policies.set(p.name, p);
     if (deps.additionalPolicies) {
@@ -317,10 +327,18 @@ export class WatchdogPolicyEngine {
     };
   }
 
+  private deferredJobResult(job: WatchdogJob, session = job.targetSession): EvaluationResult | null {
+    if (!this.deliveryDeferred?.(job.jobId, session)) return null;
+    return { job: this.jobsRepo.getById(job.jobId) ?? job,
+      outcome: { action: "skip", reason: "rig_delivery_drain" }, history: null, delivery: null, meaningful: false };
+  }
+
   async evaluate(job: WatchdogJob, evaluationPassStartedAt?: string, pass?: ReminderPass): Promise<EvaluationResult> {
     // A prior job's delivery may have yielded since the scheduler selected this row.
     const inactive = this.inactiveJobResult(job.jobId);
     if (inactive) return inactive;
+    const deferred = this.deferredJobResult(job);
+    if (deferred) return deferred;
     const policy = this.resolvePolicy(job.policy);
     const evaluatedAt = this.now().toISOString();
     const receiptCutoffAt = evaluationPassStartedAt ?? evaluatedAt;
@@ -352,6 +370,8 @@ export class WatchdogPolicyEngine {
     const parsed = this.parseSpec(job.specYaml);
     const isContextUsageThreshold = job.policy === "context-usage-threshold";
     const target = watchdogJobTarget(job, parsed.target);
+    const targetDeferred = this.deferredJobResult(job, target.session);
+    if (targetDeferred) return targetDeferred;
     const occupantGeneration = isContextUsageThreshold
       ? (this.resolveTargetGeneration?.(job.targetSession) ?? null)
       : null;
@@ -432,6 +452,8 @@ export class WatchdogPolicyEngine {
       lastFiredCondition: job.lastFiredCondition,
       occupantGeneration,
       currentGenerationTranscriptPending,
+      occupantGenerationAmbiguous: isContextUsageThreshold && !occupantGeneration
+        && (this.targetNameCarried?.(job.targetSession) ?? false),
       requiredReceiptSatisfied,
       requiredReceiptDeferred,
     };
@@ -442,6 +464,8 @@ export class WatchdogPolicyEngine {
     // Discard every outcome before it can deliver or overwrite the retirement's state.
     const retired = this.inactiveJobResult(job.jobId);
     if (retired) return retired;
+    const deferredAfterPolicy = this.deferredJobResult(job, outcome.action === "send" ? outcome.target.session : target.session);
+    if (deferredAfterPolicy) return deferredAfterPolicy;
 
     if (outcome.action === "skip") {
       // POC parity: skip clears actionable. Loud-vs-quiet decides
@@ -613,6 +637,9 @@ export class WatchdogPolicyEngine {
     // Outside a pass an ordinary park reminder still goes alone, with its continuation's preview.
     const message = digestEntry ? withContinuationPreview(outcome.message, digestEntry.qitemId, digestEntry.continuation) : outcome.message;
 
+    const deferredBeforeEffect = this.deferredJobResult(job, outcome.target.session);
+    if (deferredBeforeEffect) return deferredBeforeEffect;
+
     // Plain wakes retain the proven at-most-once ordering. Structured
     // continuity custody is retry-safe by deterministic qitem id, so its
     // receipt waits until the durable action has completed.
@@ -700,7 +727,7 @@ export class WatchdogPolicyEngine {
       let alone: { held: HeldReminder; entry: ParkReminderEntry | null } | null = null;
       for (const held of group) {
         if (finished.has(held)) continue;
-        if (this.inactiveJobResult(held.job.jobId) || this.terminalBeforeDelivery(held.job, held.evaluatedAt)) {
+        if (this.inactiveJobResult(held.job.jobId) || this.deferredJobResult(held.job, seat) || this.terminalBeforeDelivery(held.job, held.evaluatedAt)) {
           finished.add(held);
           continue;
         }
@@ -720,6 +747,9 @@ export class WatchdogPolicyEngine {
   }
 
   private async deliverDigest(seat: string, digest: HeldReminder[]): Promise<void> {
+    digest = digest.filter(held => !this.deferredJobResult(held.job, seat));
+    if (!digest.length) return;
+    if (digest.length === 1) return this.deliverAlone(seat, digest[0]!, digest[0]!.entry);
     const schedules = digest.map((held) => this.jobsRepo.deliverySchedule(held.job.jobId));
     const members = digest.map((held) => ({ jobId: held.job.jobId, occurrenceId: held.occurrenceId }));
     const digestId = `digest-${createHash("sha256").update(JSON.stringify(members.map((m) => m.occurrenceId).sort())).digest("hex")}`;
@@ -746,6 +776,7 @@ export class WatchdogPolicyEngine {
   /** A held reminder sent on its own, exactly as `evaluate` would have sent it: an ordinary park reminder with its
    *  continuation's preview, anything else verbatim. */
   private async deliverAlone(seat: string, held: HeldReminder, entry: ParkReminderEntry | null): Promise<void> {
+    if (this.deferredJobResult(held.job, seat)) return;
     const schedule = this.jobsRepo.deliverySchedule(held.job.jobId);
     const message = entry ? withContinuationPreview(held.outcome.message, entry.qitemId, entry.continuation) : held.outcome.message;
     const delivery = await this.deliver(

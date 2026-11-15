@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { CommanderError } from "commander";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -1617,6 +1618,118 @@ describe("rig queue CLI", () => {
     expect(call!.path).toContain("compact=1");
     expect(call!.path).not.toContain("as=");
     expect(call!.path).not.toContain("rig=");
+  });
+
+  it("issue2728 list sends repeated exact tags and canonical mission/slice aliases once", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "list", "--all", "--all-rigs",
+      "--tag", "review", "--tag", "publish", "--tag", "mission:launch",
+      "--mission", "launch", "--slice", "docs", "--tag", "comma,separated", "--json",
+    ]);
+    const call = calls.find((candidate) => candidate.method === "GET" && candidate.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    const params = new URLSearchParams(call!.path.split("?")[1]);
+    expect(params.getAll("tag")).toEqual(["review", "publish", "mission:launch", "slice:docs", "comma,separated"]);
+    expect(params.get("limit")).toBe("100");
+  });
+
+  it("issue2728 refuses a blank tag before contacting the daemon", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "queue", "list", "--tag", " ", "--json"]);
+    expect(calls).toHaveLength(0);
+    expect(process.exitCode).toBe(1);
+    expect(logs.join("\n")).toContain('"error":"tag_invalid"');
+    expect(logs.join("\n")).toContain("tag filters cannot be blank");
+  });
+
+  it("issue2728 clears captured list tags after blank refusal when reusing the same command", async () => {
+    const { deps, calls } = makeDeps({
+      routes: {
+        "GET /api/queue/list?tag=fresh&limit=100": { status: 200, data: [] },
+      },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+
+    await program.parseAsync([
+      "node", "rig", "queue", "list", "--all", "--all-rigs", "--full", "--tag", "stale", "--tag", " ", "--json",
+    ]);
+    expect(calls).toHaveLength(0);
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = undefined;
+    await program.parseAsync([
+      "node", "rig", "queue", "list", "--all", "--all-rigs", "--full", "--tag", "fresh", "--json",
+    ]);
+
+    const call = calls.find((candidate) => candidate.method === "GET" && candidate.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    const params = new URLSearchParams(call!.path.split("?")[1]);
+    expect(params.getAll("tag")).toEqual(["fresh"]);
+  });
+
+  it.each([
+    {
+      after: "an invalid option argument",
+      abortedArgs: ["node", "rig", "queue", "list", "--tag", "stale", "--limit", "0"],
+      exitCode: "commander.invalidArgument",
+      nextArgs: ["node", "rig", "queue", "list", "--all", "--all-rigs", "--json"],
+      expectedTags: [],
+    },
+    {
+      after: "help following tag and mission collection",
+      abortedArgs: ["node", "rig", "queue", "list", "--tag", "stale", "--mission", "old", "--help"],
+      exitCode: "commander.helpDisplayed",
+      nextArgs: ["node", "rig", "queue", "list", "--all", "--all-rigs", "--slice", "fresh", "--json"],
+      expectedTags: ["slice:fresh"],
+    },
+  ])("issue2728 clears list tags after $after when reusing the same command", async ({ abortedArgs, exitCode, nextArgs, expectedTags }) => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    program.commands.find((command) => command.name() === "queue")!.commands.find((command) => command.name() === "list")!.exitOverride();
+    program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+    let abortedWith: unknown;
+    try {
+      await program.parseAsync(abortedArgs);
+    } catch (error) {
+      abortedWith = error;
+    }
+    expect(abortedWith).toBeInstanceOf(CommanderError);
+    expect((abortedWith as CommanderError).code).toBe(exitCode);
+    expect(calls).toHaveLength(0);
+
+    await program.parseAsync(nextArgs);
+
+    const call = calls.find((candidate) => candidate.method === "GET" && candidate.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    const params = new URLSearchParams(call!.path.split("?")[1]);
+    expect(params.getAll("tag")).toEqual(expectedTags);
+    expect(params.has("tag")).toBe(expectedTags.length > 0);
+  });
+
+  it("issue2728 does not print rows when a daemon returns a row missing a requested tag", async () => {
+    const { deps, calls } = makeDeps({
+      routes: {
+        "GET /api/queue/list?tag=review&limit=100": {
+          status: 200,
+          data: [{ qitemId: "qitem-unfiltered", tags: ["other"] }],
+        },
+      },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "queue", "list", "--all", "--all-rigs", "--full", "--tag", "review", "--json"]);
+    expect(calls).toHaveLength(1);
+    expect(process.exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("filter_unsupported");
+    expect(logs.join("\n")).not.toContain("qitem-unfiltered");
   });
 
   it("list -a includes history (no activeOnly param)", async () => {

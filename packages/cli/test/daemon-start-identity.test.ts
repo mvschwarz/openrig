@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { startDaemon, getDaemonStatus, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { acquireDaemonStartLock, currentBootId } from "../src/daemon-start-lock.js";
+// Resolve the startup import before a fake clock can finish with no timer yet scheduled.
+import "@openrig/daemon/instance-initialization";
 import { createProcessLiveness, readProcessState } from "../src/commands/daemon.js";
 
 afterEach(() => vi.useRealTimers());
@@ -117,13 +119,78 @@ describe("child-bound startup", () => {
       expect((outcome as Error).message).toMatch(/identity mismatch.*observed 888/);
       expect(f.files.has(STATE_FILE)).toBe(false);
     });
+    it("keeps waiting for the same child after 20 seconds and publishes its verified readiness at 45 seconds", async () => {
+      vi.useFakeTimers();
+      const progress = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const f = fixture(); const fetch = f.deps.fetch; const began = Date.now();
+        f.deps.fetch = async (url) => {
+          const response = await fetch(url);
+          if (Date.now() - began < 45_000) throw Object.assign(new Error("still initializing"), { code: "ECONNREFUSED" });
+          return response;
+        };
+        const pending = startDaemon(opts, f.deps).catch((error: Error) => error);
+        await vi.advanceTimersByTimeAsync(25_000);
+        expect(f.files.has(STATE_FILE)).toBe(false);
+        expect(f.deps.spawn).toHaveBeenCalledTimes(1);
+        expect(f.lock.recordChild).toHaveBeenCalledWith(f.child.pid);
+        expect(f.lock.release).not.toHaveBeenCalled();
+        expect(progress).toHaveBeenCalledWith(expect.stringContaining("Waiting for daemon child 12345 readiness"));
+        await vi.runAllTimersAsync();
+        const outcome = await pending;
+        expect(outcome instanceof Error ? outcome.message : outcome.pid).toBe(f.child.pid);
+        expect(Date.now() - began).toBe(45_000);
+        expect(JSON.parse(f.files.get(STATE_FILE)!)).toMatchObject({ pid: f.child.pid, port: opts.port, host: opts.host });
+        expect(f.deps.spawn).toHaveBeenCalledTimes(1);
+        expect(f.lock.release).toHaveBeenCalledWith(false);
+        expect(f.deps.kill).not.toHaveBeenCalled();
+        expect(progress.mock.calls.length).toBeLessThanOrEqual(3);
+      } finally { progress.mockRestore(); }
+    });
+    it("stops on a child exit after the old deadline instead of waiting out the new cap", async () => {
+      vi.useFakeTimers();
+      const progress = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const f = fixture(); const fetch = f.deps.fetch;
+        f.deps.fetch = async (url) => (await fetch(url), new Promise(() => {}));
+        setTimeout(() => { f.child.exitCode = 1; f.child.emit("exit", 1, null); }, 35_000);
+        const { outcome, elapsed } = await settle(f);
+        expect((outcome as Error).message).toMatch(/exited/);
+        expect(elapsed).toBe(35_000);
+        expect(f.files.has(STATE_FILE)).toBe(false);
+        expect(f.deps.spawn).toHaveBeenCalledTimes(1);
+        expect(f.deps.kill).not.toHaveBeenCalled();
+        expect(f.lock.release).toHaveBeenCalledWith(false);
+      } finally { progress.mockRestore(); }
+    });
+    it("keeps a quick verified start immediate without a waiting progress line", async () => {
+      vi.useFakeTimers();
+      const progress = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const f = fixture(); const { outcome, elapsed } = await settle(f);
+        expect(outcome instanceof Error ? outcome.message : outcome.pid).toBe(f.child.pid);
+        expect(elapsed).toBe(0);
+        expect(f.deps.spawn).toHaveBeenCalledTimes(1);
+        expect(progress).not.toHaveBeenCalled();
+      } finally { progress.mockRestore(); }
+    });
     it("returns pending within one readiness deadline without stopping its still-starting child", async () => {
       vi.useFakeTimers();
       const f = fixture(); const fetch = f.deps.fetch;
-      f.deps.fetch = async (url) => (await fetch(url), new Promise(() => {}));
+      const probeStarts: number[] = [];
+      const began = Date.now();
+      f.deps.fetch = async (url) => {
+        await fetch(url);
+        probeStarts.push(Date.now());
+        return new Promise(() => {});
+      };
       const { outcome, elapsed } = await settle(f);
+      expect(elapsed).toBe(180_000);
+      expect(probeStarts.length).toBeGreaterThan(60);
+      expect(probeStarts.every(at => at < began + 180_000)).toBe(true);
+      expect(probeStarts.slice(1).every((at, i) => at - probeStarts[i]! <= 2_250)).toBe(true);
       expect((outcome as Error).message).toMatch(/Last probe: .*timed out|Last probe: .*healthz/);
-      expect(elapsed).toBeLessThanOrEqual(20_000);
+      expect(elapsed).toBeLessThanOrEqual(180_000);
       expect(f.files.has(STATE_FILE)).toBe(false);
       expect(f.deps.kill).not.toHaveBeenCalled();
       expect(f.lock.release).toHaveBeenCalledWith(true);
@@ -137,7 +204,7 @@ describe("child-bound startup", () => {
       const fetch = f.deps.fetch; const urls: string[] = [];
       f.deps.fetch = async (url) => {
         const res = await fetch(url);
-        if (urls.push(url) - 1 === at) vi.setSystemTime(Date.now() + 21_000);
+        if (urls.push(url) - 1 === at) vi.setSystemTime(Date.now() + 181_000);
         if (secondary && url.includes("127.0.0.2")) throw new Error("timeout");
         return res;
       };
@@ -183,7 +250,7 @@ describe("child-bound startup", () => {
       f.deps.fetch = async (url) => (await fetch(url), calls++ % 2 === 0 ? { ok: true, json: async () => f.body } : new Promise(() => {}));
       const { outcome, elapsed } = await settle(f);
       expect((outcome as Error).message).toMatch(/listener verification is incomplete.*reservation retained/);
-      expect(elapsed).toBeLessThanOrEqual(20_000);
+      expect(elapsed).toBeLessThanOrEqual(180_000);
       expect(f.files.has(STATE_FILE)).toBe(false);
       expect(f.deps.kill).not.toHaveBeenCalled();
     });
@@ -433,7 +500,7 @@ it.each(["missing", "stale"] as const)("keeps a slow child discoverable with %s 
     expect(message).toContain(path.join(path.dirname(STATE_FILE), "daemon-start.lock"));
     expect(message).toContain("only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'");
     expect(message).toContain("'rig daemon stop' cannot target this unpublished child");
-    expect(Date.now() - began).toBeLessThanOrEqual(20_000);
+    expect(Date.now() - began).toBeLessThanOrEqual(180_000);
     expect(f.deps.kill).not.toHaveBeenCalled();
     expect(f.child.exitCode).toBeNull();
     expect(f.files.get(STATE_FILE)).toBe(previousState);

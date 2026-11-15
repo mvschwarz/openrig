@@ -245,7 +245,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig import <path>` | — | `--instantiate`<br>`--materialize-only`<br>`--workspace-only`<br>`--preflight`<br>`--target-rig <rigId>`<br>`--rig-root <root>`<br>`--cwd <path>` |
+| `rig import <path>` | — | `--instantiate`<br>`--materialize-only`<br>`--operation-id <uuid>`<br>`--json`<br>`--workspace-only`<br>`--preflight`<br>`--target-rig <rigId>`<br>`--rig-root <root>`<br>`--cwd <path>` |
 
 ### ui
 
@@ -551,7 +551,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue show <qitemId>` | — | `--full`<br>`--json`<br>`--host <id>` |
 | `rig queue artifact <qitemId>` | — | `--root <name>`<br>`--json` |
 | `rig queue transitions <qitemId>` | — | `--json`<br>`--full`<br>`--host <id>` |
-| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json`<br>`--host <id>` |
+| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--tag <tag>` (repeatable, AND)<br>`--mission <id>` (repeatable)<br>`--slice <id>` (repeatable)<br>`--limit <n>`<br>`--json`<br>`--host <id>` |
 | `rig queue overdue` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue undelivered` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue inbox-drop <destinationSession>` | — | `--sender <session>`<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <inboxId>`<br>`--json` |
@@ -561,6 +561,8 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue outbox-record` | — | `--sender <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <outboxId>`<br>`--json` |
 | `rig queue outbox-list <senderSession>` | — | `--limit <n>`<br>`--json` |
 | `rig queue erase` | — | `--members <file>`<br>`--rig <id>`<br>`--ids <file>`<br>`--action <action>` (`delete`, `scrub`)<br>`--routine`<br>`--apply`<br>`--actor <session>`<br>`--json` |
+
+`rig queue list` accepts repeated exact, case-sensitive `--tag <tag>` filters and requires every tag to match before the result limit. `--mission <id>` and `--slice <id>` add the exact `mission:<id>` and `slice:<id>` tags. Exact duplicates collapse; blank values are rejected; commas inside a tag are literal. The CLI and MCP report a visibly unfiltered nonempty response from an older daemon, but an empty response cannot establish whether the daemon applied the filter.
 
 ### slack
 
@@ -1140,7 +1142,7 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat held-messages <seat>` | — | `--limit <n>`<br>`--offset <n>`<br>`--id <id>`<br>`--json` |
 | `rig seat retire-held-message <seat> <id>` | — | `--reason <text>` **required**<br>`--json` |
 | `rig seat status <seat>` | — | `--json` |
-| `rig seat handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
+| `rig seat handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--recover`<br>`--json` |
 | `rig seat switch-client <seat>` | — | `--to-window <n>`<br>`--client <id>`<br>`--json` |
 | `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |
 | `rig seat set-terminal-policy <seat>` | — | `--preset <preset>` **required**<br>`--helper <addresses...>`<br>`--rig-default`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json`<br>`--peer-compaction <decision>`<br>`--peer-model <decision>`<br>`--self-compaction <decision>`<br>`--self-model <decision>`<br>`--openrig-compaction <decision>`<br>`--openrig-model <decision>` |
@@ -1152,6 +1154,8 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |
 | `rig seat set-cwd <seat>` | — | `--cwd <directory>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat runtime-home <seat>` | — | `--json` |
+| `rig seat record-runtime-home <seat>` | — | `--home <directory>` **required**<br>`--expect-occupant <generation>` **required**<br>`--expect-original <id>` **required**<br>`--expect-revision <n>` **required**<br>`--reason <text>` **required**<br>`--operation-id <id>`<br>`--operator <address>`<br>`--json` |
 | `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>`<br>`--plan`<br>`--stop`<br>`--operator <address>`<br>`--json` |
 | `rig seat restart <seat>` | — | `--keep-conversation` **required**<br>`--reason <text>`<br>`--plan`<br>`--verify`<br>`--expect-account <text>`<br>`--operator <address>`<br>`--host <id>`<br>`--json` |
 | `rig seat continue <seat>` | — | `--json` |
@@ -1192,7 +1196,7 @@ off, draft-aware and hold modes, immediate refusal results and held-message insp
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
+| `rig handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--recover`<br>`--json` |
 
 A rebuild starts a new native conversation and primes it from durable artifacts. In the JSON result,
 `currentStatus.continuityOutcome` describes the executed source (`rebuilt`, `forked`, `fresh`, or unknown

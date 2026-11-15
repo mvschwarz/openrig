@@ -207,6 +207,20 @@ function createMockDaemon() {
         }));
         return;
       }
+      if (sourceRef.includes("skipped")) {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          installId: "inst-skip-1",
+          packageId: "pkg-1",
+          packageName: "guidance-pkg",
+          applied: [],
+          deferred: [],
+          conflicts: [],
+          verification: { passed: true },
+          notes: ["guidance_block_markers_damaged: /repo/CLAUDE.md: guidance-pkg has a BEGIN or END marker without its pair"],
+        }));
+        return;
+      }
       if (sourceRef.includes("merge")) {
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -381,6 +395,14 @@ describe("rig package", () => {
     expect(output).toContain("merge_block");
     expect(output).toContain("/repo/CLAUDE.md");
     expect(output).toContain("inst-merge-1");
+  });
+
+  it("install with a guidance file left as it is: names the file and the reason, exit 0", async () => {
+    const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "install", "/skipped/path", "--target", "/repo", "--allow-merge"]));
+    const output = logs.join("\n");
+    expect(output).toContain("Left as it is:");
+    expect(output).toContain("  guidance_block_markers_damaged: /repo/CLAUDE.md: guidance-pkg has a BEGIN or END marker without its pair");
+    expect(exitCode).toBeUndefined();
   });
 
   // Test 8: install conflicts (409) → exitCode 1

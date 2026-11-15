@@ -12,6 +12,8 @@ import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
+import { readWakeOutcome } from "./connection-contract.js";
+import { runSyncSite } from "./sync-site-wrap.js";
 // S01 (OPR.0.5.5.1) — WAKE OR ESCALATE ON BATONS. A handoff whose wake fails must never
 // silently park: today one failed nudge is recorded and nothing follows (the measured
 // dominant 0.5.3 failure class — a perfect surviving packet, a recipient never woken).
@@ -383,28 +385,44 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
 type WakeMode = "failed" | "unconfirmed" | "held";
 
 function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
-  if (!lastNudgeResult) return null;
-  if (lastNudgeResult.startsWith("failed:")) return "failed";
-  // #344 follow-up — a typing-guard refusal (retained:) wrote NO pane input, so an
-  // unclaimed baton keeps a retry path instead of stranding behind a terminal
-  // recovery. Admission is scoped to unclaimed batons by unclaimedWakeMode(): the
-  // claimed parked-owner arm's retry readback still selects `failed:%` only, so
-  // admitting retained there would make recovery OWN a row that nothing retries.
-  // Retry behaviour, as it actually runs: the first retry re-probes the guard and
-  // records a fresh attempt; later retries reuse the same delivery id, whose
-  // retained readback returns `retained` again even after the guard has cleared —
-  // so the row re-probes once and then escalates rather than looping probes.
-  // A draft-aware hold can clear on its own (the draft is sent or cleared), so it keeps that retry path. A hold or a
-  // level that holds the wake is the person's choice: retrying is held again, so it reads as held.
-  if (lastNudgeResult === "retained:typing_guard") return "held";
-  if (lastNudgeResult.startsWith("retained:")) return "failed";
-  if (
-    lastNudgeResult === "delivered-ack-pending" ||
-    lastNudgeResult.startsWith("indeterminate:") ||
-    lastNudgeResult.startsWith("gateway-owned:")
-  )
-    return "unconfirmed";
-  return null; // verified (or unknown vocabulary) — never enters the ladder
+  // A claimed row's unconfirmed result is presented as `claimed` (presentedNudgeResult): the claim is pickup, which
+  // outranks any wake outcome.
+  if (lastNudgeResult === "claimed") return null;
+  const outcome = readWakeOutcome(lastNudgeResult);
+  if (!outcome) return null;
+  switch (outcome.fact) {
+    // Nothing reached the seat, so a retry can't double-deliver. An address no route can carry (`none`) has nothing
+    // to retry; its own notice covers it.
+    case "not-delivered":
+      return outcome.route === "none" ? null : "failed";
+    // A webhook failure after the POST: its effect is unknown, but it keeps the failed path and retry policy it has
+    // always had.
+    case "failed-effect-unknown":
+      return "failed";
+    // #344 follow-up — a typing-guard refusal (retained:) wrote NO pane input, so an
+    // unclaimed baton keeps a retry path instead of stranding behind a terminal
+    // recovery. Admission is scoped to unclaimed batons by unclaimedWakeMode(): the
+    // claimed parked-owner arm's retry readback still selects `failed:%` only, so
+    // admitting retained there would make recovery OWN a row that nothing retries.
+    // Retry behaviour, as it actually runs: the first retry re-probes the guard and
+    // records a fresh attempt; later retries reuse the same delivery id, whose
+    // retained readback returns `retained` again even after the guard has cleared —
+    // so the row re-probes once and then escalates rather than looping probes.
+    // A draft-aware hold can clear on its own (the draft is sent or cleared), so it keeps that retry path. A hold or a
+    // level that holds the wake is the person's choice: retrying is held again, so it reads as held.
+    case "held":
+      return outcome.heldBy === "typing-guard" ? "held" : "failed";
+    // A rendered terminal wake, or a hosted trigger that took the ring (the stuck sweep owns a hosted member's
+    // unclaimed work), never enters. An unverified terminal send rides the confirmation path.
+    case "accepted":
+      return outcome.renderVerified || outcome.route === "hosted-trigger" ? null : "unconfirmed";
+    // Unknown, including a recorded result no reader recognises: it never retries (input may have arrived), and it
+    // escalates past the window when nothing picked the work up, instead of reading as delivered.
+    case "queued-not-started":
+    case "turn-started":
+    case "unknown":
+      return "unconfirmed";
+  }
 }
 
 /** A retained (typing-guard) result is retryable ONLY for an unclaimed baton. The
@@ -416,7 +434,7 @@ function classifyWakeResult(lastNudgeResult: string | null): WakeMode | null {
 function unclaimedWakeMode(row: Pick<QueueItem, "state" | "claimedAt" | "handedOffFrom" | "lastNudgeResult">): WakeMode | null {
   const mode = classifyWakeResult(row.lastNudgeResult);
   if (mode === null) return null;
-  const retained = row.lastNudgeResult?.startsWith("retained:") ?? false;
+  const retained = readWakeOutcome(row.lastNudgeResult)?.fact === "held";
   if (retained && !(row.state === "pending" && !row.claimedAt && row.handedOffFrom)) return null;
   return mode;
 }
@@ -559,7 +577,13 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string, a
   };
 }
 
-function appendMarker(repo: QueueRepository, row: QueueItem, note: string): void {
+function deliveryHeld(repo: QueueRepository, row: QueueItem): boolean {
+  return repo.deliveryDrains.holds(row.destinationSession);
+}
+
+function appendMarker(repo: QueueRepository, row: QueueItem, note: string, admittedOutcome = false): void {
+  // A new drain defers admission, not the durable outcome of an attempt already admitted.
+  if (!admittedOutcome && deliveryHeld(repo, row)) return;
   repo.transitionLog.append({
     qitemId: row.qitemId,
     state: row.state,
@@ -659,7 +683,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       deps.resolveOrchestrator ?? ((session: string) => {
         return resolveEscalationOwner(deps.db, session, target => deps.queueRepo.acceptsDestination(target)).owner;
       });
-    const attemptWake =
+    const sendWake =
       deps.attemptWake ??
       (async (qitemId: string, target: string): Promise<string> => {
         // A ladder retry is OpenRig's own scheduling on the row, whoever created it.
@@ -669,6 +693,12 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         await deps.queueRepo.maybeNudge(qitemId, target, true, OPENRIG_SENDER, bodyOverride, "openrig");
         return deps.queueRepo.getById(qitemId)?.lastNudgeWireResult ?? "indeterminate:no transport available";
       });
+
+    const attemptWake = async (id: string, target: string): Promise<string> => {
+      const row = deps.queueRepo.getById(id);
+      if ((row && deliveryHeld(deps.queueRepo, row)) || deps.queueRepo.deliveryDrains.holds(target)) return "deferred:rig_delivery_drain";
+      return sendWake(id, target);
+    };
 
     const actions: WakeLadderAction[] = [];
     try {
@@ -759,7 +789,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
     for (const { qitem_id } of [...batonRows, ...parkedOwnerFailureRows]) {
       const row = deps.queueRepo.getById(qitem_id);
-      if (!row || recoversEscalationNotice(deps, row)) continue;
+      if (!row || deliveryHeld(deps.queueRepo, row) || recoversEscalationNotice(deps, row)) continue;
       const usagePool = usagePoolBySeat.get(row.destinationSession);
       // OPR.0.5.6.24: the usage-limit PARK mutation applies only to pending
       // batons — a claimed in-progress row is someone's live work and is never
@@ -775,6 +805,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           );
           blockerByPool.set(usagePool.poolKey, blocker);
         }
+        if (deliveryHeld(deps.queueRepo, row)) continue;
         deps.queueRepo.update({
           qitemId: row.qitemId,
           actorSession: LADDER_ACTOR,
@@ -840,12 +871,14 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           actions.push({ qitemId: row.qitemId, action: "resume" });
         }
         if (budgetFor(row.destinationSession) >= cap) continue; // destination-bounded (F3)
-        windowBudget.set(row.destinationSession, budgetFor(row.destinationSession) + 1);
         const outcome = await attemptWake(row.qitemId, row.destinationSession);
+        if (outcome === "deferred:rig_delivery_drain") continue;
+        windowBudget.set(row.destinationSession, budgetFor(row.destinationSession) + 1);
         appendMarker(
           deps.queueRepo,
           row,
           `${LADDER_ATTEMPT_PREFIX} ${view.attempts + 1}/${cap} outcome=${outcome}`,
+          true,
         );
         actions.push({ qitemId: row.qitemId, action: "retry", target: row.destinationSession });
         continue;
@@ -863,15 +896,23 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           ? `wake failed ${view.attempts} times over ${minutesSince(view.firstMarkerTs ?? row.tsCreated, now)} min`
           : mode === "held"
             ? `held by ${row.destinationSession}'s typing guard for ${minutesSince(row.tsCreated, now)} min: nothing was typed, and it isn't retried`
-            : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
+            : readWakeOutcome(row.lastNudgeResult)?.route === null
+              ? `wake outcome unknown (unrecognised result "${row.lastNudgeResult!.slice(0, 80)}") with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`
+              : `unconfirmed delivery with no pickup evidence over ${minutesSince(row.tsCreated, now)} min`;
       if (hasConsumedEscalationHop(deps.db, row.qitemId)) {
         if (!due || suspended) continue;
         const consumedReason = `${reason}; escalates_to one-hop delivery already used; existing fallback retained`;
         // Keep this recovery visible without sharing the ordinary destination aggregate or forwarding another hop.
-        await ensureEscalationRow(deps, row.destinationSession, humanAlertCarrier(deps, row.destinationSession, row.sourceSession),
+        const escalation = await ensureEscalationRow(deps, row.destinationSession, humanAlertCarrier(deps, row.destinationSession, row.sourceSession),
           [{ row, reason: consumedReason }], consumedReason, `consumed-hop:${row.qitemId}`, [ESCALATION_HOP_TAG]);
+        if (!escalation) continue;
+        const carrierDeferred = () => {
+          const carrier = deps.queueRepo.getById(escalation.qitemId);
+          return !!carrier && deliveryHeld(deps.queueRepo, carrier);
+        };
+        if (deliveryHeld(deps.queueRepo, row) || carrierDeferred()) continue;
         if (!view.orchRung) appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${consumedReason}`);
-        if (await operatorRung(deps, row, consumedReason, actions, view)) {
+        if (await operatorRung(deps, row, consumedReason, actions, view, true, carrierDeferred)) {
           appendExhausted(deps.queueRepo, row, "consumed escalation hop reached operator fallback");
           exhaustedThisTick += 1;
         }
@@ -885,6 +926,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     // F3 — per-destination aggregation: ONE escalation carrying the row list, refreshed
     // not duplicated (the S02 idempotency shape), and rung markers on every member baton.
     for (const [dest, members] of escalating) {
+      if (members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
       const orch = openEscalationOwner(deps, escalationDedupTag(dest)) ?? resolveOrch(dest);
       const route = !deps.resolveOrchestrator
         ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
@@ -894,6 +936,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       // F3 — the aggregate refresh is detection-gated (the S02 idempotency shape): a
       // live escalation group refreshes its one open row every pass, no wake attached.
       await refreshEscalationRowIfExists(deps, dest, members);
+      if (members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
 
       const actionable = members.filter((m) => m.due && !m.suspended);
       const needsOrchRung = actionable.filter((m) => !m.view.orchRung);
@@ -908,14 +951,20 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           // escalations view and the health count
           // expose it — it stays open past the batons' exhaustion.
           const floorDest = humanAlertCarrier(deps, dest, needsOrchRung[0]!.row.sourceSession);
-          await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason);
+          const escalation = await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason);
+          if (!escalation) continue;
+          const carrierDeferred = () => {
+            const carrier = deps.queueRepo.getById(escalation.qitemId);
+            return !!carrier && deliveryHeld(deps.queueRepo, carrier);
+          };
+          if (members.some(m => deliveryHeld(deps.queueRepo, m.row)) || carrierDeferred()) continue;
           for (const m of needsOrchRung) {
             appendMarker(
               deps.queueRepo,
               m.row,
               `${LADDER_RUNG_PREFIX} orchestrator self-skip (resolves to ${orch === null ? "no orchestrator" : "destination"}) reason=${m.reason}`,
             );
-            if (await operatorRung(deps, m.row, m.reason, actions, m.view)) {
+            if (await operatorRung(deps, m.row, m.reason, actions, m.view, true, carrierDeferred)) {
               appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
               exhaustedThisTick += 1;
             }
@@ -923,13 +972,16 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         } else {
           const escRow = await ensureEscalationRow(deps, dest, orch, members, reason);
           // An already-open recovery retains its owner, including a claim made before topology changed.
+          if (!escRow || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
           const recoveryOwner = deps.queueRepo.getById(escRow.qitemId)?.destinationSession ?? orch;
           const outcome = await attemptWake(escRow.qitemId, recoveryOwner);
+          if (outcome === "deferred:rig_delivery_drain") continue;
           for (const m of needsOrchRung) {
             appendMarker(
               deps.queueRepo,
               m.row,
               `${LADDER_RUNG_PREFIX} orchestrator -> ${recoveryOwner} outcome=${outcome} reason=${m.reason}`,
+              true,
             );
             actions.push({ qitemId: m.row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });
             if (!outcome.startsWith("failed:")) {
@@ -939,6 +991,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
                 deps.queueRepo,
                 m.row,
                 `escalated to orchestrator (${outcome === "verified" ? "delivered" : outcome})`,
+                true,
               );
               exhaustedThisTick += 1;
             }
@@ -949,8 +1002,12 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
       // Orchestrator rung recorded and failed → advance to the operator rung.
       for (const m of actionable) {
-        if (m.view.orchRung && (m.view.orchRungFailed || m.view.opUnresolved !== null) && !m.view.opEngineDispatched) {
-          if (await operatorRung(deps, m.row, m.reason, actions, m.view)) {
+        // A self-skip whose readiness was deferred still owes its first operator rung.
+        if (m.view.orchRung && (m.view.orchRungFailed || !m.view.opRung || m.view.opUnresolved !== null) && !m.view.opEngineDispatched) {
+          if (await operatorRung(deps, m.row, m.reason, actions, m.view, true, () => {
+            const carrier = openEscalationOwner(deps, escalationDedupTag(dest));
+            return !!carrier && deps.queueRepo.deliveryDrains.holds(carrier);
+          })) {
             appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
             exhaustedThisTick += 1;
           }
@@ -1042,6 +1099,33 @@ const PROMPT_CLEARED_NOTE = "prompt escalation: the seat's prompt read clear";
  * escapes, so this superset (LIKE also ignores case) loses no row the exact json_each test below accepts. It only
  * spares JSON parsing of the rows that cannot match. The alert tag holds no LIKE wildcard. */
 const PROMPT_ALERT_ROWS = `(tags LIKE '%"${PROMPT_ALERT_TAG}"%' OR tags LIKE '%\\%')`;
+
+/** The rows a prompt refusal can still concern: open rows, and the rows an open prompt alert recovers (its exact
+ * `recovery-for:<id>` tags), each kept when one of its own transitions carries a refusal note. Read from the open rows
+ * (the state index) and then each candidate's own transitions (the qitem index), not by matching the note across the
+ * whole transition log, which only grows. Ordered by each row's first refusal: the order the whole-log read returned
+ * under its observed plan (it had no ORDER BY), now explicit. A recovered id is cut after the 13-byte ASCII prefix as
+ * bytes, because text substr stops at a NUL, which a caller-supplied id can hold; the join then compares it exactly. */
+export const PROMPT_REFUSAL_CANDIDATES_SQL = `WITH scored AS MATERIALIZED (
+    SELECT q.qitem_id, q.destination_session,
+      (SELECT min(t.transition_id) FROM queue_transitions t
+        WHERE t.qitem_id = q.qitem_id AND t.transition_note LIKE @refused) AS first_refusal
+    FROM (
+      SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+      UNION
+      SELECT CAST(substr(CAST(j.value AS BLOB), 14) AS TEXT) FROM queue_items a,
+        json_each(CASE WHEN json_valid(a.tags) THEN a.tags ELSE '[]' END) j
+      WHERE a.state IN ('pending','in-progress','blocked') AND json_valid(a.tags)
+        AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(a.tags) THEN a.tags ELSE '[]' END) WHERE value = @alertTag)
+        AND j.type = 'text' AND substr(j.value, 1, 13) = 'recovery-for:'
+    ) c JOIN queue_items q ON q.qitem_id = c.qitem_id)
+  SELECT qitem_id, destination_session FROM scored WHERE first_refusal IS NOT NULL ORDER BY first_refusal`;
+
+/** Named in the slow-operation log, so a stall during it is attributed to this read: one begin and one end record per tick. */
+export function readPromptRefusalCandidates(db: Database.Database): Array<{ qitem_id: string; destination_session: string }> {
+  return runSyncSite("queue.wake_ladder.prompt_candidates", () => db.prepare(PROMPT_REFUSAL_CANDIDATES_SQL)
+    .all({ refused: `${REFUSED_PREFIX}%`, alertTag: PROMPT_ALERT_TAG }) as Array<{ qitem_id: string; destination_session: string }>);
+}
 
 /** Active watchdog jobs whose latest attempt was refused at a target's prompt. A run of refusals starts
  * after the job's latest other entry at that target (looked up past the 50-entry read when the read is all refusals) or
@@ -1173,13 +1257,7 @@ async function advancePromptRefusals(
       return null;
     }
   };
-  const candidates = deps.db.prepare(`SELECT DISTINCT q.qitem_id, q.destination_session FROM queue_items q
-    JOIN queue_transitions t ON t.qitem_id = q.qitem_id
-    WHERE t.transition_note LIKE ? AND (q.state IN ('pending','in-progress','blocked') OR EXISTS (
-      SELECT 1 FROM queue_items a WHERE a.state IN ('pending','in-progress','blocked')
-      AND json_valid(a.tags) AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
-      AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = 'recovery-for:' || q.qitem_id)))`)
-    .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string; destination_session: string }>;
+  const candidates = readPromptRefusalCandidates(deps.db);
   // Every tag value of every final prompt disposition, read once per tick when the first episode needs it,
   // rather than one scan of all terminal rows per open episode. The row predicates are the per-episode lookup's;
   // membership is the same exact json_each value equality; and nothing below writes before the last episode is
@@ -1206,7 +1284,7 @@ async function advancePromptRefusals(
   };
   for (const { qitem_id, destination_session } of candidates) {
     const primary = readCandidate(qitem_id, destination_session);
-    if (!primary || recoversEscalationNotice(deps, primary)) continue;
+    if (!primary || deliveryHeld(deps.queueRepo, primary) || recoversEscalationNotice(deps, primary)) continue;
     // The shared no-route change is prospective, never a revival of old ladders.
     if (readLadder(deps.db, qitem_id).exhausted) continue;
     for (const episode of openPromptRefusals(deps.queueRepo.listTransitions(qitem_id))) {
@@ -1252,6 +1330,7 @@ async function advancePromptRefusals(
     return clearedAlerts.get(dest)!;
   };
   for (const job of refusedWatchdogJobs(deps.db, clearedAlert, readAt)) {
+    if (deps.queueRepo.deliveryDrains.holds(job.dest, job.jobId)) continue;
     const tag = `${PROMPT_EPISODE_TAG}${job.key}`;
     if (closedEpisode(tag)) continue;
     let group = groups.get(job.dest);
@@ -1274,7 +1353,7 @@ async function advancePromptRefusals(
   if (deps.readHookReviews) {
     try {
       for (const observation of await deps.readHookReviews()) {
-        if (!freshHook(observation)) continue;
+        if (!freshHook(observation) || deps.queueRepo.deliveryDrains.holds(observation.destination)) continue;
         hookObservations.set(observation.destination, observation);
         const key = `${PROMPT_EPISODE_TAG}${observation.destination}|hook-review:${observation.episode}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
         if (closedEpisode(key)) continue;
@@ -1369,6 +1448,7 @@ async function advancePromptRefusals(
   }
 
   for (const [dest, group] of groups) {
+    if (deps.queueRepo.deliveryDrains.holds(dest) || [...group.rows.values()].some(row => deliveryHeld(deps.queueRepo, row))) continue;
     if (unreadableDestinations.has(dest)) continue;
     const state = promptState(dest);
     if (state === "clear") {
@@ -1415,6 +1495,7 @@ async function advancePromptRefusals(
           ...(group.rowKeys.get(member.row.qitemId) ?? [])] : [];
         const continuation = await ensureEscalationRow(deps, dest, humanAlertCarrier(deps, dest, member.row.sourceSession),
           [{ row: member.row, reason }], reason, `consumed-hop:${member.row.qitemId}`, [ESCALATION_HOP_TAG, ...promptTags]);
+        if (!continuation || deliveryHeld(deps.queueRepo, member.row)) continue;
         if (!view.orchRung) appendMarker(deps.queueRepo, member.row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
         // A choice alert's tags and dispatch marker must live on the same durable row the shared gate reads.
         const operatorRow = choiceOnly ? deps.queueRepo.getById(continuation.qitemId)! : member.row;
@@ -1432,7 +1513,8 @@ async function advancePromptRefusals(
           members.splice(i, 1);
           continue;
         }
-        if (await operatorRung(deps, operatorRow, reason, actions, operatorView, choiceOnly)) {
+        if (await operatorRung(deps, operatorRow, reason, actions, operatorView, choiceOnly,
+          () => deps.queueRepo.deliveryDrains.holds(dest) || deliveryHeld(deps.queueRepo, member.row))) {
           // Choice custody stays on the alert until it closes; exhausting its source now would retire the alert next tick.
           if (!choiceOnly) appendExhausted(deps.queueRepo, member.row, "consumed escalation hop reached operator fallback");
           if (choiceOnly) appendExhausted(deps.queueRepo, operatorRow, "operator rung resolved");
@@ -1457,6 +1539,7 @@ async function advancePromptRefusals(
     const aggregate = await ensureEscalationRow(deps, dest,
       toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0]) : orch!, members, reason,
       `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys], group.jobs);
+    if (!aggregate || deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
     const addedKeys = keys.filter(key => !row.tags?.includes(key));
@@ -1506,6 +1589,7 @@ async function advancePromptRefusals(
       if (!current || !freshHook(current) || current.state !== "blocked"
         || current.episode !== hookObservations.get(dest)?.episode) continue;
     }
+    if (deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     if (promptState(dest) !== "blocked") continue;
     const freshMembers = members.map(m => readCandidate(m.row.qitemId, dest));
     if (unreadableDestinations.has(dest) || (!group.jobs.size && !group.hookReview && !freshMembers.some(fresh =>
@@ -1514,9 +1598,10 @@ async function advancePromptRefusals(
       if (!toOperator) {
         const recoveryOwner = row.destinationSession;
         const outcome = await attemptWake(row.qitemId, recoveryOwner);
-        appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator -> ${recoveryOwner} outcome=${outcome} reason=${reason}`);
+        if (outcome === "deferred:rig_delivery_drain") continue;
+        appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator -> ${recoveryOwner} outcome=${outcome} reason=${reason}`, true);
         actions.push({ qitemId: row.qitemId, action: "escalate-orchestrator", target: recoveryOwner });
-        if (!outcome.startsWith("failed:")) appendExhausted(deps.queueRepo, row, `escalated to orchestrator (${outcome})`);
+        if (!outcome.startsWith("failed:")) appendExhausted(deps.queueRepo, row, `escalated to orchestrator (${outcome})`, true);
         continue;
       }
       appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
@@ -1525,7 +1610,8 @@ async function advancePromptRefusals(
     // limit, posts once. Each other choice alert stays open, names the alert it waits on, and posts after that one retires.
     // A permission prompt, which only a person can approve, never waits behind it.
     if (waitsOnPostedPromptAlert(deps, row, choiceOnly)) continue;
-    if (await operatorRung(deps, row, reason, actions, view, choiceOnly)) {
+    if (await operatorRung(deps, row, reason, actions, view, choiceOnly,
+      () => deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row)))) {
       const floor = deps.queueRepo.listTransitions(row.qitemId).at(-1)?.transitionNote?.includes("human rung explicit-only");
       appendExhausted(deps.queueRepo, row, floor ? PROMPT_FLOOR_EXHAUSTED : "operator rung resolved");
     }
@@ -1559,8 +1645,11 @@ async function operatorRung(
   view: LadderView,
   /** False for a seat at a permission prompt, which only a person can approve. A choice-prompt alert follows the setting. */
   humanRungSettingApplies = true,
+  originatingDeliveryDeferred?: () => boolean,
 ): Promise<boolean> {
   const repo = deps.queueRepo;
+  const deliveryDeferred = () => deliveryHeld(repo, row) || originatingDeliveryDeferred?.() === true;
+  if (deliveryDeferred()) return false;
   if (!deps.deliveryEngine) {
     appendMarker(
       repo,
@@ -1590,7 +1679,8 @@ async function operatorRung(
     // Exactly-once per episode: never re-dispatch; the resolution pass decides advance.
     return view.opOutcomeResolved;
   }
-  const outcome = await deps.deliveryEngine.dispatchEscalation(row, reason);
+  const outcome = await deps.deliveryEngine.dispatchEscalation(row, reason, deliveryDeferred);
+  if (outcome.decision === "deferred:rig_delivery_drain") return false;
   if (outcome.dispatched === false) {
     // A real policy change: no route used to exhaust. Re-resolution is silent
     // while the reason is unchanged; the scheduler supplies the retry cadence.
@@ -1604,13 +1694,14 @@ async function operatorRung(
     repo,
     row,
     `${LADDER_RUNG_PREFIX} operator dispatched-to-engine decision=${outcome.decision} resolved=${outcome.resolved}${outcome.notificationKey ? ` notification_key=${outcome.notificationKey}` : ""}${outcome.decisionId ? ` decision_id=${outcome.decisionId}` : ""} reason=${reason}`,
+    true, // the engine admitted and posted it; a drain that began since doesn't drop the record
   );
   actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
   return outcome.resolved;
 }
 
-function appendExhausted(repo: QueueRepository, row: QueueItem, why: string): void {
-  appendMarker(repo, row, `${LADDER_EXHAUSTED_PREFIX} ${why}`);
+function appendExhausted(repo: QueueRepository, row: QueueItem, why: string, admittedOutcome = false): void {
+  appendMarker(repo, row, `${LADDER_EXHAUSTED_PREFIX} ${why}`, admittedOutcome);
 }
 
 /** Ensure the per-destination aggregate escalation row (F3): one open row, deduped by
@@ -1625,6 +1716,7 @@ async function refreshEscalationRowIfExists(
   members: Array<{ row: QueueItem }>,
   dedupTag = escalationDedupTag(dest),
 ): Promise<void> {
+  if (deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) return;
   const existing = deps.db
     .prepare(
       `SELECT qitem_id FROM queue_items
@@ -1664,7 +1756,9 @@ async function ensureEscalationRow(
   extraTags: string[] = [],
   /** Watchdog reminders refused at this seat's prompt: job id to the session that registered it. */
   jobs: ReadonlyMap<string, string> = new Map(),
-): Promise<{ qitemId: string }> {
+): Promise<{ qitemId: string } | null> {
+  if (deps.queueRepo.deliveryDrains.holds(dest) || deps.queueRepo.deliveryDrains.holds(orch)
+    || members.some(m => deliveryHeld(deps.queueRepo, m.row))) return null;
   const existing = deps.db
     .prepare(
       `SELECT qitem_id FROM queue_items

@@ -1,10 +1,11 @@
+import { ActivityGrantStore } from "./activity-grants.js";
 import type Database from "better-sqlite3";
 import { monotonicFactory } from "ulid";
 import { randomUUID } from "node:crypto";
 
 const ulid = monotonicFactory();
 import type { Session, Binding } from "./types.js";
-import { validateSessionName } from "./session-name.js";
+import { boundSessionNameProblem, validateSessionName } from "./session-name.js";
 import { formatWatchdogRegistrationError } from "./watchdog-auto-registration.js";
 import type { ClaudeLaunchedProcess, ClaudeResumeRotation } from "./native-process-lineage.js";
 
@@ -290,8 +291,10 @@ export class SessionRegistry {
     sessionName: string,
     kind: OccupantKind = "initial",
     reservedGeneration?: string | null,
+    /** The launch keeps the name the seat was bound to (an adopted seat's own name): accepted when boundSessionNameProblem finds none. */
+    opts?: { keptBoundName?: boolean },
   ): Session {
-    if (!validateSessionName(sessionName)) {
+    if (!validateSessionName(sessionName) && !(opts?.keptBoundName === true && boundSessionNameProblem(sessionName) === null)) {
       throw new Error(
         `Invalid session name "${sessionName}": must match legacy r{NN}-{suffix} or canonical {pod}-{member}@{rig} format with allowed characters (a-z, A-Z, 0-9, -, _, ., @)`
       );
@@ -327,6 +330,8 @@ export class SessionRegistry {
       .run(id, nodeId, sessionName);
     this.mintOccupantTenureBestEffort(nodeId, kind, reservedGeneration); // atom-B: mint this occupant generation
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
+    try { new ActivityGrantStore(this.db).reconcileBinding(nodeId); }
+    catch { /* Optional run attribution must not fail an already registered claimed session. */ }
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
@@ -492,6 +497,15 @@ export class SessionRegistry {
     }
   }
 
+  /** Name existence is independent of best-effort tenure recording. */
+  carriesSessionName(sessionName: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
+      WHERE r.archived_at IS NULL AND (
+        EXISTS (SELECT 1 FROM sessions s WHERE s.node_id = n.id AND s.session_name = ?)
+        OR EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = n.id AND (b.tmux_session = ? OR b.external_session_name = ?))
+      ) LIMIT 1`).get(sessionName, sessionName, sessionName);
+  }
+
   private rowToTenure(row: OccupantTenureRow): OccupantTenure {
     return {
       id: row.id,
@@ -505,6 +519,7 @@ export class SessionRegistry {
   }
 
   updateStatus(sessionId: string, status: string): void {
+    if (["exited", "detached", "superseded"].includes(status)) new ActivityGrantStore(this.db).revokeForSession(sessionId, status);
     this.db
       .prepare("UPDATE sessions SET status = ?, intentionally_stopped = 0, last_seen_at = datetime('now') WHERE id = ?")
       .run(status, sessionId);
@@ -513,6 +528,7 @@ export class SessionRegistry {
   /** A supported stop is distinct from an observed exit. Any later status write
    * clears the intent, including a resume of this same session row. */
   markIntentionallyStopped(sessionId: string): void {
+    new ActivityGrantStore(this.db).revokeForSession(sessionId, "stopped");
     this.db.prepare(
       "UPDATE sessions SET status = 'exited', intentionally_stopped = 1, last_seen_at = datetime('now') WHERE id = ?",
     ).run(sessionId);

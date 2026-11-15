@@ -157,3 +157,46 @@ it("takes the participant's item over the wire, carries pickup and the result ba
   expect(await pass()).toMatchObject({ error: "revoked" });
   expect(bindings.get(binding.id)!.state).toBe("revoked");
 });
+
+it("a lead's aggregate over its own local child work comes back once on the original hub request, and an open parent publishes nothing early", async () => {
+  const token = await addGrant(tokenFile, { name: "alex", seat: "alex@team", rigs: ["team"], roots: [], workspace: false, owner: false });
+  const task = await hubRepo.create({ sourceSession: "lead@team", destinationSession: "alex@team", summary: "Ship the fix", body: "Fix the bug and have it reviewed.", nudge: false } as never);
+  const localRepo = queue(localDb);
+  const bindings = new NetworkBindingStore(localDb, localHome);
+  const binding = bindings.create({ session: "dev-impl@lab", hubUrl, hubSeat: "alex@team", token, allowHttp: true });
+  const pass = () => runNetworkBindingPass({ db: localDb, queueRepo: localRepo, bindings, home: localHome }, bindings.get(binding.id)!);
+  const hubItem = () => hubRepo.getById(task.qitemId)!;
+
+  expect(await pass()).toMatchObject({ taken: 1 });
+  const [parent] = localRepo.list({ limit: 50 });
+  localRepo.claim({ qitemId: parent!.qitemId, destinationSession: "dev-impl@lab" });
+
+  // The lead delegates through ordinary local rows and waits on each in turn.
+  const build = await localRepo.create({ sourceSession: "dev-impl@lab", destinationSession: "builder@lab", summary: "Build the fix", body: "Fix the bug.", nudge: false } as never);
+  const review = await localRepo.create({ sourceSession: "dev-impl@lab", destinationSession: "reviewer@lab", summary: "Review the fix", body: "Review the build.", nudge: false } as never);
+  await localRepo.update({ qitemId: parent!.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: build.qitemId, transitionNote: "Waiting on the build." });
+  expect(await pass()).toMatchObject({ pickupsSent: 1, resultsSent: 0 });
+  expect(hubItem()).toMatchObject({ state: "in-progress", resolution: null });
+
+  localRepo.claim({ qitemId: build.qitemId, destinationSession: "builder@lab" });
+  await localRepo.update({ qitemId: build.qitemId, actorSession: "builder@lab", state: "done", closureReason: "no-follow-on", resolution: "Built: the fix is in commit abc123." });
+  await localRepo.update({ qitemId: parent!.qitemId, actorSession: "dev-impl@lab", state: "blocked", blockedOn: review.qitemId, transitionNote: "Waiting on the review." });
+  // A finished child isn't a result: the parent is still open, so nothing final goes to the hub.
+  expect(await pass()).toMatchObject({ resultsSent: 0 });
+  expect(hubItem()).toMatchObject({ state: "in-progress", resolution: null });
+
+  localRepo.claim({ qitemId: review.qitemId, destinationSession: "reviewer@lab" });
+  await localRepo.update({ qitemId: review.qitemId, actorSession: "reviewer@lab", state: "done", closureReason: "no-follow-on", resolution: "Reviewed: approve." });
+  const children = [localRepo.getById(build.qitemId)!, localRepo.getById(review.qitemId)!];
+  const aggregate = children.map((child) => child.resolution).join(" ");
+  await localRepo.update({ qitemId: parent!.qitemId, actorSession: "dev-impl@lab", state: "done", closureReason: "no-follow-on", resolution: aggregate });
+  expect(await pass()).toMatchObject({ resultsSent: 1 });
+  expect(hubItem()).toMatchObject({ state: "done", closureReason: "no-follow-on", resolution: "Built: the fix is in commit abc123. Reviewed: approve." });
+
+  // Once: a further pass writes nothing, and the children's own words never reached the hub as notes.
+  const transitions = hubRepo.listTransitions(task.qitemId);
+  await pass();
+  expect(hubRepo.listTransitions(task.qitemId)).toHaveLength(transitions.length);
+  expect(transitions.filter((t) => t.state === "done")).toHaveLength(1);
+  expect(transitions.map((t) => t.transitionNote ?? "").join("\n")).not.toMatch(/Waiting on|Built:.*\n.*Reviewed:/);
+});

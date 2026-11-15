@@ -1135,3 +1135,175 @@ it("stages a Pi account successor with canonical identity and a separate state d
   expect(await adapter.checkReady(binding)).toMatchObject({ ready: true });
   expect(fs.files[predecessorPath]).toBe(readyState(SESSION_FILE, "old-launch"));
 });
+
+describe("run grant at the actual Pi dispatch", () => {
+  it.each([true, false])("uses the actual attempt, activates at dispatch, and finalizes readiness=%s", async ready => {
+    const fs = memFs();
+    const statePath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+    const calls: string[] = [];
+    const finish = vi.fn(async (ok: boolean) => { calls.push(`finish:${ok}`); });
+    const runnerGrants = vi.fn(async (_binding, runtime, runId, runner) => {
+      expect([runtime, runId, runner]).toEqual(["pi", "attempt-bound", 0]);
+      calls.push("issued");
+      return { grantId: "test-grant", generation: "generation", wrap: (command: string) => `private-wrapper ${command}`, dispatched: () => { calls.push("dispatched"); }, finish };
+    });
+    const sendShellCommand = vi.fn(async (_target: string, command: string) => {
+      expect(command).toContain("private-wrapper");
+      expect(command).toContain("--launch-id 'attempt-bound'");
+      if (ready) fs.files[statePath] = readyState(SESSION_FILE, "attempt-bound");
+      return { ok: true as const };
+    });
+    const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER, runnerGrants, newLaunchId: () => "attempt-bound", sleep: async () => {} });
+    const result = await adapter.launchHarness({ tmuxSession: SESSION, cwd: "/work" } as never, { name: SESSION });
+    expect(result.ok).toBe(ready);
+    expect(calls).toEqual(["issued", "dispatched", `finish:${ready}`]);
+    expect(runnerGrants).toHaveBeenCalledOnce();
+  });
+});
+
+it("keeps the run grant and its private transfer keys out of native Pi/tools", () => {
+  const child = buildPiChildEnv({ PATH: "/bin", OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_private",
+    OPENRIG_RUN_ID: "actual-run", OPENRIG_RUN_GRANT_TEST: "oag_private", OPENRIG_NODE_ID: "seat" },
+    { agentDir: "/agent", sessionsDir: "/sessions" });
+  expect(child.OPENRIG_NODE_ID).toBe("seat");
+  expect(JSON.stringify(child)).not.toContain("oag_private");
+  expect(child).not.toHaveProperty("OPENRIG_RUN_ID");
+});
+
+describe("direct Pi resume run authority", () => {
+  it("resumes unbound when Core cannot resolve the restored grant binding", async () => {
+    const fs = memFs({ [SESSION_FILE]: "history" });
+    const sendShellCommand = vi.fn(async () => {
+      fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, "restored");
+      return { ok: true as const };
+    });
+    const adapter = new PiResumeAdapter(mockTmux({ sendShellCommand }), fs,
+      { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { runnerGrant: async () => { throw new Error("no Core binding"); },
+        newLaunchId: () => "restored", sleep: async () => {}, maxWaitMs: 1 });
+    expect(await adapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work")).toMatchObject({ ok: true });
+    expect(sendShellCommand).toHaveBeenCalledOnce();
+  });
+
+  it.each([true, false])("uses its actual new attempt and finishes exact authority, ready=%s", async ready => {
+    const fs = memFs({ [SESSION_FILE]: "history" });
+    const statePath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+    const dispatched = vi.fn(), finish = vi.fn(async (_ok: boolean) => {});
+    const runnerGrant = vi.fn(async (_session: string, _runId: string, _cwd: string) => ({ grantId: "resume-grant", generation: "generation",
+      wrap: (command: string) => `private-resume ${command}`, dispatched, finish }));
+    const sendShellCommand = vi.fn(async () => {
+      if (ready) fs.files[statePath] = readyState(SESSION_FILE, "resume-attempt");
+      return { ok: true as const };
+    });
+    const adapter = new PiResumeAdapter(mockTmux({ sendShellCommand }), fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER },
+      { runnerGrant, newLaunchId: () => "resume-attempt", maxWaitMs: 1, pollMs: 1, sleep: async () => {} });
+    const result = await adapter.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
+    expect(result.ok).toBe(ready);
+    expect(runnerGrant).toHaveBeenCalledWith(SESSION, "resume-attempt", "/work");
+    expect(sendShellCommand.mock.calls[0]?.[1]).toContain("private-resume");
+    expect(dispatched).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledWith(ready);
+  });
+});
+
+
+
+describe("optional run authority preserves existing native dispatch", () => {
+  it.each(["launch", "resume"] as const)("%s continues unbound when grant setup fails", async owner => {
+    const fs = memFs({ [SESSION_FILE]: "history" });
+    const sendShellCommand = vi.fn(async (_target: string, command: string) => {
+      fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, "maintainer-attempt");
+      return { ok: true as const };
+    });
+    const issue = async () => { throw new Error("missing anchor, PID, generation or restore binding"); };
+    const tmux = mockTmux({ sendShellCommand });
+    const result = owner === "launch"
+      ? await new PiRuntimeAdapter({ tmux, fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, runnerGrants: issue, newLaunchId: () => "maintainer-attempt", sleep: async () => {} }).launchHarness({ tmuxSession: SESSION, cwd: "/work" } as never, { name: SESSION })
+      : await new PiResumeAdapter(tmux, fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { runnerGrant: issue, newLaunchId: () => "maintainer-attempt", sleep: async () => {}, maxWaitMs: 1, pollMs: 1 }).resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
+    expect(result.ok).toBe(true);
+    expect(sendShellCommand).toHaveBeenCalledOnce();
+    expect(sendShellCommand.mock.calls[0]![1]).not.toContain("OPENRIG_RUN_ID=");
+    expect(result).not.toHaveProperty("activityGrantId");
+  });
+
+  it.each([["launch", false, true], ["resume", false, true], ["launch", true, true], ["resume", true, true], ["launch", false, false], ["resume", false, false]] as const)("%s preserves dispatch truth when optional activation fails, cleanup failure=%s, ready=%s", async (owner, cleanupFails, ready) => {
+    const fs = memFs({ [SESSION_FILE]: "history" });
+    const finish = vi.fn(async () => { if (cleanupFails) throw new Error("cleanup unreadable"); });
+    const issue = async () => ({ grantId: "failed-activation", generation: "g", wrap: (s: string) => s,
+      dispatched: () => { throw new Error("activation unreadable after send"); }, finish });
+    const sendShellCommand = vi.fn(async (_target: string, command: string) => {
+      if (ready) fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, "maintainer-attempt");
+      return { ok: true as const };
+    });
+    const tmux = mockTmux({ sendShellCommand });
+    const result = owner === "launch"
+      ? await new PiRuntimeAdapter({ tmux, fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, runnerGrants: issue, newLaunchId: () => "maintainer-attempt", sleep: async () => {} }).launchHarness({ tmuxSession: SESSION, cwd: "/work" } as never, { name: SESSION })
+      : await new PiResumeAdapter(tmux, fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { runnerGrant: issue, newLaunchId: () => "maintainer-attempt", sleep: async () => {}, maxWaitMs: 1, pollMs: 1 }).resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
+    expect(result.ok).toBe(ready);
+    expect(sendShellCommand).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledWith(false);
+    expect(result).not.toHaveProperty("activityGrantId");
+  });
+
+  it.each(["launch", "resume"] as const)("%s retains a no-effect long-command retry without run authority", async owner => {
+    const fs = memFs({ [SESSION_FILE]: "history" });
+    const finish = vi.fn(async () => {}), dispatched = vi.fn();
+    const issue = async () => ({ grantId: "too-long", generation: "g", wrap: (s: string) => `private-wrapper ${s}`, dispatched, finish });
+    const sendShellCommand = vi.fn(async (_target: string, command: string) => {
+      if (command.startsWith("private-wrapper")) return { ok: false as const, code: "launch_path_too_long", message: "not dispatched" };
+      fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, "maintainer-attempt");
+      return { ok: true as const };
+    });
+    const tmux = mockTmux({ sendShellCommand });
+    const result = owner === "launch"
+      ? await new PiRuntimeAdapter({ tmux, fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, runnerGrants: issue, newLaunchId: () => "maintainer-attempt", sleep: async () => {} }).launchHarness({ tmuxSession: SESSION, cwd: "/work" } as never, { name: SESSION })
+      : await new PiResumeAdapter(tmux, fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { runnerGrant: issue, newLaunchId: () => "maintainer-attempt", sleep: async () => {}, maxWaitMs: 1, pollMs: 1 }).resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
+    expect(result.ok).toBe(true);
+    expect(sendShellCommand).toHaveBeenCalledTimes(2);
+    expect(finish).toHaveBeenCalledWith(false);
+    expect(dispatched).not.toHaveBeenCalled();
+  });
+
+  it.each(["launch", "resume"] as const)("%s preserves the selected account command when only the optional wrapper is too long", async owner => {
+    const fs = memFs({ [SESSION_FILE]: "history" }), finish = vi.fn(async () => {});
+    const issue = async () => ({ grantId: "own", generation: "g", wrap: (s: string) => `private-wrapper ${s}`, dispatched: vi.fn(), finish });
+    const sendShellCommand = vi.fn(async (_session: string, command: string) => {
+      if (command.startsWith("private-wrapper")) return { ok: false as const, code: "launch_path_too_long", message: "not dispatched" };
+      expect(command).toContain("ACCOUNT_GUARD=selected");
+      fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, "selected");
+      return { ok: true as const };
+    });
+    const seatLaunchEnvironment = { accountHome: () => "/selected", command: async (_session: string, command: string) => `/usr/bin/env ACCOUNT_GUARD=selected ${command}` } as never;
+    const tmux = mockTmux({ sendShellCommand });
+    const result = owner === "launch"
+      ? await new PiRuntimeAdapter({ tmux, fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, runnerGrants: issue,
+        seatLaunchEnvironment, newLaunchId: () => "selected", sleep: async () => {} }).launchHarness({ tmuxSession: SESSION, cwd: "/work", nodeId: "node-pi" } as never, { name: SESSION })
+      : await new PiResumeAdapter(tmux, fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { runnerGrant: issue, seatLaunchEnvironment,
+        accountHomeForSession: () => "/selected", newLaunchId: () => "selected", sleep: async () => {}, maxWaitMs: 1 }).resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
+    expect(result.ok).toBe(true);
+    expect(sendShellCommand).toHaveBeenCalledTimes(2);
+    expect(sendShellCommand.mock.calls[0]![1]).toBe(`private-wrapper ${sendShellCommand.mock.calls[1]![1]}`);
+    expect(finish).toHaveBeenCalledWith(false);
+  });
+
+  it("rechecks the selected launch before a known-no-effect long-command retry", async () => {
+    const finish = vi.fn(async () => {}), callback = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false);
+    const sendShellCommand = vi.fn(async () => ({ ok: false as const, code: "launch_path_too_long", message: "not dispatched" }));
+    const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: memFs(), stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER, runnerGrants: async () => ({ grantId: "own", generation: "g", wrap: s => `wrapped ${s}`, dispatched: () => {}, finish }) });
+    expect(await adapter.launchHarness({ tmuxSession: SESSION, cwd: "/work" } as never,
+      { name: SESSION, beforeNativeDispatch: callback })).toMatchObject({ ok: false, error: expect.stringContaining("selection changed") });
+    expect(sendShellCommand).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledTimes(2);
+    expect(finish).toHaveBeenCalledWith(false);
+  });
+
+  it("still honors invalidated selection when optional grant setup fails", async () => {
+    const sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: memFs(), stateRoot: STATE_ROOT,
+      runnerEntryPath: RUNNER, runnerGrants: async () => { throw new Error("optional grant unavailable"); } });
+    expect(await adapter.launchHarness({ tmuxSession: SESSION, cwd: "/work" } as never,
+      { name: SESSION, beforeNativeDispatch: () => false })).toMatchObject({ ok: false, error: expect.stringContaining("selection changed") });
+    expect(sendShellCommand).not.toHaveBeenCalled();
+  });
+});

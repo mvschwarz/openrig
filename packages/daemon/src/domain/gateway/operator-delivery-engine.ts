@@ -30,6 +30,8 @@ export interface OperatorDeliveryEngine {
   dispatchEscalation: (
     row: QueueItem,
     reason: string,
+    /** Fresh admission for the originating work, checked after readiness and before a new dispatch. */
+    deliveryDeferred?: () => boolean,
   ) => Promise<{ decision: string; resolved: boolean; notificationKey?: string; dispatched?: boolean; decisionId?: string }>;
 }
 
@@ -105,7 +107,7 @@ export function makeOperatorDeliveryEngine(deps: {
       return resolvedFor(row, key) !== null || new DispatchBuffer(deps.home).pending()
         .some(d => d.decisionId === `operator:${key}`);
     },
-    async dispatchEscalation(row: QueueItem, _reason: string) {
+    async dispatchEscalation(row: QueueItem, _reason: string, deliveryDeferred?: () => boolean) {
       // The episode identity the receipt must carry (Slice 14's ledger accepts
       // the current qitemId:transitionId key; an ordinary row without an owner
       // transition uses its meaningful-progress episode in the synthetic key).
@@ -113,6 +115,10 @@ export function makeOperatorDeliveryEngine(deps: {
 
       const decisionId = `operator:${notificationKey}`;
       const accepted = () => new DispatchBuffer(deps.home).pending().some(d => d.decisionId === decisionId);
+      const deferred = () => deliveryDeferred?.() ? accepted()
+        ? { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId }
+        : { decision: "deferred:rig_delivery_drain", resolved: false, dispatched: false }
+        : null;
       const resolved = resolvedFor(row, notificationKey);
       if (resolved) return { decision: resolved, resolved: true, dispatched: true, notificationKey, decisionId };
       // An accepted decision belongs to the gateway even if registry access or
@@ -142,9 +148,9 @@ export function makeOperatorDeliveryEngine(deps: {
           botToken: resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined }),
           home: deps.home,
         }, { entities: reg.entities }));
-        if (!readiness.ready) return { decision: `unavailable:human-delivery:${readiness.reason}`, resolved: false, dispatched: false };
+        if (!readiness.ready) return deferred() ?? { decision: `unavailable:human-delivery:${readiness.reason}`, resolved: false, dispatched: false };
       } catch {
-        return { decision: "unavailable:human-delivery:readiness-unavailable", resolved: false, dispatched: false };
+        return deferred() ?? { decision: "unavailable:human-delivery:readiness-unavailable", resolved: false, dispatched: false };
       }
       const decision = decideDelivery({
         level: "ALERT",
@@ -176,6 +182,10 @@ export function makeOperatorDeliveryEngine(deps: {
         ownerNotificationKind: "human-required",
         tags: [...new Set([...(row.tags ?? []), "escalation"])],
       };
+      // Readiness can yield. An already accepted decision still belongs to the gateway;
+      // a new dispatch must recheck the original destination as well as its carrier.
+      const held = deferred();
+      if (held) return held;
       let res: DispatchResult;
       try {
         res = deps.dispatch(OUTBOUND_OP, human.address, payload, { decisionId });

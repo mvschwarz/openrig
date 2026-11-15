@@ -83,6 +83,8 @@ export interface RiggedConfig {
   ui: {
     /** Serve the web UI and its terminal WebSocket. Off by default; the daemon reads it at start. */
     enabled: boolean;
+    /** TUI topology: read a remote rig's seats through this daemon instead of the refusal hint. */
+    topologyRemoteSeats: boolean;
     timezone: string;
     terminal: { maxLiveTerminals: number };
     preview: {
@@ -181,6 +183,8 @@ export interface RiggedConfig {
     compact: boolean;
     /** With compact on, how many peers `rig whoami --json` lists (edge peers first). */
     whoamiPeers: number;
+    /** Optional recap paths shown on rebuild; 0 keeps the full list. */
+    rebuildRecaps: number;
   };
   // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view (default
   // off). Read by the daemon; the CLI key is the lockstep twin.
@@ -307,6 +311,7 @@ const DEFAULTS = {
   progress: { scanRoots: "" },
   ui: {
     enabled: false,
+    topologyRemoteSeats: false,
     timezone: "America/Los_Angeles",
     // The daemon store leaves its own resolver value unset for this key and the web
     // client falls back to 2 (settings-browser names that fallback), so the CLI reports
@@ -387,6 +392,7 @@ const DEFAULTS = {
   output: {
     compact: false,
     whoamiPeers: 8,
+    rebuildRecaps: 3,
   },
   // Slice 01 — Codex usage windows OFF until the switch is on.
   provider: {
@@ -507,6 +513,7 @@ export const VALID_KEYS = [
   "ui.preview.default_lines",
   "ui.timezone",
   "ui.enabled",
+  "ui.topology_remote_seats",
   // The legacy web client's cap on simultaneously-live terminals. The daemon store
   // resolves it (SETTINGS_VALID_KEYS), so `rig config` must accept it too.
   "ui.terminal.max_live_terminals",
@@ -557,6 +564,7 @@ export const VALID_KEYS = [
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
   "output.whoami_peers",
+  "output.rebuild_recaps",
   // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
   "provider.usage_windows",
   // The providers chosen at rig setup --providers, which kernel boot honours; lockstep with the daemon twin.
@@ -656,6 +664,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS" },
   "ui.timezone": { primary: "OPENRIG_UI_TIMEZONE" },
   "ui.enabled": { primary: "OPENRIG_UI_ENABLED" },
+  "ui.topology_remote_seats": { primary: "OPENRIG_UI_TOPOLOGY_REMOTE_SEATS" },
   "ui.terminal.max_live_terminals": { primary: "OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
@@ -697,6 +706,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
+  "output.rebuild_recaps": { primary: "OPENRIG_OUTPUT_REBUILD_RECAPS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
   "provider.selected": { primary: "OPENRIG_PROVIDER_SELECTED" },
   "bundle.services_enabled": { primary: "OPENRIG_BUNDLE_SERVICES_ENABLED" },
@@ -773,6 +783,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.timezone": ["ui", "timezone"],
   "ui.enabled": ["ui", "enabled"],
+  "ui.topology_remote_seats": ["ui", "topologyRemoteSeats"],
   "ui.terminal.max_live_terminals": ["ui", "terminal", "maxLiveTerminals"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
@@ -809,6 +820,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
+  "output.rebuild_recaps": ["output", "rebuildRecaps"],
   "provider.usage_windows": ["provider", "usageWindows"],
   "provider.selected": ["provider", "selected"],
   "bundle.services_enabled": ["bundle", "servicesEnabled"],
@@ -1177,6 +1189,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   // settings-store KEY_CONSTRAINTS twin (same messages/bounds). retention.enabled
   // is a boolean (coerceValue enforces true/false) — no constraint entry.
   // Slice 15 P5 — the whoami peer bound; lockstep with the daemon twin.
+  "output.rebuild_recaps": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Invalid value for output.rebuild_recaps: must be an integer >= 0, got "${raw}"`);
+    }
+  },
   "output.whoami_peers": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for output.whoami_peers: must be an integer >= 1, got "${raw}"`);
@@ -1308,6 +1325,12 @@ export interface ResolvedSetting {
   defaultValue: string | number | boolean;
 }
 
+export interface ContextPressurePolicyState {
+  warning: ResolvedSetting;
+  critical: ResolvedSetting;
+  rejectedPair: { warning: number; critical: number } | null;
+}
+
 export class ConfigStore {
   readonly configPath: string;
 
@@ -1420,6 +1443,7 @@ export class ConfigStore {
       },
       ui: {
         enabled: v("ui.enabled") as boolean,
+        topologyRemoteSeats: v("ui.topology_remote_seats") as boolean,
         timezone: v("ui.timezone") as string,
         terminal: { maxLiveTerminals: v("ui.terminal.max_live_terminals") as number },
         preview: {
@@ -1487,6 +1511,7 @@ export class ConfigStore {
       output: {
         compact: v("output.compact") as boolean,
         whoamiPeers: v("output.whoami_peers") as number,
+        rebuildRecaps: Number(v("output.rebuild_recaps")),
       },
       provider: {
         usageWindows: v("provider.usage_windows") as boolean,
@@ -1573,6 +1598,34 @@ export class ConfigStore {
     return out;
   }
 
+  /** Inspect resolved context-pressure policy and whether an inverted pair was rejected. */
+  resolveContextPressurePolicyState(
+    fileConfig?: Record<string, unknown>,
+    workspaceRoot?: string,
+  ): ContextPressurePolicyState {
+    const fc = fileConfig ?? this.readConfigFile();
+    const wr = workspaceRoot ?? (this.resolveOne("workspace.root", fc, DEFAULT_WORKSPACE_ROOT).value as string);
+    return this.resolveContextPressureStateRaw(fc, wr);
+  }
+
+  private resolveContextPressureStateRaw(
+    fileConfig: Record<string, unknown>,
+    workspaceRoot: string,
+  ): ContextPressurePolicyState {
+    const warningKey = "health.context_pressure.warning_percent" as const;
+    const criticalKey = "health.context_pressure.critical_percent" as const;
+    const warning = this.resolveOneUnpaired(warningKey, fileConfig, workspaceRoot);
+    const critical = this.resolveOneUnpaired(criticalKey, fileConfig, workspaceRoot);
+    if ((warning.value as number) < (critical.value as number)) {
+      return { warning, critical, rejectedPair: null };
+    }
+    return {
+      warning,
+      critical,
+      rejectedPair: { warning: warning.value as number, critical: critical.value as number },
+    };
+  }
+
   private resolveOne(key: ValidKey, fileConfig: Record<string, unknown>, workspaceRoot: string): ResolvedSetting {
     if (key === "health.context_pressure.warning_percent" || key === "health.context_pressure.critical_percent") {
       return this.resolveContextPressurePair(fileConfig, workspaceRoot)[key];
@@ -1586,13 +1639,12 @@ export class ConfigStore {
   ): Record<"health.context_pressure.warning_percent" | "health.context_pressure.critical_percent", ResolvedSetting> {
     const warningKey = "health.context_pressure.warning_percent" as const;
     const criticalKey = "health.context_pressure.critical_percent" as const;
-    const warning = this.resolveOneUnpaired(warningKey, fileConfig, workspaceRoot);
-    const critical = this.resolveOneUnpaired(criticalKey, fileConfig, workspaceRoot);
-    if ((warning.value as number) < (critical.value as number)) {
-      return { [warningKey]: warning, [criticalKey]: critical };
+    const state = this.resolveContextPressureStateRaw(fileConfig, workspaceRoot);
+    if (!state.rejectedPair) {
+      return { [warningKey]: state.warning, [criticalKey]: state.critical };
     }
     process.stderr.write(
-      `[openrig-config] context-pressure policy rejected: warning (${warning.value}) must be less than critical (${critical.value}); falling back to 95/99 defaults\n`,
+      `[openrig-config] context-pressure policy rejected: warning (${state.warning.value}) must be less than critical (${state.critical.value}); falling back to 95/99 defaults\n`,
     );
     return {
       [warningKey]: { value: 95, source: "default", defaultValue: 95 },

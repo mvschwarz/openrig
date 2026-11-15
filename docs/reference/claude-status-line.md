@@ -13,7 +13,9 @@ provider usage stop updating, and Claude resume-token capture at adoption or
 handover loses its current session evidence. An earlier sidecar can remain and
 contain an older session ID; without one, context and capture report
 `missing_sidecar`, and provider usage reports `no_statusline_cache_yet` unless an
-earlier cache remains.
+earlier cache remains. A cache that exists but cannot be read reports
+`claude_statusline_cache_unreadable`; a readable cache that carried no rate
+limits reports `claude_statusline_cache_had_no_windows`.
 
 ## Feed both commands the same input
 

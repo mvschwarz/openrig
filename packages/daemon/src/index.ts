@@ -443,6 +443,7 @@ export async function startServer(port?: number) {
       // First, while transport still works: let the delivery in flight finish; the rest wait for the next start.
       ["wake-recovery", () => wakeRecovery.stop()],
       ["terminal-following", () => deps.terminalService?.stop()],
+      ["rex-status", () => deps.rexStatusRelay?.stop()],
       ["timers", () => {
         deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);

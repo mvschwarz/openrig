@@ -94,16 +94,42 @@ it("records a retryable refusal on the parked row without consuming its one-shot
   expect(f.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "fired", deliveryStatus: "ok", live: false });
 });
 
-it("records exhausted one-shot retries as a failed wake before ending the timer", async () => {
-  const send = vi.fn(async () => absent), f = fixture(send), row = await f.park();
+it.each([false, true])("keeps a refused one-shot owed beyond the retry cap and across restart (digest=%s)", async digest => {
+  let result = absent;
+  const send = vi.fn(async () => result), f = fixture(send, undefined, digest), rows = [await f.park()];
+  if (digest) rows.push(await f.park());
   later(3600); await f.scheduler.runTickNow();
-  for (let i = 0; i < 3; i++) { later(300); await f.scheduler.runTickNow(); }
-  expect(f.errors).toHaveLength(0); expect(send).toHaveBeenCalledTimes(4);
-  expect(f.repo.getById(row.qitemId)?.state).toBe("blocked");
-  expect(f.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "fired", deliveryStatus: "failed", live: false, unconsumed: true });
-  expect(f.jobs.getByIdOrThrow(row.jobId).terminalReason).toBe("park_timer_fired_once");
-  expect(f.history.listForJob(row.jobId)[0]?.evaluationNotes?.nextAction).toContain("exhausted");
-  later(7200); await f.scheduler.runTickNow(); expect(send).toHaveBeenCalledTimes(4);
+  for (let i = 0; i < 5; i++) { later(300); await f.scheduler.runTickNow(); }
+  expect(f.errors).toHaveLength(0); expect(send).toHaveBeenCalledTimes(6);
+  const ids = f.outbox.listForSender("watchdog@system").map(e => e.outboxId).sort();
+  for (const row of rows) {
+    expect(f.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "armed", live: true });
+    expect(f.jobs.getByIdOrThrow(row.jobId)).toMatchObject({ state: "active", lastFireAt: null });
+    expect(f.history.listForJob(row.jobId)[0]?.evaluationNotes?.nextAction).toContain("remains owed");
+  }
+  const saved = f.db.serialize(); f.db.close(); const resumed = fixture(send, saved, digest);
+  result = delivered; later(299); await resumed.scheduler.runTickNow(); expect(send).toHaveBeenCalledTimes(6);
+  later(1); await resumed.scheduler.runTickNow(); expect(send).toHaveBeenCalledTimes(7);
+  for (const row of rows) {
+    expect(resumed.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "fired", deliveryStatus: "ok", live: false });
+    expect(resumed.jobs.getByIdOrThrow(row.jobId).terminalReason).toBe("park_timer_fired_once");
+    expect(resumed.repo.getById(row.qitemId)).toMatchObject({ state: "blocked", blockedOn: "external:wait", body: "Continue work" });
+    expect(resumed.repo.currentParkContinuation(row.qitemId)).toBe("work");
+  }
+  expect(resumed.outbox.listForSender("watchdog@system").map(e => e.outboxId).sort()).toEqual(ids);
+  expect(resumed.outbox.listForSender("watchdog@system").every(e => e.deliveryState === "delivered")).toBe(true);
+  later(7200); await resumed.scheduler.runTickNow(); expect(send).toHaveBeenCalledTimes(7);
+  expect(resumed.errors).toHaveLength(0);
+});
+
+it("keeps a one-shot owed when its transport is unavailable, then delivers when repaired", async () => {
+  let result: SendResult = { ...absent, reason: "transport_unavailable" };
+  const send = vi.fn(async () => result), f = fixture(send), row = await f.park();
+  later(3600); await f.scheduler.runTickNow();
+  expect(f.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "armed", live: true });
+  result = delivered; later(300); await f.scheduler.runTickNow();
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(f.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "fired", deliveryStatus: "ok", live: false });
 });
 
 it.each([false, true])("repairs a post-fire accounting crash without duplicate input (digest=%s)", async digest => {

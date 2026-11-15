@@ -622,6 +622,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     const failedAt = new Date(Date.now() - 10 * 60_000);
     setNudgeResult(row.qitemId, "Unroutable: no pane yet", failedAt);
     // Offer the row to the sweep as undelivered, whatever the listing's own prefix filter says.
+    vi.spyOn(repo, "undeliveredCandidateIds").mockResolvedValue([row.qitemId]);
     vi.spyOn(repo, "findUndelivered").mockImplementation(((opts?: { qitemId?: string }) =>
       !opts?.qitemId || opts.qitemId === row.qitemId ? [repo.getById(row.qitemId)!] : []) as typeof repo.findUndelivered);
     db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
@@ -1765,6 +1766,36 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
     await runSweep();
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it.each(["", ".", ",", ";", ":", ")"])("CUSTODY PUNCTUATION: a closing note accepts the exact target followed by %j", async (punctuation) => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target}${punctuation} registered-host read confirmed the successor` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it.each(["x.", ".other.", ":123)"])("CUSTODY PUNCTUATION: extra target characters %j do not verify a prefix", async (suffix) => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target}${suffix} registered-host read confirmed another successor` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("CUSTODY PUNCTUATION: a shortened target is not an exact target", async () => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target.slice(0, -1)}. checked elsewhere` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
   it("DISPOSITION CLOSES THE OPEN FINDING: verification landing after the finding minted auto-closes it on the next sweep, and the finding taught the recipe", async () => {

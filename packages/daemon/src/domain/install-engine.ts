@@ -4,6 +4,7 @@ import type { InstallPlanEntry } from "./install-planner.js";
 import type { PolicyResult } from "./install-policy.js";
 import type { RefinedInstallPlan } from "./conflict-detector.js";
 import { InstallRepository, type JournalEntry } from "./install-repository.js";
+import { damagedManagedBlockNote, findManagedBlocks, managedBlockBodyMatches, mergeManagedBlockText } from "./managed-blocks.js";
 
 export interface EngineFsOps {
   readFile: (filePath: string) => string;
@@ -19,6 +20,8 @@ export interface InstallResult {
   applied: JournalEntry[];
   deferred: InstallPlanEntry[];
   conflicts: InstallPlanEntry[];
+  /** Entries left as they were, each with the reason: a guidance file whose block has a marker without its pair. */
+  notes: string[];
 }
 
 export interface RollbackResult {
@@ -52,10 +55,19 @@ export class InstallEngine {
   ): InstallResult {
     const install = this.installRepo.createInstall(packageId, targetRoot, "project_shared", bootstrapId);
     const applied: JournalEntry[] = [];
+    const notes: string[] = [];
     const backupRoot = path.join(targetRoot, ".rigged-backups", install.id);
 
     try {
       for (const entry of policyResult.approved) {
+        // A guidance block with a marker that lost its pair can't be replaced, and another copy beside it is the
+        // duplicate to avoid: that file is left as it is and named, and the rest of the install goes on.
+        const unreadable = entry.exportType === "guidance" ? this.unreadableGuidanceBlock(entry, plan.packageName) : null;
+        if (unreadable) {
+          notes.push(unreadable);
+          continue;
+        }
+
         // Ensure target directory
         this.fs.mkdirp(path.dirname(entry.targetPath));
 
@@ -121,6 +133,7 @@ export class InstallEngine {
       applied,
       deferred: plan.deferred,
       conflicts: plan.conflicts,
+      notes,
     };
   }
 
@@ -170,6 +183,14 @@ export class InstallEngine {
     return { restored, deleted };
   }
 
+  /** The note for a guidance entry whose target holds a marker of the package's block without its pair, and no complete
+   *  copy, or null. */
+  private unreadableGuidanceBlock(entry: InstallPlanEntry, packageName: string): string | null {
+    if (!entry.sourcePath || !this.fs.exists(entry.targetPath)) return null;
+    const found = findManagedBlocks(this.fs.readFile(entry.targetPath), packageName);
+    return found.blocks.length === 0 && found.unpaired > 0 ? damagedManagedBlockNote(entry.targetPath, packageName) : null;
+  }
+
   private applyGuidanceMerge(entry: InstallPlanEntry, packageName: string): void {
     if (!entry.sourcePath) return;
 
@@ -178,34 +199,17 @@ export class InstallEngine {
 
     if (this.fs.exists(entry.targetPath)) {
       const existing = this.fs.readFile(entry.targetPath);
-      const startMarker = BLOCK_START(packageName);
-      const endMarker = BLOCK_END(packageName);
-      const legacyStart = `<!-- BEGIN RIGGED MANAGED BLOCK: ${packageName} -->`;
-      const legacyEnd = `<!-- END RIGGED MANAGED BLOCK: ${packageName} -->`;
-      // Prefer the OpenRig form; fall back to legacy markers from
-      // prior installs so re-applying a guidance package over a
-      // pre-rename file replaces the old block instead of appending a
-      // duplicate.
-      let startIdx = existing.indexOf(startMarker);
-      let endIdx = existing.indexOf(endMarker, startIdx + startMarker.length);
-      let matchedEndLength = endMarker.length;
-      if (startIdx === -1 || endIdx === -1) {
-        const legacyStartIdx = existing.indexOf(legacyStart);
-        const legacyEndIdx = existing.indexOf(legacyEnd, legacyStartIdx + legacyStart.length);
-        if (legacyStartIdx !== -1 && legacyEndIdx !== -1) {
-          startIdx = legacyStartIdx;
-          endIdx = legacyEndIdx;
-          matchedEndLength = legacyEnd.length;
-        }
-      }
-
-      if (startIdx !== -1 && endIdx !== -1) {
-        // Update existing block (rewrites legacy markers to OpenRig form).
-        const updated = existing.slice(0, startIdx) + block + existing.slice(endIdx + matchedEndLength);
-        this.fs.writeFile(entry.targetPath, updated);
-      } else {
+      const found = findManagedBlocks(existing, packageName);
+      if (found.blocks.length === 0) {
         // Insert new block at end
         this.fs.writeFile(entry.targetPath, existing + "\n\n" + block + "\n");
+      } else {
+        // Update the first copy in place, in the OpenRig form (legacy markers too). A later copy goes when it repeats the
+        // first copy's text or the package's; a copy with other text, which someone wrote, stays.
+        const first = found.blocks[0]!.body;
+        const updated = mergeManagedBlockText(existing, packageName, block, [],
+          (body) => !managedBlockBodyMatches(body, first) && !managedBlockBodyMatches(body, content));
+        if (updated !== null) this.fs.writeFile(entry.targetPath, updated);
       }
     } else {
       // New file

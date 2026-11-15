@@ -1,3 +1,4 @@
+import { runnerGrantIssuer } from "./domain/runner-grant-launch.js";
 import { piAccountStateRoot } from "./domain/pi-account-state.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
 import { EnvironmentPlatform } from "./domain/environment-platform.js";
@@ -14,7 +15,7 @@ import { makeWatchdogDeliver } from "./domain/watchdog-delivery.js";
 import { fileURLToPath } from "node:url";
 import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
-import { SeatDeliveryGuard, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
+import { SeatDeliveryGuard, resolveExternalCliOccupant, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
 import { seatCodexCorePluginDir, vendoredCorePluginDir } from "./domain/claude-core-plugin-env.js";
 import { queueRecoveryOwnsWake } from "./domain/queue-wake-ladder.js";
 import { HealthPolicyStore } from "./domain/health-policy.js";
@@ -36,8 +37,10 @@ import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
 import { deriveCanonicalSessionName, isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
 import { resolveExternal } from "./domain/gateway/external-admission.js";
-import { makeTopologyDestinationCheck } from "./domain/queue-destination-check.js";
-import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
+import { makeQueueRecordingCheck, makeTopologyDestinationCheck } from "./domain/queue-destination-check.js";
+import { loadHumanRegistry, resolveRegisteredHumanAddress } from "./domain/gateway/human-registry.js";
+import { readRosters } from "./domain/rosters.js";
+import { recordedSuccessorNotice } from "./domain/destination-successor.js";
 import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
@@ -115,7 +118,7 @@ import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contra
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
-import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
+import { observeClaudePaneStartedAt, listNativeProcessesOrThrow, listNativeProcesses } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport, inspectComposerInput, draftDeliveryAllows, readDraftDeliverySetting } from "./domain/session-transport.js";
@@ -131,7 +134,7 @@ import { StreamIntakeCoordinator } from "./domain/stream-intake.js";
 import { SlowOpRecorder, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import { configureSyncSiteRecorder } from "./domain/sync-site-wrap.js";
 import { RequestPhaseObserver } from "./domain/request-phase-observer.js";
-import { QueueRepository, isBlockerLive } from "./domain/queue-repository.js";
+import { QueueRepository, isBlockerLive, type QueueDestinationAdvisory } from "./domain/queue-repository.js";
 import { describeDefaultReceiver, permissionDeciderFor } from "./domain/default-receiver.js";
 import { createWorkflowFrontierPredicate } from "./domain/workflow-frontier-guard.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
@@ -423,43 +426,94 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   // Seat absence in positively known local topology is advice, never admission
   // authority. Keep every typed destination intact, including adopted aliases.
-  const topologyDestinationAdvisory = (sessionRef: string) => {
+  const topologyDestinationAdvisory = (sessionRef: string): QueueDestinationAdvisory | null => {
     const parsed = parseSessionName(sessionRef);
     if (isHumanSeatSessionRef(sessionRef) || parsed.kind !== "canonical") return null;
-    const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
-    if (rigs.length === 0) return null;
-    // Membership needs only registered names and logical seat coordinates,
-    // not the full ps projection (snapshots, activity and lifecycle history).
-    for (const rig of rigs) {
-      if (db.prepare(`SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id
-        WHERE n.rig_id = ? AND s.session_name = ? LIMIT 1`).get(rig.id, sessionRef)) return null;
-      if (db.prepare(`SELECT 1 FROM nodes WHERE rig_id = ? AND
-        CASE WHEN instr(logical_id, '.') = 0 THEN logical_id
-          WHEN instr(logical_id, '.') > 1 AND instr(logical_id, '.') < length(logical_id)
-          THEN substr(logical_id, 1, instr(logical_id, '.') - 1) || '-' || substr(logical_id, instr(logical_id, '.') + 1)
-        END = ? LIMIT 1`).get(rig.id, parsed.member)) return null;
+    const withSuccessor = (advisory: QueueDestinationAdvisory): QueueDestinationAdvisory => {
+      if (advisory.status === "hosted") return advisory;
+      let notice = "Recorded successor unknown: the topology root is unavailable.";
+      try {
+        const root = new ContextPackSettingsStore().resolveOne("topology.root").value;
+        if (typeof root === "string" && root) notice = recordedSuccessorNotice(root, sessionRef);
+      } catch { /* Keep the destination status and durable write when the ledger cannot be read. */ }
+      return { ...advisory, message: `${advisory.message} ${notice}` };
+    };
+    const status = (value: "missing" | "archived" | "hosted" | "unknown", message: string) => withSuccessor({
+      code: "destination_status" as const, status: value, destinationSession: sessionRef,
+      availableDestinations: [] as string[], message,
+    });
+    // Absence is only positive when the hosted roster surface was readable.
+    const rosterUnavailable = () => {
+      const root = new ContextPackSettingsStore().resolveOne("workspace.root").value;
+      if (typeof root !== "string" || !root) return true;
+      const folder = nodePath.join(root, "rosters");
+      try { fs.statSync(folder); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+      return readRosters(folder).warnings.length > 0;
+    };
+    try {
+      // Physical spelling can belong to a different rig from its suffix (restore
+      // preserves pinned names). Check registered and current binding names first.
+      const exact = db.prepare(`SELECT DISTINCT node_id FROM (
+        SELECT s.node_id FROM sessions s JOIN nodes n ON n.id = s.node_id
+          JOIN rigs r ON r.id = n.rig_id WHERE s.session_name = ? AND r.archived_at IS NULL
+        UNION ALL
+        SELECT b.node_id FROM bindings b JOIN nodes n ON n.id = b.node_id
+          JOIN rigs r ON r.id = n.rig_id WHERE b.tmux_session = ? AND r.archived_at IS NULL
+      ) LIMIT 2`).all(sessionRef, sessionRef) as Array<{ node_id: string }>;
+      if (exact.length === 1) return null;
+      if (exact.length > 1) return status("unknown", `${sessionRef}: destination status unknown; multiple local seats have this exact address.`);
+      const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
+      // Logical membership is also a cheap local query. Known seats need no
+      // synchronous hosted-roster or human-registry reads.
+      for (const rig of rigs) {
+        if (db.prepare(`SELECT 1 FROM nodes WHERE rig_id = ? AND
+          CASE WHEN instr(logical_id, '.') = 0 THEN logical_id
+            WHEN instr(logical_id, '.') > 1 AND instr(logical_id, '.') < length(logical_id)
+            THEN substr(logical_id, 1, instr(logical_id, '.') - 1) || '-' || substr(logical_id, instr(logical_id, '.') + 1)
+          END = ? LIMIT 1`).get(rig.id, parsed.member)) return null;
+      }
+      // The callback runs after QueueRepository construction. A hosted member is
+      // a valid queue reader even when it has no pane or wake trigger.
+      if (queueRepoInstance.isHostedMember(sessionRef)) {
+        return status("hosted", `${sessionRef} is a hosted member; it reads the queue when its owner starts a session. No pane is required. Send work as a queue item.`);
+      }
+      const humans = loadHumanRegistry();
+      if (humans.ok && resolveRegisteredHumanAddress(sessionRef, humans.entities)) return null;
+      if (rigs.length === 0) {
+        if ((!humans.ok && humans.noHumans !== true) || rosterUnavailable()) return status("unknown", `${sessionRef}: destination status unknown; a destination registry is unavailable.`);
+        const archived = db.prepare(`SELECT archived_at FROM rigs WHERE name = ? AND archived_at IS NOT NULL
+          ORDER BY created_at DESC LIMIT 1`).get(parsed.rig) as { archived_at: string } | undefined;
+        return archived
+          ? status("archived", `Rig ${parsed.rig} is archived since ${archived.archived_at}; no live seat by this name on this daemon. The row keeps the exact destination.`)
+          : status("missing", `No local rig ${parsed.rig}; no live seat by this name on this daemon. The row keeps the exact destination. If this names another host, pass --host.`);
+      }
+      const names = rigs.flatMap((rig) => db.prepare(`SELECT n.logical_id, s.session_name
+        FROM nodes n LEFT JOIN sessions s ON s.id =
+          (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
+        WHERE n.rig_id = ?`).all(rig.id) as Array<{ logical_id: string; session_name: string | null }>);
+      const canonicalName = (logicalId: string) => {
+        const dot = logicalId.indexOf(".");
+        if (dot < 0) return `${logicalId}@${parsed.rig}`;
+        return dot > 0 && dot < logicalId.length - 1
+          ? deriveCanonicalSessionName(logicalId.slice(0, dot), logicalId.slice(dot + 1), parsed.rig) : null;
+      };
+      const availableDestinations = [...new Set(names.flatMap((entry) => [
+        entry.session_name, canonicalName(entry.logical_id),
+      ]).filter((destination): destination is string => !!destination && parseSessionName(destination).kind === "canonical"))].sort();
+      if ((!humans.ok && humans.noHumans !== true) || rosterUnavailable()) return status("unknown", `${sessionRef}: destination status unknown; a destination registry is unavailable.`);
+      return withSuccessor({
+        code: "unmatched_destination_seat" as const,
+        status: "missing" as const,
+        destinationSession: sessionRef,
+        availableDestinations,
+        message: `No live seat by this name: '${sessionRef}' matches no session address of locally known rig '${parsed.rig}'. `
+          + `Available destinations: ${availableDestinations.join(", ") || "(none)"}. `
+          + "The row keeps the exact destination as typed; this warning does not guarantee pickup or delivery.",
+      });
+    } catch {
+      return status("unknown", `${sessionRef}: destination status unknown; the topology or registry lookup is unavailable. The row keeps the exact destination.`);
     }
-    const names = rigs.flatMap((rig) => db.prepare(`SELECT n.logical_id, s.session_name
-      FROM nodes n LEFT JOIN sessions s ON s.id =
-        (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
-      WHERE n.rig_id = ?`).all(rig.id) as Array<{ logical_id: string; session_name: string | null }>);
-    const canonicalName = (logicalId: string) => {
-      const dot = logicalId.indexOf(".");
-      if (dot < 0) return `${logicalId}@${parsed.rig}`;
-      return dot > 0 && dot < logicalId.length - 1
-        ? deriveCanonicalSessionName(logicalId.slice(0, dot), logicalId.slice(dot + 1), parsed.rig) : null;
-    };
-    const availableDestinations = [...new Set(names.flatMap((entry) => [
-      entry.session_name, canonicalName(entry.logical_id),
-    ]).filter((destination): destination is string => !!destination && parseSessionName(destination).kind === "canonical"))].sort();
-    return {
-      code: "unmatched_destination_seat" as const,
-      destinationSession: sessionRef,
-      availableDestinations,
-      message: `Suspected seat typo: '${sessionRef}' matches no session address of locally known rig '${parsed.rig}'. `
-        + `Available destinations: ${availableDestinations.join(", ") || "(none)"}. `
-        + "The row keeps the exact destination as typed; this warning does not guarantee pickup or delivery.",
-    };
   };
   // PL-004 Phase A — shared coordination services. Constructed early so
   // both the queueRepo dep slot and inboxHandler can share one instance.
@@ -467,6 +521,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // attachTransport().
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
+    canRecordDestination: makeQueueRecordingCheck(topologyValidateRig),
     destinationAdvisory: topologyDestinationAdvisory,
     // OPR.0.4.6.WF3 FR-6 — the frontier close-path guard's predicate,
     // INJECTED here (arch layering pin: the queue never imports the
@@ -624,17 +679,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // The same reading lets a seat a full restore stopped at a prompt be reconciled once it resumes (#2622); set once
   // the attention reconciler exists, so a reading before then waits for the next change.
   let restoredSeatActivity: ((sessionName: string, state: string | undefined) => void) | undefined;
-  const retryPromptWakes = (sessionName: string) => {
-    const runtime = sessionRegistry.findResumeContextByName(sessionName)?.runtime;
+  let rexSeatActivity: ((sessionName: string, current: import("./domain/terminal/rex-agent-status.js").SeatActivity) => void) | undefined;
+  const currentSeatActivity = (sessionName: string) => {
+    const runtime = sessionRegistry.findResumeContextByName(sessionName)?.runtime ?? null;
     const structural = seatStructuralActivityService.getStructuralActivity(sessionName);
-    const state = hookOrPaneActivity(agentActivityStore.getLatestForNode({ sessionName,
-      order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime)?.activity.state;
+    const resolved = hookOrPaneActivity(agentActivityStore.getLatestForNode({ sessionName,
+      order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime);
+    return { activity: resolved?.activity ?? null, runtime, structural };
+  };
+  const retryPromptWakes = (sessionName: string) => {
+    const { activity, runtime, structural } = currentSeatActivity(sessionName);
+    const state = activity?.state;
     void queueRepoInstance.retryPromptWakesOnClear(sessionName, state, structural?.state === "attention")
       .catch(error => console.warn(`Prompt-clear wake recovery: ${error instanceof Error ? error.name : typeof error}`));
     // A seat seen running or idle is reachable: re-send wakes recorded unroutable before it was bound (#2789).
     void queueRepoInstance.retryUnroutableWakesOnReachable(sessionName, state)
       .catch(error => console.warn(`Reachable-seat wake recovery: ${error instanceof Error ? error.name : typeof error}`));
     restoredSeatActivity?.(sessionName, state);
+    rexSeatActivity?.(sessionName, { activity, runtime });
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
   eventBus.subscribe(event => { if (event.type === "agent.activity") retryPromptWakes(event.sessionName); });
@@ -645,6 +707,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const seatIdentityReconciler = new SeatIdentityReconciler({
     db,
     tmux: tmuxAdapter,
+    readPiRunnerState: sessionName => piAdapter.readRunnerSidecar(sessionName).state,
   });
   // cmuxFactory takes precedence (for tests), then cmuxExec-based CLI transport, then default
   const cmuxFactory = opts?.cmuxFactory
@@ -809,11 +872,20 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const piOpenRouterChargeEnabled = (): boolean => {
     try { return new ContextPackSettingsStore().resolveOne("usage.pi_openrouter_charge").value === true; } catch { return false; }
   };
+  const runnerGrants = runnerGrantIssuer(db, tmuxAdapter);
   const piResume = new PiResumeAdapter(
     tmuxAdapter,
     { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }) },
     { stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath },
-    { accountHomeForSession: session => seatRuntimeHomeBySession(db, session, "pi"), stateRootForSession: piStateRootForSession, seatLaunchEnvironment, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled },
+    { runnerGrant: async (session, runId, cwd) => {
+      const owners = db.prepare(`SELECT b.node_id AS nodeId FROM bindings b JOIN nodes n ON n.id=b.node_id
+        JOIN sessions s ON s.node_id=n.id AND s.id=(SELECT id FROM sessions WHERE node_id=n.id ORDER BY id DESC LIMIT 1)
+        WHERE b.tmux_session=? AND s.session_name=? AND n.runtime='pi' AND s.status NOT IN ('superseded','detached','exited')`)
+        .all(session, session) as Array<{ nodeId: string }>;
+      const binding = owners.length === 1 ? sessionRegistry.getBindingForNode(owners[0]!.nodeId) : null;
+      if (!binding) throw new Error("The restored Pi run has no unambiguous Core binding.");
+      return runnerGrants({ ...binding, cwd }, "pi", runId, 0);
+    }, accountHomeForSession: session => seatRuntimeHomeBySession(db, session, "pi"), stateRootForSession: piStateRootForSession, seatLaunchEnvironment, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled },
   );
   const ompResume = new OmpResumeAdapter(
     tmuxAdapter,
@@ -1014,7 +1086,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } });
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
-  const piAdapter = new PiRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
+  const piAdapter = new PiRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
   const ompAdapter = new OmpRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
@@ -1049,30 +1121,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // (repo currently empty as of 2026-05-10; vendored
   // copy is the source of truth at v0).
   try {
-    const { PluginVendorService } = await import("./domain/plugin-vendor-service.js");
+    const { PluginVendorService, nodePluginVendorFs } = await import("./domain/plugin-vendor-service.js");
     const vendoredAssetsDir = nodePath.resolve(import.meta.dirname, "../assets/plugins");
     const userPluginsDir = getDefaultOpenRigPath("plugins");
-    const realFs = {
-      readFile: (p: string) => fs.readFileSync(p, "utf-8"),
-      writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
-      copyFileExclusive: (src: string, dest: string) => fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL),
-      exists: (p: string) => fs.existsSync(p),
-      mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
-      listFiles: (dir: string) => {
-        const r: string[] = [];
-        /** Collect relative file paths recursively. */
-        function w(d: string, pre: string) {
-          for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-            if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name));
-            else r.push(pre ? nodePath.join(pre, e.name) : e.name);
-          }
-        }
-        w(dir, "");
-        return r;
-      },
-      statMode: (p: string) => fs.statSync(p).mode,
-      chmod: (p: string, m: number) => fs.chmodSync(p, m),
-    };
     const httpClient = async (url: string, opts?: { timeoutMs?: number }) => {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), opts?.timeoutMs ?? 5000);
@@ -1086,7 +1137,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const vendorService = new PluginVendorService({
       vendoredAssetsDir,
       userPluginsDir,
-      fs: realFs,
+      fs: nodePluginVendorFs(),
       httpClient,
       logger: (...args) => console.log("[openrig]", ...args),
     });
@@ -1228,7 +1279,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
-    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter }),
+    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants }),
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
@@ -1293,7 +1344,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     "omp": ompAdapter,
     "stub": stubAdapter,
     "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
-  }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter });
+  }, { tmux: tmuxAdapter, seatLaunchEnvironment, environmentStartup, piAdapter, runnerGrants });
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
@@ -1357,6 +1408,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // GHOST-STAGE (c-id): reject context readings from before the live occupant booted (prior
     // generation) so a frozen pre-handover sample can't drive the threshold. null = UNKNOWN (inert).
     resolveOccupantBootAt: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.bootAt ?? null,
+    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
   });
   // Shared, read-only current-occupant record path: reporting does not depend on a pin or transport.
   const { CurrentModelReader } = await import("./domain/model-divergence/current-model-reader.js");
@@ -1420,7 +1472,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // #421 — the pane's current Claude process start time; a sidecar sampled earlier is not this
   // process's, so capture and null-fill skip it.
   const claudeProcessStartedAt = (sessionName: string) => observeClaudePaneStartedAt({ target: sessionName, tmux: tmuxAdapter });
-  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore, claudeProcessStartedAt, codexHome: configuredCodexHome,
+  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore, claudeProcessStartedAt,
+    claudeStartedAtForPass: (pass) => (sessionName) => observeClaudePaneStartedAt({ target: sessionName, tmux: tmuxAdapter,
+      listProcesses: pass.lister(listNativeProcessesOrThrow, listNativeProcesses) }), codexHome: configuredCodexHome,
     seatHome: (nodeId, runtime) => seatRuntimeHome(db, nodeId, runtime).home });
   const claimService = new ClaimService({
     db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter, transcriptStore,
@@ -2153,6 +2207,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const { CmuxProviderAdapter } = await import("./domain/terminal/cmux-provider-adapter.js");
     const { RexAdapter } = await import("./domain/terminal/rex-adapter.js");
     const { createRexCliTransport } = await import("./domain/terminal/rex-transport.js");
+    const { RexAgentStatusRelay } = await import("./domain/terminal/rex-agent-status.js");
+    const rexStatusRelay = new RexAgentStatusRelay({ clients: tmuxAdapter, resolve: currentSeatActivity });
+    rexSeatActivity = (sessionName, current) => { void rexStatusRelay.activityChanged(sessionName, current); };
+    deps.rexStatusRelay = rexStatusRelay;
     const { CmuxLayoutService } = await import("./domain/cmux-layout-service.js");
     const { TerminalViewsStore } = await import("./domain/terminal/terminal-views-store.js");
     const { createScopedTaskResolver } = await import("./domain/terminal/scope-task-terminal-view.js");
@@ -2195,7 +2253,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const providerMap: Record<string, import("./domain/terminal/terminal-provider.js").TerminalProvider> = {
       herdr: herdrProvider,
       cmux: cmuxProvider,
-      rex: new RexAdapter({ transport: createRexCliTransport(opts?.rexRun ? { run: opts.rexRun, binary: () => "rex" } : {}) }),
+      rex: new RexAdapter({
+        transport: createRexCliTransport(opts?.rexRun ? { run: opts.rexRun, binary: () => "rex" } : {}),
+        tilesOpened: (seats) => rexStatusRelay.tilesOpened(seats),
+      }),
     };
 
     // herdr-app: one provider per client (app home), created on first use. Viewers carry this instance's label, so a
@@ -2370,6 +2431,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return since == null ? null : new Date(since).toISOString();
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
+      deliveryDeferred: (jobId, session) => queueRepoInstance.deliveryDrains.holds(session, jobId),
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
       eventBus,
@@ -2383,8 +2445,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
       // occupant_tenures) so a generation-bound wake is refused once the target has handed over.
       // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
-      // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts.
-      resolveTargetGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+      // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts. Read by the
+      // seat the name addresses, not the newest row with that name: an archived generation of the same
+      // seat can hold a newer one, and a context watchdog would then read that node's telemetry. An external-CLI seat
+      // addressed by its external session name, which the guard's address rules don't match, reads its own.
+      resolveTargetGeneration: (s) => { const target = resolveGuardTarget(db, s); return target ? target.occupant ?? null : resolveExternalCliOccupant(db, s); },
+      targetNameCarried: (s) => sessionRegistry.carriesSessionName(s),
       // Issue #1180 — sampled context use for token/percent context watchdogs,
       // generation-guarded against a predecessor's frozen telemetry.
       resolveContextUsage: (s, occupantGeneration) =>

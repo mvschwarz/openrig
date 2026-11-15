@@ -14,9 +14,13 @@ describe("tmux attachment", () => {
     const child = new EventEmitter();
     vi.mocked(spawn).mockReturnValue(child as ReturnType<typeof spawn>);
     const result = attachTmux({ session: "-seat ' quoted", serverArgs: ["-S", "/private/instance socket"], readOnly });
-    expect(spawn).toHaveBeenCalledWith("tmux", [
+    const [file, args, options] = vi.mocked(spawn).mock.calls[0]!;
+    expect(file).toBe(process.platform === "win32" ? "tmux" : "/bin/sh");
+    expect(process.platform === "win32" ? args : args!.slice(2)).toEqual([
+      ...(process.platform === "win32" ? [] : ["tmux"]),
       "-S", "/private/instance socket", "attach-session", ...(readOnly ? ["-r"] : []), "-t", "=-seat ' quoted",
-    ], expect.objectContaining({ stdio: "inherit" }));
+    ]);
+    expect(options!.stdio).toBe("inherit");
     const env = vi.mocked(spawn).mock.calls[0]![2]!.env!;
     expect(env.TMUX).toBeUndefined();
     expect(env.TMUX_PANE).toBeUndefined();

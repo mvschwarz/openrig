@@ -37,6 +37,7 @@ const SPEC_4A_ROUTES = [
   "/api/provider/status",
   "/api/provider/usage/hosts",
   "/api/telemetry/usage/cost",
+  "/api/queue/hosted-members",
 ];
 
 describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)", () => {
@@ -75,6 +76,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.providerStatus();
     await c.usageAcrossHosts();
     await c.usageCost();
+    await c.hostedMembers();
 
     expect(seen.sort()).toEqual([...SPEC_4A_ROUTES].sort());
   });

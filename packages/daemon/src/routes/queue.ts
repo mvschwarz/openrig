@@ -42,7 +42,7 @@ import { listProjects, projectCatalogPaths } from "../domain/workspace/project-r
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
-import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope } from "../domain/queue-erasure.js";
+import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope, type HostClass } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
@@ -211,6 +211,24 @@ export function queueRoutes(): Hono {
       message: `No wake is set for this park: nothing wakes ${item.destinationSession} on a timer while ${item.qitemId} waits on ${item.blockedOn}. To add one, park it again with --wake-after <duration> (or --wake-watchdog <job-id>). When ${item.blockedOn} clears, rig queue resolve ${item.qitemId} --decision <evidence> unparks it.`,
     };
   }
+  /** A summary or evidence ref the update asked for but the stored row doesn't carry (a blank one, which isn't stored
+   *  because it would erase what the row has, or one the repository couldn't write): read from the stored row, so the
+   *  caller is told whatever the reason. */
+  function unstoredAdvisories(body: { summary?: unknown; evidenceRef?: unknown }, item: QueueItem) {
+    return ([["summary", "summary", "summary_not_stored"], ["evidenceRef", "evidence ref", "evidence_ref_not_stored"]] as const)
+      .flatMap(([field, name, code]) => {
+        const requested = body[field];
+        const stored = item[field];
+        if (typeof requested !== "string" || stored === requested) return [];
+        const why = requested.trim().length === 0 ? `The ${name} was blank, so it wasn't stored` : `The ${name} wasn't stored`;
+        return [{
+          code,
+          qitemId: item.qitemId,
+          field,
+          message: `${why}: ${item.qitemId} keeps ${stored ? `its ${name} "${stored}"` : `no ${name}`}. The rest of the update was applied.`,
+        }];
+      });
+  }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
   }
@@ -312,9 +330,6 @@ export function queueRoutes(): Hono {
         : err.code === "reply_to_requires_update" ? 400
         : err.code === "reply_to_not_found" ? 400
         : err.code === "invalid_human_questions" ? 400
-        // OPR.0.5.1 slice-51-06 D2: summary/evidence_ref on a non-park transition — a client
-        // input error surfaced as a structured 400 (the daemon rejects before any mutation).
-        : err.code === "summary_evidence_not_persistable" ? 400
         // OPR.0.4.6.WF3 FR-6: the frontier close-path guard — operator
         // misuse of a queue verb on a live workflow packet; structured
         // 400 with the what/why/fix message, never a 500.
@@ -756,8 +771,11 @@ export function queueRoutes(): Hono {
       return refuse("erase_rig_invalid", "rig is the account rig's id, given with members.");
     }
     if (body.members !== undefined) {
-      const members = exactList(body.members);
-      if (!members) return refuse("erase_members_invalid", "members must be a non-empty list of exact session names.");
+      // An empty list, given with rig, is an account rig that never had a member; the erasure checks the rig's history.
+      const members = Array.isArray(body.members) && body.members.length === 0 && typeof body.rig === "string" ? [] : exactList(body.members);
+      if (!members) {
+        return refuse("erase_members_invalid", "members must be a non-empty list of exact session names, or [] with rig for an account rig that never had a member.");
+      }
       scope = { kind: "members", members, ...(typeof body.rig === "string" ? { rig: body.rig } : {}) };
     } else if (body.ids !== undefined) {
       // Plain ids take the request's action (delete by default); a report's qitems entries keep their own.
@@ -795,10 +813,34 @@ export function queueRoutes(): Hono {
       }
       scope = { kind: "routine", contentDays, metadataDays };
     }
+    // Whose host a host-qualified address at the rig names, for a never-member erase. Another host is proved only by a
+    // registered entry whose identity is established (declared, or a learned binding still eligible) and differs from this
+    // daemon's known id. This daemon's id, or an entry established as it, is this host. Anything else (an entry known only
+    // by its label, or no known id for this daemon) is unknown, which refuses. Routing is unchanged.
+    const registryLoader = (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ?? loadHostRegistry;
+    const bindingsLoader =
+      (c.get("hostBindingsLoader" as never) as (() => ReturnType<typeof loadLearnedHostBindings>) | undefined) ?? loadLearnedHostBindings;
+    let hosts: { registry: Parameters<typeof eligibleQueueBindings>[0]; learned: ReturnType<typeof eligibleQueueBindings> } | null | undefined;
+    const classifyHost = (host: string): HostClass => {
+      const self = getSelfHostId();
+      if (resolvesToLocalHost(host, self)) return "self";
+      if (self === null) return "unknown";
+      if (hosts === undefined) {
+        const reg = registryLoader();
+        hosts = reg.ok ? { registry: reg.registry, learned: eligibleQueueBindings(reg.registry, bindingsLoader()) } : null;
+      }
+      const known = hosts;
+      if (!known) return "unknown";
+      const match = resolveHost(known.registry, host, known.learned);
+      if (!match.ok) return "unknown";
+      const identity = match.host.hostId ?? known.learned[match.host.id]?.hostId;
+      if (identity === undefined) return "unknown";
+      return identity === self ? "self" : "other";
+    };
     try {
       const ledger = settings?.resolveOne("retention.erasure_ledger").value;
       const report = await eraseQueue(c.get("db" as never) as Database.Database, {
-        scope, apply: body.apply === true, nowIso: new Date().toISOString(),
+        scope, apply: body.apply === true, nowIso: new Date().toISOString(), classifyHost,
         ...(typeof ledger === "string" && ledger.length > 0 ? { ledgerPath: ledger } : {}),
       });
       console.log(`[queue-erase] ${identity.session} ${scope.kind} ${report.applied ? "applied" : "dry run"}: `
@@ -922,8 +964,9 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisory = body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null;
-      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) });
+      const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, ...unstoredAdvisories(body, item)]
+        .filter((advisory) => advisory !== null);
+      return c.json({ ...item, ...(advisories.length > 0 ? { advisories } : {}) });
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -1330,6 +1373,11 @@ export function queueRoutes(): Hono {
   app.get("/list", (c) => {
     const destinationSession = c.req.query("destinationSession") || undefined;
     const sourceSession = c.req.query("sourceSession") || undefined;
+    const rawTags = c.req.queries("tag") ?? [];
+    if (rawTags.some((tag) => tag.trim().length === 0)) {
+      return c.json({ error: "tag_invalid", message: "tag filters cannot be blank" }, 400);
+    }
+    const tags = [...new Set(rawTags)];
     const stateRaw = c.req.query("state") || undefined;
     const targetRepo = c.req.query("targetRepo") || undefined;
     const parsedLimit = queryLimit(c);
@@ -1361,6 +1409,7 @@ export function queueRoutes(): Hono {
     if (!attention) {
       const repo = getRepo(c);
       const items = repo.list({
+        tag: tags.length > 0 ? tags : undefined,
         destinationSession,
         sourceSession,
         state,
@@ -1409,6 +1458,7 @@ export function queueRoutes(): Hono {
     const items = getRepo(c).listAttention({
       limit: userLimit,
       state,
+      tag: tags.length > 0 ? tags : undefined,
       destinationSession,
       sourceSession,
       targetRepo,
@@ -1440,6 +1490,11 @@ export function queueRoutes(): Hono {
     const items = getRepo(c).findOverdue({ rig, limit, compact });
     return c.json(items);
   });
+
+  // Each connected assistant on this host and whether it's checking its queue, with this daemon's own host id: the check-ins
+  // are this host's, so a reader matches members to it without needing a terminal seat to learn it. A status only:
+  // work addressed to an assistant that isn't checking in still queues and is rung as before. Precedes /:qitemId.
+  app.get("/hosted-members", (c) => c.json({ hostId: getSelfHostId(), members: getRepo(c).hostedMemberCheckIns() }));
 
   // GET /undelivered — surfaces pending create-path nudge failures plus active
   // human-notification episodes whose gateway delivery ledger failed or never posted.
@@ -1546,6 +1601,8 @@ export function queueRoutes(): Hono {
       ...item,
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
+      // The answer rows returned to this row, read by their link rather than their text; empty when none came back.
+      answers: repo.answersForAsk(qitemId),
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,

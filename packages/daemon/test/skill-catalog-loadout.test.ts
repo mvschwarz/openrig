@@ -914,6 +914,24 @@ describe("plugin skills in the managed loadout", () => {
     expect(resolvePluginSkills({ pluginId: "core", pluginRoot: plugin, runtime: "claude-code", pluginType: "codex" }).entries).toEqual([]);
   });
 
+  it.each(["claude-code", "codex"] as const)("loads a CRLF plugin skill with realistic multiline frontmatter for %s", (runtime) => {
+    const f = fixture([]);
+    const plugin = writePlugin(f.root, [".claude-plugin", ".codex-plugin"], ["applying-a-permission-policy"]);
+    const file = join(plugin, "skills", "applying-a-permission-policy", "SKILL.md");
+    const original = readFileSync(new URL("../assets/plugins/openrig-core/skills/applying-a-permission-policy/SKILL.md", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    const resolve = () => resolvePluginSkills({ pluginId: "core", pluginRoot: plugin, runtime });
+    writeFileSync(file, original, "utf8");
+    expect(resolve().entries.map((entry) => entry.id)).toEqual(["applying-a-permission-policy"]);
+    writeFileSync(file, original.replace(/\n/g, "\r\n"), "utf8");
+    const crlf = resolve();
+    expect(crlf.warnings).toEqual([]);
+    expect(crlf.entries.map((entry) => entry.id)).toEqual(["applying-a-permission-policy"]);
+    const result = reconcileSkillLoadout({ loadout: loadoutOf(crlf.entries, f.root), runtime, cwd: f.project, topologyOwner: "seat-a", apply: true });
+    expect(result).toMatchObject({ ok: true, applied: true });
+    const harness = runtime === "codex" ? ".agents" : ".claude";
+    expect(readFileSync(join(f.project, harness, "skills", "applying-a-permission-policy", "SKILL.md"), "utf8")).toBe(original.replace(/\n/g, "\r\n"));
+  });
+
   it("skips a plugin skill it cannot copy exactly and says why", () => {
     const f = fixture([]);
     const plugin = writePlugin(f.root, [".claude-plugin"], ["good", "linked"]);

@@ -106,7 +106,10 @@ You are about to lose every connection you have built. Spend this turn making th
 3. **Open the map with a summary** of 10 to 20 lines: who you are, what you hold, what mattered in this
    window, what is next and who authorizes it, and any hold in force. **Publish that summary as your seat
    recap** too: save it, plus a line naming the map's path, to a file and run
-   `rig context recap-write --file <that file>`, which writes your own seat's recap. If your world profile has a seat
+   `rig context recap-write --file <that file>`, which writes your own seat's recap. Give the file's literal absolute
+   path, with no shell variable assignment or command substitution: Claude Code's allow rules don't match past an
+   assignment (apart from a few known-safe variables), and an ask or deny rule still wins, so such a command can stop at
+   an approval prompt, and OpenRig won't send `/compact` while it waits. If your world profile has a seat
    recap atom, it loads this recap, and an old recap would be served as if it were current.
 4. **Then write the connections.** Choose what this seat needs; these are examples, not a template:
    - **State:** rows you hold (id, state), branches and PR heads, the hold or release in force and who gave
@@ -163,8 +166,8 @@ is not a restore request.
 1. **Check for a hold first.** Read the restore request, the per-seat instruction file
    (`<OPENRIG_HOME>/compaction/post-compact-extra/<session>.md`, named after your full session, such as
    `dev-impl@my-rig` with `.md` added) when it exists, the newest row or message from whoever routes your work, and any hold
-   from the authority above them. A hold, a release order or an operator's own restore map overrides the default
-   order below. Before any write, also run `rig whoami --json` and `rig queue whoami`.
+   from the authority above them. A hold you verified as live, a release order or an operator's own restore map overrides
+   the default order below for the work it covers; do the unaffected work. Before any write, also run `rig whoami --json` and `rig queue whoami`.
 2. **Name your class and state its read budget** before reading (see "Two restore classes"), with a
    checkpoint at each step below. The budget exists so that the restore leaves room for the work it was
    restored to do. Step 5 takes a high-context seat to its Tier 2 line; the extra sources under "Two restore classes" apply only
@@ -218,7 +221,7 @@ The audit message asks for a read-depth table and tells you not to conserve toke
    - where you are in time: what earlier windows established, what the last window did, what is true now;
    - the connections you have rebuilt, in a few lines;
    - the connections you could not rebuild, and where you would look;
-   - the next authorized step and who authorizes it. If a hold stands, the next step is waiting.
+   - the next authorized step and who authorizes it. If a hold you verified as live covers it, wait on that; do the unaffected work.
 
 The next restore map links this note, which keeps the chain unbroken.
 
@@ -238,7 +241,7 @@ unaffected work.
 - Do not launch a fresh session in place of restoring.
 - An honest `PARTIAL` with its reason is a correct outcome. Claiming coverage you did not reach is the
   failure.
-- Do not resume task work until the read-depth table and the reconnect note exist.
+- Write the read-depth table and the reconnect note as you resume; don't hold unaffected work for them.
 
 ## Failure modes
 
