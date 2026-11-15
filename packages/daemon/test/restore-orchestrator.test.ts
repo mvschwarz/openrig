@@ -2986,6 +2986,13 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", error: "Harness not started: no startup context for dev.moved." });
     expect(result.result.nodes[0]!.restoreGaps).toBeUndefined();
     expect(adapter.launchHarness).not.toHaveBeenCalled();
+    // The bare shell the launcher registered is marked, so it isn't counted as a running seat; nothing is stopped.
+    const shell = db.prepare("SELECT status, startup_status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get(result.result.nodes[0]!.nodeId) as { status: string; startup_status: string };
+    expect(shell).toEqual({ status: "running", startup_status: "attention_required" });
+    const failure = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1")
+      .get(result.result.nodes[0]!.nodeId) as { payload: string };
+    expect(JSON.parse(failure.payload)).toMatchObject({ stage: "harness_not_started", error: "Harness not started: no startup context for dev.moved." });
   });
 
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {

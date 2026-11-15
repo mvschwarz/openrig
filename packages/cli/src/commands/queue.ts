@@ -817,7 +817,7 @@ async function readBackQueueUpdate(
   floorUnknown?: string,
   /** Who the daemon records as this write's actor (updateActors). */
   actors: string[] = [],
-): Promise<{ ok: true; row: Record<string, unknown> } | { ok: false; detail: string }> {
+): Promise<{ ok: true; row: Record<string, unknown> } | { ok: false; detail: string; noteUnproven?: true }> {
   let response: DaemonResponse<Record<string, unknown>>;
   try {
     response = await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, options);
@@ -829,8 +829,9 @@ async function readBackQueueUpdate(
   }
   const mismatches = UPDATE_READ_BACK_FIELDS.flatMap((field) => {
     if (requested[field] === undefined) return [];
-    // A blank summary isn't stored (the daemon says so, summary_not_stored), so there's nothing of it to read back.
-    if (field === "summary" && typeof requested[field] === "string" && !(requested[field] as string).trim()) return [];
+    // A blank summary or evidence ref isn't stored (the daemon says so, summary_not_stored or evidence_ref_not_stored,
+    // and keeps the row's own), so there's nothing of it to read back.
+    if ((field === "summary" || field === "evidenceRef") && typeof requested[field] === "string" && !(requested[field] as string).trim()) return [];
     return queueUpdateFieldMatches(field, requested[field], response.data[field])
       ? []
       : [`${field}: requested ${JSON.stringify(requested[field])}, read ${JSON.stringify(response.data[field])}`];
@@ -845,19 +846,19 @@ async function readBackQueueUpdate(
   if (requestedNote !== null) {
     // Without the cursor, a transition carrying the note can't be shown to be this write's: never accept an older one.
     if (transitionFloor === undefined) {
-      return { ok: false, detail: `the requested note can't be shown to be new, because the transition read before the write failed (${floorUnknown ?? "no cursor"})` };
+      return { ok: false, noteUnproven: true, detail: `the requested note can't be shown to be new, because the transition read before the write failed (${floorUnknown ?? "no cursor"})` };
     }
     if (actors.length === 0) {
-      return { ok: false, detail: "the requested note can't be tied to this write, because the actor it was sent as isn't known" };
+      return { ok: false, noteUnproven: true, detail: "the requested note can't be tied to this write, because the actor it was sent as isn't known" };
     }
     let transitions: DaemonResponse<unknown>;
     try {
       transitions = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`, options);
     } catch (error) {
-      return { ok: false, detail: `canonical transition read-back did not answer: ${(error as Error).message}` };
+      return { ok: false, noteUnproven: true, detail: `canonical transition read-back did not answer: ${(error as Error).message}` };
     }
     if (transitions.status !== 200 || !Array.isArray(transitions.data)) {
-      return { ok: false, detail: `canonical transition read-back returned HTTP ${transitions.status} without a transition list` };
+      return { ok: false, noteUnproven: true, detail: `canonical transition read-back returned HTTP ${transitions.status} without a transition list` };
     }
     const matching = transitions.data.some((entry) => {
       if (!entry || typeof entry !== "object") return false;
@@ -872,6 +873,7 @@ async function readBackQueueUpdate(
     if (!matching) {
       return {
         ok: false,
+        noteUnproven: true,
         detail: `no newer canonical transition carried requested note ${JSON.stringify(requestedNote)} from ${actors.map((actor) => JSON.stringify(actor)).join(" or ")}`,
       };
     }
@@ -879,9 +881,12 @@ async function readBackQueueUpdate(
   return { ok: true, row: response.data };
 }
 
-function emitQueueUpdateReadBackFailure(qitemId: string, detail: string, json: boolean): void {
+/** `noteUnproven`: the requested note wasn't shown to be recorded. A note is in the row's transition log, which `queue show`
+ *  doesn't print, so the action names that too. */
+function emitQueueUpdateReadBackFailure(qitemId: string, detail: string, json: boolean, noteUnproven = false): void {
   const message = `Queue update response was not accepted as success: ${detail}. The write may have committed, but its requested state was not verified.`;
-  const action = `Run rig queue show ${shellQuote(qitemId)} --full --json against the same daemon before retrying.`;
+  const action = `Run rig queue show ${shellQuote(qitemId)} --full --json against the same daemon before retrying`
+    + (noteUnproven ? `, and rig queue transitions ${shellQuote(qitemId)} --full --json to see whether the note was recorded.` : ".");
   if (json) console.error(JSON.stringify({ error: "queue_update_readback_failed", message, action }));
   else console.error(`${message}\n${action}`);
   process.exitCode = 1;
@@ -1693,7 +1698,7 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
           const actors = await updateActors(target.client, requested.actorSession);
           const verified = await readBackQueueUpdate(target.client, qitemId, requested, target.options, transitionFloor, floorUnknown, actors);
           if (!verified.ok) {
-            emitQueueUpdateReadBackFailure(qitemId, verified.detail, opts.json ?? false);
+            emitQueueUpdateReadBackFailure(qitemId, verified.detail, opts.json ?? false, verified.noteUnproven);
             return;
           }
           // The canonical row's fields win; the write's own advisories (a park with no wake) come only with its response.

@@ -212,7 +212,9 @@ export function planRestorePermission(db: Database.Database, input: {
   if (input.runtimeError) return unknown(`restore stops for a runtime decision before it starts this seat. ${input.runtimeError}`);
   if (input.podAware === undefined) return unknown("no saved snapshot names this seat yet, so which launch path restore takes for it isn't known.");
   if (!input.podAware) return unknown("restore takes this seat's runtime from its resume token, which this read doesn't know.");
-  if (input.startupContext === false) return unknown("this seat has no saved startup context, so restore starts it fresh and re-reads its policy then.");
+  // Restore resumes such a seat's saved conversation when it holds a resume token (resumeWithoutContext), and has no
+  // fresh start for it without one, so this read can't name the path or its permission.
+  if (input.startupContext === false) return unknown("this seat has no saved startup context, so this read can't settle whether restore resumes its saved conversation or starts it fresh, or which permission that path uses.");
   if (input.runtime === null) return unknown("this seat's runtime isn't recorded.");
   try {
     const launchPosture = input.restorePosture();

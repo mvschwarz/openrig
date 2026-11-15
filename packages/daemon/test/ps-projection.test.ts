@@ -49,6 +49,34 @@ describe("PsProjectionService", () => {
       .run(id, rigId, "manual", "complete", "{}", createdAt ?? new Date().toISOString().replace("T", " ").slice(0, 19));
   }
 
+  // A pane restore left as a bare shell (no harness started) carries its own marker and isn't counted running. A seat
+  // that needs attention for another reason (an identity question here) keeps the existing running count, and so does a
+  // later launch on a once-bare seat: the marker belongs to the session that recorded it.
+  it("a seat restore left as a bare shell isn't counted running; other attention still is", () => {
+    const rigId = seedRig("shell-only");
+    const shell = seedNode(rigId, "shell");
+    const asked = seedNode(rigId, "asked");
+    const relaunched = seedNode(rigId, "relaunched");
+    const bus = new EventBus(db);
+    for (const [nodeId, stage] of [[shell, "harness_not_started"], [asked, "identity_verification"], [relaunched, "harness_not_started"]] as const) {
+      const id = seedSession(nodeId, "running");
+      db.prepare("UPDATE sessions SET startup_status = 'attention_required' WHERE id = ?").run(id);
+      bus.emit({ type: "node.startup_failed", rigId, nodeId, error: `fixture ${stage}`, sessionId: id, stage });
+    }
+    // The relaunch's own session needs attention (an identity check that records no startup failure).
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(relaunched);
+    const next = seedSession(relaunched, "running");
+    db.prepare("UPDATE sessions SET startup_status = 'attention_required' WHERE id = ?").run(next);
+
+    const entries = ps.getEntries();
+    expect(entries[0]!.nodeCount).toBe(3);
+    expect(entries[0]!.runningCount).toBe(2);
+    const inventory = getNodeInventory(db, rigId);
+    expect(inventory.find((node) => node.logicalId === "shell")).toMatchObject({ startupStatus: "attention_required", latestErrorStage: "harness_not_started" });
+    expect(inventory.find((node) => node.logicalId === "asked")).toMatchObject({ startupStatus: "attention_required", latestErrorStage: "identity_verification" });
+    expect(inventory.find((node) => node.logicalId === "relaunched")).toMatchObject({ sessionStatus: "running", startupStatus: "attention_required", latestErrorStage: null });
+  });
+
   // T1: All nodes running -> status: running
   it("all nodes running -> status: running", () => {
     const rigId = seedRig("full-run");
