@@ -3,7 +3,7 @@ import { proofSourceObservation } from "../domain/proof/source-watch.js";
 import * as path from "node:path";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import type { EventBus } from "../domain/event-bus.js";
-import { JudgmentError, evidenceAt, readSliceReadiness, readMissionReadiness, readProjectReadiness, recordJudgment, resolveProofScope, resolveProjectRoot, type JudgeInput } from "../domain/proof/judgments.js";
+import { JudgmentError, evidenceAt, readSliceReadiness, readMissionReadiness, readProjectReadinessAsync, recordJudgment, resolveProofScope, resolveProjectRoot, type JudgeInput } from "../domain/proof/judgments.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import { projectById, sameProjectRoot } from "../domain/workspace/project-read.js";
 import { ProjectReadError } from "../domain/workspace/project-catalog.js";
@@ -78,12 +78,15 @@ export function proofRoutes(): Hono {
   // freshness is reported as unverified rather than borrowing the selected workspace's state.
   const observation = (c: Parameters<typeof indexer>[0], project: { id: string; root: string } | null) =>
     project ? { state: "unavailable" as const, revision: "unverified" } : proofSourceObservation(c);
-  app.get("/", c => {
+  app.get("/", async c => {
     const { root, evidenceRoot, scope, project } = target(c, c.req.query("scope"), c.req.query("project"), c.req.query("projectRoot"));
     const common = { sourceObservation: observation(c, project), ...(project ? { project } : {}) };
     // A catalog project's own root bounds policy, scope identity and evidence (never an ancestor's project.yaml).
     const bound = project?.root;
-    if (!scope) return c.json({ ...readProjectReadiness(root, undefined, bound), ...common });
+    if (!scope) {
+      const result = await readProjectReadinessAsync(root, undefined, bound);
+      return c.json({ ...result, ...common, sourceObservation: observation(c, project) });
+    }
     const dir = resolveProofScope(root, scope);
     if (path.basename(path.dirname(dir)) !== "slices") return c.json({ ...readMissionReadiness(dir, undefined, bound), ...common });
     const refs = c.req.queries("evidence") ?? [];

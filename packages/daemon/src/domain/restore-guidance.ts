@@ -17,24 +17,20 @@ import nodePath from "node:path";
 import { lstatSync } from "node:fs";
 import type Database from "better-sqlite3";
 import {
-  MANAGED_BLOCK_START,
-  MANAGED_BLOCK_END,
   DEFAULT_CLAUDE_MANAGED_BLOCK_FILE,
+  findManagedBlocks,
   mergeManagedBlock,
   stripManagedBlocks,
   type ManagedBlockMergeFsOps,
   isPerSeatRoleGuidance,
   isPerSeatRoleStartupFile,
 } from "./managed-blocks.js";
-import { decideManagedBlock, recordManagedBlockWrite, type ManagedBlockRecords } from "./managed-block-records.js";
+import { decideManagedBlock, pruneKeptManagedBlock, recordManagedBlockWrite, type ManagedBlockRecords } from "./managed-block-records.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
-import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContextEntryFloor } from "./builtin-startup-files.js";
 import type { NodeStartupSnapshot } from "./types.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "./seat-skill-storage.js";
 import { guidanceFileIsLink } from "./footprint-choice.js";
-
-const LEGACY_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
-const LEGACY_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
 
 
 export interface GuidanceItem {
@@ -97,15 +93,10 @@ export function recordedGuidanceFile(db: Pick<Database.Database, "prepare">, nod
   } catch { return null; }
 }
 
-/** Whether guidance text holds this id's block as it is written: a BEGIN marker followed later by its END, in the
- *  current or legacy form. For reporting an installed file; restore's own `blockState` is unchanged. */
+/** Whether guidance text holds this id's block as it is written: a BEGIN marker followed by its END, in the current or
+ *  legacy form, read as the writer reads it (`findManagedBlocks`). For reporting an installed file. */
 export function hasCompleteGuidanceBlock(content: string, blockId: string): boolean {
-  const ordered = (start: string, end: string): boolean => {
-    const begin = content.indexOf(start);
-    return begin >= 0 && content.indexOf(end, begin + start.length) >= 0;
-  };
-  return ordered(MANAGED_BLOCK_START(blockId), MANAGED_BLOCK_END(blockId))
-    || ordered(LEGACY_BLOCK_START(blockId), LEGACY_BLOCK_END(blockId));
+  return findManagedBlocks(content, blockId).blocks.length > 0;
 }
 
 /** The guidance file a seat's managed blocks live in, and the blocks it should hold on restore. */
@@ -128,8 +119,7 @@ export function seatGuidance(
   // Every guidance startup file the last launch merged, whatever its appliesOn: a fresh-start-only
   // file (onboarding, an agent starter) was merged at that launch and stayed in the file until
   // `rig down` stripped it, so it is part of what the resumed conversation had.
-  for (const saved of startupCtx.resolvedStartupFiles) {
-    const f = reanchorBuiltinStartupFile(saved, undefined, undefined, exists);
+  for (const f of withContextEntryFloor(startupCtx.resolvedStartupFiles.map((saved) => reanchorBuiltinStartupFile(saved, undefined, undefined, exists)))) {
     // An "auto" file is classified from its content, as at launch (a `# SKILL` file is a skill,
     // not guidance). If the source can't be read it can't be classified: it is reported, not dropped.
     let hint: string = f.deliveryHint;
@@ -171,9 +161,9 @@ export function seatStartupTextFiles(
   readFile: (path: string) => string,
 ): SeatStartupTextFile[] {
   if (!startupCtx) return [];
-  const files = startupCtx.resolvedStartupFiles.flatMap((saved): SeatStartupTextFile[] => {
-    if (!saved.appliesOn.includes("fresh_start")) return [];
-    const f = reanchorBuiltinStartupFile(saved, undefined, undefined, exists);
+  const files = withContextEntryFloor(startupCtx.resolvedStartupFiles.map((saved) => reanchorBuiltinStartupFile(saved, undefined, undefined, exists)))
+    .flatMap((f): SeatStartupTextFile[] => {
+    if (!f.appliesOn.includes("fresh_start")) return [];
     const present = exists(f.absolutePath);
     let hint: string = f.deliveryHint;
     if (hint === "auto") {
@@ -200,19 +190,24 @@ export function applySeatSkillsLineRule(guidance: SeatGuidance, answeredYes: boo
 
 type BlockState = "complete" | "absent" | "incomplete";
 
-/** A block counts only with both its markers (current or legacy form). A lone marker is incomplete:
- *  writing next to it is unsafe, because cleanup strips from a BEGIN to the next END. */
+/** A block counts only with both its markers (current or legacy form), read as the writer reads them. A lone marker is
+ *  incomplete: writing next to it is unsafe, because cleanup strips from a BEGIN to the next END, and it would add a
+ *  second copy beside one that can't be read. */
 function blockState(content: string, blockId: string): BlockState {
-  const current = [content.includes(MANAGED_BLOCK_START(blockId)), content.includes(MANAGED_BLOCK_END(blockId))];
-  const legacy = [content.includes(LEGACY_BLOCK_START(blockId)), content.includes(LEGACY_BLOCK_END(blockId))];
-  if ((current[0] && current[1]) || (legacy[0] && legacy[1])) return "complete";
-  if (current[0] || current[1] || legacy[0] || legacy[1]) return "incomplete";
-  return "absent";
+  const found = findManagedBlocks(content, blockId);
+  if (found.blocks.length > 0) return "complete";
+  return found.unpaired > 0 ? "incomplete" : "absent";
 }
 
 function blockStates(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): Map<string, BlockState> {
   const content = fs.exists(guidance.targetPath) ? fs.readFile(guidance.targetPath) : "";
   return new Map(guidance.items.map((item) => [item.blockId, blockState(content, item.blockId)]));
+}
+
+/** #3039: the block ids the seat's guidance file doesn't hold at all (no marker of theirs), which a resumed launch can carry
+ *  instead of the file. */
+export function absentGuidanceBlocks(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): string[] {
+  return [...blockStates(guidance, fs)].filter(([, state]) => state === "absent").map(([id]) => id);
 }
 
 /** The block ids the seat's guidance file lacks right now (absent, or only partly there). */
@@ -229,11 +224,13 @@ export interface GuidanceRepair {
   refreshed: string[];
   /** #2456: blocks left as they are although they differ from their source, each named with the reason
    *  (`guidance_block_edited`, `guidance_block_may_be_stale` or `guidance_block_record_unreadable`). The seat runs them as
-   *  they are. A block written whose record wasn't saved is named here too (`guidance_block_record_not_saved`). */
+   *  they are. A block written whose record wasn't saved is named here too (`guidance_block_record_not_saved`), and so are
+   *  a kept block's removed repeats (`guidance_block_copies_removed`). */
   kept: string[];
 }
 
-const KEPT_GUIDANCE_PREFIXES = ["guidance_block_edited: ", "guidance_block_may_be_stale: ", "guidance_block_record_unreadable: "];
+const KEPT_GUIDANCE_PREFIXES = ["guidance_block_edited: ", "guidance_block_may_be_stale: ", "guidance_block_record_unreadable: ",
+  "guidance_block_markers_damaged: "];
 
 /** #2456: the one line a seat is told when a managed guidance block was left as it is (edited by hand, or possibly stale),
  *  naming each one, or undefined when none was. */
@@ -262,7 +259,8 @@ export function appendIsCleanupSafe(content: string, blocks: Array<{ blockId: st
 
 /** Put back the missing managed guidance blocks. With `records` (#2456), a block already there that OpenRig wrote is
  *  refreshed from its changed source, and one edited since, or with no record, is kept and named (`decideManagedBlock`).
- *  Without them a block already there is left as it is, as before. Any other text in the file is left exactly as it is,
+ *  Without them a block already there keeps its text. Either way a block left in place loses its exact repeats, and
+ *  OpenRig's own copies beside an edited one, and rewrapped markers go back to OpenRig's form (`pruneKeptManagedBlock`). Any other text in the file is left exactly as it is,
  *  and nothing is written unless cleanup would later remove exactly what was written. Never throws: a failure becomes a
  *  reported gap. */
 export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockMergeFsOps, records?: ManagedBlockRecords): GuidanceRepair {
@@ -280,17 +278,27 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
   for (const item of guidance.items) {
     const state = states.get(item.blockId);
     if (state === "complete") {
-      if (!records || item.unresolved) continue;
+      if (item.unresolved) continue;
       let source: string;
       try {
         if (!fs.exists(item.sourcePath)) continue;
         source = fs.readFile(item.sourcePath);
       } catch { continue; }
+      // Without records the block's text stays as it is; only its exact repeats and rewrapped markers are tidied.
+      if (!records) {
+        pruneKeptManagedBlock(fs, guidance.targetPath, item.blockId, source, undefined, repair.kept);
+        continue;
+      }
       // #2456: the same decision every adapter's guidance write makes; an exact resume and a handover keep an unrecorded block.
       const decision = decideManagedBlock(existing ?? "", item.blockId, source, records, guidance.targetPath, { unrecorded: "keep", sourcePath: item.sourcePath });
       if (decision.note) repair.kept.push(decision.note);
-      else if (decision.standing === "current") recordManagedBlockWrite(records, guidance.targetPath, item.blockId, source, repair.kept);
-      else if (decision.write) toWrite.push({ blockId: item.blockId, content: source, refresh: true });
+      if (decision.write && decision.standing !== "current") {
+        toWrite.push({ blockId: item.blockId, content: source, refresh: true });
+        continue;
+      }
+      if (decision.standing === "current") recordManagedBlockWrite(records, guidance.targetPath, item.blockId, source, repair.kept);
+      // A block left as it is (current, edited or unrecorded) keeps one copy of each distinct text, in OpenRig's markers.
+      pruneKeptManagedBlock(fs, guidance.targetPath, item.blockId, source, records, repair.kept);
       continue;
     }
     if (state === "incomplete") {
@@ -314,6 +322,9 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
   if (toWrite.length === 0) return repair;
   // A file that doesn't exist yet holds no text to lose. An existing one is written only if the
   // next rig down would remove exactly what is added.
+  // Read again: removing a kept block's repeats above may have changed the file.
+  try { existing = fs.exists(guidance.targetPath) ? fs.readFile(guidance.targetPath) : null; }
+  catch (err) { repair.gaps.push(`could not read ${guidance.targetPath}: ${(err as Error).message}`); return repair; }
   if (existing !== null && !appendIsCleanupSafe(existing, toWrite)) {
     for (const block of toWrite) {
       repair.gaps.push(`${block.blockId}: not written, because ${guidance.targetPath} has a managed-block marker that the next rig down would strip together with other text, so adding blocks there could cost that text`);
@@ -322,7 +333,7 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
   }
   for (const block of toWrite) {
     try {
-      mergeManagedBlock(fs, guidance.targetPath, block.blockId, block.content);
+      if (!mergeManagedBlock(fs, guidance.targetPath, block.blockId, block.content, { warnings: repair.gaps })) continue;
       if (records) recordManagedBlockWrite(records, guidance.targetPath, block.blockId, block.content, repair.kept);
       (block.refresh ? repair.refreshed : repair.restored).push(block.blockId);
     } catch (err) {

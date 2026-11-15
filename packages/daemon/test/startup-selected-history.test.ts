@@ -421,7 +421,29 @@ describe("selected-history startup", () => {
     const response = await request(f.path, { action: "resume", ...f.refs, revision: body.revision });
     expect(response.status).toBe(409);
     expect(adapter.launchHarness).not.toHaveBeenCalled();
-    expect(await response.json()).toMatchObject({ ok: false, resultSessionId: expect.any(String) });
+    const result = await response.json() as Record<string, any>;
+    // The terminal session is registered; nothing says the native resume went out.
+    expect(result).toMatchObject({ ok: false, resultSessionId: expect.any(String), runtimeHome: { sessionRegistered: true } });
+    expect(result.runtimeHome).not.toHaveProperty("launched");
+  });
+
+  it("reports the terminal session, not a native resume, when the legacy guard stops before dispatch", async () => {
+    const f = fixture(); const { body } = await review(f);
+    const native = vi.spyOn(CodexResumeAdapter.prototype, "resume");
+    const latest = setup.snapshotRepo.findLatestRestoreUsable.bind(setup.snapshotRepo);
+    // Once this launch's terminal session is registered, a newer snapshot is the latest, so the check before dispatch stops.
+    vi.spyOn(setup.snapshotRepo, "findLatestRestoreUsable").mockImplementation((rigId: string) => {
+      const registered = (db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE node_id = ? AND status = 'running' AND id NOT IN (?, ?)")
+        .get(f.node.id, f.old.id, f.active.id) as { n: number }).n;
+      const snapshot = latest(rigId);
+      return registered > 0 && snapshot ? { ...snapshot, id: "newer-snapshot" } : snapshot;
+    });
+    const response = await request(f.path, { action: "resume", ...f.refs, revision: body.revision });
+    const result = await response.json() as Record<string, any>;
+    expect(response.status).toBe(409);
+    expect(native).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, code: "attention_required", resultSessionId: expect.any(String), runtimeHome: { sessionRegistered: true } });
+    expect(result.runtimeHome).not.toHaveProperty("launched");
   });
 
   it("refuses source drift during the awaited liveness check before creating a terminal", async () => {
@@ -490,5 +512,276 @@ describe("selected-history startup", () => {
     expect(adapter.launchHarness).not.toHaveBeenCalled();
     expect(kill).not.toHaveBeenCalled();
     expect(await response.json()).toMatchObject({ ok: false, resultSessionId: expect.any(String) });
+  });
+
+  it("shows a recorded runtime home beside the snapshot's, and a newer correction, even to the same home, needs a new review", async () => {
+    const f = fixture();
+    const recordHome = async (home: string, operationId: string) => {
+      const state = await (await setup.app.request("/api/seat/runtime-home/desk.lead")).json() as Record<string, unknown>;
+      const res = await setup.app.request("/api/seat/record-runtime-home/desk.lead", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ home, expectedOccupant: state.occupantGeneration, expectedOriginal: state.original,
+          expectedRevision: state.revision, operationId, reason: "home after recovery" }) });
+      expect(res.status).toBe(200);
+    };
+    await recordHome("/homes/codex-b", "op-review-home-1");
+    const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
+    const refs = { snapshotId: snapshot.id, historySessionId: f.old.id };
+    const first = await review({ ...f, refs });
+    expect(first.response.status).toBe(200);
+    // The record was made for the seat's newest conversation (B); the selected history is A, so it says so.
+    expect(first.body).toMatchObject({ settingsSource: { runtimeHome: { value: "/homes/codex-b", source: "member", authentication: "unconfirmed",
+      record: { revision: 1, home: "/homes/codex-b" }, snapshotRecord: { revision: 1 }, recordedFor: "another_conversation" } } });
+
+    await recordHome("/homes/codex-b", "op-review-home-2");
+    const second = await review({ ...f, refs });
+    expect(second.body).toMatchObject({ settingsSource: { runtimeHome: { record: { revision: 2 }, snapshotRecord: { revision: 1 } } } });
+    expect(second.body.revision).not.toBe(first.body.revision);
+    expect(JSON.stringify(second.body)).not.toContain(tokenA);
+    expect(JSON.stringify(second.body)).not.toContain(tokenB);
+    const create = vi.spyOn(setup.tmuxAdapter, "createSession");
+    const stale = await request(f.path, { action: "resume", ...refs, revision: first.body.revision });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ ok: false, code: "selection_changed" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  // A record row as the record verb writes it, for a conversation the seat held then: the verb records only the current one.
+  function recordFor(nodeId: string, revision: number, home: string, original: string, runtime = "codex") {
+    db.prepare(`INSERT INTO seat_runtime_home_records (operation_id, node_id, runtime, revision, home, slot, previous_home, previous_source,
+      original, occupant_generation, request_hash, reason, operator, created_at) VALUES (?, ?, ?, ?, ?, 'member_env', NULL, 'native_default', ?, NULL, 'fixture', 'fixture', NULL, ?)`)
+      .run(`op-fixture-${revision}`, nodeId, runtime, revision, home, original, new Date().toISOString());
+  }
+  async function recordCurrent(home: string, operationId: string) {
+    const state = await (await setup.app.request("/api/seat/runtime-home/desk.lead")).json() as Record<string, unknown>;
+    const res = await setup.app.request("/api/seat/record-runtime-home/desk.lead", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ home, expectedOccupant: state.occupantGeneration, expectedOriginal: state.original,
+        expectedRevision: state.revision, operationId, reason: "home after recovery" }) });
+    expect(res.status).toBe(200);
+  }
+
+  /** A's own older home, a correction for A after the snapshot, then B's (the seat's current conversation) home. */
+  async function appliedFixture(tag: string, podAware = false) {
+    const f = fixture(podAware);
+    recordFor(f.node.id, 1, "/homes/codex-a", tokenA);
+    const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
+    recordFor(f.node.id, 2, "/homes/codex-a2", tokenA);
+    await recordCurrent("/homes/codex-b", `op-home-b-${tag}`);
+    const refs = { snapshotId: snapshot.id, historySessionId: f.old.id };
+    return { f, refs };
+  }
+  const codexHomeOf = (nodeId: string) => JSON.parse((db.prepare("SELECT env_json FROM nodes WHERE id = ?").get(nodeId) as { env_json: string }).env_json).CODEX_HOME;
+  const recordCount = () => (db.prepare("SELECT COUNT(*) AS n FROM seat_runtime_home_records").get() as { n: number }).n;
+
+  it("resumes the selected original under the newest home recorded for it, and puts B's home back when the launch is rolled back", async () => {
+    const { f, refs } = await appliedFixture("rolled-back");
+    const { body } = await review({ ...f, refs });
+    expect(body).toMatchObject({ settingsSource: { runtimeHome: { value: "/homes/codex-b", record: { revision: 3 }, snapshotRecord: { revision: 1 },
+      recordedFor: "another_conversation", uses: { plan: "apply_recorded_for_selected", home: "/homes/codex-a2", revision: 2, selectedInHome: "unknown" } } } });
+    let launchedUnder: string | undefined;
+    vi.spyOn(CodexResumeAdapter.prototype, "resume").mockImplementation(async () => {
+      launchedUnder = codexHomeOf(f.node.id);
+      return { ok: false, code: "resume_failed", message: "fixture native failed" };
+    });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(launchedUnder).toBe("/homes/codex-a2");
+    // The orchestrator rolled its blank back and B is the seat's conversation again, so the slot goes back to B's home.
+    expect(result).toMatchObject({ code: "awaiting-decision", runtimeHome: { attempted: { home: "/homes/codex-a2", revision: 4,
+      recordedFor: "selected_history", appliedBeforeLaunch: true }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+    expect(db.prepare("SELECT original, home, operation_id FROM seat_runtime_home_records WHERE revision = 4").get())
+      .toMatchObject({ original: tokenA, home: "/homes/codex-a2", operation_id: expect.stringMatching(/^resume-/) });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-b");
+    expect(db.prepare("SELECT original, home FROM seat_runtime_home_records WHERE revision = 5").get()).toMatchObject({ original: tokenB, home: "/homes/codex-b" });
+    expect(JSON.stringify(result)).not.toContain(tokenA);
+  });
+
+  it("puts B's home back when the selected restore returns before its launch (continuity recovery owns the seat)", async () => {
+    const { f, refs } = await appliedFixture("restoring", true);
+    db.prepare("INSERT INTO continuity_state (pod_id, node_id, status) VALUES ('pod-selected', ?, 'restoring')").run(f.node.id);
+    const { body } = await review({ ...f, refs });
+    const create = vi.spyOn(setup.tmuxAdapter, "createSession");
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, any>;
+    expect(create).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, code: "failed", runtimeHome: { attempted: { revision: 4, appliedBeforeLaunch: true },
+      sessionRegistered: false, putBack: { home: "/homes/codex-b", revision: 5 } } });
+    expect(result.runtimeHome).not.toHaveProperty("notPutBack");
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-b");
+  });
+
+  it("puts B's home back when the orchestrator says the selected launch never started", async () => {
+    const { f, refs } = await appliedFixture("not-started");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode").mockResolvedValue({ ok: false, launched: [{ nodeId: f.node.id,
+      logicalId: "desk.lead", status: "failed", error: "The selected seat or history changed before launch.", notStarted: true }] });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+  });
+
+  it("puts B's home back when tmux reports no terminal was created, and keeps it when the creation is unconfirmed", async () => {
+    const { f, refs } = await appliedFixture("not-created");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.tmuxAdapter, "createSession").mockResolvedValue({ ok: false, code: "session_not_created", message: "fixture: no session" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+  });
+
+  it("keeps the selected home when tmux can't confirm whether the terminal was created", async () => {
+    const { f, refs } = await appliedFixture("unconfirmed-create");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.tmuxAdapter, "createSession").mockResolvedValue({ ok: false, code: "session_unconfirmed", message: "fixture: unconfirmed" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: null, notPutBack: "outcome_unknown" } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-a2");
+  });
+
+  it("keeps the selected home when the rolled-back blank's terminal stop isn't confirmed", async () => {
+    const { f, refs } = await appliedFixture("unconfirmed-stop");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(CodexResumeAdapter.prototype, "resume").mockResolvedValue({ ok: false, code: "resume_failed", message: "fixture native failed" });
+    vi.spyOn(setup.tmuxAdapter, "killSession").mockResolvedValue({ ok: false, code: "kill_failed", message: "fixture: stop unconfirmed" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ code: "awaiting-decision", runtimeHome: { attempted: { revision: 4 }, putBack: null, notPutBack: "outcome_unknown" } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-a2");
+  });
+
+  it("keeps the selected home after a native resume whose outcome isn't confirmed, and says it isn't known", async () => {
+    const { f, refs } = await appliedFixture("unconfirmed");
+    const { body } = await review({ ...f, refs });
+    const native = vi.spyOn(CodexResumeAdapter.prototype, "resume").mockResolvedValue({ ok: false, code: "attention_required", message: "fixture native refused" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(native).toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, runtimeHome: { attempted: { home: "/homes/codex-a2", revision: 4, appliedBeforeLaunch: true },
+      putBack: null, notPutBack: "outcome_unknown" } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-a2");
+    expect(recordCount()).toBe(4);
+  });
+
+  it("reports the home it was bound to when a record lands during the launch, and doesn't put back over that record", async () => {
+    const { f, refs } = await appliedFixture("await");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(CodexResumeAdapter.prototype, "resume").mockImplementation(async () => {
+      // Another recording lands while the native resume is awaited.
+      recordFor(f.node.id, 5, "/homes/codex-late", tokenB);
+      db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/codex-late" }), f.node.id);
+      return { ok: false, code: "resume_failed", message: "fixture native failed" };
+    });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    // The record changed the selected seat, so the launch's own rollback stops and what it left isn't known.
+    expect(result).toMatchObject({ runtimeHome: { attempted: { home: "/homes/codex-a2", revision: 4, appliedBeforeLaunch: true },
+      putBack: null, notPutBack: "outcome_unknown" } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-late");
+  });
+
+  it("puts B's home back when nothing was launched", async () => {
+    const { f, refs } = await appliedFixture("not-launched");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode")
+      .mockResolvedValue({ ok: false, code: "selection_changed", message: "fixture: changed before launch" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4, appliedBeforeLaunch: true }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-b");
+  });
+
+  it("doesn't put back over a record that landed since the apply, even when nothing was launched", async () => {
+    const { f, refs } = await appliedFixture("not-launched-recorded");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode").mockImplementation(async () => {
+      recordFor(f.node.id, 5, "/homes/codex-late", tokenB);
+      return { ok: false, code: "selection_changed", message: "fixture: changed before launch" };
+    });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: null, notPutBack: "changed_since_apply" } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-a2");
+  });
+
+  it("keeps the selected home after a confirmed resume whose conversation continues under a new id", async () => {
+    setup = createTestApp(db, { listProcesses: async () => [
+      { pid: 1234, ppid: 1, command: "zsh" },
+      { pid: 1235, ppid: 1234, command: `claude --resume ${tokenA}` },
+    ], appDeps: { terminalBearerToken: "terminal-test-token" } });
+    setup.tmuxAdapter.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+    setup.tmuxAdapter.listPanes = vi.fn(async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
+    setup.tmuxAdapter.getPanePid = vi.fn(async () => 1234);
+    setup.tmuxAdapter.getPaneCommand = vi.fn(async () => "claude");
+    const f = fixture(false, "claude-code");
+    recordFor(f.node.id, 1, "/homes/claude-a", tokenA, "claude-code");
+    const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
+    await recordCurrent("/homes/claude-b", "op-home-b-rotated");
+    const refs = { snapshotId: snapshot.id, historySessionId: f.old.id };
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(ClaudeResumeAdapter.prototype, "resume").mockResolvedValue({ ok: true });
+    const originalLaunch = setup.restoreOrchestrator.launchSingleNode.bind(setup.restoreOrchestrator);
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode").mockImplementation(async (rigId, logicalId, opts) => {
+      const launched = await originalLaunch(rigId, logicalId, opts);
+      // Claude continued the selected conversation under a new id, as its hook records after a proven rotation.
+      db.prepare("UPDATE sessions SET resume_token = ? WHERE id = ?").run("native-history-A-continued", launched.launched?.[0]?.resultSessionId ?? "");
+      return launched;
+    });
+    const response = await request(f.path, { action: "resume", ...refs, revision: body.revision });
+    const result = await response.json() as Record<string, unknown>;
+    expect(response.status).toBe(200);
+    expect(result).toMatchObject({ ok: true, runtimeHome: { attempted: { home: "/homes/claude-a", revision: 3, appliedBeforeLaunch: true },
+      sessionRegistered: true, putBack: null, notPutBack: "resume_confirmed" } });
+    expect(JSON.parse((db.prepare("SELECT env_json FROM nodes WHERE id = ?").get(f.node.id) as { env_json: string }).env_json).CLAUDE_CONFIG_DIR).toBe("/homes/claude-a");
+    expect(recordCount()).toBe(3);
+  });
+
+  it("names the applied home and an unknown outcome when the launch throws, and puts nothing back", async () => {
+    const { f, refs } = await appliedFixture("throws");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode").mockRejectedValue(new Error(`fixture launcher error for ${tokenA}`));
+    const response = await request(f.path, { action: "resume", ...refs, revision: body.revision });
+    const result = await response.json() as Record<string, unknown>;
+    expect(response.status).toBe(500);
+    expect(result).toMatchObject({ ok: false, code: "launch_error", error: "fixture launcher error for [redacted]",
+      runtimeHome: { attempted: { home: "/homes/codex-a2", revision: 4, appliedBeforeLaunch: true }, sessionRegistered: null,
+        putBack: null, notPutBack: "outcome_unknown" } });
+    expect(codexHomeOf(f.node.id)).toBe("/homes/codex-a2");
+    expect(recordCount()).toBe(4);
+    expect(JSON.stringify(result)).not.toContain(tokenA);
+  });
+
+  it("claims no home change when the launch throws with nothing applied", async () => {
+    const f = fixture(); const { body } = await review(f);
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode").mockRejectedValue(new Error("fixture launcher error"));
+    const response = await request(f.path, { action: "resume", ...f.refs, revision: body.revision });
+    const result = await response.json() as Record<string, any>;
+    expect(response.status).toBe(500);
+    expect(result).toMatchObject({ ok: false, code: "launch_error", runtimeHome: { attempted: { appliedBeforeLaunch: false }, sessionRegistered: null } });
+    expect(result.runtimeHome).not.toHaveProperty("putBack");
+    expect(recordCount()).toBe(0);
+  });
+
+  it("keeps a home a switch set since the selected conversation's record, says it isn't that record's, and gives it no revision", async () => {
+    const f = fixture();
+    recordFor(f.node.id, 1, "/homes/codex-a", tokenA);
+    db.prepare("UPDATE nodes SET env_json = ?, account_home = ? WHERE id = ?").run(JSON.stringify({ CODEX_HOME: "/homes/codex-a" }), "/homes/switched", f.node.id);
+    const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
+    const refs = { snapshotId: snapshot.id, historySessionId: f.old.id };
+    const { body } = await review({ ...f, refs });
+    const uses = ((body.settingsSource as Record<string, any>).runtimeHome as Record<string, any>).uses;
+    expect(uses).toMatchObject({ plan: "as_set", home: "/homes/switched", why: "home_changed_since_record" });
+    expect(uses).not.toHaveProperty("revision");
+    vi.spyOn(CodexResumeAdapter.prototype, "resume").mockResolvedValue({ ok: false, code: "attention_required", message: "fixture native refused" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { home: "/homes/switched", revision: null, recordedFor: null, why: "home_changed_since_record" } } });
+    expect(db.prepare("SELECT account_home FROM nodes WHERE id = ?").get(f.node.id)).toEqual({ account_home: "/homes/switched" });
+    expect((db.prepare("SELECT COUNT(*) AS n FROM seat_runtime_home_records").get() as { n: number }).n).toBe(1);
+  });
+
+  it("launches as set when only another conversation's home is recorded, and says so without that record's revision as its own", async () => {
+    const f = fixture();
+    await recordCurrent("/homes/codex-b", "op-home-b-only");
+    const snapshot = setup.snapshotCapture.captureSnapshot(f.rig.id, "auto-pre-down");
+    const refs = { snapshotId: snapshot.id, historySessionId: f.old.id };
+    const { body } = await review({ ...f, refs });
+    expect(body).toMatchObject({ settingsSource: { runtimeHome: { recordedFor: "another_conversation",
+      uses: { plan: "as_set", home: "/homes/codex-b", why: "no_record_for_this_conversation", otherConversationRecord: { revision: 1 } } } } });
+    const native = vi.spyOn(CodexResumeAdapter.prototype, "resume").mockResolvedValue({ ok: false, code: "attention_required", message: "fixture native refused" });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(native).toHaveBeenCalled();
+    expect(result).toMatchObject({ runtimeHome: { attempted: { home: "/homes/codex-b", revision: null, recordedFor: null,
+      why: "no_record_for_this_conversation", otherConversationRecord: { revision: 1 } } } });
+    expect(result).not.toHaveProperty("code", "runtime_home_other_conversation");
+    expect((db.prepare("SELECT COUNT(*) AS n FROM seat_runtime_home_records").get() as { n: number }).n).toBe(1);
   });
 });

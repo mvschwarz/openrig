@@ -21,6 +21,7 @@ import { communityHarnessOf } from "./built-in-runtimes.js";
 import { communityHarnessStopsRestore } from "./community-harness-presets.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydrate-eligibility.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 /** OPR.0.4.3.20 FR-6 — a present token whose last verification is older than this
  *  is surfaced as `stale` (age-based staleness — the "stale while running" signal
@@ -321,7 +322,7 @@ export function buildRestorePlanPreview(
     };
     const stoppedCurrent = selectedHistory?.nodeId !== node.id && sessionRows.some(row => row.nodeId === savedNodeId && row.stoppedCurrent);
     // Restore checks the live binding before anything else (restoreNodeWithCompensation), and so does its forecast.
-    const attached = node.binding?.attachmentType === "external_cli";
+    const attached = seatProcessOwner(resolveSeatKind(node.binding?.attachmentType)) === "external";
     const { intendedAction, reason } = attached
       ? { intendedAction: "leave-attached" as const, reason: leftAttachedReason(node.binding?.externalSessionName ?? node.logicalId) }
       : runtimeError

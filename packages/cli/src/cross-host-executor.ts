@@ -101,7 +101,12 @@ export async function runCrossHostCommand(
     ? `OPENRIG_SESSION_NAME=${shellQuote(opts.originTriple)} ${quotedArgv}`
     : quotedArgv;
   const remoteCommandLine = `sh -lc ${shellQuote(innerCommand)}`;
-  const fullArgs = [...sshOpts, sshHost.target, remoteCommandLine];
+  // SEP-1: `--` ends ssh's own option parsing, so a target that begins with `-` reaches ssh as the
+  // destination instead of being read as one more option. That misreading is the harm: `-V`, for
+  // instance, is ssh's own version flag, parsed and exited 0 before any connection, which this
+  // executor would count as a success with no remote command run. With the separator, ssh rejects
+  // the name itself.
+  const fullArgs = [...sshOpts, "--", sshHost.target, remoteCommandLine];
 
   const spawn = opts.spawn ?? (nodeSpawn as unknown as SpawnFn);
   const child = spawn("ssh", fullArgs);

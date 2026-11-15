@@ -221,9 +221,17 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
 
     // Scenario 7: DNS-fails hostname, no bearer → THROW
     it("(7) DNS-unresolvable hostname with no bearer → THROW (HG-4)", async () => {
-      await expect(
-        assertBindAuthInvariant({ host: "this-host-does-not-exist.invalid", bearerToken: null }),
-      ).rejects.toThrow(AuthBearerTokenStartupError);
+      const lookup = vi.spyOn(dns.promises, "lookup").mockRejectedValue(
+        Object.assign(new Error("getaddrinfo ENOTFOUND this-host-does-not-exist.invalid"), { code: "ENOTFOUND" }),
+      );
+      try {
+        await expect(
+          assertBindAuthInvariant({ host: "this-host-does-not-exist.invalid", bearerToken: null }),
+        ).rejects.toThrow(AuthBearerTokenStartupError);
+        expect(lookup).toHaveBeenCalledWith("this-host-does-not-exist.invalid", { all: false });
+      } finally {
+        lookup.mockRestore();
+      }
     });
 
     // Existing-behavior preservation

@@ -147,7 +147,7 @@ describe("public human registry -> queue admission journey", () => {
     expect(response.status).toBe(400);
     const body = await response.json() as Record<string, unknown>;
     expect(body).toMatchObject({ error: "human_registry_unavailable", registryLoadError: true });
-    const nobody = "no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …";
+    const nobody = "no human configured yet — register one: rig gateway human add <entityId> --display-name … --delivery-class B [--default] (a connector --binding is optional)";
     expect(String(body.registryError)).toBe(nobody);
     expect(body).not.toHaveProperty("registryProjectionError");
     // The queue's own frame says nobody is registered, never "failed to load" or "repair the projection".

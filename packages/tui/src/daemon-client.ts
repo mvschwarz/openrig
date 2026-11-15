@@ -8,6 +8,9 @@ import type { ProjectSelection } from "./types.js";
 
 /** Usage across hosts: the daemon answers by its 15 s view deadline; 15 s + 5 s for its own read and the transfer. */
 export const USAGE_HOSTS_VIEW_WAIT_MS = 20_000;
+/** The fleet Projects view: the daemon answers within its own 10 s view deadline
+ *  whatever the registry's size, plus its 5 s read and the transfer. */
+export const FLEET_SCOPES_VIEW_WAIT_MS = 20_000;
 
 export interface DaemonClientOptions {
   baseUrl?: string;
@@ -360,6 +363,42 @@ export class DaemonClient {
     return this.get(`/api/scopes?detail=1${this.projectQuery(project)}`);
   }
 
+  /** #3093 fleet Projects: every registered host's rows as this daemon read them,
+   *  host-attributed beside per-host status. GET only; the daemon never writes. */
+  async fleetScopes(): Promise<import("./scopes/fleet-scopes-model.js").FleetScopesRead["status"]> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/api/scopes/fleet`, { headers: this.headers, signal: AbortSignal.timeout(FLEET_SCOPES_VIEW_WAIT_MS) });
+    } catch (error) {
+      return { status: null, error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) return { status: res.status, error: typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}` };
+    if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data["missions"]) || !Array.isArray(data["hosts"])) {
+      return { status: res.status, error: "the response was not a fleet Projects view" };
+    }
+    return { view: data as unknown as import("./scopes/fleet-scopes-model.js").FleetScopesView };
+  }
+
+  /** #3093: a fleet slice's DETAIL, read from its ORIGIN host through the daemon's
+   *  read-through (`?host=` envelope). The origin's shape is returned verbatim. */
+  async fleetSliceDetail(hostId: string, mission: string, slice: string): Promise<import("./scopes/fleet-scopes-model.js").FleetSliceDetailRead> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/api/scopes/slice?host=${encodeURIComponent(hostId)}&mission=${encodeURIComponent(mission)}&slice=${encodeURIComponent(slice)}`,
+        { headers: this.headers, signal: AbortSignal.timeout(USAGE_HOSTS_VIEW_WAIT_MS) });
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) {
+      const detail = data && typeof data["detail"] === "string" ? `: ${data["detail"]}` : typeof data?.["error"] === "string" ? `: ${data["error"]}` : "";
+      return { error: `HTTP ${res.status}${detail}` };
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data) || typeof data["dirName"] !== "string") return { error: "the origin answered, but not with a slice detail" };
+    return { detail: data as unknown as import("./scopes/scopes-model.js").SliceScopeSnap };
+  }
+
   /** EXECUTION view via the shipped generic view route; no new endpoint. */
   execution(mission?: string, project?: ProjectSelection | null) {
     const query = `${mission ? `&mission=${encodeURIComponent(mission)}` : ""}${this.projectQuery(project)}`;
@@ -421,6 +460,14 @@ export class DaemonClient {
     const query = [item ? `item=${encodeURIComponent(item)}` : null, view ? `view=${encodeURIComponent(view)}` : null].filter(Boolean).join("&");
     return this.get(`/api/attention${query ? `?${query}` : ""}`);
   }
+  /** Connected assistants (roster members outside any terminal) and their check-in. Optional: an older daemon has no
+   *  such route. */
+  /** This daemon's connected assistants, as the status and body it answered; an older daemon answers 404. A failed read
+   *  isn't an empty list, so the caller is given the status to tell them apart. */
+  async hostedMembers(): Promise<{ status: number; body: unknown }> {
+    const res = await this.optionalFetchImpl(`${this.baseUrl}/api/queue/hosted-members`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
+    return { status: res.status, body: res.ok ? await res.json().catch(() => null) : null };
+  }
   queueItem(qitemId: string, options: { optional?: boolean } = {}) {
     return this.get(`/api/queue/${encodeURIComponent(qitemId)}`, options.optional ? this.optionalFetchImpl : this.fetchImpl);
   }
@@ -429,6 +476,15 @@ export class DaemonClient {
   }
   reviewFleet() {
     return this.get(`/api/review/fleet`);
+  }
+  /** This host's open pairing requests (read-only; nothing in it is a credential). */
+  pairRequests() { return this.get("/api/hosts/pair-requests") as Promise<{ requests: import("./config/pairing.js").PairRequest[] }>; }
+  /** Decide a pairing request directly, as `rig host approve|deny` does (POST /api/hosts/pair-decision), with the operator's
+   *  action headers. Returns the HTTP outcome; a timeout or a lost connection throws, and then the outcome is unknown. */
+  async pairDecision(request: string, decision: "approve" | "deny"): Promise<{ status: number; body: Record<string, unknown> | null }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/api/hosts/pair-decision`, { method: "POST",
+      headers: { ...this.actionHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ request, decision }), signal: AbortSignal.timeout(10_000) });
+    return { status: res.status, body: await res.json().catch(() => null) as Record<string, unknown> | null };
   }
   /** The mission-control write Steering uses to answer a request (POST /api/mission-control/action). */
   missionControlAction(input: { verb: "approve" | "answer" | "resolve"; qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; authority?: "primary-user" }) {

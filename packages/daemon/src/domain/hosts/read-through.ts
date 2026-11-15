@@ -64,6 +64,10 @@ export const READ_THROUGH_ALLOWLIST = [
   "/api/missions/:missionId",
   "/api/specs/library",
   "/api/specs/library/:id/review",
+  // #3093 fleet Projects read-view: a fleet slice row's DETAIL and action
+  // target keep its origin host — the detail read crosses the edge with the
+  // same GET discipline as the reads above (origin shape stays the law).
+  "/api/scopes/slice",
 ] as const;
 
 export function isReadThroughPath(path: string): boolean {

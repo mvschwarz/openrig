@@ -25,6 +25,8 @@ function fixture(hooks: { file?: () => Promise<void>; exec?: (command: string) =
     commands.push(command);
     return hooks.exec ? hooks.exec(command)
       : command.includes("list-panes") ? "%1|0|/inert|80|24|1\n"
+      : command.startsWith("tmux show-environment") ? "OPENRIG_NODE_ID=a\n"
+      : command.startsWith("tmux display-message") && command.includes("#{pid}") ? "$1|4242|1700000000"
       : command.includes("#{session_id}") ? "$1" : "";
   }, { writeFile: async () => { await hooks.file?.(); }, unlink: async () => {}, tmpName: () => "/inert/buffer", bufferName: () => "inert" });
   const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name)); tmux.deliveryGuard = guard;
@@ -103,7 +105,7 @@ describe("guard-wired teardown", () => {
     expect(f.sessionRegistry.getBindingForNode("a")?.tmuxPane).toBe("%1");
     await f.guard.set("a", false, "person", "stop");
     expect(await f.teardown.teardown("r")).toMatchObject({ sessionsKilled: 1, errors: [] });
-    expect(f.commands).toContain("tmux kill-session -t '$1'");
+    expect(f.commands.some(c => /^tmux if-shell -F -t '\$1' .*#\{==:#\{pid\},4242\}.*kill-session -t .*\$1/.test(c))).toBe(true);
     expect(f.commands.filter(c => c.includes("list-panes"))).toHaveLength(1);
     expect(f.db.prepare("SELECT status FROM sessions WHERE id='sa'").get()).toEqual({ status: "exited" });
     expect(f.sessionRegistry.getBindingForNode("a")).toBeNull(); f.db.close();

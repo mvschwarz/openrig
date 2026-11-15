@@ -1,4 +1,5 @@
 import { resolveEscalationOwner, hasConsumedEscalationHop } from "./escalation-owner.js";
+import { isTypedGateBlocker } from "./queue-blocker.js";
 import type Database from "better-sqlite3";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -11,15 +12,35 @@ export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatStat
 /** A blocked row's backstop when no live timer or watchdog is armed and its blocker isn't a row that can finish. */
 export const NO_TIMED_BACKSTOP = "UNVERIFIED: no timed backstop";
 
+/** This module's statements, prepared once per connection and reused. Preparing parses and plans the SQL every time,
+ *  and these few fixed texts run on every waiting view, sweep and ladder read. A prepared statement still reads the
+ *  current data each time it runs, and SQLite re-prepares it itself after a schema change, so reuse changes no result.
+ *  Keyed by the connection, so they go with it, and by SQL text from this module's fixed set, capped as a backstop. */
+const REUSED_STATEMENT_CAP = 32;
+const reusedStatements = new WeakMap<Database.Database, Map<string, Database.Statement>>();
+export function reusedStatement(db: Database.Database, sql: string): Database.Statement {
+  let byText = reusedStatements.get(db);
+  if (!byText) {
+    byText = new Map();
+    reusedStatements.set(db, byText);
+  }
+  let statement = byText.get(sql);
+  if (!statement) {
+    statement = db.prepare(sql);
+    if (byText.size < REUSED_STATEMENT_CAP) byText.set(sql, statement);
+  }
+  return statement;
+}
+
 /** A read of the existing transition log, not another progress receipt. Machine
  * actors and typed wake receipts are bookkeeping, never task progress. Historical
  * untyped author notes remain author testimony; their text is not classified.
  * Delivery bookkeeping uses the reserved daemon actors and must not reset the
  * ladder before it can join its dispatch marker to the delivery receipt. */
 export function lastMeaningfulTransition(db: Database.Database, id: string): { id: number; at: string } | null {
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return null;
-  const hasWakes = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
-  const row = db.prepare(`SELECT t.transition_id, t.ts FROM (
+  if (!reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return null;
+  const hasWakes = reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
+  const row = reusedStatement(db, `SELECT t.transition_id, t.ts FROM (
       SELECT *, LAG(state) OVER (ORDER BY transition_id) AS previous_state FROM queue_transitions WHERE qitem_id = ?
     ) t WHERE (t.actor_session NOT IN ('watchdog@system', 'wake-ladder@system', 'daemon@kernel', 'daemon@system') OR t.state IS NOT t.previous_state)
     ${hasWakes ? "AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.transition_id = t.transition_id AND w.phase = 'fired')" : ""}
@@ -33,9 +54,9 @@ export function lastMeaningfulTransitionMany(db: Database.Database, ids: readonl
   const unique = [...new Set(ids)];
   const out = new Map<string, { id: number; at: string } | null>(unique.map((id) => [id, null]));
   if (unique.length === 0) return out;
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return out;
-  const hasWakes = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
-  const rows = db.prepare(`SELECT qitem_id, transition_id, ts FROM (
+  if (!reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transitions'").get()) return out;
+  const hasWakes = reusedStatement(db, "SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
+  const rows = reusedStatement(db, `SELECT qitem_id, transition_id, ts FROM (
       SELECT t.qitem_id, t.transition_id, t.ts, ROW_NUMBER() OVER (PARTITION BY t.qitem_id ORDER BY t.transition_id DESC) AS newest FROM (
         SELECT *, LAG(state) OVER (PARTITION BY qitem_id ORDER BY transition_id) AS previous_state FROM queue_transitions
          WHERE qitem_id IN (SELECT value FROM json_each(?))
@@ -46,21 +67,15 @@ export function lastMeaningfulTransitionMany(db: Database.Database, ids: readonl
   return out;
 }
 
-/** The waiting view's statements, each prepared once, and the schema checks they depend on, each made once. A listing
- * holds one for all its rows; a single read uses a fresh one. A listing reads synchronously, so neither the statements
- * nor the schema checks can go stale under it. */
+/** The waiting view's statements (reused per connection) and the schema checks they depend on, each made once per
+ * instance. A listing holds one for all its rows; a single read uses a fresh one. A listing reads synchronously, so its
+ * schema checks can't go stale under it, and a fresh instance checks again. */
 export class WaitingStatements {
-  private readonly prepared = new Map<string, Database.Statement>();
   private readonly tables = new Map<string, boolean>();
   constructor(private readonly db: Database.Database) {}
 
   statement(sql: string): Database.Statement {
-    let prepared = this.prepared.get(sql);
-    if (!prepared) {
-      prepared = this.db.prepare(sql);
-      this.prepared.set(sql, prepared);
-    }
-    return prepared;
+    return reusedStatement(this.db, sql);
   }
 
   hasTable(name: string): boolean {
@@ -142,7 +157,7 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   const row = held && held.qitem_id === id ? held : statements.statement(`SELECT qitem_id, source_session, destination_session, state, blocked_on, closure_required_at, tags
     FROM queue_items WHERE qitem_id = ?`).get(id) as WaitingRow | undefined;
   if (!row) return null;
-  const blocker = row.blocked_on?.startsWith("qitem-") ? statements.statement(
+  const blocker = row.blocked_on && !isTypedGateBlocker(row.blocked_on) ? statements.statement(
     "SELECT destination_session, state FROM queue_items WHERE qitem_id = ?",
   ).get(row.blocked_on) as { destination_session: string; state: string } | undefined : undefined;
   let recoveryOwner: string | null = null;
@@ -151,7 +166,7 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   const subject = row.blocked_on ? blocker?.destination_session ?? row.blocked_on : row.destination_session;
   let observed: ReturnType<WaitingActivityReader> = null;
   try { observed = readActivity?.(subject) ?? null; } catch { /* unavailable remains unknown */ }
-  const meaningful = meaningfulFor(db, row.blocked_on?.startsWith("qitem-") ? row.blocked_on : id, reads);
+  const meaningful = meaningfulFor(db, blocker ? row.blocked_on! : id, reads);
   const sweepInterval = sweepSeconds();
   const view: WaitingView = {
     obligation: id, owner: row.destination_session, state: row.state, actionableSince: row.state === "pending" ? pendingSince(db, id, statements) : null,
@@ -178,10 +193,11 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     // and the wake-now marker is due now (#860).
     const timerDue = timer ? nextDueAt({ policy: timer.policy, specYaml: timer.spec_yaml, registeredAt: timer.registered_at,
       intervalSeconds: timer.interval_seconds, scanIntervalSeconds: timer.scan_interval_seconds, lastEvaluationAt: timer.last_evaluation_at }) : null;
+    const liveBlocker = blocker && ["pending", "in-progress", "blocked"].includes(blocker.state);
     view.nextBackstop = timer ? {
       owner: row.destination_session, mechanism: `watchdog:${timer.job_id}`, intervalSeconds: timer.interval_seconds,
       dueAt: new Date(timerDue ?? Date.now()).toISOString(),
-    } :{ owner: blocker?.destination_session ?? row.destination_session, mechanism: blocker ? "blocker-transition / queue-stuck-sweep" : NO_TIMED_BACKSTOP, dueAt: null, intervalSeconds: blocker ? sweepInterval : null };
+    } :{ owner: liveBlocker ? blocker.destination_session : row.destination_session, mechanism: liveBlocker ? "blocker-transition / queue-stuck-sweep" : NO_TIMED_BACKSTOP, dueAt: null, intervalSeconds: liveBlocker ? sweepInterval : null };
     if (timer) {
       let notice: { at: string; deliveryStatus: string } | undefined;
       try {

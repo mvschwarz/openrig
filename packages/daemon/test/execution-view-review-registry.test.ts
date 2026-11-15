@@ -24,6 +24,7 @@ import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { buildExecutionView, type ExecutionViewDeps } from "../src/domain/execution-view.js";
+import { readProjectReadiness } from "../src/domain/proof/judgments.js";
 
 const SHA = "a".repeat(40);
 const REGISTRY_FILES = 450;
@@ -119,5 +120,26 @@ describe("execution view review registry", () => {
     // Other callbacks ran between the first and the last file of one traversal, not only around it.
     expect(turnsAtRead[REGISTRY_FILES - 1]! - turnsAtRead[0]!).toBeGreaterThan(0);
     expect(turnsAtRead).toHaveLength(REGISTRY_FILES);
+  });
+
+  it("also yields inside the later whole-project readiness read, preserving its projection", async () => {
+    const deps = fixture("turns", 2), missions = deps.slicesRoot()!;
+    for (const name of ["beta", "gamma"]) {
+      fs.mkdirSync(path.join(missions, name));
+      fs.writeFileSync(path.join(missions, name, "mission.yaml"), "kind: mission\ncomposition: { slices: [] }\n");
+    }
+    const first = fs.readdirSync(missions).slice(0, -1).find(name => name !== "turns")!;
+    let started = false, yielded = false;
+    hooks.onRead = file => {
+      if (!started && file === path.join(missions, first, "mission.yaml")) {
+        started = true;
+        setImmediate(() => { yielded = true; });
+      }
+    };
+    const doc = await buildExecutionView(deps, { mission: "turns" });
+    expect(started).toBe(true);
+    expect(yielded, "earlier registry yields must not hide a later synchronous project walk").toBe(true);
+    hooks.onRead = null;
+    expect(doc.project_readiness).toEqual(readProjectReadiness(missions));
   });
 });

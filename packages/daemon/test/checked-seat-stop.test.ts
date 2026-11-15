@@ -25,6 +25,10 @@ describe("seat-stop.v1 checked stop", () => {
   let onDetach: (() => void) | undefined;
   let onKill: (() => void) | undefined;
   let killError: Error | undefined;
+  let named: string | undefined;
+  // A stop's effect, held inside tmux to the session id and server it read.
+  const held = (inner: string) => "tmux if-shell -F -t '$7' '#{&&:#{==:#{session_id},$7},#{&&:#{==:#{pid},4242},#{==:#{start_time},1700000000}}}' "
+    + `'${inner.replace(/'/g, "'\"'\"'")}' 'display-message -p openrig-stop-target-changed'`;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -34,13 +38,19 @@ describe("seat-stop.v1 checked stop", () => {
     registry = new SessionRegistry(db);
     bus = new EventBus(db);
     commands = [];
+    named = undefined;
     onProbe = onPanes = onDetach = onKill = undefined;
     killError = undefined;
     adapter = new TmuxAdapter(async command => {
       commands.push(command);
       if (command.includes("has-session")) { onProbe?.(); return ""; }
-      if (command.includes("list-panes")) { onPanes?.(); return "%1|0|/project|120|40|1"; }
-      if (command.includes("display-message")) return "$7";
+      if (command.includes("list-panes")) { onPanes?.(); named = /=([^:']+):/.exec(command)?.[1] ?? named; return "%1|0|/project|120|40|1"; }
+      // The named session carries its own seat's OpenRig marker.
+      if (command.startsWith("tmux show-environment")) {
+        const bound = db.prepare("SELECT node_id FROM bindings WHERE tmux_session = ?").get(named) as { node_id: string } | undefined;
+        return `OPENRIG_NODE_ID=${bound?.node_id ?? ""}`;
+      }
+      if (command.startsWith("tmux display-message")) return "$7|4242|1700000000";
       if (command.includes("detach-client")) { onDetach?.(); return ""; }
       if (command.includes("kill-session")) { onKill?.(); if (killError) throw killError; return ""; }
       throw new Error(`unexpected tmux command: ${command}`);
@@ -129,7 +139,7 @@ describe("seat-stop.v1 checked stop", () => {
     const result = await stop(a.name, expected(a.name));
     expect(result).toMatchObject({ ok: true, sessionName: a.name, sessionId: a.session.id });
     expect(commands.filter(command => command.includes("detach-client") || command.includes("kill-session"))).toEqual([
-      "tmux detach-client -s '$7'", "tmux kill-session -t '$7'",
+      held("detach-client -s '$7'"), held("kill-session -t '$7'"),
     ]);
     expect(status(a.session.id)).toBe("exited");
     expect(registry.getBindingForNode(a.node.id)).toBeNull();

@@ -1,0 +1,12 @@
+• Ran a command
+  └ Command output
+
+• Working (4m 34s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+  └ Tip: Use /feedback to send logs to the maintainers when something looks off.
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · ~/example/work · Finish task
+  ← for agents · ? for shortcuts                                                               ⚠ 1 warning · f2 to view
+

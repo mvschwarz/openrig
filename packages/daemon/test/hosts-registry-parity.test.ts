@@ -71,6 +71,16 @@ const SHARED_FIXTURES: Array<{ label: string; parsed: unknown; ok: boolean }> = 
   { label: "invalid: reserved hostId 'kernel'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "kernel" }] }, ok: false },
   { label: "invalid: reserved hostId 'host'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "host" }] }, ok: false },
   { label: "invalid: reserved hostId 'external'", parsed: { hosts: [{ id: "vm-a", transport: "http", url: "http://x", hostId: "external" }] }, ok: false },
+  // The ssh target and the optional user are argv elements, not shell words, so whitespace
+  // never splits a destination, and a target that begins with `-` is handled by the `--` the
+  // callers pass before it rather than by a registry refusal. The registry refuses neither;
+  // these fixtures pin that in both twins, next to the ordinary shapes that must keep working.
+  { label: "valid: ssh target with whitespace (argv keeps it whole)", parsed: { hosts: [{ id: "x", transport: "ssh", target: "two words" }] }, ok: true },
+  { label: "valid: ssh user with a space in the login name (OpenSSH accepts it)", parsed: { hosts: [{ id: "x", transport: "ssh", target: "vm-a", user: "Jane Doe" }] }, ok: true },
+  { label: "valid: option-shaped target passes validation; `--` handles it at the call site", parsed: { hosts: [{ id: "x", transport: "ssh", target: "-oProxyCommand=touch /tmp/nothing" }] }, ok: true },
+  { label: "valid: ssh target as user@host", parsed: { hosts: [{ id: "x", transport: "ssh", target: "admin@vm-a.local" }] }, ok: true },
+  { label: "valid: ssh target as an IPv6 literal", parsed: { hosts: [{ id: "x", transport: "ssh", target: "admin@[::1]" }] }, ok: true },
+  { label: "valid: ssh host alias with a user", parsed: { hosts: [{ id: "x", transport: "ssh", target: "box", user: "admin" }] }, ok: true },
 ];
 
 describe("hosts-registry reader — CLI/daemon validator parity (shared fixtures)", () => {

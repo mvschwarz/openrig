@@ -137,6 +137,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
         conflicts?: Array<{ existingPath: string; reason: string }>;
         verification?: { passed: boolean };
         policyRejected?: Array<{ entry: { exportType: string; exportName: string }; reason: string }>;
+        notes?: string[];
         error?: string;
         errors?: string[];
         code?: string;
@@ -203,6 +204,11 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
         for (const r of res.data.policyRejected) {
           console.log(`  ${r.entry.exportType.padEnd(12)} ${r.entry.exportName.padEnd(20)} ${r.reason}`);
         }
+      }
+
+      if (res.data.notes && res.data.notes.length > 0) {
+        console.log("Left as it is:");
+        for (const note of res.data.notes) console.log(`  ${note}`);
       }
     });
 

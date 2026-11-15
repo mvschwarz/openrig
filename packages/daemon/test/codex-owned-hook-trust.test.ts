@@ -9,12 +9,12 @@ import { createHash } from "node:crypto";
 import { parse } from "smol-toml";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
-import { codexPluginContentHash, codexLegacyPluginTrustPath, planOwnedCodexContentApproval } from "../src/domain/codex-owned-plugin-trust.js";
+import { codexPluginContentHash, codexLegacyPluginTrustPath, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../src/domain/codex-owned-plugin-trust.js";
 
 const shipped = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
-function fixture(config = "", corruptCache = false, duringPluginAdd?: () => void) {
+function fixture(config = "", corruptCache = false, duringPluginAdd?: () => void, onConfigRead?: () => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "owned-codex-hooks-")); roots.push(root);
   const plugin = path.join(root, "plugins/openrig-core"), home = path.join(root, "codex");
   fs.cpSync(shipped, plugin, { recursive: true }); fs.mkdirSync(home);
@@ -23,7 +23,7 @@ function fixture(config = "", corruptCache = false, duringPluginAdd?: () => void
   const cache = path.join(home, "plugins/cache/openrig/openrig-core", version);
   const calls: string[][] = [];
   const adapter = () => new CodexRuntimeAdapter({ tmux: {} as TmuxAdapter, codexHome: home,
-    fsOps: { readFile: p => fs.readFileSync(p, "utf8"), writeFile: (p,c) => fs.writeFileSync(p,c), exists: fs.existsSync, mkdirp: p => fs.mkdirSync(p,{recursive:true}) },
+    fsOps: { readFile: p => { if (p === file) onConfigRead?.(); return fs.readFileSync(p, "utf8"); }, writeFile: (p,c) => fs.writeFileSync(p,c), exists: fs.existsSync, mkdirp: p => fs.mkdirSync(p,{recursive:true}) },
     resolveCorePluginDir: () => plugin, codexSystemConfigDir: path.join(root, "etc"),
     runCodexCli: async args => {
       calls.push(args);
@@ -56,6 +56,15 @@ it("a fresh install has all six exact plugin hooks trusted before the first seat
   expect(Object.fromEntries(Object.entries(states).map(([key,value]:[string,any])=>[key,value.trusted_hash]))).toEqual(expected);
   expect(Object.values(states).every((state: any) => state.trusted_content_hash === codexPluginContentHash(shipped))).toBe(true);
   expect(f.calls.map(a=>a.slice(0,2))).toEqual([["plugin","marketplace"],["plugin","add"]]);
+});
+it("refocus keeps Codex's default budget and main's declaration hash", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(shipped, "hooks/codex.json"), "utf8"));
+  const handler = manifest.hooks.UserPromptSubmit[1].hooks[0];
+  const { computeCodexHookTrust } = createRequire(import.meta.url)(path.join(shipped, "hooks/scripts/codex-hook-trust.cjs"));
+  const identity = computeCodexHookTrust("UserPromptSubmit", { ...handler, timeoutSec: handler.timeout,
+    keySource: "openrig-core@openrig:hooks/codex.json", groupIndex: 1, handlerIndex: 0 });
+  expect(identity.hash).toBe("sha256:c648714b3a02675ba4ea029b8e62dbcd77569afc317ad4f1bc3e8cbfbe7b34ee");
+  expect(handler.additionalContextLimit).toBeUndefined();
 });
 it.each(['[plugins."openrig-core@openrig"]\nenabled = false\n','[plugins._default]\nenabled = false\n'])("a disabled plugin stays disabled on restart and upgrade: %s", async config => {
   const f = fixture(config); await f.adapter().ensureCodexCorePlugin(); await f.adapter().ensureCodexCorePlugin();
@@ -351,4 +360,127 @@ it("R2 oa fresh nonmatching bundle gains no declaration-only legacy approval", a
   expect(fs.existsSync(codexLegacyPluginTrustPath(f.file))).toBe(false);
   expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
   expect(Object.keys(f.read().hooks?.state ?? {})).toHaveLength(0);
+});
+
+// #17: a home OpenRig granted for an earlier release whose Stop hook declaration differed (its timeout), recorded by
+// OpenRig's own planner and writer, then upgraded to the current shipped bundle.
+const stopKey = "openrig-core@openrig:hooks/codex.json:stop:0:0";
+const recordPath = (f: ReturnType<typeof fixture>) => path.join(f.home, ".openrig-core-hook-trust.json");
+function earlierReleaseGrant(f: ReturnType<typeof fixture>, extra = "") {
+  const earlier = path.join(path.dirname(f.home), "earlier-shipped");
+  fs.cpSync(shipped, earlier, { recursive: true });
+  const manifestPath = path.join(earlier, "hooks/codex.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.hooks.Stop[0].hooks[0].timeout += 5;
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const earlierCache = path.join(path.dirname(f.cache), "earlier");
+  fs.cpSync(earlier, earlierCache, { recursive: true });
+  const { computeCodexHookTrust } = createRequire(import.meta.url)(path.join(shipped, "hooks/scripts/codex-hook-trust.cjs"));
+  const content = codexPluginContentHash(earlier);
+  let config = `[marketplaces.openrig]\nsource = ${JSON.stringify(path.dirname(f.plugin))}\n\n[plugins."openrig-core@openrig"]\nenabled = true\n`;
+  for (const [event, groups] of Object.entries(manifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]>) {
+    groups.forEach((group, groupIndex) => group.hooks.forEach((handler, handlerIndex) => {
+      const { key, hash } = computeCodexHookTrust(event, { ...handler, matcher: group.matcher, timeoutSec: handler.timeout,
+        keySource: "openrig-core@openrig:hooks/codex.json", groupIndex, handlerIndex });
+      config += `\n[hooks.state.${JSON.stringify(key)}]\ntrusted_hash = ${JSON.stringify(hash)}\ntrusted_content_hash = ${JSON.stringify(content)}\n`;
+    }));
+  }
+  config += extra;
+  fs.writeFileSync(f.file, config);
+  const plan = planOwnedCodexContentApproval({ configPath: f.file, content: config,
+    layers: [{ name: "user config", path: f.file, state: "read", content: config }], shipped: earlier, installed: earlierCache, freshGrant: true });
+  expect(plan).toBeDefined();
+  recordOwnedCodexApproval(f.file, plan!.approval);
+  const stop = (parse(config) as any).hooks.state[stopKey];
+  return { config, record: fs.readFileSync(recordPath(f), "utf8"), earlierStop: stop.trusted_hash as string, earlierContent: content };
+}
+
+const outside = '\n[hooks.state."other-plugin@market:hooks/codex.json:stop:0:0"]\ntrusted_hash = "sha256:outside"\ntrusted_content_hash = "sha256:outside-content"\n\n\n';
+it("the first launch after an upgrade that changed a declaration renews OpenRig's own recorded approvals and its record", async () => {
+  const f = fixture(), earlier = earlierReleaseGrant(f, outside);
+  expect(earlier.earlierStop).not.toBe((await freshInstallStates())[stopKey].trusted_hash);
+  expect(await f.adapter().ensureCodexCorePlugin()).toMatchObject({ outcome: "installed" });
+  const states = f.read().hooks.state;
+  const fresh = await freshInstallStates();
+  expect(Object.fromEntries(Object.entries(states).filter(([key]) => key.startsWith("openrig-core@openrig:")))).toEqual(fresh);
+  expect(states["other-plugin@market:hooks/codex.json:stop:0:0"]).toEqual({ trusted_hash: "sha256:outside", trusted_content_hash: "sha256:outside-content" });
+  const text = fs.readFileSync(f.file, "utf8");
+  expect(text.endsWith(outside)).toBe(true);
+  expect(text.replace(/^trusted(_content)?_hash = .*\n/gm, "")).toBe(earlier.config.replace(/^trusted(_content)?_hash = .*\n/gm, ""));
+  const record = JSON.parse(fs.readFileSync(recordPath(f), "utf8"));
+  expect(record).toEqual({ schema: 1, plugin: "openrig-core@openrig", contentHash: codexPluginContentHash(shipped),
+    declarations: Object.fromEntries(Object.entries(fresh).map(([key, state]: [string, any]) => [key, state.trusted_hash])) });
+  const renewed = fs.readFileSync(f.file, "utf8");
+  await f.adapter().ensureCodexCorePlugin();
+  expect(fs.readFileSync(f.file, "utf8")).toBe(renewed);
+});
+
+it("a restart after the new bundle was installed but before renewal renews the same way, without reinstalling", async () => {
+  const f = fixture(); earlierReleaseGrant(f);
+  fs.cpSync(f.plugin, f.cache, { recursive: true });
+  expect(await f.adapter().ensureCodexCorePlugin()).toMatchObject({ outcome: "current" });
+  expect(f.calls).toEqual([]);
+  expect(f.read().hooks.state).toEqual(await freshInstallStates());
+});
+
+it.each(["mismatched declaration", "mismatched content", "disabled", "other layer", "profile choice", "nested plugin entry", "record removed", "record of another plugin"])(
+  "a changed declaration keeps Codex's review for %s", async condition => {
+    const f = fixture(), earlier = earlierReleaseGrant(f);
+    const header = `[hooks.state.${JSON.stringify(stopKey)}]`;
+    const edit = (change: (text: string) => string) => fs.writeFileSync(f.file, change(fs.readFileSync(f.file, "utf8")));
+    if (condition === "mismatched declaration") edit(text => text.replace(earlier.earlierStop, `sha256:${"0".repeat(64)}`));
+    if (condition === "mismatched content") edit(text => text.replace(`${header}\ntrusted_hash = ${JSON.stringify(earlier.earlierStop)}\ntrusted_content_hash = "${earlier.earlierContent}"`,
+      `${header}\ntrusted_hash = ${JSON.stringify(earlier.earlierStop)}\ntrusted_content_hash = "sha256:${"0".repeat(64)}"`));
+    if (condition === "disabled") edit(text => text.replace(header, `${header}\nenabled = false`));
+    if (condition === "other layer") {
+      fs.mkdirSync(path.join(path.dirname(f.home), "etc"));
+      fs.writeFileSync(path.join(path.dirname(f.home), "etc/config.toml"), `${header}\ntrusted_hash = ${JSON.stringify(earlier.earlierStop)}\n`);
+    }
+    if (condition === "profile choice") edit(text => `${text}\n[profiles.special.hooks.state.${JSON.stringify(stopKey)}]\nenabled = false\n`);
+    if (condition === "nested plugin entry") edit(text => `${text}\n[profiles.special.plugins."openrig-core@openrig"]\nenabled = true\n`);
+    if (condition === "record removed") fs.rmSync(recordPath(f));
+    if (condition === "record of another plugin") fs.writeFileSync(recordPath(f), earlier.record.replace('"openrig-core@openrig"', '"other-plugin@market"'));
+    const before = fs.readFileSync(f.file, "utf8"), record = fs.existsSync(recordPath(f)) ? fs.readFileSync(recordPath(f), "utf8") : undefined;
+    expect(f.read().hooks.state[stopKey]).toBeDefined();
+    await f.adapter().ensureCodexCorePlugin();
+    expect(fs.readFileSync(f.file, "utf8")).toBe(before);
+    expect(fs.existsSync(recordPath(f)) ? fs.readFileSync(recordPath(f), "utf8") : undefined).toBe(record);
+  });
+
+it("the planner names exactly the changed declaration to rewrite, from the earlier grant's record", async () => {
+  const f = fixture(), earlier = earlierReleaseGrant(f);
+  fs.cpSync(f.plugin, f.cache, { recursive: true });
+  const plan = planOwnedCodexContentApproval({ configPath: f.file, content: earlier.config,
+    layers: [{ name: "user config", path: f.file, state: "read", content: earlier.config }], shipped, installed: f.cache });
+  expect(plan?.trustedHashes).toEqual({ [stopKey]: (await freshInstallStates())[stopKey].trusted_hash });
+  expect(Object.values(plan!.hashes)).toEqual(Array(6).fill(codexPluginContentHash(shipped)));
+});
+
+// Codex records a person's decline of another OpenRig hook after the planner fingerprinted the installed bundle and
+// before OpenRig writes: on the first read of config.toml that follows, in the user config or in the system layer.
+it.each(["user config", "other layer"])("a choice recorded in the %s while the renewal is being prepared wins: no renewal and no new record", async where => {
+  const header = '[hooks.state."openrig-core@openrig:hooks/codex.json:session_start:0:0"]';
+  const decline = (text: string) => text.replace(header, `${header}\nenabled = false`);
+  let planned = false, injected = false;
+  const f: ReturnType<typeof fixture> = fixture("", false, undefined, () => {
+    if (!planned || injected) return;
+    injected = true;
+    if (where === "user config") fs.writeFileSync(f.file, decline(fs.readFileSync(f.file, "utf8")));
+    else {
+      fs.mkdirSync(path.join(path.dirname(f.home), "etc"), { recursive: true });
+      fs.writeFileSync(path.join(path.dirname(f.home), "etc/config.toml"), `${header}\nenabled = false\n`);
+    }
+  });
+  const earlier = earlierReleaseGrant(f);
+  const readdir = fs.readdirSync;
+  const spy = vi.spyOn(fs, "readdirSync").mockImplementation(((dir: fs.PathLike, ...rest: unknown[]) => {
+    if (String(dir).startsWith(f.cache)) planned = true;
+    return (readdir as (...args: unknown[]) => unknown)(dir, ...rest);
+  }) as typeof fs.readdirSync);
+  try {
+    await f.adapter().ensureCodexCorePlugin();
+  } finally { spy.mockRestore(); }
+  expect(injected).toBe(true);
+  expect(fs.readFileSync(f.file, "utf8")).toBe(where === "user config" ? decline(earlier.config) : earlier.config);
+  expect(fs.readFileSync(recordPath(f), "utf8")).toBe(earlier.record);
 });

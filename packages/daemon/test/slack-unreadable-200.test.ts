@@ -148,7 +148,7 @@ describe("an alert on an update", () => {
     try {
       const repo = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => registry });
       await expect(repo.create({ ...request, humanIntent: "update" })).rejects.toThrow(
-        "humanAlert marks an ask to a person as alert-worthy, and an update isn't an ask: send it without --alert; updates are notices and follow Slack's posting floor and delivery settings.");
+        "humanAlert marks an ask to a person as alert-worthy, and an update isn't an ask: send it without --alert; updates are notices; delivery depends on the person's connector and settings.");
     } finally { db.close(); }
   });
 });

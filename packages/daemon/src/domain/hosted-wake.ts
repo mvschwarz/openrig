@@ -5,7 +5,7 @@ import type { RosterWake } from "./rosters.js";
 import { resolveSecret } from "./gateway/slack/secrets.js";
 import { safeDecodeURIComponent, validateOutboundUrl } from "./mission-control/outbound-url-validator.js";
 
-/** How long a trigger may take to answer before the ring counts as failed. */
+/** How long a trigger may take to answer. After that the ring is unconfirmed, not failed: the trigger may have it. */
 export const HOSTED_WAKE_TIMEOUT_MS = 10_000;
 
 export interface HostedWakeRing {
@@ -66,8 +66,20 @@ export async function ringHostedWake(
   } catch (err) {
     // An error's text can carry the URL, so only a fixed classification is recorded: the timeout, or the error code.
     const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-    if (timedOut) return failed(urlRef, `didn't answer within ${opts.timeoutMs ?? HOSTED_WAKE_TIMEOUT_MS} ms`);
+    // The POST may have reached the trigger and started a run, so the ring is unknown, like an unconfirmed send: it isn't
+    // rung again blindly (see hostedRingMayHaveArrived), and the member's claim is still the pickup.
+    if (timedOut) {
+      return { classified: "indeterminate", nudgeResult: `indeterminate:webhook (${urlRef}) didn't answer within ${opts.timeoutMs ?? HOSTED_WAKE_TIMEOUT_MS} ms, `
+        + "so it may have the ring; it isn't rung again, and pickup is the member's claim on this row" };
+    }
     const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
     return failed(urlRef, `couldn't be reached (${typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : "network error"})`);
   }
+}
+
+/** A ring the trigger accepted, or one it may have received before it stopped answering. Either can start a run, so
+ *  recovery doesn't ring that wake intent again. A ring that never left (no URL, an invalid one, a refused connection)
+ *  is neither. */
+export function hostedRingMayHaveArrived(nudgeResult: string): boolean {
+  return nudgeResult.startsWith("wake-accepted:webhook ") || nudgeResult.startsWith("indeterminate:webhook ");
 }

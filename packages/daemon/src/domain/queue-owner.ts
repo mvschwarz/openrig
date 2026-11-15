@@ -20,13 +20,22 @@ export function resolveOperatorSeat(): string | null {
  *  approvals use. Null when unset, unreadable, or not an agent's canonical session (a person's address or
  *  human seat ref never counts). */
 export function resolveRecoveryAgentSeat(): string | null {
+  return readReceivingAgentSetting().session;
+}
+
+/** `agents.operator_session` as the receiving agent reads it: the agent's session, or null with why when it can't be used
+ *  (`problem`: unreadable, or not an agent's canonical session). Unset is null with no problem. */
+export function readReceivingAgentSetting(): { session: string | null; problem?: string } {
+  let session: string;
   try {
     const v = new SettingsStore().resolveOne("agents.operator_session" as never).value;
-    const session = typeof v === "string" ? v.trim() : "";
-    return session && parseSessionName(session).kind === "canonical" && !isHumanSeatSessionRef(session) ? session : null;
-  } catch {
-    return null;
+    session = typeof v === "string" ? v.trim() : "";
+  } catch (error) {
+    return { session: null, problem: `agents.operator_session couldn't be read (${(error as Error).message})` };
   }
+  if (!session) return { session: null };
+  return parseSessionName(session).kind === "canonical" && !isHumanSeatSessionRef(session) ? { session }
+    : { session: null, problem: `agents.operator_session is "${session}", which isn't an agent's session, so it's ignored` };
 }
 
 /** The durable session→node binding (the session-registry precedent: latest sessions row

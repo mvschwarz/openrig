@@ -16,6 +16,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
+import { humanAnswerText } from "../src/domain/human-questions.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
 import { addHumanFragment } from "../src/domain/gateway/human-registry.js";
@@ -77,6 +78,12 @@ describe("the primary user acts on anyone's ask, unattributed, on that person's 
     const reply = repo.list({ limit: 50 }).find((item) => item.replyTo === sarahs.qitemId)!;
     expect(reply).toMatchObject({ sourceSession: "human@host", destinationSession: ASKER, summary: "Unattributed (human@host) answered sarah@external's ask: Ship the draft?" });
     expect(reply.body).toContain("Answered at the terminal by someone OpenRig can't name (human@host), unattributed, on sarah@external's ask in OpenRig.");
+    // The receiver reads what that means for acting, and the route to ask the person back: never human@host.
+    expect(reply.body).toContain("human@host is how OpenRig records any answer typed at this machine's terminal or TUI");
+    expect(reply.body).toContain("don't ask them to confirm it");
+    expect(reply.body).toContain(`ask them back with an ask to sarah@external that names ${sarahs.qitemId}: rig queue create --destination sarah@external`);
+    expect(reply.body).toContain("A row to human@host names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable, so don't ask them back there.");
+    expect(humanAnswerText(reply.body)).toBe("Ship it");
   });
 
   it("records a choice on a question ask the same way", async () => {

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AttentionRead, AttentionItem } from "../attention-surface.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
+import type { EventBus } from "../domain/event-bus.js";
 import { isHumanSeatSessionRef } from "../domain/session-name.js";
 import { unansweredQuestions } from "../domain/human-questions.js";
 import type { HealthProjectionService } from "../domain/health-detectors.js";
@@ -20,6 +21,8 @@ export function attentionRoutes(): Hono {
   app.get("/", c => {
     const wanted = c.req.query("item");
     const result: AttentionRead = { scope: "instance", readAt: new Date().toISOString(), items: [], sources: [], detail: null, detailError: null };
+    const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+    if (eventBus) result.watermark = eventBus.maxSeq();
     // Whether an item is in the queue this Feed shows; an item opened by id is shown in full whatever the view.
     let inView = (_recipient: string | null | undefined): boolean => true;
     const add = (item: AttentionItem, lines: () => string[], files: () => Array<{ label: string; path: string }> = () => []) => {
@@ -84,7 +87,10 @@ export function attentionRoutes(): Hono {
           ...(!toPerson && q.state === "blocked" && q.blockedOn && isHumanSeatSessionRef(q.blockedOn) ? { answer: { verb: "resolve" as const, actorSession: actorFor(q.blockedOn) } } : {}),
           ...(toPerson ? { asker: q.sourceSession } : {}),
           ...(questions ? { humanQuestions: questions, humanAnswers: q.humanAnswers ?? {} } : {}),
-          summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Request summary unavailable", urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
+          // A pairing request is also decided directly on this host's settings page, opened on this request (its row).
+          ...(q.evidenceRef?.startsWith("pair-request:") ? { settingsLink: { category: "instance", focus: q.qitemId, label: "Open pairing settings (Approve or Deny directly)" } } : {}),
+          summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Request summary unavailable", urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}`,
+          revision: queue.decisionRevision(q), about: toPerson ? deps.slice(0, 100).map(d => d.qitem_id) : [q.qitemId] };
         const unbound = noConnector(toPerson ? q.destinationSession : q.blockedOn);
         const notSent = unbound || quiet.has(q.qitemId);
         const route = unanswered

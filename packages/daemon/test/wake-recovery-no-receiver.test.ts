@@ -95,6 +95,87 @@ describe("start-up wake recovery and seats with nothing to receive a wake", () =
     expect(t.state(b!)).toBe("delivered");
   });
 
+  // #2939: a running, bound terminal seat (a shell or a TUI, not an agent) gets nothing typed into it, so every retry
+  // would fail the same way (failed:terminal-seat) and only move the row's last nudge time, which the stuck sweep reads
+  // as new evidence. Its failed wake waits, like a stopped seat's, and the row stays owed and untouched.
+  function terminalSeat(t: ReturnType<typeof team>, runtime = "terminal") {
+    t.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-t', 'rig-1', 'dev.t', ?)").run(runtime);
+    t.db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-t', 'node-t', 'dev-t@rig1', 'running')").run();
+    t.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-t', 'node-t', 'tmux', 'dev-t@rig1')").run();
+    t.live.add("dev-t@rig1");
+  }
+
+  it("doesn't replay a failed wake to a running, bound terminal seat, nor move its row's evidence (#2939)", async () => {
+    const t = team();
+    terminalSeat(t);
+    t.repo.attachTransport({ send: t.send });
+    const id = (await t.repo.create({ sourceSession: "lead@rig1", destinationSession: "dev-t@rig1", body: "work" })).qitemId;
+    await vi.waitFor(() => expect(t.state(id)).toBe("failed"));
+    expect(t.repo.getById(id)!.lastNudgeResult).toMatch(/^failed:terminal-seat: 'dev-t@rig1' is a terminal seat/);
+    // an earlier attempt, so a retry in the same millisecond can't hide behind an equal timestamp
+    t.db.prepare("UPDATE queue_items SET last_nudge_attempt = '2026-01-01T00:00:00.000Z' WHERE qitem_id = ?").run(id);
+    const before = { row: t.repo.getById(id)!, transitions: t.transitions(id) };
+    t.send.mockClear();
+
+    const tally = await t.repo.drainPendingWakeIntents();
+
+    expect(t.send).not.toHaveBeenCalled();
+    expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0, retained: 0,
+      waiting: { notifications: 1, seats: ["dev-t@rig1"] } });
+    expect(t.state(id)).toBe("failed");
+    const after = t.repo.getById(id)!;
+    expect({ attempt: after.lastNudgeAttempt, result: after.lastNudgeResult, state: after.state, transitions: t.transitions(id) })
+      .toEqual({ attempt: before.row.lastNudgeAttempt, result: before.row.lastNudgeResult, state: "pending", transitions: before.transitions });
+  });
+
+  it("doesn't replay a failed wake to a terminal seat addressed by a canonical name whose session runs under another (#2939)", async () => {
+    const t = team();
+    // dev-u@rig1 ran once under its own name; the terminal node then reconnected under the physical name u-phys.
+    t.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-u', 'rig-1', 'dev.u', 'terminal')").run();
+    t.db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-u1', 'node-u', 'dev-u@rig1', 'exited')").run();
+    t.db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-u2', 'node-u', 'u-phys', 'running')").run();
+    t.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-u', 'node-u', 'tmux', 'u-phys')").run();
+    expect(physicalSessionName(t.db, "dev-u@rig1")).toBe("u-phys");
+    const [u] = await owe(t, ["dev-u@rig1"]);
+    t.db.prepare("UPDATE queue_items SET last_nudge_attempt = '2026-01-01T00:00:00.000Z' WHERE qitem_id = ?").run(u!);
+    const before = { attempt: t.repo.getById(u!)!.lastNudgeAttempt, transitions: t.transitions(u!) };
+    t.live.add("dev-u@rig1");
+
+    const tally = await t.repo.drainPendingWakeIntents();
+
+    expect(t.send).not.toHaveBeenCalled();
+    expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0, retained: 0,
+      waiting: { notifications: 1, seats: ["dev-u@rig1"] } });
+    expect({ attempt: t.repo.getById(u!)!.lastNudgeAttempt, transitions: t.transitions(u!) }).toEqual(before);
+  });
+
+  it("does not send the first wake to a terminal addressed by its canonical name", async () => {
+    const t = team();
+    t.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-u', 'rig-1', 'dev.u', 'terminal')").run();
+    t.db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-u', 'node-u', 'u-phys', 'running')").run();
+    t.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-u', 'node-u', 'tmux', 'u-phys')").run();
+    t.repo.attachTransport({ send: t.send });
+    t.live.add("dev-u@rig1");
+    const id = (await t.repo.create({ sourceSession: "dev-a@rig1", destinationSession: "dev-u@rig1", body: "work" })).qitemId;
+    await vi.waitFor(() => expect(t.state(id)).toBe("failed"));
+    expect(t.repo.getById(id)!.lastNudgeResult).toMatch(/^failed:terminal-seat:/);
+    expect(t.send).not.toHaveBeenCalled();
+  });
+
+  it("replays the failed wake once the seat is an agent again (#2939)", async () => {
+    const t = team();
+    terminalSeat(t);
+    t.repo.attachTransport({ send: t.send });
+    const id = (await t.repo.create({ sourceSession: "lead@rig1", destinationSession: "dev-t@rig1", body: "work" })).qitemId;
+    await vi.waitFor(() => expect(t.state(id)).toBe("failed"));
+    t.db.prepare("UPDATE nodes SET runtime = 'claude-code' WHERE id = 'node-t'").run();
+    t.send.mockClear();
+    const tally = await t.repo.drainPendingWakeIntents();
+    expect(t.send.mock.calls.map(([session]) => session)).toEqual(["dev-t@rig1"]);
+    expect(tally).toEqual({ delivered: 1, indeterminate: 0, failed: 0, retained: 0 });
+    expect(t.state(id)).toBe("delivered");
+  });
+
   it("still gives a never-tried wake to a stopped seat its one attempt, so its row records why it didn't land", async () => {
     const t = team();
     const [b] = [(await t.repo.create({ sourceSession: "lead@rig1", destinationSession: "dev-b@rig1", body: "work" })).qitemId];
@@ -178,6 +259,6 @@ describe("start-up wake recovery and seats with nothing to receive a wake", () =
     await vi.waitFor(() => expect(log.log).toHaveBeenCalled());
     await recovery.stop();
     expect(log.log).toHaveBeenCalledWith(
-      "wake-intent recovery sweep: delivered=0 indeterminate=0 failed=0 reconciled=0 waiting=3 (not replayed: no session or transport for dev-b@rig1, dev-c@rig1)");
+      "wake-intent recovery sweep: delivered=0 indeterminate=0 failed=0 reconciled=0 waiting=3 (not replayed: no receiver (no session or transport, or a terminal seat) for dev-b@rig1, dev-c@rig1)");
   });
 });

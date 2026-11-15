@@ -135,7 +135,10 @@ describe("the one-line bootstrap: the recorded choice and the delivery filter", 
       { path: join("/q", "CLAUDE.md"), runtime: "claude-code", seats: ["dev-doc@team"] },
     ]);
     expect(preview.notCovered).toEqual([{ seat: "dev-pi@team", runtime: "pi", reason: expect.any(String) }]);
-    expect(preview.ifNo).toMatch(/Nothing is written into these files/);
+    // A no skips this one line; the context-entry block still names the router for every seat, and the preview says so.
+    expect(preview.ifNo).toMatch(/This line isn't written/);
+    expect(preview.ifNo).toMatch(/context-entry block .* names the `openrig-skills` router/);
+    expect(preview.ifNo).toMatch(/custom or unrecognised one\) may not get that block/);
   });
 
   it("the filter picks out the bootstrap line, never the Codex catalog that shares its logical name", () => {

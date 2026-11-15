@@ -7,7 +7,7 @@
     "url": "https://github.com/mvschwarz"
   },
   "homepage": "https://github.com/mvschwarz/openrig",
-  "repository": "github:mvschwarz/openrig",
+  "repository": "https://github.com/mvschwarz/openrig",
   "license": "Apache-2.0",
   "keywords": [
     "openrig",
@@ -28,6 +28,8 @@
       "Write"
     ],
     "websiteURL": "https://github.com/mvschwarz/openrig",
+    "privacyPolicyURL": "https://openrig.dev/privacy",
+    "termsOfServiceURL": "https://openrig.dev/terms",
     "defaultPrompt": [
       "Ask my OpenRig team to look into the failing tests and tell me what they find.",
       "How is the work I gave my OpenRig team going?",

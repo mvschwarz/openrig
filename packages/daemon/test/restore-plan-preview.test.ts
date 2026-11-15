@@ -117,6 +117,16 @@ describe("FR-6 restore-plan token state", () => {
     expect(node.runtimePrompt).toBeUndefined();
   });
 
+  it("forecasts a seat whose stored kind is neither tmux nor external CLI on OpenRig's own path, as restore takes it today", () => {
+    const rig = {
+      rig: { id: "rig-1", name: "test-rig" },
+      nodes: [{ id: "n1", logicalId: "desk", runtime: "claude-code", binding: { attachmentType: "herdr", externalSessionName: null } }],
+      edges: [],
+    } as unknown as RigWithRelations;
+    const node = buildRestorePlanPreview(rig, null, [row("n1", { resumeType: null, resumeToken: null })]).nodes[0]!;
+    expect(node.intendedAction).not.toBe("leave-attached");
+  });
+
   it("presents a never-occupied current seat as new, without a history warning", () => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "codex" }]);
     const result = buildRestorePlanPreview(rig, null, []).nodes[0]!;

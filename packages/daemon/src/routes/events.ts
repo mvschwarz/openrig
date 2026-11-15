@@ -8,6 +8,10 @@ export const eventsRoute = new Hono();
 /** A replay is read and written this many events at a time, never built whole. */
 const REPLAY_PAGE = 500;
 
+/** Event types this stream doesn't carry, live or replayed: one-per-send diagnostics the log keeps for their own readers,
+ *  which would otherwise fill a viewer's newest-N replay and its cache. */
+const OMITTED_TYPES: readonly string[] = ["transport.delivery_evidence", "transport.prompt_observation"];
+
 function getEventBus(c: { get: (key: string) => unknown }): EventBus {
   return c.get("eventBus" as never) as EventBus;
 }
@@ -36,6 +40,7 @@ eventsRoute.get("/", (c) => {
       // A transient event (view.changed) is never stored, so it is never replayed and its seq is its cause's: this
       // stream carries stored events only, live and replayed alike.
       if (event.transient) return;
+      if (OMITTED_TYPES.includes(event.type)) return;
       // Rig-scoped: filter by rigId. Global: accept all events.
       if (rigId) {
         const eventRigId = "rigId" in event ? (event as { rigId: string }).rigId : null;
@@ -59,15 +64,15 @@ eventsRoute.get("/", (c) => {
       // Last-Event-ID, `?replay=<n>` replays the newest n (0: from now on), the whole log when it holds no more.
       const lastSeq = lastEventId !== null ? (isNaN(lastEventId) ? 0 : lastEventId)
         : replayCount === null ? 0
-        : eventBus.seqBeforeNewest(replayCount, rigId);
+        : eventBus.seqBeforeNewest(replayCount, rigId, OMITTED_TYPES);
       maxReplayedSeq = lastSeq;
       // Where it ends, read once subscribed too: an event stored after it is buffered, so events arriving while the
       // pages are written can neither keep the replay going nor be sent twice.
       const upTo = eventBus.maxSeq();
 
       // 2. Replay missed events from DB, a page at a time
-      for (let page = eventBus.replayPage(lastSeq, upTo, REPLAY_PAGE, rigId); page.length > 0 && !stream.aborted;
-        page = eventBus.replayPage(maxReplayedSeq, upTo, REPLAY_PAGE, rigId)) {
+      for (let page = eventBus.replayPage(lastSeq, upTo, REPLAY_PAGE, rigId, OMITTED_TYPES); page.length > 0 && !stream.aborted;
+        page = eventBus.replayPage(maxReplayedSeq, upTo, REPLAY_PAGE, rigId, OMITTED_TYPES)) {
         for (const event of page) {
           await stream.writeSSE({ id: String(event.seq), data: JSON.stringify(event) });
           if (event.seq > maxReplayedSeq) maxReplayedSeq = event.seq;

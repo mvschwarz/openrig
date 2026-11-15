@@ -76,6 +76,20 @@ export class WorkflowSpecError extends Error {
   }
 }
 
+interface FailedSpecRead {
+  sourceHash: string;
+  cachedAt: string;
+}
+
+// Keep capture evidence out of the original exception and out of process-global path state. The scanner can retrieve it
+// while handling this exact parse error, then persist it in the diagnostic row; WeakMap lifetime follows the exception.
+const failedSpecReads = new WeakMap<object, FailedSpecRead>();
+
+export function getFailedSpecRead(error: unknown): FailedSpecRead | null {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function") return null;
+  return failedSpecReads.get(error as object) ?? null;
+}
+
 /**
  * OPR.0.4.6.WF1 FR-7 — THE closed keysets, EXPORTED as named
  * constants: parseWorkflowSpec is the ONLY seam that sees raw keys
@@ -643,7 +657,10 @@ export class WorkflowSpecCache {
    * not previously cached).
    */
   readThrough(sourcePath: string): WorkflowSpecRow {
-    const { spec, sourceHash } = readSpecFile(sourcePath);
+    // Stamp before opening the file. If an edit races the read, a later stat must not be hidden by a timestamp
+    // assigned after that edit and after parse-error handling.
+    const capturedAt = this.now().toISOString();
+    const { spec, sourceHash } = readSpecFile(sourcePath, capturedAt);
     const named = this.db
       .prepare(
         `SELECT * FROM workflow_specs WHERE name = ? AND version = ?`,
@@ -671,11 +688,18 @@ export class WorkflowSpecCache {
         .run(sourcePath, existing?.spec_id ?? "").changes
       : 0;
     if (existing && existing.status !== "error" && existing.status !== RETAINED_STATUS && !moved && existing.source_hash === sourceHash) {
-      // A repair back to the cached bytes records this scan, so the next scan skips the file.
-      if (cleared > 0) {
-        const repairedAt = this.now().toISOString();
-        this.db.prepare(`UPDATE workflow_specs SET cached_at = ? WHERE spec_id = ?`).run(repairedAt, existing.spec_id);
-        existing.cached_at = repairedAt;
+      // A read verifies the timestamp only for its own source path, even when another copy has matching bytes. Advance only forward:
+      // this pre-read stamp is safe for stat-only skips, while a backwards clock must not replace a newer observation.
+      const existingCachedAtMs = Date.parse(existing.cached_at);
+      const capturedAtMs = Date.parse(capturedAt);
+      const shouldAdvanceObservation = existing.source_path === sourcePath && Number.isFinite(capturedAtMs) && (
+        Number.isFinite(existingCachedAtMs)
+          ? existingCachedAtMs < capturedAtMs
+          : cleared > 0
+      );
+      if (shouldAdvanceObservation) {
+        this.db.prepare(`UPDATE workflow_specs SET cached_at = ? WHERE spec_id = ?`).run(capturedAt, existing.spec_id);
+        existing.cached_at = capturedAt;
       }
       // readThrough is file-authoritative: return the freshly parsed
       // file spec so validation sees non-column metadata such as
@@ -691,7 +715,7 @@ export class WorkflowSpecCache {
       }
       return rowToWorkflowSpec(existing, spec);
     }
-    const cachedAt = this.now().toISOString();
+    const cachedAt = capturedAt;
     const purpose = spec.objective ?? null;
     const targetRig = spec.target?.rig ?? null;
     const rolesJson = JSON.stringify(spec.roles);
@@ -940,8 +964,10 @@ export class WorkflowSpecCache {
     sourcePath: string;
     sourceHash: string;
     errorMessage: string;
+    /** Capture time from the read that failed, when available. */
+    cachedAt?: string;
   }): void {
-    const cachedAt = this.now().toISOString();
+    const cachedAt = opts.cachedAt ?? this.now().toISOString();
     const existing = this.db
       .prepare(`SELECT spec_id FROM workflow_specs WHERE source_path = ? AND status = 'error'`)
       .get(opts.sourcePath) as { spec_id: string } | undefined;
@@ -1116,7 +1142,7 @@ function warnLegacyRehydrationOnce(name: string, version: string): void {
   );
 }
 
-function readSpecFile(sourcePath: string): { spec: WorkflowSpec; sourceHash: string } {
+function readSpecFile(sourcePath: string, cachedAt?: string): { spec: WorkflowSpec; sourceHash: string } {
   if (!existsSync(sourcePath)) {
     throw new WorkflowSpecError(
       "spec_file_missing",
@@ -1126,7 +1152,14 @@ function readSpecFile(sourcePath: string): { spec: WorkflowSpec; sourceHash: str
   }
   const raw = readFileSync(sourcePath, "utf-8");
   const sourceHash = createHash("sha256").update(raw).digest("hex");
-  return { spec: parseWorkflowSpec(raw, sourcePath), sourceHash };
+  try {
+    return { spec: parseWorkflowSpec(raw, sourcePath), sourceHash };
+  } catch (error) {
+    if (cachedAt && ((typeof error === "object" && error !== null) || typeof error === "function")) {
+      failedSpecReads.set(error as object, { sourceHash, cachedAt });
+    }
+    throw error;
+  }
 }
 
 function rowToWorkflowSpec(row: SpecRow, parsedSpec?: WorkflowSpec): WorkflowSpecRow {

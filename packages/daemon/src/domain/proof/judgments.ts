@@ -389,6 +389,22 @@ function declaredNodeId(dir: string): string | null {
  *  from them); it defaults to the ordinary filesystem reader and changes nothing about the evaluation. */
 export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, io: ScopeFsDeps = proofFs, observe?: (file: string) => void) {
   const missions = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory()).map(name => ({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root, io, observe) }));
+  return projectReadiness(missions);
+}
+
+/** The same semantic read, yielding between missions for daemon requests and source-watch refreshes.
+ * A single mission (including its evidence) is still synchronous; this is not a hard time bound or atomic snapshot. */
+export async function readProjectReadinessAsync(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string, io: ScopeFsDeps = proofFs, observe?: (file: string) => void) {
+  const names = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory());
+  const missions: Array<MissionReadiness & { name: string }> = [];
+  for (const name of names) {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    missions.push({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root, io, observe) });
+  }
+  return projectReadiness(missions);
+}
+
+function projectReadiness(missions: Array<MissionReadiness & { name: string }>) {
   const active = missions.filter(m => ["active", "release-candidate"].includes(m.historicalStatus ?? ""));
   return { revision: hash(active), state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
 }

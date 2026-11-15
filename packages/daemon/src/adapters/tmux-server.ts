@@ -74,17 +74,49 @@ export function daemonTmuxControlStatus(): { requested: boolean } & TmuxControlS
   return { requested: true, ...(daemonControl.status?.() ?? { state: "off" }) };
 }
 
-function shellWord(value: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\"'\"'") + "'";
+function shellWord(value: string, force = false): string {
+  return !force && /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\"'\"'") + "'";
 }
 
 /** `tmux`, with the daemon's server flags when it isn't on the default server. */
-function tmuxOnDaemonServer(): string {
+export function tmuxOnDaemonServer(): string {
   const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
   return `tmux${server ? ` ${server}` : ""}`;
 }
 
-/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
+/** A session name as tmux must receive it.
+ *
+ *  Callers hand this a raw session name, not an argument tmux has already escaped, so the name is
+ *  encoded exactly once here, for the tmux rules that apply at this layer.
+ *
+ *  `cmd_parse_from_arguments` drops a final `;` as a command separator and consumes a backslash
+ *  sitting immediately in front of it. One more backslash goes before that separator, whether or
+ *  not one is already there: a session named `report;` goes as `report\;` and one named `report\;`
+ *  goes as `report\\;`, so the two stay different all the way to tmux.
+ *
+ *  `cmd_find_parse_target` reads several spellings as target markers rather than as part of a name:
+ *  a leading `=` is the exact-match prefix, a leading `@` a window target, a leading `%` a pane
+ *  target, and the words `~` and `{marked}` mean the marked target. One more `=` in front turns
+ *  each of those back into a session name, because the marker is consumed and the rest is looked up
+ *  as the name. A name starting with `$` is the one that cannot be rescued this way:
+ *  `cmd_find_get_session` reads it as a session id before the exact-match flag is consulted. */
+function tmuxSessionWord(session: string): string {
+  const markedTarget = session === "~" || session === "{marked}";
+  let word = /^[=@%]/.test(session) || markedTarget ? `=${session}` : session;
+  if (word.endsWith(";")) word = `${word.slice(0, -1)}\\;`;
+  return word;
+}
+
+/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server.
+ *
+ *  The session is encoded for tmux first and then quoted like any other shell word: callers type
+ *  this line into a fresh terminal (the CMUX panes) or hand it to a person to run, and a session
+ *  name is not guaranteed to be shell-safe — an adopted session's name comes from outside
+ *  OpenRig. `shellWord` leaves the ordinary `name@rig` form byte-identical. `=` is the one
+ *  character it cannot leave bare: zsh expands a word beginning with `=` to the path of that
+ *  command, and with MAGIC_EQUAL_SUBST it can expand one inside a `name=value` word, so any
+ *  session word carrying `=` is forced into quotes. A shell passes those quotes through. */
 export function tmuxAttachCommand(session: string): string {
-  return `${tmuxOnDaemonServer()} attach -t ${session}`;
+  const word = tmuxSessionWord(session);
+  return `${tmuxOnDaemonServer()} attach -t ${shellWord(word, word.includes("="))}`;
 }

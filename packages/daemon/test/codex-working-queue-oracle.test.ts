@@ -221,6 +221,38 @@ it("does not renew an adjacent frame using a predecessor's counter", async () =>
   expect(oracle.getSeatState(node)?.activity).toBe("idle-at-prompt");
 });
 
+it.each([
+  { name: "the same counter", predecessorAdjacent: true, step: 0 },
+  { name: "an advanced counter", predecessorAdjacent: false, step: 1 },
+])("does not credit a restarted pane process with $name from the process before it", async ({ predecessorAdjacent, step }) => {
+  let time = Date.parse("2026-11-04T20:00:00.000Z"), elapsed = 32, pid = 4100;
+  const session = "worker@fixture", node = "node-fixture";
+  const structural = new SeatStructuralActivityService({ capturePaneContent: async () => null } as never, () => new Date(time));
+  const capture = (adjacent: boolean) => {
+    const at = new Date(time);
+    const frame = screen.replace("32s • esc to interrupt", `${elapsed}s • esc to interrupt`);
+    const text = adjacent ? frame : frame.replace("\n› Ask Codex", "\n• Edited files\n\n› Ask Codex");
+    return structural.pollSeat(session, new Map([[session, { text, capturedAt: at, pane: { id: "%5", pid } }]]), "codex", null, at);
+  };
+  const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => time / 1000 - 60 },
+    defaultWindowSeconds: 3, now: () => new Date(time), structuralActivity: structural } as never);
+  oracle.declareRungInventory({ seatNodeId: node, sessionName: session }, CODEX_ACTIVITY_RUNG_INVENTORY);
+  oracle.recordCodexOccupant(node, { paneId: "%5", pid });
+  await capture(predecessorAdjacent);
+  // An in-place restart: OpenRig verifies the new process in the same pane, and the inventory is unchanged.
+  time += 1000; elapsed += step; pid = 4200;
+  oracle.recordCodexOccupant(node, { paneId: "%5", pid });
+  const replaced = await capture(false);
+  await oracle.pollSeat(session);
+  expect(oracle.getSeatState(node)?.activity).toBe("idle-at-prompt");
+  expect(replaced?.codexWorkingFrame).toBeUndefined();
+  // The new process's own advancing counter still counts.
+  time += 1000; elapsed++;
+  await capture(false);
+  await oracle.pollSeat(session);
+  expect(oracle.getSeatState(node)?.activity).toBe("working");
+});
+
 it("does not treat counter readings separated by a capture outage as continuous activity", async () => {
   let time = Date.parse("2026-11-04T20:00:00.000Z"), elapsed = 32;
   const session = "worker@fixture", node = "node-fixture";

@@ -1045,7 +1045,7 @@ export function describeSkillRouterFootprint(seats: FootprintSeat[]): SkillRoute
     appended: `${MANAGED_BLOCK_APPEND_SEPARATOR}${written}`,
     files: [...byPath.values()],
     notCovered,
-    ifNo: "Nothing is written into these files. Each seat still has its own skills and router; a Codex seat still gets its skill list in its startup text, and any agent can run `rig skill loadout --seat self`, but nothing in the project points there.",
+    ifNo: "This line isn't written. Each seat still has its own skills and router; a Codex seat still gets its skill list in its startup text, and the context-entry block OpenRig writes beside its own OpenRig Start pointer names the `openrig-skills` router and `rig skill loadout --seat self` whatever the answer. A seat whose saved startup selection doesn't hold OpenRig's own openrig-start.md (a custom or unrecognised one) may not get that block. A yes adds this line, which sends a seat straight to its own router.",
   };
 }
 

@@ -14,6 +14,8 @@
 
 import { Hono } from "hono";
 import { settingsBrowser } from "../domain/user-settings/settings-browser.js";
+import { resolveDefaultReceiver, type DefaultReceiver } from "../domain/default-receiver.js";
+import type { QueueRepository } from "../domain/queue-repository.js";
 import {
   SETTINGS_VALID_KEYS,
   isSettingsValidKey,
@@ -42,7 +44,12 @@ export function configRoutes(opts: { home?: string } = {}): Hono {
       const gateway = c.get("gatewaySubsystem" as never) as { status(): Record<string, unknown> } | undefined;
       let observed: Record<string, unknown> | null = null;
       try { observed = gateway?.status() ?? null; } catch { /* configuration still browsable */ }
-      return c.json(settingsBrowser(store, observed, opts.home));
+      let receiver: DefaultReceiver | null = null;
+      try {
+        const repo = c.get("queueRepo" as never) as QueueRepository | undefined;
+        if (repo) receiver = resolveDefaultReceiver(repo.db);
+      } catch { /* the rest stays browsable; the receiver row is left out */ }
+      return c.json(settingsBrowser(store, observed, opts.home, receiver));
     }
     // OPR.0.4.4.15: dynamic-class enumeration rides ADDITIVELY beside the
     // static settings map (existing consumers of `settings` unaffected).

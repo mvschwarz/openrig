@@ -161,6 +161,31 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       );
     });
 
+    it("filters the requested mission before deduplicating a same-named slice", () => {
+      const missionsRoot = path.join(cleanup, "qualified-missions");
+      for (const mission of ["mission-one", "mission-two"]) {
+        writeSlice(path.join(missionsRoot, mission, "slices"), "same-name", {
+          "SPEC.md": `# ${mission}\n`,
+        });
+      }
+      const traversedMissions = fs.readdirSync(missionsRoot);
+      expect(traversedMissions).toHaveLength(2);
+      const requestedMission = traversedMissions[1]!;
+      const expectedPath = path.join(missionsRoot, requestedMission, "slices", "same-name");
+      const indexer = new SliceIndexer({
+        slicesRoot: missionsRoot,
+        dogfoodEvidenceRoot: null,
+        db,
+        missionId: requestedMission,
+      });
+
+      expect(indexer.list().map(({ name, missionId, slicePath }) => [name, missionId, slicePath])).toEqual([
+        ["same-name", requestedMission, expectedPath],
+      ]);
+      expect(indexer.get("same-name")?.slicePath).toBe(expectedPath);
+      expect(fs.readFileSync(path.join(expectedPath, "SPEC.md"), "utf8")).toBe(`# ${requestedMission}\n`);
+    });
+
     it("can index legacy flat slices and mission-aware slices from compatibility roots", () => {
       const missionsRoot = path.join(cleanup, "missions");
       writeSlice(slicesRoot, "legacy-flat-slice", {
@@ -522,6 +547,153 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       writeSlice(slicesRoot, "x", { "README.md": "---\n---\n" });
       const indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
       expect(indexer.get("x")!.proofPacket).toBeNull();
+    });
+
+    const packetPrefixSeparators = [
+      { label: "hyphen", separator: "-" },
+      { label: "dot", separator: "." },
+      { label: "underscore", separator: "_" },
+    ] as const;
+
+    it.each(packetPrefixSeparators)(
+      "qualified lookup selects an older slice packet over a newer sibling packet whose only matching token is in the mission prefix ($label separator)",
+      ({ separator }) => {
+        const missionsRoot = path.join(cleanup, "missions");
+        writeSlice(path.join(missionsRoot, "a-first", "slices"), "first", { "SPEC.md": "# a-first/first\n" });
+        writeSlice(path.join(missionsRoot, "a-first", "slices"), "second", { "SPEC.md": "# a-first/second\n" });
+
+        const correctDir = path.join(dogfoodRoot, `a-first${separator}first`);
+        fs.mkdirSync(path.join(correctDir, "screenshots"), { recursive: true });
+        fs.writeFileSync(path.join(correctDir, "correct-first.md"), "# correct proof for slice first\n");
+        fs.writeFileSync(path.join(correctDir, "screenshots", "first.png"), "FIRST-PNG\n");
+        fs.utimesSync(correctDir, 1600000010, 1600000010);
+
+        const wrongSiblingDir = path.join(dogfoodRoot, `a-first${separator}second`);
+        fs.mkdirSync(path.join(wrongSiblingDir, "screenshots"), { recursive: true });
+        fs.writeFileSync(path.join(wrongSiblingDir, "wrong-second.md"), "# wrong sibling proof for slice second\n");
+        fs.writeFileSync(path.join(wrongSiblingDir, "screenshots", "second.png"), "SECOND-PNG\n");
+        fs.utimesSync(wrongSiblingDir, 1600000020, 1600000020);
+
+        const indexer = new SliceIndexer({
+          slicesRoot: missionsRoot,
+          dogfoodEvidenceRoot: dogfoodRoot,
+          db,
+          missionId: "a-first",
+        });
+        const byName = new Map(indexer.list().map((entry) => [entry.name, entry.hasProofPacket]));
+        const firstRecord = indexer.get("first")!;
+        const secondRecord = indexer.get("second")!;
+
+        expect({
+          listHasProof: {
+            first: byName.get("first"),
+            second: byName.get("second"),
+          },
+          firstProofDir: firstRecord.proofPacket?.dirName,
+          firstMarkdownFiles: firstRecord.proofPacket?.markdownFiles,
+          firstScreenshots: firstRecord.proofPacket?.screenshots,
+          firstMarkdownBody: firstRecord.proofPacket?.markdownFiles[0]
+            ? fs.readFileSync(path.join(firstRecord.proofPacket.absPath, firstRecord.proofPacket.markdownFiles[0]), "utf8")
+            : null,
+          secondProofDir: secondRecord.proofPacket?.dirName,
+        }).toEqual({
+          listHasProof: {
+            first: true,
+            second: true,
+          },
+          firstProofDir: `a-first${separator}first`,
+          firstMarkdownFiles: ["correct-first.md"],
+          firstScreenshots: ["screenshots/first.png"],
+          firstMarkdownBody: "# correct proof for slice first\n",
+          secondProofDir: `a-first${separator}second`,
+        });
+      },
+    );
+
+    it.each(packetPrefixSeparators)(
+      "qualified lookup returns no proof packet when only a newer sibling packet shares the mission-prefix token ($label separator)",
+      ({ separator }) => {
+        const missionsRoot = path.join(cleanup, "missions");
+        writeSlice(path.join(missionsRoot, "a-first", "slices"), "first", { "SPEC.md": "# a-first/first\n" });
+        writeSlice(path.join(missionsRoot, "a-first", "slices"), "second", { "SPEC.md": "# a-first/second\n" });
+
+        const wrongSiblingDir = path.join(dogfoodRoot, `a-first${separator}second`);
+        fs.mkdirSync(path.join(wrongSiblingDir, "screenshots"), { recursive: true });
+        fs.writeFileSync(path.join(wrongSiblingDir, "wrong-second.md"), "# wrong sibling proof for slice second\n");
+        fs.writeFileSync(path.join(wrongSiblingDir, "screenshots", "second.png"), "SECOND-PNG\n");
+        fs.utimesSync(wrongSiblingDir, 1600000020, 1600000020);
+
+        const indexer = new SliceIndexer({
+          slicesRoot: missionsRoot,
+          dogfoodEvidenceRoot: dogfoodRoot,
+          db,
+          missionId: "a-first",
+        });
+        const byName = new Map(indexer.list().map((entry) => [entry.name, entry.hasProofPacket]));
+
+        expect({
+          listHasProof: {
+            first: byName.get("first"),
+            second: byName.get("second"),
+          },
+          firstProofPacket: indexer.get("first")!.proofPacket,
+          secondProofDir: indexer.get("second")!.proofPacket?.dirName,
+        }).toEqual({
+          listHasProof: {
+            first: false,
+            second: true,
+          },
+          firstProofPacket: null,
+          secondProofDir: `a-first${separator}second`,
+        });
+      },
+    );
+
+    it("preserves qualified -vN suffix stripping, same-mission overlapping-slice latest-mtime tie-break, and unqualified whole-name matching", () => {
+      const missionsRoot = path.join(cleanup, "missions");
+      writeSlice(path.join(missionsRoot, "a-first", "slices"), "first-v1", { "SPEC.md": "# a-first/first-v1\n" });
+      const olderQualified = path.join(dogfoodRoot, "a-first-first-20260101");
+      const newerOverlappingQualified = path.join(dogfoodRoot, "a-first-first-extra-20260601");
+      fs.mkdirSync(olderQualified, { recursive: true });
+      fs.mkdirSync(newerOverlappingQualified, { recursive: true });
+      fs.writeFileSync(path.join(olderQualified, "older.md"), "# older\n");
+      fs.writeFileSync(path.join(newerOverlappingQualified, "newer.md"), "# newer\n");
+      fs.utimesSync(olderQualified, 1600000010, 1600000010);
+      fs.utimesSync(newerOverlappingQualified, 1600000020, 1600000020);
+
+      const qualifiedIndexer = new SliceIndexer({
+        slicesRoot: missionsRoot,
+        dogfoodEvidenceRoot: dogfoodRoot,
+        db,
+        missionId: "a-first",
+      });
+      expect({
+        qualifiedDir: qualifiedIndexer.get("first-v1")!.proofPacket?.dirName,
+        qualifiedDocs: qualifiedIndexer.get("first-v1")!.proofPacket?.markdownFiles,
+      }).toEqual({
+        qualifiedDir: "a-first-first-extra-20260601",
+        qualifiedDocs: ["newer.md"],
+      });
+
+      const legacyDogfoodRoot = path.join(cleanup, "legacy-dogfood");
+      writeSlice(slicesRoot, "first", { "README.md": "---\n---\n" });
+      const legacyPacket = path.join(legacyDogfoodRoot, "a-first-legacy-only");
+      fs.mkdirSync(legacyPacket, { recursive: true });
+      fs.writeFileSync(path.join(legacyPacket, "legacy.md"), "# legacy\n");
+      fs.utimesSync(legacyPacket, 1600000030, 1600000030);
+
+      const unqualifiedIndexer = new SliceIndexer({
+        slicesRoot,
+        dogfoodEvidenceRoot: legacyDogfoodRoot,
+        db,
+      });
+      expect({
+        unqualifiedDir: unqualifiedIndexer.get("first")!.proofPacket?.dirName,
+        unqualifiedDocs: unqualifiedIndexer.get("first")!.proofPacket?.markdownFiles,
+      }).toEqual({
+        unqualifiedDir: "a-first-legacy-only",
+        unqualifiedDocs: ["legacy.md"],
+      });
     });
   });
 

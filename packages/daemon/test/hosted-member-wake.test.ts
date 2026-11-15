@@ -65,7 +65,7 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     expect(outcome.nudgeResult).not.toContain(url);
   });
 
-  it("records a failed ring for an error, a redirect it doesn't follow, a missing secret and a trigger that doesn't answer", async () => {
+  it("records a failed ring for an error, a redirect it doesn't follow and a missing secret", async () => {
     reply = { status: 500 };
     expect(await ringHostedWake(ring, wake, { env: env() })).toEqual({ classified: "failed", nudgeResult: "failed:webhook (GROK_WAKE_URL) answered 500" });
 
@@ -77,9 +77,15 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     expect((await ringHostedWake(ring, wake, { env: { GROK_WAKE_URL: url } })).nudgeResult)
       .toBe("failed:webhook (GROK_WAKE_URL) not rung: its Authorization value (GROK_WAKE_AUTH) isn't set");
     expect(received).toHaveLength(2);
+  });
 
+  // The ring reached a trigger that then didn't answer in time, so it may have started a run: unknown, like an unconfirmed
+  // send, never failed.
+  it("a trigger that doesn't answer in time reads unconfirmed, not failed", async () => {
     reply = "hang";
-    expect((await ringHostedWake(ring, wake, { env: env(), timeoutMs: 100 })).nudgeResult).toBe("failed:webhook (GROK_WAKE_URL) didn't answer within 100 ms");
+    expect(await ringHostedWake(ring, wake, { env: env(), timeoutMs: 100 })).toEqual({ classified: "indeterminate",
+      nudgeResult: "indeterminate:webhook (GROK_WAKE_URL) didn't answer within 100 ms, so it may have the ring; it isn't rung again, and pickup is the member's claim on this row" });
+    expect(received).toHaveLength(1);
   });
 
   it("through the queue: work for the member rings its trigger from the roster's secrets file, never its terminal, and a claim stays a separate fact", async () => {
@@ -116,7 +122,7 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     trigger = null;
     const noTrigger = repo.classifyDestinationOf("grok@lab");
     expect(noTrigger).toEqual({ class: "unroutable", teaching: "unroutable: 'grok@lab' is a hosted member with no wake trigger, "
-      + "so nothing can push work to it. It reads the queue when its owner next starts a session." });
+      + "so nothing can push work to it. It picks up its work when its person asks it to, or on a schedule they set." });
     // An address no roster lists keeps the general teaching.
     expect(repo.classifyDestinationOf("nobody@lab")).toMatchObject({ class: "unroutable",
       teaching: expect.stringContaining("Fix the address, or register the human with `rig gateway human add`.") });
@@ -126,7 +132,7 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
   // Real topology and a repository whose trigger comes from a secrets file, as on a running daemon.
   // A repository over the same database stands in for the daemon after a restart; `transport: false` for one that
   // stops before sending.
-  function hostedRepo(db: Database.Database, envLines: string, declared: RosterWake["webhook"] = wake.webhook, opts: { transport?: boolean } = {}) {
+  function hostedRepo(db: Database.Database, envLines: string, declared: RosterWake["webhook"] = wake.webhook, opts: { transport?: boolean; fetchImpl?: typeof fetch } = {}) {
     db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES ('rig-lab', 'lab')").run();
     db.prepare("INSERT OR IGNORE INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-lead', 'rig-lab', 'lead', 'claude-code', '/tmp')").run();
     const secrets = join(dir, "grok.env");
@@ -136,6 +142,7 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
       ...(opts.transport === false ? {} : { transport: { send: async () => ({ ok: true, verified: true }) } }),
       hostedWake: (destination) => destination === "grok@lab" ? { webhook: { ...declared, secrets_env_file: secrets } } : null,
+      ...(opts.fetchImpl ? { hostedWakeFetch: opts.fetchImpl } : {}),
     });
   }
 
@@ -182,6 +189,56 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
       expect(repo.getById(row.qitemId)!.lastNudgeWireResult).toMatch(/^wake-accepted:webhook \(GROK_WAKE_URL\) answered 202/);
       db.close();
     }
+  });
+
+  // A trigger that timed out may already be running the work, so startup recovery doesn't ring it again; a refused
+  // connection never left, so recovery still retries it. A timed-out ring nobody claims is still surfaced to a person.
+  const ringDouble = (first: "timeout" | "refused") => {
+    const rings: string[] = [];
+    let next: "timeout" | "refused" | "accept" = first;
+    const fetchImpl = (async () => {
+      rings.push(next);
+      if (next === "timeout") throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+      if (next === "refused") throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+      return new Response(null, { status: 202 });
+    }) as typeof fetch;
+    return { rings, fetchImpl, accept: () => { next = "accept"; } };
+  };
+  const firstResult = (first: "timeout" | "refused") => first === "timeout"
+    ? /^indeterminate:webhook \(GROK_WAKE_URL\) didn't answer within 10000 ms, so it may have the ring/
+    : /^failed:webhook \(GROK_WAKE_URL\) couldn't be reached \(ECONNREFUSED\)/;
+  const envLines = () => `GROK_WAKE_URL=${url}\nGROK_WAKE_AUTH=Bearer test-only-value\n`;
+
+  it("startup recovery doesn't ring a ring that timed out again; a refused one it rings again", async () => {
+    for (const first of ["timeout", "refused"] as const) {
+      const { rings, fetchImpl, accept } = ringDouble(first);
+      const db = new Database(":memory:");
+      migrate(db, ALL_MIGRATIONS);
+      const repo = hostedRepo(db, envLines(), wake.webhook, { fetchImpl });
+      repo.attachOutbox(new OutboxHandler(db));
+      const row = await repo.create({ sourceSession: "lead@lab", destinationSession: "grok@lab", body: "work", summary: "Work" });
+      await vi.waitFor(() => expect(repo.getById(row.qitemId)!.lastNudgeWireResult).toMatch(firstResult(first)));
+      accept();
+      await repo.drainPendingWakeIntents();
+      expect(rings).toEqual(first === "timeout" ? ["timeout"] : ["refused", "accept"]);
+      db.close();
+    }
+  });
+
+  it("a ring that timed out and was never claimed still reaches the member's person through the stuck sweep", async () => {
+    const { fetchImpl } = ringDouble("timeout");
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const repo = hostedRepo(db, envLines(), wake.webhook, { fetchImpl });
+    const row = await repo.create({ sourceSession: "lead@lab", destinationSession: "grok@lab", body: "work", summary: "Work" });
+    expect(repo.getById(row.qitemId)!.lastNudgeWireResult).toMatch(firstResult("timeout"));
+    await runStuckSweep({ db, queueRepo: repo, status: createStuckSweepStatus(), resolveOrchestrator: () => null, unclaimedAgeMinutes: 60,
+      now: new Date(Date.now() + 2 * 3_600_000), log: () => {}, isRegisteredHost: () => false,
+      resolveOperatorSeat: () => "person@external", resolveRecoveryAgentSeat: () => null });
+    const finding = repo.list({ limit: 50 }).find((item) => (item.tags ?? []).includes(STUCK_SWEEP_FINDING_TAG));
+    expect(finding).toMatchObject({ destinationSession: "person@external" });
+    expect(finding!.body).toContain(row.qitemId);
+    db.close();
   });
 
   it("a new wake for the same row rings: parked on a blocker that completes, the member is rung again, and recovery adds none", async () => {

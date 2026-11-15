@@ -94,6 +94,11 @@ pools and missing edge artifacts.
 
 ## Active surface
 
+For a worked `periodic-reminder` YAML spec, full registration command and required
+flags, read `rig context get reference/keeping-a-watch.md#recurring-reminders-for-agents`.
+This is an agent's recurring reminder. A person's watch uses the one-shot queue
+pattern in `rig context get reference/keeping-a-watch.md#setting-a-watch`.
+
 Daemon `rig watchdog` is the active host coordination surface for new
 work. History records only loud evaluations (`sent` / `terminal`);
 quiet skip reasons are NOT recorded — POC parity so agents are not

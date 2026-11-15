@@ -121,6 +121,34 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending" });
   });
 
+  it.each([false, true])("a per-row finding keeps its open or dismissed disposition across a typing hold (dismissed: %s)", async (dismissed) => {
+    const door = seat("front", "door.root", "root@front");
+    seat("ops", "watch.desk", "desk@ops");
+    rigs.addEdge(door.rig.id, door.node.id, "desk@ops", "escalates_to");
+    let sends = 0;
+    queue.attachTransport({ send: async () => { sends++; return { ok: true, verified: false }; } });
+    const row = await work("root@front");
+    await sweep();
+    const [finding] = findingsTo("desk@ops");
+    expect(finding!.tags).toContain(`stuck-sweep:unclaimed-obligation:${row.qitemId}`);
+    if (dismissed) await queue.update({ qitemId: finding!.qitemId, actorSession: "desk@ops", state: "done",
+      closureReason: "no-follow-on", transitionNote: "seen" });
+    const expected = dismissed ? "done" : "pending";
+    const before = queue.getById(row.qitemId)!;
+    const sent = sends;
+    db.prepare("UPDATE queue_items SET last_nudge_result = 'retained:typing_guard' WHERE qitem_id = ?").run(row.qitemId);
+    await sweep();
+    expect(queue.getById(finding!.qitemId)?.state).toBe(expected);
+    db.prepare("UPDATE queue_items SET last_nudge_result = NULL WHERE qitem_id = ?").run(row.qitemId);
+    await sweep();
+    await sweep();
+    expect(findingsTo("desk@ops").map((f) => ({ id: f.qitemId, state: f.state })))
+      .toEqual([{ id: finding!.qitemId, state: expected }]);
+    expect(sends).toBe(sent);
+    expect(queue.getById(row.qitemId)).toMatchObject({ state: "pending", claimedAt: null,
+      tsUpdated: before.tsUpdated, lastNudgeAttempt: before.lastNudgeAttempt });
+  });
+
   it("with an escalates_to route, each unclaimed row's finding goes to that seat, never to the seat itself", async () => {
     const door = seat("front", "door.root", "root@front");
     seat("ops", "watch.desk", "desk@ops");
@@ -133,14 +161,16 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     for (const row of rows) expect(routed.some((f) => f.tags?.includes(`stuck-sweep:unclaimed-obligation:${row.qitemId}`))).toBe(true);
   });
 
-  it("with a delegation parent, each unclaimed row's finding goes to the parent", async () => {
+  it("with a delegation parent, the unclaimed rows go to the parent in its one notice for this seat (#2988)", async () => {
     const lead = seat("lane", "work.lead", "lead@lane");
     const parent = seat("lane", "coord.owner", "owner@lane");
     rigs.addEdge(lead.rig.id, parent.node.id, lead.node.id, "delegates_to");
     const row = await work("lead@lane");
     await sweep();
     expect(findingsTo("lead@lane")).toHaveLength(0);
-    expect(findingsTo("owner@lane").map((f) => f.tags)).toEqual([expect.arrayContaining([`stuck-sweep:unclaimed-obligation:${row.qitemId}`])]);
+    const filed = findingsTo("owner@lane");
+    expect(filed.map((f) => f.tags)).toEqual([expect.arrayContaining(["stuck-sweep:unclaimed-backlog:lead@lane=>owner@lane"])]);
+    expect(filed[0]!.body).toContain(row.qitemId);
   });
 
   it("an address that isn't an agent seat here keeps a finding per row", async () => {

@@ -5,6 +5,10 @@ Real frames of Claude Code 2.1.296 (`claude-code-2.1.296/`) and Codex 0.160.0 (`
 (`claude-code-2.1.296/openrig-seat-*`, see below). `texts/` holds the texts that were sent.
 `input-box-reading.test.ts` and `session-transport-input-box.test.ts` read them.
 
+`codex-0.167.0/` adds redacted completed and working tails from a managed terminal.
+Its README records their provenance and the native streaming evidence still missing.
+The activity tests use these tails; they do not establish a staged-input/send sequence.
+
 ## Versions and their limits
 
 Every frame here is of one client version, named by its folder; the idle allow-list and the box readers were built

@@ -11,7 +11,9 @@ import { SeatStructuralActivityService } from "../src/domain/seat-structural-act
 
 type Panes = Record<string, string>;
 /** Runs a tmux argv against `panes` the way tmux does: `;` separates commands, and the first failing one ends it. */
-function runTmux(argv: string[], panes: Panes, vanished = new Set<string>(), maxBuffer = Infinity): string {
+function runTmux(argv: string[], panes: Panes, vanished = new Set<string>(), maxBuffer = Infinity,
+  /** What tmux expands `#{pane_id} #{pane_pid}` to, per session; left literal when absent. */
+  identities: Record<string, string> = {}): string {
   if (argv[1] === "list-sessions") return Object.keys(panes).join("\n") + "\n";
   const cmds: string[][] = [[]];
   for (const a of argv.slice(1)) {
@@ -24,7 +26,7 @@ function runTmux(argv: string[], panes: Panes, vanished = new Set<string>(), max
     const name = /^=(.*):$/.exec(target)?.[1];
     if (name === undefined) throw new Error(`expected an exact =name: target, got ${target}`);
     if (!(name in panes) || vanished.has(name)) throw Object.assign(new Error(`can't find session: ${name}`), { stdout: out });
-    out += c[0] === "display-message" ? `${c[c.length - 1]}\n` : panes[name];
+    out += c[0] === "display-message" ? `${c[c.length - 1]!.replace("#{pane_id} #{pane_pid}", identities[name] ?? "#{pane_id} #{pane_pid}")}\n` : panes[name];
   }
   if (out.length > maxBuffer) throw new Error("stdout maxBuffer length exceeded");
   return out;
@@ -41,12 +43,12 @@ const pane = (n: string) => `• ${n} output\n\n❯ \n`;
 describe("TmuxAdapter.capturePanesContent (#308)", () => {
   for (const mode of ["shell", "argv"] as const) {
     /** A TmuxAdapter over the fake tmux in this test's exec mode, recording every tmux argv it runs. */
-    function adapter(panes: Panes, opts: { vanished?: Set<string>; noServer?: boolean; maxBuffer?: number } = {}) {
+    function adapter(panes: Panes, opts: { vanished?: Set<string>; noServer?: boolean; maxBuffer?: number; identities?: Record<string, string> } = {}) {
       const calls: string[][] = [];
       const run = (argv: string[]) => {
         calls.push(argv);
         if (opts.noServer) throw new Error("no server running on /tmp/tmux-501/default");
-        return runTmux(argv, panes, opts.vanished, opts.maxBuffer);
+        return runTmux(argv, panes, opts.vanished, opts.maxBuffer, opts.identities);
       };
       const exec = async (cmd: string) => run(shellToArgv(cmd));
       const a = mode === "argv" ? new TmuxAdapter(async () => { throw new Error("shell path unused"); }, undefined, async (argv: string[]) => run(argv))
@@ -60,6 +62,17 @@ describe("TmuxAdapter.capturePanesContent (#308)", () => {
       // The missing seat fails the first chain; the listing beside it drops the seat for the one retry.
       expect(calls.map((c) => c[1])).toEqual(["list-sessions", "display-message", "display-message"]);
       expect(Object.fromEntries([...got!].map(([k, v]) => [k, v.text]))).toEqual({ "gone@r": null, "a@r": pane("a"), "b.x@r": pane("b.x"), "o'q@r": pane("o'q") });
+    });
+
+    it(`${mode}: the marker line's expanded pane id and pid become the capture's pane; a malformed or literal one gives none (#2515)`, async () => {
+      const { a } = adapter({ "a@r": pane("a"), "b@r": pane("b"), "c@r": pane("c") },
+        { identities: { "a@r": "%5 4100", "b@r": "%5 notapid" } });
+      const got = await a.capturePanesContent(["a@r", "b@r", "c@r"], 20);
+      expect(got!.get("a@r")).toMatchObject({ text: pane("a"), pane: { id: "%5", pid: 4100 } });
+      for (const name of ["b@r", "c@r"]) {
+        expect(got!.get(name)?.text).toBe(pane(name.slice(0, 1)));
+        expect(got!.get(name)?.pane).toBeUndefined();
+      }
     });
 
     it(`${mode}: 50 distinct live sessions = 1 listing + 3 chained calls of at most 24`, async () => {

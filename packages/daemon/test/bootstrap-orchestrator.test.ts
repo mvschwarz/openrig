@@ -1387,6 +1387,38 @@ exports:
     expect(result.errors.some((e) => e.includes("skipped"))).toBe(true);
   });
 
+  it("a package whose only guidance entry is left as it is still imports the rig, with the note in warnings", async () => {
+    writePkg(path.join(tmpDir, "test-pkg"), VALID_MANIFEST_YAML, { "skills/helper/SKILL.md": "# Helper" });
+    const guidanceManifest = `
+schema_version: 1
+name: guidance-pkg
+version: "1.0.0"
+summary: Guidance only
+compatibility:
+  runtimes: [claude-code]
+exports:
+  guidance:
+    - source: guidance/rules.md
+      name: rules
+      kind: claude_md
+      supported_scopes: [project_shared]
+      default_scope: project_shared
+      merge_strategy: managed_block
+`.trim();
+    writePkg(path.join(tmpDir, "guidance-pkg"), guidanceManifest, { "guidance/rules.md": "Follow these rules." });
+    const damaged = "# Project\n\n<!-- BEGIN OpenRig MANAGED BLOCK: guidance-pkg -->\nhalf a block\n";
+    fs.writeFileSync(path.join(tmpDir, "CLAUDE.md"), damaged);
+    const specPath = writeSpec(SPEC_WITH_PACKAGES_YAML.replace("      - ./test-pkg", "      - ./test-pkg\n      - ./guidance-pkg"));
+
+    const result = await buildOrchestrator().bootstrap({ mode: "apply", sourceRef: specPath, autoApprove: true });
+
+    expect(fs.readFileSync(path.join(tmpDir, "CLAUDE.md"), "utf-8")).toBe(damaged);
+    expect(result.errors).toEqual([]);
+    expect(result.status).toBe("completed");
+    expect(result.stages.find((s) => s.stage === "import_rig")?.status).not.toBe("skipped");
+    expect(result.warnings).toContainEqual(expect.stringMatching(/^Package '\.\/guidance-pkg' \(claude-code\): guidance_block_markers_damaged: .*CLAUDE\.md: guidance-pkg has a BEGIN or END marker without its pair/));
+  });
+
   // === P7-T05: Bundle source tests ===
 
   // T25: Real bundle bootstrap happy path

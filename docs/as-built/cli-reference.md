@@ -15,7 +15,8 @@ last-updated: 2026-11-09
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `e1dedbf531b6db9961b4c77c0a74564e58274a50`.
+Verified against the source commit in this page's `last-verified-against-source`
+frontmatter.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
@@ -244,7 +245,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig import <path>` | — | `--instantiate`<br>`--materialize-only`<br>`--workspace-only`<br>`--preflight`<br>`--target-rig <rigId>`<br>`--rig-root <root>`<br>`--cwd <path>` |
+| `rig import <path>` | — | `--instantiate`<br>`--materialize-only`<br>`--operation-id <uuid>`<br>`--json`<br>`--workspace-only`<br>`--preflight`<br>`--target-rig <rigId>`<br>`--rig-root <root>`<br>`--cwd <path>` |
 
 ### ui
 
@@ -367,20 +368,33 @@ registered person can approve (none, or several with no default; name one with
 `--human`) (`packages/daemon/src/routes/hosts.ts:379-398`).
 
 The request stays open on the target for as long as `--timeout` waits (600 seconds by default), and the person's
-approval says how long and until when, in UTC. A target older than this CLI ignores the timeout and keeps the request
+approval says how long and until when, in UTC. A target that reports who was asked (`person`) and who reads their answer (`owner`), or why
+nobody does yet (`noReader`), has `rig host pair` name them; an older target's reply keeps the general text. With
+nobody registered on the target, its refusal (409 `pair_human_required`) says to register a person there:
+`rig gateway human add <entityId> --display-name <name> --delivery-class B --default`. A target older than this CLI ignores the timeout and keeps the request
 10 minutes.
 
 On a 0.7.11 or later target, its person answers the request in the TUI (`rig tui`, then `attention`: open it), on
 Steering, or in Slack: with Approve or Deny, or in their own words. Typed words never deny it.
-- **When the target has a kernel operator (`operator-agent@kernel`),** it asks. The person's answer, a click or their
-  words, comes back to it as a reply, and it decides with `rig host approve <code>` or `rig host deny <code>`. It asks
-  the person back when the answer isn't clear. The person is told once that their answer was received. If the operator
-  isn't running, the request and that receipt say so, and they name the terminal route. The request stays pending, never
-  granted or denied, until the operator decides or the request expires. If the operator doesn't pick up the answer, the
-  person is told at expiry that it didn't.
-- **When the target has no kernel operator** (or the queue can't send rows to it, or OpenRig couldn't read which; the
-  request says which), Approve and Deny decide at once. A reply in words, or with none (a file), is kept on the
-  request, and the person is asked again with a new request.
+- **When the target has a receiving agent** (the one chosen in `agents.operator_session`, else its kernel operator
+  `operator-agent@kernel`), it asks. The person's answer, a click or their words, comes back to it as a reply, and it
+  decides with `rig host approve <code>` or `rig host deny <code>`. It asks the person back when the answer isn't clear.
+  The person is told once that their answer was received. If the agent isn't running, the request and that receipt say
+  so, and they name the direct controls (below). The request stays pending, never granted or denied, until a decision or
+  expiry. If the agent doesn't pick up the answer, the person is told at expiry that it didn't.
+- **When the target has no receiving agent** (or the queue can't send rows to it, or OpenRig couldn't read which; the
+  request says which, and names a chosen agent it couldn't use), the person's answer, a click or their words, is kept on
+  the request and decides nothing. (A Steering Deny or Drop, which closes the request, still refuses it.) The person
+  gets one receipt naming the direct controls. If a receiving agent is set
+  before the request expires, it gets their answer once and decides. (On 0.7.11, Approve and Deny decided at once here,
+  and words were asked again.)
+- **The direct controls:** the target's TUI pairing settings (`rig tui`, then Settings, Instance & work, Pairing
+  requests; the Feed's request opens it there), or `rig host approve|deny` below. The TUI lists the open requests from
+  `GET /api/hosts/pair-requests` (code, requester, expiry, status, who reads the answer, and the person's kept answer,
+  so an Approve over a kept Deny is made knowingly; no credential), reads the
+  request again before Approve or Deny, and decides through `POST /api/hosts/pair-decision` with its operator bearer
+  token. A decision it can't confirm (a timeout, a lost connection or a server error) reads "outcome unknown" and is
+  read again, never sent twice.
 - **Either way,** the outcome reaches the person as its own update: approved or denied, and by whom.
 
 On either target, `rig host approve <request>` or `rig host deny <request>` (the pairing code, or the request's
@@ -388,11 +402,11 @@ approval row id), run on the target from an agent seat or a plain terminal, deci
 token: an agent seat carries `OPENRIG_AUTH_BEARER_TOKEN`, and a person sets it or passes `--bearer <token>`. Without
 it the daemon answers 401, and nothing is decided. It decides once, and refuses an
 unknown (404 `pair_request_unknown`), expired (409 `pair_request_expired`) or already-decided (409
-`pair_request_decided`) request, including one its row already decided before the requester's next check (a click on
-a target with no kernel operator, or a refusing close). It records who decided: the seat, or `human@host` from a plain terminal. The person
+`pair_request_decided`) request, including one its row already decided before the requester's next check (an agent
+seat's close naming Approve, or a refusing close). A close never approves over the person's recorded Deny. It records who decided: the seat, or `human@host` from a plain terminal. The person
 gets one update with the result. An agent seat's `rig queue update <id> --state done --closure-reason no-follow-on
 --resolution approve` on an unanswered request still approves, and any other close that carries no answer and isn't
-the person's own reply, or `--state denied`, refuses. To refuse a pairing, answer Deny on a target with no kernel operator, run
+the person's own reply, or `--state denied`, refuses. To refuse a pairing, use Deny on the target's pairing settings or on Steering, run
 `rig host deny`, or let it expire (nothing is persisted). At its deadline a request's ask closes as expired, even when the requester stopped waiting, so a late click there isn't
 accepted. The decisions live in the daemon's memory, as the requests do, so a daemon restart drops an open request.
 
@@ -537,7 +551,7 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue show <qitemId>` | — | `--full`<br>`--json`<br>`--host <id>` |
 | `rig queue artifact <qitemId>` | — | `--root <name>`<br>`--json` |
 | `rig queue transitions <qitemId>` | — | `--json`<br>`--full`<br>`--host <id>` |
-| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json`<br>`--host <id>` |
+| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--tag <tag>` (repeatable, AND)<br>`--mission <id>`<br>`--slice <id>`<br>`--limit <n>`<br>`--json`<br>`--host <id>` |
 | `rig queue overdue` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue undelivered` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig queue inbox-drop <destinationSession>` | — | `--sender <session>`<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <inboxId>`<br>`--json` |
@@ -547,6 +561,8 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | `rig queue outbox-record` | — | `--sender <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <outboxId>`<br>`--json` |
 | `rig queue outbox-list <senderSession>` | — | `--limit <n>`<br>`--json` |
 | `rig queue erase` | — | `--members <file>`<br>`--rig <id>`<br>`--ids <file>`<br>`--action <action>` (`delete`, `scrub`)<br>`--routine`<br>`--apply`<br>`--actor <session>`<br>`--json` |
+
+`rig queue list` accepts repeated exact, case-sensitive `--tag <tag>` filters and requires every tag to match before the result limit. `--mission <id>` and `--slice <id>` add the exact `mission:<id>` and `slice:<id>` tags. Exact duplicates collapse; blank values are rejected; commas inside a tag are literal. The CLI and MCP report a visibly unfiltered nonempty response from an older daemon, but an empty response cannot establish whether the daemon applied the filter.
 
 ### slack
 
@@ -1072,17 +1088,20 @@ for input and receipt examples, rollback, and snapshot behavior.
 | `rig seat held-messages <seat>` | — | `--limit <n>`<br>`--offset <n>`<br>`--id <id>`<br>`--json` |
 | `rig seat retire-held-message <seat> <id>` | — | `--reason <text>` **required**<br>`--json` |
 | `rig seat status <seat>` | — | `--json` |
-| `rig seat handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
+| `rig seat handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--recover`<br>`--json` |
 | `rig seat switch-client <seat>` | — | `--to-window <n>`<br>`--client <id>`<br>`--json` |
 | `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |
 | `rig seat set-terminal-policy <seat>` | — | `--preset <preset>` **required**<br>`--helper <addresses...>`<br>`--rig-default`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json`<br>`--peer-compaction <decision>`<br>`--peer-model <decision>`<br>`--self-compaction <decision>`<br>`--self-model <decision>`<br>`--openrig-compaction <decision>`<br>`--openrig-model <decision>` |
 | `rig seat set-permissions <seat>` | — | `--mode <mode>`<br>`--rules <file>`<br>`--codex-permissions <file>`<br>`--codex-profile <name>`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-permissions-to <seat>` | — | `--to <person>`<br>`--clear`<br>`--deny`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat decide-permission <request>` | — | `--option <id>` **required**<br>`--reason <text>`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |
 | `rig seat set-cwd <seat>` | — | `--cwd <directory>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat runtime-home <seat>` | — | `--json` |
+| `rig seat record-runtime-home <seat>` | — | `--home <directory>` **required**<br>`--expect-occupant <generation>` **required**<br>`--expect-original <id>` **required**<br>`--expect-revision <n>` **required**<br>`--reason <text>` **required**<br>`--operation-id <id>`<br>`--operator <address>`<br>`--json` |
 | `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>`<br>`--plan`<br>`--stop`<br>`--operator <address>`<br>`--json` |
 | `rig seat restart <seat>` | — | `--keep-conversation` **required**<br>`--reason <text>`<br>`--plan`<br>`--verify`<br>`--expect-account <text>`<br>`--operator <address>`<br>`--host <id>`<br>`--json` |
 | `rig seat continue <seat>` | — | `--json` |
@@ -1123,7 +1142,7 @@ off, draft-aware and hold modes, immediate refusal results and held-message insp
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
+| `rig handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--recover`<br>`--json` |
 
 A rebuild starts a new native conversation and primes it from durable artifacts. In the JSON result,
 `currentStatus.continuityOutcome` describes the executed source (`rebuilt`, `forked`, `fresh`, or unknown

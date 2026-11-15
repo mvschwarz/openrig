@@ -1,12 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import { createServer } from "node:http";
 import { DaemonClient } from "../src/daemon-client.js";
 import { subscribeActivityEvents } from "../src/live-events.js";
 
 function delay(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-describe("activity stream header deadline", () => {
-  it("rejects a reachable endpoint that never returns response headers", async () => {
+describe.concurrent("activity stream header deadline", () => {
+  it("rejects a reachable endpoint that never returns response headers", async ({ expect }) => {
     let closed = false;
     const server = createServer((_req, res) => { res.on("close", () => { closed = true; }); });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -23,7 +23,7 @@ describe("activity stream header deadline", () => {
     } finally { if (guard) clearTimeout(guard); server.closeAllConnections(); server.close(); }
   }, 10_000);
 
-  it("keeps an established SSE stream alive beyond the header deadline", async () => {
+  it("keeps an established SSE stream alive beyond the header deadline", async ({ expect }) => {
     let closed = false;
     let writeLater!: () => void;
     const server = createServer((_req, res) => {
@@ -50,8 +50,8 @@ describe("activity stream header deadline", () => {
 });
 
 
-describe("temporary activity stream opening failures", () => {
-  it("reconnects after a slow daemon exceeds the header deadline and delivers its next event", async () => {
+describe.concurrent("temporary activity stream opening failures", () => {
+  it("reconnects after a slow daemon exceeds the header deadline and delivers its next event", async ({ expect }) => {
     let calls = 0;
     const late = new Set<ReturnType<typeof setTimeout>>();
     const server = createServer((_req, res) => {

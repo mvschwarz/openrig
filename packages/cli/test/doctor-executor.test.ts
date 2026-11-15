@@ -73,7 +73,7 @@ describe("doctor default executor", () => {
     await new Command().addCommand(doctorCommand()).parseAsync(["node", "rig", "doctor"]);
     const text = vi.mocked(console.log).mock.calls.map(call => call.join(" ")).join("\n");
     expect(text).toContain("[FAIL] codex_auth:");
-    expect(text).toContain("Only the harnesses selected for your project need a login; an unused harness does not.");
+    expect(text).toContain("A harness needs a login only when a seat you start runs on it. A built-in team can use one you didn't select: starter runs its reviewer on Codex.");
     expect(process.exitCode).toBe(1);
   });
 });

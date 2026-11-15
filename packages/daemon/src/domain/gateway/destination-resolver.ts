@@ -32,8 +32,8 @@
 //      specimen class) is gateway-routable: a PANELLESS virtual identity whose
 //      delivery rides the gateway, exactly like its @external address.
 //   4. A hosted member whose roster entry declares a trigger is hosted. One with no
-//      trigger stays unroutable, so its person is told; its teaching says it reads the
-//      queue when its owner next starts a session, not to fix the address.
+//      trigger stays unroutable, so its person is told; its teaching says it picks up its
+//      work when its person asks it to or on a schedule they set, not to fix the address.
 //   5. Anything else is unroutable, with teaching that names BOTH checks.
 import { parseSessionName } from "../session-name.js";
 import type { RosterWake } from "../rosters.js";
@@ -77,7 +77,7 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
     return {
       class: "unroutable",
       teaching: `unroutable: '${destination}' is a hosted member with no wake trigger, so nothing can push work to it. ` +
-        `It reads the queue when its owner next starts a session.`,
+        `It picks up its work when its person asks it to, or on a schedule they set.`,
     };
   }
   return {

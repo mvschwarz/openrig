@@ -16,6 +16,7 @@ import { findOtherSessionOwner } from "./session-owner.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE, cleanSeatSkills, seatSkillPaths } from "./seat-skill-storage.js";
 import { settleAutomaticRestore } from "./existing-rig-restore.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 
 export interface TeardownResult {
   rigId: string;
@@ -188,7 +189,7 @@ export class RigTeardownOrchestrator {
     for (const session of liveSessions) {
       // OpenRig neither launches nor stops a seat joined with `rig attach` as an external CLI, and it has no tmux session:
       // a missing one isn't a stop. Keep its claim, as the historical path below does for non-tmux bindings.
-      if (this.deps.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType === "external_cli") {
+      if (seatProcessOwner(resolveSeatKind(this.deps.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType)) === "external") {
         external.add(session.nodeId);
         (result.leftRunning ??= []).push(session.sessionName);
         continue;

@@ -102,6 +102,7 @@ export const COMMAND_LOADERS: ReadonlyMap<string, Load> = new Map<string, Load>(
   ["heartbeat", async () => (await import("./commands/heartbeat.js")).heartbeatCommand()],
   ["seat", async () => (await import("./commands/seat.js")).seatCommand()],
   ["handover", async () => (await import("./commands/seat.js")).handoverCommand()],
+  ["network", async () => (await import("./commands/network.js")).networkCommand()],
   ["startup-proof", async () => (await import("./commands/startup-proof.js")).startupProofCommand()],
   ["scope", async () => (await import("./commands/scope.js")).scopeCommand()],
   ["proof", async () => (await import("./commands/proof.js")).proofCommand()],

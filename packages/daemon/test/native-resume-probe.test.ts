@@ -4,6 +4,7 @@ import {
   assessNativeResumeProbe,
   buildNativeResumeCommand,
   buildCodexResumeCore,
+  claudeTrustPromptFocus,
   isProbeShellReady,
 } from "../src/domain/native-resume-probe.js";
 
@@ -390,15 +391,15 @@ describe("native resume probe", () => {
     ).toBe("claude --permission-mode acceptEdits --resume 'abc-123' --name 'dev-impl@demo-rig'");
   });
 
-  it("builds a Codex no-profile resume with the explicit -s workspace-write floor flag", () => {
+  it("builds a Codex no-profile resume with the explicit -s workspace-write floor flag and operational launch arg", () => {
     expect(buildNativeResumeCommand("codex", "019d-token")).toBe(
-      "codex -s workspace-write resume '019d-token'"
+      "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume '019d-token'"
     );
   });
 
-  it("builds a Codex profile resume with -p flag", () => {
+  it("builds a Codex profile resume with -p flag and operational launch arg", () => {
     expect(buildNativeResumeCommand("codex", "019d-token", null, "my-profile")).toBe(
-      "codex -p 'my-profile' resume '019d-token'"
+      "codex -p 'my-profile' '-c' 'check_for_update_on_startup=false' resume '019d-token'"
     );
   });
 
@@ -1416,5 +1417,187 @@ describe("Claude's Resume session picker", () => {
       "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n");
     expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent }))
       .toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+});
+
+// #2820 item 2: Claude Code's "gated grants" backstop (2.1.319+). It looks like the workspace trust prompt
+// ("Accessing workspace:", "Yes, I trust this folder"), but it also asks to approve the tool permissions the folder's
+// .claude/settings.json pre-approves, and its default choice declines them ("No, continue without these permissions")
+// or exits ("No, exit"). OpenRig must never answer it, not even with recovery.auto_drive_provider_prompts.
+describe("Claude gated grants backstop (#2820 item 2)", () => {
+  // A real capture: Claude Code 2.1.319 in a lab git repo (see claude-trust-git-root.test.ts).
+  const capture = JSON.parse(fs.readFileSync(new URL("./fixtures/claude-trust-git-root/trust-checks.json", import.meta.url), "utf8")) as { gatedGrantsScreen: string[] };
+  const screen = capture.gatedGrantsScreen.join("\n");
+  const probe = (paneContent: string) => assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
+  const gate = { status: "attention_required", code: "claude_gated_grants_gate" };
+
+  it("the captured screen, focus on 'No, continue without these permissions', is its own gate, never trust_gate", () => {
+    expect(probe(screen)).toMatchObject(gate);
+    expect(probe(screen).detail).toContain("OpenRig does not approve or bypass this review. No input was sent.");
+  });
+
+  it("is the same gate with the focus moved to 'Yes, I trust this folder'", () => {
+    const yes = screen.replace("❯ No, continue without these permissions", "  No, continue without these permissions")
+      .replace("  Yes, I trust this folder", "❯ Yes, I trust this folder");
+    expect(probe(yes)).toMatchObject(gate);
+  });
+
+  it("is the same gate in the variant with nothing trusted yet, whose default choice is 'No, exit'", () => {
+    expect(probe(screen.replace("❯ No, continue without these permissions", "❯ No, exit"))).toMatchObject(gate);
+  });
+
+  it("is the same gate when the git root is the home folder (the case item 1 deliberately does not seed)", () => {
+    expect(probe(screen.replace("<lab>/repo/cadeiras/rig/seat", "/home/agent"))).toMatchObject(gate);
+  });
+
+  it("is the same gate drawn with blank rows between its parts and a long permission list", () => {
+    const rows = capture.gatedGrantsScreen.flatMap(row => [row, ""]);
+    rows.splice(rows.findIndex(row => row.includes("Bash(ls:*)")) + 1, 0, ...Array.from({ length: 30 }, (_, n) => `   Bash(tool-${n}:*)`));
+    expect(probe(rows.join("\n"))).toMatchObject(gate);
+  });
+
+  it("a backstop still being drawn is not a trust prompt to drive: it waits for the next read", () => {
+    const partial = capture.gatedGrantsScreen.slice(0, capture.gatedGrantsScreen.findIndex(row => row.includes("Security guide")));
+    expect(probe(partial.join("\n"))).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+    const noFooter = capture.gatedGrantsScreen.slice(0, -1).join("\n");
+    expect(probe(noFooter)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("a backstop left in the scrollback above a session that started is neither this gate nor trust_gate", () => {
+    const later = [screen, "", " ▐▛███▜▌   Claude Code v2.1.319", "", "────────────────", "❯ ", "────────────────"].join("\n");
+    expect(probe(later).code).not.toBe("claude_gated_grants_gate");
+    expect(probe(later).code).not.toBe("trust_gate");
+  });
+
+  it("is the same gate in a 40-column pane, whose rows wrap and cut its marks (real capture), never trust_gate", () => {
+    const narrow = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    expect(narrow).not.toMatch(/No, continue without these permissions/);
+    expect(probe(narrow)).toMatchObject(gate);
+    expect(claudeTrustPromptFocus(narrow)).toBe("unknown");
+  });
+
+  it("a 40-column backstop captured before its wrapped warning is complete waits, never resumed", () => {
+    const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# "));
+    const partial = rows.slice(0, rows.findIndex(row => row.includes("⚠ This folder pre-approves")) + 1).join("\n");
+    expect(partial).not.toMatch(/tool permissions/);
+    expect(probe(partial)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("is the same gate in 40 columns when a long permission list scrolled the whole warning out", () => {
+    const rows = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/backstop-40col-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# "));
+    const from = rows.findIndex(row => row.includes("⚠ This folder pre-approves"));
+    const to = rows.findIndex(row => row.includes("configuration."));
+    const scrolled = [...rows.slice(0, from), ...rows.slice(to + 1)].join("\n");
+    expect(scrolled).not.toMatch(/pre-approves/);
+    expect(probe(scrolled)).toMatchObject(gate);
+  });
+
+  it("is the same gate drawn with numbered options", () => {
+    const numbered = screen.replace("❯ No, continue without these permissions", "❯ 1. No, continue without these permissions")
+      .replace("  Yes, I trust this folder", "  2. Yes, I trust this folder");
+    expect(probe(numbered)).toMatchObject(gate);
+  });
+
+  it("a reply quoting the backstop's words above a fresh plain prompt does not hide that prompt", () => {
+    const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+      .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+    const earlier = ["⏺ It reads \"This folder pre-approves 2 tool permissions\" and \"No, continue without these permissions\".",
+      "", "────────────────", "❯ ", "────────────────", ""].join("\n");
+    expect(probe(earlier + plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("a draft in Claude's input box that reads like the backstop's option is never the gate", () => {
+    const started = [" ▐▛███▜▌   Claude Code v2.1.322", "", "⏺ Done.", "", "────────────────────────────────",
+      "❯ No, continue without the tests", "────────────────────────────────", "  ⏵⏵ auto mode on (shift+tab to cycle)"].join("\n");
+    expect(probe(started)).toMatchObject({ status: "resumed" });
+  });
+
+  it("nor is that draft while the input frame's closing rule is not captured yet", () => {
+    const drawing = [" ▐▛███▜▌   Claude Code v2.1.322", "", "⏺ Done.", "", "────────────────────────────────",
+      "❯ No, continue without the tests"].join("\n");
+    expect(probe(drawing)).toMatchObject({ status: "resumed" });
+  });
+
+  // A draft's text never moves the cut: Claude draws its frame's rules from column 0 and a draft's continuation rows
+  // indented under the ❯, so a rule, a reply or a header pasted into a draft is the draft's, not Claude's.
+  const header = " ▐▛███▜▌   Claude Code v2.1.322";
+  const rule = "────────────────────────────────";
+  it.each([
+    ["a pasted rule", "  ────────"],
+    ["a pasted reply", "⏺ Earlier output"],
+    ["a pasted header", "  Claude Code v2.1.322"],
+  ])("a multi-line draft with %s above the backstop's words is never the gate", (_case, pasted) => {
+    const draft = ["❯ Review this example:", pasted, "  No, continue without the tests"];
+    const closed = [header, "", "⏺ Done.", "", rule, ...draft, rule, "  ⏵⏵ auto mode on (shift+tab to cycle)"].join("\n");
+    expect(probe(closed)).toMatchObject({ status: "resumed" });
+    const drawing = [header, "", "⏺ Done.", "", rule, ...draft].join("\n");
+    expect(probe(drawing)).toMatchObject({ status: "resumed" });
+  });
+
+  it("a draft that mentions a Claude Code version reads resumed, closed or still open (maintainer's case)", () => {
+    const draft = ["Claude Code v2.1.322", rule, "❯ Explain this Claude Code v2.1.322 message:", "  No, continue without the tests"];
+    expect(probe([...draft, rule, "  ⏵⏵ accept edits on (shift+tab to cycle)"].join("\n"))).toMatchObject({ status: "resumed" });
+    expect(probe(draft.join("\n"))).toMatchObject({ status: "resumed" });
+  });
+
+  it("a draft that starts with a pasted header is never the gate either", () => {
+    const started = [header, "", "⏺ Done.", "", rule, "❯ Claude Code v2.1.322 asks:", "  No, continue without the tests", rule].join("\n");
+    expect(probe(started)).toMatchObject({ status: "resumed" });
+  });
+
+  it("is the same gate below an old reply that quotes an input frame, with no input frame after it", () => {
+    // a quoted frame is indented like the reply: it is no frame of Claude's, so it never blanks the rows below it
+    const quoted = [header, "", "⏺ The screen looked like:", "  ────────", "  ❯ hi", "  ────────", "", "$ claude --resume x", ""].join("\n");
+    expect(probe(`${quoted}\n${capture.gatedGrantsScreen.join("\n")}`)).toMatchObject(gate);
+  });
+
+  it("is the same gate below an old session whose input frame holds a draft (N1)", () => {
+    const earlier = [header, "", "⏺ Done.", "", rule, "❯ Review this example:", "  ────────", "  more text", rule, ""].join("\n");
+    expect(probe(`${earlier}\n${screen}`)).toMatchObject(gate);
+  });
+
+  it("names the focused choice in the gate's detail", () => {
+    expect(probe(screen).detail).toContain("\"No, continue without these permissions\"");
+    const yes = screen.replace("❯ No, continue without these permissions", "  No, continue without these permissions")
+      .replace("  Yes, I trust this folder", "❯ Yes, I trust this folder");
+    expect(probe(yes).detail).toContain("\"Yes, I trust this folder\"");
+  });
+
+  it("the plain workspace trust prompt is still trust_gate (it stays auto-drivable)", () => {
+    const plain = ["Accessing workspace:", "/some/workspace", "", "Quick safety check: Is this a project you created or one you trust?",
+      "❯ 1. Yes, I trust this folder", "  2. No, exit"].join("\n");
+    expect(probe(plain)).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+});
+
+// #2820 item 2: the auto-drive presses a key on the trust prompt only for an allowlisted screen.
+describe("claudeTrustPromptFocus (#2820 item 2)", () => {
+  const plain = fs.readFileSync(new URL("./fixtures/claude-trust-git-root/plain-trust-2.1.322.txt", import.meta.url), "utf8")
+    .split("\n").filter(row => !row.startsWith("# ")).join("\n");
+  const backstop = (JSON.parse(fs.readFileSync(new URL("./fixtures/claude-trust-git-root/trust-checks.json", import.meta.url), "utf8")) as { gatedGrantsScreen: string[] }).gatedGrantsScreen.join("\n");
+
+  it("reads 'no' on the real 2.1.322 prompt, focused on 'No, exit'", () => {
+    expect(claudeTrustPromptFocus(plain)).toBe("no");
+  });
+  it("reads 'yes' once the focus is on 'Yes, I trust this folder'", () => {
+    expect(claudeTrustPromptFocus(plain.replace("❯ No, exit", "  No, exit").replace("  Yes, I trust this folder", "❯ Yes, I trust this folder"))).toBe("yes");
+  });
+  it("reads numbered prompts and the › cursor", () => {
+    expect(claudeTrustPromptFocus("Accessing workspace:\n/w\n❯ 1. Yes, I trust this folder\n  2. No, exit")).toBe("yes");
+    expect(claudeTrustPromptFocus("Accessing workspace:\n/w\n  1. Yes, I trust this folder\n› 2. No, exit")).toBe("no");
+  });
+  it("is 'unknown' without a cursor: the label cannot be checked", () => {
+    expect(claudeTrustPromptFocus("Accessing workspace:\n/w\n1. Yes, I trust this folder\n2. No, exit")).toBe("unknown");
+  });
+  it("is 'unknown' on the backstop's options, even with the focus moved to 'Yes'", () => {
+    expect(claudeTrustPromptFocus(backstop)).toBe("unknown");
+    expect(claudeTrustPromptFocus(backstop.replace("❯ No, continue without these permissions", "  No, continue without these permissions")
+      .replace("  Yes, I trust this folder", "❯ Yes, I trust this folder"))).toBe("unknown");
+  });
+  it("is 'unknown' on any other option set", () => {
+    expect(claudeTrustPromptFocus(plain.replace("  Yes, I trust this folder", "  Yes, I trust this folder\n  No, ask me later"))).toBe("unknown");
   });
 });

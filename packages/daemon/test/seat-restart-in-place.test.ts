@@ -20,6 +20,7 @@ import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
 import { accountLineNames, accountTextMark, defaultInPlaceRestartIo, linesAfterAnchor, parseEffectiveSettings, procCmdlineArgv, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 
@@ -636,8 +637,34 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     w.db.prepare("UPDATE sessions SET origin = 'claimed' WHERE id = ?").run(w.session.id);
     const claimed = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(claimed).toMatchObject({ ok: false, code: "claimed_session" });
-    // B5: the refusal names rig down and rig unclaim, not only rig unclaim.
-    expect((claimed as { guidance?: string }).guidance).toMatch(/run rig down '[^']+' \(.*\)\. To release it from OpenRig and leave its process running, run rig unclaim '/);
+    // B5: the refusal's route is rig unclaim, then ending the process and its tmux session; rig down leaves a session
+    // OpenRig didn't start running, so it isn't offered as the way to end this one.
+    const guidance = (claimed as { guidance?: string }).guidance ?? "";
+    expect(guidance).toMatch(/^To end this session, run rig unclaim '[^']+' \(it releases the session from OpenRig and leaves its process running\), then end that process and the underlying tmux session, including any remaining shell, so no session keeps the seat's name\. Closing only its viewing window leaves the tmux session running\. /);
+    expect(guidance).toMatch(/rig down '[^']+' leaves a session OpenRig didn't start running\.$/);
+    expect(guidance).not.toMatch(/run rig down/);
+  });
+
+  it("#3131: names rig launch for a recoverable seat whose tmux session is gone, and nothing for one that isn't", async () => {
+    const w = world();
+    w.tmux.probeSession = async () => ({ state: "absent" as const });
+    const plain = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plain).toMatchObject({ ok: false, code: "session_not_live" });
+    if (plain.ok) throw new Error("expected refusal");
+    expect((plain as { guidance?: string }).guidance).toBeUndefined();
+    // Recoverable, as OpenRig itself derives it: the session confirmed missing, and a usable snapshot holds this seat's token.
+    new SeatIdentityStore(w.db).upsert({ nodeId: w.node.id, verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null }, sessionName: SEAT,
+      observedAt: new Date(Date.now() + 1000).toISOString() });   // observed after the session's registration
+    const rigId = w.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(w.node.id) as { rig_id: string };
+    w.db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data) VALUES (?, ?, ?, ?, ?)").run("snap-3131", rigId.rig_id, "manual", "complete",
+      JSON.stringify({ rig: { id: rigId.rig_id, name: "r", createdAt: "2026-11-13T00:00:00Z", updatedAt: "2026-11-13T00:00:00Z" }, nodes: [], edges: [],
+        sessions: [{ id: "sess-snap", nodeId: w.node.id, sessionName: SEAT, status: "detached", resumeType: "codex_id", resumeToken: TOKEN,
+          restorePolicy: "resume_if_possible", lastSeenAt: null, createdAt: "2026-11-13T00:00:00Z", origin: "launched", startupStatus: "ready",
+          startupCompletedAt: null }], checkpoints: {} }));
+    const recoverable = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(recoverable).toMatchObject({ ok: false, code: "session_not_live",
+      guidance: "The seat is recoverable from its saved conversation: rig launch 'r' 'dev.codex' (add --plan to preview)." });
   });
 
   it("names a seat handed over before 0.7.9 instead of pointing at rig unclaim", async () => {

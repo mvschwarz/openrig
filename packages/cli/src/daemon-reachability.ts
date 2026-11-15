@@ -65,7 +65,7 @@ export function getOfflineHelpPath(): string | undefined {
  *  reporting a starved loop) gets the request, under its normal timeout. */
 export function daemonMayAnswer(status: DaemonStatus): boolean {
   if (status.state === "stopped" || status.state === "stale") return false;
-  if (status.probeErrorCode === "ECONNREFUSED" || status.startPending) return false;
+  if (status.probeErrorCode === "ECONNREFUSED" || status.startPending || status.pidUnseen) return false;
   if (status.siblingHint || isBlockedConnectionCode(status.probeErrorCode)) return false;
   return true;
 }

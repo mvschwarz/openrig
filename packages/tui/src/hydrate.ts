@@ -16,6 +16,7 @@ import { fileTargetForPath } from "./reading.js";
 //   - A failed read leaves its portion honest-empty and records a NAMED error.
 import { emptySnapshot } from "./state.js";
 import type { ConfigRead } from "./config/config-model.js";
+import type { PairRequestsRead } from "./config/pairing.js";
 import type { ConnectionsRead, ControlPlaneRead, SlackManifestRead } from "./connections/connections-model.js";
 import type { UsageRead } from "./usage/usage-model.js";
 import { DaemonClient } from "./daemon-client.js";
@@ -23,6 +24,7 @@ import { parse as parseYaml } from "yaml";
 import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SeatEffortRead, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
 import { sanitizeHostDisplayName } from "./topology/host-label.js";
+import { connectedAssistantsOf } from "./connected-assistants.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
 // the daemon's serialized output — see the Phase-2 endpoint-shape survey).
@@ -286,8 +288,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
             : node.activityState?.display === "idle"
               ? "idle"
               : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active"
-                // A community harness gives no idle signal: a quiet screen is unknown, not idle.
-                : node.communityHarness ? "unknown" : "idle"))
+                // The daemon's activity word decides when it's served (as in `rig ps`): it said unknown, so a quiet
+                // screen stays unknown. A community harness gives no idle signal either. When no activityState is
+                // served, the existing screen fallback remains.
+                : node.communityHarness || node.activityState ? "unknown" : "idle"))
           : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running"
@@ -379,7 +383,7 @@ function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
  * avoids re-reading every spec every refresh; the key rolls when the library
  * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
 export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
-export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen" | "attentionView" | "pendingDrill">;
+export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen" | "attentionView" | "pendingDrill" | "fleetSelected">;
 
 /** Last-resolved ui.topology_remote_seats per drilled remote host — see the
  *  gated read in the topology section; memory-only, reset by re-drilling. */
@@ -453,6 +457,17 @@ export async function hydrateSnapshot(
     return { ...emptySnapshot(), terminals, hydratedAt: new Date().toISOString(), readErrors: terminals.error ? [terminals.error] : [] };
   }
 
+  // FLEET PROJECTS (#3093): one GET of the daemon's view across registered hosts, plus — when a fleet slice is open —
+  // that slice's detail from its ORIGIN host through the read-through. Both are bounded reads; the pane never writes.
+  if (viewContext?.section === "fleet") {
+    const status = await client.fleetScopes();
+    if (!("view" in status)) readErrors.push(`fleet projects: ${status.error}`);
+    const sel = viewContext.fleetSelected;
+    const detail = sel ? await client.fleetSliceDetail(sel.hostId, sel.mission, sel.slice) : null;
+    if (detail && "error" in detail) readErrors.push(`fleet slice detail (${sel!.hostId}): ${detail.error}`);
+    return { ...emptySnapshot(), fleetScopes: { status }, fleetSliceDetail: detail, readErrors, hydratedAt: new Date().toISOString() };
+  }
+
   // USAGE ACROSS HOSTS: one GET of the daemon's view across registered hosts, answered from memory there and on every
   // host. Never the refresh route.
   if (viewContext?.section === "usage-hosts") {
@@ -489,17 +504,19 @@ export async function hydrateSnapshot(
     const passive = async <T>(label: string, read: () => Promise<unknown>): Promise<T | null> => {
       try { return await read() as T; } catch { readErrors.push(`${label}: unavailable`); return null; }
     };
-    const [config, controlPlane, connections] = await Promise.all([
+    const [config, controlPlane, connections, pairRequests] = await Promise.all([
       passive<ConfigRead>("CONFIG", () => client.configBrowser().catch(error => {
         configError = error instanceof Error ? error.message : "Read failed; cause not identified.";
         throw error;
       })),
       passive<ControlPlaneRead>("control plane", () => client.health()),
       passive<ConnectionsRead>("Slack observation", () => client.connections()),
+      // Instance & work's pairing requests: an in-memory, read-only list on this host.
+      passive<PairRequestsRead>("pairing requests", async () => ({ requests: (await client.pairRequests()).requests, readAt: new Date().toISOString() })),
     ]);
     let daemonTarget = "unreported";
     try { daemonTarget = new URL(client.baseUrl).origin; } catch { /* no raw invalid target */ }
-    return { ...emptySnapshot(), config, configError, controlPlane, connections, daemonTarget, hydratedAt: new Date().toISOString(), readErrors };
+    return { ...emptySnapshot(), config, configError, controlPlane, connections, pairRequests, daemonTarget, hydratedAt: new Date().toISOString(), readErrors };
   }
 
   const readingOnly = viewContext?.section === "specs";
@@ -571,6 +588,15 @@ export async function hydrateSnapshot(
   // A drilled-into host that isn't this one: its pages read none of this host's seats or queue changes.
   const drilledHost = viewContext?.section === "topology" ? viewContext.drill.find((segment) => segment.kind === "host")?.name : undefined;
   const remoteDrill = !!drilledHost && drilledHost !== (instanceHealth?.selfHostId?.trim() || "local");
+  // Optional, like the Slack manifest: a failed read isn't a page failure. But it isn't an empty list either, so the seat
+  // tables say check-in is unavailable, as `rig ps` does. Read only for the instance and rig tables that list them, and
+  // only this daemon's, never a remote host's.
+  const listsAssistants = !viewContext || (viewContext.section === "topology" && viewContext.viewTab === "table"
+    && (topologyLeaf?.kind === "host" || topologyLeaf?.kind === "rig"));
+  const connectedAssistants = listsAssistants && !remoteDrill
+    ? await client.hostedMembers().then(connectedAssistantsOf,
+      (error: unknown) => ({ unavailable: `the read failed: ${error instanceof Error ? error.message : String(error)}` }))
+    : null;
   const recentTransitionsRig = currentRigName ?? (!viewContext ? summaries?.[0]?.name : null) ?? null;
   const recentTransitionsScope = topologyLeaf?.kind === "host"
     ? { kind: "instance" } as const
@@ -684,12 +710,14 @@ export async function hydrateSnapshot(
     displayName: ownName && ownName !== "localhost" ? ownName : undefined,
     reachable: true,
     rigs: rigs.sort(byRigName),
+    ...(connectedAssistants ? "unavailable" in connectedAssistants
+      ? { connectedAssistantsUnavailable: connectedAssistants.unavailable } : { connectedAssistants: connectedAssistants.assistants } : {}),
   };
   // A remote host is any registered host, or one the attention aggregate answered for. Its reachability is the aggregate's
   // answer where there is one, else the registry's probe. Only a drilled-into remote host's rigs are read, through this
   // daemon's read-only forwarding: their names and states, never their seats. A registry entry for this host is this host.
   const registered = (hostsRead?.hosts ?? []).flatMap((h) => typeof h.id === "string" && h.id && h.id !== "local"
-    ? [{ id: h.id, reachable: h.status === "reachable" }] : []);
+    ? [{ id: h.id, reachable: h.status === "reachable" ? true : h.status === "unreachable" ? false : null }] : []);
   const aggStatus = new Map(aggHosts.filter((h) => h.hostId !== "local").map((h) => [h.hostId, h.status]));
   const remoteIds = [...new Set([...aggStatus.keys(), ...registered.map((h) => h.id)])].filter((id) => id !== localHost.name);
   const drilledRemote = remoteDrill && drilledHost && remoteIds.includes(drilledHost) ? drilledHost : null;
@@ -725,7 +753,9 @@ export async function hydrateSnapshot(
   const remoteHosts: HostNode[] = remoteIds.map((id) => ({
     id,
     name: id,
-    reachable: aggStatus.has(id) ? aggStatus.get(id) === "ok" : registered.some((h) => h.id === id && h.reachable),
+    reachable: aggStatus.has(id)
+      ? aggStatus.get(id) === "ok" ? true : aggStatus.get(id) === "unreachable" ? false : null
+      : registered.find((h) => h.id === id)?.reachable ?? null,
     rigs: id === drilledRemote
       ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id, ...(rig.name === remoteSeatRig ? remoteInventory : {}) })).sort(byRigName)
       : [],

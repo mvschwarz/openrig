@@ -231,9 +231,14 @@ describe("Node Inventory Projection", () => {
     expect(entry?.resumeCommand).toBeNull();
     expect(entry?.recoveryGuidance).toBeNull(); // relocated to detail
     const detail = getNodeDetail(db, "rig-2", "dev.qa");
-    expect(detail?.recoveryGuidance?.summary).toContain("codex -s workspace-write resume --last");
-    expect(detail?.recoveryGuidance?.summary).toContain("explicit -s workspace-write floor flag");
-    expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -s workspace-write resume --last"]);
+    expect(detail?.recoveryGuidance?.summary).toContain(
+      "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume --last"
+    );
+    expect(detail?.recoveryGuidance?.commands).toEqual([
+      "cd /workspace/app",
+      "codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume --last",
+    ]);
+    expect(detail?.recoveryGuidance?.notes).toContain("flags from current settings");
     expect(detail?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
     expect(detail?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
   });
@@ -252,11 +257,13 @@ describe("Node Inventory Projection", () => {
     const entry = getNodeInventory(db, "rig-2").find((e) => e.logicalId === "platform.mac-admin");
 
     expect(entry?.codexConfigProfile).toBe("sysadmin");
-    expect(entry?.resumeCommand).toBe("codex -p 'sysadmin' resume 'sess-456'");
+    expect(entry?.resumeCommand).toBe("codex -p 'sysadmin' '-c' 'check_for_update_on_startup=false' resume 'sess-456'");
+    expect(entry?.resumeCommandLabel).toBe("flags from current settings");
     expect(entry?.recoveryGuidance).toBeNull(); // relocated to detail
     const detail = getNodeDetail(db, "rig-2", "platform.mac-admin");
     expect(detail?.codexConfigProfile).toBe("sysadmin");
-    expect(detail?.recoveryGuidance?.commands).toContain("codex -p 'sysadmin' resume 'sess-456'");
+    expect(detail?.recoveryGuidance?.commands).toContain("codex -p 'sysadmin' '-c' 'check_for_update_on_startup=false' resume 'sess-456'");
+    expect(detail?.recoveryGuidance?.notes).toContain("flags from current settings");
     expect(detail?.recoveryGuidance?.notes).toContain("Preserve Codex config profile: sysadmin");
   });
 

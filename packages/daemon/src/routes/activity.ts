@@ -116,6 +116,16 @@ export function hookRelayRoute(value: unknown): EvidenceRoute | undefined {
 const hookEvidenceSeq = new Map<string, number>();
 // What each seat's runner has said about its turns, for deciding whether a working beat counts (the runner contract §4).
 const workingLiveness = new WorkingLivenessGate();
+/** #99: the reset instant the relay read from a Claude usage limit, as a canonical ISO timestamp, or null. The store
+ *  keeps it only on the typed StopFailure/rate_limit row; the provider lane decides whether it is still ahead. */
+function limitResetsAt(body: Record<string, unknown>): string | null {
+  if (typeof body.resetsAt !== "string" || body.resetsAt.length > 40) return null;
+  const ms = Date.parse(body.resetsAt);
+  // The relay's eight-day horizon, enforced at ingress too: no sender can park a pool for longer than the relay could.
+  return Number.isFinite(ms) && ms <= Date.now() + LIMIT_RESET_MAX_MS ? new Date(ms).toISOString() : null;
+}
+const LIMIT_RESET_MAX_MS = 8 * 24 * 3600 * 1000;
+
 function sourceSequence(body: Record<string, unknown>): number | null {
   return typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null;
 }
@@ -148,6 +158,14 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
   if (revoked && !permissionRoute) {
     return refuse(401, "activity_grant_revoked", "This activity grant was revoked; nothing was recorded.");
   }
+  if (grant.runId && body.runId !== undefined && body.runId !== grant.runId) {
+    return refuse(409, "activity_grant_stale", "This post names another run; nothing was recorded.");
+  }
+  const claimedRuntime = stringOrNull(body.runtime);
+  if (grant.binding && ((claimedRuntime && claimedRuntime !== grant.binding.runtime)
+    || (body.eventFamily === "session_identity" && !claimedRuntime))) {
+    return refuse(403, "activity_grant_runtime_mismatch", "This runner grant speaks only for its bound runtime; nothing was recorded.");
+  }
   const claimedNode = stringOrNull(body.nodeId);
   const claimedSession = stringOrNull(body.sessionName);
   if ((claimedNode && claimedNode !== grant.nodeId)
@@ -168,6 +186,15 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
  *  hasn't registered yet (pending). A `revoked` grant whose occupant wasn't replaced reads revoked: it was reissued for
  *  the same launch. `outcome` says what the refusal left undone. */
 function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string, revoked = false): Response | null {
+  if (grant.runId) {
+    const standing = new ActivityGrantStore(store.db).standing(grant.grantId);
+    if (standing === "current") return null;
+    if (standing === "unverified") {
+      return c.json({ ok: false, code: "activity_grant_unverified", retryable: true,
+        error: `This runner grant couldn't be verified now; retry verification; ${outcome}` }, 409);
+    }
+    return c.json({ ok: false, code: `activity_grant_${standing}`, error: `This runner grant is ${standing}; ${outcome}` }, standing === "revoked" ? 401 : 409);
+  }
   const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
   let standing: ReturnType<typeof grantGeneration>;
   try {
@@ -201,7 +228,10 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   }
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
-  if (bearerToken !== expectedToken && (c.req.header("x-openrig-activity-token") ?? null) !== expectedToken) {
+  const headerToken = c.req.header("x-openrig-activity-token") ?? null;
+  const grantStore = new ActivityGrantStore(sessionRegistry.db);
+  const grant = grantStore.authenticate(bearerToken) ?? grantStore.authenticate(headerToken);
+  if (bearerToken !== expectedToken && headerToken !== expectedToken && !grant?.runId) {
     return { error: c.json({ ok: false, code: "activity_hook_unauthorized", error: `${what} require the configured local hook token.` }, 401) };
   }
   let body: Record<string, unknown>;
@@ -212,6 +242,12 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   }
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return { error: c.json({ ok: false, code: "invalid_pi_usage", error: `${what} require a JSON object` }, 400) };
+  }
+  if (grant?.runId) {
+    const bound = bindToGrant(c, store, grant, body);
+    if ("refused" in bound) return { error: bound.refused };
+    if (grant.binding?.runtime !== "pi") return { error: c.json({ ok: false, code: "activity_grant_wrong_seat", error: "Pi usage requires a Pi run." }, 403) };
+    body = bound.body;
   }
   const sessionName = stringOrNull(body.sessionName);
   const piSessionId = stringOrNull(body.piSessionId);
@@ -316,6 +352,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be a JSON object." }, 400);
   }
 
+  if (Object.hasOwn(body, "runId") && !grant?.runId) {
+    return c.json({ ok: false, code: "run_grant_required", error: "Actual-run reports require their run-bound credential." }, 403);
+  }
   if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(store.db, body.sessionName) };
   if (grant) {
     const bound = bindToGrant(c, store, grant, body);
@@ -456,7 +495,7 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
         if (!generation) reason = "generation_unverifiable";
         else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
           reason = "generation_unresolvable";
-        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+        } else if (current.generationUuid !== generation && !(grant?.runId && grant.generation === generation)) reason = "generation_mismatch";
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
@@ -727,12 +766,15 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
     livenessSeconds: beat ? workingLivenessSeconds(body.livenessSeconds)
       : typeof body.livenessSeconds === "number" && Number.isSafeInteger(body.livenessSeconds)
         && body.livenessSeconds > 0 && body.livenessSeconds <= 3600 ? body.livenessSeconds : null,
+    resetsAt: limitResetsAt(body),
+    sessionId: stringOrNull(body.sessionId),
   });
 
   if (!result.ok) {
     const status = result.code === "missing_session_identity" ? 400 : 404;
     return { refused: c.json({ ok: false, code: result.code, error: result.error }, status) };
   }
+  recordPromptObservation(c, body, (result.event as { sessionName?: string } | undefined)?.sessionName ?? stringOrNull(body.sessionName));
 
   // S19 A4 — feed the ONE oracle through the adapter seam: the recorded (store-
   // normalized) event becomes ladder evidence on the lifecycle-hooks rung. The store
@@ -814,6 +856,33 @@ for (const [router, installTokenAccepted] of [[activityRoutes, true], [guestActi
   router.get("/permission-requests/:askId", (c) => readPermission(c, installTokenAccepted));
   router.post("/permission-requests/:askId/withdraw", (c) => withdrawPermission(c, installTokenAccepted));
 }
+
+// The receiving agent's decision on a request its person answered (`rig seat decide-permission`): on this host's main
+// routes only. The record names the deciding seat (X-OpenRig-Session), which is attribution, not authentication.
+activityRoutes.post("/permission-requests/:askId/decide", async (c) => {
+  const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  if (!store || !queueRepo || !eventBus) {
+    return c.json({ ok: false, code: "permission_requests_unconfigured", error: "This daemon doesn't take runner permission requests." }, 503);
+  }
+  let body: Record<string, unknown>;
+  try { body = await c.req.json() as Record<string, unknown>; } catch {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+  }
+  const optionId = typeof body.optionId === "string" ? body.optionId.trim() : "";
+  if (!optionId) return c.json({ ok: false, code: "invalid_option", error: "Name the option to decide: optionId." }, 400);
+  const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+  const rigRepo = (c.get("rigRepo" as never) as RigRepository | undefined) ?? new RigRepository(store.db);
+  const permissions = new RunnerPermissions({ db: store.db, queueRepo, eventBus, humanRegistry: () => queueRepo.humanRegistry(),
+    ownerOf: (nodeId) => rigRepo.getNodePermissionsTo(nodeId),
+    currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    stream: c.get("streamStore" as never) as StreamStore | undefined });
+  const decider = transportSenderSession(c) ?? "someone outside a seat";
+  const result = permissions.decide(c.req.param("askId") ?? "", optionId, decider, typeof body.reason === "string" ? body.reason.trim() : "");
+  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : result.code === "not_recorded" ? 409 : 400);
+  return c.json(result);
+});
 
 type PermissionContext = { store: AgentActivityStore; grant: ActivityGrant | null; registry: SessionRegistry; permissions: RunnerPermissions };
 
@@ -1072,6 +1141,28 @@ activityRoutes.get("/parked", (c) => {
     },
   });
 });
+
+/** A prompt hook's own observation, recorded as it was reported: a fingerprint and byte length of the prompt the harness
+ *  received, its native session and prompt or turn id, and the generation the hook ran as. It's raw evidence only: neither
+ *  harness reports where a prompt came from (a message OpenRig wrote, a person's own text, a background turn), so it's never
+ *  joined to a message here. A missing or malformed fingerprint records nothing; a bad id or time is left out. The hook
+ *  itself is recorded and answered either way. */
+function recordPromptObservation(c: Context, body: Record<string, unknown>, sessionName: string | null): void {
+  if (body.hookEvent !== "UserPromptSubmit") return;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  const promptSha256 = typeof body.promptSha256 === "string" && /^[0-9a-f]{64}$/.test(body.promptSha256) ? body.promptSha256 : null;
+  const promptBytes = typeof body.promptBytes === "number" && Number.isSafeInteger(body.promptBytes) && body.promptBytes >= 0 ? body.promptBytes : null;
+  if (!eventBus || !sessionName || !promptSha256 || promptBytes === null) return;
+  const nativeId = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : null;
+  // An instant, not a string to compare: a time that doesn't parse is left out.
+  const at = typeof body.occurredAt === "string" ? Date.parse(body.occurredAt) : Number.NaN;
+  try {
+    eventBus.emit({ type: "transport.prompt_observation", sessionName, occupantGeneration: stringOrNull(body.generation),
+      runtime: stringOrNull(body.runtime), source: "UserPromptSubmit", nativeSessionId: nativeId(body.sessionId),
+      nativePromptId: nativeId(body.nativePromptId), nativeTurnId: nativeId(body.turnId), promptSha256, promptBytes,
+      observedAt: Number.isFinite(at) ? new Date(at).toISOString() : null });
+  } catch { /* Best effort: the hook is recorded either way. */ }
+}
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;

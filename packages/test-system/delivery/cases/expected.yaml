@@ -1,0 +1,213 @@
+# Delivery conformance suite: expected results (owner: quality-lead@v-openrig-build)
+# Written 2026-11-12 for Builder A's S2 harness.
+# Every expectation comes from a SHIPPED contract, cited in `contract:`. A case with no stated contract is marked
+# `contract: NONE` and is a finding for its owner, not a guess. Case IDs and procedures come from the delivery
+# measurement case list, kept outside this repository; this file gives the outcome to judge.
+#
+# Judging rules for every case:
+#   - Results: PASS, FAIL or NOT RUN, with an evidence level per cell:
+#       native-standin (a real harness TUI on a local stand-in model),
+#       native-real (a real model),
+#       pty-or-container,
+#       synthetic.
+#     Never widen a claim past its level.
+#   - Oracles, all three where available:
+#       (1) the stand-in's request log, the receiver-side truth: what the model was actually sent, and how many times;
+#       (2) #2937's `transport.delivery_evidence` event for the send;
+#       (3) the raw pane log.
+#     #2937 is best effort: a MISSING event isn't proof nothing was sent. Judge delivery by (1) and (3).
+#   - Never blindly retype uncertain content. Queue isn't steer, and acceptance isn't pickup (the Lab's rules).
+#   - Pin the program versions from the installed binaries on every run: the latest and previous Claude Code and
+#     Codex, and tmux 3.3a / 3.4 / 3.6 where the case touches the terminal.
+#   - The default typing guard is OFF (`seat-delivery-guard.ts` DEFAULT_GUARD / TERMINAL_DEFAULT, mode "off").
+#     The shipped modes are SIX (docs/reference/seat-delivery.md, identical at 0.7.12 3cdc0e6c and 0.7.13 551e6c06):
+#     off (default), draft-aware, openrig-urgent, urgent-only, sends-only, hold. A terminal member (runtime: terminal)
+#     defaults to sends-only. ~~"Opted-in modes are `draft-aware` and `hold`."~~ was incomplete (quality-lead's error,
+#     corrected 2026-11-12 at S3; the earlier text is kept outside this repository).
+#   - An ordinary send is ENVELOPED: its first typed line is `From: <sender>` (daemon pane-envelope.ts:125;
+#     routes/transport.ts:26). Only `--raw` and `--dangerously-interact` (which implies --raw) type exact text with no
+#     envelope (`rig send --help`). Delivered-byte comparisons are of the envelope as OpenRig wrote it (its wireSha256).
+#   - PROGRAM TRANSFORMS (S2 ruling, 11-12 16:4xZ): a harness's own documented-or-observed rewrite of pasted input is
+#     NOT an OpenRig delivery failure, and it is NOT silently normalized away. Each one is listed below, pinned to a
+#     program version, and applied ONLY as its exact inverse when comparing the stand-in log with OpenRig's wire bytes.
+#     A cell that needed one reports "PASS (program transform: <id>)", so the content limit stays visible in results and
+#     notes. Any difference that a listed transform doesn't explain is FAIL. A transform that disappears in a later
+#     version is fine (exact equality PASSes); a NEW, unlisted one FAILs until Quality reviews it and adds an entry.
+
+program_transforms:
+  claude-code-tab-expansion:
+    program: claude
+    versions_observed: ["2.1.322"]
+    rewrite: "each pasted TAB (U+0009) arrives at the model as four spaces (U+0020 x4)"
+    inverse_check: "replacing each such 4-space run at the original TAB offsets restores OpenRig's own wireSha256 exactly"
+    evidence: "S2 harness at d18fb4a, D15 Claude: OpenRig wrote 406 B, the model received 409 B, and the restored bytes equal OpenRig's own wireSha256 (run archive retained outside this repository)"
+    user_effect: "text a person or agent sends to a Claude Code seat loses its tabs (tab-indented code, Makefile recipes, TSV). It's a content limit to disclose, not a lost or duplicated message"
+    owner_finding: "docs: seat-delivery.md should say it (desk). Whether OpenRig should route around it is a product question for the desk, not a suite rule"
+
+defaults:
+  delivered_once: "the message text reaches the model exactly once (stand-in log count == 1) as one user turn/item"
+  no_loss: "no send that returned accepted/sent is missing from the stand-in log"
+  no_dup: "no message appears twice in the stand-in log, including across retries"
+
+cases:
+
+  D01:
+    title: idle seat
+    programs: [claude, codex]
+    expect: [delivered_once, no_dup]
+    also: "the wake/doorbell, if the case sends one, appears exactly once; the seat returns to idle afterwards"
+    contract: "rig send delivers into the seat's input and submits; 0.7.12 native Codex D01 PASS (dev-qa 11-11)"
+
+  D02:
+    title: busy seat (mid-turn)
+    programs: [claude, codex]
+    expect: [delivered_once, no_loss]
+    also:
+      - "the send joins the running turn: Claude Code queues typed input and takes it at its next opportunity; Codex joins the turn"
+      - "the in-flight tool call is NOT interrupted or cancelled by the delivery (tool completion must be shown, not assumed: 0.7.12 Codex D02 was PARTIAL on exactly this)"
+      - "order relative to earlier sends is preserved"
+    contract: "the 0.7.11+ send advisory: 'busy is advisory, not a block. This message joins its running turn'"
+
+  D03:
+    title: a person's unsent draft, DEFAULT guard (off)
+    programs: [claude, codex]
+    expect: [no_loss]
+    also:
+      - "the send is written into the input together with the draft: draft and message are submitted together (MERGED). Under the default this is DOCUMENTED behaviour, judged PASS when it matches; it isn't a failure"
+      - "the person's draft text is not deleted"
+    contract: "guard default off; 0.7.11 'sends now join typed drafts by default' (rig-admin 11-12); 0.7.8 known limit 'typed drafts with the typing guard off can be submitted by a wake'; 0.7.12 Codex D03 MERGED-as-documented PASS"
+
+  D04:
+    title: a person's unsent draft, draft-aware guard (opted in)
+    programs: [claude, codex]
+    expect:
+      - "the send is RETAINED: no write to the pane (raw log shows no keystrokes), result retained / not_reached / sent:false with draft_input_busy or draft_input_unknown"
+      - "the person's draft is untouched and never becomes part of a model turn (stand-in log has no draft text)"
+      - "the retained message is readable with `rig seat held-messages`, and is NOT replayed automatically"
+      - "clearing the draft does NOT by itself deliver the held message; a new explicit send delivers it once"
+      - "with an EMPTY composer an idle draft-aware seat is NOT held: a send delivers once (#2933 cursor blank, #2942 context hint; 0.7.13 adds the clipped auto-update footer, #3016/#2948)"
+    variants:
+      - "footer: none"
+      - "footer: Claude context hint ('~Nk uncached · /clear to start fresh')"
+      - "footer: Claude auto-update failure, full wording and the width-clipped form ('… npm i -g @anthropic-ai/claude-c…'), at 80x24"
+    contract: "#2933, #2942, #3016/#2948 (0.7.13); 0.7.9 #2437/#2442 nothing replayed; 0.7.12 #2515 finding: clearing a draft is not automatic delivery"
+    note: "0.7.12 S02/D3 NOT MET this exact cell with the clipped footer (retained idle-pane evidence from that run); 0.7.12 = baseline, 0.7.13 = expected fixed"
+
+  D08:
+    title: tmux copy mode
+    programs: [claude, codex]
+    expect:
+      - "guard off: the seat is taken out of copy mode through its own address and the message is delivered once"
+      - "draft-aware: the send is retained with no write; leaving copy mode later does NOT replay it"
+    contract: "0.7.10 #2594/#2644 (every tmux mode left through the seat's address before delivery); 0.7.12 Codex D08 PASS; S02 guard-off copy PASS"
+
+  D09:
+    title: order (back-to-back sends from one sender)
+    programs: [claude, codex]
+    expect: [no_dup, no_loss]
+    also: "N sends become N separate user turns/items in send order, each once (stand-in log order == send order)"
+    contract: "0.7.12 Codex D09 PASS (three sends, three ordered native items, single writer); S02 P2 order PASS"
+    watch: "the Lab's M1 pre-window pilot saw merged and absent Claude wakes (2 and 4 of 60): a merge of two sends into one turn is a FAIL here"
+
+  D15:
+    title: multi-line paste
+    programs: [claude, codex]
+    expect: [delivered_once]
+    also:
+      - "the model receives the exact bytes: newlines, Unicode, quotes and shell-shaped text (compare the stand-in log byte-for-byte with the payload)"
+      - "submitted once as ONE message, not one per line, and not left unsubmitted in the input"
+      - "#2800 control: with UNREADABLE input, `rig send --dangerously-interact` pastes with a warning and does NOT press Enter (expected: pasted, not submitted)"
+    contract: "0.7.9 #2436 long one-line submit; #2800 (draft-aware-delivery.test.ts at b29a70f1); 0.7.12 Codex D15 exact PASS; S02 P2 rich PASS (byte equality not asserted then: assert it now)"
+    judged_s2: "S2 d18fb4a (published 0.7.12): Codex exact PASS. Claude: PASS (program transform: claude-code-tab-expansion), not FAIL. OpenRig's write was exact (wireSha256), delivered once as one submitted message, and the only difference is Claude Code's own TAB→4-space rewrite, verified by its exact inverse. Content claim for notes: 'OpenRig delivers the exact text; Claude Code itself turns pasted tabs into spaces.' Quality's ruling 11-12 16:4xZ, on A's reported evidence; I confirm the inverse on the tarball when it lands"
+
+  # ---- S3 judged cases (written 11-12 after the 16:3xZ clock read, from the shipped docs and source at 0.7.12
+  # ---- 3cdc0e6c / 0.7.13 551e6c06, whose seat-delivery.md is byte-identical). "from the source; not run" marks a
+  # ---- contract read from code rather than stated in a doc.
+
+  D07:
+    title: slash text versus an intended control
+    programs: [claude, codex]
+    arms:
+      enveloped_text:
+        do: "ordinary `rig send <seat> \"/<word> …\"` whose BODY begins with a slash (use a harmless command word that has a visible effect if run, e.g. /status or /help, and one destructive word, /clear, on a disposable stand-in seat)"
+        expect:
+          - "delivered_once: the stand-in log has ONE user turn containing the envelope and the literal body, with the leading slash intact"
+          - "NO harness command runs: no status/help panel, the conversation isn't cleared (/clear), and no other command side effect appears in the pane"
+        contract: "from the source; not run: an ordinary send's first typed line is `From: …` (pane-envelope.ts:125), so the body's slash isn't the first input character. No shipped DOC states this guarantee: FINDING for the docs owner (desk) whatever the result"
+      raw_control:
+        do: "`rig send <seat> --raw \"/status\"` (a deliberate exact-keystroke control; harmless)"
+        expect:
+          - "the harness runs the control (its panel or effect is visible in the pane), and NO user turn reaches the stand-in for it"
+          - "OpenRig's result reports transport only: sent/complete means 'transport execution succeeded', never that the command took effect (seat-delivery.md outcome table: 'native consumption is not asserted')"
+          - "still guarded: a raw control at an open dialog or question is refused before input (`--raw` 'still guarded against interactive prompts')"
+        contract: "rig send --help (--raw: exact text without the envelope, still guarded); seat-delivery.md outcome table"
+      raw_literal_slash:
+        do: "`rig send <seat> --raw \"/tmp/x is full\"` (literal text that happens to begin with a slash)"
+        expect: "RECORD what each harness does (command popup, 'unknown command', or delivered text). No PASS or FAIL: --raw is defined as exact keystrokes, so promotion is by definition, not silent. Note the observed behaviour per program version"
+        contract: "--raw definition; the Lab's rule 'literal content is not silently promoted' is met by the enveloped arm"
+    never: "a slash body promoted to a command on the ENVELOPED path (FAIL); a control reported as 'done' from an echo alone"
+
+  D14:
+    title: simultaneous human input (a person's keystroke synchronized with delivery)
+    programs: [claude, codex]
+    timings: ["keystroke before OpenRig's pre-paste read", "keystroke between the read and the paste", "keystroke between the paste and Enter"]
+    expect_by_mode:
+      off_default:
+        - "no_loss and no_dup: OpenRig's text arrives once, and none of the person's characters are deleted"
+        - "the person's keystrokes may JOIN OpenRig's text in the same submitted turn (merged). That's the documented default (transport.draft_delivery=deliver), PASS when it matches; record which timing produced it"
+        - "the result is honest: complete, or unconfirmed/indeterminate when the write raced. Never a blind resend"
+      draft_aware:
+        - "keystroke before the read: HELD, `draft_input_busy`, no write; the person's draft is untouched; retained (outboxIds) and never replayed"
+        - "keystroke between read and paste: this is #3076's window. EXPECTED by the contract: no notice in the draft. #3076 (OPEN) reproduces a paste INTO the draft with no Enter. A paste here is FAIL against the contract, classified 'known issue #3076', not a new regression, on any version where #3076 reproduces"
+        - "keystroke between paste and Enter: Enter REFUSED (`draft_input_changed`); the combined text stays in the input and isn't replayed or erased; the result reads indeterminate or held, never sent"
+    contract: "seat-delivery.md: 'The lease serializes OpenRig writes; human typing can still race the capture and paste'; 'Terminal capture is observational … The resulting changed input refuses Enter and is not replayed'; draft_input_busy / draft_input_changed; the transport.draft_delivery default; 0.7.7 known limit 'the input-box check is a read just before the paste, not a lock'"
+    attribution: "the person's keystroke is the FIXTURE's act; record its exact time and bytes. Any repair of the fixture is labelled, never silent"
+
+  D18:
+    title: every typing-guard mode
+    programs: [claude, codex]
+    modes: [off, draft-aware, openrig-urgent, urgent-only, sends-only, hold]
+    states: [idle, draft, dialog, copy_mode, busy]
+    senders:
+      deliberate: "a person's or agent's `rig send` (not --urgent)"
+      deliberate_urgent: "`rig send --urgent`, or a queue item at priority urgent/critical"
+      automatic: "OpenRig's own: a watchdog reminder, a scheduled wake, a parked-owner notice"
+    setting_checks:
+      - "set each mode with `rig seat set-typing-guard <seat> --mode <m> --reason …`; status shows DESIRED and EFFECTIVE; HTTP 202 pending:true means wait for pending:false before judging"
+      - "hold shows the text 'Typing guard: on (hold)'; `--enabled true|false` selects hold/off"
+    expect_matrix:
+      off: "deliberate and automatic both type. idle: delivered once. draft: merged and submitted (the default). dialog: refused before input (target_needs_input). copy mode: left through the seat's address, then delivered (#2594/#2644). busy: joins the turn (advisory, not a block)"
+      draft-aware: "types only into a recognized EMPTY composer. idle: delivered once. draft: HELD draft_input_busy. dialog: refused, no write. copy mode: HELD (copy mode can't authorize input). busy with an empty, recognized composer: delivered (joins the turn); unreadable: HELD draft_input_unknown"
+      openrig-urgent: "AUTOMATIC and deliberate_urgent type, never over a draft (draft: HELD). Plain deliberate sends from other agents: HELD typing_guard_enabled, the sender told, held readable"
+      urgent-only: "ONLY deliberate_urgent types, never over a draft. Deliberate and automatic: HELD typing_guard_enabled"
+      sends-only: "deliberate (and urgent) type as with off. AUTOMATIC: HELD"
+      hold: "nothing types, even at an empty prompt: every sender HELD typing_guard_enabled, retained for inspection"
+    every_held_send:
+      - "returns at once: outcome retained, sent:false, the exact reason, outboxIds; no write to the pane (raw log)"
+      - "never replayed: clearing a draft, changing mode or restarting doesn't flush it; a new explicit send rechecks and delivers once"
+      - "one held per sender per seat: a newer held message from the same sender coalesces the older (retired_by outbox@system, coalesced: {count, outboxIds}); watchdog reminders are one per job; unattributed senders aren't coalesced"
+      - "readable with `rig seat held-messages`; `retire-held-message` frees quota and delivers nothing"
+    lifecycle: "lifecycle work is REFUSED at openrig-urgent, urgent-only and hold; at draft-aware an active seat needs an explicit switch to off first"
+    dangerously_interact: "a deliberate `--dangerously-interact --reason` stays available 'at every interruption level' (openrig-urgent, urgent-only, sends-only) with its existing-input check. AT hold the doc doesn't say: RECORD the observed behaviour as contract: AMBIGUOUS, a FINDING for the docs owner, not a PASS or FAIL"
+    never: "invent a mode, a stricter default, or a general busy-seat ban; read a pending (202) mode as effective"
+    contract: "docs/reference/seat-delivery.md (mode table, 'Terminal delivery', held-send reasons, coalescing, rollback/lifecycle), identical at 3cdc0e6c and 551e6c06"
+    version_note: "0.7.13 adds #3016/#2948 (the clipped and full auto-update footers count as an EMPTY composer for draft-aware). On published 0.7.12 an idle Claude seat showing the clipped footer at 80x24 HOLDS (0.7.12 S02/D3 NOT MET); expected FIXED on 0.7.13"
+
+  D19:
+    title: resize before and during a send
+    programs: [claude, codex]
+    arms: ["resize, then send", "resize during the send, inside the guard's read → paste → Enter interval", "a narrow geometry (80x24) and a wide one"]
+    expect:
+      - "guard off: delivered_once and no_dup at the new geometry. Wrapped lines and authored whitespace arrive exact (the D15 judging, program transforms included). A resize that races the write reads unconfirmed/indeterminate, never a blind resend"
+      - "draft-aware: if the changed geometry makes the composer unrecognizable, HELD draft_input_unknown before any write; if the input or target changed between paste and Enter, Enter REFUSED (draft_input_changed). An unknown read is never classified idle or empty"
+      - "capture after the resize: a capture that cut lines reads activity UNKNOWN (not idle); `rig capture --readable`/`--size` reads a small pane at a readable size and gives the window back"
+      - "screenshots alone are not receipt evidence: judge by the stand-in log and the raw pane log"
+    contract: "seat-delivery.md ('the visible input containing the cursor is checked … again after buffer preparation, and immediately before Enter'; 'an unreadable capture and an unsupported layout cannot authorize input'; draft_input_unknown/changed); 0.7.10 #2614 (writable Herdr tiles follow their visible size); 0.7.3 capture --readable/--size; capture-cut-lines → unknown"
+
+# Later PRs (dialogs, lifecycle, faults): expectations follow when A's S3+ plan lands. Known contracts to cite then:
+later:
+  D05_D06: "permission prompt / other dialog: an ordinary send refuses (target_needs_input / selection_prompt) before any input; nothing typed into the dialog (0.7.2+; #2947 no typing within 15 s of Stop)"
+  D10: "retry after an uncertain timeout: unconfirmed/indeterminate is never resent blind; reconcile first; no duplicate (0.7.9 #2509, #2505/#2507; 0.7.2 cross-host reconcile by id)"
+  D12: "managed /compact with a typed draft: the input box is checked first; typed/unreadable input holds the step (0.7.7 #2347; #2799 compaction draft defaults)"
+  D16: "usage/rate-limit: Claude's account usage-limit dialog is likely NOT RUN on a stand-in (A's limit); a stand-in 429/overloaded error is a separate cell, judged by: no loss, no blind resend"
+  D25: "native route off / unarmed / fallback: typing stays the default and the fallback (the project's 2026-11-11 delivery-route decisions); an early pilot is the first data point for Codex's queue route"

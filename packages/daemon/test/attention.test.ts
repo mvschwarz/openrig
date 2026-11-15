@@ -81,6 +81,17 @@ it("uses real human obligations, source summaries and dependents; excludes agent
   } finally { f.db.close(); }
 });
 
+it("a pairing request links to the settings page that decides it directly, opened on that request; other asks don't", async () => {
+  const f = fixture();
+  try {
+    f.row("pair-ask", "human-founder@external"); f.row("other-ask", "human-founder@external");
+    f.db.prepare("UPDATE queue_items SET evidence_ref = ? WHERE qitem_id = ?").run("pair-request:fixture-pair-id", "pair-ask");
+    const items = (await f.read()).items;
+    expect(items.find(i => i.id === "queue:pair-ask")?.settingsLink).toEqual({ category: "instance", focus: "pair-ask", label: "Open pairing settings (Approve or Deny directly)" });
+    expect(items.find(i => i.id === "queue:other-ask")?.settingsLink).toBeUndefined();
+  } finally { f.db.close(); }
+});
+
 it("keeps current proof corrections and exact project sources, retained health clears and unavailable states", async () => {
   const f = fixture();
   try {

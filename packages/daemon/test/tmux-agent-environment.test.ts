@@ -11,6 +11,46 @@ import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js"
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { NO_SESSION_BUS } from "../src/domain/seat-runtime-dir.js";
 const exec = promisify(execFile);
+async function respawnExitedFixture(tmux: (args: string[]) => Promise<string>): Promise<string> {
+  // macOS CI sometimes refuses forkpty for this disposable setup command. The real adapter respawn below is never
+  // retried: preserve all #1178 assertions, and retry only this exact pre-fork refusal, at most twice (50 ms total).
+  for (let attempt = 0; ; attempt++) {
+    try { return await tmux(["respawn-pane", "-k", "-t", "=seat:", "/bin/sh", "-c", "exit"]); }
+    catch (error) {
+      const stderr = (error as { stderr?: string }).stderr?.trim();
+      if (process.platform !== "darwin" || attempt >= 2 || stderr !== "respawn pane failed: fork failed: Device not configured") throw error;
+      console.warn(`macOS fixture PTY allocation refused; retrying owned setup respawn (${attempt + 1}/2).`);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+}
+
+describe.skipIf(process.platform !== "darwin")("macOS fixture PTY allocation", () => {
+  const noPty = () => Object.assign(new Error("fixture command failed"), { stderr: "respawn pane failed: fork failed: Device not configured\n" });
+  it("retries only the owned setup respawn's allocation error, then still performs the setup", async () => {
+    const calls: string[][] = [];
+    await respawnExitedFixture(async args => {
+      calls.push(args);
+      if (calls.length < 3) throw noPty();
+      return "";
+    });
+    expect(calls).toEqual(Array(3).fill(["respawn-pane", "-k", "-t", "=seat:", "/bin/sh", "-c", "exit"]));
+  });
+  it("stops after three refused allocations and preserves the last error", async () => {
+    const failure = noPty();
+    let calls = 0;
+    await expect(respawnExitedFixture(async () => { calls++; throw failure; })).rejects.toBe(failure);
+    expect(calls).toBe(3);
+  });
+  it("does not retry a different error or an allocation that already succeeded", async () => {
+    const failure = Object.assign(new Error("fixture command failed"), { stderr: "can't find pane: seat" });
+    let calls = 0;
+    await expect(respawnExitedFixture(async () => { calls++; throw failure; })).rejects.toBe(failure);
+    expect(calls).toBe(1);
+    await respawnExitedFixture(async () => { calls++; return ""; });
+    expect(calls).toBe(2);
+  });
+});
 const waitFile = async (file: string) => {
   // Redirection creates the file before printf writes it; the final newline marks completion.
   for (let i = 0; i < 100; i++) {
@@ -65,7 +105,7 @@ describe.skipIf(process.platform === "win32")("#1178 initial-shell environment p
         if (successor) {
           await tmux(["new-session","-d","-s","seat","sleep 60"]);
           await tmux(["set-window-option","-t","=seat:","remain-on-exit","on"]);
-          await tmux(["respawn-pane","-k","-t","=seat:","/bin/sh","-c","exit"]);
+          await respawnExitedFixture(tmux);
           for(let i=0;i<100 && await tmux(["display-message","-p","-t","=seat:","#{pane_dead}"])!=="1";i++) await new Promise(r=>setTimeout(r,25));
           expect((await adapter.respawnPane(await tmux(["display-message","-p","-t","=seat:","#{pane_id}"]),custom,{cwd:home,env:selected})).ok).toBe(true);
         } else expect((await adapter.createSession("seat",home,selected)).ok).toBe(true);
@@ -194,7 +234,7 @@ describe.skipIf(process.platform === "win32")("#1178 initial-shell environment p
       if (mode==="respawn") {
         await tmux(["new-session","-d","-s","seat","sleep 60"]);
         await tmux(["set-window-option","-t","=seat:","remain-on-exit","on"]);
-        await tmux(["respawn-pane","-k","-t","=seat:","/bin/sh","-c","exit"]);
+        await respawnExitedFixture(tmux);
         for(let i=0;i<100 && await tmux(["display-message","-p","-t","=seat:","#{pane_dead}"])!=="1";i++) await new Promise(r=>setTimeout(r,25));
         expect((await adapter.respawnPane(await tmux(["display-message","-p","-t","=seat:","#{pane_id}"]),undefined,{cwd:home,env:selected})).ok).toBe(true);
       } else expect((await adapter.createSession("seat",home,selected)).ok).toBe(true);

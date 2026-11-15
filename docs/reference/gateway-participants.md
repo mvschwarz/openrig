@@ -26,9 +26,11 @@ A person can also bind to a local bridge adapter using a `relay` binding:
 `rig gateway human add bob --display-name "Bob" --delivery-class B --binding "relay:local-bridge:file:/etc/openrig/relay.env:primary:handle=bob-ops"`
 (see [Gateway Relay Reference](gateway-relay.md) for endpoint, secret provisioning, and custody architecture).
 `human@host` is the unnamed person at the terminal; `human@kernel` is also accepted as a human/gate address.
-These aliases (including `human-<name>@host` and `human-<name>@kernel`) are not agent sessions: reply with
-`rig queue create --destination human@host --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`,
-substituting the sender's address and your summary, evidence path and reply. A reply destination doesn't identify
+These aliases (including `human-<name>@host` and `human-<name>@kernel`) are not agent sessions. A row addressed to
+`human@host` names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To reply to a person, use
+their registered address:
+`rig queue create --destination <their address> --human-intent update --summary "<one line>" --evidence-ref "<path>" --body "..." --verify`,
+substituting your summary, evidence path and reply. A reply destination doesn't identify
 who acted or determine who may answer an ask. Clients acting as a registered person name that person's
 `actorSession`; a seat identity header takes precedence. The terminal's primary-user authority records the unnamed
 `human@host` actor, not the person whose queue is being viewed.
@@ -75,6 +77,25 @@ go to:
 
 `rig gateway default` shows the current default; `rig gateway default --clear` clears the choice. Choosing a default
 never changes `workspace.operator_seat_name`, which keeps its own meaning.
+
+## The default receiving agent
+
+The default person is who OpenRig asks. The default receiving agent is the agent that reads what a person answers when
+nothing else reads it: a request with no owner of its own, such as a host pairing request or a mode's scheduled end, and
+a Slack message no thread or channel route claims. It is:
+1. the agent chosen in `agents.operator_session` (`rig config set agents.operator_session <seat>@<rig>`; a person's
+   address there is ignored);
+2. otherwise the kernel operator, `operator-agent@kernel`, when this host has that seat, running or stopped;
+3. otherwise none, and the request says no agent reads answers on this host.
+
+A stopped receiving agent stays the receiver: answers wait for it, and the person is told it isn't running. OpenRig
+never picks whichever seat happens to be running. The TUI shows the effective agent, where it came from and its state
+under Settings > Agents & runtime ("Default receiving agent"). It never replaces the default person.
+
+For Slack, `rig slack setup --inbound-destination default-receiver` (the default for a new setup) sends unrouted
+messages to the default receiving agent, read when the connector starts. With no receiving agent on the host, they go to
+`operator-agent@kernel` for compatibility, as before. A destination already saved in the connector
+config, `operator-agent@kernel` included, is kept as chosen; pass `default-receiver` to switch it.
 
 ## In the TUI: whose queue, and who acts
 

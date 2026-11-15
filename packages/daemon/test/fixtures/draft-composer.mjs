@@ -5,19 +5,35 @@ import { StringDecoder } from "node:string_decoder";
 import stringWidth from "string-width";
 
 const [runtime, stateFile, footerVariant] = process.argv.slice(2);
+const footerRows = {
+  "context-hint": "~66k uncached · /clear to start fresh",
+  "auto-update-short": "✘ Auto-update failed · Run claude doctor",
+  "auto-update-reason": "✘ Auto-update failed: no write permission to npm prefix · Run claude doctor",
+  "auto-update-try-global": "✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code",
+  "auto-update-try-local": "✘ Auto-update failed · Try claude doctor or cd ~/.claude/local && npm update @anthropic-ai/claude-code",
+};
+const footerRow = footerRows[footerVariant];
+const cursorBlock = footerVariant === "cursor-block" || Boolean(footerRow);
+const frameWidth = footerVariant?.startsWith("auto-update-") && footerVariant !== "auto-update-short" ? 120 : 68;
+const rule = cursorBlock ? `\x1b[38;5;244m${"─".repeat(frameWidth)}\x1b[39m` : "────────────────────────────────────────";
 let input = "", pending = "", pasting = false, cursor = 0, ghost = false;
 const submissions = [];
 const decoder = new StringDecoder("utf8");
 
 function render() {
   const rows = ["Editable delivery fixture", ...submissions.slice(-3).flatMap(text => text.split("\n"))];
-  if (runtime === "claude") rows.push("────────────────────────────────────────");
+  if (cursorBlock) while (rows.length < (footerRow ? 22 : 25)) rows.push("");
+  const label = footerRow ? "dev-docs@moonjoy-workshop" : "orch-lead@moonjoy-workshop";
+  const topRule = cursorBlock ? `\x1b[38;5;244m${"─".repeat(frameWidth - stringWidth(label) - 3)} ${label} ─\x1b[39m` : rule;
+  if (runtime === "claude") rows.push(topRule);
   const start = rows.length;
   const displayed = ghost && cursor === input.length ? `${input}\x1b[2m suggested follow-up\x1b[22m`
-    : input || (runtime === "codex" ? "\x1b[2mAsk Codex to do anything\x1b[22m" : "");
+    : input || (runtime === "codex" ? "\x1b[2mAsk Codex to do anything\x1b[22m" : cursorBlock ? "\x1b[7m \x1b[0m" : "");
   const body = displayed.split("\n");
   rows.push(`${runtime === "claude" ? "❯\u00a0" : "› "}${body[0]}`, ...body.slice(1).map(line => `  ${line}`));
-  rows.push(...(runtime === "claude" ? ["────────────────────────────────────────", "? for shortcuts"] : ["", "fixture · 90% context left"]));
+  rows.push(...(runtime === "claude" ? [rule, cursorBlock
+    ? "  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle)\x1b[0m" : "? for shortcuts"] : ["", "fixture · 90% context left"]));
+  if (runtime === "claude" && footerRow) rows.push(footerRow.padStart(66));
   if (runtime === "claude" && ghost) {
     rows[rows.length - 1] = "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
     rows.push("✘ Auto-update failed: no write permission to npm prefix · Run claude doctor");

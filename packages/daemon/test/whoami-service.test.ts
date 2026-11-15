@@ -17,7 +17,8 @@ import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_c
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
-import { WhoamiService } from "../src/domain/whoami-service.js";
+import { WhoamiService, ROSTER_BUILDING_NOTE } from "../src/domain/whoami-service.js";
+import { markRigBuilding, unmarkRigBuilding } from "../src/domain/rigs-being-built.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
@@ -141,6 +142,25 @@ describe("WhoamiService", () => {
 
     expect(result["roster"]).toBeUndefined();
     expect(result["podRoster"]).toBeUndefined();
+  });
+
+  // #2871: the building state belongs to the rig being built, by id, never to another rig with the same name.
+  it("only the rig being built says so; a running rig with the same name answers as before", () => {
+    const { nodeA } = seedRig();
+    const newRig = rigRepo.createRig("my-rig");
+    const newNode = rigRepo.addNode(newRig.id, "dev.impl", { role: "worker", runtime: "claude-code" });
+    markRigBuilding(db, newRig.id);
+
+    const running = svc.resolve({ nodeId: nodeA.id })!;
+    expect(running).not.toHaveProperty("rosterState");
+    expect(running.peersNote).toBe("peers = this rig's roster excluding self (no edge filter); edges = directional relationships; use `rig ps --nodes` for node inventory including self + live state");
+
+    const building = svc.resolve({ nodeId: newNode.id })!;
+    expect(building.rosterState).toBe("building");
+    expect(building.peersNote.startsWith(ROSTER_BUILDING_NOTE)).toBe(true);
+
+    unmarkRigBuilding(db, newRig.id);
+    expect(svc.resolve({ nodeId: newNode.id })).not.toHaveProperty("rosterState");
   });
 
   it("unknown nodeId returns null", () => {

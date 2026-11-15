@@ -1019,6 +1019,16 @@ function emitHostResolutionError(res: { error: string; message: string }, json: 
   process.exitCode = 1;
 }
 
+/** Emit a local queue-list filter error without printing rows returned by a daemon that ignored it. */
+function emitQueueListFilterError(res: { error: string; message: string }, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(res));
+  } else {
+    console.error(res.message);
+  }
+  process.exitCode = 1;
+}
+
 const QUEUE_HOST_OPTION_HELP =
   "OPR.0.4.6.MH3: route this queue write to a REGISTERED remote host (see rig host ls). EXPLICIT-ONLY — queue verbs never follow the persisted 'rig host select' selection. Equivalent to the host-qualified destination form member@rig@<host>.";
 
@@ -1242,6 +1252,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const advisory = value as { code?: unknown; message?: unknown };
             if (typeof advisory.message !== "string") continue;
             switch (advisory.code) {
+              case "unmatched_destination_seat":
+              case "destination_status":
+                console.error(`Destination status: ${advisory.message}`);
+                break;
               case "scope_check_skipped":
                 console.error(`Note: ${advisory.message}`);
                 break;
@@ -1392,9 +1406,16 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
-    .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
-    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
+    .option("--summary <text>", "Summary persisted onto the item, with or without a state change (a blank one isn't stored)")
+    .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item with a state change (a park, a done close; a blank one isn't stored). For a code result, a JSON file of kind openrig.code-result/v1 (repo, base and revision as full commit ids, paths) lets a reader diff it exactly")
     .option("--note <text>", "Transition note for the audit log")
+    .addHelpText("after", `
+After reading an existing remote successor, record its exact closure target, including the host:
+  rig queue update <source-id> --note "custody-verified: receiver@team@remote-host. Registered-host read confirmed the successor"
+The note can accompany the closing update or be appended later; a separate note is not required.
+A trailing period, comma, semicolon, colon or closing parenthesis is accepted; a longer or different target is not.
+For a new cross-host transfer, prefer rig queue handoff --host <registered-host>.
+`)
     .option("--source <name@external>", "Outside a managed seat: the external routine that appends the --note, recorded as an external actor (claimed:v1), never a seat; note only, on this host's daemon (a --host that resolves to another host is refused). A managed seat stays the actor. Like any note, it resets the item's stall and notification timing (and its recovery and operator episodes) and advances a claimed item's last activity, but never resets how long an unclaimed item has waited")
     .option("--host <id>", QUEUE_HOST_ROW_OPTION_HELP)
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
@@ -1937,6 +1958,24 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
+  const listTagFiltersInArgumentOrder: string[] = [];
+  const collectListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(value);
+    return [...previous, value];
+  };
+  const collectMissionListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(`mission:${value}`);
+    return [...previous, value];
+  };
+  const collectSliceListTag = (value: string, previous: string[] = []): string[] => {
+    listTagFiltersInArgumentOrder.push(`slice:${value}`);
+    return [...previous, value];
+  };
+
+  cmd.hook("preSubcommand", (_parent, subcommand) => {
+    if (subcommand.name() === "list") listTagFiltersInArgumentOrder.length = 0;
+  });
+
   cmd
     .command("list")
     .description("List qitems (default: active + compact + current-rig; like 'docker ps')")
@@ -1950,6 +1989,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--source <session>", "Filter by source session")
     .option("--state <state>", "Filter by state (comma-separated for multiple)")
     .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
+    .option("--tag <tag>", "Exact, case-sensitive tag filter; repeat for AND (commas are literal)", collectListTag, [] as string[])
+    .option("--mission <id>", "Filter by the exact mission:<id> tag; repeatable", collectMissionListTag, [] as string[])
+    .option("--slice <id>", "Filter by the exact slice:<id> tag; repeatable", collectSliceListTag, [] as string[])
     .option("--limit <n>", "Result limit", positiveIntArg, 100)
     .option("--json", "JSON output (compact; use --full --json for complete fields)")
     .option("--host <id>", `${QUEUE_HOST_ROW_OPTION_HELP} With --host, the rows of every rig on that host unless --destination or --source narrows them; --owned and --mine name this host's seat and are refused.`)
@@ -1966,6 +2008,7 @@ Four orthogonal axes (docker/kubectl pattern):
 Active states: pending, in-progress, blocked.
 History (-a adds): done, canceled, handed-off, failed, denied.
 Use --state <states> to select specific states explicitly.
+Use repeated --tag <tag> values to require every exact, case-sensitive tag; commas are literal. --mission <id> and --slice <id> add mission:<id> and slice:<id> filters. Exact duplicates collapse and blank values are refused. A returned row that lacks a requested tag reveals an older daemon that ignored the filter; an empty list cannot prove it applied it.
 
 Depth: 'rig queue show <qitemId>' previews one body; add --full for the complete record.
 Frontier source: 'rig queue list' is the default status surface.
@@ -1993,13 +2036,24 @@ Examples:
       source?: string;
       state?: string;
       targetRepo?: string;
+      tag?: string[];
+      mission?: string[];
+      slice?: string[];
       limit: string;
       json?: boolean;
       host?: string;
     }) => {
+      const useJson = opts.json || opts.o === "json";
+      const orderedTags = listTagFiltersInArgumentOrder.splice(0);
+      const invalidTag = [...(opts.tag ?? []), ...(opts.mission ?? []), ...(opts.slice ?? [])]
+        .some((value) => value.trim().length === 0);
+      if (invalidTag) {
+        emitQueueListFilterError({ error: "tag_invalid", message: "tag filters cannot be blank" }, useJson);
+        return;
+      }
+      const tags = [...new Set(orderedTags)];
       const deps = getDeps();
       const remote = remoteHostOf(opts.host);
-      const useJson = opts.json || opts.o === "json";
       // The seat env names a seat of THIS host. On another host's daemon (a --host that resolves remote) it scopes
       // nothing that daemon holds: no rig is derived from it, and --owned/--mine are refused.
       const seatScope = (onRemote: boolean): URLSearchParams | null => {
@@ -2037,6 +2091,7 @@ Examples:
         if (opts.source) params.set("sourceSession", opts.source);
         if (opts.state) params.set("state", opts.state);
         if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
+        for (const tag of tags) params.append("tag", tag);
         if (opts.limit) params.set("limit", String(opts.limit));
         return params;
       };
@@ -2049,6 +2104,20 @@ Examples:
         const params = seatScope(target.remote !== undefined);
         if (!params) return;
         const res = await target.client.get<unknown>(`/api/queue/list?${params.toString()}`, target.options);
+        if (res.status < 400 && tags.length > 0 && Array.isArray(res.data)) {
+          const ignored = res.data.some((value) => {
+            if (!value || typeof value !== "object") return true;
+            const rowTags = (value as { tags?: unknown }).tags;
+            return !Array.isArray(rowTags) || tags.some((tag) => !rowTags.includes(tag));
+          });
+          if (ignored) {
+            emitQueueListFilterError({
+              error: "filter_unsupported",
+              message: "The daemon returned a queue row missing a requested exact tag; it may be too old to apply tag filters. Empty results cannot confirm tag filtering.",
+            }, useJson);
+            return;
+          }
+        }
         printResult(useJson, res.data, res.status);
       }, remote !== undefined, remote);
     });
@@ -2111,7 +2180,7 @@ Examples:
   cmd
     .command("erase")
     .description("Erase queue rows in one exact scope: an account's rows, a list of ids, or the closed-work retention windows; a dry run unless --apply")
-    .option("--members <file>", "Account deletion: the account's recorded session names (exact, departed seats included), one per line or a JSON array")
+    .option("--members <file>", "Account deletion: the account's recorded session names (exact, departed seats included), one per line or a JSON array. Empty, with --rig, for an account rig that never had a session")
     .option("--rig <id>", "With --members: the account rig's id. Also erases the rig's own records that outlive it (events, snapshots, node and seat records); refused unless every member is a session of it")
     .option("--ids <file>", "These qitem ids, one per line or a JSON array; a report's qitems entries, or an erasure ledger's JSON lines, keep each one's action")
     .option("--action <action>", "With --ids: delete (default) removes each row and keeps only its id; scrub removes its content and keeps the row", enumArg(["delete", "scrub"]))
@@ -2124,16 +2193,19 @@ Examples:
       "Name exactly one scope. What each one erases:",
       "  --members  every row whose source and destination are both members, in any state, deleted with its transitions,",
       "             outbox and inbox copies, stream actions, events and audit rows; then member-to-member outbox and inbox",
-      "             entries no row owns, and the members' stream items. A row with one member endpoint is reported under",
-      "             mixed and left untouched. With --rig, also the rig's own events, snapshots and node and seat records.",
+      "             entries no row owns, and the members' stream items. OpenRig's own sessions (daemon@kernel, system:*)",
+      "             belong to no account, so its wakes and notices to a member are erased too. A row with one member",
+      "             endpoint and the other outside the account is reported under mixed and left untouched. With --rig,",
+      "             also the rig's own events, snapshots and node and seat records.",
       "  --ids      the listed rows, deleted or scrubbed (a report's qitems entries keep their action); a deleted id",
       "             that's already gone keeps (or regains) its id marker.",
       "  --routine  closed rows (done, canceled, denied, handed-off) past the windows, aged from when they closed.",
       "A deleted row keeps only its id, and a create that reuses that id is refused (qitem_erased). A row a workflow still",
       "references is reported under gaps and left. Output is JSON: clean (true only when nothing was left), complete,",
       "qitems, mixed, gaps, alreadyAbsent, linked, unlinked and rig. Refusals: erase_scope_required, erase_scope_conflict,",
-      "erase_members_invalid, erase_rig_invalid, erase_rig_mismatch, erase_ids_invalid, erase_action_invalid,",
-      "erase_routine_off. A run that stops on an error returns what it committed, with error.stage, and exits 2.",
+      "erase_members_invalid, erase_rig_invalid, erase_rig_mismatch, erase_rig_had_sessions, erase_rig_history_unknown,",
+      "erase_ids_invalid, erase_action_invalid, erase_routine_off. A run that stops on an error returns what it",
+      "committed, with error.stage, and exits 2.",
       "Reference: docs/reference/queue-erasure.md",
     ].join("\n"))
     .action(async (opts: { members?: string; rig?: string; ids?: string; action?: string; routine?: boolean; apply?: boolean; actor?: string; json?: boolean }) => {

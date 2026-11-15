@@ -1,6 +1,7 @@
 import type { AttentionRead, AttentionItem } from "@openrig/daemon/attention";
 import type { Action, FleetSnapshot, ViewState } from "../types.js";
 import { listItem, wrapDetailLines, type ContentLine } from "../detail.js";
+import { displayTime } from "../time.js";
 
 /** The bounded, confirmed-delivery or bridge-acceptance projection served by S02; no client classification. */
 export interface DeliveredHumanUpdates {
@@ -10,6 +11,8 @@ export interface DeliveredHumanUpdates {
   limit: number;
   truncated: boolean;
 }
+
+const BRIDGE_ACCEPTED_SCOPE = " · accepted by bridge";
 
 function isBridgeAcceptedUpdate(q: DeliveredHumanUpdates["items"][number]): boolean {
   return q.deliveryOutcome === "accepted" || q.deliveryReceipt.startsWith("relay-owner-notification-accepted");
@@ -38,13 +41,13 @@ export function composeHumanUpdates(attention: AttentionRead | null, updates: De
     const baseScope = projects.length === 1 ? `project ${projects[0]} (queue tag)` : "instance · project unknown";
     const item: AttentionItem = { id: `human-update:${q.qitemId}`, kind: "update", summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || (accepted ? "Accepted by bridge" : "Delivered update"),
       recipient: q.destinationSession, urgency: "update", unblocks: null, at: q.deliveredAt,
-      scope: accepted ? `${baseScope} · accepted by bridge` : baseScope, project: null,
+      scope: accepted ? `${baseScope}${BRIDGE_ACCEPTED_SCOPE}` : baseScope, project: null,
       source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
     if (!read.items.some(current => current.id === `queue-update:${q.qitemId}`)) read.items.push(item);
     if (wanted === item.id && read.detail?.item.id !== item.id) {
       read.detailError = null;
       read.detail = { item, lines: [q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []),
-        `From: ${q.sourceSession}`, accepted ? `Accepted by bridge: ${q.deliveredAt}` : `Delivered: ${q.deliveredAt}`, `Delivery receipt: ${q.deliveryReceipt}`, `Queue: ${q.qitemId}`, `Evidence: ${q.evidenceRef ?? "none recorded"}`],
+        `From: ${q.sourceSession}`, `Delivery receipt: ${q.deliveryReceipt}`, `Queue: ${q.qitemId}`, `Evidence: ${q.evidenceRef ?? "none recorded"}`],
         files: q.evidenceRef?.startsWith("/") ? [{ label: "Update evidence", path: q.evidenceRef }] : [] };
     }
   }
@@ -71,7 +74,10 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
       if (d.item.recipient) lines.push({ text: `To: ${d.item.recipient}` });
       if (d.item.id.startsWith("human-update:") || d.item.id.startsWith("queue-update:")) lines.push({ text: "No action needed" });
       if (d.item.unblocks) lines.push({ text: `Unblocks: ${d.item.unblocks}` });
-      lines.push({ text: `Scope: ${d.item.scope}` }, { text: `Observed: ${d.item.at ?? "unknown"}` });
+      // Times are drawn in the person's zone (ui.timezone), as the header's are; a delivered update's time is when it was
+      // delivered or accepted by the bridge.
+      const when = !d.item.id.startsWith("human-update:") ? "Observed" : d.item.scope.endsWith(BRIDGE_ACCEPTED_SCOPE) ? "Accepted by bridge" : "Delivered";
+      lines.push({ text: `Scope: ${d.item.scope}` }, { text: `${when}: ${displayTime(d.item.at, state.timeZone)}` });
       lines.push(...questionLines(d.item).map(text => ({ text })));
       lines.push(...d.lines.map(text => ({ text })));
       for (const f of d.files) lines.push(listItem(f.label, { type: "attention-source", path: f.path }));
@@ -100,6 +106,8 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
           lines.push({ text: `Or answer in your own words: reply <text>, ${as}${verb === "answer" ? " (it fills the first unanswered question and closes the request)" : ""}.` });
         }
       }
+      // The settings page that decides this request directly (a pairing request's Approve and Deny), opened on it.
+      if (d.item.settingsLink) lines.push(listItem(d.item.settingsLink.label, { type: "config-category", category: d.item.settingsLink.category, focus: d.item.settingsLink.focus }));
       // Chat, as on the Feed card: open the asker's own terminal to answer in your own words.
       if (d.item.asker) {
         const view = seatViewOf(snap, d.item.asker);
@@ -122,10 +130,10 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
         if (i.humanQuestions?.length) lines.push({ text: `    Questions: ${i.humanQuestions.length}, ${unansweredCount(i)} unanswered` });
         if (i.id.startsWith("human-update:") || i.id.startsWith("queue-update:")) lines.push({ text: "    No action needed" });
         if (i.unblocks) lines.push({ text: `    Unblocks: ${i.unblocks}` });
-        lines.push({ text: `    ${i.scope} · ${i.at ?? "time unknown"}` });
+        lines.push({ text: `    ${i.scope} · ${displayTime(i.at, state.timeZone)}` });
       }
     }
-    lines.push({ text: "" }, { text: `Read at ${read.readAt}` }, ...read.sources.map(s => ({ text: `${s.source}: ${s.state} · ${s.detail}` })));
+    lines.push({ text: "" }, { text: `Read at ${displayTime(read.readAt, state.timeZone)}` }, ...read.sources.map(s => ({ text: `${s.source}: ${s.state} · ${s.detail}` })));
   }
   lines.push({ text: "" }, { text: "Viewing is not approval. Each request's detail says whether it went to Slack and where to answer it." });
   return wrapDetailLines(lines, width);

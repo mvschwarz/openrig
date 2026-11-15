@@ -1,0 +1,47 @@
+# Real capture (12/11/2026): Claude Code 2.1.322, fresh HOME after OpenRig's pre-launch seed with no trust, a seat
+# without .claude/settings.json; tmux 150x45. The plain workspace trust prompt opens with the focus on 'No, exit'.
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ <lab>/simples/repo/cadeiras/rig/seat
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team).
+ If not, take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

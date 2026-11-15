@@ -31,7 +31,7 @@ export async function checkSeatAttention(client: DaemonClient, seats: readonly s
   const check: AttentionCheck = { attention: [], unknown: [] };
   const byRig = new Map<string, Set<string>>();
   for (const seat of seats) {
-    const at = seat.lastIndexOf("@");
+    const at = seat.indexOf("@");
     if (at <= 0 || at === seat.length - 1) { check.unknown.push({ seat, why: "not a seat@rig name" }); continue; }
     const rig = seat.slice(at + 1);
     if (!byRig.has(rig)) byRig.set(rig, new Set());

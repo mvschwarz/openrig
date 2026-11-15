@@ -556,6 +556,33 @@ describe("QueueRepository", () => {
     expect(repo.list({ destinationSession: "bob@r", state: ["pending", "in-progress"] })).toHaveLength(2);
   });
 
+  it("issue2728 applies multiple exact tag filters with AND before limit", async () => {
+    const older = await repo.create({
+      sourceSession: "lead@r", destinationSession: "worker@r", body: "older matching row",
+      tags: ["review", "publish"], nudge: false,
+    });
+    db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run("2026-01-01T00:00:00.000Z", older.qitemId);
+    await repo.create({
+      sourceSession: "lead@r", destinationSession: "worker@r", body: "newer row with only one tag",
+      tags: ["review"], nudge: false,
+    });
+    const nearMatches = [
+      { body: "case variant is not exact", tags: ["Review", "publish"] },
+      { body: "substring is not exact", tags: ["reviewer", "publish"] },
+      { body: "comma-joined tag stays literal", tags: ["review,publish"] },
+    ];
+    for (const item of nearMatches) {
+      await repo.create({
+        sourceSession: "lead@r", destinationSession: "worker@r", ...item, nudge: false,
+      });
+    }
+
+    const both = repo.list({ tag: ["review", "publish"], limit: 1 });
+    expect(both.map((item) => item.qitemId)).toEqual([older.qitemId]);
+    expect(repo.list({ tag: ["review", "publish"], limit: 10 }).map((item) => item.qitemId)).toEqual([older.qitemId]);
+    expect(repo.list({ tag: "review", limit: 10 }).map((item) => item.qitemId)).toHaveLength(2);
+  });
+
   // ---- PL-004 Phase A revision (R1) tests ----
 
   describe("R1 default-nudge wiring", () => {

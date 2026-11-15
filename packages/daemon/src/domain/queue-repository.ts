@@ -72,6 +72,8 @@ import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
 import { lastMeaningfulTransitionMany, meaningfulFor, readWaitingView, WaitingStatements, type WaitingView, type WaitingActivityReader, type WaitingReads } from "./queue-waiting.js";
+import { isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
+export { TYPED_GATE_BLOCKER_PREFIXES, isTypedGateBlocker, typedGateBlockerPrefix } from "./queue-blocker.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
@@ -79,12 +81,13 @@ import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
-import { parseReplyToChoice, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
+import { parseReplyToChoice, parseArrivalThread, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
 import { SettingsStore } from "./user-settings/settings-store.js";
-import { hostedWakeFor, isHostedMemberAt, type RosterWake } from "./rosters.js";
-import { ringHostedWake } from "./hosted-wake.js";
+import { hostedMembersAt, hostedWakeFor, isHostedMemberAt, type RosterMember, type RosterWake } from "./rosters.js";
+import { memberCheckInStatus, type MemberCheckIn } from "./connection-contract.js";
+import { hostedRingMayHaveArrived, ringHostedWake } from "./hosted-wake.js";
 import { effectiveGateRoles } from "./gate-predicate.js";
 import {
   computeClosureRequiredAt,
@@ -101,6 +104,8 @@ import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, formatHumanAnswers, humanAnswerText, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
 import { slackMicros } from "./gateway/slack/state-store.js";
+import { askBackRoute, RUNNER_CLOSE_WAITS, terminalAnswerMeaning } from "./receiver-context.js";
+import { runSyncSite, runSyncSiteWhenSlow } from "./sync-site-wrap.js";
 
 /** A direct ask's answer row ID: from the ask, or from the ask and the park episode its answer belongs to. */
 function humanAnswerId(askId: string, episodeKey?: string): string {
@@ -180,22 +185,8 @@ const AUTO_UNPARK_BLOCKER_TAG_PREFIX = "queue:auto-unpark:blocker-ref:";
 /** The actor on the transition routeToFallback writes; the row's own history is how a later reroute finds the line it wrote. */
 const FALLBACK_ACTOR = "system:queue-fallback";
 
-/** 0.5.1-53 Atom 1a — typed non-qitem gate blocker prefixes. A park may be gated on a fold / auth /
- *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
- *  first-class, compact-visible, downstream-classifiable blocker (the ruling detail rides a transition). */
-export const TYPED_GATE_BLOCKER_PREFIXES = ["fold:", "auth:", "external:"] as const;
-
 /** The actor a terminal act is recorded as when it names no responder: explicitly unattributed, never a person. */
 export const UNATTRIBUTED_ACTOR = "human@host";
-export function typedGateBlockerPrefix(value: string): string | null {
-  return TYPED_GATE_BLOCKER_PREFIXES.find((p) => value.startsWith(p)) ?? null;
-}
-/** A well-formed typed gate blocker: a recognized prefix AND a non-empty gate body. */
-export function isTypedGateBlocker(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  const p = typedGateBlockerPrefix(value);
-  return p != null && value.slice(p.length).trim().length > 0;
-}
 
 /**
  * #165: a claim is the destination acting on the row, which is stronger evidence than
@@ -529,14 +520,13 @@ export interface QueueUpdateInput {
   wakeMessage?: string;
   /**
    * OPR.0.4.4.19 FR-6 — park-time inputs. summary + evidence_ref are
-   * updatable AT THE PARK MOMENT (state=blocked with a human-seat blocker),
-   * not create-only: `rig queue block --summary --evidence-ref` persists
-   * them onto the EXISTING item so the attention query + Packet 2 read
-   * them. A done close also persists evidence_ref, so a finished row carries
-   * its artifact. OPR.0.5.1 slice-51-06 D2: supplying either where it can't
-   * be stored is REJECTED (QueueRepositoryError "summary_evidence_not_persistable")
-   * before any mutation — not silently ignored — so a caller never believes
-   * unpersistable metadata was saved.
+   * updatable with any state change, not create-only: `rig queue block
+   * --summary --evidence-ref` persists them onto the EXISTING item so the
+   * attention query + Packet 2 read them, and a done close leaves its
+   * artifact on the finished row. A human-seat park still requires them.
+   * A blank value is not stored (it would erase the row's subject or
+   * evidence link); the update route reports any value
+   * the stored row doesn't carry, so a caller never believes it was saved.
    */
   summary?: string | null;
   evidenceRef?: string | null;
@@ -599,8 +589,8 @@ export interface QueueClaimInput {
 }
 
 export interface QueueListOptions {
-  /** Exact tag selection before the result bound (used by diagnostic occurrences). */
-  tag?: string;
+  /** One legacy exact tag or repeated exact tags, all of which must match before the result bound. */
+  tag?: string | string[];
   destinationSession?: string;
   sourceSession?: string;
   state?: QueueState | QueueState[];
@@ -618,6 +608,19 @@ export interface QueueListOptions {
   /** Pick and order rows by their latest update instead of their creation, so a bounded window of closed items holds
    *  the ones closed most recently. */
   sortByUpdated?: boolean;
+}
+
+/** Adds the exact, conjunctive tag predicates shared by the bounded list paths. */
+function pushExactTagFilters(tag: string | string[] | undefined, conditions: string[], params: unknown[]): void {
+  if (tag === undefined) return;
+  const values = [...new Set(Array.isArray(tag) ? tag : [tag])];
+  if (values.some((value) => value.trim().length === 0)) {
+    throw new TypeError("tag filters cannot be blank");
+  }
+  for (const value of values) {
+    conditions.push("EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)");
+    params.push(value);
+  }
 }
 
 /** Adds the handoff-successor and updated-since filters both list paths share. */
@@ -660,6 +663,16 @@ function defaultIsHostedMember(destination: string): boolean {
     return typeof root === "string" && !!root && isHostedMemberAt(destination, join(root, "rosters"), getSelfHostId());
   } catch {
     return false;
+  }
+}
+
+/** The hosted members the authored rosters list on this host. Empty when the rosters or this host's id can't be read. */
+function defaultHostedMembers(): RosterMember[] {
+  try {
+    const root = new SettingsStore().resolveOne("workspace.root").value;
+    return typeof root === "string" && root ? hostedMembersAt(join(root, "rosters"), getSelfHostId()) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -792,30 +805,36 @@ let successorScope: { db: Database.Database; covers: (source: string) => boolean
  *  equals a text id); has() then checks qitem_id or destination_session against the target and that the successor is
  *  not the source itself. A snapshot from its first has() until invalidate(): the caller invalidates it whenever other
  *  code could have run. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn
- *  for a covered source; any other source keeps the per-row query. */
+ *  for a covered source; any other source keeps the per-row query. builtMs() is how long the build of the index as it
+ *  is now took (0 while it is not built), so a caller can tell when rebuilding after each invalidate() costs more than
+ *  it saves. */
 export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[]): {
   has: (sourceQitemId: string, target: string) => boolean;
   run: <T>(fn: () => T) => T;
   invalidate: () => void;
+  builtMs: () => number;
 } {
   const sources = new Set(sourceQitemIds);
   let bySource: Map<string, Array<{ qitemId: string; destination: string | null }>> | null = null;
+  let buildMs = 0;
   const build = () => {
+    const startedAt = performance.now();
     const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
     const ids = JSON.stringify([...sources]);
-    const rows = db.prepare(
+    const rows = runSyncSite("queue.linked_successors.build", () => db.prepare(
       `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
         WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
        UNION
        SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
         WHERE s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
           AND j.value IN (SELECT value FROM json_each(?))`,
-    ).all(ids, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+    ).all(ids, ids)) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
     for (const r of rows) {
       const list = map.get(r.source);
       const entry = { qitemId: r.qitem_id, destination: r.destination_session };
       if (list) list.push(entry); else map.set(r.source, [entry]);
     }
+    buildMs = performance.now() - startedAt;
     return map;
   };
   const has = (sourceQitemId: string, target: string): boolean => (bySource ??= build()).get(sourceQitemId)?.some(
@@ -829,7 +848,8 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
       successorScope = own;
       try { return fn(); } finally { successorScope = previous; }
     },
-    invalidate: () => { bySource = null; },
+    invalidate: () => { bySource = null; buildMs = 0; },
+    builtMs: () => buildMs,
   };
 }
 
@@ -876,8 +896,9 @@ export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[nu
 };
 
 /** `qitemId` narrows either finder to one row, so a caller can ask again whether that row still qualifies. */
-type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string };
-type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string };
+/** waiting: false skips the waiting view of each row (the stuck sweep's own reads); the default builds it. */
+type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
+type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean; qitemId?: string; waiting?: boolean };
 
 function compactRow(item: QueueItem): CompactQueueItem {
   const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
@@ -1038,7 +1059,8 @@ function isWakeTimeoutSignal(s: string | undefined): boolean {
 }
 
 export interface QueueDestinationAdvisory {
-  code: "unmatched_destination_seat";
+  code: "unmatched_destination_seat" | "destination_status";
+  status?: "missing" | "archived" | "hosted" | "unknown";
   destinationSession: string;
   availableDestinations: string[];
   message: string;
@@ -1050,6 +1072,7 @@ export class QueueRepository {
   private readonly eventBus: EventBus;
   readonly destinationAdvisory: (sessionRef: string) => QueueDestinationAdvisory | null;
   private readonly validateRig: (sessionRef: string) => boolean;
+  private readonly canRecordDestination: (sessionRef: string) => boolean;
   private transport: QueueNudgeTransport | undefined;
   /** W1 (transactional closure): the durable wake-intent store. A terminal act
    *  (handoff / handoff-and-complete) stages an outbox intent row INSIDE its
@@ -1102,6 +1125,8 @@ export class QueueRepository {
   private readonly hostedWakeFn: (destination: string) => RosterWake | null;
   /** Whether the rosters list an address as a hosted member, trigger or not. */
   private readonly hostedMemberFn: (destination: string) => boolean;
+  private readonly hostedMembersFn: () => RosterMember[];
+  private readonly permissionDecider?: (ask: QueueItem, requester: string) => { session: string; describe?: string } | null;
   private readonly hostedWakeFetch: typeof fetch | undefined;
   /** When this process last wrote each session's inbox check-in, so a seat that polls often writes at most once a minute. */
   private readonly inboxCheckInWrittenAt = new Map<string, number>();
@@ -1117,6 +1142,8 @@ export class QueueRepository {
     eventBus: EventBus,
     opts?: {
       validateRig?: (sessionRef: string) => boolean;
+      /** Write admission may keep a destination that receiver selection cannot yet use. Defaults to validateRig. */
+      canRecordDestination?: (sessionRef: string) => boolean;
       destinationAdvisory?: (sessionRef: string) => QueueDestinationAdvisory | null;
       /**
        * R1 fix (PL-004 Phase A revision): durable+waking-by-default transport
@@ -1154,7 +1181,12 @@ export class QueueRepository {
       sharedChannels?: () => ReadonlyArray<{ address: string }>;
       hostedWake?: (destination: string) => RosterWake | null;
       isHostedMember?: (destination: string) => boolean;
+      hostedMembers?: () => RosterMember[];
       hostedWakeFetch?: typeof fetch;
+      /** Who decides a runner's permission ask after its person answers, while the runner waits (startup wires the
+       *  receiving-agent order, `permissionDeciderFor`). Absent, or null for an ask: the ask closes with the answer, as
+       *  before, and the runner reads it there. */
+      permissionDecider?: (ask: QueueItem, requester: string) => { session: string; describe?: string } | null;
     }
   ) {
     this.db = db;
@@ -1162,6 +1194,7 @@ export class QueueRepository {
     this.transitionLog = new QueueTransitionLog(db);
     this.wakeRepo = new QueueWakeRepository(db);
     this.validateRig = opts?.validateRig ?? (() => true);
+    this.canRecordDestination = opts?.canRecordDestination ?? this.validateRig;
     this.destinationAdvisory = opts?.destinationAdvisory ?? (() => null);
     if (opts?.transport) this.attachTransport(opts.transport);
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
@@ -1173,6 +1206,8 @@ export class QueueRepository {
     this.sharedChannelsFn = opts?.sharedChannels ?? (() => sharedChannelAddresses());
     this.hostedWakeFn = opts?.hostedWake ?? defaultHostedWake;
     this.hostedMemberFn = opts?.isHostedMember ?? defaultIsHostedMember;
+    this.hostedMembersFn = opts?.hostedMembers ?? defaultHostedMembers;
+    this.permissionDecider = opts?.permissionDecider;
     this.hostedWakeFetch = opts?.hostedWakeFetch;
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
@@ -1663,8 +1698,8 @@ export class QueueRepository {
     // The level can change while this send waits for the seat's lease. Under the lease, each member is admitted again with
     // its own source and urgency; only those with the first member's outcome go with this send, and the others go back
     // to their state before this claim (never marked delivered, held or failed) for their own delivery.
-    // A hosted member's trigger already accepted the ring for exactly these intents (tagged below): recovery doesn't ring
-    // it again, since each ring can start a run. Any other wake rings: a new intent, or one claimed but never sent.
+    // A hosted member's trigger already accepted the ring for exactly these intents, or may have before it stopped
+    // answering (tagged below): recovery doesn't ring it again, since each ring can start a run. Any other wake rings: a new intent, or one claimed but never sent.
     if (group.every((entry) => entry.tags?.includes(HOSTED_WAKE_ACCEPTED_TAG))) {
       for (const entry of group) this.outbox.finalizeDelivery(entry.outboxId, "indeterminate");
       return "indeterminate";
@@ -1705,8 +1740,8 @@ export class QueueRepository {
       const wakeEvent = this.db.transaction(() => {
         this.recordNudgeAttempt(qitemId, nudgeResult);
         this.outbox!.finalizeDelivery(intent.outboxId, finalState);
-        // The acceptance belongs to this intent, so recovery can tell this wake already rang.
-        if (outcome.nudgeResult.startsWith("wake-accepted:")) {
+        // The acceptance (or a ring that may have arrived) belongs to this intent, so recovery can tell this wake already rang.
+        if (hostedRingMayHaveArrived(outcome.nudgeResult)) {
           this.db.prepare(`UPDATE outbox_entries SET tags = json_insert(COALESCE(tags, '[]'), '$[#]', ?)
             WHERE outbox_id = ? AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(outbox_entries.tags, '[]')) WHERE value = ?)`)
             .run(HOSTED_WAKE_ACCEPTED_TAG, intent.outboxId, HOSTED_WAKE_ACCEPTED_TAG);
@@ -1780,11 +1815,12 @@ export class QueueRepository {
   /** Recover current notifications once per pass. A snapshot horizon and seek cursor
    * prevent new arrivals or persistent failures from making this pass unbounded. `stopRequested` is checked before
    * each delivery: a stopped pass leaves the notifications it has not attempted as they are, for the next start.
-   * A notification already tried for a seat that still has no session or transport would only fail again, so it isn't
-   * claimed, alone or in a group: it stays as it is, its row stays owed, and the pass reports it as waiting. The
-   * receiver is read at each claim, so a seat that starts during the pass gets its later notifications. */
+   * A notification already tried for a seat that still has no session or transport, or that is a bound terminal seat,
+   * would only fail again, so it isn't claimed, alone or in a group: it stays as it is, its row stays owed, and the
+   * pass reports it as waiting. The receiver is read at each claim, so a seat that starts during the pass gets its
+   * later notifications. */
   async drainPendingWakeIntents(opts?: { stopRequested?: () => boolean }): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number;
-    /** Present only when a notification waits for a seat with no session or transport. */
+    /** Present only when a notification waits for a seat with no receiver (no session or transport, or a terminal). */
     waiting?: { notifications: number; seats: string[] } }> {
     const tally: { delivered: number; indeterminate: number; failed: number; retained: number;
       waiting?: { notifications: number; seats: string[] } } = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
@@ -1838,16 +1874,20 @@ export class QueueRepository {
     return result();
   }
 
-  /** Positive evidence only that a wake can't land now: no transport can hold the address, or the newest session
-   * under the name the transport sends to has stopped (exited, or detached because its tmux session is gone). A
-   * canonical address resolves to its current physical session first. Anything unknown may have a receiver. */
+  /** Positive evidence only that a wake can't land now: no transport can hold the address, the address is a bound
+   * terminal seat (a shell or a TUI: performWakeSend types nothing there, so a retry can only fail the same way and
+   * move the row's last nudge time, which the stuck sweep reads as new evidence; #2939), or the newest session under
+   * the name the transport sends to has stopped (exited, or detached because its tmux session is gone). A canonical
+   * address resolves to its current physical session first. Anything unknown may have a receiver. */
   private wakeHasNoReceiver(destinationSession: string): boolean {
     try {
       const destClass = this.classifyDestinationOf(destinationSession).class;
       if (destClass === "unroutable") return true;
       if (destClass !== "pane-bound") return false;
+      const physical = physicalSessionName(this.db, destinationSession);
+      if (isBoundTerminalSeat(this.db, destinationSession) || isBoundTerminalSeat(this.db, physical)) return true;
       const newest = this.db.prepare("SELECT status FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
-        .get(physicalSessionName(this.db, destinationSession)) as { status: string } | undefined;
+        .get(physical) as { status: string } | undefined;
       return newest?.status === "exited" || newest?.status === "detached";
     } catch {
       return false;
@@ -2077,7 +2117,7 @@ export class QueueRepository {
     // command line (it carries the row's summary), and nothing there can claim the row. So nothing
     // is typed; the row stays queued and visible. `failed:` keeps it on the wake ladder, whose
     // retries come back here and type nothing before it escalates.
-    if (isBoundTerminalSeat(this.db, destinationSession)) {
+    if (isBoundTerminalSeat(this.db, destinationSession) || isBoundTerminalSeat(this.db, physicalSessionName(this.db, destinationSession))) {
       return {
         classified: "failed",
         nudgeResult: `failed:terminal-seat: '${destinationSession}' is a terminal seat (runtime: terminal), not an agent, so no wake was typed into it and nothing there can claim this row. The row stays queued; route it to an agent seat.`,
@@ -2183,6 +2223,51 @@ export class QueueRepository {
       .map((row) => ({ qitemId: row.qitem_id, body: row.body ?? "" }));
   }
 
+  /** Every answer returned to this ask, oldest first, under getHumanAnswer's rule for whoever answered: an ask to a person
+   *  (never an update), a row back to the asker linked by reply_to, from someone who may answer it (never a shared
+   *  channel). An answer row carries the human-answer tag; the unnamed primary user's own is one. An untagged Slack reply
+   *  (from before that tag) counts only when it came before the ask's first tagged answer (in this read's order) and no
+   *  later than the ask's first close, even if it was reopened since, and only each person's first: after an answer or a
+   *  close, a reply on the thread is correspondence. Each gives who, when,
+   *  their words without the footer, the park it answered (null for the ask itself or an older Slack reply), and the
+   *  identity recorded when the answer row was created. An ask answered in place (a runner's permission request, a host
+   *  pairing request) has no answer row: its answer is on the ask. */
+  answersForAsk(askId: string): Array<{ qitemId: string; by: string; at: string; text: string; episode: string | null;
+    recordedIdentity: { provenance: string | null; principal: string | null } | null }> {
+    const ask = this.getById(askId);
+    if (!this.hasReplyToColumn || !ask || ask.humanIntent === "update" || !this.isPersonAddress(ask.destinationSession)) return [];
+    const candidates = (this.db.prepare(`SELECT qitem_id, source_session, ts_created,
+        EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer') AS tagged
+      FROM queue_items
+      WHERE reply_to = ? AND destination_session = ?
+        AND (EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')
+          OR (qitem_id LIKE 'qitem-slack-inbound-%' AND COALESCE(summary, '') NOT LIKE '[Recovered after gap] %'))
+      ORDER BY ts_created, rowid`).all(askId, ask.sourceSession) as Array<{ qitem_id: string; source_session: string; ts_created: string; tagged: number }>)
+      .filter((row) => !this.isSharedChannel(row.source_session)
+        && (this.answersAsk(ask, row.source_session) || (row.tagged === 1 && row.source_session === UNATTRIBUTED_ACTOR)));
+    const firstTagged = candidates.findIndex((row) => row.tagged === 1);
+    const history = this.transitionLog.listForQitem(askId);
+    // The ask's first close, whatever its state now: a reopen doesn't make later thread replies its answers.
+    const firstClose = history.find((transition) => !isBlockerLive(transition.state))?.ts;
+    const legacyFirst = new Set<string>();
+    const rows = candidates.filter((row, index) => row.tagged === 1 || ((firstTagged < 0 || index < firstTagged)
+      && (!firstClose || row.ts_created <= firstClose) && !legacyFirst.has(row.source_session) && !!legacyFirst.add(row.source_session)));
+    if (rows.length === 0) return [];
+    // An answer to a park's question has the ID made from that park's episode, so the episode is read back from the ID.
+    const episodes = new Map(history
+      .filter((transition) => transition.ownerNotificationKind === "human-required")
+      .map((transition) => `${askId}:${transition.transitionId}`)
+      .map((key) => [humanAnswerId(askId, key), key] as const));
+    return rows.flatMap(({ qitem_id }) => {
+      const row = this.getById(qitem_id);
+      if (!row) return [];
+      const created = this.transitionLog.listForQitem(qitem_id)[0];
+      return [{ qitemId: row.qitemId, by: row.sourceSession, at: row.tsCreated, text: humanAnswerText(row.body),
+        episode: episodes.get(row.qitemId) ?? null,
+        recordedIdentity: created ? { provenance: created.identityProvenance, principal: created.identityPrincipal } : null }];
+    });
+  }
+
   /** This person's answer to the current question of a decision parked on them, if one was returned. */
   currentEpisodeAnswer(qitemId: string, actorSession: string): QueueItem | null {
     const episode = this.currentHumanRequiredEpisode(qitemId);
@@ -2199,7 +2284,7 @@ export class QueueRepository {
     // instance. Host identity is added only at the cross-host forwarding boundary
     // (routes/queue.ts stamp-at-FORWARD), and a genuine origin triple arriving from a
     // forward is stored verbatim (never re-stamped, never stripped).
-    if (!this.validateRig(input.destinationSession)) {
+    if (!this.canRecordDestination(input.destinationSession)) {
       throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
     }
 
@@ -2310,7 +2395,7 @@ export class QueueRepository {
     destinationSession: string;
     nudge: boolean | undefined;
   } {
-    if (!this.validateRig(input.destinationSession)) {
+    if (!this.canRecordDestination(input.destinationSession)) {
       throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
     }
     const result = this.createInTransactionalContext(input);
@@ -2466,7 +2551,7 @@ export class QueueRepository {
       throw new QueueRepositoryError("invalid_human_notification", "humanAlert marks an ask to a person as alert-worthy: it needs a human destination.");
     }
     if (humanIntent === "update") {
-      throw new QueueRepositoryError("invalid_human_notification", "humanAlert marks an ask to a person as alert-worthy, and an update isn't an ask: send it without --alert; updates are notices and follow Slack's posting floor and delivery settings.");
+      throw new QueueRepositoryError("invalid_human_notification", "humanAlert marks an ask to a person as alert-worthy, and an update isn't an ask: send it without --alert; updates are notices; delivery depends on the person's connector and settings.");
     }
   }
 
@@ -2495,6 +2580,14 @@ export class QueueRepository {
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  }
+
+  /** The registered person an address names, so an ask back reaches them; null for anyone else, the unattributed
+   *  terminal actor included (a person address, but a row there asks no one; it waits on Steering and in the Feed, and OpenRig reports it as undeliverable). */
+  reachablePerson(address: string | null | undefined): string | null {
+    if (!address || address === UNATTRIBUTED_ACTOR) return null;
+    const registry = this.loadHumanRegistryFn();
+    return registry.ok ? resolveRegisteredHumanAddress(address, registry.entities) : null;
   }
 
   /** Who may answer an ask: the asked person, and any other registered person in this workspace, who's recorded as
@@ -2542,6 +2635,17 @@ export class QueueRepository {
    * with `handed_off_from` recording the chain. One atomic transaction.
    */
   async handoff(input: QueueHandoffInput): Promise<{ closed: QueueItem; created: QueueItem }> {
+    return this.handoffNow(input);
+  }
+
+  /** {@link handoff}'s whole act, synchronously: its transaction commits before this returns, and the wake is delivered
+   *  after commit without being awaited, so a synchronous caller (an answer's close path) can hand a row on. Named in
+   *  the slow-operation log, so a stall during a handoff is attributed to it. */
+  private handoffNow(input: QueueHandoffInput): { closed: QueueItem; created: QueueItem } {
+    return runSyncSite("queue.handoff", () => this.handoffWithin(input));
+  }
+
+  private handoffWithin(input: QueueHandoffInput): { closed: QueueItem; created: QueueItem } {
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -2555,7 +2659,7 @@ export class QueueRepository {
         `qitem ${input.qitemId} is already in terminal state ${source.state}`
       );
     }
-    if (!this.validateRig(input.toSession)) {
+    if (!this.canRecordDestination(input.toSession)) {
       throw destinationValidationError("to_session", input.toSession, this.loadHumanRegistryFn);
     }
     this.assertHumanAlert(input.humanAlert, input.toSession);
@@ -2704,8 +2808,10 @@ export class QueueRepository {
     });
 
     txn();
+    // Inside a caller's notify envelope (an answer's close path), the events join it; otherwise they're notified now.
     for (const e of events) {
-      this.eventBus.notifySubscribers(e.payload as import("./types.js").PersistedEvent);
+      const event = e.payload as import("./types.js").PersistedEvent;
+      if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
     }
 
     // Closure and successor are persisted. Delivery is separate and recoverable
@@ -2739,7 +2845,7 @@ export class QueueRepository {
         `qitem ${input.qitemId} is already in terminal state ${source.state}`
       );
     }
-    if (!this.validateRig(input.toSession)) {
+    if (!this.canRecordDestination(input.toSession)) {
       throw destinationValidationError("to_session", input.toSession, this.loadHumanRegistryFn);
     }
     this.assertHumanAlert(input.humanAlert, input.toSession);
@@ -3353,6 +3459,7 @@ export class QueueRepository {
     }
     const hasNote = typeof input.transitionNote === "string" && input.transitionNote.trim().length > 0;
     const hasValidSummary = typeof input.summary === "string" && input.summary.trim().length > 0;
+    const hasValidEvidenceRef = typeof input.evidenceRef === "string" && input.evidenceRef.trim().length > 0;
     const isGuardedTerminal = (["done", "canceled", "handed-off"] as const).includes(
       qitem.state as "done" | "canceled" | "handed-off",
     );
@@ -3562,35 +3669,15 @@ export class QueueRepository {
       throw new QueueRepositoryError("invalid_human_notification", "An informational delivery cannot become a human approval park; author a separate decision request.");
     }
     // A park on a person by any address (a legacy human seat, or a registered person's own address or alias) keeps the
-    // summary and evidence it names. validateHumanPark still requires them only for the legacy human-seat form.
+    // summary and evidence it names, or the row's own where it names a blank one. validateHumanPark still requires them
+    // only for the legacy human-seat form.
     const isHumanPark = input.state === "blocked" && !!effectiveBlockedOn && this.isPersonAddress(effectiveBlockedOn);
-    // A done close can also store the artifact the work produced, so the finished row carries its link.
-    const isDoneClose = input.state === "done";
+    // OPR.0.5.1 slice-51-06 D2 refused the whole transition when summary/evidence_ref came with a state it
+    // didn't store them for, so finished work could stay pending over optional metadata. A state change now
+    // stores them (below), except a blank value; the route reports what wasn't stored.
 
-    // OPR.0.5.1 slice-51-06 D2 — summary/evidence_ref are persist-able ONLY at a human-seat park
-    // (see the FR-6 note below). Silently ignoring them on any other transition is a data-loss trap
-    // (the operator believes the metadata was saved). HARD-REJECT before ANY UPDATE/log/event so the
-    // caller learns immediately and nothing is half-applied. null/undefined = absent (allowed);
-    // empty string = present (a deliberate value → rejected on a non-park transition).
-    if (!isHumanPark) {
-      const invalidFields: Array<"summary" | "evidenceRef"> = [];
-      if (input.summary != null) invalidFields.push("summary");
-      if (input.evidenceRef != null && !isDoneClose) invalidFields.push("evidenceRef");
-      if (invalidFields.length > 0) {
-        const flags = invalidFields.map((f) => (f === "summary" ? "--summary" : "--evidence-ref")).join(" / ");
-        const where = invalidFields.map((f) => f === "summary"
-          ? "summary persists on a human-seat park, or on its own (rig queue update <id> --summary … with no --state)"
-          : "evidenceRef persists on a human-seat park or a done close").join("; ");
-        throw new QueueRepositoryError(
-          "summary_evidence_not_persistable",
-          `${where}; the '${input.state}' transition cannot store ${invalidFields.length > 1 ? "them" : "it"}. Remove ${flags}, or use one of those.`,
-          { invalidFields },
-        );
-      }
-    }
-
-    // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE, beside the reference
-    // reject above: an incoherent field must never silently persist (worse than a drop —
+    // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE: an incoherent
+    // field must never silently persist (worse than a drop —
     // the COALESCE below would write it). Admits-map, derived from LIVE schema use:
     //   closure_reason/closure_target → state "done", OR the PARK-RECORD form
     //     (state "blocked" with closureReason "blocked_on" — the workflow gate/park
@@ -3668,8 +3755,8 @@ export class QueueRepository {
     let effectiveSummary = qitem.summary;
     let effectiveEvidenceRef = qitem.evidenceRef;
     if (isHumanPark) {
-      effectiveSummary = input.summary ?? qitem.summary;
-      effectiveEvidenceRef = input.evidenceRef ?? qitem.evidenceRef;
+      effectiveSummary = hasValidSummary ? input.summary! : qitem.summary;
+      effectiveEvidenceRef = hasValidEvidenceRef ? input.evidenceRef! : qitem.evidenceRef;
       const park = validateHumanPark({
         blockedOn: effectiveBlockedOn,
         summary: effectiveSummary,
@@ -3797,15 +3884,13 @@ export class QueueRepository {
         input.qitemId
       );
 
-    // FR-6: park-time summary/evidence_ref are PERSISTED onto the existing
-    // item (not merely validated-then-dropped) — visible to the attention
-    // query and to Packet 2. A done close writes evidence_ref the same way.
-    if (isHumanPark) {
-      this.persistSummary(input.qitemId, input.summary ?? null);
-      this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
-    } else if (isDoneClose) {
-      this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
-    }
+    // FR-6: summary/evidence_ref are PERSISTED onto the existing item (not
+    // merely validated-then-dropped) — visible to the attention query, to
+    // Packet 2 and to every reader of the row. Only non-blank values are
+    // stored, on a park on a person too: a blank one would erase the row's
+    // subject or evidence link, and the route reports it as not stored.
+    if (hasValidSummary) this.persistSummary(input.qitemId, input.summary!);
+    if (hasValidEvidenceRef) this.persistEvidenceRef(input.qitemId, input.evidenceRef!);
 
     const transition = this.transitionLog.append({
       qitemId: input.qitemId,
@@ -3889,9 +3974,9 @@ export class QueueRepository {
       closureReason: validation.closureReason ?? null,
       closureTarget: validation.closureTarget ?? null,
       actorSession: input.actorSession,
-      // FR-1 × FR-6: the event carries the summary as of THIS mutation
+      // FR-1 × FR-6: the event carries the summary as stored by THIS mutation
       // (park-time summary included) so surfaces refresh without a fetch.
-      summary: effectiveSummary ?? null,
+      summary: this.getById(input.qitemId)?.summary ?? null,
     });
     return { persistedEvent, persistedEvents: [...dependentEvents, persistedEvent] };
   }
@@ -4175,6 +4260,8 @@ export class QueueRepository {
    * button set is already final; its resolve continuation must not overwrite those answers.
    */
   resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean {
+    const passed = this.passRunnerAnswerToDecider(input);
+    if (passed !== null) return passed;
     let mine = true;
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
@@ -4198,6 +4285,131 @@ export class QueueRepository {
       if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
     }
     return mine;
+  }
+
+  /** A runner's permission ask its person answered, where an agent can decide while the runner waits on it: their answer
+   *  (a choice, or their words) stays on the ask, and the ask is handed to that agent to decide, never closed with it. The
+   *  runner reads pending until the agent decides (`rig seat decide-permission`), or the person uses a direct control.
+   *  Null when this doesn't apply (no decider, or another person's answer settles it), and the ask closes as before. */
+  private passRunnerAnswerToDecider(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean | null {
+    const item = this.getById(input.qitemId);
+    if (!this.permissionDecider || item?.state !== "pending" || !runnerPermissionOrigin(item) || item.humanIntent === "update"
+      || (!this.answersAsk(item, input.actorSession) && !input.primaryUser) || !this.isPersonAddress(item.destinationSession)
+      || this.committedAnswerFromAnother(item.qitemId, input.actorSession)) return null;
+    // The requester is the runner seat that asked: the first row of the request, whoever handed it on since.
+    let root: QueueItem = item;
+    for (let hops = 0; root.handedOffFrom && hops < 10; hops++) {
+      const before = this.getById(root.handedOffFrom);
+      if (!before || !runnerPermissionOrigin(before)) break;
+      root = before;
+    }
+    let chosen: { session: string; describe?: string } | null;
+    try { chosen = this.permissionDecider(item, root.sourceSession); } catch { chosen = null; }
+    const decider = chosen?.session ?? null;
+    if (!decider || !this.validateRig(decider)) return this.keepRunnerAnswer(item, input.actorSession, input.decision, root.sourceSession);
+    this.db.transaction(() => { this.placeTypedReply(item, input.decision); })();
+    const answered = this.getById(item.qitemId) ?? item;
+    const question = (this.permissionQuestionsFor(answered) ?? [])[0];
+    const answer = question ? answered.humanAnswers?.[question.id] : undefined;
+    const said = typeof answer === "string" ? `chose "${question?.options.find((o) => o.id === answer)?.label ?? answer}" (option ${answer})`
+      : answer && typeof answer === "object" && "text" in answer ? `wrote "${String(answer.text).trim()}"`
+      : "answered without a choice or words";
+    const person = input.actorSession;
+    // Who to ask back: the person who answered when OpenRig can name them, else the person the request went to.
+    const unattributed = person === UNATTRIBUTED_ACTOR;
+    const askBack = (unattributed ? null : this.reachablePerson(person)) ?? this.reachablePerson(item.destinationSession);
+    // A handoff that fails after persisting its events rolls them back with its savepoint: discardOnThrow takes their
+    // tokens out of the caller's notify envelope too, so the kept answer below still commits.
+    try { this.eventBus.discardOnThrow(() => this.handoffNow({
+      qitemId: item.qitemId, fromSession: person, toSession: decider,
+      summary: `Decide: ${item.summary ?? "a runner's permission request"} (${person} answered)`,
+      transitionNote: `runner-permission-answer-passed: ${person}'s answer goes to ${decider}, the receiving agent, to decide while the runner waits`,
+      body: [
+        `${person} answered ${item.sourceSession}'s permission request ${item.qitemId}: they ${said}. Its runner is waiting on your decision: nothing is permitted or refused until you decide.`,
+        "",
+        `- **Question:** ${question?.question ?? "Allow this tool call?"}`,
+        "- **Options:**",
+        ...(question?.options ?? []).map((o) => `  - ${o.label} (${o.id})`),
+        "",
+        `Their whole answer is recorded on the request: rig queue show ${answered.qitemId} --full.`,
+        `Decide with: rig seat decide-permission ${item.qitemId} --option <id> --reason "<why>"`,
+        `- **Who's who:** ${root.sourceSession} is the agent asking to run the tool; ${item.destinationSession} is the person it asked; ${person} answered.`,
+        ...(unattributed ? [terminalAnswerMeaning(UNATTRIBUTED_ACTOR)] : []),
+        "Act on a clear answer at once: a clear yes or an allow click is the allow option, a clear no or a reject click the reject option. Don't ask them to confirm a clear answer.",
+        `${askBackRoute(askBack, UNATTRIBUTED_ACTOR, `request ${item.qitemId}`)} Then decide on what they answer.`,
+        "Until it's decided (by you, or by anyone with that command), the runner keeps waiting, with no timeout that refuses it; if its turn ends first, nothing is sent.",
+        RUNNER_CLOSE_WAITS,
+      ].join("\n"),
+    })); } catch (error) {
+      // Kept, and committed with the answer's own write (a throw here would roll it back): the request stays open, and
+      // the person is told it couldn't be passed on. Never a default permit.
+      console.error(`[queue] a runner permission answer couldn't be handed to ${decider}; it's kept and the request stays open`, error);
+      return this.keepRunnerAnswer(item, person, input.decision, root.sourceSession, decider);
+    }
+    // The person learns who decides and in what recorded state, so a delay is shown: one update per request.
+    const toldId = `qitem-runner-permission-passed-${item.qitemId.replace(/^qitem-runner-permission-/, "").replace(/^qitem-/, "")}`;
+    setImmediate(() => {
+      // The request the person answered is what they'd judge (convention C3: a note to a person names its evidence).
+      void this.create({ qitemId: toldId, sourceSession: root.sourceSession, destinationSession: person, humanIntent: "update",
+        evidenceRef: `rig queue show ${root.qitemId}`,
+        summary: `Your answer went to ${decider} to decide; ${root.sourceSession} is waiting`,
+        body: [`Your answer to ${root.sourceSession}'s permission request ${root.qitemId} went to ${decider}, which decides it while ${root.sourceSession} waits. Nothing runs until it decides.`,
+          ...(chosen?.describe ? [`Receiving agent: ${chosen.describe}`] : []),
+          `To decide directly instead: rig seat decide-permission ${root.qitemId} --option <id>.`].join("\n") })
+        .catch((error) => console.error(`[queue] the update for ${item.qitemId}'s decider wasn't written`, error));
+    });
+    return true;
+  }
+
+  /** An agent's decision on a runner's permission request, on the row that holds it now: the chosen option under its
+   *  question, and the row closed done, in one transaction. False when the row isn't open any more. */
+  recordPermissionDecision(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; transitionNote: string }): boolean {
+    const result = this.db.transaction(() => {
+      const item = this.getById(input.qitemId);
+      if (!item) return null;
+      const answers: HumanAnswers = { ...item.humanAnswers, [input.questionId]: input.optionId };
+      // A row closed without a decision (an agent's or a person's ordinary close): the decision is recorded on it, with
+      // its own transition, over any kept answer (which the transition names); the runner's next read takes it.
+      // (The caller read it first: a row already decided explicitly, withdrawn or stale never reaches here.)
+      if (item.state === "done" || item.state === "failed") {
+        this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
+        this.transitionLog.append({ qitemId: item.qitemId, state: item.state, actorSession: input.actorSession, transitionNote: input.transitionNote });
+        // The row's state doesn't change, but its decision does: a runner waiting on this request reads it now, and
+        // Steering refreshes.
+        return { persistedEvents: [this.eventBus.persistWithinTransaction({ type: "queue.updated", qitemId: item.qitemId,
+          fromState: item.state, toState: item.state, closureReason: null, closureTarget: null,
+          actorSession: input.actorSession, summary: item.summary ?? null })] };
+      }
+      if (item.state !== "pending" && item.state !== "in-progress" && item.state !== "blocked") return null;
+      this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
+      return this.updateInTransactionalContext({ qitemId: item.qitemId, actorSession: input.actorSession, state: "done",
+        closureReason: "no-follow-on", transitionNote: input.transitionNote });
+    })();
+    if (!result) return false;
+    for (const event of result.persistedEvents) {
+      if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
+    }
+    return true;
+  }
+
+  /** No agent here can read a runner permission answer before the tool runs (none is set, or the only one is the seat
+   *  asking): the person's answer, a click or words, is kept on the ask, the request stays pending, and the person is
+   *  told once that the tool hasn't run and how to decide directly. Never a default permit, never read as a refusal. */
+  private keepRunnerAnswer(item: QueueItem, person: string, decision: string, requester: string, unreachable?: string): boolean {
+    this.db.transaction(() => { this.placeTypedReply(item, decision); })();
+    const options = (this.permissionQuestionsFor(item) ?? [])[0]?.options ?? [];
+    const receiptId = `qitem-runner-permission-kept-${item.qitemId.replace(/^qitem-runner-permission-/, "")}`;
+    // After the answer's own write settles: one receipt per request (its id is the request's), told to who answered.
+    setImmediate(() => {
+      void this.create({ qitemId: receiptId, sourceSession: requester, destinationSession: person, humanIntent: "update",
+        evidenceRef: `rig queue show ${item.qitemId}`,
+        summary: `Your answer to ${requester}'s permission request is kept; the tool hasn't run`,
+        body: [`Your answer to ${requester}'s permission request ${item.qitemId} is kept, and the request is still waiting: ${unreachable ? `it couldn't be passed to ${unreachable}, the receiving agent, just now (answer again to retry)` : `no receiving agent on this host can read it before the tool runs (none is set, or the only one is ${requester} itself)`}. The tool hasn't run, and nothing was permitted or refused.`,
+          `To decide now: rig seat decide-permission ${item.qitemId} --option <id>${options.length ? ` (options: ${options.map((o) => `${o.id}, ${o.label}`).join("; ")})` : ""}. Or set up a receiving agent that isn't ${requester}: rig config set agents.operator_session <seat>@<rig>.`,
+          "If the agent's turn ends first, the tool call doesn't happen, and nothing is sent later."].join("\n") })
+        .catch((error) => console.error(`[queue] the kept-answer receipt for ${item.qitemId} wasn't written`, error));
+    });
+    return true;
   }
 
   /** Another person's committed return to this ask: its shared reply (for a park's question, `episodeKey`'s). It's the
@@ -4265,6 +4477,8 @@ export class QueueRepository {
     clickedTs?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
     if (this.closeStaleRunnerPermission(input.qitemId)) return { status: "not-applicable", reason: "state-canceled" };
+    // Set inside the transaction when this click changed the answers (a declared type, so the closure's write is seen).
+    let changed = null as { summary: string | null; answered: number } | null;
     const result = this.db.transaction((): RecordHumanAnswerResult => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
@@ -4295,8 +4509,21 @@ export class QueueRepository {
       const answers: HumanAnswers = { ...(item.humanAnswers ?? {}), [input.questionId]: input.optionId };
       this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), input.qitemId);
       const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
+      if (item.humanAnswers?.[input.questionId] !== input.optionId) {
+        changed = { summary: item.summary ?? null, answered: item.humanQuestions.length - unansweredQuestions(item.humanQuestions, answers).length };
+      }
       return { status: "recorded" as const, answers, complete, questions: item.humanQuestions };
     })();
+    // The click is on the ask before anyone hears of it; a failed event never takes it back or holds up its return.
+    if (changed && result.status === "recorded") {
+      try {
+        this.eventBus.emit({ type: "queue.answer_recorded", qitemId: input.qitemId, actorSession: input.actorSession,
+          questionId: input.questionId, answered: changed.answered, questions: result.questions.length,
+          complete: result.complete, summary: changed.summary });
+      } catch (error) {
+        console.warn(`[queue] ${input.qitemId}'s recorded answer has no event`, error);
+      }
+    }
     // A pending ask's interrupted close finishes here, as theirs; a park resumes with it through the reply resolver.
     if (result.status === "not-applicable" && result.answeredBy) {
       this.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision: "", primaryUser: input.primaryUser });
@@ -4316,17 +4543,20 @@ export class QueueRepository {
   }
 
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
-  /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions) and its decision state
-   *  (open, blocked or terminal; who it's addressed to or parked on; its answers, a decision made for them, the current park,
-   *  and the replies returned). A label, a wake, a claim or a note on a park doesn't change it; a new park does, on any blocker. */
+  /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions, and the evidence it
+   *  points to, when it has any) and its decision state (open, blocked or terminal; who it's addressed to or parked on; its
+   *  answers, a decision made for them, the current park, and the replies returned). A label, a wake, a claim or a note on a
+   *  park doesn't change it; a new park does, on any blocker, and so does a new evidence pointer. A row with no evidence
+   *  keeps the revision it had before evidence counted. */
   decisionRevision(item: QueueItem, opts?: DecisionRevisionOptions): string {
     const phase = item.state === "blocked" ? "blocked" : item.state === "pending" || item.state === "in-progress" ? "open" : item.state;
     const excludeOp =
       typeof opts?.excludeOperationReply === "string" && opts.excludeOperationReply.length > 0
         ? mcOperationTag(opts.excludeOperationReply)
         : null;
+    // Named only when slow: it runs on every row read and on each row of the attention read.
     const replies = this.hasReplyToColumn
-      ? (excludeOp
+      ? runSyncSiteWhenSlow("queue.decision_revision.replies", () => excludeOp
           ? (this.db
               .prepare(
                 "SELECT qitem_id FROM queue_items WHERE reply_to = ? AND NOT (tags IS NOT NULL AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)) ORDER BY ts_created, rowid",
@@ -4344,7 +4574,8 @@ export class QueueRepository {
       if (transitions[i]!.state === "blocked" && transitions[i - 1]?.state !== "blocked") parkEntry = transitions[i]!.transitionId;
     }
     const decision = [item.body, item.humanIntent ?? null, item.humanQuestions ?? null, phase, item.destinationSession, item.blockedOn,
-      item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies];
+      item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies,
+      ...(item.evidenceRef ? [item.evidenceRef] : [])];
     return `dr1-${createHash("sha256").update(JSON.stringify(decision)).digest("hex").slice(0, 24)}`;
   }
 
@@ -4550,7 +4781,9 @@ export class QueueRepository {
     return rows.map((row) => this.rowToItem(row));
   }
 
-  getById(qitemId: string): QueueItem | null {
+  /** opts.waiting: false skips the row's waiting view (the stuck sweep's own reads); the default builds it. Per call:
+   *  it never changes what another read returns. */
+  getById(qitemId: string, opts?: { waiting?: boolean }): QueueItem | null {
     const row = this.db
       .prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
       .get(qitemId) as QueueItemRow | undefined;
@@ -4558,7 +4791,7 @@ export class QueueRepository {
     // OPR.0.5.6.14 — the row FACE answers "did it reach them" in one read for
     // gateway-routed rows; null for pane-bound (absence-governed, no key lies).
     // The same projection as a listing's, for one row: one read of its owner notifications and ledger.
-    const item = this.projectRows([row], true)[0]!;
+    const item = this.projectRows([row], opts?.waiting !== false)[0]!;
     return {
       ...item,
       ...(item.replyTo ? { replyToFallback: this.replyToFallbackFor(item.qitemId) } : {}),
@@ -4574,6 +4807,17 @@ export class QueueRepository {
       if (t.actorSession !== REPLY_TO_CHOICE_ACTOR || t.identityProvenance !== null) continue;
       const choice = parseReplyToChoice(t.transitionNote ?? "");
       if (choice) return choice;
+    }
+    return null;
+  }
+
+  /** #2990 — the thread an inbound reply actually arrived in, without gate correlation.
+   *  Only an in-process daemon write counts, with the same trust rule as replyToChoiceFor. */
+  arrivalThreadFor(qitemId: string): { threadTs: string; channel: string } | null {
+    for (const t of this.transitionLog.listForQitem(qitemId).reverse()) {
+      if (t.actorSession !== REPLY_TO_CHOICE_ACTOR || t.identityProvenance !== null) continue;
+      const arrival = parseArrivalThread(t.transitionNote ?? "");
+      if (arrival) return arrival;
     }
     return null;
   }
@@ -4650,10 +4894,7 @@ export class QueueRepository {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];
-    if (opts?.tag) {
-      conditions.push("EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)");
-      params.push(opts.tag);
-    }
+    pushExactTagFilters(opts?.tag, conditions, params);
 
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -4800,6 +5041,7 @@ export class QueueRepository {
   listAttention(opts?: {
     limit?: number;
     state?: QueueState | QueueState[];
+    tag?: string | string[];
     destinationSession?: string;
     sourceSession?: string;
     targetRepo?: string;
@@ -4848,6 +5090,7 @@ export class QueueRepository {
     ];
     if (this.hasHumanIntentColumn) conditions.push("COALESCE(human_intent, 'decision') <> 'update'");
     const params: unknown[] = [...states];
+    pushExactTagFilters(opts?.tag, conditions, params);
     if (opts?.destinationSession) {
       const addresses = this.resolveSessionAddresses(opts.destinationSession);
       conditions.push(`destination_session IN (${addresses.map(() => "?").join(",")})`);
@@ -4912,7 +5155,7 @@ export class QueueRepository {
       params.push(opts.limit);
     }
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
-    const items = rows.map((r) => this.rowToItem(r, !opts?.compact));
+    const items = rows.map((r) => this.rowToItem(r, !opts?.compact && opts?.waiting !== false));
     return opts?.compact ? items.map(compactRow) : items;
   }
 
@@ -5018,7 +5261,7 @@ export class QueueRepository {
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     const out: QueueItem[] = [];
     for (const r of rows) {
-      const item = this.rowToItem(r, !opts?.compact);
+      const item = this.rowToItem(r, !opts?.compact && opts?.waiting !== false);
       const ledger = this.deliveryOutcomeFor(item.qitemId);
       if (ledger?.outcome === "posted" || ledger?.outcome === "accepted") continue; // the receipt wins, always
       if (ledger?.outcome === "transport-failed") {
@@ -5049,8 +5292,8 @@ export class QueueRepository {
     return opts?.compact ? out.map(compactRow) : out;
   }
 
-  /** Read the same address-admission predicate used by queue writes before choosing
-   *  a recovery owner. Admission does not require a live seat or terminal binding. */
+  /** Existing address preflight for choosing a receiver or recovery owner.
+   *  Recordability is separate and does not establish that somebody can receive the work. */
   acceptsDestination(destinationSession: string): boolean {
     return this.validateRig(destinationSession);
   }
@@ -5132,6 +5375,24 @@ export class QueueRepository {
       }
       this.inboxCheckInWriteFailed = true;
     }
+  }
+
+  /** Each hosted member on this host with its check-in status: its stated cadence against its own inbox reads. A status
+   *  only; nothing here changes how work reaches it. */
+  hostedMemberCheckIns(now: Date = new Date()): Array<{ seat: string; rung: boolean } & MemberCheckIn> {
+    return this.hostedMembersFn().map((m) => ({ seat: m.seat, rung: m.wake !== undefined,
+      ...memberCheckInStatus({ checkInMinutes: m.check_in_minutes, onRequest: m.check_in_on_request, cadenceProblem: m.check_in_problem,
+        checkIn: this.lastInboxCheckIn(m.seat), now }) }));
+  }
+
+  /** One member's check-in status, as `hostedMemberCheckIns` gives it. A seat the rosters don't list here (or can't be
+   *  read for) states no cadence, so it reads by its check-ins alone. */
+  hostedMemberCheckIn(seat: string, now: Date = new Date()): MemberCheckIn {
+    let member: RosterMember | undefined;
+    try { member = this.hostedMembersFn().find((m) => this.isSameSession(m.seat, seat)); } catch { member = undefined; }
+    // The roster's spelling of the seat, as the list read uses, so both read the same check-ins.
+    return memberCheckInStatus({ checkInMinutes: member?.check_in_minutes, onRequest: member?.check_in_on_request,
+      cadenceProblem: member?.check_in_problem, checkIn: this.lastInboxCheckIn(member?.seat ?? seat), now });
   }
 
   /** This session's latest recorded check-in under any of its names. */
@@ -5704,7 +5965,7 @@ export class QueueRepository {
    *  their qitem blockers' last meaningful transitions too. */
   private listingReads(rows: QueueItemRow[], includeWaiting: boolean): ListingReads {
     const ids = rows.map((r) => r.qitem_id);
-    if (includeWaiting) for (const r of rows) if (r.blocked_on?.startsWith("qitem-")) ids.push(r.blocked_on);
+    if (includeWaiting) for (const r of rows) if (r.blocked_on) ids.push(r.blocked_on);
     // Each owner's activity once per listing: a row and its waiting view (and every other row to that owner) read the
     // same seat state. ownerActivity reads a failure as null, so one session's failure stays that session's.
     const activities = new Map<string, ReturnType<WaitingActivityReader>>();

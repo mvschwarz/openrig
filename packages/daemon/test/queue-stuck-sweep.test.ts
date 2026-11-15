@@ -1394,7 +1394,10 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     // Issue step 3: the source is excluded from candidates, and the resolution pass used
     // to read that exclusion as "condition resolved" and close the finding as done /
     // no-follow-on. Suppression must leave the finding open; delivery evidence closes it.
-    await runSweep();
+    const suppressed = await runSweep();
+    // #2939: the pass reports no action on it, but the finding is still open, and healthz says so
+    expect(suppressed.result.findings).toEqual([]);
+    expect(suppressed.status.snapshot()).toMatchObject({ findingsRouted: 0, findingsOpen: 1 });
     const after = await findingsFor(row.qitemId);
     expect(after).toHaveLength(1);
     expect(repo.getById(after[0]!.qitemId)?.state).toBe("pending");
@@ -1762,6 +1765,36 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
     await runSweep();
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it.each(["", ".", ",", ";", ":", ")"])("CUSTODY PUNCTUATION: a closing note accepts the exact target followed by %j", async (punctuation) => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target}${punctuation} registered-host read confirmed the successor` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it.each(["x.", ".other.", ":123)"])("CUSTODY PUNCTUATION: extra target characters %j do not verify a prefix", async (suffix) => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target}${suffix} registered-host read confirmed another successor` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("CUSTODY PUNCTUATION: a shortened target is not an exact target", async () => {
+    const row = await mkRow();
+    const target = "qitem-20990101000000-punctuation@remote-host";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done",
+      closureReason: "handed_off_to", closureTarget: target,
+      transitionNote: `custody-verified: ${target.slice(0, -1)}. checked elsewhere` });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
   it("DISPOSITION CLOSES THE OPEN FINDING: verification landing after the finding minted auto-closes it on the next sweep, and the finding taught the recipe", async () => {

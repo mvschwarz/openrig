@@ -10,7 +10,9 @@
 >   runner is qualified beyond that.
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
-> - **Unchanged:** plain community presets and the built-in runtimes (Claude Code, Codex, Pi, OMP, terminal).
+> - **Current source:** per-launch credentials for hosted Pi, Pi-RPC presets and declared community runners (section 4).
+>   This credential does not qualify new native input or cancellation behavior.
+> - **Unchanged:** plain community presets and the other built-in runtimes (Claude Code, Codex, OMP, terminal).
 >
 > **What has run natively, in 0.7.8's release testing, against a Claude Haiku model:**
 > - **dsh-seat 0.3.0**, an outside runner for dsh 0.2.1-rc.2 over ACP: launch and first input, useful queue work, a
@@ -127,6 +129,29 @@ immediately before the preset's native command, after OpenRig's launcher assignm
 
 ## 4. Activity: report turn boundaries
 
+Managed hosted Pi, Pi-RPC presets and declared community runners can receive an actual-launch credential in
+`OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`. Keep this credential in the runner's own
+process; remove it from the native agent and tool environment. It is delivered through tmux's private environment,
+never as a literal launch argument or launch-result field. A report that supplies `runId` requires this bound
+credential; knowing a generation or the install token does not supply run authority.
+
+Issuing or delivering this optional credential never blocks an otherwise supported launch or restore. If the launch
+anchor, PID, generation or private credential channel is unavailable, the existing unbound install-token path remains;
+that path adds no new run-authority claim and is not attributed to a selected run. A refused bound report stays
+refused: it is never silently retried with the install token. If native dispatch already occurred before activation
+failed, Core preserves the dispatched outcome and does not replay input; cleanup addresses only that launch's grant.
+Unreadable observations cannot revoke a grant. Confirmed exit/replacement or intentional lifecycle cleanup still can.
+
+Core activates a pending credential after dispatch against its selected session, pane and recorded runner. A staged
+successor waits for the existing binding cutover; pending posts receive `activity_grant_pending` and must retry.
+An unreadable binding is `activity_grant_unverified` (409, retryable): it could not be verified now, not proven stale.
+Nothing is recorded and the grant is retained; retry when its binding can be checked again.
+Failed launches revoke their own credential. Relaunch replaces the active run; an explicit no-launch adoption can
+retain it only with the original concrete pane/process evidence and an adoption-only tenure continuation. These
+checks bind a runner's reports to its launch; they do not independently verify its claimed native identity. Existing
+host hooks, contained guest grants and install-token Pi usage keep their legacy behavior. Pi usage also accepts a
+current bound Pi credential. No native input channel or cancellation capability is implied by this credential.
+
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
 - **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to
   `127.0.0.1`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`, or else from `$OPENRIG_HOME/activity-endpoint.json`.
@@ -241,8 +266,15 @@ permission or input handling in existing built-in runtimes or require every poss
 
 - **On `/abort` or Ctrl-C:** send the agent's cancel (for ACP, the `session/cancel` notification, which has no reply),
   and record when you sent it.
-  - A person cancels by typing `/abort` in the seat's pane. A `/abort` sent with `rig send` arrives inside a From/To
-    envelope, so it's an ordinary prompt.
+  - **Sending it:** a person types `/abort` in the seat's pane. From another seat or a script,
+    `rig send <seat> "/abort" --raw` pastes exactly `/abort`, with no From/To envelope, and presses Enter, so a runner
+    that follows section 5 gets the control. 0.7.8's native runs typed it in the pane; a raw send hasn't been run
+    natively. An ordinary `rig send` wraps its text in a From/To envelope, so there `/abort` is an ordinary prompt.
+  - **Not while the seat needs input:** a raw send is still refused while the seat reads needs input
+    (`target_needs_input`), for example while the runner holds a permission request for a person (section 7). Type
+    `/abort` in the pane then.
+  - **A sent `/abort` is a request.** A typed control can't name the turn it was meant for: the runner cancels whatever
+    turn is running when it reads it. Whether a turn was cancelled is the runner's `Stop` / `cancelled` below.
 - **Report "cancelled" only when the agent says so:** for ACP, when `session/prompt` returns `stopReason: "cancelled"`.
   Then post `Stop` / `cancelled`.
 - **Whether the provider stopped work or spend is unknown.** Don't claim it.
@@ -298,8 +330,30 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 | replies with just a no ("no", "deny", "reject", "stop" …), or denies it in the Feed | the agent's reject (`reject_once`, else `reject_always`), or, with no reject option, cancelled. A person's no is never a grant |
 | routes or hands it to another person | the ask waits for that person, who gets the same options; their answer counts as if they'd been asked. The handoff itself never permits |
 | routes or hands it to an agent seat | that seat gets no options. The request waits until that row is closed, by the seat or a person. Closed as done without a choice (including a drop), or as failed, is no answer, so it's permitted. Closed as denied (the Feed's deny, `--closure-reason denied`, or the state `denied`) is a no. A row set to the state `canceled` cancels the request, and a further handoff is followed; a person it reaches gets the same options. Or the request waits until the agent's turn ends |
-| closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow, and OpenRig records the permit (below) |
+| closes it with no answer at all (a drop) | no answer, so the default applies: **permitted** with the agent's allow, and OpenRig records the permit (below) |
+| answers in other words that nobody decides on | after 0.7.11, **the request waits**: the words are kept, never the default permit, until an explicit decision (`rig seat decide-permission`) or the turn's end |
 | doesn't answer | the request **stays pending and visible** (the seat reads needs input) until the agent's turn ends. It's never timed out into a grant. |
+
+**After 0.7.11, a person's answer goes to an agent that decides, or waits:**
+- **Who decides:** this host's receiving agent (`agents.operator_session`, else the kernel operator
+  `operator-agent@kernel`), unless it's the runner that asked (the request's first row, however it was handed on) or
+  a seat this host doesn't have; then the kernel operator, unless it's the runner that asked.
+- **What happens to the answer:** a click, a plain yes or no, other words, or Steering's Approve or Deny on the request
+  (a yes or a no) is kept on the row it was given on. The request is handed to that agent with the person's whole
+  answer, the question and the options, and the person is told once who decides and in what recorded state.
+- **The runner keeps reading `pending`.** The agent decides with `rig seat decide-permission <askId> --option <id>
+  --reason "…"` (`POST <base>/api/activity/permission-requests/<askId>/decide` with `{"optionId", "reason"}`).
+  - It accepts only an option the agent offered.
+  - It records an agent's decision: who decided, why, and the person's words.
+  - A request that's no longer pending comes back as it is, and nothing is written.
+- **A kept answer counts only through an explicit decision.** If the row is closed without one (an agent's or a
+  person's ordinary close), the answer stays kept and the request waits; `rig seat decide-permission` still settles it.
+  A refusing close (denied) is still a no.
+- **With no agent that can decide,** any answer is kept, the request waits, and the person is told once that the tool
+  hasn't run and how to decide directly (`rig seat decide-permission`) or set up a receiving agent. A handoff that fails
+  leaves the request waiting the same way.
+- **No timeout refuses a request.** If the turn ends first, nothing is sent.
+- **The default permit stays** for a request nobody can be asked about (above), and one closed with no answer at all.
 
 - **An answer reaches only the live request it was asked for,** once. A request from an earlier occupant reads
   `stale`, and one withdrawn at the turn's end reads `withdrawn`. Neither can take a later answer.
@@ -345,7 +399,9 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
      `no_allow_offered` when it was closed without a choice and the agent offered no allow option), `withdrawn` or
      `stale`.
    - **From 0.7.9, `said`,** with `permitted` or `refused` (`no_allow_offered`), is the person's own words, when they
-     answered in words that were neither a choice nor a plain yes or no. It never changes the outcome.
+     answered in words that were neither a choice nor a plain yes or no. It never changes the outcome. After 0.7.11, words are never
+     answered with the default permit (they keep the request waiting), so `said` no longer arrives. A runner that handles
+     it keeps working.
    - **A seat grant reads and withdraws only its own launch's requests.** Once its occupant is replaced, the grant is
      refused (`409 activity_grant_stale`), even during a read's wait.
 3. **Deliver** `{"outcome": {"outcome": "selected", "optionId": "<optionId>"}}` to the agent once, and only while that
@@ -370,6 +426,7 @@ answer. Only the seat's opt-in refuses and holds attention.
 | `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. | answers `cancelled` |
 | `activity_grant_wrong_seat` | 403 | The grant speaks for another seat. | answers `cancelled` |
 | `activity_grant_stale` | 409 | The grant's launch generation no longer occupies the seat. | answers `cancelled` |
+| `activity_grant_unverified` | 409 | The binding could not be verified now; this is retryable, not evidence of replacement or cancellation. | permits under the existing unavailable-answer policy |
 | `activity_grant_revoked` | 401 | The grant was revoked while its launch generation still occupies the seat, or before it has registered, so this may still be the live request; a replaced occupant's grant reads `activity_grant_stale` instead, even once revoked. | permits |
 | `activity_grant_pending` | 409 | The grant's launch hasn't registered its occupant yet. | permits |
 | `duplicate_request` | 409 | This request id was already submitted in another turn; an agent may reuse an id. | permits |

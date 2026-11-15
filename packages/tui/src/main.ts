@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { DAEMON_START_COMMAND_TIMEOUT_MS } from "@openrig/daemon/daemon-shutdown";
 import { pageReadKey } from "./page-read.js";
 import { completeCommand } from "./commands/completion.js";
 import { resolveTimeZone } from "./time.js";
@@ -34,6 +35,7 @@ import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-cl
 import { daemonStartArgs } from "./crash-cart/start-daemon.js";
 import { readLocal } from "./local-reading.js";
 import { replyAct, opensOnDefaultFeed, actingAs, answerRequest } from "./attention/attention-model.js";
+import { decidePairRequest } from "./config/pairing.js";
 import type { AttentionRead } from "@openrig/daemon/attention";
 import { StartupController } from "./startup.js";
 import { dirname, join } from "node:path";
@@ -249,7 +251,7 @@ async function run(): Promise<void> {
   if (client) startup = new StartupController({
     client, home: process.env["OPENRIG_HOME"] ?? "default local instance", probe: runCrashCartVerb,
     startDaemon: () => new Promise<void>((resolve, reject) => {
-      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { cwd: helperCwd(), timeout: 30_000 }, (error, stdout, stderr) => {
+      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { cwd: helperCwd(), timeout: DAEMON_START_COMMAND_TIMEOUT_MS }, (error, stdout, stderr) => {
         if (error) reject(new Error(`Daemon start did not confirm completion: ${stderr.trim() || stdout.trim() || error.message}`));
         else resolve();
       });
@@ -342,7 +344,7 @@ async function run(): Promise<void> {
     restoreCancelRequested = false;
     restoreScrollOffset = 0;
     new Promise<void>((resolve, reject) =>
-      execFile("rig", ["daemon", "start"], { cwd: helperCwd(), timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
+      execFile("rig", ["daemon", "start"], { cwd: helperCwd(), timeout: DAEMON_START_COMMAND_TIMEOUT_MS }, (err) => (err ? reject(err) : resolve())),
     )
       .then(() => pollRestore(daemonClient))
       .catch((e: unknown) => {
@@ -379,7 +381,7 @@ async function run(): Promise<void> {
       startingDaemon = true;
       crashCartOpts = { ...crashCartOpts, starting: client!.baseUrl };
       draw();
-      execFile(cliExecutable, cliArgs(startArgs), { cwd: helperCwd(), timeout: 30_000 }, (error, stdout, stderr) => {
+      execFile(cliExecutable, cliArgs(startArgs), { cwd: helperCwd(), timeout: DAEMON_START_COMMAND_TIMEOUT_MS }, (error, stdout, stderr) => {
         startingDaemon = false;
         if (error) {
           crashCartOpts = { unavailable: `Daemon start did not confirm completion. Retry reads actual state before another attempt. ${stderr.trim() || stdout.trim() || error.message}` };
@@ -387,6 +389,8 @@ async function run(): Promise<void> {
         } else {
           void refreshCrashCart();
           void live?.refresh();
+          // Daemon only: no seat was started. Start and return lists the rigs, with a kernel first if there is one, to bring one back.
+          if (startup) view.dispatch({ type: "notice", message: "Daemon started; this start didn't start any seats. Press S to choose seats to bring back; a kernel, if you have one, is listed first." });
         }
       });
       return;
@@ -463,12 +467,15 @@ async function run(): Promise<void> {
       } else if (action.act === "run") {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
+      } else if (action.act === "pair-decision") {
+        view.dispatch({ type: "notice", message: await decidePairRequest(client, action) });
       } else if (action.act === "answer") {
         const result = await client.missionControlAction(answerRequest(action));
         const actor = actingAs(snapshot.attentionRead, action.actorSession);
         view.dispatch({ type: "notice", message: action.verb === "resolve" ? `Resolved ${action.qitemId} as ${actor}: it's unparked for its owner, with your decision.`
           : action.verb === "approve"
-          ? `Approved ${action.qitemId} as ${actor}: the request is closed on its own row.`
+          // A runner's permission request says what became of the answer: handed to its receiving agent, or kept.
+          ? result.answer?.message ?? `Approved ${action.qitemId} as ${actor}: the request is closed on its own row.`
           : result.answer?.message ?? (result.answer?.outcome === "recorded" ? `Recorded on ${action.qitemId}. Still to answer: ${result.answer.unanswered.join("; ")}`
           : `Answered ${action.qitemId} as ${actor}: the answer went back to the asker, and the request is closed.`) });
       }

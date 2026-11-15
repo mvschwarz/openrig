@@ -13,6 +13,8 @@ export function validatePreRestore(
     freshLogicalIds?: string[];
     /** The runtime each seat has now, by logical id. A seat not listed is read as its saved runtime. */
     currentRuntimes?: Record<string, string | null | undefined>;
+    /** Current explicit seat selections; a missing key is unknown, null is an explicit absence. */
+    currentCodexProfiles?: Record<string, string | null>;
   },
 ): { blockers: RestoreValidationBlocker[]; warnings: string[] } {
   const blockers: RestoreValidationBlocker[] = [];
@@ -88,6 +90,12 @@ export function validatePreRestore(
   }
 
   for (const node of topology.intendedNodes) {
+    if (node.runtime === "codex" && node.codexConfigProfile
+      && opts.currentRuntimes?.[node.logicalId] === "codex"
+      && opts.currentCodexProfiles && Object.hasOwn(opts.currentCodexProfiles, node.logicalId)
+      && opts.currentCodexProfiles[node.logicalId] === null) {
+      warnings.push(`Restore pre-validation: ${node.logicalId} had Codex profile ${node.codexConfigProfile} in this snapshot, but its current seat selection has no named profile. Restore uses the current selection; an ordinary floor launch uses workspace-write instead. Review rig seat set-permissions before restoring if this change is unintended. The snapshot does not prove what a prior process enforced.`);
+    }
     const checkpoint = checkpoints[node.id] ?? null;
     if (checkpoint && !node.cwd) {
       add({
@@ -112,7 +120,8 @@ export function validatePreRestore(
     // nothing, skip; usable type + token => exact resume, skip; a token
     // WITHOUT a usable resume type follows the current fresh path,
     // validate.
-    const resolution = resolveActiveSnapshotSession(data, node.id);
+    // A missing sessions list is already a blocker above; read it as empty here rather than throw.
+    const resolution = resolveActiveSnapshotSession({ ...data, sessions: sessions ?? [] }, node.id);
     const freshListed = opts.freshLogicalIds?.includes(node.logicalId) ?? false;
     let consumesReplay: boolean;
     if (resolution.kind === "ambiguous") {

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { EventBus } from "../event-bus.js";
 import type { ScopeFsDeps } from "../scope/scope-view-projection.js";
-import { createProofPolicyRead, proofFs, readProjectReadiness, resolveProjectRoot } from "./judgments.js";
+import { createProofPolicyRead, proofFs, readProjectReadinessAsync, resolveProjectRoot } from "./judgments.js";
 
 export interface ProofSourceWatch {
   close(): void;
@@ -76,16 +76,15 @@ function shallowWatches(missionsRoot: string, realRoot: string, top: string, pro
  * including absent nearer ones, and accepted evidence elsewhere in the project) is watched at its parent directory,
  * not recursively, so sibling checkouts and build trees are never subscribed to.
  */
-export function watchProofSources(missionsRoot: string, invalidate: () => void, bus: EventBus, scopeChanged?: () => void): ProofSourceWatch {
+export async function watchProofSources(missionsRoot: string, invalidate: () => void, bus: EventBus, scopeChanged?: () => void): Promise<ProofSourceWatch> {
   missionsRoot = path.resolve(missionsRoot);
   let projectRoot = path.dirname(missionsRoot);
   try { projectRoot = resolveProjectRoot(missionsRoot) ?? projectRoot; } catch { /* Legacy roots keep the missions root's parent. */ }
   const top = path.dirname(path.resolve(projectRoot));
   // The authority boundary in real terms: what the readers' containment check accepts.
   const project = canonical(projectRoot) ?? path.resolve(projectRoot);
-  // ponytail: bounded local workspaces use a full semantic read after a file burst.
-  // Keep this workload measured; subtree indexing is warranted only when that bound is exceeded.
-  const basis = () => {
+  // Keep the full semantic read, but let queue/send requests run between missions.
+  const basis = async () => {
     const read = new Set<string>();
     const note = (p: string) => { read.add(p); return p; };
     const io: ScopeFsDeps = {
@@ -95,7 +94,8 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
       listDir: (p) => proofFs.listDir(note(p)),
       isDirectory: (p) => proofFs.isDirectory(note(p)),
     };
-    const hash = createHash("sha256").update(JSON.stringify(readProjectReadiness(missionsRoot, createProofPolicyRead(), undefined, io, note).missions.map(m => [m.name, m.revision]))).digest("hex");
+    const result = await readProjectReadinessAsync(missionsRoot, createProofPolicyRead(), undefined, io, note);
+    const hash = createHash("sha256").update(JSON.stringify(result.missions.map(m => [m.name, m.revision]))).digest("hex");
     // A file read through a link inside the project depends on its real location too: observe both.
     for (const file of [...read]) {
       const real = canonical(file);
@@ -107,6 +107,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   let closed = false, failed = false, covered = false, readable = false;
   let revision = "unavailable", timer: NodeJS.Timeout | undefined;
   let scopeDirty = false;
+  let reading = true, dirty = false;
   const notifyScope = () => { try { scopeChanged?.(); } catch { /* A later event or explicit refresh retries the view read. */ } };
   let wanted: Shallow = new Map();
   const shallow = new Map<string, fs.FSWatcher>();
@@ -163,25 +164,32 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   /** Read the sources and keep the subscriptions in step with what was read, even when the result is unchanged.
    *  Coverage is certified only by a read whose every dependency was already watched before it; if the dependencies
    *  keep moving past a small budget, the sources are reported unobserved rather than read forever. */
-  const evaluate = (): string => {
-    let read = basis();
+  const evaluate = async (): Promise<{ hash: string; covered: boolean }> => {
+    let read = await basis();
     for (let i = 0; ; i++) {
+      if (closed) return { hash: revision, covered: false };
       // A root whose real location is unknown or outside the project has no anchors there: never certified.
-      if (!resubscribe(read.watches)) { covered = recursiveReal !== null && within(recursiveReal, project); return read.hash; }
-      if (i === 2) { covered = false; return read.hash; }
-      read = basis();
+      // Coverage belongs to this candidate, just like the hash; neither escapes a discarded read.
+      if (!resubscribe(read.watches)) return { hash: read.hash, covered: recursiveReal !== null && within(recursiveReal, project) };
+      if (i === 2) return { hash: read.hash, covered: false };
+      read = await basis();
     }
   };
   const observed = () => !closed && !failed && covered && readable;
   const schedule = () => {
-    if (timer || closed) return;
-    timer = setTimeout(() => {
+    dirty = true;
+    if (timer || reading || closed) return;
+    timer = setTimeout(async () => {
       timer = undefined;
       if (closed) return;
+      reading = true; dirty = false;
       try {
         if (scopeDirty) { scopeDirty = false; notifyScope(); }
         const before = observed();
-        const next = evaluate();
+        const candidate = await evaluate();
+        if (closed || dirty) return;
+        const next = candidate.hash;
+        covered = candidate.covered && !failed;
         readable = true;
         // Deduplicate on what clients see: the revision and whether the sources are observed. Losing or regaining
         // coverage is news even when the proof result itself did not change.
@@ -190,12 +198,16 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
         invalidate();
         notify(observed() ? revision : "unavailable");
       } catch (e) {
+        if (closed) return;
         // Never report the sources as watched after a failed read or a watch that could not be attached.
         readable = false;
         if (e instanceof WatchFailure) covered = false;
         revision = "unavailable";
         invalidate();
         notify("unavailable");
+      } finally {
+        reading = false;
+        if (dirty && !closed) schedule();
       }
     }, 40);
     timer.unref();
@@ -203,7 +215,10 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   try {
     recursiveReal = canonical(missionsRoot);
     recursive = watchDir(missionsRoot, true);
-    try { revision = evaluate(); readable = true; } catch (e) {
+    try {
+      const candidate = await evaluate();
+      if (!dirty) { revision = candidate.hash; covered = candidate.covered && !failed; readable = true; }
+    } catch (e) {
       if (e instanceof WatchFailure) throw e;
       // Direct reads name unavailable inputs; watching may recover them.
       covered = true;
@@ -214,6 +229,9 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
     for (const watcher of shallow.values()) watcher.close();
     invalidate(); notify("unavailable"); notifyScope();
     return { close() {}, observation: () => ({ state: "unavailable", revision }) };
+  } finally {
+    reading = false;
+    if (dirty && !closed) schedule();
   }
   return {
     observation: () => ({ state: observed() ? "watching" : "unavailable", revision }),

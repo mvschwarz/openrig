@@ -1,3 +1,4 @@
+import { ObservationPass } from "../src/domain/process-observation-pass.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -156,7 +157,8 @@ describe("ContextMonitor readiness ownership", () => {
       const inventory = getNodeInventory(db, rig.id);
       expect(inventory).toMatchObject([{ nodeId: node.id, startupStatus: ready ? "ready" : "attention_required" }]);
       expect(compactNodeProjection(inventory)).toMatchObject([{ startupStatus: ready ? "ready" : "attention_required" }]);
-      expect(check).toHaveBeenCalledWith(expect.objectContaining({ nodeId: node.id, tmuxSession: session.sessionName }));
+      expect(check).toHaveBeenCalledWith(expect.objectContaining({ nodeId: node.id, tmuxSession: session.sessionName }),
+        ...(runtime === "codex" ? [{ observationPass: expect.any(ObservationPass) }] : []));
       const first = state(session.id);
       await monitor.pollOnce();
       expect(state(session.id)).toEqual(first);

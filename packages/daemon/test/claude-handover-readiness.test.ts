@@ -1,5 +1,6 @@
 // Reuses the released handover fixture. Process startup and pane bytes are modeled; no native Claude.
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
+import { verifyClaudePaneProcess } from "../src/domain/native-process-lineage.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -384,6 +385,92 @@ describe("Claude fresh in-place handover readiness", () => {
     expect(respawnPane).toHaveBeenCalled();
     expect(killSession).not.toHaveBeenCalled();
 
+  });
+
+  // #2985: a rebuild handover whose readiness window (30 s) closes before the new Claude is proven in the pane. The
+  // retiree is already ended and the pane respawned, so the failure leaves the successor that comes up a few seconds
+  // later running, with the binding on the previous conversation and its generation uncommitted. The result must say
+  // so instead of "retry", which would end that successor.
+  it("2985 rebuild: readiness times out at 30 s, the successor comes up after it and keeps running unadopted; the failure says so", async () => {
+    const startedAtMs = Date.parse("2026-11-10T16:21:00Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(startedAtMs);
+    const { node, sessionId } = seedSeat({ runtime: "claude-code" });
+    const previousToken = "11111111-1111-4111-8111-111111111111";
+    sessionRegistry.updateResumeToken(sessionId!, "claude_id", previousToken, "hook");
+    const successorToken = "22222222-2222-4222-8222-222222222222";
+    const nativeAt = 33_000; // the issue: the new Claude was seen about 3 s after the 30 s window closed
+    let elapsed = 0, requested = false;
+    const running = () => requested && elapsed >= nativeAt;
+    const oldFrame = "Claude Code v2.1.322\n❯ predecessor finished turn\n  ⏵⏵ accept edits on (shift+tab to cycle)";
+    // The new Claude's frame is drawn from the launch on, so readiness waits on the process proof
+    // ("Waiting to confirm the new Claude process in this pane."), which the 30 s window never sees.
+    const freshFrame = "───────── dev-impl@seat-rig ─\n❯ \n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)";
+    getPaneCommand.mockImplementation(async () => running() ? "claude" : "zsh");
+    capturePaneScreen.mockImplementation(async () => requested ? freshFrame : `${oldFrame}\n❯ `);
+    const capturePaneContent = vi.fn(async () => requested ? freshFrame : `${oldFrame}\n❯ `);
+    const target = { ...tmux(), capturePaneContent, getPanePid: vi.fn(async () => 100),
+      sendShellCommand: async (session: string, text: string) => sendText(session, text) } as unknown as TmuxAdapter;
+    const startedAt = "Tue Nov 10 16:21:00 2026";
+    const listProcesses = vi.fn(() => [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 102 : 100, command: "-zsh", executableName: "zsh", startedAt },
+      ...(running() ? [{ pid: 102, ppid: 100, pgid: 102, tpgid: 102,
+        command: `claude --session-id ${successorToken} --name dev-impl@seat-rig`, executableName: "claude", startedAt }] : []),
+    ]);
+    sendText.mockImplementation(async (_session: string, text: string) => {
+      if (text.includes("claude ") && text.includes(`--session-id ${successorToken}`)) requested = true;
+      return { ok: true };
+    });
+    const fsError = () => { throw new Error("unexpected filesystem access"); };
+    const claude = new ClaudeCodeAdapter({ tmux: target, fsOps: { exists: () => false, readFile: fsError,
+      writeFile: fsError, mkdirp: fsError, copyFile: fsError }, listProcesses, sleep: async () => {}, sessionIdFactory: () => successorToken });
+    const handover = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: target, now: () => new Date("2026-11-10T16:21:00Z"), newSuccessorId: () => "01SUCCID0",
+      runtimeAdapters: { "claude-code": claude as unknown as RuntimeAdapter },
+      contextUsageStore: { readSidecar } as never, resumeTokenCapturer: { captureCodexThreadId } as never,
+      occupantInvalidator: { invalidateRetiringOccupant }, activityOracle: { declareOccupantSwap },
+      predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 30_000,
+      sleep: async ms => { elapsed += ms; vi.setSystemTime(startedAtMs + elapsed); },
+    });
+    const sessionsBefore = db.prepare("SELECT session_name,status,resume_token FROM sessions ORDER BY id").all();
+
+    const result = await handover.handover({ seatRef: "dev-impl@seat-rig", source: "rebuild", reason: "context-wall" });
+
+    // The real case: the in-place respawn ran, readiness timed out at 30 s, and the handover failed at start_agent.
+    expect(result).toMatchObject({ ok: false, code: "successor_create_failed" });
+    if (result.ok) throw new Error("expected failure");
+    expect(result.message).toContain('Handover failed at step "start_agent"');
+    expect(result.message).toContain("readiness timeout after 30s: Waiting to confirm the new Claude process in this pane.");
+    expect(elapsed).toBeLessThan(nativeAt);
+    expect(respawnPane).toHaveBeenCalledTimes(1);
+    expect(killSession).not.toHaveBeenCalled();
+    // The binding is unchanged: the previous conversation is still the resume target, nothing completed, and the
+    // successor's reserved generation was never committed (its hooks are answered generation_uncommitted).
+    expect(db.prepare("SELECT session_name,status,resume_token FROM sessions ORDER BY id").all()).toEqual(sessionsBefore);
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'seat.handover_completed'").get()).toEqual({ n: 0 });
+    const generation = (respawnPane.mock.calls[0]?.[2] as { env?: Record<string, string> } | undefined)?.env?.OPENRIG_OCCUPANT_GENERATION;
+    expect(generation).toBeTruthy();
+    expect(sessionRegistry.isOccupantGenerationRegistered(node.id, generation!)).toBe(false);
+
+    // The fixture then models what the issue observed: a few seconds after the window closed, the successor is proven
+    // in the pane under its own session id, while the seat still holds the previous one (asserted above).
+    elapsed = nativeAt + 1000;
+    expect(await verifyClaudePaneProcess({ target: "%9", tmux: target, listProcesses, expectedToken: successorToken })).not.toBeNull();
+    expect(await verifyClaudePaneProcess({ target: "%9", tmux: target, listProcesses, expectedToken: previousToken })).toBeNull();
+
+    // The fix: the failure says a successor was launched and may be running unadopted, names its pane, and warns that
+    // a retry or a fresh launch with --stop ends it, instead of telling the operator to retry.
+    expect(result).toMatchObject({ replacementStarted: true, successorPane: "%9" });
+    expect(result.guidance).not.toMatch(/\bretry\b/i);
+    expect(result.guidance).toContain("binding is unchanged");
+    expect(result.guidance).toContain('a successor was launched in pane "%9"');
+    expect(result.guidance).toContain("OpenRig has not registered the successor as the seat's occupant");
+    expect(result.guidance).toContain("rig capture 'dev-impl@seat-rig'");
+    expect(result.guidance).toContain(`Another handover, or rig seat launch 'dev-impl@seat-rig' --fresh --stop --reason "<why>", ends that successor if it goes ahead`);
+    // A readiness failure doesn't prove the process exited: Claude can still be starting behind shell-looking output.
+    expect(result.guidance).not.toContain("no successor is running");
+    expect(result.guidance).toContain("Shell-looking output alone does not confirm that the successor has stopped; check the launch and process state before another handover.");
   });
 });
 

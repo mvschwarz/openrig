@@ -35,9 +35,10 @@ try {
   const seats = new Map();
   for (const member of ["a", "b", "c", "sibling"]) {
     const name = `${member}@shrink-fixture`;
-    await native(["new-session", "-d", "-s", name, "sleep 120"]);
-    const pane = (await native(["list-panes", "-t", name, "-F", "#{pane_id}"])).trim();
     const node = rigRepo.addNode(rig.id, member, { runtime: "terminal", ...(member === "sibling" ? {} : { podId: pod.id }) });
+    // As OpenRig launches a seat: its session carries the node's OPENRIG_NODE_ID, which a guarded stop requires.
+    await native(["new-session", "-d", "-s", name, "-e", `OPENRIG_NODE_ID=${node.id}`, "sleep 120"]);
+    const pane = (await native(["list-panes", "-t", name, "-F", "#{pane_id}"])).trim();
     const session = sessionRegistry.registerSession(node.id, name);
     sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: pane });

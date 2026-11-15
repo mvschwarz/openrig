@@ -1,3 +1,5 @@
+import type { PiRunnerState } from "../adapters/pi-runner-protocol.js";
+import { ActivityGrantStore, hasActivityGrantsTable } from "./activity-grants.js";
 import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { claudeResumeRotation } from "./session-registry.js";
@@ -91,6 +93,7 @@ export interface SeatIdentityReconcilerDeps {
   tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes">>;
   now?: () => Date;
   listProcesses?: NativeProcessLister;
+  readPiRunnerState?: (sessionName: string) => PiRunnerState | null;
 }
 
 /**
@@ -110,6 +113,7 @@ export class SeatIdentityReconciler {
   private readonly now: () => Date;
   private readonly store: SeatIdentityStore;
   private readonly listProcesses: NativeProcessLister;
+  private readonly readPiRunnerState?: SeatIdentityReconcilerDeps["readPiRunnerState"];
   private timer: ReturnType<typeof setInterval> | null = null;
   private reconciling = false;
   private generation = 0;
@@ -120,6 +124,7 @@ export class SeatIdentityReconciler {
     this.now = deps.now ?? (() => new Date());
     this.store = new SeatIdentityStore(deps.db);
     this.listProcesses = deps.listProcesses ?? listNativeProcesses;
+    this.readPiRunnerState = deps.readPiRunnerState;
   }
 
   private runningSeats(): RunningSeatRow[] {
@@ -141,6 +146,22 @@ export class SeatIdentityReconciler {
     `).all() as RunningSeatRow[];
   }
 
+  /** Nodes whose latest session `rig unclaim` released (detached, origin claimed). Unclaim leaves the process running,
+   *  so the node's last recorded process stays on record: a fresh launch reads it before reopening a tmux server, and
+   *  must not start a second occupant beside a process that still runs. An older schema without `origin` keeps none. */
+  private releasedSeats(): string[] {
+    try {
+      return (this.db.prepare(`
+        SELECT n.id as node_id FROM nodes n
+        JOIN sessions s ON s.node_id = n.id
+          AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+        WHERE s.status = 'detached' AND s.origin = 'claimed'
+      `).all() as Array<{ node_id: string }>).map((r) => r.node_id);
+    } catch {
+      return [];
+    }
+  }
+
   /** Reconcile every running tmux-bound seat once and persist the verdicts. */
   async reconcileAll(): Promise<void> {
     // Skip ticks while actual reads are pending; never release on a deadline
@@ -156,8 +177,25 @@ export class SeatIdentityReconciler {
 
   private async reconcileSweep(generation: number): Promise<void> {
     const seats = this.runningSeats();
-    // Prune verdicts for nodes no longer running (keep the table bounded).
-    this.store.pruneExcept(seats.map((s) => s.node_id));
+    // Capture exact issuance before any observation awaits. A delayed verdict cannot revoke a successor.
+    const grants = hasActivityGrantsTable(this.db) ? new ActivityGrantStore(this.db) : null;
+    const observedGrants = new Map(seats.map(seat => {
+      const grant = grants?.activeForNode(seat.node_id);
+      let bootstrapComplete = false;
+      if (grant?.binding?.runtime === "pi" && grant.binding.runner === 0) {
+        // A shell can be the launch bootstrap. Capture current-attempt readiness BEFORE observing the pane;
+        // a later ready result cannot turn an earlier bootstrap-shell sample into a definitive exit.
+        try {
+          const state = this.readPiRunnerState?.(seat.session_name);
+          bootstrapComplete = !!state && state.launchId === grant.runId && (state.ready || !!state.exited);
+        } catch { /* Missing launch evidence is unknown, not proof that the runner exited. */ }
+      }
+      return [seat.node_id, grant?.runId && grant.binding?.pane === seat.tmux_pane
+        ? { grantId: grant.grantId, shellExitConfirmed: grant.binding.runtime !== "pi" || grant.binding.runner !== 0 || bootstrapComplete }
+        : null];
+    }));
+    // Prune verdicts for nodes no longer running (keep the table bounded), except a released seat's.
+    this.store.pruneExcept([...seats.map((s) => s.node_id), ...this.releasedSeats()]);
     if (seats.length === 0) return;
 
     const observedAt = this.now().toISOString();
@@ -256,6 +294,11 @@ export class SeatIdentityReconciler {
         const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes);
         if (generation !== this.generation) return;
         this.store.upsert(verdict);
+        const observedGrant = observedGrants.get(seat.node_id);
+        if (observedGrant && (verdict.verdict === "pane_missing"
+          || (verdict.verdict === "mismatch" && verdict.reason === "process_identity_mismatch" && observedGrant.shellExitConfirmed))) {
+          grants!.revoke({ grantId: observedGrant.grantId }, "runner_exit_observed");
+        }
       } catch {
         if (generation !== this.generation) return;
         // A single seat's tmux failure must not crash the loop; record it as
@@ -326,9 +369,15 @@ export class SeatIdentityReconciler {
     }
     const pid = batched ? batched.pid : await this.tmux.getPanePid(seat.tmux_pane);
     if (pid === null) {
-      // The registered pane no longer resolves. Distinguish "the whole tmux
-      // session is gone" from "the pane within a live session is gone".
+      // getPanePid collapses transport/read failures into null. Only a readable census
+      // showing another pane, or a successful session snapshot proving absence, establishes loss.
       const sessionAlive = liveSessions.has(seat.session_name);
+      if (sessionAlive) {
+        const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
+        if (!currentPanes?.length || currentPanes.some(pane => pane.id === seat.tmux_pane)) {
+          return this.tmuxUnavailableVerdict(seat, observedAt);
+        }
+      }
       return {
         ...base,
         verdict: "pane_missing",

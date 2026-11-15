@@ -134,6 +134,8 @@ describe("disabled-by-default production observer ports",()=>{
     await terminal(existing).transport.send("seat@rig","hello world",{verify:true});await existing.drain();
     expect(existing.status().sink.errors).toBe(1);expect(fs.readFileSync(destination,"utf8")).toBe(bytes);
     const shared=path.join(dir,"shared");fs.mkdirSync(shared,{mode:0o755});
+    fs.chmodSync(shared,0o755);
+    expect(fs.statSync(shared).mode & 0o777).toBe(0o755);
     const rejected=new ShadowCapture({...config,destination:path.join(shared,"no.jsonl")});
     await terminal(rejected).transport.send("seat@rig","hello world",{verify:true});await rejected.drain();
     expect(rejected.status().sink.errors).toBe(1);expect(fs.existsSync(path.join(shared,"no.jsonl"))).toBe(false);

@@ -22,9 +22,28 @@ const nodeMetadataFault = vi.hoisted(() => ({
   selectionCode: "EACCES",
   selectionHits: 0,
 }));
+const evidenceRootFault = vi.hoisted(() => ({
+  targetPath: null as string | null,
+  stage: null as "resolve" | "access" | "readdir" | "unexpected" | null,
+  code: "EACCES",
+  hits: 0,
+}));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   const injectedError = (code: string) => Object.assign(new Error("injected node metadata failure"), { code });
+  const matchesEvidenceFaultTarget = (candidate: unknown): boolean =>
+    evidenceRootFault.targetPath !== null && typeof candidate === "string" && candidate === evidenceRootFault.targetPath;
+  const maybeThrowEvidenceResolveFault = (candidate: unknown): void => {
+    if (!matchesEvidenceFaultTarget(candidate)) return;
+    if (evidenceRootFault.stage === "resolve") {
+      evidenceRootFault.hits++;
+      throw injectedError(evidenceRootFault.code);
+    }
+    if (evidenceRootFault.stage === "unexpected") {
+      evidenceRootFault.hits++;
+      throw Object.assign(new TypeError("unexpected caller type error"), { code: "ERR_INVALID_ARG_TYPE" });
+    }
+  };
   const existsSync = ((...args: Parameters<typeof actual.existsSync>) => {
     if (String(args[0]) === nodeMetadataFault.selectionPath && nodeMetadataFault.selectionPath !== null) {
       nodeMetadataFault.selectionHits++;
@@ -33,6 +52,14 @@ vi.mock("node:fs", async (importOriginal) => {
     }
     return actual.existsSync(...args);
   }) as typeof actual.existsSync;
+  const lstatSync = ((...args: Parameters<typeof actual.lstatSync>) => {
+    maybeThrowEvidenceResolveFault(args[0]);
+    return actual.lstatSync(...args);
+  }) as typeof actual.lstatSync;
+  const realpathSync = Object.assign(((...args: Parameters<typeof actual.realpathSync>) => {
+    maybeThrowEvidenceResolveFault(args[0]);
+    return actual.realpathSync(...args);
+  }) as typeof actual.realpathSync, { native: actual.realpathSync.native });
   const statSync = ((...args: Parameters<typeof actual.statSync>) => {
     if (String(args[0]) === nodeMetadataFault.selectionPath && nodeMetadataFault.selectionPath !== null) {
       nodeMetadataFault.selectionHits++;
@@ -45,9 +72,20 @@ vi.mock("node:fs", async (importOriginal) => {
       nodeMetadataFault.selectionHits++;
       throw injectedError(nodeMetadataFault.selectionCode);
     }
+    if (matchesEvidenceFaultTarget(args[0]) && evidenceRootFault.stage === "access") {
+      evidenceRootFault.hits++;
+      throw injectedError(evidenceRootFault.code);
+    }
     return actual.accessSync(...args);
   }) as typeof actual.accessSync;
-  const readFileSync = ((...args: Parameters<typeof actual.readFileSync>) => {
+  const readdirSync = vi.fn(((...args: Parameters<typeof actual.readdirSync>) => {
+    if (matchesEvidenceFaultTarget(args[0]) && evidenceRootFault.stage === "readdir") {
+      evidenceRootFault.hits++;
+      throw injectedError(evidenceRootFault.code);
+    }
+    return actual.readdirSync(...args);
+  }) as typeof actual.readdirSync) as unknown as typeof actual.readdirSync;
+  const readFileSync = vi.fn(((...args: Parameters<typeof actual.readFileSync>) => {
     const requestedPath = String(args[0]);
     if (catalogReadObservation.activePath !== null && requestedPath === catalogReadObservation.activePath) {
       catalogReadObservation.reads++;
@@ -61,10 +99,18 @@ vi.mock("node:fs", async (importOriginal) => {
       throw injectedError(nodeMetadataFault.selectionCode);
     }
     return actual.readFileSync(...args);
-  }) as typeof actual.readFileSync;
+  }) as typeof actual.readFileSync) as unknown as typeof actual.readFileSync;
   const actualDefault = (actual as unknown as { default?: object }).default ?? actual;
-  const defaultFs = Object.assign(Object.create(actualDefault), { existsSync, statSync, accessSync, readFileSync });
-  return { ...actual, existsSync, statSync, accessSync, readFileSync, default: defaultFs };
+  const defaultFs = Object.assign(Object.create(actualDefault), {
+    existsSync,
+    lstatSync,
+    realpathSync,
+    statSync,
+    accessSync,
+    readdirSync,
+    readFileSync,
+  });
+  return { ...actual, existsSync, lstatSync, realpathSync, statSync, accessSync, readdirSync, readFileSync, default: defaultFs };
 });
 
 import { Hono } from "hono";
@@ -86,6 +132,7 @@ import { missionControlActionsSchema } from "../src/db/migrations/037_mission_co
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projector.js";
 import { slicesRoutes } from "../src/routes/slices.js";
+import * as slicesRoutesModule from "../src/routes/slices.js";
 import { browserBoundary } from "../src/middleware/browser-boundary.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -169,8 +216,14 @@ describe("PL-slice-story-view-v0 slices routes", () => {
   });
 
   afterEach(() => {
+    evidenceRootFault.targetPath = null;
+    evidenceRootFault.stage = null;
+    evidenceRootFault.code = "EACCES";
+    evidenceRootFault.hits = 0;
     db.close();
     fs.rmSync(cleanupDir, { recursive: true, force: true });
+    (fs.readdirSync as unknown as { mockClear: () => void }).mockClear();
+    (fs.readFileSync as unknown as { mockClear: () => void }).mockClear();
   });
 
   describe("GET /api/slices (list)", () => {
@@ -438,6 +491,18 @@ describe("PL-slice-story-view-v0 slices routes", () => {
             "SPEC.md": `# ${project}/${mission}\n`, "notes/a b.md": `${project}/${mission} nested document\n`,
           });
         }
+        const projectEvidenceRoot = path.join(projectRoot, "dogfood-evidence");
+        for (const mission of ["a-first", "z-later"]) {
+          const scopedProofDir = path.join(projectEvidenceRoot, `${mission}-same-slice`);
+          fs.mkdirSync(path.join(scopedProofDir, "screenshots"), { recursive: true });
+          fs.writeFileSync(path.join(scopedProofDir, "proof.md"), `# ${project}/${mission} proof\n`);
+          fs.writeFileSync(
+            path.join(scopedProofDir, "screenshots/scope.png"),
+            `${project.toUpperCase()}-${mission.toUpperCase()}-PROOF\n`,
+          );
+          const mtime = mission === "a-first" ? 1600000003 : 1600000002;
+          fs.utimesSync(scopedProofDir, mtime, mtime);
+        }
         const proofDir = path.join(dogfoodRoot, `same-slice-${project}`);
         fs.mkdirSync(path.join(proofDir, "screenshots"), { recursive: true });
         fs.writeFileSync(path.join(proofDir, "screenshots/scope.png"), `${project.toUpperCase()}-PROOF\n`);
@@ -449,17 +514,36 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       app = buildApp({ indexer, projector, workspaceRoot });
     });
 
+    const addAlphaMissionWithProof = (mission: string, mtime: number): void => {
+      const projectRoot = path.join(workspaceRoot, "alpha");
+      const missionsRoot = path.join(projectRoot, "missions");
+      writeSlice(missionsRoot, mission, { "SPEC.md": `# ${mission}\n` });
+      writeSlice(path.join(missionsRoot, mission, "slices"), "same-slice", {
+        "SPEC.md": `# alpha/${mission}\n`,
+        "notes/a b.md": `alpha/${mission} nested document\n`,
+      });
+      const proofDir = path.join(projectRoot, "dogfood-evidence", `${mission}-same-slice`);
+      fs.mkdirSync(path.join(proofDir, "screenshots"), { recursive: true });
+      fs.writeFileSync(path.join(proofDir, "proof.md"), `# alpha/${mission} proof\n`);
+      fs.writeFileSync(path.join(proofDir, "screenshots/scope.png"), `ALPHA-${mission.toUpperCase()}-PROOF\n`);
+      fs.utimesSync(proofDir, mtime, mtime);
+    };
+
     it.each([
-      { project: "alpha", literal: "# alpha/a-first\n" },
-      { project: "beta", literal: "# beta/a-first\n" },
-    ])("detail selects $project independently and has no qualified proof discovery", async ({ project, literal }) => {
-      const detail = await app.request(`/api/slices/same-slice?project=${project}&mission=a-first`);
+      { project: "alpha", mission: "a-first", literal: "# alpha/a-first\n" },
+      { project: "beta", mission: "a-first", literal: "# beta/a-first\n" },
+    ])("detail selects project $project/$mission and discovers project-scoped proof", async ({ project, mission, literal }) => {
+      const detail = await app.request(`/api/slices/same-slice?project=${project}&mission=${mission}`);
       expect(detail.status).toBe(200);
       const body = await detail.json();
-      expect(body.slicePath).toBe(path.join(workspaceRoot, project, "missions/a-first/slices/same-slice"));
+      expect(body.slicePath).toBe(path.join(workspaceRoot, project, "missions", mission, "slices", "same-slice"));
       expect(fs.readFileSync(path.join(body.slicePath, "SPEC.md"), "utf8")).toBe(literal);
-      expect(body.missionId).toBe("a-first");
-      expect(body.tests.proofPackets).toEqual([]);
+      expect(body.missionId).toBe(mission);
+      expect(body.tests.proofPackets).toMatchObject([{
+        dirName: `${mission}-same-slice`,
+        primaryMarkdown: { relPath: "proof.md", content: `# ${project}/${mission} proof\n` },
+        screenshots: ["screenshots/scope.png"],
+      }]);
       expect(body.tests.aggregate).toEqual({ passCount: 0, failCount: 0 });
     });
 
@@ -473,25 +557,762 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       expect(await response.json()).toEqual({ relPath: decodeURIComponent(rel), content: literal });
     });
 
-    it.each(["alpha", "beta"])("qualified proof for %s does not substitute the injected legacy packet", async (project) => {
-      const response = await app.request(`/api/slices/same-slice/proof-asset/screenshots/scope.png?project=${project}&mission=a-first`);
-      expect({ status: response.status, text: await response.text() }).toEqual({
-        status: 404, text: JSON.stringify({ error: "proof_packet_not_found" }),
+    it.each([
+      { project: "alpha", mission: "a-first" },
+      { project: "beta", mission: "a-first" },
+      { project: "alpha", mission: "z-later" },
+      { project: "beta", mission: "z-later" },
+    ])("qualified proof for $project/$mission serves its scoped packet, not the injected legacy packet", async ({ project, mission }) => {
+      const response = await app.request(`/api/slices/same-slice/proof-asset/screenshots/scope.png?project=${project}&mission=${mission}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("image/png");
+      expect(await response.text()).toBe(`${project.toUpperCase()}-${mission.toUpperCase()}-PROOF\n`);
+    });
+
+    it("qualified detail and proof assets distinguish prefix-overlapping mission names", async () => {
+      addAlphaMissionWithProof("a-first-extra", 1600000004);
+      const shortDetail = await app.request("/api/slices/same-slice?project=alpha&mission=a-first");
+      const shortBody = await shortDetail.json();
+      const shortPacket = shortBody.tests.proofPackets[0];
+      const shortAsset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+      const shortAssetBytes = await shortAsset.text();
+
+      const longDetail = await app.request("/api/slices/same-slice?project=alpha&mission=a-first-extra");
+      const longBody = await longDetail.json();
+      const longPacket = longBody.tests.proofPackets[0];
+      const longAsset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first-extra");
+      const longAssetBytes = await longAsset.text();
+
+      expect({
+        short: {
+          detailStatus: shortDetail.status,
+          missionId: shortBody.missionId,
+          proofDir: shortPacket?.dirName,
+          proofMarkdown: shortPacket?.primaryMarkdown?.content,
+          assetStatus: shortAsset.status,
+          assetBytes: shortAssetBytes,
+        },
+        long: {
+          detailStatus: longDetail.status,
+          missionId: longBody.missionId,
+          proofDir: longPacket?.dirName,
+          proofMarkdown: longPacket?.primaryMarkdown?.content,
+          assetStatus: longAsset.status,
+          assetBytes: longAssetBytes,
+        },
+      }).toEqual({
+        short: {
+          detailStatus: 200,
+          missionId: "a-first",
+          proofDir: "a-first-same-slice",
+          proofMarkdown: "# alpha/a-first proof\n",
+          assetStatus: 200,
+          assetBytes: "ALPHA-A-FIRST-PROOF\n",
+        },
+        long: {
+          detailStatus: 200,
+          missionId: "a-first-extra",
+          proofDir: "a-first-extra-same-slice",
+          proofMarkdown: "# alpha/a-first-extra proof\n",
+          assetStatus: 200,
+          assetBytes: "ALPHA-A-FIRST-EXTRA-PROOF\n",
+        },
       });
     });
 
-    it("records detail's existing later-duplicate mission absence without inventing a successful lookup", async () => {
-      expect(fs.readFileSync(path.join(workspaceRoot, "alpha/missions/z-later/slices/same-slice/SPEC.md"), "utf8")).toBe("# alpha/z-later\n");
-      const detail = await app.request("/api/slices/same-slice?project=alpha&mission=z-later");
-      expect(detail.status).toBe(404);
-      expect(await detail.json()).toEqual({ error: "slice_not_found", name: "same-slice" });
+    it("does not fall back to an overlapping mission's packet when the requested mission has none", async () => {
+      addAlphaMissionWithProof("a-first-extra", 1600000004);
+      fs.rmSync(path.join(workspaceRoot, "alpha", "dogfood-evidence", "a-first-same-slice"), { recursive: true });
+
+      const detail = await app.request("/api/slices/same-slice?project=alpha&mission=a-first");
+      const detailBody = await detail.json();
+      const asset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+      const assetBody = await asset.text();
+      expect({
+        detailStatus: detail.status,
+        proofPackets: detailBody.tests.proofPackets,
+        assetStatus: asset.status,
+        assetNotFound: assetBody.includes("proof_packet_not_found"),
+        otherMissionBytesLeaked: assetBody.includes("ALPHA-A-FIRST-EXTRA-PROOF\n"),
+      }).toEqual({
+        detailStatus: 200,
+        proofPackets: [],
+        assetStatus: 404,
+        assetNotFound: true,
+        otherMissionBytesLeaked: false,
+      });
     });
 
-    it("doc preserves the detail route's current missing later-duplicate selection", async () => {
+    it.each([
+      { siblingKind: "in-project symlinked mission" },
+      { siblingKind: "plain mission without slices" },
+    ])("does not use an overlapping sibling packet when the sibling is a $siblingKind", async ({ siblingKind }) => {
+      addAlphaMissionWithProof("a-first-extra", 1600000004);
+      const projectRoot = path.join(workspaceRoot, "alpha");
+      const siblingMission = path.join(projectRoot, "missions", "a-first-extra");
+      if (siblingKind === "in-project symlinked mission") {
+        const archiveMission = path.join(projectRoot, "archive", "a-first-extra");
+        fs.mkdirSync(path.dirname(archiveMission), { recursive: true });
+        fs.renameSync(siblingMission, archiveMission);
+        fs.symlinkSync(path.relative(path.dirname(siblingMission), archiveMission), siblingMission, "dir");
+      } else {
+        fs.rmSync(path.join(siblingMission, "slices"), { recursive: true, force: true });
+      }
+      fs.rmSync(path.join(projectRoot, "dogfood-evidence", "a-first-same-slice"), { recursive: true, force: true });
+
+      const detail = await app.request("/api/slices/same-slice?project=alpha&mission=a-first");
+      const detailText = await detail.text();
+      const detailBody = JSON.parse(detailText) as { missionId?: string; tests?: { proofPackets?: unknown[] } };
+      const asset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+      const assetText = await asset.text();
+      const returnedText = `${detailText}\n${assetText}`;
+      expect({
+        detailStatus: detail.status,
+        missionId: detailBody.missionId,
+        proofPackets: detailBody.tests?.proofPackets,
+        assetStatus: asset.status,
+        assetNotFound: assetText.includes("proof_packet_not_found"),
+        siblingBytesLeaked: returnedText.includes("# alpha/a-first-extra proof") || returnedText.includes("ALPHA-A-FIRST-EXTRA-PROOF"),
+      }).toEqual({
+        detailStatus: 200,
+        missionId: "a-first",
+        proofPackets: [],
+        assetStatus: 404,
+        assetNotFound: true,
+        siblingBytesLeaked: false,
+      });
+    });
+
+    it("preserves mission token order when proof names contain the mission id", async () => {
+      addAlphaMissionWithProof("first-a", 1600000004);
+      const detail = await app.request("/api/slices/same-slice?project=alpha&mission=a-first");
+      const body = await detail.json();
+      const packet = body.tests.proofPackets[0];
+      const asset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+
+      expect({
+        proofDir: packet?.dirName,
+        proofMarkdown: packet?.primaryMarkdown?.content,
+        assetBytes: await asset.text(),
+      }).toEqual({
+        proofDir: "a-first-same-slice",
+        proofMarkdown: "# alpha/a-first proof\n",
+        assetBytes: "ALPHA-A-FIRST-PROOF\n",
+      });
+    });
+
+    const packetPrefixSeparators = [
+      { label: "hyphen", separator: "-" },
+      { label: "dot", separator: "." },
+      { label: "underscore", separator: "_" },
+    ] as const;
+
+    it.each(packetPrefixSeparators)(
+      "qualified detail and proof assets select an older slice packet over a newer same-mission packet whose only matching token is in the mission prefix ($label separator)",
+      async ({ separator }) => {
+        addAlphaMissionWithProof("a-first-extra", 1600000040);
+        const alphaRoot = path.join(workspaceRoot, "alpha");
+        const betaRoot = path.join(workspaceRoot, "beta");
+        writeSlice(path.join(alphaRoot, "missions", "a-first", "slices"), "first", {
+          "SPEC.md": "# alpha/a-first/first\n",
+        });
+        writeSlice(path.join(alphaRoot, "missions", "a-first", "slices"), "second", {
+          "SPEC.md": "# alpha/a-first/second\n",
+        });
+
+        const writeScopedPacket = (
+          evidenceRoot: string,
+          dirName: string,
+          markdown: string,
+          assetBytes: string,
+          mtime: number,
+        ): void => {
+          const packetDir = path.join(evidenceRoot, dirName);
+          fs.mkdirSync(path.join(packetDir, "screenshots"), { recursive: true });
+          fs.writeFileSync(path.join(packetDir, "proof.md"), markdown);
+          fs.writeFileSync(path.join(packetDir, "screenshots", "scope.png"), assetBytes);
+          fs.utimesSync(packetDir, mtime, mtime);
+        };
+
+        const alphaEvidence = path.join(alphaRoot, "dogfood-evidence");
+        writeScopedPacket(
+          alphaEvidence,
+          `a-first${separator}first`,
+          "# alpha/a-first/first proof\n",
+          "ALPHA-A-FIRST-SLICE-FIRST-PROOF\n",
+          1600000010,
+        );
+        writeScopedPacket(
+          alphaEvidence,
+          `a-first${separator}second`,
+          "# alpha/a-first/second proof\n",
+          "ALPHA-A-FIRST-SLICE-SECOND-PROOF\n",
+          1600000020,
+        );
+        writeScopedPacket(
+          alphaEvidence,
+          `a-first-extra${separator}first`,
+          "# alpha/a-first-extra/first proof\n",
+          "ALPHA-A-FIRST-EXTRA-SLICE-FIRST-PROOF\n",
+          1600000040,
+        );
+        writeScopedPacket(
+          path.join(betaRoot, "dogfood-evidence"),
+          `a-first${separator}first`,
+          "# beta/a-first/first proof\n",
+          "BETA-A-FIRST-SLICE-FIRST-PROOF\n",
+          1600000050,
+        );
+
+        const firstDetail = await app.request("/api/slices/first?project=alpha&mission=a-first");
+        const firstBody = await firstDetail.json();
+        const firstPacket = firstBody.tests.proofPackets[0];
+        const firstAsset = await app.request("/api/slices/first/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+        const firstAssetBytes = await firstAsset.text();
+
+        const secondDetail = await app.request("/api/slices/second?project=alpha&mission=a-first");
+        const secondBody = await secondDetail.json();
+        const secondPacket = secondBody.tests.proofPackets[0];
+        const secondAsset = await app.request("/api/slices/second/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+        const secondAssetBytes = await secondAsset.text();
+
+        expect({
+          first: {
+            detailStatus: firstDetail.status,
+            missionId: firstBody.missionId,
+            proofDir: firstPacket?.dirName,
+            proofMarkdown: firstPacket?.primaryMarkdown?.content,
+            assetStatus: firstAsset.status,
+            assetBytes: firstAssetBytes,
+          },
+          second: {
+            detailStatus: secondDetail.status,
+            missionId: secondBody.missionId,
+            proofDir: secondPacket?.dirName,
+            proofMarkdown: secondPacket?.primaryMarkdown?.content,
+            assetStatus: secondAsset.status,
+            assetBytes: secondAssetBytes,
+          },
+        }).toEqual({
+          first: {
+            detailStatus: 200,
+            missionId: "a-first",
+            proofDir: `a-first${separator}first`,
+            proofMarkdown: "# alpha/a-first/first proof\n",
+            assetStatus: 200,
+            assetBytes: "ALPHA-A-FIRST-SLICE-FIRST-PROOF\n",
+          },
+          second: {
+            detailStatus: 200,
+            missionId: "a-first",
+            proofDir: `a-first${separator}second`,
+            proofMarkdown: "# alpha/a-first/second proof\n",
+            assetStatus: 200,
+            assetBytes: "ALPHA-A-FIRST-SLICE-SECOND-PROOF\n",
+          },
+        });
+      },
+    );
+
+    it.each(packetPrefixSeparators)(
+      "qualified detail and proof assets do not fall back to a same-mission packet whose only matching token is in the mission prefix ($label separator)",
+      async ({ separator }) => {
+        const alphaRoot = path.join(workspaceRoot, "alpha");
+        writeSlice(path.join(alphaRoot, "missions", "a-first", "slices"), "first", {
+          "SPEC.md": "# alpha/a-first/first\n",
+        });
+        const wrongSiblingPacket = path.join(alphaRoot, "dogfood-evidence", `a-first${separator}second`);
+        fs.mkdirSync(path.join(wrongSiblingPacket, "screenshots"), { recursive: true });
+        fs.writeFileSync(path.join(wrongSiblingPacket, "proof.md"), "# alpha/a-first/second proof\n");
+        fs.writeFileSync(path.join(wrongSiblingPacket, "screenshots", "scope.png"), "ALPHA-A-FIRST-SLICE-SECOND-PROOF\n");
+        fs.utimesSync(wrongSiblingPacket, 1600000020, 1600000020);
+
+        const detail = await app.request("/api/slices/first?project=alpha&mission=a-first");
+        const detailText = await detail.text();
+        const detailBody = JSON.parse(detailText) as { missionId?: string; tests?: { proofPackets?: unknown[] } };
+        const asset = await app.request("/api/slices/first/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+        const assetText = await asset.text();
+
+        expect({
+          detailStatus: detail.status,
+          missionId: detailBody.missionId,
+          proofPackets: detailBody.tests?.proofPackets,
+          assetStatus: asset.status,
+          assetNotFound: assetText.includes("proof_packet_not_found"),
+          wrongPacketLeaked:
+            detailText.includes("# alpha/a-first/second proof")
+            || assetText.includes("ALPHA-A-FIRST-SLICE-SECOND-PROOF"),
+        }).toEqual({
+          detailStatus: 200,
+          missionId: "a-first",
+          proofPackets: [],
+          assetStatus: 404,
+          assetNotFound: true,
+          wrongPacketLeaked: false,
+        });
+      },
+    );
+
+    const clearEvidenceReadRecord = (): void => {
+      (fs.readdirSync as unknown as { mockClear: () => void }).mockClear();
+      (fs.readFileSync as unknown as { mockClear: () => void }).mockClear();
+    };
+
+    const recordedReadsUnder = (roots: string[]): string[] => {
+      const prefixes = Array.from(new Set(roots.flatMap((root) => {
+        const resolved = path.resolve(root);
+        const parentReal = fs.existsSync(path.dirname(resolved))
+          ? path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved))
+          : resolved;
+        const targetReal = fs.existsSync(resolved) ? fs.realpathSync(resolved) : parentReal;
+        return [resolved, parentReal, targetReal];
+      })));
+      const matchesRoot = (target: unknown): boolean => {
+        if (typeof target === "number" || target == null) return false;
+        const resolved = path.resolve(String(target));
+        return prefixes.some((prefix) => resolved === prefix || resolved.startsWith(`${prefix}${path.sep}`));
+      };
+      const readdirCalls = (fs.readdirSync as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .filter((args) => matchesRoot(args[0]))
+        .map((args) => `readdir:${String(args[0])}`);
+      const readFileCalls = (fs.readFileSync as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .filter((args) => matchesRoot(args[0]))
+        .map((args) => `readFile:${String(args[0])}`);
+      return [...readdirCalls, ...readFileCalls];
+    };
+
+    const withEvidenceRootFault = async <T>(
+      targetPath: string,
+      stage: "resolve" | "access" | "readdir" | "unexpected",
+      code: string,
+      action: () => Promise<T> | T,
+    ): Promise<{ result: T; hits: number }> => {
+      evidenceRootFault.targetPath = targetPath;
+      evidenceRootFault.stage = stage;
+      evidenceRootFault.code = code;
+      evidenceRootFault.hits = 0;
+      try {
+        const result = await action();
+        return { result, hits: evidenceRootFault.hits };
+      } finally {
+        evidenceRootFault.targetPath = null;
+        evidenceRootFault.stage = null;
+        evidenceRootFault.code = "EACCES";
+        evidenceRootFault.hits = 0;
+      }
+    };
+
+    // Maintainer-directed PR #2960 contract change: an evidence root symlink
+    // resolving outside the selected project is treated as an absent evidence
+    // root (detail 200 with empty proofPackets; proof-asset 404
+    // proof_packet_not_found) without reading outside the project, while an
+    // escaping asset symlink inside a valid evidence root still returns 409.
+    it("treats a qualified evidence root symlink outside the selected project as absent", async () => {
+      const outsideRoot = path.join(cleanupDir, "outside-proof-root");
+      const outsidePacket = path.join(outsideRoot, "a-first-same-slice");
+      const outsideMarkdown = "OUTSIDE-ROOT-MARKDOWN";
+      const outsideAsset = "OUTSIDE-ROOT-ASSET";
+      fs.mkdirSync(path.join(outsidePacket, "screenshots"), { recursive: true });
+      fs.writeFileSync(path.join(outsidePacket, "proof.md"), `${outsideMarkdown}\n`);
+      fs.writeFileSync(path.join(outsidePacket, "screenshots/scope.png"), `${outsideAsset}\n`);
+      const selectedEvidenceRoot = path.join(workspaceRoot, "alpha", "dogfood-evidence");
+      fs.rmSync(selectedEvidenceRoot, { recursive: true, force: true });
+      fs.symlinkSync(outsideRoot, selectedEvidenceRoot, "dir");
+
+      clearEvidenceReadRecord();
+      const detail = await app.request("/api/slices/same-slice?project=alpha&mission=a-first");
+      const detailText = await detail.text();
+      const detailBody = JSON.parse(detailText) as {
+        slicePath?: string;
+        missionId?: string;
+        tests?: { proofPackets?: unknown[] };
+      };
+      const asset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+      const assetText = await asset.text();
+      const assetBody = JSON.parse(assetText) as unknown;
+      expect({
+        detailStatus: detail.status,
+        slicePath: detailBody.slicePath,
+        missionId: detailBody.missionId,
+        proofPackets: detailBody.tests?.proofPackets,
+        detailLeaksOutsideProof: detailText.includes(outsideMarkdown),
+        assetStatus: asset.status,
+        assetBody,
+        assetLeaksOutsideProof: assetText.includes(outsideAsset),
+        evidenceReads: recordedReadsUnder([selectedEvidenceRoot, outsideRoot]),
+      }).toEqual({
+        detailStatus: 200,
+        slicePath: path.join(workspaceRoot, "alpha", "missions", "a-first", "slices", "same-slice"),
+        missionId: "a-first",
+        proofPackets: [],
+        detailLeaksOutsideProof: false,
+        assetStatus: 404,
+        assetBody: { error: "proof_packet_not_found" },
+        assetLeaksOutsideProof: false,
+        evidenceReads: [],
+      });
+    });
+
+    it("keeps a missing qualified evidence root optional", async () => {
+      fs.rmSync(path.join(workspaceRoot, "alpha", "dogfood-evidence"), { recursive: true });
+
+      const detail = await app.request("/api/slices/same-slice?project=alpha&mission=a-first");
+      const detailBody = await detail.json();
+      const asset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+      expect({
+        detailStatus: detail.status,
+        proofPackets: detailBody.tests.proofPackets,
+        assetStatus: asset.status,
+        assetError: await asset.json(),
+      }).toEqual({
+        detailStatus: 200,
+        proofPackets: [],
+        assetStatus: 404,
+        assetError: { error: "proof_packet_not_found" },
+      });
+    });
+
+    it("serves a qualified slice document when the selected project's evidence root symlink escapes the project", async () => {
+      const outsideRoot = path.join(cleanupDir, "outside-doc-proof-root");
+      const outsidePacket = path.join(outsideRoot, "z-later-same-slice");
+      const outsideMarkdown = "OUTSIDE-DOC-ROOT-MARKDOWN";
+      const outsideNote = "OUTSIDE-DOC-ROOT-NOTE";
+      fs.mkdirSync(path.join(outsidePacket, "notes"), { recursive: true });
+      fs.writeFileSync(path.join(outsidePacket, "proof.md"), `${outsideMarkdown}\n`);
+      fs.writeFileSync(path.join(outsidePacket, "notes", "a b.md"), `${outsideNote}\n`);
+      const selectedEvidenceRoot = path.join(workspaceRoot, "alpha", "dogfood-evidence");
+      fs.rmSync(selectedEvidenceRoot, { recursive: true, force: true });
+      fs.symlinkSync(outsideRoot, selectedEvidenceRoot, "dir");
+
+      clearEvidenceReadRecord();
+      const response = await app.request("/api/slices/same-slice/doc/notes/a%20b.md?project=alpha&mission=z-later");
+      const responseText = await response.text();
+      const body = JSON.parse(responseText) as unknown;
+      expect({
+        status: response.status,
+        body,
+        evidenceReads: recordedReadsUnder([selectedEvidenceRoot, outsideRoot]),
+        leaksOutsideEvidence: responseText.includes(outsideMarkdown) || responseText.includes(outsideNote),
+      }).toEqual({
+        status: 200,
+        body: { relPath: "notes/a b.md", content: "alpha/z-later nested document\n" },
+        evidenceReads: [],
+        leaksOutsideEvidence: false,
+      });
+    });
+
+    describe("when the selected project's evidence root symlink is dangling", () => {
+      let missingTarget: string;
+      let selectedEvidenceRoot: string;
+
+      beforeEach(() => {
+        missingTarget = path.join(cleanupDir, "missing-doc-proof-root");
+        selectedEvidenceRoot = path.join(workspaceRoot, "alpha", "dogfood-evidence");
+        fs.rmSync(selectedEvidenceRoot, { recursive: true, force: true });
+        fs.symlinkSync(missingTarget, selectedEvidenceRoot, "dir");
+        expect(fs.existsSync(missingTarget)).toBe(false);
+        expect(fs.lstatSync(selectedEvidenceRoot).isSymbolicLink()).toBe(true);
+      });
+
+      it("serves a qualified slice document when the selected project's evidence root symlink is dangling", async () => {
+        clearEvidenceReadRecord();
+        const response = await app.request("/api/slices/same-slice/doc/notes/a%20b.md?project=alpha&mission=z-later");
+        const responseText = await response.text();
+        const body = JSON.parse(responseText) as unknown;
+        expect({
+          status: response.status,
+          body,
+          evidenceReads: recordedReadsUnder([selectedEvidenceRoot, missingTarget]),
+        }).toEqual({
+          status: 200,
+          body: { relPath: "notes/a b.md", content: "alpha/z-later nested document\n" },
+          evidenceReads: [],
+        });
+      });
+
+      // Maintainer-directed PR #2960 contract change: a dangling evidence root
+      // symlink is treated as an absent evidence root rather than 409
+      // project_source_unavailable, matching missing-root behavior on detail
+      // (200 with empty proofPackets) and proof-asset (404 proof_packet_not_found).
+      it("treats a dangling qualified evidence root symlink as absent on detail and proof-asset", async () => {
+        clearEvidenceReadRecord();
+        const detail = await app.request("/api/slices/same-slice?project=alpha&mission=z-later");
+        const detailBody = await detail.json() as {
+          slicePath?: string;
+          missionId?: string;
+          tests?: { proofPackets?: unknown[] };
+        };
+        const asset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=z-later");
+        const assetBody = await asset.json() as unknown;
+        expect({
+          detailStatus: detail.status,
+          slicePath: detailBody.slicePath,
+          missionId: detailBody.missionId,
+          proofPackets: detailBody.tests?.proofPackets,
+          assetStatus: asset.status,
+          assetBody,
+          evidenceReads: recordedReadsUnder([selectedEvidenceRoot, missingTarget]),
+        }).toEqual({
+          detailStatus: 200,
+          slicePath: path.join(workspaceRoot, "alpha", "missions", "z-later", "slices", "same-slice"),
+          missionId: "z-later",
+          proofPackets: [],
+          assetStatus: 404,
+          assetBody: { error: "proof_packet_not_found" },
+          evidenceReads: [],
+        });
+      });
+    });
+
+    it.each(["resolve", "access"] as const)(
+      "treats an unreadable qualified evidence root (%s EACCES) as absent on detail and proof-asset",
+      async (stage) => {
+        const selectedEvidenceRoot = fs.realpathSync(path.join(workspaceRoot, "alpha", "dogfood-evidence"));
+        const { result, hits } = await withEvidenceRootFault(selectedEvidenceRoot, stage, "EACCES", async () => {
+          const detail = await app.request("/api/slices/same-slice?project=alpha&mission=a-first");
+          const detailText = await detail.text();
+          const detailBody = JSON.parse(detailText) as {
+            slicePath?: string;
+            missionId?: string;
+            tests?: { proofPackets?: unknown[] };
+          };
+          const asset = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+          const assetText = await asset.text();
+          const assetBody = JSON.parse(assetText) as unknown;
+          const doc = await app.request("/api/slices/same-slice/doc/SPEC.md?project=alpha&mission=a-first");
+          const docBody = await doc.json() as unknown;
+          return {
+            detailStatus: detail.status,
+            slicePath: detailBody.slicePath,
+            missionId: detailBody.missionId,
+            proofPackets: detailBody.tests?.proofPackets,
+            detailLeaksProof: detailText.includes("alpha/a-first proof"),
+            assetStatus: asset.status,
+            assetBody,
+            assetLeaksProof: assetText.includes("ALPHA-PROOF"),
+            docStatus: doc.status,
+            docBody,
+          };
+        });
+        expect({ ...result, faultTriggered: hits > 0 }).toEqual({
+          detailStatus: 200,
+          slicePath: path.join(workspaceRoot, "alpha", "missions", "a-first", "slices", "same-slice"),
+          missionId: "a-first",
+          proofPackets: [],
+          detailLeaksProof: false,
+          assetStatus: 404,
+          assetBody: { error: "proof_packet_not_found" },
+          assetLeaksProof: false,
+          docStatus: 200,
+          docBody: { relPath: "SPEC.md", content: "# alpha/a-first\n" },
+          faultTriggered: true,
+        });
+      },
+    );
+
+    it("qualifiedEvidenceRoot returns null for unavailable or escaping roots without swallowing unrelated caller errors", async () => {
+      const helper = (slicesRoutesModule as {
+        qualifiedEvidenceRoot?: (projectRoot: string, missionsRoot: string) => string | null;
+      }).qualifiedEvidenceRoot;
+      expect(helper).toBeTypeOf("function");
+
+      const alphaRoot = fs.realpathSync(path.join(workspaceRoot, "alpha"));
+      const alphaMissionsRoot = path.join(alphaRoot, "missions");
+      const selectedEvidenceRoot = path.join(alphaRoot, "dogfood-evidence");
+      expect(helper!(alphaRoot, alphaMissionsRoot)).toBe(selectedEvidenceRoot);
+
+      for (const stage of ["resolve", "access", "readdir"] as const) {
+        const { result, hits } = await withEvidenceRootFault(selectedEvidenceRoot, stage, "EACCES", () =>
+          helper!(alphaRoot, alphaMissionsRoot),
+        );
+        expect({ stage, result, faultTriggered: hits > 0 }).toEqual({
+          stage,
+          result: null,
+          faultTriggered: true,
+        });
+      }
+
+      await expect(
+        withEvidenceRootFault(selectedEvidenceRoot, "unexpected", "EACCES", () =>
+          helper!(alphaRoot, alphaMissionsRoot),
+        ),
+      ).rejects.toThrow(TypeError);
+
+      fs.rmSync(selectedEvidenceRoot, { recursive: true, force: true });
+      expect(helper!(alphaRoot, alphaMissionsRoot)).toBeNull();
+
+      const missingTarget = path.join(cleanupDir, "missing-helper-evidence-root");
+      fs.symlinkSync(missingTarget, selectedEvidenceRoot, "dir");
+      expect(helper!(alphaRoot, alphaMissionsRoot)).toBeNull();
+
+      fs.rmSync(selectedEvidenceRoot, { recursive: true, force: true });
+      const outsideRoot = path.join(cleanupDir, "outside-helper-evidence-root");
+      fs.mkdirSync(outsideRoot, { recursive: true });
+      fs.symlinkSync(outsideRoot, selectedEvidenceRoot, "dir");
+      expect(helper!(alphaRoot, alphaMissionsRoot)).toBeNull();
+
+      fs.rmSync(selectedEvidenceRoot, { recursive: true, force: true });
+      fs.writeFileSync(selectedEvidenceRoot, "not-a-directory\n");
+      expect(helper!(alphaRoot, alphaMissionsRoot)).toBeNull();
+    });
+
+    it("rejects a qualified proof asset symlink outside the selected project", async () => {
+      const outsideAsset = "OUTSIDE-DIRECT-ASSET-BYTES";
+      const outsidePath = path.join(cleanupDir, "outside-proof-asset.png");
+      const selectedAsset = path.join(workspaceRoot, "alpha", "dogfood-evidence", "a-first-same-slice", "screenshots", "scope.png");
+      fs.writeFileSync(outsidePath, `${outsideAsset}\n`);
+      fs.rmSync(selectedAsset);
+      fs.symlinkSync(outsidePath, selectedAsset, "file");
+
+      const response = await app.request("/api/slices/same-slice/proof-asset/screenshots/scope.png?project=alpha&mission=a-first");
+      const responseText = await response.text();
+      expect({
+        status: response.status,
+        projectPathEscape: responseText.includes("project_path_escape"),
+        leaksOutsideAsset: responseText.includes(outsideAsset),
+      }).toEqual({ status: 409, projectPathEscape: true, leaksOutsideAsset: false });
+    });
+
+    it("uses the missions-root-relative evidence directory for custom missions.root", async () => {
+      const project = "custom";
+      const mission = "custom-first";
+      const slice = "same-slice";
+      const projectRoot = path.join(workspaceRoot, project);
+      fs.writeFileSync(path.join(workspaceRoot, "workspace.yaml"),
+        "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n  - id: custom\n    root: custom\n");
+      writeSlice(workspaceRoot, project, {
+        "project.yaml": "metadata:\n  id: custom\nmissions:\n  root: work/missions\n",
+        "SPEC.md": "# custom project\n",
+      });
+      const missionsRoot = path.join(projectRoot, "work", "missions");
+      writeSlice(missionsRoot, mission, { "SPEC.md": `# ${mission}\n` });
+      writeSlice(path.join(missionsRoot, mission, "slices"), slice, { "SPEC.md": `# ${project}/${mission}\n` });
+
+      // The CLI contract is path.dirname(project/work/missions)/dogfood-evidence,
+      // i.e. project/work/dogfood-evidence; this is a literal fixture path, not a helper call.
+      const conventionalRoot = path.join(projectRoot, "work", "dogfood-evidence");
+      const projectRootDecoy = path.join(projectRoot, "dogfood-evidence");
+      const writePacket = (root: string, marker: string, mtime: number): void => {
+        const packet = path.join(root, `${mission}-${slice}`);
+        fs.mkdirSync(path.join(packet, "screenshots"), { recursive: true });
+        fs.writeFileSync(path.join(packet, "proof.md"), `# ${marker}\n`);
+        fs.writeFileSync(path.join(packet, "screenshots/scope.png"), `${marker}\n`);
+        fs.utimesSync(packet, mtime, mtime);
+      };
+      const expectedMarker = "CUSTOM-WORK-MISSIONS-PROOF";
+      writePacket(conventionalRoot, expectedMarker, 1600000004);
+      writePacket(projectRootDecoy, "CUSTOM-PROJECT-ROOT-DECOY", 1600000005);
+
+      const detail = await app.request(`/api/slices/${slice}?project=${project}&mission=${mission}`);
+      const body = await detail.json();
+      const packet = body.tests.proofPackets[0];
+      const asset = await app.request(`/api/slices/${slice}/proof-asset/screenshots/scope.png?project=${project}&mission=${mission}`);
+      expect({
+        detailStatus: detail.status,
+        proofDir: packet?.dirName,
+        proofMarkdown: packet?.primaryMarkdown?.content,
+        assetStatus: asset.status,
+        assetBytes: await asset.text(),
+      }).toEqual({
+        detailStatus: 200,
+        proofDir: `${mission}-${slice}`,
+        proofMarkdown: `# ${expectedMarker}\n`,
+        assetStatus: 200,
+        assetBytes: `${expectedMarker}\n`,
+      });
+    });
+
+    it("keeps missions.root . healthy and treats its parent evidence store as optional", async () => {
+      const project = "dot-root";
+      const mission = "dot-first";
+      const slice = "same-slice";
+      const projectRoot = path.join(workspaceRoot, project);
+      fs.writeFileSync(path.join(workspaceRoot, "workspace.yaml"),
+        "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n  - id: dot-root\n    root: dot-root\n");
+      writeSlice(workspaceRoot, project, {
+        "project.yaml": "metadata:\n  id: dot-root\nmissions:\n  root: .\n",
+        "SPEC.md": "# dot-root project\n",
+      });
+      writeSlice(projectRoot, mission, { "SPEC.md": `# ${mission}\n` });
+      writeSlice(path.join(projectRoot, mission, "slices"), slice, {
+        "SPEC.md": "# dot-root/dot-first\n",
+        "notes/a b.md": "dot-root own document\n",
+      });
+
+      // Literal parent path for missions.root: .; this is the legacy store outside the project.
+      const parentEvidenceRoot = path.join(workspaceRoot, "dogfood-evidence");
+      const parentPacket = path.join(parentEvidenceRoot, `${mission}-${slice}`);
+      const parentMarkdownMarker = "PARENT-LEGACY-PROOF-ROOT";
+      const parentAssetMarker = "PARENT-LEGACY-PROOF-ASSET";
+      fs.mkdirSync(path.join(parentPacket, "screenshots"), { recursive: true });
+      fs.writeFileSync(path.join(parentPacket, "proof.md"), `# ${parentMarkdownMarker}\n`);
+      fs.writeFileSync(path.join(parentPacket, "screenshots/scope.png"), `${parentAssetMarker}\n`);
+
+      const detail = await app.request(`/api/slices/${slice}?project=${project}&mission=${mission}`);
+      const detailBody = await detail.json();
+      const doc = await app.request(`/api/slices/${slice}/doc/SPEC.md?project=${project}&mission=${mission}`);
+      const docBody = await doc.json();
+      const asset = await app.request(`/api/slices/${slice}/proof-asset/screenshots/scope.png?project=${project}&mission=${mission}`);
+      const assetText = await asset.text();
+      const returnedText = `${JSON.stringify(detailBody)}\n${JSON.stringify(docBody)}\n${assetText}`;
+      expect({
+        detailStatus: detail.status,
+        slicePath: detailBody.slicePath,
+        missionId: detailBody.missionId,
+        proofPackets: detailBody.tests?.proofPackets,
+        docStatus: doc.status,
+        docBody,
+        assetStatus: asset.status,
+        assetNotFound: assetText.includes("proof_packet_not_found"),
+        parentProofBytesLeaked: returnedText.includes(parentMarkdownMarker) || returnedText.includes(parentAssetMarker),
+      }).toEqual({
+        detailStatus: 200,
+        slicePath: path.join(projectRoot, mission, "slices", slice),
+        missionId: mission,
+        proofPackets: [],
+        docStatus: 200,
+        docBody: { relPath: "SPEC.md", content: "# dot-root/dot-first\n" },
+        assetStatus: 404,
+        assetNotFound: true,
+        parentProofBytesLeaked: false,
+      });
+    });
+
+    it("qualified detail finds the later duplicate mission and its own proof packet", async () => {
+      const expectedSlicePath = path.join(workspaceRoot, "alpha", "missions", "z-later", "slices", "same-slice");
+      expect(fs.readFileSync(path.join(expectedSlicePath, "SPEC.md"), "utf8")).toBe("# alpha/z-later\n");
+      const detail = await app.request("/api/slices/same-slice?project=alpha&mission=z-later");
+      expect(detail.status).toBe(200);
+      expect(await detail.json()).toMatchObject({
+        slicePath: expectedSlicePath,
+        missionId: "z-later",
+        tests: { proofPackets: [{
+          dirName: "z-later-same-slice",
+          primaryMarkdown: { relPath: "proof.md", content: "# alpha/z-later proof\n" },
+          screenshots: ["screenshots/scope.png"],
+        }] },
+      });
+    });
+
+    it("doc follows the detail route's later-duplicate mission selection", async () => {
       const response = await app.request("/api/slices/same-slice/doc/SPEC.md?project=alpha&mission=z-later");
-      const body = await response.json();
-      expect({ status: response.status, content: body.content }).toEqual({ status: 404, content: undefined });
-      expect(body).toEqual({ error: "doc_not_found" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ relPath: "SPEC.md", content: "# alpha/z-later\n" });
+    });
+
+    it.each([
+      { route: "detail", endpoint: "" },
+      { route: "doc", endpoint: "/doc/SPEC.md" },
+      { route: "proof", endpoint: "/proof-asset/screenshots/scope.png" },
+    ])("qualified $route preserves the source error for a nonexistent mission", async ({ endpoint }) => {
+      const response = await app.request(`/api/slices/same-slice${endpoint}?project=alpha&mission=unrelated`);
+      expect(response.status).toBe(409);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      const body = await response.json() as { error: string; message: string };
+      expect(body.error).toBe("project_source_unavailable");
+      expect(body.message).toMatch(/ENOENT|no such file/i);
+      expect(body).not.toHaveProperty("content");
+      expect(body).not.toHaveProperty("proofPackets");
     });
 
     it.each([

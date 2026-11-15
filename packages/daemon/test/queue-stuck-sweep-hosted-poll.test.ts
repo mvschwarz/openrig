@@ -11,7 +11,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { queueRoutes } from "../src/routes/queue.js";
-import type { RosterWake } from "../src/domain/rosters.js";
+import type { RosterMember, RosterWake } from "../src/domain/rosters.js";
 import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG, unclaimedBacklogTag } from "../src/domain/queue-stuck-sweep.js";
 
 const MEMBER = "helper-a@hub";
@@ -23,12 +23,13 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
   let repo: QueueRepository;
 
   function makeRepo(opts: { hostedWake?: (d: string) => RosterWake | null; resolveSessionAddresses?: (n: string) => string[];
-    validateRig?: (d: string) => boolean } = {}): QueueRepository {
+    validateRig?: (d: string) => boolean; hostedMembers?: () => RosterMember[] } = {}): QueueRepository {
     return new QueueRepository(db, bus, {
       validateRig: opts.validateRig ?? (() => true),
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
       isHostedMember: (d) => d === MEMBER,
       hostedWake: opts.hostedWake ?? (() => null),
+      hostedMembers: opts.hostedMembers ?? (() => []),
       ...(opts.resolveSessionAddresses ? { resolveSessionAddresses: opts.resolveSessionAddresses } : {}),
     });
   }
@@ -114,16 +115,88 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(more).toEqual([]);
     expect(notice!.destinationSession).toBe(PERSON);
     expect(notice!.sourceSession).toBe(MEMBER);
-    expect(notice!.body).toContain(`check-ins: no check-in observed since ${at.toISOString()}`);
+    expect(notice!.body).toContain(`check-ins: unknown (no check-in cadence declared); no check-in since ${at.toISOString()}`);
     expect(notice!.body).toContain("no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat");
     for (const row of rows) expect(notice!.body).toContain(`- ${row.qitemId}, unclaimed since ${row.tsCreated}, from lead@hub: work for ${MEMBER}`);
     expect(notice!.body).not.toMatch(/dead/i);
   });
 
+  /** The member as its roster lists it, with the cadence its person stated at setup (or none). */
+  const asListed = (checkInMinutes?: number): RosterMember[] => [{ seat: MEMBER, host: "hub", capabilities: ["research"],
+    engagement: ["delegate"], use_when: "research", why: "it researches", hosted: true,
+    ...(checkInMinutes === undefined ? {} : { check_in_minutes: checkInMinutes }) }];
+
+  it("a stated cadence decides only the notice's check-in line, never when the notice is filed: overdue past twice it, checking in within it", async () => {
+    const at = new Date(Date.now() - 3 * 3_600_000);
+    repo = makeRepo({ hostedMembers: () => asListed(60) });
+    repo.recordInboxCheckIn(MEMBER, at);
+    await work(MEMBER, { ageMinutes: 61 });
+    await sweep();
+    expect(notices()[0]!.body).toContain(`check-ins: overdue: last check-in ${at.toISOString()}, expected every 60 min; its schedule may be off or waiting for an approval`);
+    expect(notices()[0]!.body).toContain("why: nobody has claimed these rows, and it hasn't checked in as often as its setup expects.");
+
+    // The same three-hour-old check-in is on time for a member expected every four hours, though older than the
+    // unclaimed age that judges a member with no stated cadence.
+    db.close();
+    db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    bus = new EventBus(db);
+    repo = makeRepo({ hostedMembers: () => asListed(240) });
+    seedSeat("lead@hub");
+    repo.recordInboxCheckIn(MEMBER, at);
+    await work(MEMBER, { ageMinutes: 61 });
+    await sweep();
+    expect(notices()[0]!.body).toContain("check-ins: checking in: its last check-in is within twice its expected 240 min");
+  });
+
+  it("the notice says what the hosted-members read says: an unusable cadence reads unknown with its reason, even with a fresh check-in", async () => {
+    const member = { ...asListed()[0]!, check_in_problem: "check_in_minutes \"60\" isn't a positive whole number of minutes" };
+    repo = makeRepo({ hostedMembers: () => [member] });
+    repo.recordInboxCheckIn(MEMBER, new Date(Date.now() - 5 * 60_000));
+    await work(MEMBER, { ageMinutes: 61 });
+    await sweep();
+    expect(repo.hostedMemberCheckIns()[0]).toMatchObject({ status: "unknown", reason: member.check_in_problem });
+    expect(notices()[0]!.body).toContain(`check-ins: unknown (${member.check_in_problem}); it read its own inbox within the last 60 min`);
+    expect(notices()[0]!.body).not.toContain("checking in");
+  });
+
+  it("check-in status is a status, never a refusal: work for an overdue or never-seen member queues and is recorded as before", async () => {
+    repo = makeRepo({ hostedMembers: () => asListed(60) });
+    repo.recordInboxCheckIn(MEMBER, new Date(Date.now() - 5 * 3_600_000));
+    const overdue = await repo.create({ sourceSession: "lead@hub", destinationSession: MEMBER, body: "work", summary: "work" });
+    const unlisted = makeRepo();
+    const baseline = await unlisted.create({ sourceSession: "lead@hub", destinationSession: MEMBER, body: "work", summary: "work" });
+    expect(repo.getById(overdue.qitemId)).toMatchObject({ state: "pending", destinationSession: MEMBER });
+    expect(repo.getById(overdue.qitemId)!.lastNudgeResult).toBe(unlisted.getById(baseline.qitemId)!.lastNudgeResult);
+    expect(repo.hostedMemberCheckIns().map((m) => m.status)).toEqual(["check-in-overdue"]);
+  });
+
+  it("the hosted-members read gives each member's status, last check-in and stated cadence", async () => {
+    const members = [...asListed(60), { ...asListed()[0]!, seat: "helper-b@hub", check_in_on_request: true as const },
+      { ...asListed(30)[0]!, seat: "helper-c@hub" }, { ...asListed()[0]!, seat: "helper-d@hub" }];
+    repo = makeRepo({ hostedMembers: () => members });
+    const at = new Date(Date.now() - 10 * 60_000);
+    repo.recordInboxCheckIn(MEMBER, at);
+    repo.recordInboxCheckIn("helper-b@hub", at);
+    repo.recordInboxCheckIn("helper-d@hub", at);
+    const res = await appFor(repo).request("/api/queue/hosted-members");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { hostId: unknown; members: unknown };
+    expect(body).toHaveProperty("hostId");
+    expect(body.members).toEqual([
+      { seat: MEMBER, rung: false, status: "checking-in", lastCheckInAt: at.toISOString(), expectedMinutes: 60, onRequest: false, reporter: "openrig-observed" },
+      { seat: "helper-b@hub", rung: false, status: "on-request", lastCheckInAt: at.toISOString(), expectedMinutes: null, onRequest: true, reporter: "openrig-observed" },
+      { seat: "helper-c@hub", rung: false, status: "no-check-in-yet", lastCheckInAt: null, expectedMinutes: 30, onRequest: false, reporter: "openrig-observed" },
+      // States neither a cadence nor on request: unknown, with its last check-in, never on request, idle or overdue.
+      { seat: "helper-d@hub", rung: false, status: "unknown", lastCheckInAt: at.toISOString(), expectedMinutes: null, onRequest: false,
+        reporter: "openrig-observed", reason: "no check-in cadence declared" },
+    ]);
+  });
+
   it("a member that never checked in says so", async () => {
     await work(MEMBER, { ageMinutes: 61 });
     await sweep();
-    expect(notices()[0]!.body).toContain("check-ins: no check-in observed yet");
+    expect(notices()[0]!.body).toContain("check-ins: no check-in yet; no check-in cadence declared");
   });
 
   it("polling without claiming: old work still surfaces, and the member's check-ins neither reset its age nor rewrite the notice", async () => {
@@ -132,8 +205,8 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await poll();
     await sweep();
     const [notice] = notices();
-    expect(notice!.body).toContain("check-ins: checking in: it read its own inbox within the last 60 min");
-    expect(notice!.body).toContain("it's checking in, but this work is still unclaimed");
+    expect(notice!.body).toContain("check-ins: unknown (no check-in cadence declared); it read its own inbox within the last 60 min");
+    expect(notice!.body).toContain("it's reading its own inbox, but this work is still unclaimed");
     expect(notice!.body).toContain(`- ${old.qitemId}, unclaimed since ${old.tsCreated}`);
     expect(notice!.body).not.toContain(young.qitemId);
     expect(perRow()).toEqual([]);
@@ -186,7 +259,7 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     expect(errors.mock.calls.filter((call) => String(call[0]).includes("inbox check-in not recorded"))).toHaveLength(1);
     expect(repo.lastInboxCheckIn(MEMBER)).toEqual({ state: "unknown" });
     await sweep();
-    expect(notices()[0]!.body).toContain("check-ins: unknown: its check-ins couldn't be read");
+    expect(notices()[0]!.body).toContain("check-ins: unknown (its check-ins couldn't be read)");
   });
 
   it("after a restart the stale check-in is still known, and the first new read records at once", async () => {
@@ -262,6 +335,164 @@ describe("stuck sweep: a hosted member that polls for its work", () => {
     await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" });
     const open = notices().filter((n) => n.state === "pending");
     expect(open.map((n) => n.destinationSession)).toEqual(["operator@hub"]);
+  });
+
+  // Review of #3049: an unreadable list is rebuilt from every row still waiting at the member, never left alone or
+  // narrowed, so another creator's row still moves the notice on and never stays unseen.
+  it.each(["missing", "malformed"] as const)("a notice to a creator whose list is %s still moves on for another creator's row", async (how) => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    const first = await work(MEMBER, { ageMinutes: 61 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(how === "malformed" ? `${body}\n${prefix}[` : body, toLead!.qitemId);
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 70 });
+    await sweep(noPerson);
+    const open = notices().filter((n) => n.state === "pending");
+    expect(open.map((n) => n.destinationSession)).toEqual(["operator@hub"]);
+    for (const row of [first, other]) expect(open[0]!.body).toContain(row.qitemId);
+    expect(repo.getById(toLead!.qitemId)!.state).toBe("done");
+  });
+
+  it("a notice to a creator whose list is unreadable isn't moved on by another creator's row that doesn't qualify yet", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    await work(MEMBER, { ageMinutes: 61 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(body, toLead!.qitemId);
+    await work(MEMBER, { from: "orch@hub", ageMinutes: 1 });
+    await sweep(noPerson);
+    expect(notices().filter((n) => n.state === "pending").map((n) => n.destinationSession)).toEqual(["lead@hub"]);
+  });
+
+  // Review of #3049: an old recipient the sweep no longer recognizes isn't proof the rows were its own. A notice the
+  // operator agent got for two creators' rows keeps standing for both when the operator setting changes and its list
+  // is unreadable, even with a raised threshold hiding both rows.
+  it.each(["missing", "malformed"] as const)("a notice whose list is %s keeps every row when the operator it went to is no longer recognized", async (how) => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    seedSeat("operator2@hub");
+    const first = await work(MEMBER, { ageMinutes: 70 });
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 70 });
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" });
+    const [toOperator] = notices();
+    expect(toOperator!.destinationSession).toBe("operator@hub");
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toOperator!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(how === "malformed" ? `${body}\n${prefix}[` : body, toOperator!.qitemId);
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator2@hub", unclaimedAgeMinutes: 120 });
+    const open = notices().filter((n) => n.state === "pending");
+    expect(open.length).toBeGreaterThan(0);
+    for (const row of [first, other]) expect(open.some((n) => repo.getById(n.qitemId)!.body.includes(row.qitemId))).toBe(true);
+  });
+
+  it("a creator's notice that grows with another creator's row in place loses the creator mark", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const first = await work(MEMBER, { ageMinutes: 70 });
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" });
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+    expect(toLead!.tags).toContain("stuck-sweep-backlog-to-creator:lead@hub");
+    // lead@hub becomes the recovery agent: it sees any row, so another creator's row joins its notice in place.
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 70 });
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "lead@hub" });
+    expect(repo.getById(toLead!.qitemId)!.body).toContain(other.qitemId);
+    expect((repo.getById(toLead!.qitemId)!.tags ?? []).some((t) => t.startsWith("stuck-sweep-backlog-to-creator"))).toBe(false);
+    // Then the setting changes back and the list is unreadable: the other creator's row is still stood for.
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(body, toLead!.qitemId);
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub", unclaimedAgeMinutes: 120 });
+    const open = notices().filter((n) => n.state === "pending");
+    for (const row of [first, other]) expect(open.some((n) => repo.getById(n.qitemId)!.body.includes(row.qitemId))).toBe(true);
+  });
+
+  it("the creator mark alone proves provenance: a member that gains a wake keeps its creator's notice to that creator's rows", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    await work(MEMBER, { ageMinutes: 70 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.tags).toContain("stuck-sweep-backlog-to-creator:lead@hub");
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(body, toLead!.qitemId);
+    // The member gains a wake (no longer polled), and another creator's young row arrives with its wake verified.
+    repo = makeRepo({ hostedWake: (d) => (d === MEMBER ? { webhook: { url_ref: "HELPER_A_WAKE" } } as RosterWake : null) });
+    await work(MEMBER, { from: "orch@hub", ageMinutes: 5, result: "verified" });
+    await sweep(noPerson);
+    const toLeadNow = notices().filter((n) => n.state === "pending" && n.destinationSession === "lead@hub");
+    for (const n of toLeadNow) expect(repo.getById(n.qitemId)!.body).not.toContain("orch@hub");
+  });
+
+  // Review of #3049: the mark names the creator the sweep filed the notice to. A notice that changes hands (a queue handoff
+  // carries its tags; a fallback changes its destination in place) still stands for that creator's rows, never for the
+  // rows of whoever holds it now, even with its list gone and a raised threshold hiding them.
+  it.each(["handoff", "fallback"] as const)("a marked notice that changes hands by %s, its list unreadable, still stands for the creator's rows", async (how) => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    seedSeat("helper@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    const first = await work(MEMBER, { ageMinutes: 90 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+    if (how === "handoff") {
+      // Handed on with no tags of its own and a body of its own: the successor carries the key and the mark, no list.
+      const { created } = await repo.handoff({ qitemId: toLead!.qitemId, fromSession: "lead@hub", toSession: "helper@hub",
+        body: "Can you look at this member's backlog?", nudge: false });
+      expect(created.tags).toEqual(toLead!.tags);
+    } else {
+      repo.routeToFallback(toLead!.qitemId, "helper@hub", "lead@hub stopped");
+      const prefix = "Every row this notice stands for: ";
+      const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+      db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(body, toLead!.qitemId);
+    }
+    const pass = await sweep({ ...noPerson, unclaimedAgeMinutes: 120 });
+    expect(pass.outcome).not.toBe("failed");
+    // The creator's row still waits, and an open notice's rebuilt list stands for it.
+    expect(repo.getById(first.qitemId)!.state).toBe("pending");
+    const open = notices().filter((n) => ["pending", "in-progress", "blocked"].includes(n.state));
+    expect(open.some((n) => repo.getById(n.qitemId)!.body.split("\n")
+      .some((l) => l.startsWith("Every row this notice stands for: ") && l.includes(first.qitemId)))).toBe(true);
+  });
+
+  // Review of #3049: a notice with two creator marks (tags passed by hand on a handoff or create) names no creator, so
+  // with its list unreadable it is rebuilt from every unresolved row, never from the first mark's rows alone.
+  it("a notice with two creator marks and an unreadable list stands for every unresolved row", async () => {
+    seedSeat("orch@hub");
+    seedSeat("operator@hub");
+    const noPerson = { resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "operator@hub" };
+    const first = await work(MEMBER, { ageMinutes: 90 });
+    await sweep(noPerson);
+    const [toLead] = notices();
+    expect(toLead!.tags).toContain("stuck-sweep-backlog-to-creator:lead@hub");
+    const other = await work(MEMBER, { from: "orch@hub", ageMinutes: 90 });
+    const prefix = "Every row this notice stands for: ";
+    const body = repo.getById(toLead!.qitemId)!.body.split("\n").filter((l) => !l.startsWith(prefix)).join("\n");
+    db.prepare("UPDATE queue_items SET body = ?, tags = json_insert(tags, '$[#]', ?) WHERE qitem_id = ?")
+      .run(body, "stuck-sweep-backlog-to-creator:orch@hub", toLead!.qitemId);
+    await sweep({ ...noPerson, unclaimedAgeMinutes: 120 });
+    const open = notices().filter((n) => ["pending", "in-progress", "blocked"].includes(n.state));
+    for (const row of [first, other]) expect(open.some((n) => repo.getById(n.qitemId)!.body.includes(row.qitemId))).toBe(true);
+  });
+
+  it("a member's notice to the one creator of its rows is marked even when that creator is also the recovery agent", async () => {
+    await work(MEMBER, { ageMinutes: 70 });
+    await sweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => "lead@hub" });
+    const [toLead] = notices();
+    expect(toLead!.destinationSession).toBe("lead@hub");
+    expect(toLead!.tags).toContain("stuck-sweep-backlog-to-creator:lead@hub");
   });
 
   it("a notice to a creator lists only that creator's rows: another creator's row moves every row to the next recipient", async () => {

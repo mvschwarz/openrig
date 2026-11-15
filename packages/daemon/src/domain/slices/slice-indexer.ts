@@ -811,19 +811,22 @@ export class SliceIndexer {
   // --- internals ---
 
   private readSliceLocations(): SliceLocation[] {
-    return this.walkSliceLocations().filter((location) => !this.missionId || location.missionId === this.missionId);
+    return this.walkSliceLocations(false, [], undefined, this.missionId || undefined);
   }
 
-  /** Every slice location under the roots, whatever mission this indexer is scoped to.
-   *  Directory names are deduplicated (first wins) unless `physical` asks for every folder. */
+  /** Every slice location under the roots. A requested mission is filtered before
+   *  directory-name deduplication; otherwise the first matching name wins unless
+   *  `physical` asks for every folder. */
   private walkSliceLocations(
     physical = false,
     additionalRoots: readonly string[] = [],
     onReadError?: () => void,
+    missionId?: string,
   ): SliceLocation[] {
     const locations: SliceLocation[] = [];
     const seen = new Set<string>();
     const addLocation = (location: SliceLocation) => {
+      if (missionId !== undefined && location.missionId !== missionId) return;
       if (!physical) {
         if (seen.has(location.name)) return;
         seen.add(location.name);
@@ -1085,7 +1088,7 @@ export class SliceIndexer {
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
     const qitemIds = this.matchQitems(name, served);
-    const proofPacket = this.findProofPacket(name);
+    const proofPacket = this.findProofPacket(name, this.missionId ? missionId : null);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
 
     return {
@@ -1115,7 +1118,7 @@ export class SliceIndexer {
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
     const qitemIds = this.matchQitems(name, served);
-    const proofPacket = this.findProofPacket(name);
+    const proofPacket = this.findProofPacket(name, this.missionId ? missionId : null);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
     const commitRefs = this.extractCommitRefs(frontmatter);
     const files = this.listSliceFiles(slicePath);
@@ -1502,7 +1505,34 @@ export class SliceIndexer {
     return this.membershipIndex;
   }
 
-  private findProofPacket(sliceName: string): SliceProofPacket | null {
+  private discoverMissionIds(): Set<string> {
+    const missionIds = new Set<string>();
+    for (const root of this.sliceRoots()) {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+      catch { continue; }
+      for (const entry of entries) {
+        if ((!entry.isDirectory() && !entry.isSymbolicLink()) || entry.name.startsWith(".")) continue;
+        // Project readers treat every non-dot directory or symlink entry as a mission;
+        // ownership needs only its name and never follows a sibling link.
+        missionIds.add(entry.name);
+      }
+    }
+    return missionIds;
+  }
+
+  private proofDirectoryMissionOwner(dirName: string, missionIds: ReadonlySet<string>): string | null {
+    let owner: string | null = null;
+    for (const candidate of missionIds) {
+      if (!dirName.startsWith(candidate)) continue;
+      const separator = dirName[candidate.length];
+      if (separator !== "-" && separator !== "." && separator !== "_") continue;
+      if (!owner || candidate.length > owner.length) owner = candidate;
+    }
+    return owner;
+  }
+
+  private findProofPacket(sliceName: string, missionId: string | null): SliceProofPacket | null {
     if (!this.dogfoodEvidenceRoot) return null;
     let entries: fs.Dirent[];
     try {
@@ -1511,19 +1541,26 @@ export class SliceIndexer {
       return null;
     }
 
-    // Match strategy: token-based. Tokenize slice name on `-`, drop
-    // trailing `vN` version tokens (real proof dirs typically don't
-    // include the version suffix), then a dir matches if every remaining
-    // token appears as a hyphen-bounded substring of the dir name. This
-    // handles real-world dir-naming where phase indicators land at the
-    // front (e.g. `pl005-phase-a-mission-control-queue-observability-...`)
-    // even though the slice folder uses suffix form
-    // (`mission-control-queue-observability-phase-a`). Latest mtime wins.
+    // Qualified proof directories use the observed `<mission>-<slice>` form:
+    // the literal mission ID must lead the name at a separator boundary. If
+    // known mission IDs overlap, the longest prefix owns the directory. This
+    // is a fixture-supported rule, not a historically documented contract.
+    // Unqualified reads retain their legacy slice-only token match. Once a
+    // qualified directory is attributed, slice tokens match against the
+    // remainder after that mission prefix and separator (`vN` handling unchanged);
+    // latest mtime remains the tie-break among same-mission matches.
+    let knownMissionIds: Set<string> | null = null;
+    if (missionId) {
+      knownMissionIds = this.discoverMissionIds();
+      knownMissionIds.add(missionId);
+    }
     const sliceTokens = sliceName.split("-").filter((t) => t.length > 0 && !/^v\d+$/.test(t));
     const matches: { dirent: fs.Dirent; mtime: number }[] = [];
     for (const dirent of entries) {
       if (!dirent.isDirectory()) continue;
-      const dirTokenSet = new Set(dirent.name.split(/[-._]/).filter((t) => t.length > 0));
+      if (knownMissionIds && this.proofDirectoryMissionOwner(dirent.name, knownMissionIds) !== missionId) continue;
+      const tokenSource = knownMissionIds && missionId ? dirent.name.slice(missionId.length + 1) : dirent.name;
+      const dirTokenSet = new Set(tokenSource.split(/[-._]/).filter((t) => t.length > 0));
       const allTokensPresent = sliceTokens.every((t) => dirTokenSet.has(t));
       if (!allTokensPresent) continue;
       try {

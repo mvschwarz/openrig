@@ -27,11 +27,13 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { mergeManagedBlock, MANAGED_BLOCK_START, MANAGED_BLOCK_END } from "../src/domain/managed-blocks.js";
-import { appendIsCleanupSafe } from "../src/domain/restore-guidance.js";
+import { appendIsCleanupSafe, seatGuidance } from "../src/domain/restore-guidance.js";
 import type { ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
+import type { NodeStartupSnapshot } from "../src/domain/types.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { getNodeDetail } from "../src/domain/node-inventory.js";
 
@@ -75,6 +77,8 @@ interface SeatOptions {
   seatSkillsLine?: boolean;
   /** #875: a Pi launch that chose its own agent folder's AGENTS.md, recorded with the startup context. */
   piAgentFile?: boolean;
+  /** A launch from before the context-entry floor: the saved selection has the built-in openrig-start.md and no floor. */
+  legacyStart?: boolean;
 }
 
 /** The resume type each runtime records for its native session. */
@@ -82,6 +86,8 @@ const resumeTypeOf = (runtime: NonNullable<SeatOptions["runtime"]>): string =>
   runtime === "codex" ? "codex_id" : runtime === "pi" ? "pi_session_file" : "claude_id";
 
 const SEAT_SKILLS_ASSET = path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
+const START_ASSET = path.join(import.meta.dirname, "../assets/guidance/openrig-start.md");
+const CONTEXT_ENTRY_ASSET = path.join(import.meta.dirname, "../assets/guidance/openrig-context-entry.md");
 
 describe("a seat's guidance across rig down then rig up --existing (exact resume)", () => {
   let db: Database.Database;
@@ -164,6 +170,10 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       files.push({ path: "openrig-seat-skills.md", absolutePath: SEAT_SKILLS_ASSET, ownerRoot: path.dirname(SEAT_SKILLS_ASSET),
         deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] });
     }
+    if (opts.legacyStart) {
+      files.push({ path: "openrig-start.md", absolutePath: START_ASSET, ownerRoot: path.dirname(path.dirname(START_ASSET)),
+        deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] });
+    }
     if (opts.autoSkillFile) {
       fs.writeFileSync(path.join(spec, "helper.md"), "# SKILL\nA skill, never merged into guidance.");
       files.push({ path: "helper.md", absolutePath: path.join(spec, "helper.md"), ownerRoot: spec,
@@ -183,6 +193,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     mergeManagedBlock(nodeFs, guidanceFile, "SOP.md", "How work flows here.");
     if (opts.freshOnlyFile) mergeManagedBlock(nodeFs, guidanceFile, "onboarding.md", "Onboarding: how this world works.");
     if (opts.autoGuidanceFile) mergeManagedBlock(nodeFs, guidanceFile, "NOTES.md", "Team notes, an older auto startup file.");
+    if (opts.legacyStart) mergeManagedBlock(nodeFs, guidanceFile, "openrig-start.md", fs.readFileSync(START_ASSET, "utf-8"));
     return { rigId: rig.id, guidanceFile };
   }
 
@@ -282,6 +293,35 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     for (const other of ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"].filter((f) => f !== file)) {
       expect(fs.existsSync(path.join(cwd, other)), `${other} must not be written`).toBe(false);
     }
+  });
+
+  // A seat launched before the context-entry floor existed: its exact resume puts back openrig-start.md and adds the floor
+  // beside it, in the seat's own guidance file on either runtime. The person's text stays, and the floor is no guidance gap.
+  // (This harness doesn't simulate Codex's native resume proof, so a Codex seat here reads attention_required with or
+  // without the floor; the rig result is checked for Claude.)
+  it.each([
+    { runtime: "claude-code" as const, file: "CLAUDE.md" },
+    { runtime: "codex" as const, file: "AGENTS.md" },
+  ])("an exact resume of a seat saved before the context-entry floor gets the floor in its $file", async ({ runtime, file }) => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime, legacyStart: true, userText: "Person notes\n" });
+    expect(path.basename(guidanceFile)).toBe(file);
+    expect(fs.readFileSync(guidanceFile, "utf-8")).not.toContain(MANAGED_BLOCK_START("openrig-context-entry.md"));
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, { podAware: true, runtime });
+    expect(fileAtHarnessStart).toContain("Person notes");
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("openrig-start.md"));
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("openrig-context-entry.md"));
+    expect(fileAtHarnessStart).toContain(fs.readFileSync(CONTEXT_ENTRY_ASSET, "utf-8").trim());
+    expect(fileAtHarnessStart!.indexOf(MANAGED_BLOCK_START("openrig-context-entry.md")))
+      .toBeGreaterThan(fileAtHarnessStart!.indexOf(MANAGED_BLOCK_START("openrig-start.md")));
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
+    if (runtime === "claude-code") expect(result.rigResult).toBe("fully_restored");
+  });
+
+  it("a seat whose saved selection has no built-in openrig-start.md gets no floor (a custom start file isn't the anchor)", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true });
+    const { fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, { podAware: true });
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(fileAtHarnessStart).not.toContain(MANAGED_BLOCK_START("openrig-context-entry.md"));
   });
 
   // #875: a Pi seat's blocks live in AGENTS.md. Down takes them out like a Codex seat's, and the exact resume puts them back.
@@ -553,6 +593,137 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(fs.readFileSync(guidanceFile, "utf-8")).toContain("My own notes below it.");
   });
 
+  // #3039: a pod-aware Codex seat through the real Codex adapter. On Codex 0.164.0 or later its fresh launch carried its guidance
+  // as developer instructions, so the person's tracked AGENTS.md holds none, and rig down takes nothing out. The exact resume
+  // carries the saved guidance in its own launch instead of putting it in that file; an older Codex keeps the put-back.
+  const CODEX_TOKEN = "00000000-0000-7000-8000-00000000c0de";
+  const TRACKED = "# Our repository\n\nRun the tests with make test.\n";
+  const instructionsIn = (command: string | undefined): string | undefined => {
+    const arg = command ? /-c 'developer_instructions=([^']*)'/.exec(command)?.[1] : undefined;
+    return arg === undefined ? undefined : JSON.parse(arg) as string;
+  };
+
+  async function downThenUpExistingCodex(rigId: string, guidanceFile: string, codexVersion: string, betweenDownAndUp?: () => void) {
+    db.prepare("UPDATE sessions SET resume_token = ? WHERE resume_token = ?").run(CODEX_TOKEN, TOKEN);
+    const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus })
+      .teardown(rigId);
+    expect(down.snapshotId).toBeTruthy();
+    betweenDownAndUp?.();
+    const beforeUp = fs.readFileSync(guidanceFile, "utf-8");
+    let started = false;
+    const screen = "OpenAI Codex (v0.164.0)\n\u203a Ask Codex to do anything";
+    const tmux = {
+      ...mockTmux(),
+      createSession: vi.fn(async () => { started = true; return { ok: true as const }; }),
+      hasSession: vi.fn(async () => started),
+      sendShellCommand: vi.fn(async () => ({ ok: true as const })),
+      getPanePid: vi.fn(async () => 3001),
+      getPaneCommand: vi.fn(async () => "bash"),
+      capturePaneScreen: vi.fn(async () => screen),
+      capturePaneContent: vi.fn(async () => screen),
+    } as unknown as TmuxAdapter;
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    const listProcesses = async () => [
+      { pid: 3001, ppid: 1, pgid: 3001, tpgid: 3002, executableName: "zsh", command: "-zsh", startedAt },
+      { pid: 3002, ppid: 3001, pgid: 3002, tpgid: 3002, executableName: "codex", command: `/opt/native/codex resume ${CODEX_TOKEN}`,
+        argv: ["/opt/native/codex", "resume", CODEX_TOKEN], startedAt },
+    ];
+    const adapter = new CodexRuntimeAdapter({ tmux, listProcesses, sleep: async () => {}, codexHome: path.join(tmp, "codex-home"),
+      codexSystemConfigDir: path.join(tmp, "etc-codex"), fsOps: { ...nodeFs, homedir: tmp },
+      readResumeEvidence: () => ({ threadId: CODEX_TOKEN }), resolveManagedConfigSettings: async () => ({ enabled: false, codexVersion }) });
+    const restore = new RestoreOrchestrator({
+      db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture, checkpointStore,
+      nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux }), tmuxAdapter: tmux,
+      claudeResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as ClaudeResumeAdapter,
+      codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
+      listProcesses,
+    });
+    const up = await restore.restore(down.snapshotId!, { adapters: { codex: adapter } });
+    expect(up.ok).toBe(true);
+    if (!up.ok) throw new Error("restore did not run");
+    const sent = [...(tmux.sendShellCommand as ReturnType<typeof vi.fn>).mock.calls, ...(tmux.sendText as ReturnType<typeof vi.fn>).mock.calls]
+      .map((call) => String(call[1] ?? ""));
+    const token = (db.prepare("SELECT resume_token FROM sessions WHERE status = 'running' ORDER BY id DESC LIMIT 1").get() as { resume_token: string | null } | undefined)?.resume_token;
+    return { result: up.result, sent, launch: sent.find((command) => command.includes(CODEX_TOKEN)), beforeUp, token };
+  }
+
+  it("a Codex 0.164 seat's exact resume carries its guidance in the launch and leaves the tracked AGENTS.md byte-identical", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex", autoSkillFile: true });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { result, sent, launch, token } = await downThenUpExistingCodex(rigId, guidanceFile, "0.164.0");
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe(TRACKED);
+    // The same conversation, resumed, with the saved guidance from its current sources as developer instructions.
+    expect(launch).toMatch(new RegExp(` resume '?${CODEX_TOKEN}'?`));
+    expect(token).toBe(CODEX_TOKEN);
+    const text = instructionsIn(launch);
+    expect(text).toContain("You lead this team.");
+    expect(text).toContain("How work flows here.");
+    // Still contained: no startup action, no skill, no other file.
+    expect(sent.join("\n")).not.toContain("STARTUP-PROMPT-MUST-NOT-REPLAY");
+    expect(text).not.toContain("A skill, never merged into guidance.");
+    expect(fs.existsSync(path.join(cwd, ".agents"))).toBe(false);
+    for (const other of ["CLAUDE.md", "CLAUDE.local.md"]) expect(fs.existsSync(path.join(cwd, other)), other).toBe(false);
+    expect(result.nodes[0]?.status).toBe("resumed");
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
+    expect(result.rigResult).toBe("fully_restored");
+  });
+
+  it("an older Codex keeps the put-back: the blocks return to AGENTS.md beside the person's text, and the launch carries none", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex" });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { launch } = await downThenUpExistingCodex(rigId, guidanceFile, "0.163.9");
+    const content = fs.readFileSync(guidanceFile, "utf-8");
+    expect(content).toContain(TRACKED.trim());
+    expect(content).toContain(MANAGED_BLOCK_START("lead-role"));
+    expect(content).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(launch).toBeDefined();
+    expect(launch).not.toContain("developer_instructions");
+  });
+
+  // A file that already holds a block keeps it as it is (the restore writer's own rule; #2456 refreshes only one OpenRig
+  // wrote), and only the block the file lacks goes with the launch.
+  it("a block already in the tracked AGENTS.md stays as it is, and only the absent one goes with the launch", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex" });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { launch, beforeUp, result } = await downThenUpExistingCodex(rigId, guidanceFile, "0.164.0",
+      () => mergeManagedBlock(nodeFs, guidanceFile, "lead-role", "The person's own version of the role."));
+    expect(beforeUp).toContain("The person's own version of the role.");
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe(beforeUp);
+    const text = instructionsIn(launch);
+    expect(text).toContain("How work flows here.");
+    expect(text).not.toContain("You lead this team.");
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
+  });
+
+  it("a block whose source is gone isn't carried and stays a disclosed gap", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex" });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { launch, result } = await downThenUpExistingCodex(rigId, guidanceFile, "0.164.0", () => fs.rmSync(path.join(spec, "SOP.md")));
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe(TRACKED);
+    expect(instructionsIn(launch)).toContain("You lead this team.");
+    expect(result.nodes[0]?.guidanceGaps).toEqual(["SOP.md"]);
+    expect(result.rigResult).toBe("partially_restored");
+  });
+
+  // A source that exists but can't be read (here a directory) stays with the restore writer, which reports it without
+  // stopping the resume, whether it's a projected block or a startup file. The readable one still goes with the launch.
+  it.each([
+    { kind: "a projected block", file: "lead.md", id: "lead-role", readable: "How work flows here." },
+    { kind: "a startup guidance file", file: "SOP.md", id: "SOP.md", readable: "You lead this team." },
+  ])("$kind whose source exists but can't be read stays a disclosed gap, and the resume goes on", async ({ file, id, readable }) => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "codex" });
+    fs.writeFileSync(guidanceFile, TRACKED);
+    const { launch, result } = await downThenUpExistingCodex(rigId, guidanceFile, "0.164.0", () => {
+      fs.rmSync(path.join(spec, file));
+      fs.mkdirSync(path.join(spec, file));
+    });
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe(TRACKED);
+    expect(result.nodes[0]?.status).toBe("resumed");
+    expect(instructionsIn(launch)).toContain(readable);
+    expect(result.nodes[0]?.guidanceGaps).toEqual([id]);
+    expect(result.rigResult).toBe("partially_restored");
+  });
+
   it("decides by cleanup's own effect: refuses every hazard shape, allows ordinary files", () => {
     const add = [{ blockId: "lead-role", content: "You lead this team." }];
     const legacyBegin = "<!-- BEGIN RIGGED MANAGED BLOCK: old -->";
@@ -574,5 +745,30 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       "a truncated legacy BEGIN": "# P\n<!-- BEGIN RIGGED MANAGED BLOCK: \nnotes\n",
     };
     for (const [name, content] of Object.entries(safe)) expect(appendIsCleanupSafe(content, add), name).toBe(true);
+  });
+});
+
+// A selection saved by an older version can hold an openrig-start.md entry with no ownerRoot. Its identity is unknown, so
+// it doesn't anchor the context-entry block, and the rest of the seat's guidance selection is still put back.
+describe("an older saved selection whose openrig-start.md has no ownerRoot", () => {
+  const assets = "/old/node_modules/@openrig/cli/daemon/assets";
+  const snapshot = (ownerKnown: boolean) => ({
+    runtime: "claude-code", projectionEntries: [], startupActions: [],
+    resolvedStartupFiles: [
+      { path: "SOP.md", absolutePath: "/team/SOP.md", ownerRoot: "/team", deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] },
+      { path: "openrig-start.md", absolutePath: `${assets}/guidance/openrig-start.md`, ...(ownerKnown ? { ownerRoot: assets } : {}),
+        deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] },
+    ],
+  }) as unknown as NodeStartupSnapshot;
+
+  it("keeps the whole selection, required SOP included, and adds no block for the unknown entry", () => {
+    const guidance = seatGuidance(snapshot(false), "/team/work", undefined, () => true, () => "text");
+    expect(guidance?.items.map((item) => item.blockId)).toEqual(["SOP.md", "openrig-start.md"]);
+    expect(guidance?.items.find((item) => item.blockId === "SOP.md")?.required).toBe(true);
+  });
+
+  it("with its ownerRoot, the same entry anchors the block (control)", () => {
+    const guidance = seatGuidance(snapshot(true), "/team/work", undefined, () => true, () => "text");
+    expect(guidance?.items.map((item) => item.blockId)).toEqual(["SOP.md", "openrig-start.md", "openrig-context-entry.md"]);
   });
 });

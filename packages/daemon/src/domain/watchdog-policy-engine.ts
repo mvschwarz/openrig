@@ -142,6 +142,10 @@ interface WatchdogPolicyEngineDeps {
    * SKIPPING, so an unknown target-generation must never skip a legitimate wake (note-2 inversion).
    */
   resolveTargetGeneration?: (sessionName: string) => string | null;
+  /** Whether an unarchived node still carries this name, even without a recorded tenure. When resolveTargetGeneration is
+   *  unknown, a carried name is unresolved (a context watch skips and measures again); one carried by
+   *  nothing is a seat that's gone (the watch ends). Absent → gone, as before. */
+  targetNameCarried?: (sessionName: string) => boolean;
   /**
    * Issue #1180 — the target seat's latest context-usage sample under its live
    * occupant generation (generation-guarded by the jobs repository). Null = no
@@ -275,6 +279,7 @@ export class WatchdogPolicyEngine {
   private readonly now: () => Date;
   private readonly policies: Map<string, Policy>;
   private readonly resolveTargetGeneration?: (sessionName: string) => string | null;
+  private readonly targetNameCarried?: (sessionName: string) => boolean;
   private readonly resolveContextUsage?: WatchdogPolicyEngineDeps["resolveContextUsage"];
   private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
   private readonly resolveQueueWait?: WatchdogPolicyEngineDeps["resolveQueueWait"];
@@ -287,6 +292,7 @@ export class WatchdogPolicyEngine {
     this.eventBus = deps.eventBus;
     this.deliver = deps.deliver;
     this.resolveTargetGeneration = deps.resolveTargetGeneration;
+    this.targetNameCarried = deps.targetNameCarried;
     this.resolveContextUsage = deps.resolveContextUsage;
     this.resolvePreDeliveryTerminalReason = deps.resolvePreDeliveryTerminalReason;
     this.onWakeAttempt = deps.onWakeAttempt;
@@ -432,6 +438,8 @@ export class WatchdogPolicyEngine {
       lastFiredCondition: job.lastFiredCondition,
       occupantGeneration,
       currentGenerationTranscriptPending,
+      occupantGenerationAmbiguous: isContextUsageThreshold && !occupantGeneration
+        && (this.targetNameCarried?.(job.targetSession) ?? false),
       requiredReceiptSatisfied,
       requiredReceiptDeferred,
     };

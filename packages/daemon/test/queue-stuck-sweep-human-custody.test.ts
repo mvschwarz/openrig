@@ -334,6 +334,29 @@ describe("#514 custody findings for a human decision", () => {
 
     expect((await sweep()).findings.map((f) => f.action)).toEqual(["refreshed", "refreshed", "refreshed"]);
     expect(sent.sort()).toEqual(terminalWakes);
+    // #2939: a pass that only finds the same open findings routes nothing new
+    expect(status.snapshot()).toMatchObject({ lastOutcome: "findings", findingsRouted: 3, findingsOpen: 3 });
+  });
+
+  it("counts an open finding once in findingsRouted and reports what is still open as findingsOpen (#2939)", async () => {
+    const row = await ask("unclaimed@r");
+    const past = new Date(Date.now() - 90 * 60_000).toISOString();
+    db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(past, row.qitemId);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(past, row.qitemId);
+
+    expect((await sweep()).findings.map((f) => f.action)).toEqual(["created"]);
+    expect(status.snapshot()).toMatchObject({ lastOutcome: "findings", findingsRouted: 1, findingsOpen: 1 });
+    for (let pass = 0; pass < 3; pass++) {
+      expect((await sweep()).findings.map((f) => f.action)).toEqual(["refreshed"]);
+    }
+    // the same open finding on every pass: still "findings", but the routed total does not grow
+    expect(status.snapshot()).toMatchObject({ lastOutcome: "findings", findingsRouted: 1, findingsOpen: 1 });
+
+    repo.claim({ qitemId: row.qitemId, destinationSession: "unclaimed@r" });
+    expect((await sweep()).findings.map((f) => f.action)).toEqual(["closed"]);
+    expect(status.snapshot()).toMatchObject({ findingsRouted: 1, findingsOpen: 0 });
+    expect((await sweep()).outcome).toBe("clean");
+    expect(status.snapshot()).toMatchObject({ lastOutcome: "clean", findingsRouted: 1, findingsOpen: 0 });
   });
 
   it.each([

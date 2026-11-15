@@ -998,7 +998,7 @@ export function pendingConversationsFor(entityId: string, home: string = getOpen
 
 /** The refusal when nobody is registered yet; the wording `rig gateway human list` uses for an empty registry. */
 export const NO_HUMAN_CONFIGURED =
-  "no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …";
+  "no human configured yet — register one: rig gateway human add <entityId> --display-name … --delivery-class B [--default] (a connector --binding is optional)";
 
 export type LoadResult =
   | { ok: true; entities: HumanFragment[] }

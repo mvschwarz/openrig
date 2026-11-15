@@ -50,6 +50,12 @@ This plugin ships dual-manifest packaging — both `.claude-plugin/` and `.codex
     no-ops. The plugin supplies refocus and skills. Disabling an inline activity hook is not bypassed by the plugin.
   - **Seat scope:** the commands require both `OPENRIG_SEAT_PROJECT_DIR` and the executable `OPENRIG_NODE`. Personal and
     unselected sessions are no-ops. A nested Codex inheriting those seat variables still acts as that seat.
+  - **Refocus output:** the Codex prompt handler keeps its unchanged declaration and default 2,500-token budget
+    (10,000 UTF-8 bytes), preserving its native trust identity. Larger packets
+    send a prefix and an explicit shortening notice for the current attempt. After a claimed, successful render/write
+    and state save, the refocus record lists that attempt's omitted tail byte count and full packet's `.context.txt`
+    path, or says the full text could not be saved. A trace/content failure or unavailable final state guard/write can
+    leave older metadata or no record. The metadata describes the last successfully recorded attempt, not model receipt.
 
 Generated Claude settings commands for the activity relay and context collector use the daemon's absolute Node
 executable when its name is recognized (`node` or `node.exe`); other names keep the legacy bare `node` command and

@@ -24,7 +24,8 @@ import type { FollowControls } from "./terminal-follow-policy.js";
 //    label embeds a per-launch token — and `layout.apply` itself is
 //    empirically non-idempotent (the four-reapply capture shows a re-apply
 //    minting tab t3, never replacing t2), so a re-open can never clobber a
-//    previous view.
+//    previous view. Only an open that asks for it (`reuseLive`, #3052) focuses a workspace that still shows
+//    the same plan with every tile attached instead.
 //  - Pane labels ride the layout.apply pane nodes' `label` field (AC-7
 //    `<agent> · <slice>`) — the captures show the label echoed per pane, so
 //    no separate `pane rename` pass is needed (there is no `pane rename` CLI
@@ -63,6 +64,7 @@ import type {
   ComposedPane,
   ComposedView,
   DegradedSeat,
+  OpenViewOptions,
   OpenViewResult,
   ProviderLiveness,
   ProviderStatus,
@@ -74,6 +76,7 @@ import type {
   HerdrTransportFactory,
 } from "./herdr-transport.js";
 import { blankShellArgv } from "./login-shell.js";
+import { findLiveHerdrWorkspace, type LiveWorkspaceReaders, type LiveWorkspaceSearch } from "./herdr-live-workspace.js";
 import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
 
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
@@ -316,6 +319,9 @@ export interface HerdrAdapterDeps {
   tabPrefix?: string;
   /** The wait between restart-command report rounds. Injectable for tests. */
   sleep?: (ms: number) => Promise<void>;
+  /** Reads Herdr's CLI on this endpoint and the tmux server's clients, for an open that may reuse a live workspace.
+   *  Without it every open creates a workspace. */
+  liveWorkspace?: Omit<LiveWorkspaceReaders, "serverArgs">;
 }
 
 /** The applied pane ids of a page, in its leaf order, when Herdr's reply echoes exactly the requested tree. */
@@ -479,7 +485,7 @@ export class HerdrAdapter implements TerminalProvider {
         code: "follow_unsupported", error: "This endpoint has no qualified following allocator." };
   }
 
-  async openView(view: ComposedView): Promise<OpenViewResult> {
+  async openView(view: ComposedView, options?: OpenViewOptions): Promise<OpenViewResult> {
     const absent: AbsentSeat[] = [...view.absent];
     const degraded: DegradedSeat[] = [...view.degraded];
     const opened: string[] = [];
@@ -515,6 +521,12 @@ export class HerdrAdapter implements TerminalProvider {
       };
     }
 
+    const notes: string[] = [];
+    if (options?.reuseLive) {
+      const reused = await this.reuseLiveWorkspace(view, notes);
+      if (reused) return reused;
+    }
+
     // A fresh workspace per open (BR-5 fresh-on-relaunch, strongest form).
     // Herdr accepts a duplicate label, so a re-open would otherwise sit beside the earlier
     // view under the same name. The existing labels are read first: when this rig's view is
@@ -523,7 +535,6 @@ export class HerdrAdapter implements TerminalProvider {
     // The labeled create is tried first. If herdr refuses it and a workspace with
     // that label already exists, retry once with a numbered suffix and say so;
     // otherwise fall back ONCE to a bare create before degrading.
-    const notes: string[] = [];
     let workspaceId: string | null = null;
     let defaultTabId: string | null = null;
     let createErr: unknown = null;
@@ -684,6 +695,43 @@ export class HerdrAdapter implements TerminalProvider {
       degraded,
       pages: plan.pages.length,
       ...(notes.length ? { notes } : {}),
+    };
+  }
+
+  /**
+   * #3052: the same reuse as the CLI's `--window`. A workspace whose tabs still show every tile of this plan,
+   * attached, is focused and returned instead of opening a numbered copy. Anything unconfirmed opens a new
+   * workspace, as before, and the notes name the workspaces that were kept.
+   */
+  private async reuseLiveWorkspace(view: ComposedView, notes: string[]): Promise<OpenViewResult | null> {
+    const readers = this.deps.liveWorkspace;
+    if (!readers || !view.planId) return null;
+    let found: LiveWorkspaceSearch;
+    try {
+      found = await findLiveHerdrWorkspace({ id: view.id, planId: view.planId, pages: view.pages, ...(view.spaceLabel ? { spaceLabel: view.spaceLabel } : {}) },
+        { ...readers, serverArgs: view.localTmuxServer ?? [] });
+    } catch (err) {
+      notes.push(`Could not check existing Herdr workspaces (${err instanceof Error ? err.message : String(err)}); this open adds a new workspace and keeps the existing ones.`);
+      return null;
+    }
+    for (const id of found.stale) notes.push(`Workspace ${id} has an older or different plan for this view and was kept.`);
+    for (const id of found.unconfirmed) notes.push(`Workspace ${id} has this view, but its tiles' live attachments could not be confirmed, so it was kept.`);   // what this open does next is said once it's known
+    if (!found.live) return null;
+    const { workspace_id: id, tab_id: tabId } = found.live;
+    // The reuse counts only when the reply names this exact tab and workspace; anything less is one more uncertain
+    // branch: keep that workspace, say so, and open a fresh one (headless callers need the view, not the focus).
+    let focused: unknown;
+    try { focused = (await this.transport.request("tab.focus", { tab_id: tabId }))["tab"]; }
+    catch (err) { focused = err instanceof Error ? err.message : String(err); }
+    const tab = focused && typeof focused === "object" ? focused as Record<string, unknown> : null;
+    if (tab?.["tab_id"] !== tabId || tab?.["workspace_id"] !== id) {
+      notes.push(`Workspace ${id} already shows this view, but herdr did not confirm focusing its tab ${tabId}${typeof focused === "string" ? ` (${focused})` : ""}; it was kept.`);
+      return null;
+    }
+    notes.push(`Workspace ${id} already shows this view with live attachments, so it was reused; its contents were kept and no new tiles were opened.`);
+    return {
+      provider: this.name, ok: true, opened: [], absent: [...view.absent], degraded: [...view.degraded], pages: 0,
+      reusedWorkspace: { id, tabId, view: view.id }, notes,
     };
   }
 }

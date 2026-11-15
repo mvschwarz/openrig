@@ -193,7 +193,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     scope: "project",
     runtime: "claude-code",
     path: "CLAUDE.md (or CLAUDE.local.md when the rig chooses it)",
-    purpose: "OpenRig managed blocks at each start: the rig's culture, the OpenRig Start identity pointer, the onboarding pages at a fresh start (onboarding.default_pack.enabled), and guidance files a team merges. The router line is added only on a yes. rig down removes the blocks unless a seat of another active rig, or a still-running seat of this one, uses the file.",
+    purpose: "OpenRig managed blocks at each start: the rig's culture, the OpenRig Start identity pointer, the context-entry pointer to skills, help and declared context, the onboarding pages at a fresh start (onboarding.default_pack.enabled), and guidance files a team merges. The router line is added only on a yes. rig down removes the blocks unless a seat of another active rig, or a still-running seat of this one, uses the file.",
   },
   {
     scope: "project",
@@ -954,7 +954,7 @@ tmux scrollback:
           if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
         }
         listChecks();
-        console.log("Only the harnesses selected for your project need a login; an unused harness does not (rerun with --providers to leave it out).");
+        console.log("A harness needs a login only when a seat you start runs on it (rerun with --providers to leave it out). A built-in team can use one you didn't select: starter runs its reviewer on Codex.");
         console.log("Run `rig doctor` to recheck the system and provider authentication.");
       }
       // Keep the conversation route available even after a dry run or incomplete setup,

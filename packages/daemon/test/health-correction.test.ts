@@ -34,7 +34,9 @@ async function setup() {
   const sends: unknown[] = []; queue.attachTransport({ send: async (...args) => { sends.push(args); return { ok: true, verified: true }; } });
   await queue.create({ qitemId: "plan", sourceSession: "owner@rig", destinationSession: "owner@rig", body: "Independent planning", tags: ["project:demo"], nudge: false });
   const now = new Date().toISOString(); db.prepare("UPDATE queue_transitions SET ts = ?").run(now);
-  for (let i = 0; i < 23; i++) db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES('plan',?,'in-progress',?)").run(now, i % 2 ? "system:watchdog" : "owner@rig");
+  // Half the retained transitions are daemon bookkeeping (system:*), which the ceremony count leaves out:
+  // `created` plus 20 owner transitions keep this family above the default threshold of 20.
+  for (let i = 0; i < 40; i++) db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES('plan',?,'in-progress',?)").run(now, i % 2 ? "system:watchdog" : "owner@rig");
   const modes = new RigModeStore(db), posture = new OperatingPostureService(db, modes, () => home);
   const policy = new HealthPolicyStore(home, () => ({ warningPercent: 95, criticalPercent: 99 }));
   const checkpoints = new HealthCheckpointSource(home, queue, policy, () => now, home);

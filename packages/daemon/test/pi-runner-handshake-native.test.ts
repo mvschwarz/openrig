@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import { piSeatPaths, PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER } from "../src/adapters/pi-runner-protocol.js";
 
@@ -78,10 +79,24 @@ if(cmd.type==='prompt') { console.error('Unknown option: --name'); console.error
         type: "api_key", key: credential === "dynamic" ? "!private-command" : "private-value",
       } }));
     }
+    const reports: Array<{ body: Record<string, unknown>; token: string | undefined }> = [];
+    const endpoint = createServer((req, res) => {
+      let body = ""; req.on("data", chunk => { body += chunk; });
+      req.on("end", () => {
+        if (req.method === "POST") reports.push({ body: JSON.parse(body), token: req.headers.authorization });
+        res.statusCode = credential === "present" ? 409 : 200;
+        res.end(JSON.stringify({ tokenPersisted: credential !== "present" }));
+      });
+    });
+    await new Promise<void>(resolve => endpoint.listen(0, "127.0.0.1", resolve));
+    const port = (endpoint.address() as { port: number }).port;
+    const token = credential === "absent" ? "fixture-install-token" : "oag_fixture-bound";
+    const envRunId = credential === "dynamic" ? "owned-attempt" : "inherited-predecessor";
     const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/adapters/pi-runner.ts", import.meta.url)),
       "--session-name", "fixture", "--state-root", stateRoot, "--cwd", temp,
       "--launch-id", "owned-attempt", "--no-approve", "--model", "openrouter/fixture"], {
-      env: { PATH: bin + path.delimiter + path.dirname(process.execPath), HOME: temp, OPENRIG_HOME: path.join(temp, "home") },
+      env: { PATH: bin + path.delimiter + path.dirname(process.execPath), HOME: temp, OPENRIG_HOME: path.join(temp, "home"),
+        OPENRIG_URL: `http://127.0.0.1:${port}`, OPENRIG_ACTIVITY_HOOK_TOKEN: token, OPENRIG_RUN_ID: envRunId },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let output = "";
@@ -104,6 +119,15 @@ if(cmd.type==='prompt') { console.error('Unknown option: --name'); console.error
       expect(state.launchId).toBe("owned-attempt");
       if (success) {
         expect(state.sessionFile).toBe(sessionFile);
+        const reportDeadline = Date.now() + 5000;
+        while (!reports.some(r => r.body.eventFamily === "session_identity") && Date.now() < reportDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        const identity = reports.find(r => r.body.eventFamily === "session_identity");
+        expect(identity).toBeDefined();
+        if (credential === "absent") expect(identity!.body).not.toHaveProperty("runId");
+        else expect(identity!.body.runId).toBe(envRunId); // a refused bound claim is never rewritten or downgraded
+        expect(reports.every(r => r.token === `Bearer ${token}`)).toBe(true);
         child.stdin.write("emit a runtime warning\n");
         const warningDeadline = Date.now() + 5000;
         while (!output.includes("AFTER_RUNNING_WARNING") && Date.now() < warningDeadline) {
@@ -122,6 +146,7 @@ if(cmd.type==='prompt') { console.error('Unknown option: --name'); console.error
       }
       child.kill("SIGTERM");
       await new Promise<void>(resolve => { if (child.exitCode !== null || child.signalCode !== null) resolve(); else child.once("exit", () => resolve()); });
+      await new Promise<void>(resolve => endpoint.close(() => resolve()));
       fs.rmSync(temp, { recursive: true, force: true });
     }
   }, 20000);

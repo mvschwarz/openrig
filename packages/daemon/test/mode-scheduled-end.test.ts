@@ -1,7 +1,7 @@
 // A person's mode ends at the scheduled end they chose: armed with the application on the watchdog's own clock, it ends
 // that application only, with the same end-if-mine path as "I'm back", and tells the kernel operator to give the account.
 // Real SQLite (all migrations), real person records in a temp home, the real queue and watchdog jobs table.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,7 +76,60 @@ describe("a mode's scheduled end", () => {
     f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-rig', 'rig')").run(); // orch@rig is a routable seat
     const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
     expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: "orch@rig" });
-    expect(f.toOperator()[0]!.body).toContain(`Sent to orch@rig because ${KERNEL_OPERATOR_SESSION} isn't on this host.`);
+    expect(f.toOperator()[0]!.body).toContain(`Sent to orch@rig because this host has no receiving agent (no agents.operator_session, and ${KERNEL_OPERATOR_SESSION} isn't on this host).`);
+  });
+
+  it("a receiving agent chosen in agents.operator_session is told, ahead of the seat that applied the mode", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-rig', 'rig')").run();
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "lead@rig");
+    try {
+      expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: "lead@rig" });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("when the host's seats can't be read, no other recipient is chosen: the notice stays owed for the next pass", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-rig', 'rig')").run(); // the applier would be routable
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    const jobId = f.jobFor(app.applicationId)!.jobId;
+    const real = f.db.prepare.bind(f.db);
+    const spy = vi.spyOn(f.db, "prepare").mockImplementation(((sql: string) => {
+      if (sql.includes("FROM sessions WHERE session_name = ? ORDER BY rowid")) throw new Error("sessions unreadable");
+      return real(sql);
+    }) as typeof f.db.prepare);
+    try {
+      expect(await f.run(jobId, END)).toMatchObject({ state: "notice-pending", why: expect.stringContaining("OpenRig couldn't tell whether this host has a receiving agent") });
+    } finally { spy.mockRestore(); }
+    expect(f.toOperator()).toEqual([]);
+    expect(new WatchdogJobsRepository(f.db).getById(jobId)?.state).not.toBe("terminal");
+  });
+
+  it("a receiving agent used instead of an unusable setting is told why, in the notice", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-k', 'kernel')").run();
+    f.db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-op', 'r-k', 'operator.agent')").run();
+    f.db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('s-op', 'n-op', ?)").run(KERNEL_OPERATOR_SESSION);
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "op").application!;
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "alex@external");
+    try {
+      expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: KERNEL_OPERATOR_SESSION });
+    } finally { vi.unstubAllEnvs(); }
+    expect(f.toOperator()[0]!.body).toContain(`Sent to ${KERNEL_OPERATOR_SESSION} because agents.operator_session is "alex@external", which isn't an agent's session, so it's ignored.`);
+  });
+
+  it("with no kernel operator here, an unusable setting is named in the reason, never as unset", async () => {
+    const f = fixture();
+    f.db.prepare("INSERT INTO rigs (id, name) VALUES ('r-rig', 'rig')").run(); // orch@rig is a routable seat
+    const app = f.modes.apply("alex", "asleep", { scheduledEnd: END }, "orch@rig").application!;
+    vi.stubEnv("OPENRIG_AGENTS_OPERATOR_SESSION", "alex@external");
+    try {
+      expect(await f.run(f.jobFor(app.applicationId)!.jobId, END)).toEqual({ state: "ended", notified: "orch@rig" });
+    } finally { vi.unstubAllEnvs(); }
+    const body = f.toOperator()[0]!.body;
+    expect(body).toContain(`Sent to orch@rig because this host has no receiving agent (agents.operator_session is "alex@external", which isn't an agent's session, so it's ignored, and ${KERNEL_OPERATOR_SESSION} isn't on this host).`);
+    expect(body).not.toContain("no agents.operator_session");
   });
 
   it("applied by a named operator outside any seat, with no kernel operator here, the person is told, as an update", async () => {
@@ -88,7 +141,7 @@ describe("a mode's scheduled end", () => {
     expect(row).toMatchObject({ dest: "alex@external", intent: "update" });
     expect(row.body).toBe(`Your asleep ended at its scheduled time. Its account: \`rig gateway human mode account alex ${app.applicationId}\`; ask your operator to go through it.`);
     expect(new WatchdogJobsRepository(f.db).getById(jobId)).toMatchObject({ state: "terminal",
-      terminalReason: `ended at its scheduled time; alex@external told (${KERNEL_OPERATOR_SESSION} isn't on this host, and op, who applied it, isn't an address the queue accepts)` });
+      terminalReason: `ended at its scheduled time; alex@external told (this host has no receiving agent (no agents.operator_session, and ${KERNEL_OPERATOR_SESSION} isn't on this host), and op, who applied it, isn't an address the queue accepts)` });
   });
 
   it("a person registry that can't be read leaves the notice owed, not lost; once it reads again the person is told once", async () => {
@@ -114,7 +167,7 @@ describe("a mode's scheduled end", () => {
     const jobId = f.jobFor(app.applicationId)!.jobId;
     expect(removeHumanFragment("alex", { inflight: [] }, f.home).ok).toBe(true);
     expect(await f.run(jobId, END)).toEqual({ state: "ended", notified: undefined });
-    const reason = `ended at its scheduled time; no notice: ${KERNEL_OPERATOR_SESSION} isn't on this host, op, who applied it, isn't an address the queue accepts, and alex isn't registered`;
+    const reason = `ended at its scheduled time; no notice: this host has no receiving agent (no agents.operator_session, and ${KERNEL_OPERATOR_SESSION} isn't on this host), op, who applied it, isn't an address the queue accepts, and alex isn't registered`;
     expect(new WatchdogJobsRepository(f.db).getById(jobId)).toMatchObject({ state: "terminal", terminalReason: reason });
     await f.run(jobId, new Date("2026-10-21T07:05:00Z")); // a second pass changes nothing
     expect(new WatchdogJobsRepository(f.db).getById(jobId)).toMatchObject({ state: "terminal", terminalReason: reason });

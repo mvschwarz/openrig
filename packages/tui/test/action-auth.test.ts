@@ -118,10 +118,20 @@ describe("against the daemon's real routes, a pairing answer without the operato
     expect(await d.poll()).toMatchObject({ status: "pending" });
   });
 
-  it("with the operator bearer, the person's Approve is recorded and decides the agent-free request", async () => {
+  it("with the operator bearer, the person's Approve is recorded and kept for a receiving agent; it doesn't decide the agent-free request", async () => {
     const d = await daemon();
     await d.approve(d.tui({ Authorization: `Bearer ${ACTION}` }));
     expect(d.repo.getById(d.issued.approvalQitemId)).toMatchObject({ state: "done", humanAnswers: { pair: "approve" } });
+    expect(await d.poll()).toMatchObject({ status: "pending" });
+  });
+
+  it("the settings page's direct decision takes the operator bearer: without it nothing is decided, with it the request is approved", async () => {
+    const d = await daemon();
+    const refused = await d.tui({ Authorization: `Bearer ${TERMINAL}` }).pairDecision(d.issued.approvalQitemId, "approve");
+    expect(refused.status).toBe(401);
+    expect(await d.poll()).toMatchObject({ status: "pending" });
+    const decided = await d.tui({ Authorization: `Bearer ${ACTION}` }).pairDecision(d.issued.approvalQitemId, "approve");
+    expect(decided).toMatchObject({ status: 200, body: { ok: true, decision: "approve" } });
     expect(await d.poll()).toMatchObject({ status: "approved" });
   });
 });

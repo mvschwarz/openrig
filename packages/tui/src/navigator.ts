@@ -103,7 +103,7 @@ function agentOf(parsed: KeyParts, snap: FleetSnapshot): AgentRow | null {
 /** Use structured identity/presence, never the possibly clipped status suffix. */
 function rigPresence(parsed: KeyParts, snap: FleetSnapshot): boolean | null {
   const host = snap.hosts.find(h => h.name === parsed.parts[0]);
-  if (!host?.reachable) return null;
+  if (host?.reachable !== true) return null;
   return host.rigs.find(r => r.name === parsed.parts[1])?.hasLiveAgents ?? null;
 }
 
