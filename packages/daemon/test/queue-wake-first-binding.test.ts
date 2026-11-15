@@ -297,6 +297,35 @@ describe("a failed queue wake when its seat returns", () => {
     expect(f.intentOf(f.row.qitemId).deliveryState).toBe("failed");
   });
 
+  it("rolls back a released member's state when restoring its proof throws", async () => {
+    let owed = false;
+    const f = await failed(undefined, () => owed);
+    const peer = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "urgent peer", priority: "urgent" });
+    await vi.waitFor(() => expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed"));
+    for (const row of [f.row, peer]) {
+      const entry = f.intentOf(row.qitemId);
+      f.db.prepare("UPDATE outbox_entries SET tags=? WHERE outbox_id=?").run(JSON.stringify([...(entry.tags ?? []), "queue:return:paired"]), entry.outboxId);
+    }
+    let observed: { before: string; after: string; error: unknown; proofCalls: unknown[] } | undefined;
+    f.send.mockImplementationOnce(async (_session, _text, opts) => {
+      const before = f.intentOf(peer.qitemId).deliveryState;
+      const proofWriter = f.repo as unknown as { setWakePreInputFailure(id: string, proved: boolean): void };
+      const proofWrite = vi.spyOn(proofWriter, "setWakePreInputFailure").mockImplementationOnce(() => { throw new Error("proof write failed"); });
+      let error: unknown;
+      try { opts!.recheckMembers!((input) => !input.urgent, true); }
+      catch (caught) { error = caught instanceof Error ? caught.message : caught; }
+      finally {
+        observed = { before, after: f.intentOf(peer.qitemId).deliveryState, error, proofCalls: [...proofWrite.mock.calls] };
+        proofWrite.mockRestore();
+      }
+      owed = true;
+      return { ok: false, outcome: "retained", reason: "typing_guard_enabled", sent: false, inputPhase: "not_reached", sessionName: "worker@test" };
+    });
+    await reachable(f);
+    // Assert outside the transport callback, whose rejected promise is normally converted into a failed send.
+    expect(observed).toEqual({ before: "sending", after: "sending", error: "proof write failed", proofCalls: [[f.intentOf(peer.qitemId).outboxId, true]] });
+  });
+
   it("preserves no-input proof for a grouped member removed before the send", async () => {
     let owed = false;
     const f = await failed(undefined, () => owed);

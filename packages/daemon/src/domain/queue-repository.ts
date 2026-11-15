@@ -1742,9 +1742,11 @@ export class QueueRepository {
       });
       for (const entry of group) {
         if (keep.includes(entry)) continue;
-        const restored = this.db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ? AND delivery_state = 'sending'").run(entry.deliveryState, entry.outboxId);
-        // This member never reached transport input, so its earlier failed-attempt proof still applies.
-        if (restored.changes && entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG)) this.setWakePreInputFailure(entry.outboxId, true);
+        this.db.transaction(() => {
+          const restored = this.db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ? AND delivery_state = 'sending'").run(entry.deliveryState, entry.outboxId);
+          // This member never reached transport input, so its earlier failed-attempt proof still applies.
+          if (restored.changes && entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG)) this.setWakePreInputFailure(entry.outboxId, true);
+        })();
         released.push(entry);
       }
       return { text: recoveryNotice(keep) + keep.map(entry => entry.body).join("\n"), outboxIds: keep.map(entry => entry.outboxId) };
