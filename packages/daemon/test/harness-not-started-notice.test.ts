@@ -140,4 +140,21 @@ describe("the grouped notice for seats left as bare shells", () => {
     expect(report.warnings).toEqual(["The notice to lead-bad@crew for b@crew wasn't recorded (queue refused it)."]);
     expect(notices().map((n) => n.destination_session).sort()).toEqual(["lead-one@crew", "lead-three@crew"]);
   });
+  it.each([undefined, "Harness not started: no startup context"])("reports a full adopted name on first creation and replay (cause %s)", async (cause) => {
+    const lead = seat("crew", "lead", "lead@crew");
+    const adopted = seat("crew", "adopted", "bad name!");
+    rigs.addEdge(lead.rig.id, lead.node.id, adopted.node.id, "delegates_to");
+    const input = { rigId: lead.rig.id, attempt: "restore attempt adopted",
+      seats: [{ nodeId: adopted.node.id, logicalId: adopted.node.logicalId, ...(cause ? { cause } : {}) }] };
+    const first = await noticeHarnessNotStarted(db, queue, input);
+    expect(first.notices).toEqual([expect.objectContaining({ owner: "lead@crew", seats: ["bad name!"] })]);
+    expect(first.warnings).toEqual([]);
+    expect(notices()).toHaveLength(1);
+    const body = notices()[0]!.body;
+    expect(body).toContain(`- bad name!${cause ? `: ${cause}` : ""}`);
+    expect(await noticeHarnessNotStarted(db, queue, input)).toEqual(first);
+    expect(notices()).toHaveLength(1);
+    expect(notices()[0]!.body).toBe(body);
+  });
+
 });

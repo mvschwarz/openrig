@@ -23,7 +23,7 @@ function seatSession(db: Database.Database, nodeId: string): string | null {
 
 /** The seats a stored notice names: its `- <seat>` lines. */
 function noticeSeats(body: string): string[] {
-  return body.split("\n").flatMap((line) => /^- ([^\s:]+)/.exec(line)?.[1] ?? []).sort();
+  return body.split("\n").flatMap((line) => /^- ([^:]+)(?:: |$)/.exec(line)?.[1] ?? []).sort();
 }
 
 /**
