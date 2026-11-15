@@ -96,6 +96,14 @@ edges: []
 }
 
 const policyLines = (warnings: string[]) => warnings.filter((warning) => warning.includes("permission_policy"));
+// A config-surface policy's line says it's recorded but its rules aren't applied, and what the seat launches with:
+// the team default's allowances for standard or open, and none for any other.
+const notApplied = (ref: string) => ref === "builtin:standard" || ref === "builtin:open"
+  ? `; ${ref} is recorded, but its rules aren't applied at launch: this seat launches at the floor with the team default's allowances,`
+    + " unless it has its own permission choice, rules or named Codex profile (the applying-a-permission-policy skill applies more per seat)"
+  : `; ${ref} is recorded, but its rules aren't applied at launch: unless the seat has an explicit native permission mode, Codex envelope`
+    + " or named Codex profile, it launches at the floor without the team default's allowances until its rules are applied per seat"
+    + " (the applying-a-permission-policy skill)";
 
 function createTestApp(...args: Parameters<typeof createBaseTestApp>) {
   const setup = createBaseTestApp(...args);
@@ -317,7 +325,7 @@ describe("Seam C permission-policy discovery", () => {
       if (!materialized.ok) return;
       expect(materialized.result.warnings).toEqual([
         'dev.impl: permission_policy ref="policies/operator-full.md" origin=custom launch_posture=full_bypass',
-        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor',
+        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor' + notApplied("builtin:standard"),
       ]);
 
       const launched = await setup.podInstantiator.launchValidatedSpec(
@@ -483,7 +491,7 @@ describe("Seam C permission-policy discovery", () => {
 
       expect(overrideResponse.status).toBe(201);
       expect(overrideBody.result.warnings).toEqual([
-        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor',
+        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor' + notApplied("builtin:standard"),
         "later launch warning",
       ]);
       expect(bindings[1]?.launchPosture).toBe("floor");
@@ -524,7 +532,7 @@ describe("Seam C permission-policy discovery", () => {
         "dev.impl: permission_policy absent; launch_posture=floor",
       ]);
       expect(policyLines(attached.result.warnings ?? [])).toEqual([
-        'dev.impl: permission_policy ref="builtin:locked" origin=builtin launch_posture=floor',
+        'dev.impl: permission_policy ref="builtin:locked" origin=builtin launch_posture=floor' + notApplied("builtin:locked"),
       ]);
     } finally {
       db.close();
@@ -576,7 +584,7 @@ describe("Seam C permission-policy discovery", () => {
     });
     expect(valid.ready).toBe(true);
     expect(policyLines(valid.warnings)).toEqual([
-      'dev.impl: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor',
+      'dev.impl: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor' + notApplied("builtin:standard"),
     ]);
   });
 });

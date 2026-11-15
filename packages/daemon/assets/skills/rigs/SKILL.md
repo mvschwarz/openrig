@@ -126,6 +126,8 @@ person needs in their project or home folder and name that path.
   OpenRig in a plain shell so the operator sees a named teammate instead of "unknown sender". Inside tmux, offer
   joining as optional, with the effects below. Ask the person yes or no after this short explanation:
   - This adds me as a named member of the team, with my name on messages.
+  - While the team works, I bring each seat's permission prompt to you here as a question and send your answer, so
+    you don't need to open the seats' terminals. Joining puts my name on those answers.
   - In a plain shell, joining writes no files in your project or personal settings.
   - Inside tmux, my sender and reply address is `<member>@<rig>`, even when your tmux session is named `0`;
     `rig attach --self` returns it and `rig whoami` confirms it; `--display-name` does not change it.
@@ -246,19 +248,36 @@ person needs in their project or home folder and name that path.
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
-  read it with `rig capture <seat>@<rig>`. A permission prompt is the person's to answer: show it to them, with any
-  others waiting, one line each (seat, exact action, the choices offered). For a commit, also say whether the team's
+  read it with `rig capture <seat>@<rig>`.
+- **Seat permission prompts come to the person here, as questions, for as long as the team works,** whether you or
+  the operator started it, and whether or not they joined. This is the default, not a fallback. A permission prompt
+  is the person's to answer: they decide, which doesn't mean they type it into the seat's pane, so don't decline to
+  relay it. After each step you hand off, and before you report progress, check `rig ps --nodes --rig <rig>` for a
+  seat stopped at a prompt, and repeat that check while you wait for a seat's result, so a prompt that appears after
+  your last check still reaches them. Show the person each one, with any others waiting, one line each (seat,
+  exact action, the choices offered), and the whole prompt when they ask. For a commit, also say whether the team's
   review has run; they may be expecting one. Before sending their choice, capture that
-  seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt
-  (`rig send --help` says how to send a digit, a letter or Escape to a prompt). A yes to one prompt isn't a
+  seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
+  `rig send <seat>@<rig> "<key>" --dangerously-interact --reason "<their choice, in their words>"`, where `<key>` is
+  the digit or letter that capture shows for their choice, never their words: the text is typed as keys, and a letter
+  can pick a menu's shortcut. If the screen shows no key for their choice, ask them. When their choice is Escape,
+  send the key itself, written with bash or zsh quoting:
+  `rig send <seat>@<rig> $'\e' --dangerously-interact --reason "<their choice, in their words>"`. It's sent once, with
+  no Enter added. Never answer a prompt on your own and record it as theirs,
+  even one that only reads: ask them, and send their answer. A yes to one prompt isn't a
   yes to the next, and never pick a "don't ask again" choice they didn't pick. If they've told you outright to decide a
   kind of future prompt (say, "approve prompts that only write inside my project"), you may decide each one: read its
   whole action, answer only when it's clearly inside what they said, and tell them you answered under that instruction,
-  not that they said yes. Bring anything unclear or outside it back to them; a command's name or a path that looks like
+  not that they said yes. Say the same in `--reason`: your call under their instruction, not their approval. Bring
+  anything unclear or outside it back to them; a command's name or a path that looks like
   their project doesn't show what the action touches. Their instruction changes no permission setting.
   Don't send them to a bare `tmux attach` to answer: relay their choice this way, or point them to that seat in the
   team's terminals the operator opened. If they want fewer prompts, the operator offers once to allow the commands
   that keep asking, for their project only (`applying-a-permission-policy`); tell it what they chose.
+  Trust and hook-review prompts are the person's to answer, as permission prompts are. Once you've sent their answer
+  to a prompt a seat stopped at while starting, check `rig ps --nodes --rig <rig>` again: if it shows
+  `Startup details (<seat>)` ending in `rig seat continue <seat>`, run that command: it delivers the seat's startup
+  instructions in the same conversation.
   Another kind of menu you can answer with
   the key that screen shows, or ask the person. Capture it again before sending anything more.
 - **Replies:** in a plain shell, other agents can't type into this session. Their questions and work for you arrive
@@ -321,9 +340,12 @@ Follow these steps by default. Only when the person declined the Codex offer abo
   anything else.
 - **Then ask what's next.** If no team can take the work, fix that or ask the person. Don't quietly do it yourself.
 - **Coming back later:** in a new session, use the same return address and the task IDs you gave the person. Read
-  each with `rig queue show <id> --json` and follow its `successors` to the newest item, as above;
+  each with `rig queue show <id> --json` and follow its `successors` to the newest item, as above. A task handed to
+  another host has no `successors` here: its `successorNote` names the successor as `<id>@<host>`, so read it there
+  with `rig queue show <id> --host <host> --json`.
   `OPENRIG_SESSION_NAME=<address> rig queue list --mine -a` lists everything this address sent or owns, finished work
-  included (without `-a` it shows only open items). Follow that work rather than creating it again.
+  included (without `-a` it shows only open items). It returns at most 100 rows unless you pass `--limit`, so on a busy
+  address keep the task IDs you created, or raise `--limit`. Follow that work rather than creating it again.
   Adding OpenRig's MCP plugin to this app later starts a new session; it doesn't carry this conversation over.
 - **Other ways to work with the team:** `rig send <seat>@<rig> "..."` types into an agent's terminal,
   `rig capture <seat>@<rig>` reads its screen, and `rig ps --nodes --rig <rig>` shows who's on it.
