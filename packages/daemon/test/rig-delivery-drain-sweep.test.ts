@@ -124,4 +124,46 @@ describe("delivery drain and standing stuck sweep", () => {
     } finally { spy?.mockRestore(); f.db.close(); }
   });
 
+  it("checks a held notice's closed sources without an unbounded turn of rich row reads", async () => {
+    const f = fixture();
+    const realImmediate = globalThis.setImmediate;
+    let reads = 0, maxReads = 0;
+    let get: ReturnType<typeof vi.spyOn> | undefined;
+    let yieldSpy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const node = f.rigs.addNode(f.held.id, "door.root", { runtime: "claude-code" });
+      f.db.prepare("INSERT INTO sessions(id,node_id,session_name,status) VALUES(?,?,?,?)")
+        .run("session-source-batch", node.id, "root@held-one", "running");
+      const ids = new Set<string>();
+      for (let i = 0; i < 2 * STUCK_SWEEP_YIELD_EVERY_ROWS + 1; i++) {
+        ids.add((await f.work("root@held-one")).qitemId);
+      }
+      f.db.prepare("UPDATE queue_items SET ts_created=? WHERE destination_session=?")
+        .run(new Date(Date.now() - 120 * 60_000).toISOString(), "root@held-one");
+      await f.sweep();
+      const [notice] = f.withTag(unclaimedBacklogTag("root@held-one"));
+      expect(notice?.state).toBe("pending");
+      f.begin();
+      const missing = [...ids].at(-1)!;
+      f.db.prepare("UPDATE queue_items SET state='done' WHERE qitem_id IN (SELECT value FROM json_each(?))")
+        .run(JSON.stringify([...ids]));
+      f.db.prepare("DELETE FROM queue_items WHERE qitem_id=?").run(missing);
+      await f.sweep();
+      expect(f.queue.getById(notice!.qitemId)?.state).toBe("pending"); // absence is not positive completion
+      await f.queue.create({ qitemId: missing, sourceSession: "sender@other-two", destinationSession: "root@held-one", body: "retained work", nudge: false });
+      f.db.prepare("UPDATE queue_items SET state='done' WHERE qitem_id=?").run(missing);
+      const getById = f.queue.getById.bind(f.queue);
+      get = vi.spyOn(f.queue, "getById").mockImplementation((id, options) => {
+        if (ids.has(id)) { reads++; maxReads = Math.max(maxReads, reads); }
+        return getById(id, options);
+      });
+      yieldSpy = vi.spyOn(globalThis, "setImmediate").mockImplementation(((callback: (...args: unknown[]) => void, ...args: unknown[]) =>
+        realImmediate(() => { reads = 0; callback(...args); })) as typeof setImmediate);
+      expect((await f.sweep()).outcome).not.toBe("failed");
+      expect(f.queue.getById(notice!.qitemId)?.state).toBe("done");
+      // The existing yielded reconciliation reads the row and its delivery-resolution evidence: two reads per row.
+      expect(maxReads).toBeLessThanOrEqual(2 * STUCK_SWEEP_YIELD_EVERY_ROWS);
+    } finally { yieldSpy?.mockRestore(); get?.mockRestore(); f.db.close(); }
+  });
+
 });

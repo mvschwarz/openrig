@@ -100,7 +100,7 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
  *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
 export const HANDOFF_SUCCESSOR_LIMIT = 20;
-export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
   try {
     // Newest first, one past the bound so a cut list is known.
     const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
@@ -1458,7 +1458,8 @@ export function queueRoutes(): Hono {
       if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
         repo.recordInboxCheckIn(sender);
       }
-      return c.json(items);
+      return c.json(items.map((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
+        ? { ...item, ...handoffSuccessors(repo, item) } : item));
     }
 
     // OPR.0.3.2.20 — attention path goes through
