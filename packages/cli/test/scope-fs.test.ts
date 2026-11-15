@@ -152,6 +152,25 @@ describe("frontmatter parser", () => {
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
+  describe.each(["\n", "\r\n"])("empty frontmatter (%j)", (newline) => {
+    it.each(["", "# Mission", "# Mission\n---\nKeep this section."])("updates fields while preserving body %j", (bodyText) => {
+      const dir = mktemp();
+      const file = path.join(dir, "README.md");
+      const body = bodyText ? newline + bodyText.replace(/\n/g, newline) + newline : "";
+      const opening = `--- \t${newline}`;
+      const closing = "---\t";
+      try {
+        writeFile(file, opening + closing + body);
+        updateFrontmatter(file, { stage: "wip" });
+        const expected = `${opening}stage: wip${newline}${closing}${body}`;
+        expect(fs.readFileSync(file, "utf8")).toBe(expected);
+        expect(readFrontmatter(file)).toEqual({ stage: "wip" });
+        updateFrontmatter(file, { stage: "wip" });
+        expect(fs.readFileSync(file, "utf8")).toBe(expected);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    });
+  });
+
   it("generates minimal frontmatter when absent", () => {
     const dir = mktemp();
     const p = path.join(dir, "README.md");

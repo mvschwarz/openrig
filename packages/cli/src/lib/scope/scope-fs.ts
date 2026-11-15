@@ -88,18 +88,21 @@ export function updateFrontmatter(
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
-  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
-  if (!match) {
+  const opening = /^---[ \t]*\r?\n/.exec(original);
+  const rest = original.slice(opening?.[0].length ?? 0);
+  const closing = opening && /^---[ \t]*(?=\r?\n|(?![\s\S]))/m.exec(rest);
+  if (!opening || !closing) {
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
     const separator = original.startsWith("\n") ? "" : "\n";
     fs.writeFileSync(absPath, `---\n${yaml}\n---\n${separator}${original}`, "utf8");
     return;
   }
 
-  const originalBlock = match[1]!;
-  const blockStart = original.indexOf("\n") + 1;
+  const capturedBlock = rest.slice(0, closing.index);
+  const originalBlock = capturedBlock.replace(/\r?\n$/, "");
+  const blockStart = opening[0].length;
   const blockEnd = blockStart + originalBlock.length;
-  const newline = original.slice(blockEnd, blockEnd + 2) === "\r\n" ? "\r\n" : "\n";
+  const newline = (capturedBlock || opening[0]).endsWith("\r\n") ? "\r\n" : "\n";
   let block: string;
   try {
     block = updateMappedFrontmatter(original.slice(blockStart, blockEnd), updates, newline, absPath);
@@ -108,11 +111,12 @@ export function updateFrontmatter(
     console.warn(`[warn] ${absPath}: frontmatter isn't valid YAML; using line-based updates. Listing cannot read its fields until the YAML is fixed.`);
     // Start again from the original block, including when a splice removed a used anchor.
     block = updateFrontmatterLines(originalBlock, updates);
-    const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
+    const updated = `---\n${block}\n---` + rest.slice(closing.index + closing[0].length);
     fs.writeFileSync(absPath, updated, "utf8");
     return;
   }
-  fs.writeFileSync(absPath, original.slice(0, blockStart) + block + original.slice(blockEnd), "utf8");
+  const separator = capturedBlock === "" && block !== "" ? newline : "";
+  fs.writeFileSync(absPath, original.slice(0, blockStart) + block + separator + original.slice(blockEnd), "utf8");
 }
 
 /** Keep main's line-based update for YAML that cannot use source-range splicing. */
