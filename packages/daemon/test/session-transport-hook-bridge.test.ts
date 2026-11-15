@@ -386,4 +386,99 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect(direct.outcome).toBe("bridged");
     expect((s.bridge.poll(s.nodeId, armId) as { messages: Array<{ outboxId: string }> }).messages.map((m) => m.outboxId)).toEqual(direct.outboxIds);
   });
+  // #3270 round 7.
+  const beginDrain = (s: Awaited<ReturnType<typeof seat>>, repo: QueueRepository, id: string) => {
+    const jobs = new WatchdogJobsRepository(s.db);
+    repo.deliveryDrains.begin(s.rigId, { drainId: id, owner: "owner@team", reviewAt: new Date(Date.now() + 3_600_000).toISOString() }, jobs);
+    return () => repo.deliveryDrains.end(s.rigId, id, jobs);
+  };
+  const state = (s: Awaited<ReturnType<typeof seat>>, id: string) => new OutboxHandler(s.db).getById(id)?.deliveryState;
+
+  it("doesn't type a drain-held wake when a direct send to a seat with no live waiter sweeps its queue; the direct send arrives (R7-1)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const repo = queueOn(s);
+    s.drainWith((name) => repo.deliveryDrains.holds(name));
+    const held = await handoffTo(s, repo);
+    beginDrain(s, repo, "m-r7-1");
+    s.advance(HOOK_BRIDGE_TURN_BOUND_MS + 1); // no live waiter now
+    const direct = await s.transport.send(s.sessionName, "From: peer@team\n---\ndirect\n---", { actorSession: "peer@team" });
+    await s.transport.sweepHookBridge({ nodeId: s.nodeId });
+    expect(direct).toMatchObject({ ok: true });
+    expect(direct.outcome).not.toBe("bridged");
+    expect(s.writes.filter((w) => w === "paste")).toHaveLength(1);
+    expect(s.bridge.queued(s.nodeId).map((r) => r.outboxId)).toEqual([held.id]);
+  });
+
+  it("doesn't hand back a wake whose rig's drain began after the sweep selected it, before the final handback (R7-1)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const repo = queueOn(s);
+    s.drainWith((name) => repo.deliveryDrains.holds(name));
+    const wake = await handoffTo(s, repo);
+    s.advance(HOOK_BRIDGE_TURN_BOUND_MS + 1);
+    let release!: () => void;
+    const holding = s.guard.exclusive(s.nodeId, () => new Promise<void>((r) => { release = r; }));
+    const sweeping = s.transport.sweepHookBridge();
+    await new Promise((r) => setTimeout(r, 30)); // the sweep has selected the wake and waits for the seat's lease
+    beginDrain(s, repo, "m-r7-2");
+    release(); await holding;
+    expect(await sweeping).toEqual([]);
+    expect(s.writes).toEqual([]);
+    expect(s.bridge.queued(s.nodeId).map((r) => r.outboxId)).toEqual([wake.id]);
+  });
+
+  it("lets a direct send and the explicit resolve notice pass a drain-held wake; the held wake arrives after the drain ends (R7-2)", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const repo = queueOn(s);
+    s.drainWith((name) => repo.deliveryDrains.holds(name));
+    const held = await handoffTo(s, repo);
+    const end = beginDrain(s, repo, "m-r7-3");
+    const direct = await s.transport.send(s.sessionName, "From: peer@team\n---\ndirect\n---", { actorSession: "peer@team" });
+    const explicit = await s.transport.send(s.sessionName, "From: openrig\n---\nresolved\n---", { actorSession: "lead@team", queueWake: true, drainExempt: true, deliveryId: "explicit-1" } as never);
+    const during = s.bridge.poll(s.nodeId, armId) as { action: string; batchId: string; messages: Array<{ outboxId: string }> };
+    expect(during.messages.map((m) => m.outboxId)).toEqual([direct.outboxIds![0], explicit.outboxIds![0]]);
+    s.bridge.ack(s.nodeId, s.sessionName, s.occupant, armId, during.batchId);
+    end();
+    const next = s.bridge.arm({ nodeId: s.nodeId, sessionName: s.sessionName, generation: s.occupant, hookEvent: "Stop" });
+    expect((s.bridge.poll(s.nodeId, next.armId) as { messages: Array<{ outboxId: string }> }).messages.map((m) => m.outboxId)).toEqual([held.id]);
+  });
+
+  it("doesn't hand over a queue wake whose row was claimed while it waited: it ends not delivered (R7-3)", async () => {
+    const s = await seat();
+    const { armId } = s.optInAndArm();
+    const repo = queueOn(s);
+    const wake = await handoffTo(s, repo);
+    repo.claim({ qitemId: wake.qitemId, destinationSession: s.sessionName });
+    expect(s.bridge.poll(s.nodeId, armId)).toEqual({ action: "wait" });
+    expect(state(s, wake.id)).toBe("failed");
+    expect(s.bridge.status(s.nodeId, s.occupant).notDelivered.outboxIds).toEqual([wake.id]);
+  });
+
+  it("doesn't queue a send whose caller cancelled it while it waited for the seat's lease (R7-4)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    let release!: () => void;
+    const holding = s.guard.exclusive(s.nodeId, () => new Promise<void>((r) => { release = r; }));
+    const controller = new AbortController();
+    const sending = s.transport.send(s.sessionName, "From: peer@team\n---\ncancelled\n---", { actorSession: "peer@team", signal: controller.signal });
+    await new Promise((r) => setTimeout(r, 30));
+    controller.abort();
+    release(); await holding;
+    expect((await sending).outcome).not.toBe("bridged");
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+    expect(s.writes).toEqual([]);
+  });
+  it("puts a new message behind ones already queued after the seat opted out, so the fallback types them in order (R7-5)", async () => {
+    const s = await seat();
+    s.optInAndArm();
+    const first = await s.transport.send(s.sessionName, "From: peer@team\n---\none\n---", { actorSession: "peer@team" });
+    expect(first.outcome).toBe("bridged");
+    s.bridge.setPreference(s.nodeId, false, "human@team", "back to typed");
+    const second = await s.transport.send(s.sessionName, "From: peer@team\n---\ntwo\n---", { actorSession: "peer@team" });
+    expect(second.outcome).toBe("bridged"); // queued behind the first, not typed ahead of it
+    const typed = await s.transport.sweepHookBridge();
+    expect(typed.map((t) => t.outboxId)).toEqual([first.outboxIds![0], second.outboxIds![0]]);
+  });
 });

@@ -2359,6 +2359,7 @@ export class SessionTransport {
   private agentActivityStore?: AgentActivityStore;
   private eventBus?: EventBus;
   private hookBridge?: HookBridge;
+  private queueWakeApplicable?: (entries: readonly QueueWakeFacts[]) => boolean;
   private hookBridgeSweep: Promise<Array<{ outboxId: string; result: SendResult }>> | null = null;
   private hookBridgeSweepAgain = false;
   private now: () => Date;
@@ -2401,6 +2402,9 @@ export class SessionTransport {
 
   configureGuardedWakes(applicable: (entries: readonly QueueWakeFacts[]) => boolean): void {
     this.guardedDelivery?.configureWakes(applicable);
+    // The hook bridge checks the same predicate before it queues an automatic wake and before it hands one over.
+    this.queueWakeApplicable = applicable;
+    if (this.hookBridge) this.hookBridge.wakeApplicable = applicable;
   }
 
   attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
@@ -2920,7 +2924,8 @@ export class SessionTransport {
     bridge.reconcileUnacked();
     const due = bridge.dueForFallback();
     if (opts.nodeId && !due.some((d) => d.nodeId === opts.nodeId) && !bridge.live(opts.nodeId)) {
-      const ids = bridge.queued(opts.nodeId).map((m) => m.outboxId);
+      // By the same rule as the poll and the fallback: what a delivery drain holds stays queued (superseded wakes end).
+      const ids = bridge.queuedForTyping(opts.nodeId);
       if (ids.length) due.push({ nodeId: opts.nodeId, outboxIds: ids, reason: bridge.unavailable(opts.nodeId) });
     }
     const outbox = new OutboxHandler(this.db);
@@ -2939,6 +2944,10 @@ export class SessionTransport {
           hookBridgeFallback: { nodeId, reason, admission: row.admission }, actorSession: entry.senderSession,
           ...(entry.auditPointer ? { auditPointer: entry.auditPointer } : {}) });
         if (result.reason === "hook_bridge_claimed") break;
+        // A drain that began since the selection holds it: untouched, and what's behind it may still go.
+        if (result.reason === "delivery_drain_held") continue;
+        // Its wake no longer applies: ended not delivered at the handback.
+        if (result.reason === "draft_wake_superseded" && result.sent === false) { typed.push({ outboxId, result }); continue; }
         if (result.reason === "guard_target_changed" && result.sent === false) {
           bridge.abandon(nodeId, entry.destinationSession, outboxId, "it was queued for an earlier occupant of the seat, which is gone");
           typed.push({ outboxId, result });
@@ -2967,6 +2976,13 @@ export class SessionTransport {
     const target = this.tmuxAdapter.deliveryGuard!.target(sessionName);
     if (entry?.guardBinding && JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) {
       return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "guard_target_changed", error: "This message was queued for another occupant of the seat; no input written." };
+    }
+    const refused = this.hookBridge?.handbackRefusal(fallback.nodeId, outboxId);
+    if (refused === "drained") {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "delivery_drain_held", error: "The seat's rig is in a delivery drain; this message stays queued until it ends." };
+    }
+    if (refused === "superseded") {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "draft_wake_superseded", error: "The queue wake is no longer applicable; it ended not delivered, and nothing was typed." };
     }
     if (!this.hookBridge?.releaseForTyping(fallback.nodeId, sessionName, outboxId, fallback.reason)) {
       return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "hook_bridge_claimed", error: "The seat's hook bridge took this message first; nothing typed." };
@@ -3055,22 +3071,36 @@ export class SessionTransport {
         // Only a plain message is bridged (see bridgeable): everything else is typed, where its checks run.
         if (bridge && bridgeable(memberText, memberOpts)) {
           const target = guard.target(sessionName);
-          if (bridge.routes(target)) {
+          const routed = bridge.routes(target);
+          // Messages already queued that a typed send would take now go first: a new one goes behind them even when
+          // the bridge no longer routes (an opt-out after they were queued).
+          const ahead = bridge.queuedForTyping(target.nodeId).length > 0;
+          if (routed || ahead) {
+            // As the typed path checks before typing: a caller gone while it waited for the lease, and an automatic
+            // wake its queue row no longer wants (an explicit notice isn't subject to it), queue nothing.
+            if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
             const bridgeIds = memberOpts?.committedOutboxIds ?? ids;
+            if (memberOpts?.queueWake && !memberOpts.drainExempt && this.queueWakeApplicable) {
+              const outbox = new OutboxHandler(this.db);
+              const facts = memberOpts.committedOutboxIds ? bridgeIds.map((id) => outbox.getById(id)).filter((e): e is NonNullable<typeof e> => !!e)
+                : [{ outboxId: bridgeIds[0]!, auditPointer: memberOpts.auditPointer ?? null, destinationSession: sessionName }];
+              if (!this.queueWakeApplicable(facts)) return { ok: false, sessionName, outcome: "failed" as const, sent: false, inputPhase: "not_reached" as const,
+                reason: "draft_wake_superseded", error: "The queue wake is no longer applicable; nothing was queued or typed." };
+            }
             const queueOpts = { ...(memberOpts ?? {}), admission };
             // A deposit that queued nothing (an id already settled) isn't reported queued: the send goes on as it would
             // without the bridge.
-            if (bridge.live(target.nodeId)) {
+            if (routed && bridge.live(target.nodeId)) {
               const queued = bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds);
               if (queued) return queued;
             } else {
-              const reason = bridge.unavailable(target.nodeId);
-              const queued = bridge.queued(target.nodeId).length ? bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds) : null;
+              const reason = routed ? bridge.unavailable(target.nodeId) : "the seat no longer routes through it";
+              const queued = ahead ? bridge.deposit(target, sessionName, memberText, queueOpts, bridgeIds) : null;
               if (queued) {
                 setImmediate(() => { void this.sweepHookBridge({ nodeId: target.nodeId }).catch(() => {}); });
                 return { ...queued, warning: `${sessionName}'s hook bridge isn't available (${reason}): this message is typed after the ones already queued for it.` };
               }
-              bridgeWarning = `${sessionName}'s hook bridge isn't available (${reason}): delivered by typing instead.`;
+              if (routed) bridgeWarning = `${sessionName}'s hook bridge isn't available (${reason}): delivered by typing instead.`;
             }
           }
         }

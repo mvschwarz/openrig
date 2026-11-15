@@ -18,6 +18,7 @@ import type Database from "better-sqlite3";
 import { OutboxHandler } from "./outbox-handler.js";
 import type { RigEvent } from "./types.js";
 import type { AdmissionInput } from "./seat-delivery-guard.js";
+import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 
 /** The hooks' `timeout` (seconds): past an hour idle, so a waiter stays armed through a long idle (7200 measured). */
 export const HOOK_BRIDGE_TIMEOUT_SECONDS = 7200;
@@ -72,8 +73,8 @@ interface BridgeReceipt {
   hookEvent?: string;
   ackedAt?: string;
 }
-interface QueuedRow { outboxId: string; body: string; senderSession: string; sessionName: string; queuedAt: string; occupant: string | null;
-  admission: HookBridgeAdmission | null; automatic: boolean }
+interface QueuedRow { outboxId: string; body: string; senderSession: string; sessionName: string; auditPointer: string | null; queuedAt: string;
+  occupant: string | null; admission: HookBridgeAdmission | null; automatic: boolean }
 
 export type HookBridgeEvent = Extract<RigEvent, { type: `transport.hook_bridge_${string}` }>;
 
@@ -124,6 +125,9 @@ export class HookBridge {
   private readonly now: () => number;
   /** Told how each queued message ended at the bridge; startup points a queue wake's end at its queue row. */
   onEnd?: (end: HookBridgeEnd) => void;
+  /** Whether a queue wake still applies (QueueRepository's current-wake predicate, which the typed path also checks):
+   *  set by the transport when the queue attaches. */
+  wakeApplicable?: (entries: readonly QueueWakeFacts[]) => boolean;
 
   constructor(readonly db: Database.Database, private readonly deps: {
     now?: () => number;
@@ -245,14 +249,14 @@ export class HookBridge {
 
   /** The seat's queued messages, oldest first. */
   queued(nodeId: string): QueuedRow[] {
-    const rows = this.db.prepare(`SELECT outbox_id, body, sender_session, destination_session, guard_binding, guard_delivery FROM outbox_entries
+    const rows = this.db.prepare(`SELECT outbox_id, body, sender_session, destination_session, audit_pointer, guard_binding, guard_delivery FROM outbox_entries
       WHERE delivery_state = 'sending' AND guard_binding IS NOT NULL AND json_extract(guard_binding, '$.nodeId') = ?
         AND json_extract(guard_delivery, '$.channel') = ? AND json_extract(guard_delivery, '$.state') = 'queued'
       ORDER BY ts_dispatched, rowid`).all(nodeId, HOOK_BRIDGE_CHANNEL) as Array<{ outbox_id: string; body: string; sender_session: string; destination_session: string;
-        guard_binding: string; guard_delivery: string }>;
+        audit_pointer: string | null; guard_binding: string; guard_delivery: string }>;
     return rows.map((r) => {
       const receipt = JSON.parse(r.guard_delivery) as BridgeReceipt;
-      return { outboxId: r.outbox_id, body: r.body, senderSession: r.sender_session, sessionName: r.destination_session, queuedAt: receipt.queuedAt,
+      return { outboxId: r.outbox_id, body: r.body, senderSession: r.sender_session, sessionName: r.destination_session, auditPointer: r.audit_pointer, queuedAt: receipt.queuedAt,
         occupant: (JSON.parse(r.guard_binding) as HookBridgeTarget).occupant ?? null, admission: receipt.admission ?? null, automatic: receipt.automatic === true };
     });
   }
@@ -265,6 +269,42 @@ export class HookBridge {
       console.error(`[hook-bridge] ${row.sessionName}'s delivery drain couldn't be read; delivering:`, error);
       return false;
     }
+  }
+
+  /** An automatic wake whose queue row no longer wants it (claimed, closed, moved, superseded): the typed path refuses it
+   *  (draft_wake_superseded), so the bridge ends it not delivered rather than hand it over. An explicit notice and a
+   *  direct send aren't automatic, so this never applies to them. */
+  private superseded(row: QueuedRow): boolean {
+    if (!row.automatic || !this.wakeApplicable) return false;
+    try { return !this.wakeApplicable([{ outboxId: row.outboxId, auditPointer: row.auditPointer, destinationSession: row.sessionName }]); }
+    catch { return false; }
+  }
+
+  /** The seat's queued rows, oldest first, with superseded wakes ended (not delivered) and left out. */
+  private current(nodeId: string): QueuedRow[] {
+    return this.queued(nodeId).filter((row) => {
+      if (!this.superseded(row)) return true;
+      this.abandon(nodeId, row.sessionName, row.outboxId, "the queue wake no longer applies: its row was claimed, closed or moved on");
+      return false;
+    });
+  }
+
+  /** The queued messages a typed send may take now, oldest first: everything but what a delivery drain holds (and
+   *  superseded wakes, which end). The rule the poll and the fallback both apply, for an on-demand sweep. */
+  queuedForTyping(nodeId: string): string[] {
+    return this.current(nodeId).filter((row) => !this.drainHolds(row)).map((row) => row.outboxId);
+  }
+
+  /** Checked again at the final handback, under the seat's lease, just before a typed fallback takes a row: whether a
+   *  drain now holds it, or its wake no longer applies (then it's ended not delivered). Null to go ahead. */
+  handbackRefusal(nodeId: string, outboxId: string): "drained" | "superseded" | null {
+    const row = this.queued(nodeId).find((r) => r.outboxId === outboxId);
+    if (!row) return null; // claimed or gone: the release decides
+    if (this.superseded(row)) {
+      this.abandon(nodeId, row.sessionName, outboxId, "the queue wake no longer applies: its row was claimed, closed or moved on");
+      return "superseded";
+    }
+    return this.drainHolds(row) ? "drained" : null;
   }
 
   /** Why the bridge can't deliver this queued row to `generation` now, or null when it can. */
@@ -287,9 +327,10 @@ export class HookBridge {
       const live = this.live(nodeId);
       const ids: string[] = [];
       let reason: string | null = null;
-      for (const row of this.queued(nodeId)) {
-        // Held by the rig's delivery drain: not due, so not typed, and nothing behind it overtakes it.
-        if (this.drainHolds(row)) break;
+      for (const row of this.current(nodeId)) {
+        // Held by the rig's delivery drain: not due, so not typed. What a drain doesn't hold (a direct send, an explicit
+        // notice) passes it, in its own order, as on the typed path.
+        if (this.drainHolds(row)) continue;
         const why = this.undeliverable(nodeId, row, generation);
         const stale = !live && this.now() - Date.parse(row.queuedAt) >= HOOK_BRIDGE_LIVE_BOUND_MS;
         if (!why && !stale) break; // keep send order: what's behind a deliverable row waits with it
@@ -386,10 +427,11 @@ export class HookBridge {
     }
     if (seat.turn !== "idle") return { action: "wait" };
     const deliverable: QueuedRow[] = [];
-    for (const row of this.queued(nodeId)) {
-      // A row the rig's delivery drain holds waits here, with everything behind it; one the bridge can't deliver goes
-      // to typed delivery.
-      if (this.drainHolds(row) || this.undeliverable(nodeId, row, seat.arm.generation)) break;
+    for (const row of this.current(nodeId)) {
+      // A row the rig's delivery drain holds waits for the drain's end; what the drain doesn't hold passes it, in order.
+      // One the bridge can't deliver goes to typed delivery, and what's behind it waits with it.
+      if (this.drainHolds(row)) continue;
+      if (this.undeliverable(nodeId, row, seat.arm.generation)) break;
       deliverable.push(row);
     }
     if (!deliverable.length) return { action: "wait" };
