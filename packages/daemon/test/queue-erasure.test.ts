@@ -13,6 +13,10 @@ import { EraseRefusal, eraseQueue } from "../src/domain/queue-erasure.js";
 import { runQueueRetentionSweep } from "../src/domain/queue-retention.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { recordReaderAction } from "../src/domain/stream-reader-actions.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { ChatRepository } from "../src/domain/chat-repository.js";
+import { subscribe } from "../src/domain/stream-subscriptions.js";
+import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -491,6 +495,268 @@ describe("round 1 controls", () => {
     const swept = await runQueueRetentionSweep(db, { nowIso: NOW, closedContentDays: 30, transitionsRetentionDays: 1 });
     expect(swept.closedError).toMatch(/disk I\/O error/);
     expect(swept.archivedQitems).toBeGreaterThan(0); // the transition archive still ran
+  });
+});
+
+// An account rig that never had an assistant connect has no members to name. It's erased with members [] and its rig,
+// but only when this database can show the rig never had a session.
+describe("account deletion of a rig that never had a member", () => {
+  const RIG = "rig-empty-id";
+  const erase = (apply = true) => eraseQueue(db, { scope: { kind: "members", members: [], rig: RIG }, apply, nowIso: NOW });
+  beforeEach(() => {
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, 'n-empty'), ('rig-else-id', 'n-else')").run(RIG);
+    const bus = new EventBus(db);
+    bus.emit({ type: "rig.imported", rigId: RIG, specName: "secret-empty-spec", specVersion: "1" } as never);
+    bus.emit({ type: "node.launched", rigId: "rig-else-id", nodeId: "node-x", logicalId: "x.other", sessionName: OUT } as never);
+    db.prepare("INSERT INTO snapshots (id, rig_id, kind, data) VALUES ('snap-empty', ?, 'periodic', '{\"seat\":\"secret-empty-snapshot\"}')").run(RIG);
+  });
+
+  it.each([["no nodes", false], ["a node that was never launched", true]] as const)("with %s, erases clean, and the run after its removal completes", async (_label, node) => {
+    if (node) db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-idle', ?, 'idle.one')").run(RIG);
+    const dry = await erase(false);
+    expect(dry).toMatchObject({ applied: false, rig: { found: true, verified: true } });
+    expect(everything()).toContain("secret-empty-snapshot");
+    const first = await erase();
+    expect(first).toMatchObject({ complete: true, clean: true, qitems: [], rig: { id: RIG, found: true, verified: true, erased: { snapshots: 1 } } });
+    expect(everything()).not.toContain("secret-empty-spec");
+    expect(everything()).not.toContain("secret-empty-snapshot");
+    expect(payloads()).toContain(`"sessionName":"${OUT}"`);
+    // The rig is removed, and its removal writes under the rig's id; the same run then erases that and completes.
+    db.prepare("DELETE FROM nodes WHERE rig_id = ?").run(RIG);
+    db.prepare("DELETE FROM rigs WHERE id = ?").run(RIG);
+    new EventBus(db).emit({ type: "rig.deleted", rigId: RIG } as never);
+    const after = await erase();
+    expect(after).toMatchObject({ clean: true, rig: { found: false, verified: true, erased: { events: 1 }, completedAt: NOW } });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+    expect(await erase()).toMatchObject({ clean: true, rig: { found: false, verified: true, completedAt: NOW, unknown: [] } });
+  });
+
+  it.each([
+    ["has a session now", () => {
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-s', ?, 's.one')").run(RIG);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-s', 'node-s', 's-one@n-empty', 'exited')").run();
+    }, "erase_rig_mismatch"],
+    ["has an event naming a session", () => {
+      new EventBus(db).emit({ type: "node.launched", rigId: RIG, nodeId: "node-gone", logicalId: "g.one", sessionName: "g-one@n-empty" } as never);
+    }, "erase_rig_had_sessions"],
+    ["has a node's event naming a session", () => {
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-e', ?, 'e.one')").run(RIG);
+      db.prepare("INSERT INTO events (node_id, type, payload) VALUES ('node-e', 'node.startup_failed', ?)").run(JSON.stringify({ type: "node.startup_failed", sessionId: "sess-e" }));
+    }, "erase_rig_had_sessions"],
+    ["had a node removed", () => {
+      new EventBus(db).emit({ type: "node.removed", rigId: RIG, nodeId: "node-r" } as never);
+    }, "erase_rig_history_unknown"],
+    ["was erased before with members", () => {
+      db.prepare("INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at) VALUES (?, 'n-empty', 'digest-of-other-members', ?)").run(RIG, NOW);
+    }, "erase_rig_had_sessions"],
+  ] as const)("refuses a rig that %s, and erases nothing", async (_label, seed, code) => {
+    seed();
+    const before = everything();
+    await expect(erase(false)).rejects.toMatchObject({ code });
+    await expect(erase()).rejects.toMatchObject({ code });
+    expect(everything()).toBe(before);
+  });
+
+  // A seat with no session row still leaves its work under its address: a grant-service caller acting as its grant's
+  // seat, or a hosted member. That address at the rig, plain or host-qualified, refuses [], and naming the seat works.
+  it("refuses [] when queue work names a seat at the rig, and accepts that seat named", async () => {
+    const GRANT = "helper@n-empty";
+    await row("g-grant", GRANT, OUT, [{ state: "done", daysAgo: 2 }]);
+    await row("g-lookalike", "y@n-empty-other", "z@n_empty", [{ state: "done", daysAgo: 2 }]);
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining(GRANT) });
+    db.prepare("UPDATE queue_items SET source_session = ? WHERE qitem_id = 'g-grant'").run(`${GRANT}@hub-host`);
+    db.prepare("UPDATE queue_transitions SET actor_session = ? WHERE qitem_id = 'g-grant'").run(`${GRANT}@hub-host`);
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining(`${GRANT}@hub-host`) });
+    // Named, the seat is accepted (it has no session, so the both-ways check holds); its row with OUT is mixed and kept.
+    const named = await eraseQueue(db, { scope: { kind: "members", members: [`${GRANT}@hub-host`], rig: RIG }, apply: true, nowIso: NOW });
+    expect(named).toMatchObject({ complete: true, mixed: [{ qitemId: "g-grant" }], rig: { found: true, verified: true } });
+    expect(exists("g-lookalike")).toBe(true);
+  });
+
+  // A [] receipt is taken while the rig exists. A member who comes later and the rig's removal must not let the rerun
+  // erase the later evidence and report clean: the rerun is refused, dry run and apply.
+  it.each([
+    ["a launch", () => new EventBus(db).emit({ type: "node.launched", rigId: RIG, nodeId: "node-late", logicalId: "late.one", sessionName: "late@n-empty" } as never)],
+    ["a claim", () => new EventBus(db).emit({ type: "node.claimed", rigId: RIG, nodeId: "node-late", logicalId: "late.one" } as never)],
+    ["a grant seat's work", () => row("g-late", "late@n-empty", OUT, [{ state: "done", daysAgo: 0 }])],
+  ] as const)("refuses the rerun after removal when %s came after the [] receipt", async (_label, later) => {
+    expect(await erase()).toMatchObject({ clean: true, rig: { found: true, verified: true } });
+    await later();
+    db.prepare("DELETE FROM nodes WHERE rig_id = ?").run(RIG);
+    db.prepare("DELETE FROM rigs WHERE id = ?").run(RIG);
+    new EventBus(db).emit({ type: "rig.deleted", rigId: RIG } as never);
+    const before = everything();
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions" });
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_had_sessions" });
+    expect(everything()).toBe(before);
+  });
+
+  // The proof is rechecked in each transaction that deletes or records. A seat registered while the run yields stops it
+  // before anything goes; one whose event lands between two delete chunks stops it there. Neither run writes a receipt.
+  // A launch writes its session row and its event in separate statements, so the run can see either one alone.
+  it.each([["with its launch event", true], ["by its session row alone", false]] as const)("stops when a seat registers during the run (%s), before erasing anything, and writes no receipt", async (_label, launched) => {
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-new', ?, 'new.one')").run(RIG);
+    const run = erase();
+    new SessionRegistry(db).registerSession("node-new", "new-one@n-empty");
+    if (launched) new EventBus(db).emit({ type: "node.launched", rigId: RIG, nodeId: "node-new", logicalId: "new.one", sessionName: "new-one@n-empty" } as never);
+    const report = await run;
+    expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "rig", message: expect.stringContaining("changed during the run") } });
+    expect(everything()).toContain("secret-empty-snapshot");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE node_id = 'node-new'").get()).toEqual({ n: 1 });
+  });
+
+  it("stops between delete chunks when a seat's event lands, and writes no receipt", async () => {
+    const insert = db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'rig.imported', '{}')");
+    for (let i = 0; i < 1500; i++) insert.run(RIG);
+    const first = (db.prepare("SELECT MIN(seq) AS seq FROM events WHERE rig_id = ?").get(RIG) as { seq: number }).seq;
+    db.exec(`CREATE TEMP TRIGGER late_claim AFTER DELETE ON events WHEN old.seq = ${first}
+      BEGIN INSERT INTO events (rig_id, type, payload) VALUES ('${RIG}', 'node.claimed', '{}'); END;`);
+    const report = await erase();
+    expect(report).toMatchObject({ complete: false, error: { stage: "rig", message: expect.stringContaining("event node.claimed") } });
+    expect(report.rig!.erased.events).toBe(1000);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ? AND type = 'node.claimed'").get(RIG)).toEqual({ n: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+  });
+
+  // More of what a seat with no session row leaves under its address, each through the code that writes it.
+  it.each([
+    ["an inbox check-in", () => repo.recordInboxCheckIn("helper@n-empty", new Date(NOW))],
+    ["a reader's decline on another rig's stream item", () => {
+      db.prepare("INSERT INTO stream_items (stream_item_id, ts_emitted, stream_sort_key, source_session, body) VALUES ('s-else', ?, 'k', ?, 'x')").run(NOW, OUT);
+      recordReaderAction(db, { streamItemId: "s-else", readerSession: "helper@n-empty", action: "decline", reason: "not mine" }, NOW);
+    }],
+    ["a post in another rig's chatroom", () => { new ChatRepository(db).send("rig-else-id", "helper@n-empty", "hello"); }],
+    ["a stream subscription", () => { subscribe(db, { readerSession: "helper@n-empty", hintType: "note", actor: "helper@n-empty" }, NOW); }],
+  ] as const)("refuses [] when %s names a seat at the rig, and erases nothing", async (_label, seed) => {
+    seed();
+    const before = everything();
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining("helper@n-empty") });
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_had_sessions" });
+    expect(everything()).toBe(before);
+  });
+
+  // A reroute changes an old row instead of adding one. The real reroute lands between two delete chunks; a later
+  // check sees the row now at the rig, stops the run, and keeps it.
+  it("stops when an existing row is rerouted to a seat at the rig during the run, and writes no receipt", async () => {
+    await row("g-move", OUT, "x-gone@n-else");
+    const insert = db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'rig.imported', '{}')");
+    for (let i = 0; i < 1500; i++) insert.run(RIG);
+    const count = () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ?").get(RIG) as { n: number }).n;
+    const full = count();
+    const run = erase();
+    for (let i = 0; i < 10_000 && count() === full; i++) await new Promise((resolve) => setImmediate(resolve));
+    expect(count()).toBeLessThan(full);
+    repo.routeToFallback("g-move", "helper@n-empty", "owner unavailable");
+    const report = await run;
+    expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "rig", message: expect.stringContaining("a row moved to an address at the rig") } });
+    expect(repo.getById("g-move")?.destinationSession).toBe("helper@n-empty");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+  });
+
+  // A table without AUTOINCREMENT reuses a deleted top rowid. The highest reader action (an outside reader's) is deleted
+  // during a yield, and a seat at the rig then declines with that same rowid, at the watermark. The receipt's own check
+  // reads every row at the rig, so the run stops and writes no record.
+  it("stops when a record at the rig reuses a deleted row's rowid during the run, and writes no receipt", async () => {
+    db.prepare("INSERT INTO stream_items (stream_item_id, ts_emitted, stream_sort_key, source_session, body) VALUES ('s-out', ?, 'k', ?, 'x')").run(NOW, OUT);
+    recordReaderAction(db, { streamItemId: "s-out", readerSession: OUT, action: "decline", reason: "outside" }, NOW);
+    const top = (db.prepare("SELECT MAX(rowid) AS n FROM stream_reader_actions").get() as { n: number }).n;
+    const insert = db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'rig.imported', '{}')");
+    for (let i = 0; i < 1500; i++) insert.run(RIG);
+    const count = () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE rig_id = ?").get(RIG) as { n: number }).n;
+    const full = count();
+    const run = erase();
+    for (let i = 0; i < 10_000 && count() === full; i++) await new Promise((resolve) => setImmediate(resolve));
+    expect(count()).toBeLessThan(full);
+    db.prepare("DELETE FROM stream_reader_actions WHERE rowid = ?").run(top);
+    recordReaderAction(db, { streamItemId: "s-out", readerSession: "helper@n-empty", action: "decline", reason: "not mine" }, NOW);
+    expect(db.prepare("SELECT rowid AS n FROM stream_reader_actions WHERE reader_session = 'helper@n-empty'").get()).toEqual({ n: top });
+    const report = await run;
+    expect(report).toMatchObject({ complete: false, clean: false, error: { stage: "rig", message: expect.stringContaining("stream_reader_actions") } });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM queue_erased_rigs WHERE rig_id = ?").get(RIG)).toEqual({ n: 0 });
+  });
+
+  // An address at the rig qualified with a host: this host's own id is this rig's seat, and so is a host that can't be
+  // resolved; another known host's is that host's same-named rig, which doesn't refuse and isn't erased.
+  it("reads a host-qualified address by its host: this one refuses, another known host doesn't, an unresolved one refuses", async () => {
+    await row("g-host", "helper@n-empty@some-host", OUT, [{ state: "done", daysAgo: 2 }]);
+    db.prepare("INSERT OR REPLACE INTO self_host_identity (singleton, host_id, minted_at, reconciled_at) VALUES (1, 'some-host', ?, ?)").run(NOW, NOW);
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining("helper@n-empty@some-host") });
+    db.prepare("DELETE FROM self_host_identity").run();
+    await expect(erase(false)).rejects.toMatchObject({ code: "erase_rig_had_sessions", message: expect.stringContaining("helper@n-empty@some-host") });
+    const other = await eraseQueue(db, { scope: { kind: "members", members: [], rig: RIG }, apply: true, nowIso: NOW, classifyHost: () => "other" });
+    expect(other).toMatchObject({ complete: true, clean: true, rig: { found: true, verified: true } });
+    expect(exists("g-host")).toBe(true);
+  });
+
+  // The route's reading, for a never-member erase only: another host is proved by a registered entry with an established
+  // identity (declared, or an eligible learned binding) that differs from this daemon's known id. Anything less refuses.
+  const HOST_URL = "http://127.0.0.1:9";
+  it.each([
+    ["no known id for this daemon, even beside a declared host", null, "remote-host",
+      [{ id: "remote-host", hostId: "remote-host", transport: "http", url: HOST_URL }], {}, 400],
+    ["this daemon's own id", "this-host", "this-host", [], {}, 400],
+    ["an unregistered host", "this-host", "nowhere", [], {}, 400],
+    ["an alias known only by its label", "this-host", "desk", [{ id: "desk", transport: "http", url: HOST_URL }], {}, 400],
+    ["an alias learned as this daemon", "this-host", "desk", [{ id: "desk", transport: "http", url: HOST_URL }],
+      { desk: { hostId: "this-host", observedUrl: HOST_URL } }, 400],
+    ["a host declared as another", "this-host", "remote-host",
+      [{ id: "remote-host", hostId: "remote-host", transport: "http", url: HOST_URL }], {}, 200],
+    ["a host learned as another", "this-host", "vps-b", [{ id: "b", transport: "http", url: HOST_URL }],
+      { b: { hostId: "vps-b", observedUrl: HOST_URL } }, 200],
+  ] as const)("the route reads a host-qualified address at the rig by its host: %s", async (_label, self, host, hosts, bindings, status) => {
+    await row("g-host", `helper@n-empty@${host}`, OUT, [{ state: "done", daysAgo: 2 }]);
+    const hono = new Hono();
+    hono.use("*", async (c, next) => {
+      c.set("db" as never, db as never);
+      c.set("settingsStore" as never, { resolveOne: () => ({ value: 0 }) } as never);
+      c.set("hostRegistryLoader" as never, (() => ({ ok: true, registry: { hosts } })) as never);
+      c.set("hostBindingsLoader" as never, (() => ({ version: 1, bindings })) as never);
+      await next();
+    });
+    hono.route("/api/queue", queueRoutes());
+    setSelfHostId(self);
+    try {
+      const res = await hono.request("/api/queue/erase", {
+        method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "ops-admin@n-ops" },
+        body: JSON.stringify({ members: [], rig: RIG }),
+      });
+      expect(res.status).toBe(status);
+      expect(await res.json()).toMatchObject(status === 200 ? { applied: false, rig: { found: true, verified: true } } : { error: "erase_rig_had_sessions" });
+    } finally {
+      setSelfHostId(null);
+    }
+    expect(exists("g-host")).toBe(true);
+  });
+
+  it("refuses a removed rig no earlier run recorded with no members, and members [] without a rig", async () => {
+    db.prepare("DELETE FROM rigs WHERE id = ?").run(RIG);
+    const before = everything();
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_history_unknown" });
+    db.prepare("INSERT INTO queue_erased_rigs (rig_id, rig_name, members_digest, verified_at) VALUES (?, 'n-empty', 'digest-of-other-members', ?)").run(RIG, NOW);
+    await expect(erase()).rejects.toMatchObject({ code: "erase_rig_history_unknown" });
+    db.prepare("DELETE FROM queue_erased_rigs WHERE rig_id = ?").run(RIG);
+    expect(everything()).toBe(before);
+    await expect(eraseQueue(db, { scope: { kind: "members", members: [] }, apply: true, nowIso: NOW })).rejects.toMatchObject({ code: "erase_members_invalid" });
+  });
+
+  it("the route takes members [] only with a rig", async () => {
+    const hono = new Hono();
+    hono.use("*", async (c, next) => {
+      c.set("db" as never, db as never);
+      c.set("settingsStore" as never, { resolveOne: () => ({ value: 0 }) } as never);
+      await next();
+    });
+    hono.route("/api/queue", queueRoutes());
+    const post = async (body: unknown) => {
+      const res = await hono.request("/api/queue/erase", {
+        method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "ops-admin@n-ops" }, body: JSON.stringify(body),
+      });
+      return [res.status, await res.json()] as const;
+    };
+    expect(await post({ members: [] })).toMatchObject([400, { error: "erase_members_invalid" }]);
+    expect(await post({ members: [], rig: "rig-nobody-id" })).toMatchObject([400, { error: "erase_rig_history_unknown" }]);
+    expect(await post({ members: [], rig: RIG, apply: true })).toMatchObject([200, { clean: true, rig: { id: RIG, found: true, verified: true } }]);
   });
 });
 

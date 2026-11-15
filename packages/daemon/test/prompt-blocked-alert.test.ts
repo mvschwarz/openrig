@@ -119,6 +119,148 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     return repo.getById(row.qitemId)!;
   }
 
+
+  it.each([false, true])("ordinary operator fallback retains its cross-rig carrier through readiness (consumedHop=%s)", async consumedHop => {
+    const rigs = new RigRepository(db); rigs.createRig("fixture"); const carrierRig = rigs.createRig("carrier");
+    const jobs = new WatchdogJobsRepository(db);
+    const first = await repo.create({ sourceSession: "sender@carrier", destinationSession: "relay@carrier", body: "work", nudge: false,
+      ...(consumedHop ? { tags: ["escalation-route:one-hop"] } : {}) });
+    const { created: row } = await repo.handoff({ qitemId: first.qitemId, fromSession: "relay@carrier", toSession: seat, nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt=?,last_nudge_result='failed:offline' WHERE qitem_id=?")
+      .run(new Date(Date.now() - 3600_000).toISOString(), row.qitemId);
+    const posts: unknown[] = [], dispatchedTo: string[] = [];
+    let release!: (value: { ready: boolean; reason: string }) => void;
+    const pending = new Promise<{ ready: boolean; reason: string }>(resolve => { release = resolve; });
+    const readiness = vi.fn(() => pending);
+    const port = engine(posts, true, dispatchedTo, readiness);
+    const now = new Date(Date.now() + 301_000);
+    const run = () => runWakeLadderTick({ db, queueRepo: repo, now, retryCap: 0, resolveOrchestrator: () => null,
+      readPromptState: () => "clear", humanRung: "always", deliveryEngine: port });
+    const inFlight = run();
+    await vi.waitFor(() => expect(readiness).toHaveBeenCalledTimes(1));
+    const carriers = repo.list({ limit: 100 }).filter(x => x.tags?.includes("recovery-for:" + row.qitemId));
+    expect(carriers).toHaveLength(1);
+    expect(carriers[0]!.destinationSession).toBe("relay@carrier");
+    const before = repo.listTransitions(row.qitemId);
+    const drain = repo.deliveryDrains.begin(carrierRig.id, { drainId: "carrier-readiness", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    release({ ready: true, reason: "readiness resumed after carrier BEGIN" });
+    expect((await inFlight).outcome).not.toBe("failed");
+    expect(dispatchedTo).toEqual([]);
+    expect(new DispatchBuffer(home).pending()).toEqual([]);
+    expect(repo.listTransitions(row.qitemId)).toEqual(before);
+    repo.deliveryDrains.end(carrierRig.id, drain.drainId, jobs);
+    await run();
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(dispatchedTo).toHaveLength(1);
+    expect(repo.list({ limit: 100 }).filter(x => x.tags?.includes("recovery-for:" + row.qitemId)).map(x => x.qitemId)).toEqual([carriers[0]!.qitemId]);
+    await run();
+    expect(dispatchedTo).toHaveLength(1);
+  });
+
+  it.each(["negative", "rejected"])("cross-rig %s readiness during a destination drain preserves the carrier rung", async failure => {
+    const original = await refusal();
+    const rigs = new RigRepository(db), target = rigs.createRig("fixture");
+    rigs.createRig("carrier");
+    db.prepare("UPDATE queue_items SET source_session=? WHERE qitem_id=?").run("sender@carrier", original.qitemId);
+    const jobs = new WatchdogJobsRepository(db);
+    const posts: unknown[] = [], dispatchedTo: string[] = [];
+    let release!: (value: { ready: boolean; reason: string }) => void;
+    let reject!: (error: Error) => void;
+    const pending = new Promise<{ ready: boolean; reason: string }>((resolve, fail) => { release = resolve; reject = fail; });
+    const readiness = vi.fn(() => pending);
+    const port = engine(posts, true, dispatchedTo, readiness);
+    const now = new Date(Date.now() + 120_000);
+    const inFlight = tick(port, { humanRung: "always", now });
+    await vi.waitFor(() => expect(readiness).toHaveBeenCalledTimes(1));
+    const alert = alerts()[0]!;
+    expect(alert.destinationSession).toBe("sender@carrier");
+    const before = repo.listTransitions(alert.qitemId);
+    const lastRung = () => repo.listTransitions(alert.qitemId).filter(t => t.transitionNote?.startsWith("escalation-rung:"));
+    const previousRung = lastRung();
+    expect(previousRung.length).toBeGreaterThan(0);
+    const drain = repo.deliveryDrains.begin(target.id, { drainId: "cross-rig-readiness", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    if (failure === "negative") release({ ready: false, reason: "fixture not ready" });
+    else reject(new Error("fixture readiness rejected"));
+    const result = await inFlight;
+    expect(dispatchedTo).toEqual([]);
+    expect(new DispatchBuffer(home).pending()).toEqual([]);
+    expect(repo.listTransitions(alert.qitemId)).toEqual(before);
+    expect(lastRung()).toEqual(previousRung);
+    expect(result.actions.filter(a => a.action === "escalate-operator")).toEqual([]);
+    repo.deliveryDrains.end(target.id, drain.drainId, jobs);
+    readiness.mockResolvedValue({ ready: true, reason: "ready after END" });
+    // Same time and episode: END must not wait out a marker written during the hold.
+    await tick(port, { humanRung: "always", now });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(dispatchedTo).toHaveLength(1);
+    expect(alerts()[0]?.qitemId).toBe(alert.qitemId);
+    await tick(port, { humanRung: "always", now: new Date(now.getTime() + 120_000) });
+    expect(dispatchedTo).toHaveLength(1);
+  });
+
+  it("a drain begun during operator readiness defers the originating prompt episode before gateway enqueue", async () => {
+    await refusal();
+    const rig = new RigRepository(db).createRig("fixture");
+    const jobs = new WatchdogJobsRepository(db);
+    const posts: unknown[] = [], dispatchedTo: string[] = [];
+    let release!: (value: { ready: boolean; reason: string }) => void;
+    const pending = new Promise<{ ready: boolean; reason: string }>(resolve => { release = resolve; });
+    const readiness = vi.fn(() => pending);
+    const port = engine(posts, true, dispatchedTo, readiness);
+    const inFlight = tick(port, { humanRung: "always" });
+    await vi.waitFor(() => expect(readiness).toHaveBeenCalledTimes(1));
+    const alert = alerts()[0]!;
+    const before = repo.listTransitions(alert.qitemId);
+    const drain = repo.deliveryDrains.begin(rig.id, { drainId: "readiness-window", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    release({ ready: true, reason: "readiness resumed after BEGIN" });
+    await inFlight;
+    expect(dispatchedTo).toEqual([]);
+    expect(new DispatchBuffer(home).pending()).toEqual([]);
+    expect(repo.listTransitions(alert.qitemId)).toEqual(before);
+    repo.deliveryDrains.end(rig.id, drain.drainId, jobs);
+    await tick(port, { humanRung: "always", now: new Date(Date.now() + 240_000) });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(dispatchedTo).toHaveLength(1);
+    expect(alerts()[0]?.qitemId).toBe(alert.qitemId);
+    await tick(port, { humanRung: "always", now: new Date(Date.now() + 360_000) });
+    expect(dispatchedTo).toHaveLength(1);
+  });
+
+  it.each([false, true])("watchdog drain admission uses its target, not registrar (holdTarget=%s)", async holdTarget => {
+    const rigs = new RigRepository(db); const source = rigs.createRig("source"), target = rigs.createRig("fixture");
+    const jobs = new WatchdogJobsRepository(db); const { jobId } = reminder(["refused"]);
+    db.prepare("UPDATE watchdog_jobs SET registered_by_session=? WHERE job_id=?").run("owner@source", jobId);
+    const held = holdTarget ? target : source;
+    repo.deliveryDrains.begin(held.id, { drainId: "watchdog-window", owner: "owner@source",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    const posts: unknown[] = [], to: string[] = []; state = "unknown";
+    const wakes = vi.fn(async () => "verified");
+    // The registrar and the actual escalation carrier are independent roles.
+    await tick(engine(posts, true, to), { resolveOrchestrator: () => "lead@fixture", attemptWake: wakes });
+    if (holdTarget) { expect(alerts()).toEqual([]); expect(wakes).not.toHaveBeenCalled(); }
+    else {
+      expect(alerts()).toHaveLength(1);
+      expect(wakes).toHaveBeenCalledWith(alerts()[0]!.qitemId, "lead@fixture");
+      expect(repo.deliveryDrains.status(source.id, jobs).retained.dueWatchdogJobs).toBe(0);
+    }
+  });
+
+  it("an undrained destination cannot escalate into a drained target", async () => {
+    const row = await refusal(); const rig = new RigRepository(db).createRig("escalation");
+    const jobs = new WatchdogJobsRepository(db);
+    const drain = repo.deliveryDrains.begin(rig.id, { drainId: "escalation-window", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    const attemptWake = vi.fn(async () => "verified"); const before = notes(row.qitemId); const port = engine([], false);
+    await tick(port, { resolveOrchestrator: () => "lead@escalation", attemptWake });
+    expect(alerts()).toEqual([]); expect(attemptWake).not.toHaveBeenCalled(); expect(notes(row.qitemId)).toEqual(before);
+    repo.deliveryDrains.end(rig.id, drain.drainId, jobs);
+    await tick(port, { resolveOrchestrator: () => "lead@escalation", attemptWake });
+    expect(attemptWake).toHaveBeenCalledWith(expect.any(String), "lead@escalation"); expect(alerts()).toHaveLength(1);
+  });
+
   it("single seat: prompt refusal reaches the actual notification sink without retrying the seat", async () => {
     const row = await refusal(); const posts: unknown[] = []; const wakeTargets: string[] = [];
     const result = await runWakeLadderTick({ db, queueRepo: repo, resolveOrchestrator: () => null,
