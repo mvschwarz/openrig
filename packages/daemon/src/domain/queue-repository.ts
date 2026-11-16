@@ -81,7 +81,7 @@ import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
-import { RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG } from "./return-route.js";
+import { isEpisodeRelay, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG } from "./return-route.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
 import { parseReplyToChoice, parseArrivalThread, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
@@ -6047,8 +6047,10 @@ export class QueueRepository {
     if (!relay.tags?.includes(RELAY_TAG)) return;
     const escalationId = relay.tags.find(t => t.startsWith(RELAY_FOR_PREFIX))?.slice(RELAY_FOR_PREFIX.length);
     const key = relay.tags.find(t => t.startsWith(RELAY_KEY_PREFIX))?.slice(RELAY_KEY_PREFIX.length);
-    const escalation = escalationId ? this.getById(escalationId) : null;
-    if (!escalation || !key) return;
+    // Only the episode's own relay (its id, OpenRig as source, its tags) records pickup; a row that only carries the tags doesn't.
+    if (!escalationId || !key || !isEpisodeRelay(relay, escalationId, key, OPENRIG_SENDER)) return;
+    const escalation = this.getById(escalationId);
+    if (!escalation) return;
     this.transitionLog.append({
       qitemId: escalation.qitemId, state: escalation.state, actorSession: "wake-ladder@system",
       transitionNote: `${RELAY_CLAIMED_PREFIX} notification_key=${key} relay=${relay.qitemId} by=${actor}: picked up at the return route; not the person's answer or approval`,

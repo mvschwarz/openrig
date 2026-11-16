@@ -10,7 +10,13 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
+import { execFileSync } from "node:child_process";
 import { issuedReturnAddress, relayTaskId, resolveEscalationReturnRoute } from "../src/domain/return-route.js";
+import { QueueRepositoryError } from "../src/domain/queue-repository.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "../src/domain/policies/parked-owner-consumer.js";
+import type { PolicyJob } from "../src/domain/policies/types.js";
+import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
+import { queueRecoveryOwnsWake } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
@@ -127,7 +133,7 @@ describe("first-user return route", () => {
       expect((await repo.handoff({ qitemId: plain.qitemId, fromSession: "b@r", toSession: "c@r", nudge: false })).created).not.toHaveProperty("returnRoute");
     });
 
-    it("a create sent to another host names this host on the route; without a host id nothing is sent", async () => {
+    it("a create sent to another host names this host on the route; without a host id it goes without the route and says so", async () => {
       const sent: Array<Record<string, unknown>> = [];
       const remote = new Hono();
       remote.use("*", async (c, next) => {
@@ -145,14 +151,57 @@ describe("first-user return route", () => {
         body: JSON.stringify({ qitemId: "qitem-goal-x", destinationSession: lead, body: "goal", nudge: false, returnRoute: "auto", hostId: "host-b" }) });
       setSelfHostId(null);
       const unknown = await post();
-      expect(unknown.status).toBe(409);
-      expect((await unknown.json() as { error: string }).error).toBe("return_route_host_unknown");
-      expect(sent).toEqual([]);
+      expect(unknown.status).toBe(201);
+      expect((await unknown.json() as { advisories: Array<{ code: string }> }).advisories.map(a => a.code)).toContain("return_route_not_carried");
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).not.toHaveProperty("returnRoute");
+      expect(sent[0]).not.toHaveProperty("returnRouteBasis");
+      expect(sent[0]!.tags).toContain("return-route-not-carried"); // the row there says so too
+      sent.length = 0;
       setSelfHostId("host-a");
       await post();
       expect(sent).toHaveLength(1);
       expect(sent[0]).toMatchObject({ returnRoute: `${issuedReturnAddress("qitem-goal-x")}@host-a`, returnRouteBasis: "issued-actor",
         sourceSession: `${issuedReturnAddress("qitem-goal-x")}@host-a` });
+    });
+
+    it.each(["handoff", "handoff-and-complete"] as const)("a %s to another host carries the route naming this host; without a host id it goes without the route and says so", async verb => {
+      const sent: Array<Record<string, unknown>> = [];
+      const remote = new Hono();
+      remote.use("*", async (c, next) => {
+        c.set("queueRepo" as never, repo);
+        c.set("hostRegistryLoader" as never, () => ({ ok: true, registry: { hosts: [{ id: "host-b", transport: "http", url: "http://host-b.invalid" }] } }));
+        c.set("hostBindingsLoader" as never, () => ({ ok: true, bindings: [] }));
+        c.set("remoteFetchImpl" as never, (async (_url: string, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body));
+          sent.push(body);
+          return new Response(JSON.stringify({ qitemId: body.qitemId, destinationSession: body.destinationSession, state: "pending" }), { status: 201, headers: { "content-type": "application/json" } });
+        }) as typeof fetch);
+        await next();
+      });
+      remote.route("/api/queue", queueRoutes());
+      const handOver = async () => {
+        const goal = await repo.create({ sourceSession: "front@kernel", destinationSession: lead, body: "goal", returnRoute: "front@kernel", returnRouteBasis: "caller", nudge: false });
+        repo.claim({ qitemId: goal.qitemId, destinationSession: lead });
+        const res = await remote.request(`/api/queue/${goal.qitemId}/${verb}`, { method: "POST",
+          headers: { "content-type": "application/json", "x-openrig-session": lead }, body: JSON.stringify({ toSession: reviewer, hostId: "host-b", nudge: false }) });
+        return { goal, res };
+      };
+      setSelfHostId(null);
+      const unknown = await handOver();
+      expect(unknown.res.status).toBe(201);
+      expect((await unknown.res.json() as { advisories: Array<{ code: string }> }).advisories.map(a => a.code)).toEqual(["return_route_not_carried"]);
+      expect(sent[0]).not.toHaveProperty("returnRoute");
+      expect(sent[0]!.tags).toContain("return-route-not-carried");
+      expect(repo.listTransitions(unknown.goal.qitemId).some(t => t.transitionNote?.startsWith("return-route not-carried: The return route front@kernel wasn't carried"))).toBe(true);
+      expect(repo.getById(unknown.goal.qitemId)!.state).not.toMatch(/pending|in-progress/); // the work went on
+      sent.length = 0;
+      setSelfHostId("host-a");
+      const known = await handOver();
+      expect(known.res.status).toBe(201);
+      expect(await known.res.json()).not.toHaveProperty("advisories");
+      expect(sent[0]).toMatchObject({ returnRoute: "front@kernel@host-a", returnRouteBasis: "caller" });
+      expect(sent[0]!.tags).not.toContain("return-route-not-carried");
     });
 
     it("the receiving host keeps a carried route's host and basis; one naming this host is local", async () => {
@@ -215,7 +264,7 @@ describe("first-user return route", () => {
       const relayId = relayTaskId(first.notificationKey!);
       const relay = repo.getById(relayId)!;
       expect(relay).toMatchObject({ sourceSession: OPENRIG_SENDER, destinationSession: "front@kernel", state: "pending" });
-      expect(relay.body).toContain(`rig capture ${reviewer}`);
+      expect(relay.body).toContain(`rig capture '${reviewer}'`);
       expect(relay.body).toContain(`--reason 'task ${relayId}: <their words>'`);
       expect(relay.lastNudgeResult).toBeNull(); // nothing to wake: the conversation reads it on its next turn
       await port.dispatchEscalation(alert, "again");
@@ -250,7 +299,7 @@ describe("first-user return route", () => {
       expect(repo.listTransitions(foreign.qitemId).some(t => t.transitionNote?.startsWith("return-route on-another-host route=front@kernel@host-a"))).toBe(true);
     });
 
-    it("an agent's claim at the route resolves the delivery episode, as pickup only; closing without a claim records nothing", async () => {
+    it("a note on the relay isn't pickup; an agent's claim at the route is, and it resolves the delivery episode as pickup only", async () => {
       const alert = await promptAlert("front@kernel");
       const port = engine(nobody);
       const { notificationKey } = await port.dispatchEscalation(alert, "x");
@@ -263,6 +312,91 @@ describe("first-user return route", () => {
       expect(note.transitionNote).toContain("not the person's answer or approval");
       expect(await port.dispatchEscalation(alert, "x")).toMatchObject({ decision: "picked-up", resolved: true });
     });
+
+    it.each(["done", "canceled"] as const)("closing the relay without a claim (%s) records no pickup, answer or clearance, and keeps its custody", async how => {
+      const alert = await promptAlert("front@kernel");
+      const port = engine(nobody);
+      const { notificationKey } = await port.dispatchEscalation(alert, "x");
+      const relayId = relayTaskId(notificationKey!);
+      await repo.update(how === "done"
+        ? { qitemId: relayId, actorSession: "front@kernel", state: "done", closureReason: "no-follow-on", resolution: "yes" }
+        : { qitemId: relayId, actorSession: OPENRIG_SENDER, state: "done", closureReason: "canceled", closureTarget: "withdrawn" });
+      const notes = repo.listTransitions(alert.qitemId).map(t => t.transitionNote ?? "");
+      expect(notes.some(n => n.startsWith("return-route relay-claimed"))).toBe(false);
+      expect(notes.some(n => n.includes("prompt_override") || n.includes("prompt escalation"))).toBe(false);
+      expect(await port.dispatchEscalation(alert, "x")).toMatchObject({ decision: "return-route:front@kernel", resolved: false });
+    });
+
+    it("an unrelated row holding the relay's id is left alone, said on the escalation, and the existing route is used", async () => {
+      const alert = await promptAlert("front@kernel");
+      const key = `${alert.qitemId}:operator-rung`;
+      const squatter = await repo.create({ qitemId: relayTaskId(key), sourceSession: "someone@else", destinationSession: "front@kernel", body: "unrelated", nudge: false });
+      const port = engine(nobody);
+      expect(port.hasAcceptedEscalation!(alert)).toBe(false);
+      expect((await port.dispatchEscalation(alert, "x")).decision).toBe("undeliverable:no-registered-human");
+      expect(repo.getById(squatter.qitemId)).toMatchObject({ sourceSession: "someone@else", body: "unrelated", state: "pending" });
+      expect(repo.listTransitions(alert.qitemId).some(t => t.transitionNote?.startsWith(`return-route relay-id-taken relay=${squatter.qitemId}`))).toBe(true);
+      // A claim of that row records no pickup for the episode.
+      repo.claim({ qitemId: squatter.qitemId, destinationSession: "front@kernel" });
+      expect(repo.listTransitions(alert.qitemId).some(t => t.transitionNote?.startsWith("return-route relay-claimed"))).toBe(false);
+    });
+
+    it("a relay create that fails is said on the row and the existing route is used; one written before the failure is kept", async () => {
+      const port = engine(nobody);
+      const failing = await promptAlert("front@kernel");
+      const original = repo.create.bind(repo);
+      const spy = vi.spyOn(repo, "create").mockImplementation(async input => {
+        if (input.qitemId?.startsWith("qitem-route-relay-")) throw new QueueRepositoryError("qitem_erased", "erased");
+        return original(input);
+      });
+      expect((await port.dispatchEscalation(failing, "x")).decision).toBe("undeliverable:no-registered-human");
+      expect(repo.listTransitions(failing.qitemId).some(t => t.transitionNote?.includes("relay-not-made") && t.transitionNote.includes("code=qitem_erased"))).toBe(true);
+      spy.mockImplementation(async input => {
+        const made = await original(input);
+        if (input.qitemId?.startsWith("qitem-route-relay-")) throw new Error("connection lost after the write");
+        return made;
+      });
+      const written = await promptAlert("front@kernel");
+      expect((await port.dispatchEscalation(written, "x")).decision).toBe("return-route:front@kernel");
+      expect(repo.listTransitions(written.qitemId).some(t => t.transitionNote?.includes("relay-not-made"))).toBe(false);
+    });
+
+    it("a relay already made keeps its episode when the route changes before the dispatch marker: conflicting or gone", async () => {
+      const dispatched: unknown[] = [];
+      const port = engine(slackPerson, dispatched);
+      const alert = await promptAlert("front@kernel");
+      expect((await port.dispatchEscalation(alert, "x")).decision).toBe("return-route:front@kernel");
+      // No dispatch marker was recorded (the crash window). A second routed goal now joins this alert.
+      const other = await repo.create({ sourceSession: "front-2@kernel", destinationSession: lead, body: "goal 2", returnRoute: "front-2@kernel", nudge: false });
+      db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify([...alert.tags!, `prompt-routed-work:${other.qitemId}`]), alert.qitemId);
+      const conflicting = repo.getById(alert.qitemId)!;
+      expect(resolveEscalationReturnRoute(db, conflicting).kind).toBe("conflict");
+      expect(port.hasAcceptedEscalation!(conflicting)).toBe(true);
+      expect((await port.dispatchEscalation(conflicting, "x")).decision).toBe("return-route:front@kernel");
+      // The association gone altogether.
+      db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(["wake-prompt-refusal", `prompt-destination:${reviewer}`]), alert.qitemId);
+      expect((await port.dispatchEscalation(repo.getById(alert.qitemId)!, "x")).decision).toBe("return-route:front@kernel");
+      expect(dispatched).toEqual([]);
+      expect(repo.list({ destination: "front@kernel", limit: 100 }).filter(r => r.tags?.includes("return-route-relay"))).toHaveLength(1);
+    });
+
+    it("the relay's commands quote every name, and its quoting rule keeps the person's words literal", async () => {
+      const goal = await repo.create({ sourceSession: "front@kernel", destinationSession: lead, body: "goal", returnRoute: "front@kernel", nudge: false });
+      const alert = await repo.create({ sourceSession: OPENRIG_SENDER, destinationSession: "operator-agent@kernel", body: "WAKE ESCALATION", nudge: false,
+        tags: ["wake-prompt-refusal", "prompt-destination:dev review@starter", `prompt-routed-work:${goal.qitemId}`] });
+      const { notificationKey } = await engine(nobody).dispatchEscalation(alert, "x");
+      const relayId = relayTaskId(notificationKey!);
+      const body = repo.getById(relayId)!.body;
+      expect(body).toContain("rig capture 'dev review@starter'");
+      expect(body).toContain(`rig send 'dev review@starter' "<key>" --dangerously-interact --reason 'task ${relayId}: <their words>'`);
+      expect(body).toContain(`OPENRIG_SESSION_NAME='front@kernel' rig queue claim '${relayId}'`);
+      expect(body).toContain("--resolution '<their words>'");
+      expect(body).toContain("writing each ' in them as '\\''");
+      // Following that rule, words with an apostrophe, a dollar sign and a backtick reach the command unchanged.
+      const words = "yes, but it's $HOME and `date` only";
+      const quoted = `'${words.replaceAll("'", "'\\''")}'`;
+      expect(execFileSync("/bin/sh", ["-c", `printf %s ${quoted}`], { encoding: "utf8" })).toBe(words);
+    });
   });
 
   describe("the ladder: a routed goal waiting on a reviewer at a prompt", () => {
@@ -270,8 +404,11 @@ describe("first-user return route", () => {
     beforeEach(() => { prompt = "blocked"; });
     const port = () => makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => nobody },
       dispatch: () => { throw new Error("no gateway dispatch expected"); } });
+    let kind: "choice" | "permission" | "unknown";
+    beforeEach(() => { kind = "unknown"; });
     const tick = (now = new Date(Date.now() + 120_000), attemptWake = vi.fn(async () => "verified")) => runWakeLadderTick({ db, queueRepo: repo,
       resolveOrchestrator: s => (s === reviewer ? lead : null), readPromptState: dest => (dest === reviewer ? prompt : "unknown"),
+      readPromptKind: dest => (dest === reviewer ? kind : "unknown"),
       retryIntervalSeconds: 60, now, deliveryEngine: port(), attemptWake, log: (line: string) => { throw new Error(`unexpected ladder log: ${line}`); } });
     const alerts = () => repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 }).filter(r => r.tags?.includes("wake-prompt-refusal"));
     const relays = () => repo.list({ destination: "front@kernel", limit: 1000 }).filter(r => r.tags?.includes("return-route-relay"));
@@ -302,6 +439,67 @@ describe("first-user return route", () => {
       expect(relays()[0]!.body).toContain(`${reviewer} is stopped at a prompt`);
       await tick(new Date(Date.now() + 400_000), wake);
       expect(relays()).toHaveLength(1);
+    });
+
+    it("a seat reporting a permission prompt takes the route too", async () => {
+      kind = "permission";
+      await waitingGoal("front@kernel", "held");
+      await tick();
+      expect(relays()).toHaveLength(1);
+    });
+
+    it("a choice prompt the seat reports, with routed work only, keeps the choice route: its lead is woken and no relay is made", async () => {
+      kind = "choice";
+      await waitingGoal("front@kernel", "held");
+      const wake = vi.fn(async () => "verified");
+      await tick(undefined, wake);
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.tags).toContain("prompt-kind:choice");
+      expect(wake).toHaveBeenCalledWith(alerts()[0]!.qitemId, lead);
+      expect(relays()).toEqual([]);
+    });
+
+    it("a choice already known from a refused wake isn't turned into a permission prompt by routed work at that seat", async () => {
+      const routed = await waitingGoal("front@kernel", "held");
+      const history: WatchdogHistoryEntry[] = [];
+      const policy = makeParkedOwnerConsumerPolicy({
+        diagnoseRig: () => ({ seats: [{ sessionName: reviewer, parked: true,
+          activity: { value: "idle-at-prompt", needsInput: { count: 1, reason: "selection prompt" } },
+          obligations: { items: [{ qitemId: routed.qitemId, state: "in-progress", summary: "review" }], held: [] } }] }),
+        history: { listForJob: () => history, countForJob: () => history.length },
+        rows: {
+          listTransitions: id => repo.listTransitions(id),
+          appendNote: (id, note) => { void repo.update({ qitemId: id, actorSession: "watchdog@system", transitionNote: note }); return { ok: true }; },
+          recordNudgeResult: (id, result) => repo.recordNudgeAttempt(id, result),
+          listOpenIds: () => [routed.qitemId],
+          recoveryOwnsWake: id => queueRecoveryOwnsWake(db, repo.getById(id)),
+        },
+      });
+      const job = { jobId: "choice-job", policy: PARKED_OWNER_POLICY_NAME, target: { session: makeRigAnchor("starter") }, context: {} } as PolicyJob;
+      const wakeNotes = await policy.evaluate(job);
+      history.push({ historyId: "choice-history", jobId: job.jobId, evaluatedAt: new Date().toISOString(), outcome: "sent", skipReason: null,
+        deliveryTargetSession: reviewer, deliveryStatus: "failed", deliveryMessage: "wake", evaluationNotes: { ...wakeNotes.notes,
+          deliveryReason: `Refused: '${reviewer}' is at an interactive prompt (selection_prompt). No text was sent.` } });
+      await policy.evaluate(job);
+      const wake = vi.fn(async () => "verified");
+      await tick(undefined, wake);
+      expect(alerts()[0]!.tags).toContain("prompt-kind:choice");
+      expect(wake).toHaveBeenCalledWith(alerts()[0]!.qitemId, lead);
+      expect(relays()).toEqual([]);
+    });
+
+    it("closing the relay without a claim leaves the alert's delivery unresolved and the prompt's alert open until it clears", async () => {
+      await waitingGoal("front@kernel");
+      await tick();
+      const relay = relays()[0]!;
+      await repo.update({ qitemId: relay.qitemId, actorSession: "front@kernel", state: "done", closureReason: "no-follow-on", resolution: "yes" });
+      await tick(new Date(Date.now() + 400_000));
+      const alert = alerts()[0]!;
+      expect(repo.listTransitions(alert.qitemId).some(t => t.transitionNote?.startsWith("ladder-exhausted:"))).toBe(false);
+      expect(relays()).toHaveLength(1);
+      prompt = "clear";
+      await tick(new Date(Date.now() + 800_000));
+      expect(alerts()).toEqual([]);
     });
 
     it.each(["seat", "held"] as const)("without a route the same work (%s) raises nothing, as before", async on => {

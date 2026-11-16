@@ -56,6 +56,26 @@ describe("queue create --return-route", () => {
     expect(stderr.some(l => l.includes("--source is required"))).toBe(true);
   });
 
+  it.each(["create", "handoff", "handoff-and-complete"] as const)("%s says so when the route wasn't carried to another host", async verb => {
+    const message = "The return route front@kernel wasn't carried: this daemon doesn't know its own host id.";
+    const d: QueueDeps = {
+      lifecycleDeps: { readFile: () => null, exists: () => false, fetch: async () => ({ ok: true }) } as QueueDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        post: async (_url: string, body: Record<string, unknown>) => {
+          posted.push(body);
+          const row = { qitemId: "qitem-x", sourceSession: "front@kernel", destinationSession: "dev-build@starter", state: "pending", body: "goal" };
+          const advisories = [{ code: "return_route_not_carried", message }];
+          return { status: 201, data: verb === "create" ? { ...row, advisories } : { closed: { ...row, state: "handed-off" }, created: row, advisories } };
+        },
+      }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
+    };
+    process.env.OPENRIG_SESSION_NAME = "front@kernel";
+    await queueCommand(d).parseAsync(verb === "create"
+      ? ["create", "--destination", "dev-build@starter", "--body", "goal", "--summary", "goal", "--return-route", "self", "--host", "host-b", "--no-nudge"]
+      : [verb, "qitem-x", "--to", "dev-build@starter", "--host", "host-b", "--no-nudge"], { from: "user" });
+    expect(stderr).toContain(`Warning: ${message}`);
+  });
+
   it("a plain create sends no route and prints no route line", async () => {
     await create(deps(null), ["--source", "front@kernel"]);
     expect(JSON.parse(JSON.stringify(posted[0]))).not.toHaveProperty("returnRoute");

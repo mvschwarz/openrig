@@ -15,7 +15,8 @@ import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js"
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
-import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
+import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+  routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -82,6 +83,12 @@ export function hostQualifiedRoute(route: string): string | null {
   if (splitRoute(route).host) return route;
   const stamped = stampSelfHostSuffix(route);
   return stamped === route ? null : stamped;
+}
+
+/** A forwarded row's tags, with the mark that its return route wasn't carried when that's so. */
+function withRouteNotCarriedTag(tags: string[] | undefined, notCarried: string | null): string[] | undefined {
+  if (!notCarried) return tags;
+  return [...(tags ?? []).filter(t => t !== RETURN_ROUTE_NOT_CARRIED_TAG), RETURN_ROUTE_NOT_CARRIED_TAG];
 }
 
 /** How a named route was established: a route carried from another host keeps the basis it was sent with there. */
@@ -572,12 +579,11 @@ export function queueRoutes(): Hono {
     }
 
     // (2) The deterministic successor identity + forwarded body. The goal's return route goes with the work, naming the host
-    // it's on; without this host's id it can't, and the handoff is refused rather than sent without it.
+    // it's on. Without this host's id it can't say where the conversation is, so the work goes without it, and the response,
+    // the source row and the successor say so; the route is never sent as a bare address the other host would read as its own.
     const carriedRoute = source.returnRoute ? hostQualifiedRoute(source.returnRoute) : null;
-    if (source.returnRoute && !carriedRoute) {
-      return c.json({ error: "return_route_host_unknown", message: `qitem ${qitemId} carries a return route (${source.returnRoute}), and this daemon doesn't know its own host id yet, so the route couldn't say which host the conversation is on. Nothing was sent: retry once the host id is set.` }, 409);
-    }
-    const effectiveTags = body.tags ?? source.tags ?? undefined;
+    const routeNotCarried = source.returnRoute && !carriedRoute ? routeNotCarriedMessage(source.returnRoute) : null;
+    const effectiveTags = withRouteNotCarriedTag(body.tags ?? source.tags ?? undefined, routeNotCarried);
     const forwardBody: Record<string, unknown> = {
       qitemId: successorId,
       // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon IS the origin,
@@ -624,10 +630,15 @@ export function queueRoutes(): Hono {
     } catch (err) {
       return errorResponse(c, err);
     }
+    const notCarriedNote = routeNotCarried ? `${RETURN_ROUTE_NOTE_PREFIX}not-carried: ${routeNotCarried}` : null;
+    if (notCarriedNote && !repo.listTransitions(source.qitemId).some(t => t.transitionNote === notCarriedNote)) {
+      repo.transitionLog.append({ qitemId: source.qitemId, state: closed.item.state, actorSession: body.fromSession, transitionNote: notCarriedNote });
+    }
 
     // Same {closed, created} shape as the local transactional handoff;
     // `created` is the origin daemon's row, verbatim.
-    return c.json({ closed: closed.item, created: fwd.payload }, 201);
+    return c.json({ closed: closed.item, created: fwd.payload,
+      ...(routeNotCarried ? { advisories: [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] } : {}) }, 201);
   }
 
   /**
@@ -745,31 +756,32 @@ export function queueRoutes(): Hono {
       if (body.classificationBinding !== undefined)
         return c.json({ error: "invalid_classification_binding", message: "Classifier-bound effects belong to this daemon's local queue." }, 400);
       const mintedId = createId ?? newQitemId();
-      // The route names this host, so the receiving daemon never reads it as one of its own addresses.
+      // The route names this host, so the receiving daemon never reads it as one of its own addresses. Without this host's id
+      // the work goes without the route, and the response and the row say so.
       const carried = route ? hostQualifiedRoute(route.address) : null;
-      if (route && !carried) {
-        return c.json({ error: "return_route_host_unknown", message: "This daemon doesn't know its own host id yet, so a return route sent to another host couldn't say which host the conversation is on. Nothing was sent: create it on this host, or retry once the host id is set." }, 409);
-      }
+      const routeNotCarried = route && !carried ? routeNotCarriedMessage(route.address) : null;
       const { hostId: _dropped, returnRoute: _route, returnRouteBasis: _basis, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
         ...rest,
-        ...(route ? { returnRoute: carried, returnRouteBasis: route.basis } : {}),
+        ...(route && carried ? { returnRoute: carried, returnRouteBasis: route.basis } : {}),
         qitemId: mintedId,
         // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon is the origin,
         // so it stamps its OWN self-id (overriding the bare spread) before the
         // remote create() runs — else the remote would forge member@rig@RECEIVER.
         sourceSession: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? sourceSession : stampSelfHostSuffix(sourceSession),
-        tags: crossHostProvenanceTags(body.tags),
+        tags: crossHostProvenanceTags(withRouteNotCarriedTag(body.tags, routeNotCarried)),
       };
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
+      const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
+        ...(routeNotCarried ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
       const payload = fwd.payload;
-      if (!skippedScope || payload === null || typeof payload !== "object" || Array.isArray(payload))
+      if (!added.length || payload === null || typeof payload !== "object" || Array.isArray(payload))
         return c.json(payload, fwd.status as 200);
       const objectPayload = payload as Record<string, unknown>;
       const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
-      return c.json({ ...objectPayload, advisories: [...existingAdvisories, toCreateScopeAdvisory(skippedScope)] }, fwd.status as 200);
+      return c.json({ ...objectPayload, advisories: [...existingAdvisories, ...added] }, fwd.status as 200);
     }
 
     try {

@@ -11,7 +11,8 @@ import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
-import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RETURN_ROUTE_NOTE_PREFIX, resolveEscalationReturnRoute } from "./return-route.js";
+import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RETURN_ROUTE_NOTE_PREFIX, promptKindFromReason, resolveEscalationReturnRoute,
+  type PromptKind } from "./return-route.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
 import { readWakeOutcome } from "./connection-contract.js";
@@ -214,6 +215,8 @@ export interface WakeLadderDeps {
   usageLimitJitterSeconds?: number;
   /** Cached arbitrated activity only: no new probe or native input. */
   readPromptState?: (destination: string, refusedAt: string) => "blocked" | "clear" | "unknown";
+  /** The kind of prompt a seat's cached activity reports (its needs-input reason); "unknown" when it doesn't say. */
+  readPromptKind?: (destination: string) => PromptKind;
   /** Fresh bound kernel Codex screens only; no native input or new scheduler. */
   readHookReviews?: () => Promise<HookReviewObservation[]>;
   now?: Date;
@@ -1065,6 +1068,18 @@ export function classifyPromptAfterRefusal(
   return Date.parse(evidence.observedAt) > Date.parse(refusedAt) ? "clear" : "unknown";
 }
 
+/** The production prompt-kind read: the seat's cached needs-input reason (selection or permission), and "unknown" otherwise. */
+export function makePromptKindReader(deps: {
+  db: Database.Database;
+  getSeatState?: (nodeId: string) => Pick<ArbitratedSeatState, "needsInput"> | null | undefined;
+}): (destination: string) => PromptKind {
+  return destination => {
+    const nodeId = resolveSessionNodeId(deps.db, destination);
+    const state = nodeId ? deps.getSeatState?.(nodeId) : null;
+    return state && state.needsInput.count > 0 ? promptKindFromReason(state.needsInput.reason) : "unknown";
+  };
+}
+
 /** The production prompt read for a refused destination. The activity oracle answers first; when it has no
  *  evidence, the ladder reads the same retained runtime hook the send gate refused on, so a held wake still
  *  escalates after the activity service is rebuilt, or when the oracle does not yet trust the hook source
@@ -1394,7 +1409,14 @@ async function advancePromptRefusals(
     if (!group.keys.includes(key)) group.keys.push(key);
     (group.waiterKeys ??= new Set()).add(key);
     (group.waiters ??= new Map()).set(row.qitemId, row);
-    group.other = true; // a seat's prompt the person answers, as a permission prompt is
+    // The kind the seat's activity reports. A choice prompt keeps the choice route and its setting, and a permission prompt
+    // the permission route; a kind it doesn't report marks neither, so it's never taken for a positively identified one.
+    let kind: PromptKind = "unknown";
+    try { kind = deps.readPromptKind?.(dest) ?? "unknown"; } catch { /* unknown */ }
+    if (kind === "choice") {
+      group.choice = true;
+      if (group.refusedAt === now.toISOString()) group.latestChoice = true;
+    } else if (kind === "permission") group.other = true;
   }
 
   // A recovery returned to the blocked seat inherits only its source row's episodes.

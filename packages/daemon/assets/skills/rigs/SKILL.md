@@ -244,7 +244,8 @@ commands; if the two ever differ, this step is right.
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
     tell you, a condition included ("yes, but only on a branch"): claim it, then
-    `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution "<their words>"`.
+    `OPENRIG_SESSION_NAME=<address> rig queue update <id> --state done --closure-reason no-follow-on --resolution '<their words>'`,
+    keeping their words in single quotes and writing each `'` in them as `'\''`, so the shell runs and changes nothing in them.
     Add no label, quotation marks or notes of your own, and don't turn their words into a yes or a no: the agent that
     asked decides what they mean. You speak as yourself, never as the person. If they aren't there to answer, leave
     it open and tell them it's waiting; never answer for them.

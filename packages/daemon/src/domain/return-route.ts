@@ -37,6 +37,30 @@ export function relayTaskId(notificationKey: string): string {
   return `qitem-route-relay-${createHash("sha256").update(notificationKey).digest("hex").slice(0, 24)}`;
 }
 
+/** Whether a row is this episode's relay task: at the episode's relay id, from OpenRig, and tagged for this escalation and
+ *  key. Any other row that happens to hold the id isn't the relay, and it's never treated as one. */
+export function isEpisodeRelay(row: { qitemId: string; sourceSession: string; tags?: string[] | null } | null,
+  escalationId: string, notificationKey: string, openRigSender: string): boolean {
+  if (!row || row.qitemId !== relayTaskId(notificationKey) || row.sourceSession !== openRigSender) return false;
+  const tags = row.tags ?? [];
+  return tags.includes(RELAY_TAG) && tags.includes(`${RELAY_FOR_PREFIX}${escalationId}`) && tags.includes(`${RELAY_KEY_PREFIX}${notificationKey}`);
+}
+
+/** Said on a cross-host create or handoff whose return route couldn't go with it: the work goes, without the route. */
+export const RETURN_ROUTE_NOT_CARRIED = "return_route_not_carried";
+export const RETURN_ROUTE_NOT_CARRIED_TAG = "return-route-not-carried";
+export function routeNotCarriedMessage(route: string): string {
+  return `The return route ${route} wasn't carried: this daemon doesn't know its own host id, so the route couldn't say which ` +
+    `host the conversation is on. The work went on without it, and its escalations there take that host's usual route.`;
+}
+
+/** What kind of prompt a seat's activity reports: a choice (a selection menu, such as a usage-limit dialog), a permission
+ *  prompt, or a kind it doesn't say. Read from the reason the activity already records; nothing new is probed. */
+export type PromptKind = "choice" | "permission" | "unknown";
+export function promptKindFromReason(reason: string | null | undefined): PromptKind {
+  return reason === "selection_prompt" ? "choice" : reason === "permission_prompt" ? "permission" : "unknown";
+}
+
 /** A route's address, and the host it names when it was carried from another host (`member@rig@host`). */
 export function splitRoute(route: string): { address: string; host: string | null } {
   const parts = route.split("@");

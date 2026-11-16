@@ -20,6 +20,7 @@ import {
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
+  makePromptKindReader,
   makePromptStateReader,
   resolveWakeRetryIntervalSeconds,
   runWakeLadderTick,
@@ -256,6 +257,7 @@ export function startWakeLadderScheduler(deps: {
           order: runtime === "claude-code" ? "source" : "arrival",
         }),
       }),
+      readPromptKind: makePromptKindReader({ db, getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId) }),
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
         : {}),

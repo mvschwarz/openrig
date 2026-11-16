@@ -468,6 +468,14 @@ function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptCo
 /** A handoff whose outcome is unknown may have committed. This names the source row to read before any retry, on the
  *  daemon the command used, and where a successor would be. It never says the handoff failed, names a successor id, or
  *  asks for the handoff to be repeated. */
+/** A cross-host handoff whose return route couldn't go with the work says so, as a warning beside the result. */
+function warnRouteNotCarried(status: number, data: unknown): void {
+  const advisories = status < 400 ? (data as { advisories?: unknown } | null)?.advisories : undefined;
+  for (const advisory of Array.isArray(advisories) ? advisories as Array<{ code?: unknown; message?: unknown }> : []) {
+    if (advisory.code === "return_route_not_carried" && typeof advisory.message === "string") console.error(`Warning: ${advisory.message}`);
+  }
+}
+
 function handoffRecoveryHint(qitemId: string, hostId: string | undefined): string {
   const remote = remoteHostOf(hostId);
   return `Before any retry, read source row ${qitemId} at the same endpoint and OPENRIG_HOME: `
@@ -1467,6 +1475,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               case "empty_scope":
               case "conflicting_scope":
               case "scope_check_unavailable":
+              case "return_route_not_carried":
                 console.error(`Warning: ${advisory.message}`);
                 break;
             }
@@ -1946,6 +1955,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
+        warnRouteNotCarried(res.status, res.data);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
@@ -2049,6 +2059,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
+        warnRouteNotCarried(res.status, res.data);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
