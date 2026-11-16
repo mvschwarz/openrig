@@ -247,6 +247,31 @@ def age_cue(path, text):
 
 def parsed_frontmatters(texts):
     """Parse all trace frontmatter in one batch; unknown documents stay unknown."""
+    def simple_fallback(block):
+        # Installed plugins may have neither PyYAML nor Node's yaml package.
+        # Recognise only unambiguous single-line scalar fields; do not guess
+        # flow mappings, complex values, or duplicate keys.
+        if block is None:
+            return None
+        fields, seen = {}, set()
+        pattern = re.compile(r'''^[ \t]*(?:(?P<quote>["'])(?P<quoted>progress_rail|current_state_updated)(?P=quote)|(?P<plain>progress_rail|current_state_updated))[ \t]*:[ \t]*(?P<value>[^\r\n#]*?)[ \t]*(?:\#.*)?$''')
+        for line in block.splitlines():
+            match = pattern.match(line)
+            if not match:
+                continue
+            key = match.group("quoted") or match.group("plain")
+            if key in seen:
+                return None
+            seen.add(key)
+            value = match.group("value").strip()
+            if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+                value = value[1:-1]
+            if key == "progress_rail" and value == "readme-only":
+                fields[key] = value
+            elif key == "current_state_updated" and re.fullmatch(r"[0-9TtZz:+.\-]+", value):
+                fields[key] = value
+        return fields
+
     blocks = []
     for text in texts:
         match = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", text or "", re.S)
@@ -279,7 +304,7 @@ process.stdout.write(JSON.stringify(blocks.map(block => {
             values = json.loads(result.stdout)
             return values if isinstance(values, list) and len(values) == len(blocks) else [None] * len(blocks)
         except (OSError, subprocess.SubprocessError, ValueError):
-            return [None] * len(blocks)
+            return [simple_fallback(block) for block in blocks]
 
 
 def current_state_cue(text, metadata):
