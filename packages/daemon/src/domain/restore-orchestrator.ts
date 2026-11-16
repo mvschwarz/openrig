@@ -2037,8 +2037,10 @@ export class RestoreOrchestrator {
     const recoveryRuntime = startupCtx?.runtime
       ?? (!isPodAware && liveRuntime === node.runtime ? node.runtime : null);
     if (resumeRequested && resumeToken && launchResult && recoveryRuntime === "claude-code") {
+      // The saved hooks resource ships under the install's specs: read it from the running install, as replay does.
       const entries = (startupCtx?.projectionEntries ?? []).filter(e =>
-        e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");
+        e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks")
+        .map((e) => reanchorShippedProjectionEntry(e, undefined, opts?.fsOps?.exists ?? (() => true)));
       if (entries.length > 0 && activityAdapter) try {
         const result = await activityAdapter.project({
           runtime: "claude-code", cwd: launchCwd,

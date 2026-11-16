@@ -10,7 +10,7 @@ import { resolveNodeConfig, selectedPluginPaths, type ResolutionContext } from "
 import { claudeConflictTargetPath, filterProtectedProjections, planProjection, projectionConflictWarnings, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { isKeptPluginSkill, reconcileSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
-import { reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { ensureSeatSkillPlugin, seatCatalogKeptNote, seatSkillLocation, seatSkillPaths, writeSeatSkillCatalog, type SeatSkillPaths } from "./seat-skill-storage.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { readSeatEffort } from "./seat-effort.js";
@@ -138,7 +138,8 @@ export function planRuntimeSwitchMaterials(input: RuntimeSwitchMaterialsInput): 
   const pointer = seatSkillsPointerStartupFile();
   const projectedGuidance = new Set(plan.entries
     .filter((entry) => entry.category === "guidance" && entry.mergeStrategy === "managed_block").map((entry) => entry.absolutePath));
-  const neutral = (input.saved?.resolvedStartupFiles ?? []).filter((file) => file.absolutePath !== pointer.absolutePath
+  // OpenRig's own saved files are read from the running install, as launch and restore read them (#261).
+  const neutral = (input.saved?.resolvedStartupFiles ?? []).map((file) => reanchorBuiltinStartupFile(file)).filter((file) => file.absolutePath !== pointer.absolutePath
     && file.absolutePath !== sourceSeat?.catalogPath && !(file.deliveryHint === "guidance_merge" && projectedGuidance.has(file.absolutePath)));
   const delivered = filterProtectedProjections(neutral, plan).delivered;
   const files: ResolvedStartupFile[] = [...delivered, pointer, ...(runtime === "codex" ? [{
@@ -222,7 +223,7 @@ function findAgentSource(node: Node, saved: ParsedStartupContext, fsOps: AgentRe
   const candidates = new Set<string>();
   if (node.agentRef?.startsWith("path:")) candidates.add(node.agentRef.slice("path:".length));
   for (const entry of saved.plan.entries) candidates.add(reanchorShippedProjectionEntry(entry).sourcePath);
-  for (const file of saved.resolvedStartupFiles) candidates.add(file.ownerRoot);
+  for (const file of saved.resolvedStartupFiles) candidates.add(reanchorBuiltinStartupFile(file).ownerRoot);
   const sources = [...candidates]
     .filter((root) => nodePath.isAbsolute(root) && fsOps.exists(nodePath.join(root, "agent.yaml")))
     .map((root) => resolveAgentRef(`path:${root}`, root, fsOps))
