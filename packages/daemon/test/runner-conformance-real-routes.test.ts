@@ -1289,7 +1289,7 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
     const providerUrl = `http://127.0.0.1:${(provider.address() as { port: number }).port}`;
     const h = await nativeProcess(kind, { bin: executable!, providerUrl });
     const version = execFileSync(executable!, ["--version"], { encoding: "utf8", timeout: 10000, env: { PATH: process.env["PATH"], HOME: h.dir, DSH_HOME: join(h.dir, "dsh"), XDG_CONFIG_HOME: join(h.dir, "config"), XDG_DATA_HOME: join(h.dir, "data"), XDG_CACHE_HOME: join(h.dir, "cache"), DSH_TELEMETRY_DISABLED: "1" } }).trim();
-    h.start(); await h.ready();
+    const runner = h.start(); await h.ready();
     await h.f.transport.sendNativeWake("dev@channel", "idle native", "idle-native", "sender");
     expect(await waitFor(() => h.f.outbox.runnerReceipt("idle-native")?.stage === "completed", 12000), h.output).toBe(true);
     expect(h.f.outbox.runnerReceipt("idle-native")?.result).toMatchObject({ completion: "completed", answer: "native-answer: idle native" });
@@ -1303,6 +1303,7 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
     expect(requests.some(request => request.text === "ordinary native")).toBe(true);
     const nativeFrames = () => h.entries().flatMap(entry => entry.native ? [entry.native as Record<string, unknown>] : []);
     for (const busy of kind === "pi" ? [false, true] : [false]) {
+      const nativeStart = nativeFrames().length;
       const label = busy ? "BUSY" : "CANCEL", e = `NATIVE_${label}_E`, f = `NATIVE_${label}_F`, cancelId = `cancel-native-${label}`;
       if (busy) await h.f.transport.send("dev@channel", e, { deliveryId: `E-${label}`, actorSession: "sender" });
       else await h.f.transport.sendNativeWake("dev@channel", e, `E-${label}`, "sender");
@@ -1317,7 +1318,22 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
       const command = { type: "cancel", requestId: cancelId, target: { runId: target!.runId, nativeTurnId: target!.nativeTurnId } };
       if (!busy) h.fault = { type: "result", requestId: cancelId, commit: true, hits: 0 };
       expect((await h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(command) })).status).toBe(202);
-      expect(await waitFor(() => h.f.outbox.runnerReceipt(cancelId)?.result?.outcome === "cancelled", 12000), h.output).toBe(true);
+      expect(await waitFor(() => h.f.outbox.runnerReceipt(cancelId)?.stage === "completed", 12000), h.output).toBe(true);
+      const cancellationReceipt = h.f.outbox.runnerReceipt(cancelId)!;
+      expect(cancellationReceipt.result).toMatchObject(kind === "pi"
+        ? { outcome: "requested", confirmed: false, operationAccepted: false, detail: "native_end_without_cancellation_proof" }
+        : { outcome: "cancelled", confirmed: true });
+      if (busy) {
+        // Native cancellation releases its hold, but the dedicated wake still requires an idle, empty native queue.
+        expect(await waitFor(() => nativeFrames().slice(nativeStart).some(frame => String(frame.id).startsWith("openrig-native-idle-")
+          && (frame.data as { isStreaming?: boolean; pendingMessageCount?: number } | undefined)?.isStreaming === false
+          && (frame.data as { pendingMessageCount?: number } | undefined)?.pendingMessageCount === 1)), h.output).toBe(true);
+        expect(nativeFrames().slice(nativeStart).filter(frame => frame.type === "queue_update").at(-1)).toMatchObject({ steering: ["NATIVE_BUSY_STEER"], followUp: [] });
+        expect(held.has(f)).toBe(false); expect(requests.filter(request => request.text === "NATIVE_BUSY_STEER")).toEqual([]);
+        // Explicit person continuation is a disclosed native-queue limitation, not automatic successor progress.
+        runner.stdin!.write("person continues retained work\n");
+        expect(await waitFor(() => requests.filter(request => request.text === "NATIVE_BUSY_STEER").length === 1, 12000), h.output).toBe(true);
+      }
       expect(await waitFor(() => held.has(f), 12000), h.output).toBe(true);
       if (!busy) { const hello = h.hellos; h.server.closeAllConnections(); expect(await waitFor(() => h.hellos > hello)).toBe(true); h.fault = null; }
       const calls = () => h.entries().filter(frame => kind === "pi" ? frame.type === "abort" && frame.id === `openrig-cancel-${cancelId}` : frame.method === "session/cancel");
@@ -1331,18 +1347,14 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
       const fIndex = entries.findIndex(frame => promptText(frame) === f);
       if (kind === "pi") {
         const ackIndex = entries.findIndex(frame => (frame.native as { type?: string; id?: string; success?: boolean } | undefined)?.type === "response" && (frame.native as { id?: string; success?: boolean }).id === `openrig-cancel-${cancelId}` && (frame.native as { success?: boolean }).success === true);
-        expect(ackIndex).toBeGreaterThan(-1); expect(fIndex).toBeGreaterThan(ackIndex);
+        expect(ackIndex).toBeGreaterThan(-1);
         const eIndex = entries.findIndex(frame => promptText(frame) === e);
         const aborted = entries.findIndex((frame, index) => index > eIndex && (frame.native as { message?: { stopReason?: string } } | undefined)?.message?.stopReason === "aborted");
         const ended = entries.findIndex((frame, index) => index > aborted && (frame.native as { type?: string } | undefined)?.type === "agent_end");
         expect(aborted).toBeGreaterThan(eIndex); expect(ended).toBeGreaterThan(aborted); expect(fIndex).toBeGreaterThan(ended);
-        const empty = entries.findIndex((frame, index) => index > ackIndex && (frame.native as { id?: string; data?: { isStreaming?: boolean; pendingMessageCount?: number } } | undefined)?.id === `openrig-cancel-state-${cancelId}`
-          && (frame.native as { data?: { isStreaming?: boolean; pendingMessageCount?: number } }).data?.isStreaming === false && (frame.native as { data?: { pendingMessageCount?: number } }).data?.pendingMessageCount === 0);
-        expect(empty).toBeGreaterThan(ended); expect(fIndex).toBeGreaterThan(empty);
-        if (busy) {
-          const cleared = entries.findIndex(frame => (frame.native as { id?: string; success?: boolean } | undefined)?.id === `openrig-cancel-clear-${cancelId}` && (frame.native as { success?: boolean }).success === true);
-          expect(cleared).toBeGreaterThan(ackIndex); expect(cleared).toBeGreaterThan(ended); expect(empty).toBeGreaterThan(cleared);
-        }
+        expect(ackIndex).toBeGreaterThan(ended);
+        expect(entries.filter(frame => frame.type === "clear_queue")).toEqual([]);
+        expect(entries.filter(frame => frame.type === "get_state" && frame.id === `openrig-cancel-state-${cancelId}`)).toEqual([]);
       } else {
         const ePrompt = entries.find(frame => promptText(frame) === e)!;
         const terminal = entries.findIndex(frame => (frame.native as { id?: unknown; result?: { stopReason?: string } } | undefined)?.id === ePrompt.id && (frame.native as { result?: { stopReason?: string } }).result?.stopReason === "cancelled");
@@ -1355,7 +1367,10 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
         const fPrompt = h.entries().find(frame => promptText(frame) === f)!;
         expect(nativeFrames().find(frame => frame.id === fPrompt.id && (frame.result as { stopReason?: string } | undefined)?.stopReason === "end_turn")).toBeTruthy();
       }
-      if (busy) expect(requests.find(request => request.text === f)?.history).not.toContain("NATIVE_BUSY_STEER");
+      if (busy) {
+        expect(requests.filter(request => request.text === "NATIVE_BUSY_STEER")).toHaveLength(1);
+        expect(requests.find(request => request.text === f)?.history).toContain("NATIVE_BUSY_STEER");
+      }
     }
     console.log(JSON.stringify({ nativeProgram: kind, version, executable, provider: "local fake Anthropic messages; no external network", prompts: requests.map(request => request.text) }));
   }, 60000);

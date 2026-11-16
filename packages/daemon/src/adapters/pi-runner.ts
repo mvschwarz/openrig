@@ -1417,7 +1417,7 @@ export class RunnerCore {
       cancellation.submitted = true; cancellation.entry.state = "submitted";
       this.io.sendRpc({ type: "abort", id: `openrig-cancel-${cancellation.entry.frame.requestId}` });
       this.reportManaged(cancellation.entry, "submitted", { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
-      this.diag(`Cancellation ${JSON.stringify(cancellation.entry.frame.requestId)} for ${JSON.stringify(cancellation.target.nativeTurnId)} is requested, not confirmed. Managed inputs ${JSON.stringify(this.managedQueue.map(entry => entry.frame.requestId))} remain recorded for ${this.identity.sessionName}. Inspect rig seat status ${this.identity.sessionName} --json. The named invocation ending releases work; person's /abort remains available, or explicitly choose rig seat stop ${this.identity.sessionName} --reason <reason>. Nothing restarts or replays automatically.`);
+      this.diag(`Cancellation ${JSON.stringify(cancellation.entry.frame.requestId)} for ${JSON.stringify(cancellation.target.nativeTurnId)} is requested, not confirmed. Managed inputs ${JSON.stringify(this.managedQueue.map(entry => entry.frame.requestId))} remain recorded for ${this.identity.sessionName}. Inspect rig seat status ${this.identity.sessionName} --json. The named invocation ending releases the cancellation hold; a wake still waits for native idle and an empty queue. Retained native words may need a person to continue them. Person's /abort remains available, or explicitly choose rig seat stop ${this.identity.sessionName} --reason <reason>. Nothing restarts or replays automatically.`);
       return;
     }
     if (cancellation && record.id === `openrig-cancel-${cancellation.entry.frame.requestId}`) {
