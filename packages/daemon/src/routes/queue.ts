@@ -14,7 +14,8 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
+import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -75,6 +76,20 @@ const WORK_CANDIDATE_LIST_LIMIT = 50;
 // shipped registry has no canonical own-alias reader, and D-4 frames this name
 // as free-text best-effort by design.
 export const CROSS_HOST_TAG = "cross-host";
+/** A route this daemon sends to another host, naming this host (`member@rig@<self>`); one carried from another host keeps
+ *  its own. Null when this daemon doesn't know its host id, so the route can't say where it is. */
+export function hostQualifiedRoute(route: string): string | null {
+  if (splitRoute(route).host) return route;
+  const stamped = stampSelfHostSuffix(route);
+  return stamped === route ? null : stamped;
+}
+
+/** How a named route was established: a route carried from another host keeps the basis it was sent with there. */
+function carriedRouteBasis(route: string, basis: unknown): ReturnRouteBasis {
+  return splitRoute(canonicalSenderSession(route)).host && RETURN_ROUTE_BASES.includes(basis as ReturnRouteBasis)
+    ? basis as ReturnRouteBasis : "named";
+}
+
 export function crossHostProvenanceTags(existing: string[] | undefined): string[] {
   const base = existing ?? [];
   const fromHost = `from-host:${osHostname()}`;
@@ -556,7 +571,12 @@ export function queueRoutes(): Hono {
       );
     }
 
-    // (2) The deterministic successor identity + forwarded body.
+    // (2) The deterministic successor identity + forwarded body. The goal's return route goes with the work, naming the host
+    // it's on; without this host's id it can't, and the handoff is refused rather than sent without it.
+    const carriedRoute = source.returnRoute ? hostQualifiedRoute(source.returnRoute) : null;
+    if (source.returnRoute && !carriedRoute) {
+      return c.json({ error: "return_route_host_unknown", message: `qitem ${qitemId} carries a return route (${source.returnRoute}), and this daemon doesn't know its own host id yet, so the route couldn't say which host the conversation is on. Nothing was sent: retry once the host id is set.` }, 409);
+    }
     const effectiveTags = body.tags ?? source.tags ?? undefined;
     const forwardBody: Record<string, unknown> = {
       qitemId: successorId,
@@ -579,6 +599,7 @@ export function queueRoutes(): Hono {
       ...(body.evidenceRef !== undefined ? { evidenceRef: body.evidenceRef } : {}),
       ...(body.nudge !== undefined ? { nudge: body.nudge } : {}),
       ...(body.humanAlert !== undefined ? { humanAlert: body.humanAlert } : {}),
+      ...(carriedRoute ? { returnRoute: carriedRoute, returnRouteBasis: source.returnRouteBasis ?? "named" } : {}),
     };
 
     // (3) Successor-create FIRST — origin-owns-the-record; failure leaves the
@@ -630,7 +651,9 @@ export function queueRoutes(): Hono {
       if (refusal) return { ok: false, response: refusal };
       try {
         // Recorded as the receiving /create records a forwarded write: no transport header, so claimed:v1.
-        const item = await getRepo(c).create({ ...input, identityProvenance: "claimed:v1" });
+        // A route naming this host is one of this host's own addresses.
+        const route = typeof input.returnRoute === "string" ? canonicalSenderSession(input.returnRoute) : input.returnRoute;
+        const item = await getRepo(c).create({ ...input, ...(route ? { returnRoute: route } : {}), identityProvenance: "claimed:v1" });
         const advisory = destinationAdvisory(c, item.destinationSession);
         return { ok: true, payload: { ...item, ...(advisory ? { advisories: [advisory] } : {}) } };
       } catch (err) {
@@ -665,15 +688,40 @@ export function queueRoutes(): Hono {
       // session string stays member@rig; the host is NEVER in-string).
       // Absent / "" / "local" = today's local path, byte-identical.
       hostId?: string;
+      /** The first-user return route (return-route.ts): auto, self, or an agent conversation's queue address. */
+      returnRoute?: string;
+      /** How a route carried from another host was established there. */
+      returnRouteBasis?: string;
     }>().catch(() => ({} as never));
+
+    // The return route, when the caller asks for one: `auto` issues a conversation address for this create (from its id, so
+    // an exact retry issues the same one), `self` takes the caller's own identity, and anything else is an address the
+    // caller named. Absent, the create is exactly as before.
+    const requestedRoute = typeof body.returnRoute === "string" ? body.returnRoute.trim() : undefined;
+    if (body.returnRoute !== undefined && (!requestedRoute
+      || (requestedRoute !== "auto" && requestedRoute !== "self" && !isRouteAddress(canonicalSenderSession(requestedRoute))))) {
+      return c.json({ error: "invalid_return_route", message: "A return route is auto, self, or an agent conversation's queue address (member@rig). A person is reached through the gateway, not a return route." }, 400);
+    }
+    const createId = body.qitemId ?? (requestedRoute ? newQitemId() : undefined);
+    const issued = requestedRoute === "auto" ? issuedReturnAddress(createId!) : null;
 
     // P21 I3 — the source is the transport-derived sender (X-OpenRig-Session), NEVER the body claim.
     // P18 deliver-and-label: absent header + a body sourceSession → recorded as the claimed-era stamp
     // claimed:v1; absent header + no body → 400 actor_required; a body sourceSession that DIFFERS from the
     // header → the wire SUPERSEDES it (transport:v1), not a 409. `sourceSession` below is authoritative.
-    const identity = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
+    // A caller with neither that asks for an issued route is declared by it: the issued address is the row's actor,
+    // recorded as claimed:v1 (declared here, not verified), never as a transport identity. A known caller keeps its own.
+    const derived = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
+    const identity: typeof derived = !derived.ok && issued ? { ok: true, session: issued, provenance: "claimed:v1" } : derived;
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
+    const route = requestedRoute === undefined ? null
+      : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
+        : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
+          : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
+    if (route && !isRouteAddress(route.address)) {
+      return c.json({ error: "invalid_return_route", message: `--return-route self takes the caller's own address, and this caller is ${sourceSession}, which isn't an agent conversation's queue address. Use auto, or name the address.` }, 400);
+    }
     { const held = switchCustody(c, sourceSession); if (held) return held; }
     // Required destination and body, then PL-007: validate target_repo against
     // source rig's workspace.repos[].
@@ -696,10 +744,16 @@ export function queueRoutes(): Hono {
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       if (body.classificationBinding !== undefined)
         return c.json({ error: "invalid_classification_binding", message: "Classifier-bound effects belong to this daemon's local queue." }, 400);
-      const mintedId = body.qitemId ?? newQitemId();
-      const { hostId: _dropped, ...rest } = body;
+      const mintedId = createId ?? newQitemId();
+      // The route names this host, so the receiving daemon never reads it as one of its own addresses.
+      const carried = route ? hostQualifiedRoute(route.address) : null;
+      if (route && !carried) {
+        return c.json({ error: "return_route_host_unknown", message: "This daemon doesn't know its own host id yet, so a return route sent to another host couldn't say which host the conversation is on. Nothing was sent: create it on this host, or retry once the host id is set." }, 409);
+      }
+      const { hostId: _dropped, returnRoute: _route, returnRouteBasis: _basis, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
         ...rest,
+        ...(route ? { returnRoute: carried, returnRouteBasis: route.basis } : {}),
         qitemId: mintedId,
         // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon is the origin,
         // so it stamps its OWN self-id (overriding the bare spread) before the
@@ -722,7 +776,7 @@ export function queueRoutes(): Hono {
       const fence = classificationRefusal(c, sourceSession, body.classificationBinding);
       if (fence) return fence;
       const item = await getRepo(c).create({
-        qitemId: body.qitemId,
+        qitemId: createId,
         sourceSession,
         destinationSession: body.destinationSession!, // required by createInputRefusal
         body: body.body!,
@@ -741,6 +795,7 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
+        ...(route ? { returnRoute: route.address, returnRouteBasis: route.basis } : {}),
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
       const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory].filter(Boolean);

@@ -23,6 +23,12 @@ import {
   resolveAvailability,
   type DeliveryDecision,
 } from "./delivery-rules-engine.js";
+import {
+  RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG, RETURN_ROUTE_NOTE_PREFIX,
+  relayTaskId, resolveEscalationReturnRoute, splitRoute,
+} from "../return-route.js";
+import { getSelfHostId } from "../hosts/fanout-contract.js";
+import { OPENRIG_SENDER } from "../../lib/pane-envelope.js";
 
 export interface OperatorDeliveryEngine {
   /** Read durable pre-marker custody without dispatching or rechecking readiness. */
@@ -55,6 +61,45 @@ export function buildDeferralFirePayload(row: QueueItem, notificationKey: string
 
 function describeDecision(d: DeliveryDecision): string {
   return d.deferMinutes !== undefined ? `${d.outcome}-deferred-${d.deferMinutes}m` : d.outcome;
+}
+
+/** A route's address when the conversation is on this host; null when it names another host. */
+function routeOnThisHost(route: string): string | null {
+  const { address, host } = splitRoute(route);
+  return host === null || host === getSelfHostId() ? address : null;
+}
+
+/** The seat a prompt alert is about, or the escalated row's own seat. */
+function escalatedSeat(row: QueueItem): string {
+  const tag = row.tags?.find(t => t.startsWith("prompt-destination:") || t.startsWith("consumed-prompt-destination:"));
+  return tag ? tag.slice(tag.indexOf(":") + 1) : row.destinationSession;
+}
+
+/** The relay task's words: what the agent at the route does with it, for a seat's prompt or any other escalation. */
+function relayBody(row: QueueItem, route: string, relayId: string, notificationKey: string, anchors: string[], reason: string): string {
+  const seat = escalatedSeat(row);
+  const work = anchors.length ? ` (${anchors.join(", ")})` : "";
+  const queue = `OPENRIG_SESSION_NAME=${route} rig queue`;
+  const pickup = `Claim it when you pick it up (${queue} claim ${relayId}). That tells OpenRig it reached you; it isn't the ` +
+    `person's answer or approval, and closing or canceling this task doesn't clear anything at the seat.`;
+  const record = `Record only what they tell you: ${queue} update ${relayId} --state done --closure-reason no-follow-on ` +
+    `--resolution "<their words>".`;
+  const ref = `(OpenRig escalation ${row.qitemId}, notification ${notificationKey})`;
+  if (row.tags?.includes("wake-prompt-refusal")) {
+    return `${seat} is stopped at a prompt in the work you handed over${work}, and it can't go on until someone answers.\n\n` +
+      `${pickup}\n\n` +
+      `Bring it to the person. Capture it first: rig capture ${seat} shows the prompt's own words and the choices it offers. ` +
+      `Show them the seat, the exact action and the choices. ${record}\n\n` +
+      `No other agent passes this answer on. Once you've recorded it, send their choice yourself, as the rigs skill says for a ` +
+      `seat's prompt: capture the seat again first (a changed prompt needs a new answer), then ` +
+      `rig send ${seat} "<key>" --dangerously-interact --reason 'task ${relayId}: <their words>'. A no stays a no, never pick a ` +
+      `"don't ask again" choice they didn't pick, and never send again while the effect is unknown. If the prompt has gone when ` +
+      `you look, tell them it isn't waiting any more and send nothing. OpenRig retires its alert when the seat's prompt reads ` +
+      `clear.\n\n${ref}`;
+  }
+  return `The work you handed over${work} is stuck at ${seat}: ${reason}.\n\n${pickup}\n\n` +
+    `Tell the person in your own words, with what you can see (rig ps --nodes shows the team's seats), and ask what they want ` +
+    `done. ${record}\n\n${ref}`;
 }
 
 /** The production port for the operator rung (A1.2: this engine IS the rung's
@@ -97,6 +142,7 @@ export function makeOperatorDeliveryEngine(deps: {
         if (note.startsWith("slack-owner-notification-posted ")) resolved = "posted";
         if (note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `)) resolved = "accepted";
         if (note.startsWith("delivery-termination:")) resolved = "terminated";
+        if (note.startsWith(`${RELAY_CLAIMED_PREFIX} `)) resolved = "picked-up";
       }
     }
     return resolved;
@@ -104,10 +150,11 @@ export function makeOperatorDeliveryEngine(deps: {
   return {
     hasAcceptedEscalation: row => {
       const key = notificationKeyFor(row);
-      return resolvedFor(row, key) !== null || new DispatchBuffer(deps.home).pending()
-        .some(d => d.decisionId === `operator:${key}`);
+      // A relay task at the return route holds the episode, as an accepted gateway decision does.
+      return resolvedFor(row, key) !== null || deps.queueRepo.getById(relayTaskId(key)) !== null
+        || new DispatchBuffer(deps.home).pending().some(d => d.decisionId === `operator:${key}`);
     },
-    async dispatchEscalation(row: QueueItem, _reason: string, deliveryDeferred?: () => boolean) {
+    async dispatchEscalation(row: QueueItem, reason: string, deliveryDeferred?: () => boolean) {
       // The episode identity the receipt must carry (Slice 14's ledger accepts
       // the current qitemId:transitionId key; an ordinary row without an owner
       // transition uses its meaningful-progress episode in the synthetic key).
@@ -124,6 +171,39 @@ export function makeOperatorDeliveryEngine(deps: {
       // An accepted decision belongs to the gateway even if registry access or
       // routing changes before the ladder records its dispatch marker.
       if (accepted()) return { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId };
+      // A goal handed over with a return route takes its new escalations to that conversation as one relay task per episode,
+      // ahead of the registry and any connector (return-route.ts). An episode the gateway already accepted stays with it (above).
+      const routed = resolveEscalationReturnRoute(deps.queueRepo.db, row);
+      const local = routed.kind === "route" ? routeOnThisHost(routed.route) : null;
+      if (routed.kind === "route" && local) {
+        const held = deferred();
+        if (held) return held;
+        const relayId = relayTaskId(notificationKey);
+        if (!deps.queueRepo.getById(relayId)) {
+          await deps.queueRepo.create({
+            qitemId: relayId, sourceSession: OPENRIG_SENDER, destinationSession: local, wakeTrigger: "openrig",
+            body: relayBody(row, local, relayId, notificationKey, routed.anchors, reason),
+            summary: row.tags?.includes("wake-prompt-refusal")
+              ? `${escalatedSeat(row)} is stopped at a prompt in the work you handed over`
+              : `The work you handed over is stuck at ${escalatedSeat(row)}`,
+            tags: [RELAY_TAG, `${RELAY_FOR_PREFIX}${row.qitemId}`, `${RELAY_KEY_PREFIX}${notificationKey}`],
+            // A conversation's address has no pane to wake: its agent reads the task on the person's next turn, and its claim
+            // is the delivery evidence.
+            nudge: false,
+          });
+        }
+        return { decision: `return-route:${local}`, resolved: false, dispatched: true, notificationKey };
+      }
+      // A route this daemon can't deliver to, or two that disagree, is said on the row; the episode takes the existing route.
+      const unused = routed.kind === "conflict"
+        ? `${RETURN_ROUTE_NOTE_PREFIX}conflict routes=${routed.routes.join(",")} notification_key=${notificationKey}: this work carries more than one return route, so neither was chosen; the existing route is used`
+        : routed.kind === "route"
+          ? `${RETURN_ROUTE_NOTE_PREFIX}on-another-host route=${routed.route} notification_key=${notificationKey}: this daemon doesn't deliver to another host's conversation; the existing route is used`
+          : null;
+      if (unused && !deps.queueRepo.listTransitions(row.qitemId).some(t => t.transitionNote === unused)) {
+        deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "wake-ladder@system", transitionNote: unused,
+          closureTarget: row.state === "in-progress" ? deps.queueRepo.retainedClaimBlocker(row.qitemId) : undefined });
+      }
       let reg: LoadResult;
       try {
         reg = deps.registry ? deps.registry.loadHumanRegistry() : loadHumanRegistry(deps.home);

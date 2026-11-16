@@ -1,0 +1,64 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { queueCommand, type QueueDeps } from "../src/commands/queue.js";
+
+// `rig queue create --return-route`: a session with no address of its own can hand over a goal with `auto`, and the CLI prints
+// the address OpenRig issued and how to read the team's questions there. Without the flag, create is unchanged.
+describe("queue create --return-route", () => {
+  const saved = { session: process.env.OPENRIG_SESSION_NAME, rigged: process.env.RIGGED_SESSION_NAME, pane: process.env.TMUX_PANE };
+  let posted: Array<Record<string, unknown>>;
+  let stderr: string[];
+  let exit: typeof process.exitCode;
+  beforeEach(() => {
+    delete process.env.OPENRIG_SESSION_NAME; delete process.env.RIGGED_SESSION_NAME; delete process.env.TMUX_PANE;
+    posted = []; stderr = []; exit = process.exitCode;
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { stderr.push(args.join(" ")); });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.exitCode = exit;
+    for (const [key, value] of [["OPENRIG_SESSION_NAME", saved.session], ["RIGGED_SESSION_NAME", saved.rigged], ["TMUX_PANE", saved.pane]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const deps = (route: string | null): QueueDeps => ({
+    lifecycleDeps: { readFile: () => null, exists: () => false, fetch: async () => ({ ok: true }) } as QueueDeps["lifecycleDeps"],
+    clientFactory: () => ({
+      post: async (_url: string, body: Record<string, unknown>) => {
+        posted.push(body);
+        return { status: 201, data: { qitemId: body.qitemId, sourceSession: route ?? body.sourceSession, destinationSession: body.destinationSession,
+          state: "pending", body: body.body, ...(route ? { returnRoute: route, returnRouteBasis: "issued-actor" } : {}) } };
+      },
+    }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
+  });
+  const create = (d: QueueDeps, extra: string[]) => queueCommand(d).parseAsync(["create", "--destination", "operator-agent@kernel",
+    "--body", "Goal: add word counts", "--summary", "the goal", "--no-nudge", ...extra], { from: "user" });
+
+  it("auto needs no address of its own: it sends the request without a source and prints the issued address", async () => {
+    await create(deps("conversation-3f2a9c1b7e44@kernel"), ["--return-route", "auto"]);
+    expect(posted).toHaveLength(1);
+    const wire = JSON.parse(JSON.stringify(posted[0])); // what the client sends
+    expect(wire).toMatchObject({ returnRoute: "auto" });
+    expect(wire).not.toHaveProperty("sourceSession");
+    const line = stderr.find(l => l.startsWith("Return route: conversation-3f2a9c1b7e44@kernel."));
+    expect(line).toContain("OPENRIG_SESSION_NAME='conversation-3f2a9c1b7e44@kernel' rig queue list --owned --state pending,in-progress");
+    expect(line).toContain("in front of your other queue commands for this work");
+  });
+
+  it("without the flag, or with self, a session with no address still needs one, as before", async () => {
+    for (const extra of [[], ["--return-route", "self"]]) {
+      process.exitCode = undefined;
+      await create(deps(null), extra);
+      expect(process.exitCode).toBe(1);
+    }
+    expect(posted).toEqual([]);
+    expect(stderr.some(l => l.includes("--source is required"))).toBe(true);
+  });
+
+  it("a plain create sends no route and prints no route line", async () => {
+    await create(deps(null), ["--source", "front@kernel"]);
+    expect(JSON.parse(JSON.stringify(posted[0]))).not.toHaveProperty("returnRoute");
+    expect(stderr.some(l => l.startsWith("Return route:"))).toBe(false);
+  });
+});

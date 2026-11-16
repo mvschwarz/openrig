@@ -176,9 +176,10 @@ commands; if the two ever differ, this step is right.
   - A machine they'll pair with needs its own person: registering here doesn't give that machine one.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Hand it over by where the person will answer the team, from what they've already told you:
-  - **They stay here** (they said so, or they can't use the operator's pane): hand the goal over as a task from your
-    own address ("If the person stays with you" below), so the team's questions, its seats' prompts and the result
-    come back to you. Don't tell the operator they'll answer in its pane.
+  - **They stay here** (they said so, or they can't use the operator's pane): hand the goal over as a task with a
+    return route ("If the person stays with you" below), so the team's questions, its seats' prompts and the result
+    come back to you. Tell them in a line that for this goal these come here ahead of a Slack connection they've
+    registered; their other work doesn't change. Don't tell the operator they'll answer in its pane.
   - **They'll talk to the operator in its pane:** find the `operator.agent` row in `rig ps --nodes --rig kernel --json`,
     take its `canonicalSessionName` (never the logical ID or a guessed name) and send:
     `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
@@ -201,20 +202,22 @@ commands; if the two ever differ, this step is right.
   prompts included, and bring back what it produced and what its latest review found, through the task queue rather
   than the operator's screen.
   - **Your return address:** if this session joined the team (above), it's the `OPENRIG_SESSION_NAME` that
-    `rig attach` printed. Otherwise agree one with the person on the kernel's rig, such as `claude-app@kernel` or
-    `codex-app@kernel`. It's an address the queue takes tasks for; nothing is launched for it and no file is written.
-    If the person keeps more than one of these conversations, give each its own address (for example
-    `claude-app-2@kernel`); one address shares its questions.
+    `rig attach` printed, and you hand over the goal with `--return-route self`. Otherwise OpenRig issues you one when
+    you hand over the goal with `--return-route auto` (below): an address on the kernel's rig, such as
+    `conversation-3f2a9c1b7e44@kernel`. It's an address the queue takes tasks for; nothing is launched for it and no
+    file is written. If the person keeps more than one of these conversations, each hands over its own goal and gets its
+    own address; one address shares its questions.
     To tell the team what it's for, the person can add it to a roster as a hosted member
     (`docs/reference/hosted-members.md` in the OpenRig package).
-    Put it in front of every `rig queue` command: `OPENRIG_SESSION_NAME=<address> rig queue ...` (add
+    Once you have it, put it in front of every other `rig queue` command: `OPENRIG_SESSION_NAME=<address> rig queue ...` (add
     `OPENRIG_HOME=<home>` when OpenRig doesn't use the default home). A `--source` name only labels the one task it's
     on: claiming and answering the team's questions need the address in `OPENRIG_SESSION_NAME`.
   - **Hand over the goal:** write it to a file with what the message above carries (that you're the agent that
     installed OpenRig and the person stays with you, the goal, folder, branch, constraints, logins and permission
-    choices), and end it with this paragraph, filling in your address:
+    choices), and end it with this paragraph:
 
-    > To ask me anything, create a queue item to `<address>` (`rig queue create --destination <address> ...`), then
+    > To ask me anything, create a queue item to my return address, this item's `returnRoute` (`rig queue show <this
+    > id> --full` prints it): `rig queue create --destination <that address> ...`, then
     > block this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I
     > check it whenever the person talks to me. Don't ask in your own terminal: the person isn't there. A seat's
     > permission prompt in this work is their question too: send me its own text and choices, the seat, what it was
@@ -231,9 +234,12 @@ commands; if the two ever differ, this step is right.
     > evidence ref.
 
     Then run
-    `OPENRIG_SESSION_NAME=<address> rig queue create --destination <canonicalSessionName> --summary "<the goal in a sentence>" --body-file <file> --verify`.
-    Tell the person the task ID it prints, and keep the goal, your address and that ID: they're how you find this work
-    again.
+    `rig queue create --destination <canonicalSessionName> --return-route auto --summary "<the goal in a sentence>" --body-file <file> --verify`
+    (if this session joined, `--return-route self` with your `OPENRIG_SESSION_NAME` in front). It prints
+    `Return route: <address>`: that's your address from now on. The goal's handoffs carry it, and a seat that stops at a
+    prompt in this work reaches you there as a task. Tell the person the task ID it prints, and keep the goal, your
+    address and that ID: they're how you find this work again. If the outcome is unknown, repeat the same command with
+    the `--id` it printed: the same task keeps the same address.
   - **The team's questions** come to your address as tasks:
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
@@ -244,7 +250,9 @@ commands; if the two ever differ, this step is right.
     it open and tell them it's waiting; never answer for them.
     A question can be a seat's permission prompt that the operator or a team seat sent you: show it with the seat,
     the exact action and the choices it offers, and record their words the same way. The agent that sent it passes
-    their answer to the seat, so don't send that prompt's answer yourself as well.
+    their answer to the seat, so don't send that prompt's answer yourself as well. A task from OpenRig itself
+    (`daemon@kernel`: "<seat> is stopped at a prompt in the work you handed over") is a prompt no agent is relaying:
+    capture the seat to show it, record their words on that task, and send their choice yourself, as its text says.
   - **A question only on the operator's screen:** if the operator asks in its pane and nothing reached your address,
     read it with `rig capture <canonicalSessionName>`, show the person, and send their words as a new task to the
     operator that names your task's ID, not as keys typed into its pane.
@@ -269,7 +277,7 @@ commands; if the two ever differ, this step is right.
   `rig seat launch <seat> --fresh --stop --reason "…"` and check the model it reports. Either way the operator starts a
   new conversation without your handoff, so send it again: the goal, folder, branch, constraints and permission choices.
 - **Installation is finished** when the operator is ready and the person is talking to it or, when they stay with you,
-  once the goal has reached it as a task from your address (read its wake outcome); a healthy daemon alone isn't
+  once the goal has reached it as a task with your return route (read its wake outcome); a healthy daemon alone isn't
   that. If they'd rather talk later, keep that choice, leave them the exact connection step and say the handoff to the
   operator is still pending.
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
@@ -284,7 +292,7 @@ commands; if the two ever differ, this step is right.
   your last check still reaches them. Show the person each one, with any others waiting, one line each (seat,
   exact action, the choices offered), and the whole prompt when they ask. If a question about that prompt is already
   open at your address (the operator or a team seat sent it), use that one: record their words on it, and its sender
-  passes them on, not you. Once you've recorded them, that prompt stays its sender's to answer even while the seat
+  passes them on, not you (on OpenRig's own task about it, you pass them on). Once you've recorded them, that prompt stays its sender's to answer even while the seat
   still shows it: don't ask about it again or send anything for it unless the prompt changes or the sender asks you
   again. For a commit, also say whether the team's review has run; they may be expecting one. Before sending their choice, capture that
   seat again: if its prompt changed, don't reuse the answer. Then send exactly the choice they made for that prompt:
