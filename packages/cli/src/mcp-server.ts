@@ -1936,6 +1936,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     async ({ cursor, start, rigId, nodeId, limit }) => {
       try {
         const params = new URLSearchParams();
+        const ignored = [cursor === "" ? "cursor" : undefined, nodeId === "" ? "nodeId" : undefined, rigId === "" ? "rigId" : undefined]
+          .filter((name): name is string => name !== undefined);
         if (rigId) {
           const rig = await rigIdFor(client, rigId);
           if ("content" in rig) return rig;
@@ -1949,7 +1951,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (start) params.set("start", start);
         if (nodeId) params.set("nodeId", nodeId);
         if (limit !== undefined) params.set("limit", String(limit));
-        return mapResult(await client.get(`/api/telemetry/v1/events?${params.toString()}`));
+        const response = await client.get<Record<string, unknown>>(`/api/telemetry/v1/events?${params.toString()}`);
+        if (response.status < 400 && ignored.length) {
+          return mapResult({ ...response, data: { ...response.data, note: `Ignored empty optional argument(s): ${ignored.join(", ")}.` } });
+        }
+        return mapResult(response);
       } catch (err) {
         return caught(err);
       }
