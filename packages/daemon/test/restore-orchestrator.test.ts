@@ -3299,6 +3299,27 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.harnessNotStarted).toEqual(report);
   });
 
+  // #3216's follow-up (CodeRabbit's Major): a full restore launches a seat by its logical id, so a seat recreated since the
+  // snapshot is launched under its live node. The notice reads that node, where the bare shell's session is; the result
+  // keeps the snapshot's node id, the identity its roll call and receipt use.
+  it("hands the notice a recreated seat's live node, where its bare shell was registered", async () => {
+    const { node, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(node.id);
+    const live = rigRepo.addNode(node.rigId, "dev.moved", { runtime: "claude-code", podId: "pod-test-rig" });
+    const notice = vi.fn(async () => ({ notices: [], unrouted: [], warnings: [] }));
+    const result = await createOrchestrator({ harnessNotStartedNotice: notice })
+      .restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "attention_required", stage: "harness_not_started" });
+    const shell = db.prepare("SELECT node_id FROM sessions WHERE startup_status = 'attention_required'").all() as Array<{ node_id: string }>;
+    expect(shell).toEqual([{ node_id: live.id }]);
+    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+      seats: [{ nodeId: live.id, logicalId: "dev.moved", cause: "Harness not started: no startup context for dev.moved." }],
+    }));
+  });
+
   it("carries a partial notice report, and its warnings join the restore's", async () => {
     const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
     const report = { notices: [], unrouted: [{ seat: "dev-moved@r", outcome: "none", reason: "no parent" }],

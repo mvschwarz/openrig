@@ -1838,8 +1838,12 @@ export class RestoreOrchestrator {
    *  attempt's, and a failure to send it is a warning too: it never changes or blocks the attempt's own result. Seats not
    *  positively left as shells stay in the roll call. */
   private async noticeBareShells(rigId: string, attempt: string, results: RestoreNodeResult[], warnings: string[]): Promise<HarnessNotStartedReport | undefined> {
+    // The launcher finds a seat by its logical id in the live rig, so a seat recreated since the snapshot was launched
+    // under its live node, while its result keeps the snapshot's node id: the notice reads the node the shell is on.
+    const liveNodes = this.rigRepo.getRig(rigId)?.nodes ?? [];
     const seats = results.filter((n) => n.stage === "harness_not_started")
-      .map(({ nodeId, logicalId, error }) => ({ nodeId, logicalId, ...(error ? { cause: error } : {}) }));
+      .map(({ nodeId, logicalId, error }) => ({ nodeId: liveNodes.find((node) => node.logicalId === logicalId)?.id ?? nodeId,
+        logicalId, ...(error ? { cause: error } : {}) }));
     if (seats.length === 0 || !this.harnessNotStartedNotice) return undefined;
     try {
       const report = await this.harnessNotStartedNotice({ rigId, attempt, seats });
