@@ -25,7 +25,9 @@ function mockClient(overrides?: {
 // rig_team it lists the team first; pickup is said only where it's true for the path.
 const ASK_LISTED = "Before sending a request to another assistant, list the team's members. If more than one could be the one your person means, ask which, using their names from the list (like \"Sam's Claude\"); if the list shows only addresses, describe each in plain words from what the list says about it (like \"the Claude chat agent\"), never reading the address out. Don't pick from your own history or memory. If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway. If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else.";
 const ASK_RUNNING_PICKUP = "When you send to a running team seat, tell your person that seat will pick it up on its own.";
-const ASK_CONNECTED_PICKUP = "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.";
+const ASK_CONNECTED_PICKUP = "When you send to another connected assistant, tell your person how it picks requests up as the list says (when its person asks it, or on its check-in schedule); if the list doesn't say, say that's unknown, and don't promise a time.";
+// How an external connection keeps one request one item: it chooses the id, so an uncertain create is checked, never resent.
+const RETRY_RULE = "Acceptance is not completed work. Choose a qitemId and pass it to rig_queue_create, so an uncertain create (a timeout, or an error after sending) can be checked: read that same qitemId with rig_queue_show first, and create again only with that same id, never a new one.";
 const ASK_SENT_ANYWAY = "If you sent it anyway, tell your person it waits until that one is back.";
 const ASK_UNLISTED = "If more than one assistant could be the one your person means, ask which; don't pick from your own history or memory. If your person names one clearly, go ahead.";
 const ASK_GO_AHEAD = "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.";
@@ -941,6 +943,50 @@ describe("MCP Server", () => {
     // team first and may reach another connected assistant, so it's told when that one picks the request up.
     expect(instructions.includes("ask which")).toBe(offered.has("rig_queue_create"));
     if (offered.has("rig_queue_create")) expect(instructions).toContain(`${ASK_LISTED} ${ASK_CONNECTED_PICKUP} ${ASK_GO_AHEAD} ${ASK_REMOVED_FACT}`);
+    // A grant that can send and read back what it sent carries the retry rule; one that only works its inbox doesn't.
+    expect(instructions.includes(RETRY_RULE)).toBe(offered.has("rig_queue_create"));
+    await external.close();
+    await server.close();
+  });
+
+  it("names rig_queue_show in rig_queue_create's description only for a grant that offers it", async () => {
+    const createDescription = async (objects: Record<string, string[]>) => {
+      const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+        access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects } } });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "create-only", version: "1.0.0" });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const description = (await client.listTools()).tools.find((tool) => tool.name === "rig_queue_create")?.description ?? "";
+      await client.close();
+      await server.close();
+      return description;
+    };
+    const createOnly = await createDescription({ queue: ["create"] });
+    expect(createOnly).not.toContain("rig_queue_show");
+    expect(createOnly).toContain("Pass a qitemId you choose, and retry an uncertain create (a timeout, or an error after sending) only with that same id, never a new one");
+    expect(await createDescription({ queue: ["create", "show"] })).toContain("check rig_queue_show with that qitemId first, and retry only with the same id, never a new one.");
+  });
+
+  it("a network grant's tool descriptions carry the request rules on their own, for a client that drops instructions", async () => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false,
+        external: { objects: { queue: ["create", "show", "list", "claim", "update"], team: ["list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const described = new Map((await external.listTools()).tools.map((tool) => [tool.name, tool.description ?? ""]));
+    // Send: choose the id, check by it, retry only with it; the pickup is the recipient's; a no-requests seat is said after.
+    expect(described.get("rig_queue_create")).toContain("Pass a qitemId you choose, so an uncertain create can be checked: if the call times out or errors after sending, check rig_queue_show with that qitemId first, and retry only with the same id, never a new one.");
+    expect(described.get("rig_queue_create")).toContain("When it's picked up depends on that assistant: rig_team shows how each one checks for requests, where that's known.");
+    expect(described.get("rig_queue_create")).toContain("requestsAdvisory says so");
+    // Answer: on the same item, where its sender reads it.
+    expect(described.get("rig_queue_update")).toContain("the answer in resolution, which the item keeps and its sender reads on this same item");
+    expect(described.get("rig_queue_show")).toContain("this is where its answer is");
+    // Who to send to: an address as listed, and which ones take no requests.
+    expect(described.get("rig_team")).toContain("Send to an address exactly as shown.");
+    expect(described.get("rig_team")).toContain("An entry with takesRequests: false is one whose owner says it takes no requests");
     await external.close();
     await server.close();
   });

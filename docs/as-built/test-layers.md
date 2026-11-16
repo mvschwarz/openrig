@@ -54,6 +54,10 @@ Some package tests are gated. `OPENRIG_E2E_REAL_CODEX=1` runs two daemon e2e tes
 real Codex (they also need tmux, `codex` and `~/.codex/auth.json`, and they use provider
 credits). `OPENRIG_REAL_CLAUDE_INTEGRATION=1` enables only a placeholder: it requires
 `OPENRIG_PARENT_NATIVE_ID` and checks its format, and no real-Claude fork test exists yet.
+`OPENRIG_REAL_CLAUDE_BIN=<path to claude>` runs `claude-auto-mode-native.test.ts`. It passes a
+seat's composed `--settings` to the real `claude auto-mode config` with a fixture
+`CLAUDE_CONFIG_DIR`. It needs no login and uses no credits. Managed settings on the machine can
+add entries.
 Without tmux, some tmux tests skip and others (such as `transcript-seat-env-native.test.ts`)
 fail. The CLI's release-tag tests skip without local tags unless `CI=true`, so a green local
 run without tags has skipped them. CI installs tmux and fetches full history.

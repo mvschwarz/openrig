@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
+import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
 import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
@@ -1752,15 +1753,14 @@ export class TmuxAdapter {
       `tmux set-environment -t ${tmuxConfigQuote(target)} ${tmuxConfigQuote(key)} ${tmuxConfigQuote(value)}`);
   }
 
-  /** Remove one variable from a session's environment, so a process spawned there afterwards
-   *  inherits the server's value for it, or none. A name that is the launching session's own
-   *  identity in the server's environment (see parent-session-env) is marked removed instead, as a
-   *  launch does, so the server's value does not come back. */
+  /** Remove one variable from a session's environment. Ordinary names inherit the server's value
+   *  afterwards, if any. Credentials and the launching session's own identity are marked removed
+   *  instead, so they cannot come back from the server's global environment. */
   async unsetSessionEnv(session: string, key: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    const parentIdentity = parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
-    const flag = parentIdentity ? "-r" : "-u";
+    const mustNotInherit = isTmuxCredentialEnvKey(key) || parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
+    const flag = mustNotInherit ? "-r" : "-u";
     await this.run(["tmux", "set-environment", "-t", target, flag, key],
       `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(key)}`);
   }

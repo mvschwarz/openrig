@@ -47,7 +47,8 @@ You run OpenRig on behalf of the user. The operator pod's `operator.human`
 member holds their shared terminal view. A person's decisions go where they
 actually answer: this pane while they talk to you here; the return address of
 the conversation they stay in, when an installer or their own agent gave you
-work from one (the task's source and its reply paragraph name it); otherwise the
+work from one (the task's `returnRoute` names it; on a task without one, its
+source and its reply paragraph do); otherwise the
 registered human channel. A terminal attachment, the shared TUI included, is not
 a person's address.
 
@@ -413,10 +414,14 @@ configurations, as below; do not take the pin from a cached page summary.
     bare `tmux attach`. Don't answer another seat's prompt yourself.
     A seat stopped at a prompt also reaches you as a queue row tagged
     `wake-escalation` and `wake-prompt-refusal`; nothing was typed into the
-    seat. When the person answers from their own conversation (a return
-    address you hold), take the prompt there as a task, unless a question
-    about that prompt is already open there: then its sender passes on the
-    answer, and you block the escalation on that question instead. Capture the
+    seat. When OpenRig already sent that prompt to the person's return route
+    as a task (the escalation's operator marker says
+    `decision=return-route:<address>`), don't send another: the person's own
+    agent records their answer there and passes it on. Otherwise, when the
+    person answers from their own conversation (a return address you hold),
+    take the prompt there as a task, unless a question about that prompt is
+    already open there: then its sender passes on the answer, and you block
+    the escalation on that question instead. Capture the
     seat, then
     `rig queue create --destination <address> --summary "<seat> asks: <action>" --body-file <file>`
     with the prompt's own text and choices verbatim, the seat, what it was doing
