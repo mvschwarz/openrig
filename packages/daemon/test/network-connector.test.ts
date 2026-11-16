@@ -129,7 +129,7 @@ describe("network connector", () => {
     // After the requester's words: what goes back to them, that sharing instructions apply, and how to answer, in that order.
     const after = local!.body!.split("\n---\n")[1]!.split("\n");
     expect(after).toEqual([
-      "The requester gets back only this item's progress (queued, picked up, or an outcome that isn't known) and your answer. Nothing else from here goes to the hub: no other notes, items or files.",
+      "The requester gets back only this item's progress (queued, picked up, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. Nothing else from here goes to the hub: no other notes, items or files.",
       "Put in your answer only what this seat's sharing instructions allow.",
       `Answer by closing this item with your result: rig queue update ${local!.qitemId} --state done --closure-reason no-follow-on --resolution "<your answer>".`,
       "OpenRig returns the resolution to the hub item.",

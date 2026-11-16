@@ -148,16 +148,18 @@ function readRosterFile(file: string): Roster {
   } finally { if (fd !== undefined) closeSync(fd); }
 }
 
-export function readRosters(folder: string): { rosters: Roster[]; warnings: string[] } {
-  const rosters: Roster[] = [], warnings: string[] = [];
+/** The rosters in file-name order, each with its file (`files[i]` is `rosters[i]`'s), and the files that couldn't be read,
+ *  so a caller that takes the first roster's entry can tell when an unread file came first. */
+export function readRosters(folder: string): { rosters: Roster[]; warnings: string[]; files: string[]; unreadable: string[] } {
+  const rosters: Roster[] = [], warnings: string[] = [], files: string[] = [], unreadable: string[] = [];
   let names: string[];
   try { names = readdirSync(folder).filter(n => n.endsWith(".json")).sort(); }
-  catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`] }; }
+  catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`], files, unreadable }; }
   for (const name of names) {
-    try { rosters.push(readRosterFile(join(folder, name))); }
-    catch (error) { warnings.push(`${name}: ${(error as Error).message}`); }
+    try { rosters.push(readRosterFile(join(folder, name))); files.push(name); }
+    catch (error) { warnings.push(`${name}: ${(error as Error).message}`); unreadable.push(name); }
   }
-  return { rosters, warnings };
+  return { rosters, warnings, files, unreadable };
 }
 
 /** The name a person knows a rig's team by: its network roster's (`network-<rig>.json`) authored `name`, or, when there's

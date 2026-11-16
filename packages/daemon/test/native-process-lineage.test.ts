@@ -485,6 +485,9 @@ describe("Claude identity with inline settings in ps output", () => {
     })],
     // #2508: a proxy that writes its settings with spaces between JSON members, as ps shows the argument.
     ["spaced JSON", '{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080", "ANTHROPIC_AUTH_TOKEN": "fixture"}}'],
+    // A seat's auto mode prose: spaces, braces, quotes and identity-shaped text stay inside the one value.
+    ["auto mode prose", operationalLaunchArgs("claude-code", { teamPermissionDefault: true, claudeAutoMode: { environment: ["$defaults",
+      "Routine: claude --resume different and --session-id different; braces {like} this, \"quotes\" and it's fine"] } })[1]!],
   ];
   function input(args: string) {
     const list = [
