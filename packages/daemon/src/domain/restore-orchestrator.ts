@@ -260,11 +260,13 @@ export interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. */
-  freshLaunch?: (rigId: string, nodeId: string) => Promise<{
+  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. #3253: the restore passes "recovery", so a
+   *  process limit that can't be applied doesn't stop the seat; the notice comes back in `processLimits`. */
+  freshLaunch?: (rigId: string, nodeId: string, opts?: { processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode }) => Promise<{
     status: "launched" | "failed" | "attention_required";
     error?: string;
     warnings?: string[];
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
   }>;
   /** Return whether a persisted fresh launch can be attempted without discarding the current pane. */
   freshLaunchAvailable?: (rigId: string, nodeId: string) => boolean;
@@ -1126,11 +1128,11 @@ export class RestoreOrchestrator {
    *  review), taken before any restore mutation: the seats kept attached to an external CLI, from their bindings (the
    *  record that makes restore leave them running, left_attached, instead of launching them), and, only when this
    *  restore would resume a seat with a recorded conversation it can pair (pairableConversation), ONE read of the node inventory of the listed rigs and
-   *  this rig (an archived rig's restore inclusive): this rig's seats' sessionStatus and the partners' records. A session
-   *  of this rig recorded running that classifyRunningSessions found stale (no tmux session) is named detached, the
-   *  status this restore gives it before it launches anything, so the report never calls it running. An inventory that
-   *  cannot be read leaves the partner comparison unavailable; this rig's own statuses then come from a read of this rig
-   *  alone ("unknown" when that fails too). */
+   *  this rig (an archived rig's restore inclusive): this rig's seats' sessionStatus and the partners' records. A seat of
+   *  this rig whose current session is recorded running and was found stale by classifyRunningSessions (no tmux session)
+   *  is named detached, the status this restore gives it before it launches anything, so the report never calls it
+   *  running. An inventory that cannot be read leaves the partner comparison unavailable; this rig's own statuses then
+   *  come from a read of this rig alone ("unknown" when that fails too). */
   private observeConversationRecords(rigId: string, data: SnapshotData, freshLogicalIds: string[] | undefined,
     currentRuntimes: Record<string, string | null | undefined>, staleSessionIds: readonly string[]): ConversationRecords {
     const attachedLogicalIds = (this.rigRepo.getRig(rigId)?.nodes ?? [])
@@ -1140,7 +1142,14 @@ export class RestoreOrchestrator {
       return { currentStatuses: {}, attachedLogicalIds, inventory: [] };
     }
     const staleIds = new Set(staleSessionIds);
-    const staleNodeIds = new Set(this.sessionRegistry.getSessionsForRig(rigId).filter((session) => staleIds.has(session.id)).map((session) => session.nodeId));
+    // An inventory entry is its node's newest session (node-inventory's ORDER BY id DESC). It is named detached only
+    // when that session is a stale one, not when an older session of the node is.
+    const newestByNode = new Map<string, string>();
+    for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
+      const newest = newestByNode.get(session.nodeId);
+      if (newest === undefined || session.id > newest) newestByNode.set(session.nodeId, session.id);
+    }
+    const staleNodeIds = new Set([...newestByNode].filter(([, sessionId]) => staleIds.has(sessionId)).map(([nodeId]) => nodeId));
     const labelled = (entry: NodeInventoryEntry): NodeInventoryEntry =>
       entry.rigId === rigId && entry.sessionStatus === "running" && staleNodeIds.has(entry.nodeId) ? { ...entry, sessionStatus: "detached" } : entry;
     const statusesOf = (entries: readonly NodeInventoryEntry[]) => Object.fromEntries(entries.map((entry) => [entry.logicalId, entry.sessionStatus ?? null]));
@@ -1564,6 +1573,9 @@ export class RestoreOrchestrator {
     const onSessionLaunched = opts?.onSessionLaunched;
     const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId, {
       ...launchOpts,
+      // #3253: a restore or resume is a recovery: nothing of the seat runs, so a limit that can't be applied doesn't stop
+      // it. It goes ahead with a structured warning, and the request stays stored for a fresh launch to apply.
+      processLimitsMode: "recovery",
       ...(selectedHistory ? { expectedNodeId: nodeId, beforeEffect: selectedHistory.beforeNative,
         beforeRegistration: selectedHistory.beforeRegistration } : {}),
       ...(savedStartup ? { pluginPaths: pluginPathsOf(savedStartup.projectionEntries) } : {}),
@@ -1600,7 +1612,9 @@ export class RestoreOrchestrator {
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
-      ...(keptPane ? { launchStarted: true as const } : {}) };
+      ...(keptPane ? { launchStarted: true as const } : {}),
+      // #3253: the provisional shell's notice, unless a replacement retired it and reported its own (the key is set).
+      ...(launchResult.processLimits && !("processLimits" in restored) ? { processLimits: launchResult.processLimits } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id,
       ...(compensation.ran ? { compensated: true as const } : {}) } : checked;
   }
@@ -2310,19 +2324,25 @@ export class RestoreOrchestrator {
             && candidate.status === "running"
             && candidate.id !== launchResult.session.id);
         try {
-          const fresh = await this.freshLaunch(rigId, node.id);
+          // #3253: this replaces the provisional shell of a restore, so it is a recovery too: a limit that can't be
+          // applied doesn't stop the seat, and its notice is the node's.
+          const fresh = await this.freshLaunch(rigId, node.id, { processLimitsMode: "recovery" });
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
+          // The replacement's own outcome, also when it applied the limit (no notice): the retired provisional shell's
+          // notice no longer describes the seat (the key is set either way, so the caller doesn't fall back to it).
+          const limits = { processLimits: fresh.processLimits };
           if (fresh.status === "launched") {
-            return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed" };
+            return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed", ...limits };
           }
           if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
-          return { nodeId: node.id, logicalId: node.logicalId, status: fresh.status, error: fresh.error };
+          return { nodeId: node.id, logicalId: node.logicalId, status: fresh.status, error: fresh.error, ...limits };
         } catch (err) {
           if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
           return {
             nodeId: node.id,
             logicalId: node.logicalId,
             status: "failed",
+            processLimits: undefined,
             error: `Fresh launch failed: ${(err as Error).message}`,
           };
         }

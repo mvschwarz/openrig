@@ -624,6 +624,25 @@ describe("selected-history startup", () => {
     expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: { home: "/homes/codex-b", revision: 5 } } });
   });
 
+  it("#3253: puts B's home back when the launch is refused for its limit before tmux made a terminal", async () => {
+    const { f, refs } = await appliedFixture("limits-refused");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.tmuxAdapter, "createSession").mockResolvedValue({ ok: false, code: "process_limits_setup", message: "fixture: not started",
+      retryable: false, processLimits: { kind: "setup", reason: "fixture" } });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+  });
+
+  it("#3253: a resume that went on without the seat's limit returns the notice", async () => {
+    const { f, refs } = await appliedFixture("limits-notice");
+    const { body } = await review({ ...f, refs });
+    const notice = { state: "not_applied" as const, kind: "unverified" as const, retryable: true, reason: "fixture: user manager timed out" };
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode").mockResolvedValue({ ok: false, launched: [{ nodeId: f.node.id,
+      logicalId: "desk.lead", status: "failed", error: "fixture: resume not confirmed", processLimits: notice }] });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ processLimits: notice });
+  });
+
   it("keeps the selected home when tmux can't confirm whether the terminal was created", async () => {
     const { f, refs } = await appliedFixture("unconfirmed-create");
     const { body } = await review({ ...f, refs });

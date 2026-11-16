@@ -7,7 +7,7 @@ import { resolveRegisteredHumanAddress } from "../human-registry.js";
 import { callWebApi, type FetchImpl, type WebApiResult } from "./slack-api.js";
 import { budgetLeft, HISTORY, REPLIES, MethodBackoff, newRecoveryBudget } from "./recovery-budget.js";
 import { parsePostedStamp } from "./thread-seat-map.js";
-import { TYPED_REPLY_HINT, CHANNEL_REPLY_HINT, HUMAN_REQUIRED_REPLY_HINT, QUESTION_BLOCK_PREFIX, escapeSlackText, redactSecrets } from "./message.js";
+import { TYPED_REPLY_HINT, CHANNEL_REPLY_HINT, HUMAN_REQUIRED_REPLY_HINT, QUESTION_BLOCK_PREFIX, recommendationLabel, escapeSlackText, redactSecrets } from "./message.js";
 
 const UPDATE = "chat.update";
 const EDITED = "slack-ask-settled";
@@ -34,7 +34,7 @@ function handledMessage(message: { text: string; blocks: Block[] }, status: stri
     if (block.type === "actions" && block.block_id?.startsWith(QUESTION_BLOCK_PREFIX)) {
       // The labels remain history after their controls disappear, as in the resolved-notice render.
       const buttons = block.elements as unknown as Array<{ text?: { text?: string }; style?: string }>;
-      return [{ type: "section", text: { type: "mrkdwn", text: buttons.map((b) => `• ${b.text?.text ?? ""}${b.style === "primary" ? " (recommended)" : ""}`).join("\n") } }];
+      return [{ type: "section", text: { type: "mrkdwn", text: buttons.map((b) => `• ${recommendationLabel(b.text?.text ?? "", b.style === "primary")}`).join("\n") } }];
     }
     const hint = block.type === "context" && block.elements?.length === 1 ? block.elements[0]?.text : undefined;
     if (!hint || !hints.has(hint)) return [block];
@@ -48,10 +48,11 @@ function handledMessage(message: { text: string; blocks: Block[] }, status: stri
 }
 
 function statusLine(t: QueueTransition, label?: string): string {
-  const what = label ?? (t.ownerNotificationKind === "human-decision-resolved" ? "Answered" : t.state === "done" ? "Done"
+  const what = label ?? (t.closureReason === "denied" ? "Denied"
+    : t.ownerNotificationKind === "human-decision-resolved" ? "Answered" : t.state === "done" ? "Done"
     : t.state === "canceled" ? "Canceled" : terminal.has(t.state) ? t.state : "Handled");
   const note = redactSecrets((t.transitionNote ?? "").replace(/\s+/g, " ")).slice(0, 1000);
-  return escapeSlackText([`${what}${t.closureReason ? ` · ${t.closureReason}` : ""}`, t.ts, `by ${t.actorSession}`, note].filter(Boolean).join(" · "));
+  return escapeSlackText([what, t.ts, `by ${t.actorSession}`, note].filter(Boolean).join(" · "));
 }
 
 export class SlackAskSettlement {

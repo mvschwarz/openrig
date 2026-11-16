@@ -1602,10 +1602,12 @@ export class WorkflowRuntime {
         [oldPacketId] = instance.currentFrontier;
         // Retried without --packet, the adoption selects its own successor. Only a queue handoff records handed_off_from
         // (route's own packets don't), so a selected packet that is the sole successor of a packet handed off to this
-        // same target, with that packet off the frontier, is that adoption again.
+        // same target, with that packet off the frontier, is that adoption again, unless the selected packet was itself
+        // handed off to this target since: then its own successor is the one to adopt, below.
         const selected = oldPacketId ? this.queueRepo.getById(oldPacketId) : null;
         const original = selected?.handedOffFrom ? handoffSuccessorOf(selected.handedOffFrom) : null;
-        if (original && original.successor.qitemId === oldPacketId && !instance.currentFrontier.includes(original.packet.qitemId)) {
+        if (original && original.successor.qitemId === oldPacketId && !instance.currentFrontier.includes(original.packet.qitemId)
+          && !handoffSuccessorOf(oldPacketId)) {
           adoptionReplay(original);
           return;
         }

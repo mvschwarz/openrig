@@ -177,9 +177,10 @@ commands; if the two ever differ, this step is right.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Hand it over by where the person will answer the team, from what they've already told you:
   - **They stay here** (they said so, or they can't use the operator's pane): hand the goal over as a task with a
-    return route ("If the person stays with you" below), so the team's questions, its seats' prompts and the result
-    come back to you. Tell them in a line that for this goal these come here ahead of a Slack connection they've
-    registered; their other work doesn't change. Don't tell the operator they'll answer in its pane.
+    return route ("If the person stays with you" below), giving the operator your return address for the team's questions and
+    result. A seat's prompt may still not reach this conversation. Tell them in a line that this goal's route selects
+    this conversation ahead of a Slack connection they've registered; their other work doesn't change. Don't tell
+    the operator they'll answer in its pane.
   - **They'll talk to the operator in its pane:** find the `operator.agent` row in `rig ps --nodes --rig kernel --json`,
     take its `canonicalSessionName` (never the logical ID or a guessed name) and send:
     `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
@@ -236,12 +237,13 @@ commands; if the two ever differ, this step is right.
     Then run
     `rig queue create --destination <canonicalSessionName> --return-route auto --summary "<the goal in a sentence>" --body-file <file> --verify`
     (if this session joined, `--return-route self` with your `OPENRIG_SESSION_NAME` in front). It prints
-    `Return route: <address>`: that's your address from now on. The goal's handoffs carry it, and a seat that stops at a
-    prompt in this work reaches you there as a task. Tell the person the task ID it prints, and keep the goal, your
-    address and that ID: they're how you find this work again. If the outcome is unknown, repeat the same command with
+    `Return route: <address>`: that's your address from now on. The goal's handoffs carry it. Bring a seat's prompt in
+    this work to this address as a task; it may still not reach you by itself, so check the seats when the person is
+    waiting. Tell the person the task ID it prints, and keep the goal, your address and that ID: they're how you find
+    this work again. If the outcome is unknown, repeat the same command with
     `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
     same address.
-  - **The team's questions** come to your address as tasks:
+  - **When a question arrives at your address as a task,** list the pending work with
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
     tell you, a condition included ("yes, but only on a branch"): claim it, then
@@ -286,8 +288,8 @@ commands; if the two ever differ, this step is right.
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
   read it with `rig capture <seat>@<rig>`.
-- **Seat permission prompts come to the person here, as questions, for as long as the team works,** whether you or
-  the operator started it, and whether or not they joined. This is the default, not a fallback. A permission prompt
+- **Bring seat permission prompts to the person here, as questions, for as long as the team works,** whether you or
+  the operator started it, and whether or not they joined. This is your default responsibility, not a fallback. A permission prompt
   is the person's to answer: they decide, which doesn't mean they type it into the seat's pane, so don't decline to
   relay it. After each step you hand off, and before you report progress, check `rig ps --nodes --rig <rig>` for a
   seat stopped at a prompt, and repeat that check while you wait for a seat's result, so a prompt that appears after

@@ -665,6 +665,51 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(alive.has(adoptedName)).toBe(true);
   });
 
+  it("#3253: an explicit fresh --stop whose process limit can't be applied refuses before anything is stopped", async () => {
+    const live = seedSeat();
+    const plan = vi.fn(async () => ({ state: "not_applied" as const, kind: "unverified" as const, retryable: true,
+      reason: "asking the systemd user manager timed out", requested: { tasksMax: 256 } }));
+    (tmux as unknown as { seatProcessLimitsRecoveryPlan: typeof plan }).seatProcessLimitsRecoveryPlan = plan;
+    const result = await service.launchFresh({ seatRef: live.sessionName, fresh: true, stop: true, reason: "x" });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true,
+      processLimits: { kind: "unverified", reason: "asking the systemd user manager timed out", requested: { tasksMax: 256 } },
+      message: expect.stringMatching(/^Nothing was stopped or cleaned: .*timed out.*retry/) });
+    expect(plan).toHaveBeenCalledWith(live.node.id);
+    expect(killed).toEqual([]);
+    expect(alive.has(live.sessionName)).toBe(true);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("#3253: an explicit fresh of a stopped seat refuses before clean or supersede", async () => {
+    const stopped = seedSeat();
+    sessionRegistry.updateStatus(stopped.session!.id, "exited");
+    alive.delete(stopped.sessionName);
+    livePanes.delete(stopped.sessionName);
+    const plan = vi.fn(async () => ({ state: "not_applied" as const, kind: "setup" as const, retryable: false,
+      reason: "this daemon gives seats no launch environment", requested: { tasksMax: 256 } }));
+    (tmux as unknown as { seatProcessLimitsRecoveryPlan: typeof plan }).seatProcessLimitsRecoveryPlan = plan;
+    const before = db.serialize();
+    const result = await service.launchFresh({ seatRef: stopped.sessionName, fresh: true, reason: "x" });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_setup", retryable: false,
+      processLimits: { kind: "setup", reason: "this daemon gives seats no launch environment" } });
+    expect(result).not.toHaveProperty("processLimits.state");
+    expect(db.serialize()).toEqual(before);
+    expect(sessionRegistry.getBindingForNode(stopped.node.id)).not.toBeNull();
+    expect(tmux.probeSession).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("#3253: a launch refused for its limit after the plan passed keeps its process_limits code", async () => {
+    const seat = seedSeat({ clean: true });
+    (tmux as unknown as { seatProcessLimitsRecoveryPlan: () => Promise<null> }).seatProcessLimitsRecoveryPlan = async () => null;
+    const problem = { kind: "unverified" as const, reason: "the seat's scope start was not confirmed in time", requested: { tasksMax: 256 } };
+    (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: false as const, code: "process_limits_unverified",
+      message: "not started", retryable: true, processLimits: problem });
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", message: "not started", retryable: true,
+      processLimits: problem });
+  });
+
   it("checks historical occupants before stopping the current managed seat", async () => {
     const seat = seedSeat({ clean: true });
     const historical = sessionRegistry.registerSession(seat.node.id, "old-impl@fresh-rig");

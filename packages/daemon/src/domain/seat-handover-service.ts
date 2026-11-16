@@ -175,6 +175,8 @@ export interface SeatHandoverMutationResult {
   startedWithoutRequired?: string[];
   /** What the successor was told on taking the seat: its held messages, which are never replayed (#2431). */
   warnings?: string[];
+  /** #3253: the handover went ahead without the seat's requested process limit (the request stays stored). */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). Nothing was typed into
    *  its pane; a context or priming packet the failed handover didn't deliver was not delivered either. */
   recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
@@ -186,9 +188,13 @@ export type SeatHandoverResult =
   | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented" | "source_not_supported" | "resume_token_unavailable" | "fork_source_not_found"; message: string; guidance: string }
   | { ok: false; code: "address_conflict" | "current_occupant_required" | "discovered_not_active" | "successor_tmux_absent" | "successor_already_managed" | "successor_is_current" | "runtime_mismatch"; message: string; guidance: string }
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
-  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string }
+  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string;
+    /** #3253: the successor went on without the seat's requested process limit before the failure. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
   // #2985: once the successor was launched in the respawned pane, the failure says so and names the pane.
-  | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string }
+  | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string;
+    /** #3253: the respawned pane went on without the seat's requested process limit before the failure. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
   // #2985: `--recover` found nothing to adopt, or could not prove the pane's process is the failed handover's successor.
   | { ok: false; code: "no_handover_to_recover" | "handover_attempt_superseded" | "successor_identity_unproven" | "recover_runtime_unsupported"; message: string; guidance: string }
   | Extract<SeatStatusResult, { ok: false }>;
@@ -678,6 +684,8 @@ export class SeatHandoverService {
       },
     });
     if (!launch.ok) {
+      // #3253: a respawn that went on without the seat's limit says so in the failure too.
+      const limitsFailure = launch.processLimits ? { processLimits: launch.processLimits } : {};
       // #2985: the harness was launched into the respawned pane and only readiness failed. The previous occupant is
       // already ended and the successor may come up (or already be working) there, but the handover never commits,
       // so its generation is never registered. Retrying the handover would end it, so the guidance says what may be
@@ -703,9 +711,10 @@ export class SeatHandoverService {
           message: `Handover failed at step "${launch.step}": ${launch.message}`,
           replacementStarted: true,
           ...(launch.tmuxPane ? { successorPane: launch.tmuxPane } : {}),
-          guidance: recorded
+          ...limitsFailure,
+          guidance: (recorded
             ? `${this.recoverLine(quoted)} ${unadoptedNote}`
-            : unadoptedNote,
+            : unadoptedNote),
         };
       }
       return {
@@ -715,9 +724,10 @@ export class SeatHandoverService {
         // The registry binding is unchanged (commit never ran). A resolve_pane failure leaves the live
         // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
-        guidance: launch.code === "successor_preflight_failed"
+        ...limitsFailure,
+        guidance: (launch.code === "successor_preflight_failed"
           ? `The predecessor is still running and its binding is unchanged. ${launch.message}`
-          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
+          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry."),
       };
     }
 
@@ -769,6 +779,7 @@ export class SeatHandoverService {
           ok: false,
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-restore-packet": ${delivered.message}`,
+          ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
           guidance: recorded
             ? `${this.recoverLine(shellQuote(latestSession.session_name))} The successor candidate was unwound and the seat's binding is unchanged. The successor is live in pane "${launch.tmuxPane}" without its restore packet; ${NO_RETRY}`
             : "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
@@ -852,6 +863,7 @@ export class SeatHandoverService {
           ok: false,
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-rebuild-priming": ${delivered.message}`,
+          ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
           guidance: recorded
             ? `${this.recoverLine(shellQuote(latestSession.session_name))} The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; ${NO_RETRY}`
             : "The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; retry only after tmux delivery is healthy.",
@@ -888,6 +900,7 @@ export class SeatHandoverService {
       launchAdditionNotes,
       startedWithoutRequired,
       launchWarnings: [...coreCopyNotes, ...(launch.warnings ?? [])],
+      ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
       // #2861 item 2: finalization can still fail once the successor is ready in the respawned pane.
       recordFailure: (failureCode) => RECOVERABLE_FINALIZE_CODES.has(failureCode) && this.recordUnadoptedSuccessor({ node,
@@ -1361,14 +1374,18 @@ export class SeatHandoverService {
     startedWithoutRequired?: string[];
     /** #2426: what the successor's preparation named, as a launch's warnings (what became of openrig-core's earlier copies). */
     launchWarnings?: string[];
+    /** #3253: the launch went ahead without the seat's requested process limit. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
     cleanup: (() => Promise<void>) | null;
     /** #2861 item 2: records the failed attempt of a composer-launched successor (returns whether it was recorded). */
     recordFailure?: (failureCode: string) => boolean;
     /** #2985: this finalization adopts the running successor of a failed handover (`--recover`). */
     recovered?: { attempt: SeatHandoverAttempt; continuity?: "resumed"; conversationUnconfirmed?: string };
   }): Promise<SeatHandoverResult> {
-    const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
+    const fail = async (refused: SeatHandoverResult): Promise<SeatHandoverResult> => {
       if (input.cleanup) await input.cleanup();
+      // #3253: a successor that went on without the seat's limit says so, also when its finalization fails.
+      const result = !refused.ok && input.processLimits ? { ...refused, processLimits: input.processLimits } as SeatHandoverResult : refused;
       if (!result.ok && input.recordFailure?.(result.code) && "guidance" in result) {
         // #3044 review S6: the refusal's own guidance (retry, or discovered-source advice) would end the running
         // successor; the message already says what refused, so the recovery leads.
@@ -1512,6 +1529,7 @@ export class SeatHandoverService {
     }
     // #2426: the successor's preparation is named on the result, as a launch names it.
     if (input.launchWarnings?.length && "result" in committed) committed.result.warnings = [...(committed.result.warnings ?? []), ...input.launchWarnings];
+    if (input.processLimits && "result" in committed) committed.result.processLimits = input.processLimits;
     return committed;
   }
 
