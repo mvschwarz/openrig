@@ -468,11 +468,13 @@ export class RestoreOrchestrator {
       const liveNodes = this.rigRepo.getRig(rigId)?.nodes ?? [];
       const liveNodeIds = new Set(liveNodes.map((current) => current.id));
       const snapshotNodeIds = new Set(snapshot.data.nodes.map((node) => node.id));
+      const intendedLiveIds = new Set(liveNodes.filter(current => topology.intendedRoster.some(intended => intended.logicalId === current.logicalId))
+        .map(current => current.id));
       const narrowedRoster = snapshot.data.topologyRoster?.source === "operator_explicit";
       const excludedNodes: RestoreExcludedNode[] = [
         ...topology.excludedNodes.map((excluded) => !narrowedRoster && liveNodeIds.has(excluded.nodeId)
           ? { ...excluded, reason: "current_seat_not_in_intended_roster" as const } : excluded),
-        ...(narrowedRoster ? [] : liveNodes.filter((current) => !snapshotNodeIds.has(current.id)).map((current) => ({
+        ...(narrowedRoster ? [] : liveNodes.filter((current) => !snapshotNodeIds.has(current.id) && !intendedLiveIds.has(current.id)).map((current) => ({
           nodeId: current.id, logicalId: current.logicalId, reason: "current_seat_not_in_intended_roster" as const,
         }))),
       ];
@@ -1517,6 +1519,7 @@ export class RestoreOrchestrator {
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
     // Saved inputs stay keyed by the snapshot; the result names the seat that the launcher actually registered.
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings), nodeId: launchResult.session.nodeId,
+      ...(launchResult.session.nodeId !== node.id ? { intendedNodeId: node.id } : {}),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id,

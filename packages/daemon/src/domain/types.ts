@@ -582,6 +582,8 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** Saved intended seat when this attempt launched a recreated node; nodeId names the registered current node. */
+  intendedNodeId?: string;
   /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
   stage?: "harness_not_started";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */

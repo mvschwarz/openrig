@@ -49,6 +49,8 @@ import type { StartupOrchestrator } from "../src/domain/startup-orchestrator.js"
 import { createHash } from "node:crypto";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { noticeHarnessNotStarted } from "../src/domain/harness-not-started-notice.js";
+import { deriveRestoreAttemptReceipt } from "../src/domain/restore-attempt-receipt.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 
@@ -3045,6 +3047,30 @@ describe("RestoreOrchestrator", () => {
     expect(notice.body).toContain(`- ${shell.sessionName}: Harness not started: no startup context for dev.moved.`);
     expect(snapshotRepo.getSnapshot(snap.id)!.data.nodes[0]!.id).toBe(savedNode.id);
     expect(adapter.launchHarness).not.toHaveBeenCalled();
+
+    const attempt = db.prepare("SELECT seq FROM events WHERE type = 'restore.started' AND rig_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(snap.rigId) as { seq: number };
+    const receipt = deriveRestoreAttemptReceipt(db, snap.rigId, attempt.seq);
+    expect(receipt.ok).toBe(true);
+    if (!receipt.ok) return;
+    expect(receipt.currentNodes).toEqual([expect.objectContaining({ nodeId: current.id, status: "attention_required" })]);
+    expect(receipt.intendedRoster).toEqual([{ nodeId: savedNode.id, logicalId: "dev.moved" }]);
+    expect(result.result.nodes[0]).toMatchObject({ intendedNodeId: savedNode.id, nodeId: current.id });
+    expect(receipt.excludedNodes.some(node => node.nodeId === current.id)).toBe(false);
+    expect(result.result.warnings.some(warning => warning.includes("dev.moved was skipped"))).toBe(false);
+
+    const recover = (attemptId: number) => eventBus.emit({ type: "restore.outcome_reconciled", rigId: snap.rigId,
+      nodeId: current.id, attemptId, from: "attention_required", to: "operator_recovered",
+      evidence: { tmux: true, fgProcess: "claude", resumeTokenUsed: true, paneState: "usable" } });
+    recover(attempt.seq + 999);
+    expect(getNodeInventory(db, snap.rigId).find(node => node.nodeId === current.id)?.continuityOutcome).toBeNull();
+    recover(attempt.seq);
+    const recovered = deriveRestoreAttemptReceipt(db, snap.rigId, attempt.seq);
+    expect(recovered.ok && recovered.currentNodes).toEqual([expect.objectContaining({ nodeId: current.id, status: "operator_recovered" })]);
+    expect(recovered.ok && recovered.reconciliations).toHaveLength(1);
+    expect(recovered.ok && recovered.unresolvedIntendedSeats).toEqual([]);
+    expect(getNodeInventory(db, snap.rigId).find(node => node.nodeId === current.id))
+      .toMatchObject({ restoreOutcome: "operator_recovered", continuityOutcome: "resumed" });
   });
 
   it("carries a partial notice report, and its warnings join the restore's", async () => {
