@@ -352,7 +352,9 @@ describe("Starter specs", () => {
     const role = readFileSync(join(SPECS_ROOT, "rigs/launch/kernel/agents/operator/agent/guidance/role.md"), "utf-8").replace(/\s+/g, " ");
 
     expect(role).toContain("A registered person who writes to you (a row from their `<id>@external` address, however it reached you) is one of the people you work for.");
-    expect(role).toContain("You don't need the terminal user's leave to answer them: `@external` marks a registered person, not an outsider.");
+    expect(role).toContain("You don't need the terminal user's leave to answer them. Their registered address doesn't make them an outsider.");
+    // An @external address alone doesn't name a registered person: a shared channel's unregistered writer has one too.
+    expect(role).not.toContain("`@external` marks a registered person");
     expect(role).toContain("Actions at the hard lines (credentials, destructive deletes, money, publishing) still stop and ask about the action.");
     // The decision-routing lines stay as they were.
     expect(role).toContain("A person's decisions go where they actually answer: this pane while they talk to you here;");
