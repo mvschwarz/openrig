@@ -404,9 +404,15 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     const h = makeAdapter({ limits: { "node-a": 256 }, printed: "" });
     h.adapter.probeSession = async () => { throw new Error("no server running on /tmp/tmux-1000/default"); };
     const result = await h.adapter.createSession("impl-a@demo", "/work", A);
-    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false, processLimits: { possiblyRunning: true } });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false,
+      processLimits: { possiblyRunning: true, commandStarted: "unknown" } });
     expect((result as { message: string }).message).toContain("kill-session -t '=impl-a@demo'");
     expect(h.tmuxCalls("kill-session")).toEqual([]);
+    // a recovery never stops for the limit: the same window stays the plain session_unconfirmed
+    const recovery = makeAdapter({ limits: { "node-a": 256 }, printed: "" });
+    recovery.adapter.probeSession = async () => { throw new Error("no server running on /tmp/tmux-1000/default"); };
+    expect(await recovery.adapter.createSession("impl-a@demo", "/work", A, { processLimitsMode: "recovery" }))
+      .toMatchObject({ ok: false, code: "session_unconfirmed" });
     // positively absent: still the plain session_not_created
     const gone = makeAdapter({ limits: { "node-a": 256 }, printed: "" });
     gone.adapter.probeSession = async () => ({ state: "absent" as const });

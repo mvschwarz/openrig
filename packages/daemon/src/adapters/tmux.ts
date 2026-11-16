@@ -1799,9 +1799,10 @@ export class TmuxAdapter {
       const unconfirmed = await this.sessionUnconfirmedAfterCreate(name);
       // #3253: a capped launch whose session can't be read back may be running uncapped: the possibly-running refusal
       // (no retry, how to look and stop it). A session positively absent stays session_not_created.
-      if (unconfirmed?.code === "session_unconfirmed" && notices.capped) {
+      // Only a fresh launch: a recovery never stops for the limit, and keeps the plain session_unconfirmed.
+      if (unconfirmed?.code === "session_unconfirmed" && notices.capped && launchOpts?.processLimitsMode !== "recovery") {
         if (notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
-        return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied({ kind: "unverified",
+        return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied({ kind: "unverified", commandStarted: "unknown",
           ...(notices.tasksMax !== undefined ? { requested: { tasksMax: notices.tasksMax } } : {}),
           reason: `tmux printed no pane for the launch and its session couldn't be read back (${unconfirmed.message})` }),
           await this.removeRefusedSession(name, null));
