@@ -221,12 +221,34 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       kind: "overdue-claim", findingQitemId: prior.qitemId, action: "refreshed",
     }));
     const current = repo.getById(prior.qitemId)!;
-    expect(current.summary).toContain("Stuck sweep: overdue-claim");
+    expect(current.summary).toMatch(new RegExp(`^Checked on ${row.qitemId}: it was picked up and is past its close-by time \\(\\d+ minutes?\\)$`));
     expect(current.body).toMatch(/^STUCK SWEEP FINDING \(overdue-claim\)/);
     expect(current.body).toContain(`--- Original finding (historical) ---\n${prior.body}`);
     await runSweep();
     expect(repo.getById(prior.qitemId)!.body).toBe(current.body);
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("recognizes a finding an earlier version titled \"Stuck sweep: <kind> on <id>\", and rewrites it in place, not again", async () => {
+    for (const keepKindLine of [true, false]) {
+      const row = await mkRow();
+      repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+      ageClaim(row.qitemId, 60);
+      await runSweep();
+      const prior = (await findingsFor(row.qitemId))[0]!;
+      // As an earlier version left it on a running install: the old title, and its evidence with or without the kind line.
+      const oldBody = keepKindLine ? prior.body : prior.body.replace(/^STUCK SWEEP FINDING \(stalled-after-claim\)\n/, "");
+      db.prepare("UPDATE queue_items SET summary = ?, body = ? WHERE qitem_id = ?")
+        .run(`Stuck sweep: stalled-after-claim on ${row.qitemId} (60 min)`, oldBody, prior.qitemId);
+      makeOverdue(row.qitemId);
+      await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed work" });
+      const result = await runSweep();
+      expect(result.result.findings).toContainEqual(expect.objectContaining({ kind: "overdue-claim", findingQitemId: prior.qitemId, action: "refreshed" }));
+      const current = repo.getById(prior.qitemId)!;
+      expect(current.summary, String(keepKindLine)).toMatch(new RegExp(`^Checked on ${row.qitemId}: it was picked up and is past its close-by time`));
+      expect(current.body).toMatch(/^STUCK SWEEP FINDING \(overdue-claim\)/);
+      expect(await findingsFor(row.qitemId)).toHaveLength(1);
+    }
   });
 
   it("does not rewrite a recovery presenting an unrelated finding kind", async () => {
@@ -235,12 +257,14 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     ageClaim(row.qitemId, 60);
     await runSweep();
     const prior = (await findingsFor(row.qitemId))[0]!;
-    const otherSummary = `Stuck sweep: undelivered-wake on ${row.qitemId} (60 min)`;
-    db.prepare("UPDATE queue_items SET summary = ? WHERE qitem_id = ?").run(otherSummary, prior.qitemId);
+    // The kind a finding presents is its body's first line; its title follows it.
+    const otherSummary = `Checked on ${row.qitemId}: its owner couldn't be woken (60 minutes)`;
+    const otherBody = prior.body.replace("STUCK SWEEP FINDING (stalled-after-claim)", "STUCK SWEEP FINDING (undelivered-wake)");
+    db.prepare("UPDATE queue_items SET summary = ?, body = ? WHERE qitem_id = ?").run(otherSummary, otherBody, prior.qitemId);
     makeOverdue(row.qitemId);
     await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed work" });
     await runSweep();
-    expect(repo.getById(prior.qitemId)).toMatchObject({ summary: otherSummary, body: prior.body });
+    expect(repo.getById(prior.qitemId)).toMatchObject({ summary: otherSummary, body: otherBody });
   });
 
   it("#2278 keeps a local human decision on the attention surface without a false failed-wake finding", async () => {
@@ -991,7 +1015,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(repo.getById(row.qitemId)!.pickup?.state).toBe("stalled-after-claim");
     await runSweep();
     const [finding] = await findingsFor(row.qitemId);
-    expect(finding!.summary).toBe(`Stuck sweep: stalled-after-claim on ${row.qitemId} (20 min)`);
+    expect(finding!.summary).toBe(`Checked on ${row.qitemId}: it stalled after it was picked up (20 minutes)`);
     expect(finding!.body).toContain("\nage: 20 min\n");
     expect(finding!.body).toContain("no meaningful queue change for 20 min");
   });
@@ -1002,7 +1026,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     ageClaim(row.qitemId, 30 + 40 / 60);
     await runSweep();
     const [finding] = await findingsFor(row.qitemId);
-    expect(finding!.summary).toBe(`Stuck sweep: stalled-after-claim on ${row.qitemId} (30 min)`);
+    expect(finding!.summary).toBe(`Checked on ${row.qitemId}: it stalled after it was picked up (30 minutes)`);
     expect(finding!.body).toContain("\nage: 30 min\n");
     expect(finding!.body).toMatch(/why: (claimed|no meaningful queue change for) 30 min/);
   });
@@ -2786,7 +2810,8 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
       if (current) expect(next).toMatchObject({ qitemId: current.qitemId, state: current.state,
         destinationSession: current.destinationSession, body: current.body, summary: current.summary });
       current = next;
-      expect.soft(current.summary, `delivery pass ${pass}: current condition is visible`).toContain("undelivered-human-notice");
+      expect.soft(current.body, `delivery pass ${pass}: current condition is visible`).toMatch(/^STUCK SWEEP FINDING \(undelivered-human-notice\)/);
+      expect.soft(current.summary, `delivery pass ${pass}: its title says so`).toMatch(new RegExp(`^Checked on ${row.qitemId}: the person it's for wasn't notified \\(\\d+ minutes?\\)$`));
       expect.soft(current.body, `delivery pass ${pass}: current recipient and failure are visible`)
         .toContain(`human notice ${outcome} to ${destination}`);
       expect(repo.getById(row.qitemId)!.waiting!.nextBackstop).toMatchObject({ owner: current.destinationSession,

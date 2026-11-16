@@ -118,6 +118,33 @@ export function findingDedupTag(kind: StuckFindingKind, qitemId: string): string
   return `stuck-sweep:${kind}:${qitemId}`;
 }
 
+/** A finding's title, written for the person whose work list shows it; an agent reads it too, so it names the item. Code
+ *  reads the kind from the dedup tag and the body's first line (`STUCK SWEEP FINDING (<kind>)`), never from this. */
+export function findingTitle(kind: StuckFindingKind, rowId: string, ageMinutes: number): string {
+  const minutes = `${ageMinutes} ${ageMinutes === 1 ? "minute" : "minutes"}`;
+  switch (kind) {
+    case "unclaimed-obligation": return `Checked on ${rowId}: nobody has picked it up in ${minutes}`;
+    case "stalled-after-claim": return `Checked on ${rowId}: it stalled after it was picked up (${minutes})`;
+    case "overdue-claim": return `Checked on ${rowId}: it was picked up and is past its close-by time (${minutes})`;
+    case "parked-owner-no-input": return `Checked on ${rowId}: its parked owner couldn't be reminded (${minutes})`;
+    case "unconsumed-wait": return `Checked on ${rowId}: its owner hasn't answered the wait notice (${minutes})`;
+    case "undelivered-wake": return `Checked on ${rowId}: its owner couldn't be woken (${minutes})`;
+    case "undelivered-human-notice": return `Checked on ${rowId}: the person it's for wasn't notified (${minutes})`;
+    case "dangling-closure": return `Checked on ${rowId}: it was closed onto a successor that isn't here (${minutes})`;
+    case "unclaimed-backlog": return `Checked on ${rowId}: nobody has picked it up in ${minutes}`;
+  }
+}
+
+/** A standing notice's title: whose work, and how many items nobody has picked up. */
+function backlogTitle(whose: string, count: number): string {
+  return `Checked on ${whose}: ${count} ${count === 1 ? "item" : "items"} nobody has picked up`;
+}
+
+/** The kind a finding row presents: its body's first line, else (a row written before the titles changed) its title. */
+function findingKindOf(row: QueueItem): string | undefined {
+  return row.body.match(/^STUCK SWEEP FINDING \(([a-z-]+)\)/)?.[1] ?? row.summary?.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
+}
+
 /** Idempotency key of a seat's standing unclaimed-backlog notice: one open notice per seat. */
 export function unclaimedBacklogTag(seat: string): string {
   return `stuck-sweep:unclaimed-backlog:${seat}`;
@@ -639,7 +666,7 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
   const { sorted, listed, count } = backlogListing(rows);
   const edge = node ? `rig edge add ${node.rig} ${node.logicalId} <watching seat> --kind escalates_to` : "an escalates_to edge from this seat";
   return {
-    summary: `Stuck sweep: unclaimed-backlog on ${seat} (${count})`,
+    summary: backlogTitle(`${seat}'s work`, rows.length),
     body:
       `STUCK SWEEP FINDING (unclaimed-backlog)\n` +
       `seat: ${seat}\n` +
@@ -660,7 +687,7 @@ function unclaimedBacklogText(seat: string, rows: BacklogRow[], thresholdMinutes
 function parentBacklogText(child: string, parent: string, rows: BacklogRow[], thresholdMinutes: number, routedHere: boolean): { summary: string; body: string } {
   const { sorted, listed, count } = backlogListing(rows);
   return {
-    summary: `Stuck sweep: unclaimed-backlog on ${child}, for its delegation parent ${parent} (${count})`,
+    summary: backlogTitle(`${child}'s work, for its delegation parent ${parent}`, rows.length),
     body:
       `STUCK SWEEP FINDING (unclaimed-backlog)\n` +
       `parent: ${parent}\n` +
@@ -715,7 +742,7 @@ function polledBacklogText(member: string, rows: BacklogRow[], thresholdMinutes:
         ? "nobody has claimed these rows, and whether it's reading its queue isn't known. Ask its owner, or route the work to another seat"
         : "nobody has claimed these rows, and no read of its own inbox has been observed in that time. Ask its owner to check it's running, or route the work to another seat";
   return {
-    summary: `Stuck sweep: unclaimed-backlog on ${member} (${count})`,
+    summary: backlogTitle(`${member}'s work`, rows.length),
     body:
       `STUCK SWEEP FINDING (unclaimed-backlog)\n` +
       `member: ${member} (a hosted member with no wake trigger: it picks up work when it reads its own queue)\n` +
@@ -1517,8 +1544,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         // the current reason when a different condition now owns this recovery.
         // Only the sweep's own findings are mutable here; other recovery rows
         // can share custody and must retain their author's text.
-        if (sharedRow && isFindingRow(sharedRow) && sharedRow.summary?.startsWith("Stuck sweep: ")) {
-          const currentKind = sharedRow.summary.match(/^Stuck sweep: ([a-z-]+) on /)?.[1];
+        if (sharedRow && isFindingRow(sharedRow)) {
+          const currentKind = findingKindOf(sharedRow);
           const pickupOrDeadline = (kind: string) => kind === "stalled-after-claim" || kind === "overdue-claim";
           const humanUpdateNotice = currentKind === "unclaimed-obligation"
             && c.kind === "undelivered-human-notice"
@@ -1528,7 +1555,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             const marker = "\n\n--- Original finding (historical) ---\n";
             const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
             const body = evidenceBody(deps.db, c) + marker + original;
-            const summary = `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`;
+            const summary = findingTitle(c.kind, c.row.qitemId, c.ageMinutes);
             deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary = ? AND state IN ('pending', 'in-progress', 'blocked')")
               .run(body, summary, shared.qitemId, sharedRow.body, sharedRow.summary);
           }
@@ -1573,7 +1600,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           body: evidenceBody(deps.db, now_) + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
           summary: now_.verificationTargets
             ? custodyHeadline(c.row.qitemId, now_.verificationTargets, now_.ageMinutes)
-            : `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${now_.ageMinutes} min)`,
+            : findingTitle(c.kind, c.row.qitemId, now_.ageMinutes),
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId),
             ...(routed.has(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : []),

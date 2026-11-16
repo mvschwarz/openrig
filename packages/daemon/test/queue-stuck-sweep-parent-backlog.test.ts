@@ -77,7 +77,7 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     expect(filed).toHaveLength(2);
     const notice = filed.find((f) => f.tags?.includes(parentBacklogTag("owner@lane", "dev1@lane")))!;
     expect(notice).toMatchObject({ state: "pending", sourceSession: "dev1@lane",
-      summary: "Stuck sweep: unclaimed-backlog on dev1@lane, for its delegation parent owner@lane (3 rows)" });
+      summary: "Checked on dev1@lane's work, for its delegation parent owner@lane: 3 items nobody has picked up" });
     for (const row of one) expect(notice.body).toContain(row.qitemId);
     expect(notice.body).not.toContain(two.qitemId);
     expect(notice.body).toContain("parent: owner@lane");
@@ -95,7 +95,7 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     const after = findingsTo("owner@lane").filter((f) => f.tags?.includes(parentBacklogTag("owner@lane", "dev1@lane")));
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ qitemId: notice.qitemId, state: "pending",
-      summary: "Stuck sweep: unclaimed-backlog on dev1@lane, for its delegation parent owner@lane (4 rows)" });
+      summary: "Checked on dev1@lane's work, for its delegation parent owner@lane: 4 items nobody has picked up" });
     expect(after[0]!.body).toContain(fourth.qitemId);
     expect(after[0]!.lastNudgeAttempt).toBe(wakeBefore);
   });
@@ -118,7 +118,7 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     queue.claim({ qitemId: a.qitemId, destinationSession: "dev1@lane" });
     queue.update({ qitemId: b.qitemId, actorSession: "dev1@lane", state: "blocked", blockedOn: "external:ci", transitionNote: "parked" });
     await sweep();
-    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending", summary: expect.stringContaining("(1 row)") });
+    expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "pending", summary: expect.stringContaining(": 1 item nobody has picked up") });
     queue.update({ qitemId: c.qitemId, actorSession: "dev1@lane", state: "done", closureReason: "no-follow-on", transitionNote: "dropped" });
     await sweep();
     expect(queue.getById(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
@@ -131,7 +131,7 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     for (let i = 0; i < 25; i++) rows.push(await work("dev1@lane", 90));
     await sweep();
     const [notice] = findingsTo("owner@lane");
-    expect(notice!.summary).toContain("(25 rows)");
+    expect(notice!.summary).toContain(": 25 items nobody has picked up");
     expect(notice!.body.split("\n").filter((line) => line.startsWith("- qitem-"))).toHaveLength(20);
     expect(notice!.body).toContain("- and 5 more");
     const counted = rows.find((r) => !notice!.body.includes(`- ${r.qitemId}`))!;
@@ -139,7 +139,7 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     // A raised threshold stops detection, which isn't resolution.
     await sweep(120);
     const after = queue.getById(notice!.qitemId)!;
-    expect(after).toMatchObject({ state: "pending", summary: expect.stringContaining("(1 row)") });
+    expect(after).toMatchObject({ state: "pending", summary: expect.stringContaining(": 1 item nobody has picked up") });
     expect(after.body).toContain(`- ${counted.qitemId}`);
   });
 
@@ -172,7 +172,7 @@ describe("stuck sweep: unclaimed rows routed to a delegation parent (#2988)", ()
     await sweep();
     const reopened = findingsTo("owner@lane").filter(isOpen);
     expect(reopened).toHaveLength(1);
-    expect(reopened[0]!.summary).toContain("(2 rows)");
+    expect(reopened[0]!.summary).toContain(": 2 items nobody has picked up");
     expect(reopened[0]!.body).toContain(old.qitemId);
     expect(reopened[0]!.body).toContain(newer.qitemId);
   });
