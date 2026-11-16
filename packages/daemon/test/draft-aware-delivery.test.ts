@@ -1277,9 +1277,13 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   it("holds as unreadable when tmux can't report recent writable-client activity; with no writable client it delivers", async () => {
     const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
-    vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("command timed out"));
+    vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("PRIVATE_DETAIL command timed out"));
     const held = await f.send("activity-unreadable", notice, { openrigNotice: true, verify: false });
-    expect(held).toMatchObject({ sent: false, reason: "draft_input_unknown" });
+    // The hold carries its own reason, so a caller that keeps the last diagnostic it was given never keeps an older one.
+    expect(held).toMatchObject({ sent: false, reason: "draft_input_unknown", inputReadFailure: {
+      check: "draft-aware", status: "unknown", confidence: null, reason: "client_activity_unavailable", timedOut: null,
+      cursor: { present: false, valid: null, atEnd: null } } });
+    expect(JSON.stringify(held.inputReadFailure)).not.toContain("PRIVATE_DETAIL");
     expect(pasted(f)).toEqual([]);
     setActivity(f, () => null);
     f.advance();
