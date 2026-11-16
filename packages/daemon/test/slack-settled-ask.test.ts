@@ -127,6 +127,16 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(postCount).toBe(1);
   });
 
+  it("labels a done denial as Denied while retaining its stored closure reason", async () => {
+    const item = await postAsk();
+    repo.update({ qitemId: item.qitemId, actorSession: human, state: "done", closureReason: "denied" });
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(String(updates[0]!.text).split("\n")[0]).toMatch(/^Denied · /);
+    expect(repo.getById(item.qitemId)).toMatchObject({ state: "done", closureReason: "denied" });
+    expect((updates[0]!.blocks as Array<Record<string, unknown>>).some((b) => b.type === "actions")).toBe(false);
+    expect(postCount).toBe(1);
+  });
+
   it("settles only the primary of a multipart ask", async () => {
     const item = await postAsk("Supplemental evidence, unchanged.");
     expect(messages).toHaveLength(2);

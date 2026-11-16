@@ -48,7 +48,8 @@ function handledMessage(message: { text: string; blocks: Block[] }, status: stri
 }
 
 function statusLine(t: QueueTransition, label?: string): string {
-  const what = label ?? (t.ownerNotificationKind === "human-decision-resolved" ? "Answered" : t.state === "done" ? "Done"
+  const what = label ?? (t.closureReason === "denied" ? "Denied"
+    : t.ownerNotificationKind === "human-decision-resolved" ? "Answered" : t.state === "done" ? "Done"
     : t.state === "canceled" ? "Canceled" : terminal.has(t.state) ? t.state : "Handled");
   const note = redactSecrets((t.transitionNote ?? "").replace(/\s+/g, " ")).slice(0, 1000);
   return escapeSlackText([what, t.ts, `by ${t.actorSession}`, note].filter(Boolean).join(" · "));
