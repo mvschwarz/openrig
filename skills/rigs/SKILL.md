@@ -237,12 +237,13 @@ commands; if the two ever differ, this step is right.
     Then run
     `rig queue create --destination <canonicalSessionName> --return-route auto --summary "<the goal in a sentence>" --body-file <file> --verify`
     (if this session joined, `--return-route self` with your `OPENRIG_SESSION_NAME` in front). It prints
-    `Return route: <address>`: that's your address from now on. The goal's handoffs carry it, and a seat that stops at a
-    prompt in this work reaches you there as a task. Tell the person the task ID it prints, and keep the goal, your
-    address and that ID: they're how you find this work again. If the outcome is unknown, repeat the same command with
+    `Return route: <address>`: that's your address from now on. The goal's handoffs carry it. Bring a seat's prompt in
+    this work to this address as a task; it may still not reach you by itself, so check the seats when the person is
+    waiting. Tell the person the task ID it prints, and keep the goal, your address and that ID: they're how you find
+    this work again. If the outcome is unknown, repeat the same command with
     `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
     same address.
-  - **The team's questions** come to your address as tasks:
+  - **When a question arrives at your address as a task,** list the pending work with
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
     tell you, a condition included ("yes, but only on a branch"): claim it, then
