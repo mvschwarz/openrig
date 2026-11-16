@@ -1426,6 +1426,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (nodeId, generation) =>
       sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
+    isOccupantContinuedByAdoption: (nodeId, generation) =>
+      sessionRegistry.isOccupantContinuedByAdoption(nodeId, generation),
   });
   // Context usage store — constructed ahead of the refresher + ClaimService so the
   // Claude status-line sidecar reader can be injected into BOTH: FR-3
