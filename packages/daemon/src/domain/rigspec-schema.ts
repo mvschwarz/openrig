@@ -1,5 +1,6 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { claudeAutoModeAdvisories, validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
@@ -68,7 +69,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
   "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
@@ -540,6 +541,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   if (member["claude_permissions"] !== undefined) {
     if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_permissions: only valid when runtime is "claude-code"`);
     try { validateClaudePermissionRules(member["claude_permissions"], `${prefix}.claude_permissions`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
+  if (member["claude_auto_mode"] !== undefined) {
+    if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_auto_mode: only valid when runtime is "claude-code"`);
+    try { advisories.push(...claudeAutoModeAdvisories(validateClaudeAutoMode(member["claude_auto_mode"], `${prefix}.claude_auto_mode`), `${prefix}.claude_auto_mode`)); }
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["claude_token"] !== undefined) {
@@ -1318,6 +1324,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
     ...(m["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(m["claude_permissions"]) }),
+    ...(m["claude_auto_mode"] === undefined ? {} : { claudeAutoMode: validateClaudeAutoMode(m["claude_auto_mode"]) }),
     ...(m["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(m["claude_token"], "claude_token") }),
     ...(m["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(m["claude_mcp"]) }),
     ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
@@ -1449,6 +1456,11 @@ export class LegacyRigSpecSchema {
           try { validateClaudePermissionRules(node["claude_permissions"], `nodes.${nodeWhere}.claude_permissions`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        if (node["claude_auto_mode"] !== undefined) {
+          if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.claude_auto_mode: only valid when runtime is "claude-code"`);
+          try { advisories.push(...claudeAutoModeAdvisories(validateClaudeAutoMode(node["claude_auto_mode"], `nodes.${nodeWhere}.claude_auto_mode`), `nodes.${nodeWhere}.claude_auto_mode`)); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["claude_token"] !== undefined) {
           if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.claude_token: only valid when runtime is "claude-code"`);
           try { specClaudeTokenRef(node["claude_token"], `nodes.${nodeWhere}.claude_token`); }
@@ -1531,6 +1543,7 @@ export class LegacyRigSpecSchema {
       effort: typeof n["effort"] === "string" && n["effort"].trim() ? n["effort"].trim() : undefined,
       advisor: typeof n["advisor"] === "string" && n["advisor"].trim() ? n["advisor"].trim() : undefined,
       ...(n["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(n["claude_permissions"]) }),
+      ...(n["claude_auto_mode"] === undefined ? {} : { claudeAutoMode: validateClaudeAutoMode(n["claude_auto_mode"]) }),
       ...(n["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(n["claude_token"], "claude_token") }),
       ...(n["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(n["claude_mcp"]) }),
       ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
