@@ -10,6 +10,7 @@ const CLAUDE_FLOOR_EFFECT = {
   state: "observed",
   value: "acceptEdits",
   reason: "emitted_launch_arguments",
+  claudeAutoMode: null,
 } as const;
 
 function mockTmux(overrides?: {
@@ -58,6 +59,55 @@ describe("ClaudeResumeAdapter", () => {
     expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ continuationConfigDir: launch.configDir }), "auto");
     expect(nativeCommand).toHaveBeenCalledWith(["--settings", "/custom rules/settings.json", "--model", "opus", "--name", "seat@rig", "--effort", "high", "--permission-mode", "auto", "--resume", "same-conversation"], { OPENRIG_RESUME_LAUNCH: "same-conversation" });
     expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
+  });
+
+  describe("a continuation from captured arguments sends and records the seat's current auto mode block", () => {
+    const running = { permissions: { allow: ["Read(/a b)"] }, autoMode: { environment: ["$defaults", "Running A"] } };
+    const saved = { environment: ["$defaults", "Saved B"] };
+    const resumeWith = async (block: unknown, args = ["--settings", JSON.stringify(running), "--model", "opus"]) => {
+      const tmux = mockTmux();
+      tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+      const nativeCommand = vi.fn((_args: string[]) => "retained-launch");
+      const prepare = vi.fn(async () => ({ command: nativeCommand, warnings: [], assertCurrent: () => {} }));
+      const adapter = new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch });
+      const result = await adapter.resume("seat@rig", "claude_id", "same", "/repo", "auto", undefined, "auto", "node",
+        ...Array(8).fill(undefined), "/native/claude", undefined, undefined, { args, configDir: null, warnings: [] }, block as never);
+      const sent = nativeCommand.mock.calls[0]![0];
+      const value = sent.includes("--settings") ? sent[sent.indexOf("--settings") + 1]! : undefined;
+      return { result, sent, settings: value?.startsWith("{") ? JSON.parse(value) : value };
+    };
+
+    it("replaces the running block with the saved one and keeps the other settings", async () => {
+      const { result, settings } = await resumeWith(saved);
+      expect(settings).toEqual({ permissions: running.permissions, autoMode: saved });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: saved } });
+    });
+
+    it("drops the running block after a clear and records that none was sent", async () => {
+      const { result, settings } = await resumeWith(undefined);
+      expect(settings).toEqual({ permissions: running.permissions });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: null } });
+    });
+
+    it("drops the running block when the saved one can't be read, and warns", async () => {
+      const unreadable = "Seat n1: the saved claude_auto_mode can't be read (broken), so launches don't send it.";
+      const { result, settings } = await resumeWith({ unreadable });
+      expect(settings).toEqual({ permissions: running.permissions });
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([unreadable]), appliedLaunch: { claudeAutoMode: null } });
+    });
+
+    it("adds the saved block when the running process had no settings", async () => {
+      const { result, settings } = await resumeWith(saved, ["--model", "opus"]);
+      expect(settings).toEqual({ autoMode: saved });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: saved } });
+    });
+
+    it.each([["a saved block", saved], ["no saved block", undefined]])("records unknown when the running settings are a file, with %s", async (_label, block) => {
+      const { result, sent } = await resumeWith(block, ["--settings", "/custom/settings.json", "--model", "opus"]);
+      expect(sent).toContain("/custom/settings.json");
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringContaining("can't set or check its auto mode block")]),
+        appliedLaunch: { claudeAutoMode: { unknown: "settings_file" } } });
+    });
   });
 
   it.each([false, true])("carries the retained executable and wrapper through restore preparation (managed: %s)", async managed => {
@@ -214,6 +264,40 @@ describe("ClaudeResumeAdapter", () => {
       expect(launch).toContain(step);
       expect(launch).toContain('"deny":["Read(../peer/**)"]');
       expect(launch).toContain("--resume 'conversation'");
+    });
+
+    it("composes the seat's auto mode block into the resume's --settings and records it as applied", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const block = { environment: ["$defaults", "Source control: github.com/acme's org"] };
+      const result = await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(12).fill(undefined), block);
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { value: "auto", claudeAutoMode: block } });
+      const launch = String(sendText.mock.calls[0]![1]);
+      expect(launch).toContain("--permission-mode auto");
+      expect(launch.replace(/'"'"'/g, "'")).toContain(`"autoMode":${JSON.stringify(block)}`);
+    });
+
+    it("resumes without a saved block that can't be read, warns, and records that none was sent", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const unreadable = "Seat n1: the saved claude_auto_mode can't be read (broken), so launches don't send it.";
+      const result = await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(12).fill(undefined), { unreadable });
+      expect(result).toMatchObject({ ok: true, warnings: [unreadable], appliedLaunch: { claudeAutoMode: null } });
+      expect(String(sendText.mock.calls[0]![1])).not.toContain("autoMode");
+    });
+
+    it("composes member rules and the auto mode block into one --settings on resume", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new ClaudeResumeAdapter(mockTmux({ sendText }));
+      const block = { soft_deny: ["$defaults", "Pushing to main"] };
+      await adapter.resume("seat@rig", "claude_id", "conversation", "/repo", "auto", undefined, undefined, "node",
+        ...Array(6).fill(undefined), { allow: [], deny: ["Read(../peer/**)"] }, ...Array(5).fill(undefined), block);
+      const launch = String(sendText.mock.calls[0]![1]);
+      expect(launch.match(/'--settings'/g)).toHaveLength(1);
+      expect(launch).toContain('"deny":["Read(../peer/**)"]');
+      expect(launch).toContain(`"autoMode":${JSON.stringify(block)}`);
     });
 
     it("returns { ok: true } on success", async () => {
