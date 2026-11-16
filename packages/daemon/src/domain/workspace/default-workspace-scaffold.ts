@@ -72,9 +72,11 @@ export interface InitWorkspaceResult {
   root: string;
   rootCreated: boolean;
   subdirs: Array<{ name: string; path: string; created: boolean }>;
-  files: Array<{ relPath: string; absPath: string; created: boolean; skipped: "exists" | null }>;
+  files: Array<{ relPath: string; absPath: string; created: boolean; skipped: "exists" | "existing_project" | null }>;
   conflicts: InitializationConflict[];
   dryRun: boolean;
+  /** The root already holds a project of its own (this `project.yaml`, with no `workspace.yaml`): nothing was written. */
+  existingProject?: string;
 }
 
 export function nodeInitializationFs(): InitializationFsOps {
@@ -105,34 +107,42 @@ export function ensureDefaultWorkspace(options: {
   const fs = options.fs ?? nodeInitializationFs();
   const dryRun = options.dryRun ?? false;
   const rootKind = fs.pathKind(options.root);
+  // A root that already holds a project of its own (its project.yaml with no workspace.yaml beside it, such as a
+  // project folder set as workspace.root on a restored machine) is left as it is: a catalog written here would name it
+  // `default` against its own id, and without one the project readers take that project.yaml's id.
+  const ownProject = join(options.root, "project.yaml");
+  const existingProject = rootKind === "directory" && fs.pathKind(ownProject) === "file"
+    && fs.pathKind(join(options.root, "workspace.yaml")) === "missing" ? ownProject : undefined;
   const subdirs = workspaceScaffoldDirs().map((name) => {
     const path = join(options.root, name);
-    return { name, path, created: fs.pathKind(path) === "missing" };
+    return { name, path, created: !existingProject && fs.pathKind(path) === "missing" };
   });
   const files = workspaceScaffoldFiles().map(({ relPath }) => {
     const absPath = join(options.root, relPath);
-    const created = fs.pathKind(absPath) === "missing";
-    return { relPath, absPath, created, skipped: created ? null : "exists" as const };
+    const missing = fs.pathKind(absPath) === "missing";
+    const created = !existingProject && missing;
+    return { relPath, absPath, created, skipped: created ? null : missing ? "existing_project" as const : "exists" as const };
   });
   const conflicts: InitializationConflict[] = [];
 
   if (rootKind !== "missing" && rootKind !== "directory") {
     conflicts.push({ path: options.root, expected: "directory", actual: rootKind });
   }
-  for (const subdir of subdirs) {
+  // Nothing is written into an existing project, so its own paths can't conflict with the scaffold.
+  for (const subdir of existingProject ? [] : subdirs) {
     const actual = fs.pathKind(subdir.path);
     if (actual !== "missing" && actual !== "directory") {
       conflicts.push({ path: subdir.path, expected: "directory", actual });
     }
   }
-  for (const file of files) {
+  for (const file of existingProject ? [] : files) {
     const actual = fs.pathKind(file.absPath);
     if (actual !== "missing" && actual !== "file") {
       conflicts.push({ path: file.absPath, expected: "file", actual });
     }
   }
 
-  if (conflicts.length === 0 && !dryRun) {
+  if (conflicts.length === 0 && !dryRun && !existingProject) {
     if (rootKind === "missing") fs.mkdirp(options.root);
     for (const subdir of subdirs) if (subdir.created) fs.mkdirp(subdir.path);
     for (const file of workspaceScaffoldFiles()) {
@@ -149,5 +159,6 @@ export function ensureDefaultWorkspace(options: {
     files,
     conflicts,
     dryRun,
+    ...(existingProject ? { existingProject } : {}),
   };
 }
