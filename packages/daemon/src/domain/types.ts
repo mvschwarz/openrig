@@ -43,6 +43,10 @@ export interface Node {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; null/absent = none. */
   launchWrapper?: string[] | null;
+  /** The seat's own process limits (spec `process_limits`, #3253): applied to its new launches; null/absent = none. */
+  processLimits?: import("./process-limits.js").ProcessLimits | null;
+  /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
+  processLimitsError?: string;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -639,6 +643,9 @@ export interface RestoreNodeResult {
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
+  /** #3253: the seat was launched without its requested process limit (the request stays stored; a fresh launch
+   *  applies it). */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
 }
 
 export type RestoreOutcome =
@@ -1237,6 +1244,8 @@ export interface LegacyRigSpecNode {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1365,6 +1374,8 @@ export interface RigSpecPodMember {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;

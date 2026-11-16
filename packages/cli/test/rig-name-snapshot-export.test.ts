@@ -133,6 +133,20 @@ describe("rig snapshot, rig export and rig restore --rig", () => {
     expect(out).toContain("Exported to out.yaml");
   });
 
+  it("#3253: a refused export prints the daemon's error, not its raw JSON, and writes nothing", async () => {
+    const d = fakeDaemon();
+    const error = "Cannot export seat 'dev.impl': Seat n1 process_limits: stored value is not valid JSON. Fix it by re-applying the spec " +
+      "with process_limits: { tasks_max: <N> }, or clear it with process_limits: {}; then export again.";
+    const client = d.deps.clientFactory("") as unknown as { getText: ReturnType<typeof vi.fn> };
+    client.getText.mockResolvedValueOnce({ status: 409, data: JSON.stringify({ error, code: "export_refused" }) });
+    const writeFile = vi.fn();
+    const { out, exitCode } = await run(exportCommand({ ...d.deps, writeFile } as ExportDeps), ["export", "solo", "-o", "out.yaml"]);
+    expect(out).toContain(`Export failed: ${error}`);
+    expect(out).not.toContain("export_refused");
+    expect(exitCode).toBe(1);
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+
   it("restore posts to the named rig's id", async () => {
     const d = fakeDaemon();
     await run(restoreCommand(d.deps), ["restore", "snap-1", "--rig", "solo"]);

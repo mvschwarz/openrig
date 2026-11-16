@@ -132,11 +132,7 @@ describe("RestoreOrchestrator", () => {
     pi?: PiResumeAdapter;
     omp?: OmpResumeAdapter;
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
-    freshLaunch?: (rigId: string, nodeId: string) => Promise<{
-      status: "launched" | "failed" | "attention_required";
-      error?: string;
-      warnings?: string[];
-    }>;
+    freshLaunch?: RestoreOrchestratorDeps["freshLaunch"];
     harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
@@ -4305,7 +4301,7 @@ describe("RestoreOrchestrator", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id);
+      expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id, { processLimitsMode: "recovery" });
       expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "fresh-primed" });
       expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
     }
@@ -4675,6 +4671,22 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("#3253: a restore launches in recovery mode and carries the notice", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType: "none" });
+    const notice = { state: "not_applied" as const, kind: "unverified" as const, retryable: true,
+      reason: "the user manager timed out", requested: { tasksMax: 256 } };
+    const line = "process_limits requested, not applied: the user manager timed out";
+    const tmux = mockTmux();
+    (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true as const, processLimits: notice, warnings: [line] });
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: ["worker"] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect((tmux.createSession as ReturnType<typeof vi.fn>).mock.calls[0]![3]).toEqual({ processLimitsMode: "recovery" });
+    expect(result.result.nodes[0]).toMatchObject({ logicalId: "worker", processLimits: notice });
+    expect(result.result.warnings).toContain(line);
+  });
+
   it("restored sessions launch tmux in the snapshot node cwd", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-cwd-"));
     try {
@@ -4699,7 +4711,7 @@ describe("RestoreOrchestrator", () => {
       // A1 premise: DELIBERATE fresh (fresh-listed).
       const result = await orch.restore(snap.id, { freshLogicalIds: ["worker"] });
       expect(result.ok).toBe(true);
-      expect(createSessionSpy).toHaveBeenCalledWith(expect.any(String), tmpDir, expect.any(Object));
+      expect(createSessionSpy).toHaveBeenCalledWith(expect.any(String), tmpDir, expect.any(Object), { processLimitsMode: "recovery" });
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
