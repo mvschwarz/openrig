@@ -557,13 +557,14 @@ describe("SeatAttentionReconciler", () => {
     return { rigId: rig.id, nodeId: node.id, sessionId: session.id, attemptId: started.seq };
   }
 
-  function strictDerivedReconciler() {
+  function strictDerivedReconciler(stillAtPrompt: (nodeId: string) => boolean = () => false) {
     return new SeatAttentionReconciler({
       sessionRegistry,
       eventBus,
       agentActivityStore: activityStore,
       db,
       reconcileRestoreOutcome: async (rigId, nodeId) => {
+        if (stillAtPrompt(nodeId)) return { ok: false as const, code: "pane_not_usable", detail: "Still at the picker." };
         const started = db.prepare(
           "SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1",
         ).get(rigId) as { seq: number };
@@ -1063,7 +1064,8 @@ describe("SeatAttentionReconciler", () => {
       const elsewhere = seat(other.id, "worker", "worker@r-2622-elsewhere");
       eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-1" });
       eventBus.emit({ type: "restore.started", rigId: other.id, snapshotId: "snap-1" });
-      const checked = strictDerivedReconciler();
+      // At completion every flagged seat in the rig is checked; the one still at its picker doesn't prove out.
+      const checked = strictDerivedReconciler((nodeId) => nodeId === waiting);
 
       // Answered and settled while the rest of the rig was still restoring: nothing to reconcile yet.
       expect(await checked.onSeatActivity("early@r-2622-early", "idle")).toBe(false);
@@ -1151,6 +1153,53 @@ describe("SeatAttentionReconciler", () => {
       expect(await checked.onRestoreCompleted(rig.id)).toBe(0);
       expect(strict).toHaveBeenCalledTimes(1);
       expect(attention(rig.id, node.id).needsAttention).toBe(false);
+    });
+
+    // A seat whose activity never reads running or idle (an unrecognized runtime version, say) is still checked once when
+    // its launch completes. The proof decides: a resumed seat clears, and one that isn't stays flagged with nothing appended.
+    it("at a subset launch's completion, seats whose activity never read running or idle are checked, and only a proven one clears", async () => {
+      const rig = rigRepo.createRig("r-subset-unknown");
+      const seat = (logicalId: string) => {
+        const node = rigRepo.addNode(rig.id, logicalId, { role: "worker", runtime: "codex" });
+        const session = sessionRegistry.registerSession(node.id, `${logicalId}@r-subset-unknown`);
+        sessionRegistry.updateStartupStatus(session.id, "ready");
+        sessionRegistry.updateStatus(session.id, "running");
+        return node.id;
+      };
+      const resumed = seat("resumed"), other = seat("other");
+      const completed = eventBus.emit({ type: "restore.subset_completed", rigId: rig.id, snapshotId: "snap-subset", result: {
+        snapshotId: "snap-subset", preRestoreSnapshotId: null, rigResult: "partially_restored",
+        nodes: [{ nodeId: resumed, logicalId: "resumed", status: "attention_required" }, { nodeId: other, logicalId: "other", status: "attention_required" }],
+        warnings: [],
+      } } as any);
+      const strict = vi.fn(async (rigId: string, nodeId: string) => {
+        if (nodeId !== resumed) return { ok: false as const, code: "process_lineage_mismatch", detail: "The pane runs another conversation." };
+        const evidence = { tmux: true, fgProcess: "codex" as const, resumeTokenUsed: true, paneState: "usable" as const };
+        eventBus.emit({ type: "restore.outcome_reconciled", rigId, nodeId, attemptId: completed.seq, from: "attention_required", to: "operator_recovered", evidence });
+        return { ok: true as const, attemptId: completed.seq, from: "attention_required" as const, to: "operator_recovered" as const, evidence };
+      });
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      await checked.onSeatActivity("other@r-subset-unknown", "unknown");
+
+      expect(await checked.onRestoreCompleted(rig.id)).toBe(1);
+
+      expect(strict.mock.calls.map(([, nodeId]) => nodeId).sort()).toEqual([resumed, other].sort());
+      expect(attention(rig.id, resumed).needsAttention).toBe(false);
+      expect(attention(rig.id, other)).toEqual({ lifecycleState: "attention_required", needsAttention: true });
+    });
+
+    it("a subset seat cleared by rig seat clear-attention isn't proved again when a launch completes", async () => {
+      const { rigId } = seedSubsetAtPrompt("r-subset-cleared", "worker@r-subset-cleared");
+      const strict = subsetProof(true);
+      const checked = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: activityStore, reconcileRestoreOutcome: strict });
+      const cleared = await checked.clearAttention("worker@r-subset-cleared", { reason: "Saw the resumed conversation in the pane" });
+      expect(cleared).toMatchObject({ ok: true });
+      const recorded = (db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[])
+        .map((row) => JSON.parse(row.payload).attemptId);
+      expect(recorded).toEqual([0]);
+
+      expect(await checked.onRestoreCompleted(rigId)).toBe(0);
+      expect(strict).not.toHaveBeenCalled();
     });
   });
 });

@@ -426,13 +426,20 @@ export class SeatAttentionReconciler {
   }
 
   /** A seat can answer its prompt and settle while the rest of the rig still restores, before its outcome exists, and
-   *  then report no further change. When a restore or subset launch completes, check each of the rig's seats last read
-   *  running or idle, once, the same way. Returns how many outcomes were reconciled. */
+   *  then report no further change; or its activity may never read running or idle (an unrecognized runtime version,
+   *  say). When a restore or subset launch completes, check each of the rig's seats with a failed or attention outcome
+   *  once, the same way, whatever its activity reads. A failed check changes nothing. Returns how many outcomes were
+   *  reconciled. */
   async onRestoreCompleted(rigId: string): Promise<number> {
-    const checks = [...this.lastActivity]
-      .filter(([, state]) => state === "running" || state === "idle")
-      .map(([sessionName]) => this.reconcileRestored(sessionName, rigId));
-    return (await Promise.all(checks)).filter(Boolean).length;
+    const seats = this.deps.sessionRegistry.db.prepare(
+      `SELECT s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id
+        WHERE n.rig_id = ? AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)`,
+    ).all(rigId) as Array<{ session_name: string }>;
+    let reconciled = 0;
+    // One at a time: each check reads the seat's processes and pane.
+    for (const seat of seats) if (await this.reconcileRestored(seat.session_name, rigId)) reconciled++;
+    return reconciled;
   }
 
   private async reconcileRestored(sessionName: string, rigId?: string): Promise<boolean> {
