@@ -4630,7 +4630,7 @@ export class QueueRepository {
    */
   recordHumanAnswer(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; primaryUser?: boolean;
     /** The click's Slack action_ts: a decision parked on the person it asked takes the click only from after its current question posted. */
-    clickedTs?: string }): RecordHumanAnswerResult {
+    clickedTs?: string; identityProvenance?: string; identityPrincipal?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
     if (this.closeStaleRunnerPermission(input.qitemId)) return { status: "not-applicable", reason: "state-canceled" };
     // Set inside the transaction when this click changed the answers (a declared type, so the closure's write is seen).
@@ -4663,9 +4663,13 @@ export class QueueRepository {
         return { status: "recorded" as const, answers: recorded, complete: true, questions: item.humanQuestions };
       }
       const answers: HumanAnswers = { ...(item.humanAnswers ?? {}), [input.questionId]: input.optionId };
-      this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), input.qitemId);
       const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
       if (item.humanAnswers?.[input.questionId] !== input.optionId) {
+        const transition = this.transitionLog.append({ qitemId: input.qitemId, state: item.state, actorSession: input.actorSession,
+          transitionNote: `human-answer-recorded: ${JSON.stringify({ questionId: input.questionId, optionId: input.optionId })}`,
+          identityProvenance: input.identityProvenance, identityPrincipal: input.identityPrincipal });
+        this.db.prepare("UPDATE queue_items SET human_answers = ?, ts_updated = ? WHERE qitem_id = ?")
+          .run(JSON.stringify(answers), transition.ts, input.qitemId);
         changed = { summary: item.summary ?? null, answered: item.humanQuestions.length - unansweredQuestions(item.humanQuestions, answers).length };
       }
       return { status: "recorded" as const, answers, complete, questions: item.humanQuestions };

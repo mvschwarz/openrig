@@ -291,6 +291,32 @@ describe("structured human questions (#193)", () => {
       await vi.waitFor(() => expect(finals(envelopeId).length).toBe(before + 1));
     }
 
+    it("answer trail: each partial Slack click records its mapped person", async () => {
+      await click("db", "pg");
+      const trail = repo.transitionLog.listForQitem(decisionId).filter(t => t.transitionNote?.startsWith("human-answer-recorded:"));
+      expect(trail).toEqual([expect.objectContaining({ actorSession: human,
+        identityProvenance: "gateway:slack:v1", identityPrincipal: registry.entities[0]!.entityId })]);
+      expect(repliesToSeat()).toEqual([]);
+    });
+
+    it("answer trail: a completed Slack reply exposes the mapped person's provenance", async () => {
+      await click("db", "pg");
+      await click("ship", "yes");
+      expect(repo.answersForAsk(decisionId)).toEqual([expect.objectContaining({ by: human,
+        recordedIdentity: { provenance: "gateway:slack:v1", principal: registry.entities[0]!.entityId } })]);
+      const reply = repliesToSeat()[0]!;
+      const before = repo.transitionLog.listForQitem(decisionId).length;
+      await click("ship", "yes");
+      expect(repliesToSeat().map(row => row.qitemId)).toEqual([reply.qitemId]);
+      expect(repo.transitionLog.listForQitem(decisionId)).toHaveLength(before);
+    });
+
+    it("answer trail: a typed Slack answer uses the same mapped person on its reply", async () => {
+      await typeReply("Use Postgres and ship this week");
+      expect(repo.answersForAsk(decisionId)).toEqual([expect.objectContaining({ by: human,
+        recordedIdentity: { provenance: "gateway:slack:v1", principal: registry.entities[0]!.entityId } })]);
+    });
+
     it("posts the buttons, records each click, and resolves back to the seat once every question is answered", async () => {
       expect(JSON.stringify(posts[0]?.blocks)).toContain("or-opt:pg");
 
