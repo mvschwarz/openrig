@@ -228,7 +228,7 @@ export function buildCodexResumeDisplay(
     // observeCodexEnvelope records only sandbox type and approval_policy, not sandbox_workspace_write.* options
     // (writable_roots, network_access, exclude_tmpdir_env_var, exclude_slash_tmp), so workspace-write envelopes retain
     // conservative uncertainty rather than claiming unrecorded workspace flags matched.
-    if (envelope?.sandboxPolicy.type === "workspace-write") {
+    if (permissions?.sandbox === "workspace-write") {
       return {
         command,
         status: "recorded_uncertain",
