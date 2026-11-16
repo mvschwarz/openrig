@@ -806,6 +806,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // #2030: on Linux, the daemon's runtime directory, with a session bus address that can't connect.
     runtimeDir: seatRuntimeDir(process.env),
   });
+  // #3253: a seat's own process limits (rig spec `process_limits`), read from its node at each launch.
+  tmuxAdapter.seatProcessLimits = (nodeId) => rigRepo.getNodeProcessLimits(nodeId);
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,
     platform: opts?.tmuxOptionPlatform,

@@ -45,6 +45,8 @@ type Shape = "shell_backed" | "direct_native";
 
 interface WorldOptions {
   shape?: Shape;
+  /** #3253: the seat has process limits (rig spec process_limits); "applied": its running pane is proven under them. */
+  processLimited?: boolean | "applied";
   runningArgs?: string;
   runningArgv?: string[];
   savedModel?: string | null;
@@ -171,6 +173,8 @@ function world(options: WorldOptions = {}) {
   };
 
   const tmux = {
+    ...(options.processLimited ? { seatProcessLimitsSet: () => true,
+      seatProcessLimitsNotApplied: async () => (options.processLimited === "applied" ? null : "requested: the seat's process is not in a seat scope") } : {}),
     probeSession: async () => ({ state: "present" as const }),
     listPanes: async () => (paneGone ? [] : [{ id: "%1", index: 0, cwd: "/work", width: 80, height: 24, active: true }]),
     getPanePid: async () => (shape === "shell_backed" ? 100 : rows[0]?.pid ?? null),
@@ -1256,6 +1260,28 @@ describe("#1196 round 2: the shell branch keeps the running settings (F1)", () =
     expect(await adapter.sendResumeCommand(SEAT, command, TOKEN)).toMatchObject({ ok: true });
     expect(sent).toEqual([command]);
     expect(verified).toEqual([TOKEN]);
+  });
+});
+
+describe("#3253: a seat with process limits", () => {
+  it("a bare (direct-native) pane is refused before anything is held, signalled or respawned: its respawn carries no seat environment", async () => {
+    const w = world({ shape: "direct_native", remainOnExit: "off", processLimited: true });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "not_started", message: expect.stringContaining("process_limits") });
+    expect(w.calls.some((call) => call.startsWith("signal") || call.startsWith("respawn") || call.startsWith("remain"))).toBe(false);
+  });
+
+  it("a shell-backed pane under its limit restarts in place as before: the resume is typed into the scoped shell", async () => {
+    const w = world({ shape: "shell_backed", processLimited: "applied" });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).not.toMatchObject({ outcome: "not_started" });
+  });
+
+  it("a shell-backed pane not proven under its limit is refused before anything is signalled", async () => {
+    const w = world({ shape: "shell_backed", processLimited: true });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "not_started", message: expect.stringContaining("not proven to be under them") });
+    expect(w.calls.some((call) => call.startsWith("signal") || call.startsWith("respawn"))).toBe(false);
   });
 });
 

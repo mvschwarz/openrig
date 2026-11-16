@@ -107,4 +107,30 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
       db.close();
     }
   });
+
+  it("171_node_process_limits adds a nullable process_limits column and guards pre-171 databases", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "171_node_process_limits.sql")).toBe(true);
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "171_node_process_limits.sql"));
+      const repo = new RigRepository(db);
+      const rig = repo.createRig("pre-171");
+      const legacyNode = repo.addNode(rig.id, "legacy", { runtime: "codex" });
+      expect("processLimits" in legacyNode).toBe(false);
+      expect(repo.getNodeProcessLimits(legacyNode.id)).toBeUndefined();
+      expect(repo.setNodeProcessLimits(legacyNode.id, null)).toBe(false);
+      expect(() => repo.setNodeProcessLimits(legacyNode.id, { tasksMax: 512 })).toThrow(/migration/i);
+      expect(() => repo.addNode(rig.id, "unmigrated-limited", { runtime: "codex", processLimits: { tasksMax: 512 } })).toThrow(/migration/i);
+      expect(db.prepare("SELECT id FROM nodes WHERE logical_id = 'unmigrated-limited'").get()).toBeUndefined();
+
+      migrate(db, ALL_MIGRATIONS);
+      const col = (db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string; notnull: number }>)
+        .find((c) => c.name === "process_limits");
+      expect(col?.notnull).toBe(0);
+      const limited = repo.addNode(rig.id, "migrated-limited", { runtime: "codex", processLimits: { tasksMax: 512 } });
+      expect(limited.processLimits).toEqual({ tasksMax: 512 });
+    } finally {
+      db.close();
+    }
+  });
 });

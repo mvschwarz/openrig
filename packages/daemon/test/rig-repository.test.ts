@@ -501,3 +501,50 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     expect(repo.getNodeLaunchRecipe(node.id)).toBeNull();
   });
 });
+
+describe("RigRepository process_limits persistence (#3253)", () => {
+  let db: Database.Database;
+  let repo: RigRepository;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    repo = new RigRepository(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it.each(["codex", "claude-code", "pi", "terminal"])("round-trips tasks_max on a %s seat and reads none when absent", (runtime) => {
+    const rig = repo.createRig("limits-rig");
+    const limited = repo.addNode(rig.id, "limited", { runtime, processLimits: { tasksMax: 512 } });
+    expect(limited.processLimits).toEqual({ tasksMax: 512 });
+    expect(repo.getNodeProcessLimits(limited.id)).toEqual({ tasksMax: 512 });
+    expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(limited.id) as { process_limits: string })
+      .process_limits).toBe('{"tasks_max":512}');
+    const plain = repo.addNode(rig.id, "plain", { runtime });
+    expect("processLimits" in plain).toBe(false);
+    expect(repo.getNodeProcessLimits(plain.id)).toBeUndefined();
+  });
+
+  it("replaces and clears a stored limit", () => {
+    const rig = repo.createRig("limits-rig");
+    const node = repo.addNode(rig.id, "seat", { runtime: "codex", processLimits: { tasksMax: 512 } });
+    expect(repo.setNodeProcessLimits(node.id, { tasksMax: 1024 })).toBe(true);
+    expect(repo.getNodeProcessLimits(node.id)).toEqual({ tasksMax: 1024 });
+    expect(repo.getRig(rig.id)!.nodes[0]!.processLimits).toEqual({ tasksMax: 1024 });
+    expect(repo.setNodeProcessLimits(node.id, null)).toBe(true);
+    expect(repo.getNodeProcessLimits(node.id)).toBeUndefined();
+    expect("processLimits" in repo.getRig(rig.id)!.nodes[0]!).toBe(false);
+  });
+
+  it("refuses an out-of-range limit and fails closed on a malformed stored value", () => {
+    const rig = repo.createRig("limits-rig");
+    const node = repo.addNode(rig.id, "seat", { runtime: "codex" });
+    expect(() => repo.setNodeProcessLimits(node.id, { tasksMax: 10 })).toThrow(/tasks_max/);
+    for (const raw of ["not json", "{}", '{"tasks_max":10}', '{"memory_max":"1G"}']) {
+      db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run(raw, node.id);
+      expect(() => repo.getNodeProcessLimits(node.id), raw).toThrow(/process_limits/);
+    }
+  });
+});

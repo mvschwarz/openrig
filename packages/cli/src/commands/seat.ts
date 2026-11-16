@@ -39,6 +39,9 @@ interface SeatStatusResponse {
   runtimeSwitch?: { id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; attention: string | null; outcome: string | null };
   compaction?: { stage: string; detail: string };
   current_occupant: string | null;
+  /** #3253: the seat's process limits, read back from its process (requested, applied, unsupported or unknown). */
+  processLimits?: { state: "requested" | "applied" | "unsupported" | "unknown"; requested: { tasksMax: number };
+    reason?: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number; scope?: string };
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
   terminalPolicy?: {
@@ -239,6 +242,11 @@ function printHuman(status: SeatStatusResponse): void {
   // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
   if (status.permissions_to || status.runner) {
     console.log(`Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
+  }
+  if (status.processLimits) {
+    const l = status.processLimits;
+    const read = l.pidsMax !== undefined ? ` (pids.max ${l.pidsMax}, current ${l.pidsCurrent ?? "?"}, limit hit ${l.limitHits ?? 0} times)` : "";
+    console.log(`Process limits: tasks_max ${l.requested.tasksMax}: ${l.state}${read}${l.reason ? `; ${l.reason}` : ""}`);
   }
   if (status.runtime_home) {
     const h = status.runtime_home;

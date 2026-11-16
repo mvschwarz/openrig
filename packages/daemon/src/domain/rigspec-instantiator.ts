@@ -1,5 +1,6 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { isLaunchWrapperRuntime, sameLaunchWrapper } from "./launch-wrapper.js";
+import { effectiveProcessLimits } from "./process-limits.js";
 import nodePath from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
@@ -25,6 +26,11 @@ import { markRigBuilding, unmarkRigBuilding } from "./rigs-being-built.js";
 
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
+
+/** Two process-limit values are the same request: none, `{}` and undefined all mean no limit. */
+function sameProcessLimits(a: { tasksMax?: number } | null | undefined, b: { tasksMax?: number } | null | undefined): boolean {
+  return (a?.tasksMax ?? null) === (b?.tasksMax ?? null);
+}
 
 interface RigInstantiatorDeps {
   db: Database.Database;
@@ -129,6 +135,7 @@ export class RigInstantiator {
             claudeMcp: specNode.claudeMcp,
             codexPermissions: specNode.codexPermissions,
             launchWrapper: specNode.launchWrapper,
+            processLimits: effectiveProcessLimits(specNode.processLimits),
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -940,6 +947,7 @@ export class PodRigInstantiator {
           model: live.model ?? undefined, effort: live.effort ?? undefined, advisor: live.advisor ?? undefined,
           claudeMcp: live.runtime === "claude-code" ? live.claudeMcp ?? undefined : undefined,
           launchWrapper: isLaunchWrapperRuntime(live.runtime) ? (live.launchWrapper ?? []) : undefined,
+          processLimits: live.processLimits ? { tasksMax: live.processLimits.tasksMax } : {},
           codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
           permissionPolicy: undefined },
@@ -970,6 +978,7 @@ export class PodRigInstantiator {
       .filter(key => !isDeepStrictEqual(saved.member[key] ?? null, context.member[key] ?? null));
     const changes: string[] = [...changed];
     if (!sameLaunchWrapper(saved.member.launchWrapper, context.member.launchWrapper)) changes.push("launchWrapper");
+    if (!sameProcessLimits(saved.member.processLimits, context.member.processLimits)) changes.push("processLimits");
     if (saved.effortChoice && saved.effortChoice !== (context.member.effort ?? null)) changes.push("saved effort choice");
     if (saved.policyRef !== (context.member.permissionPolicy ?? null)
       || saved.rigPolicyRef !== (source.spec.permissionPolicy ?? null)) changes.push("permission policy");
@@ -1349,7 +1358,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1365,7 +1374,8 @@ export class PodRigInstantiator {
     const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
     if (`${pod.id}.${member.id}` !== node.logicalId || !same(member.agentRef, node.agentRef) || !same(member.profile, node.profile)
       || !same(member.runtime, node.runtime) || !same(member.role, node.role) || !same(member.label, node.label) || !same(member.codexConfigProfile, node.codexConfigProfile)
-      || !same(member.permissionPolicy, node.permissionPolicy) || !same(member.claudeMcp, node.claudeMcp) || !sameLaunchWrapper(member.launchWrapper, node.launchWrapper)) return refuse("Member source disagrees with the retained seat identity or policy.");
+      || !same(member.permissionPolicy, node.permissionPolicy) || !same(member.claudeMcp, node.claudeMcp) || !sameLaunchWrapper(member.launchWrapper, node.launchWrapper)
+      || !sameProcessLimits(member.processLimits, node.processLimits)) return refuse("Member source disagrees with the retained seat identity or policy.");
     const resolved = resolveAgentRef(member.agentRef, rigRoot, this.deps.fsOps);
     if (!resolved.ok) return refuse(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
     if (!node.resolvedSpecHash || resolved.resolved.hash !== node.resolvedSpecHash) return refuse("Agent source hash differs from the failed first start.");
@@ -1713,6 +1723,7 @@ export class PodRigInstantiator {
             claudeMcp: member.claudeMcp,
             codexPermissions: member.codexPermissions,
             launchWrapper: member.launchWrapper,
+            processLimits: effectiveProcessLimits(member.processLimits),
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2108,6 +2119,7 @@ export class PodRigInstantiator {
       claudeMcp: input.member.claudeMcp,
       codexPermissions: input.member.codexPermissions,
       launchWrapper: input.member.launchWrapper,
+      processLimits: effectiveProcessLimits(input.member.processLimits),
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
@@ -2231,6 +2243,7 @@ export class PodRigInstantiator {
     return {
       ...recipeMember,
       launchWrapper: isLaunchWrapperRuntime(node.runtime) ? (node.launchWrapper ?? []) : undefined,
+      processLimits: node.processLimits ? { tasksMax: node.processLimits.tasksMax } : {},
       claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
       ...(node.model !== null ? { model: node.model } : {}),
       ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
@@ -2584,6 +2597,11 @@ export class PodRigInstantiator {
     // Forward per-seat silenceWindowSeconds from the resolved profile.
     // Currently inert: the live SeatActivityService poller uses the
     // global 3s default. Retained for a future per-seat-poller decision.
+    // #3253: the terminal reads a seat's process limits as it creates the pane, so the authored value is written
+    // before this launch (unlike launch_wrapper, read later at the harness command); `{}` clears; absent keeps.
+    if (input.member.processLimits !== undefined) {
+      this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
+    }
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, {
       sessionName: canonicalSessionName,
       silenceWindowSeconds: configResult.config.activity?.silenceWindowSeconds,
@@ -2932,6 +2950,11 @@ export class PodRigInstantiator {
     }
 
     const canonicalSessionName = deriveCanonicalSessionName(input.pod.id, input.member.id, input.rigSpec.name);
+    // #3253: the terminal reads a seat's process limits as it creates the pane, so the authored value is written
+    // before this launch (unlike launch_wrapper, read later at the harness command); `{}` clears; absent keeps.
+    if (input.member.processLimits !== undefined) {
+      this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
+    }
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, env: input.envOverride });
     if (!launchResult.ok) {
       return { status: "failed", code: launchResult.code, error: launchResult.message };

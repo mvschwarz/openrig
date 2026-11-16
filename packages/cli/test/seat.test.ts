@@ -191,6 +191,22 @@ describe("seat typing guard commands", () => {
     expect(result.logs.join("\n")).not.toContain("the native default");
   });
 
+  it("#3253: prints where the seat's process limits stand, from the readback", async () => {
+    const applied = { state: "applied", requested: { tasksMax: 512 }, pidsMax: "512", pidsCurrent: 37, limitHits: 2,
+      scope: "openrig-seat-worker_test-1a2b3c4d.scope" };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, processLimits: applied } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result.logs).toContain("Process limits: tasks_max 512: applied (pids.max 512, current 37, limit hit 2 times)");
+    const requested = { state: "requested", requested: { tasksMax: 512 }, reason: "the seat is not running; the limit applies at its next launch" };
+    const deps2 = makeDeps({ status: 200, data: { ...STATUS, processLimits: requested } }, []);
+    const result2 = await captureLogs(() => makeCommand(deps2).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result2.logs).toContain("Process limits: tasks_max 512: requested; the seat is not running; the limit applies at its next launch");
+    // Without limits, no line.
+    const deps3 = makeDeps({ status: 200, data: STATUS }, []);
+    const result3 = await captureLogs(() => makeCommand(deps3).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result3.logs.join("\n")).not.toContain("Process limits");
+  });
+
   it("prints the daemon's managed restore delivery failure", async () => {
     const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
     const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);

@@ -326,6 +326,24 @@ describe("SuccessorSessionLauncher", () => {
     expect(launchHarness).toHaveBeenCalledTimes(1);
   });
 
+  it("#3253: a seat whose process limits this host can't apply is refused before the retiree is signalled", async () => {
+    const seatProcessLimitsRefusal = vi.fn(async (nodeId: string) => (nodeId === "n" ? "not Linux" : null));
+    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell,
+      getPaneCommand, seatProcessLimitsRefusal } as unknown as TmuxAdapter;
+    const l = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+      sessionEnv: { OPENRIG_HOME: "/home" }, newId: () => "01ABCDEFG", runtimeAdapters: { codex: fakeAdapter("codex") },
+      readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
+    });
+    const res = await l.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, code: "process_limits_unsupported", replacementStarted: false });
+    expect(signalPaneProcess).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled();
+    // A seat without limits on the same host goes ahead as before.
+    const other = await l.createSuccessor({ node: { id: "m", runtime: "codex", cwd: "/w" }, departingSessionName: "b@r" });
+    expect(other).not.toMatchObject({ code: "process_limits_unsupported" });
+    expect(signalPaneProcess).toHaveBeenCalled();
+  });
+
   it("retiree NEVER exits (survives TERM and KILL) → structured retiree_not_terminated, NO respawn (never clobber a live retiree)", async () => {
     isPaneDead.mockResolvedValue(false); // never becomes dead
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });

@@ -3,6 +3,7 @@ import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
+import { validateProcessLimits } from "./process-limits.js";
 import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
@@ -68,7 +69,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
   "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
@@ -557,6 +558,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
       errors.push(`${prefix}.launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
     }
     try { validateLaunchWrapper(member["launch_wrapper"], `${prefix}.launch_wrapper`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
+  if (member["process_limits"] !== undefined) {
+    // Valid on every runtime, terminal included: the limit is on the seat's pane, not on its harness.
+    try { validateProcessLimits(member["process_limits"], `${prefix}.process_limits`); }
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["codex_config_profile"] !== undefined) {
@@ -1322,6 +1328,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(m["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(m["claude_mcp"]) }),
     ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
     ...(m["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(m["launch_wrapper"]) }),
+    ...(m["process_limits"] === undefined ? {} : { processLimits: validateProcessLimits(m["process_limits"]) }),
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
@@ -1466,6 +1473,10 @@ export class LegacyRigSpecSchema {
           try { validateLaunchWrapper(node["launch_wrapper"], `nodes.${nodeWhere}.launch_wrapper`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        if (node["process_limits"] !== undefined) {
+          try { validateProcessLimits(node["process_limits"], `nodes.${nodeWhere}.process_limits`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["effort"] !== undefined) {
           if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
             advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
@@ -1535,6 +1546,7 @@ export class LegacyRigSpecSchema {
       ...(n["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(n["claude_mcp"]) }),
       ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
       ...(n["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(n["launch_wrapper"]) }),
+      ...(n["process_limits"] === undefined ? {} : { processLimits: validateProcessLimits(n["process_limits"]) }),
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

@@ -2130,6 +2130,62 @@ state: 2-named
     }
   });
 
+  describe("process_limits lifecycle and retention (#3253)", () => {
+    it("stores the limit on creation and, on re-apply, writes it before the pane is created; absent keeps, {} clears", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const memberBase = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." };
+        const spec = (processLimits?: { tasksMax?: number }) => RigSpecCodec.serialize(makeRigSpec({
+          pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, ...(processLimits ? { processLimits } : {}) }], edges: [] }],
+        }));
+        const clearOccupancy = (rigId: string) => {
+          for (const s of sessionRegistry.getSessionsForRig(rigId)) {
+            sessionRegistry.markDetached(s.id);
+            sessionRegistry.clearBinding(s.nodeId);
+          }
+        };
+        // What the terminal would read for the seat at the moment its pane is created.
+        const seen: Array<{ tasksMax: number } | undefined> = [];
+        let nodeId = "";
+        tmux.createSession = vi.fn(async () => {
+          seen.push(nodeId ? rigRepo.getNodeProcessLimits(nodeId) : undefined);
+          return { ok: true as const };
+        });
+
+        const mat = await inst.materialize(spec({ tasksMax: 512 }), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodeProcessLimits(nodeId)).toEqual({ tasksMax: 512 });
+        expect(RigSpecCodec.serialize(makeRigSpec({ pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, processLimits: { tasksMax: 512 } }], edges: [] }] })))
+          .toContain("tasks_max: 512");
+
+        const kept = await inst.launchMaterialized(spec(), RIG_ROOT, rigId);
+        expect(kept.ok, JSON.stringify(kept)).toBe(true);
+        expect(seen.at(-1)).toEqual({ tasksMax: 512 });
+
+        clearOccupancy(rigId);
+        const replaced = await inst.launchMaterialized(spec({ tasksMax: 1024 }), RIG_ROOT, rigId);
+        expect(replaced.ok, JSON.stringify(replaced)).toBe(true);
+        expect(seen.at(-1)).toEqual({ tasksMax: 1024 });
+
+        clearOccupancy(rigId);
+        const cleared = await inst.launchMaterialized(spec({}), RIG_ROOT, rigId);
+        expect(cleared.ok, JSON.stringify(cleared)).toBe(true);
+        expect(seen.at(-1)).toBeUndefined();
+        expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as { process_limits: string | null })
+          .process_limits).toBeNull();
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   describe("launch_wrapper lifecycle and retention", () => {
     it("persists launch_wrapper on new creation (instantiate and materialize) and passes it to launchHarness", async () => {
       const piAdapter = mockAdapter("pi");

@@ -275,6 +275,13 @@ export class SuccessorSessionLauncher {
       }
     }
 
+    // #3253: a seat whose process limits this host can't apply is refused before the retiree is ended.
+    const limitsRefusal = await this.tmuxAdapter.seatProcessLimitsRefusal?.(input.node.id);
+    if (limitsRefusal) {
+      return { ok: false, code: "process_limits_unsupported", step: "create_successor", replacementStarted: false,
+        message: `process_limits is set for this seat, but it can't get a systemd user scope here (${limitsRefusal}); nothing was stopped.` };
+    }
+
     // 2. Terminate the retiree IN PLACE, then respawn the now-dead pane WITHOUT -k so native scrollback
     //    survives (respawn-pane -k CLEARS the pane history — verified on tmux 3.6a; that would defeat the
     //    money-proof). The swap: set remain-on-exit so the pane survives the exit → graceful SIGTERM

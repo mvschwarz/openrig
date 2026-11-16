@@ -1,4 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { processLimitsToSpec } from "./process-limits.js";
 import type {
   RigSpec,
   LegacyRigSpec,
@@ -170,6 +171,7 @@ export class RigSpecCodec {
         if (m.claudeMcp !== undefined) member["claude_mcp"] = m.claudeMcp;
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
         if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
+        if (m.processLimits !== undefined) member["process_limits"] = processLimitsToSpec(m.processLimits);
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;
@@ -255,6 +257,7 @@ export class LegacyRigSpecCodec {
         if (node.claudeMcp !== undefined) n["claude_mcp"] = node.claudeMcp;
         if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
         if (node.launchWrapper !== undefined) n["launch_wrapper"] = [...node.launchWrapper];
+        if (node.processLimits !== undefined) n["process_limits"] = processLimitsToSpec(node.processLimits);
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

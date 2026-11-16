@@ -396,6 +396,12 @@ export class NodeLauncher {
     if (!panes.some((candidate) => candidate.id === pane)) {
       return { ok: false, code: "pane_not_found", message: `Pane ${pane} isn't in tmux session "${sessionName}", so nothing was stopped.` };
     }
+    // #3253: a seat whose process limits this host can't apply is refused before its running process is ended.
+    const refusal = await this.tmuxAdapter.seatProcessLimitsRefusal?.(nodeId);
+    if (refusal) {
+      return { ok: false, code: "process_limits_unsupported",
+        message: `process_limits is set for this seat, but it can't get a systemd user scope here (${refusal}); nothing was stopped.` };
+    }
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
     const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);

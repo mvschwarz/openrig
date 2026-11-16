@@ -771,6 +771,19 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(live.id)).toEqual({ status: "superseded" });
     });
 
+    it("#3253: a seat whose process limits this host can't apply is refused before its process is ended", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      Object.assign(tmux, { seatProcessLimitsRefusal: vi.fn(async () => "the daemon is not a systemd user service: MANAGERPID is unset") });
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true });
+      expect(JSON.stringify(result)).toContain("process_limits");
+      expect((tmux as any).signalPaneProcess).not.toHaveBeenCalled();
+      expect((tmux as any).respawnPane).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+    });
+
     it("launches a kept running effort in place of the saved one, without saving it as the seat's choice", async () => {
       const { rigId, nodeIds } = seedPodAwareRig();
       db.prepare("UPDATE nodes SET effort = 'low' WHERE id = ?").run(nodeIds[0]);

@@ -39,7 +39,7 @@ export type InPlaceRestartTmux = Pick<TmuxAdapter,
   | "getPanePid" | "getPaneCommand" | "listPanes" | "getSessionEnv" | "signalPid" | "setRemainOnExit"
   | "signalPaneProcess" | "isPaneDead" | "respawnPane" | "getPaneLocalOption" | "restorePaneOption"
   | "capturePaneHistory" | "capturePaneHistoryParts">
-  & Partial<Pick<TmuxAdapter, "getDefaultShell">>;
+  & Partial<Pick<TmuxAdapter, "getDefaultShell" | "seatProcessLimitsSet" | "seatProcessLimitsNotApplied">>;
 
 /** The Codex runtime adapter's resume surface this operation reuses. */
 export interface InPlaceCodexLauncher {
@@ -288,6 +288,13 @@ export class CodexInPlaceRestart {
 
     let launch: HarnessLaunchResult;
     if (report.paneShape === "shell_backed") {
+      // #3253: the resume is typed into the running shell, so the seat keeps the process tree it has: refused before
+      // anything is stopped unless that shell is proven to be under the seat's process limits.
+      const notApplied = await this.deps.tmux.seatProcessLimitsNotApplied?.(target.seat.nodeId, pane);
+      if (notApplied) {
+        return { ...report, outcome: "not_started", recoveryCommand,
+          message: `Nothing was stopped: this seat has process_limits, and its running shell is not proven to be under them (${notApplied}). Use rig seat launch --fresh.` };
+      }
       const stopped = await this.stopUnderShell(pane, panePid, codexPid, codexStartedAt, report.oldProcess);
       if (stopped === "running") {
         return { ...report, outcome: "not_started", recoveryCommand, message: "Codex did not exit after TERM and KILL; nothing was restarted and the original process is still running." };
@@ -306,6 +313,12 @@ export class CodexInPlaceRestart {
       return this.verifyReplacement(target, report, oldExe);
     }
 
+    // #3253: this respawn carries no seat environment, so a seat with process limits would come back without its scope.
+    // Refused before anything is stopped; a fresh launch re-applies the limit.
+    if (await this.deps.tmux.seatProcessLimitsSet?.(target.seat.nodeId)) {
+      return { ...report, outcome: "not_started", recoveryCommand,
+        message: "Nothing was stopped: this seat has process_limits, and a restart in place can't re-apply them to a bare pane. Use rig seat launch --fresh." };
+    }
     // Hold the pane before any signal: without remain-on-exit, Codex exiting would destroy the pane and
     // there would be nothing to respawn into. The hold counts only once tmux reads it back as on.
     progress.stage = "pane hold";

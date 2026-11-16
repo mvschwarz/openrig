@@ -101,7 +101,7 @@ seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
   } catch (error) { return c.json({ error: (error as Error).message }, 409); }
 });
 
-seatRoutes.get("/status/:seatRef", (c) => {
+seatRoutes.get("/status/:seatRef", async (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const service = new SeatStatusService({ rigRepo, activityStore: c.get("agentActivityStore" as never) as import("../domain/agent-activity-store.js").AgentActivityStore | undefined,
     compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined });
@@ -112,7 +112,15 @@ seatRoutes.get("/status/:seatRef", (c) => {
     const target = guard?.maybeTarget(c.req.param("seatRef")!);
     const nodeId = rigRepo.getRig(result.status.rig_id)?.nodes.find((node) => node.logicalId === result.status.logical_id)?.id;
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
-    return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
+    // #3253: a seat with process limits says where they stand, read back from its process, never from the spec alone.
+    const limits = nodeId ? rigRepo.getNodeProcessLimits(nodeId) : undefined;
+    const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
+    const processLimits = limits
+      ? result.status.current_occupant && tmux
+        ? await tmux.readSeatProcessLimits(result.status.current_occupant, limits)
+        : { state: "requested" as const, requested: { tasksMax: limits.tasksMax }, reason: "the seat is not running; the limit applies at its next launch" }
+      : null;
+    return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }
