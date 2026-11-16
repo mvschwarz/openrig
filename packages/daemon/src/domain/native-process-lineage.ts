@@ -1025,6 +1025,28 @@ export async function verifyPaneIdleShell(input: {
   return first !== null && await sample() === first;
 }
 
+/** Whether the bound pane holds nothing but its idle shell: `verifyPaneIdleShell`'s two matching samples, and in each
+ *  the shell has no child process at all. A harness or any other job started from it, suspended or in the background in
+ *  another process group, is a child, so it isn't empty. For ending a pane without --stop; delivery keeps the
+ *  foreground rule above. A missing or failed listing isn't empty. */
+export async function verifyPaneEmptyShell(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  listProcesses?: NativeProcessLister;
+}): Promise<boolean> {
+  const sample = async (): Promise<string | null> => {
+    try {
+      const pid = await input.tmux.getPanePid(input.target);
+      if (!pid) return null;
+      const rows = await (input.listProcesses ?? (() => runAsyncSite("codex.runtime.list_processes", readProcessTable)))();
+      const root = idleShellRoot(rows, pid);
+      return root && !rows.some(row => row.ppid === pid) ? JSON.stringify(root) : null;
+    } catch { return null; }
+  };
+  const first = await sample();
+  return first !== null && await sample() === first;
+}
+
 export interface ClaudeDeliveryObservation {
   state: "verified" | "unknown" | "idle_shell" | "conflict";
   detail: string;

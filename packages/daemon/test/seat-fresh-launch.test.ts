@@ -702,6 +702,67 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(killed).toEqual([]);
     });
 
+    // r1 F1: the shell keeps the foreground while a harness started from it runs in the background or is suspended.
+    it.each([
+      { shape: "a background Claude", child: { executableName: "claude", command: "claude", argv: ["claude"] } },
+      { shape: "a suspended Codex", child: { executableName: "codex", command: "codex resume", argv: ["codex", "resume"] } },
+      { shape: "any other background job", child: { executableName: "sleep", command: "sleep 600", argv: ["sleep", "600"] } },
+    ])("still needs --stop when the shell has $shape under it", async ({ child }) => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      listProcesses = async () => [...idleShell(),
+        { pid: 5000, ppid: 4242, pgid: 5000, tpgid: 4242, startedAt: "Sat Jan  1 12:01:00 2000", ...child }];
+      expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true }))
+        .toMatchObject({ launchable: false, stopRequired: true, blockers: [expect.objectContaining({ code: "session_live" })] });
+      expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" })).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+    });
+
+    // r1 F2: what changes while the pane is observed after the first proof is caught before the stop.
+    it.each([
+      { change: "a harness starts in the pane", during: () => { listProcesses = async () => [...idleShell(),
+        { pid: 5000, ppid: 4242, pgid: 5000, tpgid: 4242, executableName: "claude", command: "claude", argv: ["claude"], startedAt: "Sat Jan  1 12:01:00 2000" }]; } },
+      { change: "a later start reaches ready", during: (seat: ReturnType<typeof seedSeat>) => {
+        eventBus.emit({ type: "node.startup_ready", rigId: seat.rig.id, nodeId: seat.node.id }); } },
+    ])("still needs --stop when $change during the pane observation after the first proof", async ({ during }) => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      let emptySamples = 0;
+      let samplesBeforeObservation = -1;
+      listProcesses = async () => { emptySamples++; return idleShell(); };
+      (tmux.listPanes as ReturnType<typeof vi.fn>).mockImplementationOnce(async (name: string) => {
+        samplesBeforeObservation = emptySamples;
+        during(seat);
+        return [{ id: livePanes.get(name)!, index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+      });
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" });
+      expect(samplesBeforeObservation).toBe(2); // the first proof had seen an empty shell twice
+      expect(result).toMatchObject({ ok: false, code: "session_live" });
+      expect((result as { guidance?: string }).guidance).toContain("no longer holds only a failed start's shell");
+      expect(killed).toEqual([]);
+    });
+
+    it("with the delivery guard, a startup event that arrives inside the stop refuses at its effect", async () => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      listProcesses = async () => idleShell();
+      Object.defineProperty(tmux, "deliveryGuard", { value: {
+        ownsLifecycle: () => true, checkInput: () => undefined, preference: () => ({ desired: false, effective: false }) } });
+      tmux.killSession = vi.fn(async (name: string, beforeEffect?: () => void): Promise<TmuxResult> => {
+        eventBus.emit({ type: "node.startup_ready", rigId: seat.rig.id, nodeId: seat.node.id });
+        try { beforeEffect?.(); } catch (error) {
+          return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: (error as Error).message } as TmuxResult;
+        }
+        killed.push(name);
+        return { ok: true };
+      }) as TmuxAdapter["killSession"];
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" });
+      expect(result).toMatchObject({ ok: false, code: "selection_changed" });
+      expect((result as { message: string }).message).toContain("arrived before the stop");
+      expect(tmux.killSession).toHaveBeenCalledWith(seat.sessionName, expect.any(Function));
+      expect(killed).toEqual([]);
+    });
+
     it("still needs --stop when the readiness failure wasn't a return to a shell", async () => {
       const seat = seedSeat();
       markFailedStart(seat, { stage: "readiness_check", readinessCode: "awaiting_runtime" });

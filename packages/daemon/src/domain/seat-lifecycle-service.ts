@@ -3,7 +3,7 @@ import { readClaudePermissionRules, validateClaudePermissionRules } from "./clau
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
-import { verifyPaneIdleShell, type NativeProcessLister } from "./native-process-lineage.js";
+import { verifyPaneEmptyShell, type NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -1524,14 +1524,20 @@ export class SeatLifecycleService {
     return currentSession!;
   }
 
-  /** The seat's current session holds no conversation: its startup failed with the harness gone and the pane left as a
-   *  shell (a launch's readiness saw it return to a proven idle shell, or restore marked it), and the pane is still a
-   *  proven idle shell now. A fresh launch replaces such a shell without --stop; a harness started there since keeps it. */
+  /** The seat's current session holds no conversation: it's still the seat's latest session, its startup failed with the
+   *  harness gone and the pane left as a shell (a launch's readiness saw it return to a proven idle shell, or restore
+   *  marked it), and the pane is still nothing but that shell now, with no process under it. A fresh launch replaces such
+   *  a shell without --stop; a harness started there since, even suspended or in the background, keeps the refusal. */
   private async holdsUnstartedShell(nodeId: string, sessionId: string, pane: string | null | undefined): Promise<boolean> {
+    return this.unstartedShellMarked(nodeId, sessionId) && !!pane && await verifyPaneEmptyShell({ target: pane,
+      tmux: this.tmuxAdapter, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
+  }
+
+  /** The recorded half of `holdsUnstartedShell`, readable at a stop's effect boundary: no newer startup event or session. */
+  private unstartedShellMarked(nodeId: string, sessionId: string): boolean {
+    if (this.latestSession(nodeId)?.id !== sessionId) return false;
     const failure = getLatestStartupFailedEvent(this.db, nodeId, sessionId);
-    if (failure?.readinessCode !== "returned_to_shell" && failure?.stage !== "harness_not_started") return false;
-    return !!pane && await verifyPaneIdleShell({ target: pane, tmux: this.tmuxAdapter,
-      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
+    return failure?.readinessCode === "returned_to_shell" || failure?.stage === "harness_not_started";
   }
 
   /**
@@ -1754,14 +1760,27 @@ export class SeatLifecycleService {
     if (canonicalProbe.state === "present") {
       const currentSession = await this.validateFreshCollision(resolved, canonicalSessionName, input.stop === true);
       if ("code" in currentSession) return currentSession;
-      // Without --stop, validation passes only for a pane that holds just a shell.
-      if (input.stop !== true) viewWarnings.push(UNSTARTED_SHELL_REPLACED);
+      // Without --stop, validation passed only for a pane that held just a shell. The pane observation since may have
+      // seen a start, so prove it again right before the stop, and have the stop re-read the record at its effect.
+      let shellOnly: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]> } | undefined;
+      if (input.stop !== true) {
+        if (!await this.holdsUnstartedShell(node.id, currentSession.id, this.sessionRegistry.getBindingForNode(node.id)?.tmuxPane)) {
+          return { ok: false, code: "session_live", message: `Seat "${canonicalSessionName}" is live; fresh launch refuses without --stop.`,
+            guidance: "Its pane no longer holds only a failed start's shell. Re-run with --stop to end exactly this managed occupant." };
+        }
+        viewWarnings.push(UNSTARTED_SHELL_REPLACED);
+        const guard = this.tmuxAdapter.deliveryGuard;
+        if (guard) shellOnly = { guard, selection: () => this.unstartedShellMarked(node.id, currentSession.id) ? null : {
+          ok: false, code: "selection_changed", message: `A startup event for "${canonicalSessionName}" arrived before the stop, so its `
+            + "pane may no longer hold only a shell; nothing was stopped. Re-run with --stop to end exactly this managed occupant." } };
+      }
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,
         input.reason,
         input.operator,
         false,
+        shellOnly,
       );
       if (!stopped.ok) return stopped;
       // Older open views still attach once. Keep recovery guidance for those
