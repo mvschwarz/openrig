@@ -665,6 +665,63 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(alive.has(adoptedName)).toBe(true);
   });
 
+  describe("#3318 rehearsal: a pane its failed start left as a shell", () => {
+    const idleShell = () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242, executableName: "zsh", command: "-zsh", argv: ["-zsh"],
+      startedAt: "Sat Jan  1 12:00:00 2000" }];
+    const markFailedStart = (seat: ReturnType<typeof seedSeat>, marker: { stage: "readiness_check" | "harness_not_started"; readinessCode?: string }) => {
+      sessionRegistry.updateStartupStatus(seat.session!.id, marker.stage === "harness_not_started" ? "attention_required" : "failed");
+      eventBus.emit({ type: "node.startup_failed", rigId: seat.rig.id, nodeId: seat.node.id, sessionId: seat.session!.id,
+        error: "Readiness timeout after 30s — harness did not become interactive: The probe pane returned to a shell instead of staying inside the runtime.",
+        stage: marker.stage, ...(marker.readinessCode ? { readinessCode: marker.readinessCode } : {}) });
+    };
+
+    it.each([
+      { marker: { stage: "readiness_check" as const, readinessCode: "returned_to_shell" }, by: "a launch whose readiness saw it return to a shell" },
+      { marker: { stage: "harness_not_started" as const }, by: "restore's bare-shell marker" },
+    ])("replaces it without --stop, in the preview and the launch: $by", async ({ marker }) => {
+      const seat = seedSeat();
+      markFailedStart(seat, marker);
+      listProcesses = async () => idleShell();
+      const plan = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+      expect(plan).toMatchObject({ ok: true, launchable: true, stopRequired: false, wouldStop: true, blockers: [] });
+      expect((plan as { warnings: string[] }).warnings).toContain(
+        "The seat's pane holds only a shell (its harness never started or returned to the shell), so a fresh launch replaces it without --stop.");
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "replace the shell" });
+      expect(result.ok).toBe(true);
+      expect(killed).toEqual([seat.sessionName]);
+      expect(result.warnings).toContain(
+        "The seat's pane holds only a shell (its harness never started or returned to the shell), so a fresh launch replaces it without --stop.");
+    });
+
+    it("still needs --stop when a harness runs in that shell now", async () => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      listProcesses = async () => [{ ...idleShell()[0]!, tpgid: 5000 },
+        { pid: 5000, ppid: 4242, pgid: 5000, tpgid: 5000, executableName: "claude", command: "claude", argv: ["claude"], startedAt: "Sat Jan  1 12:01:00 2000" }];
+      expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" })).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+    });
+
+    it("still needs --stop when the readiness failure wasn't a return to a shell", async () => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "awaiting_runtime" });
+      listProcesses = async () => idleShell();
+      expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true }))
+        .toMatchObject({ launchable: false, stopRequired: true, blockers: [expect.objectContaining({ code: "session_live" })] });
+      expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" })).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+    });
+
+    it("still needs --stop when a later start of that session reached ready", async () => {
+      const seat = seedSeat();
+      markFailedStart(seat, { stage: "readiness_check", readinessCode: "returned_to_shell" });
+      eventBus.emit({ type: "node.startup_ready", rigId: seat.rig.id, nodeId: seat.node.id });
+      listProcesses = async () => idleShell();
+      expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "x" })).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+    });
+  });
+
   it("#3253: an explicit fresh --stop whose process limit can't be applied refuses before anything is stopped", async () => {
     const live = seedSeat();
     const plan = vi.fn(async () => ({ state: "not_applied" as const, kind: "unverified" as const, retryable: true,

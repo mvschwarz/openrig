@@ -3,7 +3,7 @@ import { readClaudePermissionRules, validateClaudePermissionRules } from "./clau
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
-import type { NativeProcessLister } from "./native-process-lineage.js";
+import { verifyPaneIdleShell, type NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -17,7 +17,7 @@ import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
 import type { NodeLauncher } from "./node-launcher.js";
-import type { PendingStartupContext, StartupOrchestrator } from "./startup-orchestrator.js";
+import { getLatestStartupFailedEvent, type PendingStartupContext, type StartupOrchestrator } from "./startup-orchestrator.js";
 import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
@@ -335,6 +335,9 @@ export type LaunchFreshResult =
       generation?: string;
       warnings?: string[];
     });
+
+const UNSTARTED_SHELL_REPLACED = "The seat's pane holds only a shell (its harness never started or returned to the shell), "
+  + "so a fresh launch replaces it without --stop.";
 
 interface LatestSessionRow {
   id: string;
@@ -1495,7 +1498,7 @@ export class SeatLifecycleService {
           + "then launch again. Closing only its viewing window doesn't end the session.",
       };
     }
-    if (!stop) {
+    if (!stop && !await this.holdsUnstartedShell(resolved.nodeId, currentSession!.id, currentBinding?.tmuxPane)) {
       return {
         ok: false,
         code: "session_live",
@@ -1519,6 +1522,16 @@ export class SeatLifecycleService {
       };
     }
     return currentSession!;
+  }
+
+  /** The seat's current session holds no conversation: its startup failed with the harness gone and the pane left as a
+   *  shell (a launch's readiness saw it return to a proven idle shell, or restore marked it), and the pane is still a
+   *  proven idle shell now. A fresh launch replaces such a shell without --stop; a harness started there since keeps it. */
+  private async holdsUnstartedShell(nodeId: string, sessionId: string, pane: string | null | undefined): Promise<boolean> {
+    const failure = getLatestStartupFailedEvent(this.db, nodeId, sessionId);
+    if (failure?.readinessCode !== "returned_to_shell" && failure?.stage !== "harness_not_started") return false;
+    return !!pane && await verifyPaneIdleShell({ target: pane, tmux: this.tmuxAdapter,
+      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
   }
 
   /**
@@ -1599,6 +1612,7 @@ export class SeatLifecycleService {
     const currentOccupant = "code" in probe ? "unknown" : probe.state;
     let stopRequired: boolean | null = currentOccupant === "absent" ? false : null;
     let owned = false;
+    let unstartedShell = false;
     if ("code" in probe) record(probe);
     else if (probe.state === "present") {
       // Check ownership even without --stop; presence alone is not permission to stop.
@@ -1606,8 +1620,11 @@ export class SeatLifecycleService {
       if ("code" in collision) record(collision);
       else {
         owned = true;
-        stopRequired = true;
-        if (!input.stop) blockers.push({ code: "session_live", message: "A live managed occupant requires --stop." });
+        unstartedShell = await this.holdsUnstartedShell(resolved.nodeId, collision.id,
+          this.sessionRegistry.getBindingForNode(resolved.nodeId)?.tmuxPane);
+        stopRequired = !unstartedShell;
+        if (unstartedShell) warnings.push(UNSTARTED_SHELL_REPLACED);
+        else if (!input.stop) blockers.push({ code: "session_live", message: "A live managed occupant requires --stop." });
       }
     }
     const launchable = blockers.length > 0 ? false : complete ? true : null;
@@ -1617,7 +1634,7 @@ export class SeatLifecycleService {
     return {
       ok: true as const, planOnly: true as const, complete, launchable, seat,
       sessionName: canonicalSessionName, currentOccupant,
-      stopRequired, wouldStop: blockers.length > 0 ? false : tmuxUnknown ? null : owned && input.stop === true,
+      stopRequired, wouldStop: blockers.length > 0 ? false : tmuxUnknown ? null : owned && (input.stop === true || unstartedShell),
       blockers, warnings, siblings,
       // OPR.0.7.0.9: what this seat's launch passes of its own additions (null when none).
       launchAdditions: node.runtime === "claude-code"
@@ -1737,6 +1754,8 @@ export class SeatLifecycleService {
     if (canonicalProbe.state === "present") {
       const currentSession = await this.validateFreshCollision(resolved, canonicalSessionName, input.stop === true);
       if ("code" in currentSession) return currentSession;
+      // Without --stop, validation passes only for a pane that holds just a shell.
+      if (input.stop !== true) viewWarnings.push(UNSTARTED_SHELL_REPLACED);
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,
