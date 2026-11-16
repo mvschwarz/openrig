@@ -163,6 +163,17 @@ function openrigEndpoint() {
   return base && token ? { base: base.replace(/\/+$/, ""), token } : null;
 }
 
+function runnerFrameBound(buffer) {
+  const overhead = 64 * 1024;
+  const fallback = { limit: 6 * 1024 * 1024 + overhead };
+  if (!buffer.startsWith(": runner-frame-chars=") || !buffer.includes("\n")) return fallback;
+  const header = /^: runner-frame-chars=([0-9]+)\n/.exec(buffer);
+  const chars = header ? Number(header[1]) : NaN;
+  if (!Number.isSafeInteger(chars) || chars < 1 || chars > Number.MAX_SAFE_INTEGER - overhead)
+    throw new Error("Invalid channel frame size");
+  return { limit: chars + overhead, chars };
+}
+
 async function callOpenRig(method, path, body, timeoutMs) {
   const endpoint = openrigEndpoint();
   if (!endpoint) return { status: 0, body: null };
@@ -349,15 +360,16 @@ async function main() {
             buffer += part.value.replace(/\r/g, "");
             let end;
             while ((end = buffer.indexOf("\n\n")) >= 0) {
-              // A 1 MiB question can occupy six JSON characters per source character, plus envelope metadata.
-              if (end > 6 * 1024 * 1024 + 64 * 1024) throw new Error("Channel frame too large");
+              const bound = runnerFrameBound(buffer);
+              if (end > bound.limit) throw new Error("Channel frame too large");
               const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
               const data = block.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
+              if (bound.chars !== undefined && data.length !== bound.chars) throw new Error("Channel frame size mismatch");
               if (!data) continue;
               const frame = JSON.parse(data); if (frame.runId !== env.OPENRIG_RUN_ID || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1) throw new Error("Invalid channel frame");
               cursor = Math.max(cursor, frame.sequence); void acceptFrame(frame).catch(() => {});
             }
-            if (buffer.length > 6 * 1024 * 1024 + 64 * 1024) throw new Error("Channel frame too large");
+            if (buffer.length > runnerFrameBound(buffer).limit) throw new Error("Channel frame too large");
           }
         } finally { await reader.cancel().catch(() => {}); }
       } catch { /* Reconnect with this process's retained map; never replay native operations. */ }

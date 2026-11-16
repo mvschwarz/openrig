@@ -11,14 +11,27 @@ import { connectPiRunnerChannel, RunnerCore } from "../src/adapters/pi-runner.js
 
 // Real runner + real offline JSONL child, never a provider API or installed Pi.
 describe.skipIf(process.platform === "win32")("Pi startup RPC handshake", () => {
-  it.each(["\n", "\0"])("the production SSE reader accepts the full escaped question quota (%j)", async character => {
+  it.each([
+    { character: "\n", members: 0, hint: undefined }, { character: "\0", members: 0, hint: undefined },
+    { character: "\0", members: 2, hint: undefined }, { character: "\n", members: 9, hint: undefined },
+    ...["omit", "invalid", "9007199254740991", "1"].map(hint => ({ character: "\0", members: 2, hint })),
+  ])("the production SSE reader bounds escaped retained input ($members members, $character, $hint)", async ({ character, members, hint }) => {
     const posts: Record<string, unknown>[] = [], rpc: Record<string, unknown>[] = [];
     const core = new RunnerCore({ sendRpc: command => { rpc.push(command); }, mirrorLine: () => {}, mirrorAppend: () => {},
       postActivity: () => {}, writeSidecar: () => {}, now: () => new Date().toISOString(), postRunner: async body => { posts.push(body); return true; } },
       { sessionName: "fixture", runId: "run" });
     core.start(); core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionId: "offline", isStreaming: false, pendingMessageCount: 0 } }));
-    const question = "q" + character.repeat(1024 * 1024 - 1);
-    const frames = [1, 2].map(sequence => `event: request\ndata: ${JSON.stringify({ version: 1, runId: "run", requestId: `large-${sequence}`, sequence, kind: "wake", payload: { question } })}\n\n`).join("");
+    const question = "q" + character.repeat(hint && hint !== "omit" ? 1 : 1024 * 1024 - 1);
+    const frames = [1, 2].map(sequence => {
+      const memberIds = Array.from({ length: members }, (_, index) => index === 0 ? `large-${sequence}` : `large-${sequence}-source-🧭-${index}`);
+      const grouped = members > 0 && sequence === 1;
+      const frame = grouped ? { version: 1, requestId: `large-${sequence}`, nodeId: "node-🧭", runId: "run", sequence,
+        kind: "input", inputRoute: "native", stage: "offered", bindingHash: "b".repeat(64), memberIds,
+        payload: { text: Array.from({ length: members }, () => question).join("\n") } }
+        : { version: 1, runId: "run", requestId: `large-${sequence}`, sequence, kind: "wake", payload: { question } };
+      const data = JSON.stringify(frame);
+      return `${grouped && hint !== "omit" ? `: runner-frame-chars=${hint ?? data.length}\n` : ""}event: request\ndata: ${data}\n\n`;
+    }).join("");
     const controller = new AbortController();
     let reads = 0;
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
@@ -27,17 +40,27 @@ describe.skipIf(process.platform === "win32")("Pi startup RPC handshake", () => 
       return new Response(new ReadableStream({ start(stream) {
         // Deliberately split the first JSON escape and then coalesce two valid large frames.
         const split = frames.indexOf(character === "\n" ? "\\n" : "\\u0000") + 1;
-        stream.enqueue(new TextEncoder().encode(frames.slice(0, split)));
+        if (members) stream.enqueue(new TextEncoder().encode(frames.slice(0, 9)));
+        stream.enqueue(new TextEncoder().encode(frames.slice(members ? 9 : 0, split)));
         stream.enqueue(new TextEncoder().encode(frames.slice(split))); stream.close();
       } }));
     });
     try {
       const connected = connectPiRunnerChannel(core, { baseUrl: "http://fixture", token: "fixture" }, "run", controller.signal);
-      const until = Date.now() + 1000;
-      while (posts.filter(post => post.type === "ack").length < 2 && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+      const until = Date.now() + 3000;
+      while ((hint ? reads < 2 : posts.filter(post => post.type === "ack").length < 2) && Date.now() < until)
+        await new Promise(resolve => setTimeout(resolve, 10));
       controller.abort(); await connected;
-      expect(posts.filter(post => post.type === "ack").map(post => post.requestId)).toEqual(["large-1", "large-2"]);
-      expect(reads).toBe(1);
+      expect(posts.filter(post => post.type === "ack").map(post => post.requestId)).toEqual(hint ? [] : ["large-1", "large-2"]);
+      if (hint) {
+        expect(reads).toBeGreaterThanOrEqual(2); // The actual reader rejected and reconnected before this test stops it.
+        expect(rpc.filter(command => command.type === "prompt")).toEqual([]);
+      } else expect(reads).toBe(1);
+      if (members && !hint) {
+        const prompts = rpc.filter(command => command.type === "prompt");
+        expect(prompts).toHaveLength(1); // The second accepted operation waits for the first native start.
+        expect(prompts[0]?.message).toBe(Array.from({ length: members }, () => question).join("\n"));
+      }
     } finally { controller.abort(); fetch.mockRestore(); }
   });
 

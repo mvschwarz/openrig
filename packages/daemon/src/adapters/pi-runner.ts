@@ -2170,6 +2170,17 @@ function isPermanentPiRunRefusal(status: number, code?: string): boolean {
   return status === 401 || status === 403 || ["runner_grant_required", "runner_grant_revoked", "runner_grant_stale"].includes(code ?? "");
 }
 
+function runnerFrameBound(buffer: string): { limit: number; chars?: number } {
+  const overhead = 64 * 1024;
+  const fallback = { limit: 6 * 1024 * 1024 + overhead };
+  if (!buffer.startsWith(": runner-frame-chars=") || !buffer.includes("\n")) return fallback;
+  const header = /^: runner-frame-chars=([0-9]+)\n/.exec(buffer);
+  const chars = header ? Number(header[1]) : NaN;
+  if (!Number.isSafeInteger(chars) || chars < 1 || chars > Number.MAX_SAFE_INTEGER - overhead)
+    throw new Error("Invalid channel frame size");
+  return { limit: chars + overhead, chars };
+}
+
 /** Pi's HTTP/SSE wire loop; it owns no native executor or durable receiver journal. */
 export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseUrl: string; token: string }, runId: string, signal: AbortSignal): Promise<void> {
   let retained = false, cursor = 0;
@@ -2201,10 +2212,11 @@ export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseU
           buffer += chunk.value.replace(/\r/g, "");
           let end: number;
           while ((end = buffer.indexOf("\n\n")) >= 0) {
-            // A 1 MiB question can occupy six JSON characters per source character, plus envelope metadata.
-            if (end > 6 * 1024 * 1024 + 64 * 1024) throw new Error("Channel frame too large");
+            const bound = runnerFrameBound(buffer);
+            if (end > bound.limit) throw new Error("Channel frame too large");
             const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
             const data = block.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
+            if (bound.chars !== undefined && data.length !== bound.chars) throw new Error("Channel frame size mismatch");
             if (!data) continue;
             const frame = JSON.parse(data) as PiManagedRequest;
             if (frame.runId !== runId || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1) throw new Error("Invalid channel frame");
@@ -2212,7 +2224,7 @@ export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseU
             // Do not block reconnection on an ack whose response was lost; the core retains its acceptance promise.
             void core.acceptRunnerRequest(frame).catch(() => {});
           }
-          if (buffer.length > 6 * 1024 * 1024 + 64 * 1024) throw new Error("Channel frame too large");
+          if (buffer.length > runnerFrameBound(buffer).limit) throw new Error("Channel frame too large");
         }
       } finally { await reader.cancel().catch(() => {}); }
     } catch { /* Same live process/map reconnects; native writes never replay here. */ }

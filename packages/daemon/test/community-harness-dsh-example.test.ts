@@ -739,7 +739,7 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
 });
 
 
-async function nativeChannelFixture(lostResultId = "WAKE:A", refusal?: { status: number; code: string }) {
+async function nativeChannelFixture(lostResultId = "WAKE:A", refusal?: { status: number; code: string }, frameHint?: string) {
   const frames: Array<Record<string, unknown>> = [], stages = new Map<string, string>(), posts: Array<Record<string, unknown>> = [];
   const streams = new Set<import("node:http").ServerResponse>();
   let lostAck = refusal !== undefined, lostResult = false, refusalSent = false;
@@ -747,7 +747,8 @@ async function nativeChannelFixture(lostResultId = "WAKE:A", refusal?: { status:
   const offer = () => {
     const frame = frames.find(f => stages.get(String(f.requestId)) === "offered") ?? frames.find(f => !stages.has(String(f.requestId)));
     if (!frame) return; stages.set(String(frame.requestId), "offered");
-    const wire = `event: request\nid: ${frame.sequence}\ndata: ${JSON.stringify(frame)}\n\n`;
+    const data = JSON.stringify(frame);
+    const wire = `${frame.memberIds && frameHint !== "omit" ? `: runner-frame-chars=${frameHint ?? data.length}\n` : ""}event: request\nid: ${frame.sequence}\ndata: ${data}\n\n`;
     for (const stream of streams) {
       if (wire.length > 2 * 1024 * 1024) {
         // A JSON escape can cross HTTP chunks; send its backslash before the remainder.
@@ -785,10 +786,42 @@ async function nativeChannelFixture(lostResultId = "WAKE:A", refusal?: { status:
   return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, posts,
     push: (ids: string[], payloadText?: string) => { for (const id of ids) frames.push({ version: 1, runId: "native-run", requestId: id, sequence: frames.length + 1,
       kind: id.startsWith("WAKE:") ? "wake" : "input", payload: id.startsWith("WAKE:") ? { question: payloadText ?? id } : { text: payloadText ?? id } }); offer(); },
+    pushGroup: (members: number, body: string) => {
+      const requestId = "GROUP";
+      frames.push({ version: 1, requestId, nodeId: "node-🧭", runId: "native-run", sequence: frames.length + 1,
+        kind: "input", inputRoute: "native", stage: "offered", bindingHash: "b".repeat(64),
+        memberIds: Array.from({ length: members }, (_, index) => index === 0 ? requestId : `source-🧭-${index}`),
+        payload: { text: Array.from({ length: members }, () => body).join("\n") } }); offer();
+    },
     reconnect: () => { for (const stream of streams) stream.end(); } };
 }
 
 describe("the actual dsh runner native channel", () => {
+  it.each(["omit", "invalid", "9007199254740991", "1"])("the production dsh reader refuses an invalid or unannounced oversized frame (%s)", async hint => {
+    const channel = await nativeChannelFixture("none", undefined, hint), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.pushGroup(2, hint === "omit" ? "q" + "\0".repeat(1024 * 1024 - 1) : "q");
+    await waitFor(() => channel.posts.filter(post => post.type === "hello").length >= 2, "reader rejection and reconnect", 2000);
+    expect(channel.posts.filter(post => post.type === "ack")).toEqual([]);
+    expect(requests(runner.log(), "session/prompt")).toEqual([]);
+  });
+
+  it.each([{ members: 2, character: "\0" }, { members: 9, character: "\n" }])("the production dsh reader accepts $members-member escaped retained groups", async ({ members, character }) => {
+    const channel = await nativeChannelFixture("none"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    const body = "q" + character.repeat(1024 * 1024 - 1);
+    channel.pushGroup(members, body);
+    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "GROUP"), "group native completion", 5000);
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    const prompts = requests(runner.log(), "session/prompt");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({ params: { prompt: [{ type: "text", text: Array.from({ length: members }, () => body).join("\n") }] } });
+    channel.push(["WAKE:AFTER-GROUP"]); // An unhinted successor uses its own legacy bound, including after reconnect.
+    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "WAKE:AFTER-GROUP"), "unhinted successor");
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  });
+
   it.each([
     { status: 409, code: "runner_receipt_erased", later: true },
     { status: 401, code: "runner_grant_revoked", later: false },

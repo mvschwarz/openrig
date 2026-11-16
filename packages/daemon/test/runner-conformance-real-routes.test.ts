@@ -827,11 +827,41 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
       try { return await Promise.race([reader.read(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("channel read timed out")), 2000); })]); }
       finally { if (timer) clearTimeout(timer); }
     };
-    expect(new TextDecoder().decode((await read()).value)).toContain('"requestId":"one"');
+    const readFrame = async () => {
+      let text = "";
+      while (!text.includes("\n\n")) text += new TextDecoder().decode((await read()).value);
+      return text;
+    };
+    expect(await readFrame()).toContain('"requestId":"one"');
     f.channel.post(f.grant.token, { type: "ack", runId: "run-one", requestId: "one", sequence: 1, state: "accepted" });
-    expect(new TextDecoder().decode((await read()).value)).toContain('"requestId":"two"');
+    expect(await readFrame()).toContain('"requestId":"two"');
     f.grants.revoke({ grantId: f.grant.grantId }, "stopped");
     expect((await read()).done).toBe(true);
+  });
+  it("the SSE route sizes a complete composed receipt and reoffers its unchanged custody after a lost ack", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    const bodies = ["\0".repeat(1024 * 1024), "\0".repeat(1024 * 1024)];
+    const memberIds = ["large-member-one", "large-member-two"];
+    for (const [i, id] of memberIds.entries()) f.outbox.record({ outboxId: id, senderSession: "system", destinationSession: "dev@channel", body: bodies[i]! });
+    const payload = { question: bodies.join("\n") };
+    const receipt = f.channel.admit(f.node.id, { outboxId: memberIds[0]!, senderSession: "system", destinationSession: "dev@channel", body: bodies[0]!, kind: "wake", inputRoute: "native", payload, memberIds });
+    const readOffer = async (cursor: number) => {
+      const response = await f.app.request("/api/activity/runner-channel", { headers: { authorization: `Bearer ${f.grant.token}`, "Last-Event-ID": String(cursor) } });
+      const reader = response.body!.getReader(); cleanups.push(() => reader.cancel());
+      let text = "";
+      const decoder = new TextDecoder();
+      while (!text.includes("\n\n")) { const chunk = await reader.read(); if (chunk.done) throw new Error("offer missing"); text += decoder.decode(chunk.value, { stream: true }); }
+      await reader.cancel();
+      const data = text.split("\n").find(line => line.startsWith("data: "))!.slice(6);
+      expect(data.length).toBeGreaterThan(12 * 1024 * 1024);
+      expect(text.split("\n")[0]).toBe(`: runner-frame-chars=${data.length}`);
+      return JSON.parse(data);
+    };
+    const offered = await readOffer(0);
+    expect(offered).toMatchObject({ ...receipt, stage: "offered", memberIds, payload });
+    expect(await readOffer(receipt.sequence)).toEqual(offered);
+    expect(f.outbox.runnerReceipts(f.node.id, "run-one")).toHaveLength(1);
+    for (const [i, id] of memberIds.entries()) expect(f.outbox.getById(id)?.body).toBe(bodies[i]);
   });
   it("a composed wake group stays one native operation while preserving its original member histories", async () => {
     const f = await fixture();

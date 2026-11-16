@@ -191,8 +191,11 @@ activityRoutes.get("/runner-channel", c => {
             again = false;
             for (const frame of channel.frames(token, cursor)) {
               if (written.has(frame.sequence)) continue;
+              const data = JSON.stringify(frame);
               channel.authenticate(token); // Recheck immediately before each run-local write.
-              await stream.writeSSE({ id: String(frame.sequence), event: "request", data: JSON.stringify(frame) });
+              await stream.write(`: runner-frame-chars=${data.length}\n`);
+              channel.authenticate(token); // The comment write yielded; recheck before exposing the receipt.
+              await stream.writeSSE({ id: String(frame.sequence), event: "request", data });
               written.add(frame.sequence);
             }
           } while (again && !closed);
