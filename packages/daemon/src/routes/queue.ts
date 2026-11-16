@@ -34,6 +34,7 @@ import {
   evaluateCreateScope,
   skippedCreateScopeAdvisory,
   toCreateScopeAdvisory,
+  type CreateScopeAdvisoryContext,
   type CurrentWorkRow,
   type MissionsRootResolver,
   type RoleOrientation,
@@ -44,6 +45,7 @@ import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope, type HostClass } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
+import { HUMAN_ALERT_TAG } from "../domain/gateway/human-registry.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
@@ -65,6 +67,9 @@ import { feedPerspective } from "../domain/feed-perspective.js";
 const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
+/** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
+const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
+const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -159,7 +164,7 @@ export function queueRoutes(): Hono {
     try { return getRepo(c).destinationAdvisory(sessionRef); }
     catch { return null; }
   }
-  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null) {
+  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null, context?: CreateScopeAdvisoryContext) {
     try {
       const check = evaluateCreateScope(tags, () => {
         const flat = (tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim())).filter(Boolean);
@@ -180,7 +185,7 @@ export function queueRoutes(): Hono {
         const value = store?.resolveOne("workspace.slices_root").value;
         return typeof value === "string" && value.trim() ? value : null;
       });
-      return check ? toCreateScopeAdvisory(check) : null;
+      return check ? toCreateScopeAdvisory(check, context) : null;
     } catch {
       return null;
     }
@@ -525,6 +530,7 @@ export function queueRoutes(): Hono {
     },
     createSuccessor: (forwardBody: Record<string, unknown>) => Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> =
       (forwardBody) => forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody),
+    delivery: "forwarded" | "in-process" = "forwarded",
   ): Promise<Response> {
     const repo = getRepo(c);
     const source = repo.getById(qitemId);
@@ -604,9 +610,33 @@ export function queueRoutes(): Hono {
       return errorResponse(c, err);
     }
 
-    // Same {closed, created} shape as the local transactional handoff;
-    // `created` is the origin daemon's row, verbatim.
-    return c.json({ closed: closed.item, created: fwd.payload }, 201);
+    // `created` is the origin daemon's row, verbatim. The origin can also report
+    // that its own scope check was skipped, without pretending the forwarding
+    // daemon inspected remote filesystem state.
+    const receiverReportedTags = fwd.payload && typeof fwd.payload === "object" && !Array.isArray(fwd.payload)
+      ? (fwd.payload as { tags?: unknown }).tags
+      : undefined;
+    const hasAcceptedTags = receiverReportedTags === null || Array.isArray(receiverReportedTags);
+    const acceptedTags = Array.isArray(receiverReportedTags)
+      ? receiverReportedTags.filter((tag): tag is string => typeof tag === "string")
+      : [];
+    const requestedTags = forwardBody.tags as string[];
+    const acceptedScopeTags = acceptedTags.filter((tag) => tag !== HUMAN_ALERT_TAG);
+    const requestedScopeTags = requestedTags.filter((tag) => tag !== HUMAN_ALERT_TAG);
+    const acceptedTagsMatchRequest = acceptedScopeTags.length === requestedScopeTags.length
+      && acceptedScopeTags.every((tag, index) => tag === requestedScopeTags[index]);
+    const scopeCheckRequested = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1";
+    const scopeCheck = scopeCheckRequested
+      ? skippedCreateScopeAdvisory(hasAcceptedTags ? acceptedTags : requestedTags)
+      : null;
+    const scopeAdvisory = scopeCheck ? toCreateScopeAdvisory(scopeCheck, {
+      verb: terminalState === "done" ? "handoff-and-complete" : "handoff",
+      tagSource: hasAcceptedTags && acceptedTagsMatchRequest ? (body.tags == null ? "inherited" : "explicit") : "unknown",
+      delivery,
+    }) : null;
+    return c.json({ closed: closed.item, created: fwd.payload,
+      ...(scopeAdvisory ? { advisories: [scopeAdvisory] } : {}),
+      ...(scopeCheckRequested ? { [HANDOFF_SCOPE_CHECK_ACKNOWLEDGED]: true } : {}) }, 201);
   }
 
   /**
@@ -1054,7 +1084,7 @@ export function queueRoutes(): Hono {
     // Exact self id: finish a handoff that an earlier self-forward already started.
     if (typeof body.hostId === "string" && body.hostId === getSelfHostId()
       && priorSelfForwardSuccessor(c, qitemId, crossHostBody.toSession, body.hostId)) {
-      return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody, createSuccessorInProcess(c));
+      return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody, createSuccessorInProcess(c), "in-process");
     }
 
     try {
@@ -1074,8 +1104,17 @@ export function queueRoutes(): Hono {
         humanAlert: body.humanAlert,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisory = destinationAdvisory(c, result.created.destinationSession);
-      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const destination = destinationAdvisory(c, result.created.destinationSession);
+      const scopeCheckRequested = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1";
+      const scope = scopeCheckRequested
+        ? createScopeAdvisory(c, result.created.tags, {
+          verb: "handoff",
+          tagSource: body.tags == null ? "inherited" : "explicit",
+        })
+        : null;
+      const advisories = [destination, scope].filter(Boolean);
+      return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}),
+        ...(scopeCheckRequested ? { [HANDOFF_SCOPE_CHECK_ACKNOWLEDGED]: true } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -1139,7 +1178,7 @@ export function queueRoutes(): Hono {
     // Exact self id: finish a handoff that an earlier self-forward already started.
     if (typeof body.hostId === "string" && body.hostId === getSelfHostId()
       && priorSelfForwardSuccessor(c, qitemId, crossHostBody.toSession, body.hostId)) {
-      return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody, createSuccessorInProcess(c));
+      return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody, createSuccessorInProcess(c), "in-process");
     }
 
     try {
@@ -1159,8 +1198,17 @@ export function queueRoutes(): Hono {
         humanAlert: body.humanAlert,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      const advisory = destinationAdvisory(c, result.created.destinationSession);
-      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const destination = destinationAdvisory(c, result.created.destinationSession);
+      const scopeCheckRequested = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1";
+      const scope = scopeCheckRequested
+        ? createScopeAdvisory(c, result.created.tags, {
+          verb: "handoff-and-complete",
+          tagSource: body.tags == null ? "inherited" : "explicit",
+        })
+        : null;
+      const advisories = [destination, scope].filter(Boolean);
+      return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}),
+        ...(scopeCheckRequested ? { [HANDOFF_SCOPE_CHECK_ACKNOWLEDGED]: true } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
