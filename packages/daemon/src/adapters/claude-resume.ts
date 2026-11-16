@@ -168,8 +168,10 @@ export class ClaudeResumeAdapter {
         tokenWarnings.push(this.options.claudeManagedLaunch?.tokenNotApplied?.(nodeId!, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
       }
       if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude resume input" };
-      return assertSelected ? this.tmux.sendShellCommand(tmuxSessionName, staged, assertSelected, { sourceInPane: true })
-        : this.tmux.sendShellCommand(tmuxSessionName, staged, undefined, { sourceInPane: true });
+      // The token step is POSIX shell: a fish pane runs the launch with /bin/sh rather than sourcing it.
+      const shellOptions = { sourceInPane: true, ...(seatToken && staged.includes(seatToken.step) ? { posix: true } : {}) };
+      return assertSelected ? this.tmux.sendShellCommand(tmuxSessionName, staged, assertSelected, shellOptions)
+        : this.tmux.sendShellCommand(tmuxSessionName, staged, undefined, shellOptions);
     };
     if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false, code: "attention_required", message: "Selected history changed during Claude resume preparation; no native command was sent." };
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, beforeManagedInput) : await sendClassic();

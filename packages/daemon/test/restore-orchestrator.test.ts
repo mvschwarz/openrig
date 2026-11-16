@@ -137,6 +137,7 @@ describe("RestoreOrchestrator", () => {
       error?: string;
       warnings?: string[];
     }>;
+    harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
@@ -150,6 +151,7 @@ describe("RestoreOrchestrator", () => {
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
       seatSkillSelection: opts?.seatSkillSelection,
+      harnessNotStartedNotice: opts?.harnessNotStartedNotice,
     });
   }
 
@@ -551,6 +553,61 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.excludedNodes).toEqual([
       expect.objectContaining({ logicalId: "historical", reason: "historical_not_in_intended_roster" }),
     ]);
+  });
+
+  // A seat claimed after the rig's topology was recorded is still a node of the rig but isn't in a snapshot's recorded
+  // roster: restore doesn't start it, names it as skipped, and the rig isn't fully restored. A roster the operator
+  // narrowed on purpose, and a node no longer in the rig, read as before.
+  it.each([
+    ["recorded", "materialized_topology", true, "current_seat_not_in_intended_roster", "partially_restored"],
+    ["operator-narrowed", "operator_explicit", true, "historical_not_in_intended_roster", "fully_restored"],
+    ["recorded, node since removed", "materialized_topology", false, "historical_not_in_intended_roster", "fully_restored"],
+  ] as const)("a seat outside a %s roster", async (_label, source, stillInRig, reason, rigResult) => {
+    const snap = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "shell", role: "worker", runtime: "terminal" },
+        { logicalId: "claimed", role: "worker", runtime: "claude-code" },
+      ],
+      edges: [],
+    });
+    const claimed = snap.data.nodes.find((node) => node.logicalId === "claimed")!;
+    const fixed = updateSnapshotData(snap, (data) => {
+      data.topologyRoster = { version: 1, source, intendedNodeIds: data.nodes.filter((node) => node.logicalId !== "claimed").map((node) => node.id) };
+    });
+    if (!stillInRig) rigRepo.deleteNode(claimed.id);
+
+    const result = await createOrchestrator().restore(fixed.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.map((node) => node.logicalId)).toEqual(["shell"]);
+    expect(result.result.excludedNodes).toEqual([expect.objectContaining({ logicalId: "claimed", reason })]);
+    const skippedWarning = "Restore: claimed was skipped: it's a seat of this rig but not in this snapshot's intended roster (it was added or claimed after that roster was recorded), so restore didn't start it.";
+    expect(result.result.warnings.includes(skippedWarning)).toBe(reason === "current_seat_not_in_intended_roster");
+    expect(result.result.rigResult).toBe(rigResult);
+  });
+
+  // A seat added or claimed after the selected snapshot was taken isn't in it at all. Restore doesn't start it either, so
+  // it's named as skipped the same way; a roster the operator narrowed on purpose still keeps it out without a skip.
+  it.each([
+    ["a recorded", "materialized_topology", true],
+    ["an operator-narrowed", "operator_explicit", false],
+  ] as const)("a seat added after the snapshot, restored from %s roster", async (_label, source, named) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "shell", role: "worker", runtime: "terminal" }], edges: [] });
+    const fixed = updateSnapshotData(snap, (data) => {
+      data.topologyRoster = { version: 1, source, intendedNodeIds: data.nodes.map((node) => node.id) };
+    });
+    const late = rigRepo.addNode(snap.rigId, "late", { role: "worker", runtime: "claude-code" });
+
+    const result = await createOrchestrator().restore(fixed.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.map((node) => node.logicalId)).toEqual(["shell"]);
+    expect(result.result.excludedNodes).toEqual(named ? [{ nodeId: late.id, logicalId: "late", reason: "current_seat_not_in_intended_roster" }] : []);
+    const skippedWarning = "Restore: late was skipped: it's a seat of this rig but not in this snapshot's intended roster (it was added or claimed after that roster was recorded), so restore didn't start it.";
+    expect(result.result.warnings.includes(skippedWarning)).toBe(named);
+    expect(result.result.rigResult).toBe(named ? "partially_restored" : "fully_restored");
   });
 
   it("rejects an explicitly selected unusable snapshot before mutation", async () => {
@@ -1143,11 +1200,11 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes.find((n) => n.logicalId === "desk")).toMatchObject({
       status: "left_attached", error: expect.stringContaining("rig unclaim desk-app@r99"),
     });
-    // A seat left attached doesn't count against the rig.
+    // A seat left attached wasn't restored here, so the rig isn't fully restored.
     expect(rollupRestoreRigResult([
       { nodeId: "a", logicalId: "a", status: "resumed" },
       { nodeId: "b", logicalId: "b", status: "left_attached" },
-    ])).toBe("fully_restored");
+    ])).toBe("partially_restored");
   });
 
   it("a full restore launches a seat whose stored kind is neither tmux nor external CLI on OpenRig's own path, as it does today", async () => {
@@ -1192,7 +1249,8 @@ describe("RestoreOrchestrator", () => {
     if (!result.ok) return;
     expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(claimed.id)).toEqual({ status: "running" });
     expect(result.result.nodes).toEqual([expect.objectContaining({ logicalId: "desk", status: "left_attached" })]);
-    expect(result.result.rigResult).toBe("fully_restored");
+    // A seat left in its external attachment wasn't restored here, so the rig isn't fully restored.
+    expect(result.result.rigResult).toBe("partially_restored");
   });
 
   it("still blocks restore when tmux sessions are genuinely alive (inverse invariant)", async () => {
@@ -2945,6 +3003,59 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", error: "Harness not started: no startup context for dev.moved." });
     expect(result.result.nodes[0]!.restoreGaps).toBeUndefined();
     expect(adapter.launchHarness).not.toHaveBeenCalled();
+    // The bare shell the launcher registered is marked, so it isn't counted as a running seat; nothing is stopped.
+    const shell = db.prepare("SELECT status, startup_status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get(result.result.nodes[0]!.nodeId) as { status: string; startup_status: string };
+    expect(shell).toEqual({ status: "running", startup_status: "attention_required" });
+    const failure = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1")
+      .get(result.result.nodes[0]!.nodeId) as { payload: string };
+    expect(JSON.parse(failure.payload)).toMatchObject({ stage: "harness_not_started", error: "Harness not started: no startup context for dev.moved." });
+  });
+
+  // An attempt that positively leaves a seat as a bare shell hands that seat to the grouped notice once, under the
+  // attempt's own identity, and carries the notice's report. Seats not positively left as shells aren't handed over.
+  it("hands the seats a restore left as bare shells to the notice, with the attempt's identity, and carries its report", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const report = { notices: [{ owner: "lead@r", qitemId: "qitem-harness-not-started-x", seats: ["dev-moved@r"] }], unrouted: [], warnings: [] };
+    const notice = vi.fn(async () => report);
+    const orch = createOrchestrator({ harnessNotStartedNotice: notice });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: expect.stringMatching(/^restore attempt \d+$/),
+      seats: [{ nodeId: result.result.nodes[0]!.nodeId, logicalId: "dev.moved", cause: "Harness not started: no startup context for dev.moved." }],
+    }));
+    expect(result.result.harnessNotStarted).toEqual(report);
+  });
+
+  it("carries a partial notice report, and its warnings join the restore's", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const report = { notices: [], unrouted: [{ seat: "dev-moved@r", outcome: "none", reason: "no parent" }],
+      warnings: ["The notice to lead@r for dev-moved@r wasn't recorded (queue refused it)."] };
+    const orch = createOrchestrator({ harnessNotStartedNotice: async () => report });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(result.result.harnessNotStarted).toEqual(report);
+    expect(result.result.warnings).toContain("Restore: The notice to lead@r for dev-moved@r wasn't recorded (queue refused it).");
+  });
+
+  it("keeps the restore's result when the notice itself throws, with a warning", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const orch = createOrchestrator({ harnessNotStartedNotice: async () => { throw new Error("queue unavailable"); } });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(result.result.harnessNotStarted).toBeUndefined();
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (queue unavailable).");
   });
 
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
@@ -3281,6 +3392,52 @@ describe("RestoreOrchestrator", () => {
       }
       else expect(tmux.killSession).toHaveBeenCalled();
     }
+  });
+
+  // The blank attempt's terminal stop isn't confirmed (tmux refused, or the call threw): the session may still be running,
+  // so its session record and binding are left as they are and the seat needs attention, not "no session is running".
+  it.each([
+    ["a false kill", async () => ({ ok: false as const, code: "kill_failed", message: "fixture: stop unconfirmed" })],
+    ["a thrown kill", async () => { throw new Error("fixture: tmux call failed"); }],
+  ] as const)("an unconfirmed rollback stop leaves the blank session's record and binding, and asks for attention: %s", async (_label, kill) => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-stop", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-stop" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-claude-token", "scrape");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh", missingConversation: true as const })),
+    };
+    const tmux = mockTmux();
+    tmux.killSession = vi.fn(kill) as typeof tmux.killSession;
+
+    const result = await createOrchestrator({ tmux }).launchSingleNode(rig.id, node.logicalId, { snapshotId: snap.id, adapters: { "claude-code": mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.launched!.find((n) => n.nodeId === node.id)!;
+      expect(nodeResult.status).toBe("attention_required");
+      expect(nodeResult.error).toContain("the blank session this restore launched couldn't be confirmed stopped: it may still be running");
+      expect(nodeResult.error).toContain(`rig seat stop '${node.logicalId}@test-rig' --reason "<why>"`);
+      expect(nodeResult.error).not.toContain("no session is running");
+    }
+    expect(tmux.killSession).toHaveBeenCalledOnce();
+    // Nothing was rolled back: the launched session isn't superseded, and its binding still names it.
+    const rows = db.prepare("SELECT id, status FROM sessions WHERE node_id = ?").all(node.id) as Array<{ id: string; status: string }>;
+    const launched = rows.filter(row => row.id !== session.id);
+    expect(launched).toHaveLength(1);
+    expect(launched[0]!.status).not.toBe("superseded");
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@test-rig");
   });
 
   // The pause is the same whatever the records say about use: a seat that reached its prompt, had an output observed or has a
@@ -4869,6 +5026,63 @@ describe("RestoreOrchestrator", () => {
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
     });
 
+    // A subset launch records no restore.started: its completion is its attempt.
+    function seedSubsetAttempt(restoreOutcome: "failed" | "attention_required") {
+      const rigName = `r${nextSeed++}`;
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "codex" });
+      const sessionName = `test-worker@${rigName}`;
+      sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
+      const sess = sessionRegistry.registerSession(node.id, sessionName);
+      db.prepare("UPDATE sessions SET resume_type = 'codex_id', resume_token = 'tok-abc-123' WHERE id = ?").run(sess.id);
+      const completed = eventBus.emit({ type: "restore.subset_completed", rigId: rig.id, snapshotId: "snap-subset", result: {
+        snapshotId: "snap-subset", preRestoreSnapshotId: null, rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: restoreOutcome }], warnings: [],
+      } } as any);
+      return { rig, nodeId: node.id, attemptId: completed.seq };
+    }
+    const resumedCodexPane = (token: string) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("bash");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue("OpenAI Codex (v0.155.1)\n› continue");
+      const listProcesses = async () => [
+        { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "bash", executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: `codex resume ${token}`,
+          argv: ["codex", "resume", token], executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ];
+      return { tmux, listProcesses };
+    };
+
+    it.each(["attention_required", "failed"] as const)("reconciles a subset-launched Codex seat (%s) from the same exact lineage, keeping its outcome and appending the recovery", async (outcome) => {
+      const seeded = seedSubsetAttempt(outcome);
+      const original = db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed'").get();
+      const { tmux, listProcesses } = resumedCodexPane("tok-abc-123");
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: true, attemptId: seeded.attemptId, from: outcome, to: "operator_recovered" });
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed'").get()).toEqual(original);
+      const reconciled = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+      expect(reconciled.map((row) => JSON.parse(row.payload))).toEqual([expect.objectContaining({
+        nodeId: seeded.nodeId, attemptId: seeded.attemptId, from: outcome, to: "operator_recovered" })]);
+      // One receipt per attempt: a repeated check reports it without appending another.
+      await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+    });
+
+    it("a subset-launched seat running another conversation keeps its outcome, and nothing is appended", async () => {
+      const seeded = seedSubsetAttempt("attention_required");
+      const { tmux, listProcesses } = resumedCodexPane("tok-other-999");
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: false, code: "process_lineage_mismatch" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toEqual([]);
+    });
+
     it.each([
       ["Claude Code v2.1.220\n ❯ accept edits on", true],
       ["Choose a conversation to resume:\n  1. project-foo", false],
@@ -5847,15 +6061,62 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
     });
 
-    it("invalid pinned name: falls back to the derived name with an observable invalid-pin warning", async () => {
-      const { snapId } = seedSeat({ logicalId: "worker-a", boundName: "bad name!" }); // fails validateSessionName
+    // An adopted seat is bound to its own tmux session's name (`rig adopt` registers it as found), which need not follow
+    // OpenRig's pattern. Restore keeps it when tmux creates and finds the session under exactly that name and OpenRig's
+    // address readers read it back unchanged, so the seat's peers still reach it by that name.
+    it.each(["c42a-lead", "bad name!", "c42a+lead", "c42a#lead", "c42a#[x]", "%c42a", "=c42a", "c42a+lead@main"])("an adopted seat's own session name %s: restore keeps it, so the seat's address doesn't change", async (bound) => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "main.lead", podAware: true, boundName: bound });
       const tmux = mockTmux();
-      const orch = createOrchestrator({ tmux });
+      const result = await createOrchestrator({ tmux }).restore(snapId);
+      expect(result.ok).toBe(true);
+      expect(createdSessionNames(tmux)).toContain(bound);
+      expect(createdSessionNames(tmux)).not.toContain("main-lead@r99");
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe(bound);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE node_id = ? AND session_name = ?").get(nodeId, bound)).toEqual({ n: 1 });
+      expect(result.result.warnings.some((w) => w.includes("FR-5"))).toBe(false);
+    });
 
-      const result = await orch.restore(snapId);
+    it.each([
+      ["c42a.lead", 'tmux turns "." into "_" in a session name'],
+      ["c42a#Slead", 'tmux replaces "#S" with a value in a new session\'s name'],
+      ["c42a#{x}", 'tmux expands "#{…}" in a new session\'s name'],
+      ["c42a##lead", 'tmux reads "##" as "#" in a new session\'s name'],
+      ["$c42a", 'tmux reads a name starting with "$" as a session id, even in an exact target'],
+      ["%3", 'tmux reads "%3" as a pane id'],
+      ["a b@c@d", 'it contains more than one "@", so OpenRig reads its last part as a host'],
+      ["c42a,lead", 'it contains ",", which `rig send --to` reads as a list separator'],
+      [" c42a-lead", "it starts or ends with whitespace, which `rig send --to` trims"],
+    ])("a bound name that can't be launched again as given (%s): the derived name, with the change and its reason said", async (bound, problem) => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: bound });
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(snapId);
       expect(result.ok).toBe(true);
       expect(createdSessionNames(tmux)).toContain("r99-worker-a");
-      expect(result.result.warnings.some((w) => w.includes("FR-5") && w.includes("is invalid"))).toBe(true);
+      expect(createdSessionNames(tmux)).not.toContain(bound);
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("r99-worker-a");
+      expect(result.result.warnings).toContain(`FR-5: restore starts worker-a as "r99-worker-a", not "${bound}", the session name it was bound to: ${problem}. Once it runs there, peers that address "${bound}" need "r99-worker-a".`);
+    });
+
+    it("a failed launch under the derived name: the line names only the attempt, the node fails and keeps its bound name", async () => {
+      const { snapId, nodeId } = seedSeat({ logicalId: "worker-a", boundName: "c42a.lead" });
+      const tmux = mockTmux();
+      (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false as const, code: "duplicate_session", message: "err" });
+      const result = await createOrchestrator({ tmux }).restore(snapId);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes.find((n) => n.logicalId === "worker-a")?.status).toBe("failed");
+      expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe("c42a.lead");
+      const line = result.result.warnings.find((w) => w.startsWith("FR-5: restore starts worker-a"));
+      expect(line).toContain('as "r99-worker-a", not "c42a.lead"');
+      expect(result.result.warnings.some((w) => /comes back as|now answers at|has moved to/.test(w))).toBe(false);
+    });
+
+    it("only a launch that keeps the seat's bound name accepts one outside the naming pattern, and only one it can reuse", () => {
+      const { nodeId } = seedSeat({ logicalId: "worker-a", boundName: null });
+      expect(() => sessionRegistry.registerSession(nodeId, "c42a-lead")).toThrow(/Invalid session name "c42a-lead"/);
+      expect(() => sessionRegistry.registerSession(nodeId, "c42a.lead", "initial", null, { keptBoundName: true }))
+        .toThrow(/Invalid session name "c42a.lead"/);
+      expect(sessionRegistry.registerSession(nodeId, "c42a-lead", "initial", null, { keptBoundName: true }).sessionName).toBe("c42a-lead");
     });
 
     it("subset launch surfaces the FR-5 fallback warning (not discarded) — API result + restore.subset_completed event", async () => {

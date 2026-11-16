@@ -158,7 +158,7 @@ describe("a seat's Claude autoMode block", () => {
   });
 
   it("keeps a launch observation on a database without the applied column", () => {
-    const f = fixture(ALL_MIGRATIONS.filter(m => m.name !== "170_claude_auto_mode.sql"));
+    const f = fixture(ALL_MIGRATIONS.filter(m => m.name !== "171_claude_auto_mode.sql"));
     const generation = f.registry.currentOccupantTenure(f.a.id)!.generationUuid;
     const launches = new AppliedLaunchObservationStore(f.db);
     expect(launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: block })).toBe(true);

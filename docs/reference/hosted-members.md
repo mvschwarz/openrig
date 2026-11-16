@@ -89,7 +89,8 @@ These facts stay separate on the row:
 - **Wake:** with a trigger, the row's wake result is `wake-accepted:webhook (<url_ref>) answered <status>` when the trigger took the
   ring, `indeterminate:webhook …` when it didn't answer in time, or `failed:webhook …`. Accepted means the tool's trigger
   answered, not that the member read the row.
-  - With no trigger, the result is `unroutable`. The member finds work by reading its own inbox and picks a row up by claiming
+  - With no trigger, the result is `awaiting-pickup: …`: no wake is sent, and the work waits until the member reads its queue (rows
+    recorded before this wording read `unroutable: …`, and both are read the same way). The member finds work by reading its own inbox and picks a row up by claiming
     it, so a row gets no finding of its own. Work it leaves unclaimed past the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default) is listed in one standing notice per member. The notice goes to
     the operator seat when it's a person, else the rows' creator when they all share one, else the operator agent, else the
@@ -182,7 +183,8 @@ and nothing else is offered:
   can address count, and the first of these that any of them matches decides, so another seat's slug never makes an exact
   name ambiguous and a seat the grant can't address never shadows one it can. The item is stored under that
   seat's actual session. A slug two seats match returns `destination_ambiguous` with the candidates, and a name that no
-  seat the grant can reach has returns `destination_not_found`. A name the grant can't address as written (its own seat,
+  seat the grant can reach has returns `destination_not_found`. If the team couldn't be read to check, it returns
+  `destination_unchecked` and nothing was written; try again. A name the grant can't address as written (its own seat,
   or another assistant's without `team`/`list`) stays `out_of_scope`, whether or not that seat exists.
 - **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form

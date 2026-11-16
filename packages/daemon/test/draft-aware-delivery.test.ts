@@ -418,6 +418,31 @@ describe("current draft-aware delivery through the real transport", () => {
       expect(f.bodies.a).toBe(text);
     });
 
+  // D04 at full width (Claude 2.1.322 and 2.1.323, 200x50, as banked): the paste hint and the auto-update failure share
+  // the footer row under an empty input box, before any paste of ours.
+  const wideFooter = `  paste again to expand${" ".repeat(97)}✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code`;
+  const underWideFooter = (f: ReturnType<typeof fixture>) => vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+    const snapshot = frame(f.bodies.a ?? "");
+    snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${wideFooter}\n`);
+    return snapshot;
+  });
+
+  it("delivers once to an empty input box under the full-width paste hint and auto-update failure row", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    underWideFooter(f);
+    const result = await f.send("wide-footer", "next work", { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["next work"]);
+  });
+
+  it("still holds a person's draft under the same full-width footer row", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "a person's draft";
+    underWideFooter(f);
+    expect(await f.send("wide-footer-draft", "next work")).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe("a person's draft");
+  });
+
   it.each(Array.from({ length: nativePaste.afterSamples }, (_, i) => i + 1))("submits its retained native paste across the footer change (sample %i)", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const text = Array.from({ length: 71 }, (_, i) => `delivery line ${i}`).join("\n");
@@ -1252,9 +1277,13 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   it("holds as unreadable when tmux can't report recent writable-client activity; with no writable client it delivers", async () => {
     const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
-    vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("command timed out"));
+    vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("PRIVATE_DETAIL command timed out"));
     const held = await f.send("activity-unreadable", notice, { openrigNotice: true, verify: false });
-    expect(held).toMatchObject({ sent: false, reason: "draft_input_unknown" });
+    // The hold carries its own reason, so a caller that keeps the last diagnostic it was given never keeps an older one.
+    expect(held).toMatchObject({ sent: false, reason: "draft_input_unknown", inputReadFailure: {
+      check: "draft-aware", status: "unknown", confidence: null, reason: "client_activity_unavailable", timedOut: null,
+      cursor: { present: false, valid: null, atEnd: null } } });
+    expect(JSON.stringify(held.inputReadFailure)).not.toContain("PRIVATE_DETAIL");
     expect(pasted(f)).toEqual([]);
     setActivity(f, () => null);
     f.advance();

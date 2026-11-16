@@ -1,3 +1,4 @@
+import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
 import { runnerGrantIssuer } from "./domain/runner-grant-launch.js";
 import { piAccountStateRoot } from "./domain/pi-account-state.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
@@ -212,6 +213,7 @@ import { recoverSeatSkillAttempts } from "./domain/seat-skill-apply.js";
 import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import { lstatLinkInfo } from "./domain/restore-guidance.js";
 import { managedBlockRecords } from "./domain/managed-block-records.js";
+import { noticeHarnessNotStarted } from "./domain/harness-not-started-notice.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -358,7 +360,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       allowConflict: allowDbConflict });
   for (const warning of databaseWarnings) console.warn(`Warning: ${warning}`);
   const db = createDb(dbPath);
+  const endMigrations = beginStartupPhase("migrations");
   migrate(db, ALL_MIGRATIONS);
+  const migrationsTiming = endMigrations();
 
   // 51-09 increment 1 — establish the daemon's durable self-host identity at
   // boot (mint on first boot, reconcile thereafter). host.name is a display-only
@@ -398,6 +402,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     : new SlowOpRecorder({
         logPath: nodePath.join(OPENRIG_HOME, "logs", "slow-operations.jsonl"),
       }));
+  // The migration interval ends before recorder setup; submit it only once the
+  // normal nonblocking sink exists. A failed pre-recorder boot has no record.
+  recordStartupPhase(slowOpRecorder, migrationsTiming);
   configureSyncSiteRecorder(slowOpRecorder);
   // Instrumentation wiring is observe-only: neither a throwing registration
   // call nor a throwing callback body (streamStore.emit) may abort createDaemon
@@ -923,6 +930,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     seatSkillSelection: async (rigId, nodeId) => persistedSeatSkillSelection
       ? persistedSeatSkillSelection(rigId, nodeId)
       : { ok: false, reason: "the pod instantiator is not ready" },
+    harnessNotStartedNotice: (input) => noticeHarnessNotStarted(db, queueRepoInstance, input),
   });
 
   // Connect to cmux at startup — degrades gracefully if absent
@@ -931,6 +939,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Reconcile all managed rigs — marks stale sessions as detached.
   // Capture aggregate counts and log a compact summary so cold-start truth
   // repair is visible in daemon output instead of silently swallowed.
+  const endReconciliation = beginStartupPhase("reconciliation");
   const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter });
   const rigs = rigRepo.listRigs();
   let reconcileChecked = 0;
@@ -974,6 +983,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // eslint-disable-next-line no-console
     console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} unseen=${reconcileUnseen} errors=${reconcileErrors}`);
   } catch { /* logging must never throw */ }
+
+  recordStartupPhase(slowOpRecorder, endReconciliation());
 
   // Transcript rotators are process-local. Reattach them after lifecycle
   // reconciliation so surviving tmux sessions keep ingesting across daemon
@@ -1115,6 +1126,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
 
+  const endManagedPlugins = beginStartupPhase("managed_plugins");
   // plugin-primitive Phase 3a slice 3.2 — vendor openrig-core plugin to
   // ~/.openrig/plugins/openrig-core/ on first launch. Auto-fetch from
   // github.com/mvschwarz/openrig-plugins is best-effort + 404-tolerant
@@ -1177,6 +1189,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } catch (err) {
     console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
+
+  recordStartupPhase(slowOpRecorder, endManagedPlugins());
 
   // PL-014: one daemon-scoped ContextPackLibraryService backs the
   // delivery-free /api/context-packs list/sync/compose/read/delete/preview/pieces
@@ -1397,6 +1411,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     scanner: tmuxScanner, fingerprinter: sessionFingerprinter, enricher: sessionEnricher,
     discoveryRepo, sessionRegistry, eventBus,
   });
+  // W2a-1 — producer wiring: the live occupant generation resolves synchronously from the shipped
+  // occupant-tenure ledger. generation_uuid CHANGES for a new occupant and persists only within one
+  // tenure (a same-session relaunch is a continuation with no new generation); node_id is the stable-
+  // across-handover key, not this. null = UNKNOWN, honored by the store as abstain (never a stale claim
+  // rendered live). No tmux exec — a better-sqlite3 read on the hot path.
+  const agentActivityStore = new AgentActivityStore({
+    db,
+    eventBus,
+    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    isRegisteredOccupantGeneration: (nodeId, generation) =>
+      sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
+  });
   // Context usage store — constructed ahead of the refresher + ClaimService so the
   // Claude status-line sidecar reader can be injected into BOTH: FR-3
   // adoption-boundary capture (ClaimService) and FR-4 snapshot null-fill (refresher).
@@ -1404,10 +1430,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { ContextUsageStore } = await import("./domain/context-usage-store.js");
   const contextUsageStore = new ContextUsageStore(db, {
     stateDir: OPENRIG_HOME,
+    runnerObservations: agentActivityStore,
     codexHome: configuredCodexHome,
     // GHOST-STAGE (c-id): reject context readings from before the live occupant booted (prior
     // generation) so a frozen pre-handover sample can't drive the threshold. null = UNKNOWN (inert).
     resolveOccupantBootAt: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.bootAt ?? null,
+    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
   });
   // Shared, read-only current-occupant record path: reporting does not depend on a pin or transport.
   const { CurrentModelReader } = await import("./domain/model-divergence/current-model-reader.js");
@@ -1424,7 +1452,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     return resolver;
   };
   const currentModelReader = new CurrentModelReader({
-    sessions: sessionRegistry, identities: new SeatIdentityStore(db), context: contextUsageStore,
+    sessions: sessionRegistry, identities: new SeatIdentityStore(db), context: contextUsageStore, runnerObservations: agentActivityStore,
     census: modelCensus,
     readAllPaneProcesses: () => tmuxAdapter.readAllPaneProcesses(),
     native: {
@@ -1505,18 +1533,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // (ContextUsageStore is constructed above, ahead of ClaimService, for FR-3.)
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
   const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmuxAdapter, tmuxAdapter);
-  // W2a-1 — producer wiring: the live occupant generation resolves synchronously from the shipped
-  // occupant-tenure ledger. generation_uuid CHANGES for a new occupant and persists only within one
-  // tenure (a same-session relaunch is a continuation with no new generation); node_id is the stable-
-  // across-handover key, not this. null = UNKNOWN, honored by the store as abstain (never a stale claim
-  // rendered live). No tmux exec — a better-sqlite3 read on the hot path.
-  const agentActivityStore = new AgentActivityStore({
-    db,
-    eventBus,
-    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
-    isRegisteredOccupantGeneration: (nodeId, generation) =>
-      sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
-  });
   // #763 — Codex usage-limit banner detector. The reactive tap only accepts a
   // typed at_limit hook row and no hook producer emits one for Codex, so the
   // structural sweep reports what the seat itself shows. Attached late (rather
@@ -1550,7 +1566,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   };
   eventBus.subscribe(event => {
-    if (event.type !== "restore.completed") return;
+    if (event.type !== "restore.completed" && event.type !== "restore.subset_completed") return;
     void seatAttentionReconciler.onRestoreCompleted(event.rigId)
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   });
@@ -1647,6 +1663,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     teardownOrchestrator: new RigTeardownOrchestrator({
       db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus, resumeMetadataRefresher, serviceOrchestrator,
       claudeCollectorAssetPath,
+      releaseClaimedSession: async (sessionId) => {
+        const released = await rigLifecycleService.unclaimSession(sessionId);
+        return released.ok ? { ok: true } : { ok: false, error: released.error };
+      },
     }),
     podInstantiator,
     podBundleSourceResolver,
@@ -2430,6 +2450,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return since == null ? null : new Date(since).toISOString();
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
+      deliveryDeferred: (jobId, session) => queueRepoInstance.deliveryDrains.holds(session, jobId),
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
       eventBus,
@@ -2831,6 +2852,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
   // the manual back-half drain through the auto poll loop (no second path).
   deps.compactionEnforcer = compactionEnforcer;
+  const { PiCompactionService } = await import("./domain/pi-compaction-service.js");
+  const { PiCompactionRequestStore } = await import("./domain/pi-compaction-request-store.js");
+  if (sessionTransport) deps.piCompactionService = new PiCompactionService({
+    requestStore: new PiCompactionRequestStore(nodePath.join(OPENRIG_HOME, "state", "pi-compaction-requests")),
+    readSidecar: session => piAdapter.readRunnerSidecar(session).state,
+    // The agent's ordinary guarded send path (session transport + delivery guard),
+    // not a raw tmux write: drafts, holds, prompts and the occupant are respected.
+    send: (session, text, opts) => sessionTransport.send(session, text, opts),
+    terminalPolicies: new TerminalPolicyStore(db),
+  });
 
   // GHOST-STAGE (e/Class-B) — construct the canonical OccupantInvalidator now that both Class-A deps
   // exist (the enforcer's in-mem maps 1a-1f + the context sidecar 2a). Injected into SeatHandoverService

@@ -710,3 +710,103 @@ describe("PM dogfood #1 — authored README sections vs pristine scaffold PRD", 
     expect(asPlanned.findings).toEqual(asPlaceholder.findings);
   });
 });
+
+// A planning pilot writes one `## Requirements` list: bullets that start `R<n>.`, plain or bold, each with its proof
+// after `Observable:`, plain or italic. The audit takes it in place of `## Mini-requirements` and `## Proof contract`.
+describe("a single `## Requirements` R list", () => {
+  const LISTS = ["mini_requirements_missing_or_malformed", "proof_contract_missing_or_malformed"];
+  function specSlice(body: string): ScopeAuditInput {
+    return {
+      id: null,
+      path: "/w/missions/studio/slices/03-plan-work-proof",
+      readmeFrontmatterRaw: "id: OPR.9.9.3\nstatus: building\nintent: plan, work and proof in one list\ndepends_on: []",
+      progressFileExists: true,
+      readmeOnlyMarker: false,
+      isActiveRelease: true,
+      level: "slice",
+      readmeContent: `# Slice 03 — Plan, work, proof\n\n${body}`,
+      implementationPrdExists: false,
+      implementationPrdContent: null,
+    };
+  }
+  const R_LIST = [
+    "## Requirements",
+    "",
+    "- **R1. One promise per requirement.** A slice SPEC has a one-sentence intent and numbered promises.",
+    "  *Observable:* the slice's SPEC shows R1 and R2, each with its proof.",
+    "- R2. The audit reads the list as written. Observable: `rig scope audit` reports no requirements or proof finding.",
+  ].join("\n");
+  const sectionFindings = (body: string) => classifyScopeItem(specSlice(body)).findings.filter((f) => LISTS.includes(f.kind));
+
+  it("reads an R list, bold or plain, with italic or plain Observable, as both lists", () => {
+    expect(sectionFindings(R_LIST)).toEqual([]);
+  });
+
+  it("reads clean when the scaffold's two placeholder lists are still there beside a hand-written R list", () => {
+    const scaffold = [
+      "## Mini-requirements", "", "1. [The fix as an observable outcome. For a bug fix this may BE the whole plan.]", "",
+      "## Proof contract", "", "- [ ] [The repro no longer reproduces / the regression test pins it — captured.]", "",
+    ].join("\n");
+    expect(sectionFindings(`${scaffold}${R_LIST}`)).toEqual([]);
+  });
+
+  it("names the R items with no observable proof, with the R list's own remediation, and no request for the two lists", () => {
+    const findings = sectionFindings([
+      "## Requirements",
+      "- **R1. One promise.** Observable: the SPEC shows it.",
+      "- **R2. A second promise.** Still being worked out.",
+      "- R3. A third. *Observable:*",
+    ].join("\n"));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      kind: "proof_contract_missing_or_malformed",
+      severity: "low",
+      path: "/w/missions/studio/slices/03-plan-work-proof/SPEC.md",
+      message: "`## Requirements` has R items with no observable proof (R2, R3), so proof has nothing to pair against for them.",
+    });
+    expect(findings[0]!.remediation).toContain("after `Observable:`");
+    expect(findings[0]!.remediation).not.toMatch(/^Add `## (Mini-requirements|Proof contract)`/);
+  });
+
+  // An unnumbered `## Requirements` (the contract's "not numbered yet", and older slices' own lists) isn't an R list.
+  it("leaves a slice with neither shape, or an unnumbered `## Requirements`, with today's two findings", () => {
+    for (const body of ["## Requirements\n\n1. Begin from the real state.\n2. Keep drafts.\n", "## Repro\n\nsteps\n"]) {
+      const findings = sectionFindings(body);
+      expect(findings.map((f) => f.kind)).toEqual(LISTS);
+      expect(findings.map((f) => f.message)).toEqual([
+        "No `## Mini-requirements` section — the scope plan has no concise requirements tier.",
+        "No `## Proof contract` section — proof has no promised-deliverables source to pair against.",
+      ]);
+    }
+  });
+
+  it("leaves a legacy two-list slice unchanged", () => {
+    expect(sectionFindings("## Mini-requirements\n\n1. one\n\n## Proof contract\n\n- [ ] a deliverable — captured\n")).toEqual([]);
+  });
+
+  // An R item's proof must be in the same item: a sibling bullet, or text back at the margin after a blank line, isn't it.
+  it("reads an R item as ending at the next sibling bullet or a paragraph after it, so neither lends it proof", () => {
+    const findings = sectionFindings([
+      "## Requirements",
+      "- R1. Show the panel.",
+      "- Reviewer note. Observable: inspect the review log.",
+      "- R2. Keep the order.",
+      "",
+      "Observable: a paragraph after the list, not R2's.",
+      "- R3. Say what changed.",
+      "  - Observable: a deeper bullet inside R3 is R3's own proof.",
+    ].join("\n"));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.message).toBe("`## Requirements` has R items with no observable proof (R1, R2), so proof has nothing to pair against for them.");
+  });
+
+  // A UI slice whose mockup reference sits in an R item has its mockup; the R list stands in for the proof contract.
+  it("counts a mockup reference inside an accepted R list for a UI slice", () => {
+    const visual = "## Intent visual\n\nThe review panel, as drawn.\n\n";
+    const mockups = (body: string) => classifyScopeItem(specSlice(`${visual}${body}`)).findings.filter((f) => f.kind === "ui_slice_missing_mockup");
+    expect(mockups("## Requirements\n- R1. Show the panel. *Observable:* it matches plannedRef: mockups/panel.png.\n")).toEqual([]);
+    expect(mockups("## Requirements\n- R1. Show the panel. Observable: ![panel](mockups/panel.png)\n")).toEqual([]);
+    // Without a reference anywhere, a UI slice still gets the advisory.
+    expect(mockups("## Requirements\n- R1. Show the panel. Observable: the panel shows.\n")).toHaveLength(1);
+  });
+});

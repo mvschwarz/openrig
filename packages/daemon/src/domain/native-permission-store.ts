@@ -121,6 +121,12 @@ export function resolveLaunchOverrideFromFacts(
   return { ...ruleBinding, kernelAuthority: false, teamPermissionDefault: launchDefault === "team", ...permissionBindingOverride(selection) };
 }
 
+/** Why a seat whose policy asks for auto launches at the floor: only Claude Code has an auto mode. */
+export function noAutoModeFallback(runtime: string): string {
+  const runtimeName = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime;
+  return `${runtimeName} has no auto mode and launches at the floor`;
+}
+
 /** The stable node owns the desired setting. Native history and current processes are untouched. */
 export class NativePermissionStore {
   constructor(private readonly db: Database.Database) {}
@@ -287,12 +293,11 @@ export class NativePermissionStore {
 
       if (effectivePosture === "auto") {
         if (runtime !== "claude-code") {
-          const runtimeName = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime;
           return {
             effectiveMode: "floor",
             source: "member_spec",
             launchPosture: "floor",
-            fallbackReason: `${runtimeName} has no auto mode and launches at the floor`,
+            fallbackReason: noAutoModeFallback(runtime),
           };
         }
         return {
@@ -337,12 +342,11 @@ export class NativePermissionStore {
 
       if (posture === "auto") {
         if (runtime !== "claude-code") {
-          const runtimeName = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime;
           return {
             effectiveMode: "floor",
             source: "rig_spec",
             launchPosture: "floor",
-            fallbackReason: `${runtimeName} has no auto mode and launches at the floor`,
+            fallbackReason: noAutoModeFallback(runtime),
           };
         }
         return {

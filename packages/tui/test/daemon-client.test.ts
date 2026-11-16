@@ -146,9 +146,9 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
       .toContain("Startup prompt still staged; press Enter in that pane.");
   });
 
-  it("reports an already-running launch response honestly", () => {
+  it("reports a launch over a live session as not relaunched, with its agent unproven", () => {
     expect(launchNodeNotice("dev.qa", { ok: true, code: "already_running", alreadyRunning: [{ logicalId: "dev.qa" }] }))
-      .toBe("agent already running: dev.qa");
+      .toBe("not relaunched, live session (its agent isn't proven running): dev.qa");
     expect(launchNodeNotice("dev.qa", { ok: true, launched: [{ logicalId: "dev.qa" }] }))
       .toBe("agent run requested: dev.qa");
   });

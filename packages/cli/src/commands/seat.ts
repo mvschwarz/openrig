@@ -183,7 +183,7 @@ interface SeatHandoverMutationResult {
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
         model?: { requested: string | null; predecessorCompared: false } };
   /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
-  restorePacket?: { status: "unconfirmed"; reason: string };
+  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). */
@@ -439,7 +439,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       console.log(`Codex rebuild model: ${outcome.model.requested ? `requested ${outcome.model.requested}` : "runtime configuration/default"}. The predecessor's in-pane model was not compared or carried.`);
     }
     if (outcome.primedArtifacts.length > 0) {
-      const heading = result.restorePacket?.status === "unconfirmed" ? "Rebuild packet includes" : "Rebuild primed from";
+      const heading = result.restorePacket ? "Rebuild packet includes" : "Rebuild primed from";
       console.log(`${heading} ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
       for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);
     }
@@ -457,7 +457,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       return;
     }
   }
-  if (result.sideEffects.startupContextDelivered) {
+  if (result.sideEffects.startupContextDelivered && result.restorePacket?.status === "accepted") {
+    // Typed and submitted on a runtime whose input box isn't read: delivered as far as OpenRig can tell, no further.
+    console.log(`The ${result.source.mode === "rebuild" ? "rebuild priming packet" : "captured startup context (restore packet)"} was typed and submitted to the successor; ${result.restorePacket.reason}.`);
+    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
+  } else if (result.sideEffects.startupContextDelivered) {
     if (result.source.mode === "rebuild") {
       console.log("The rebuild priming packet was delivered to the successor.");
     } else {
@@ -926,13 +930,13 @@ identity remains unverified; a version number alone cannot clear it.
     .option("--rules <file>", "JSON allow/deny lists for this Claude seat; replaces its recorded rules without changing its mode")
     .option("--auto-mode <file>", "JSON Claude autoMode block for this seat; replaces its recorded block without changing its mode")
     .option("--clear-auto-mode", "Clear this Claude seat's recorded autoMode block")
-    .option("--codex-permissions <file>", "JSON sandbox/approval envelope for this Codex seat; replaces its recorded mode")
+    .option("--codex-permissions <file>", "JSON sandbox/approval envelope, or filesystem policy, for this Codex seat; replaces its recorded mode")
     .option("--codex-profile <name>", "Codex config profile for this seat, or inherit to clear it; approval stays with the envelope or session")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")
-    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--auto-mode takes a JSON object with Claude's environment, allow, soft_deny and hard_deny lists of prose entries, and optionally classifyAllShell. Claude adds them to your user and managed auto mode settings. Without \"$defaults\", a list may replace Claude's built-in entries for that section, unless another scope (user or managed settings) keeps \"$defaults\" there; OpenRig warns but doesn't add it. claude auto-mode config shows the effective lists. --clear-auto-mode stops OpenRig passing a block; user and managed settings are unaffected.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
+    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--auto-mode takes a JSON object with Claude's environment, allow, soft_deny and hard_deny lists of prose entries, and optionally classifyAllShell. Claude adds them to your user and managed auto mode settings. Without \"$defaults\", a list may replace Claude's built-in entries for that section, unless another scope (user or managed settings) keeps \"$defaults\" there; OpenRig warns but doesn't add it. claude auto-mode config shows the effective lists. --clear-auto-mode stops OpenRig passing a block; user and managed settings are unaffected.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. Or, in place of sandbox and those fields, filesystem: a nonempty mapping of absolute paths, ~/paths or native special paths such as :minimal and :workspace_roots to read, write or deny, with approval never or on-request and an optional network_access. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
     .action(async (seat: string, opts: { mode?: string; rules?: string; autoMode?: string; clearAutoMode?: boolean; codexPermissions?: string; codexProfile?: string; reason: string; operator?: string; json?: boolean }) => {
       if ([opts.mode, opts.rules, opts.autoMode, opts.clearAutoMode, opts.codexPermissions, opts.codexProfile].filter(value => value !== undefined).length !== 1) {
         console.error("Choose exactly one of --mode, --rules <file>, --auto-mode <file>, --clear-auto-mode, --codex-permissions <file> or --codex-profile <name>."); process.exitCode = 1; return;
@@ -950,7 +954,7 @@ identity remains unverified; a version number alone cannot clear it.
       let codexPermissions: unknown;
       if (opts.codexPermissions !== undefined) {
         try { codexPermissions = JSON.parse(readFileSync(opts.codexPermissions, "utf8")); }
-        catch { console.error(`Cannot read JSON from ${opts.codexPermissions}; provide a sandbox/approval mapping.`); process.exitCode = 1; return; }
+        catch { console.error(`Cannot read JSON from ${opts.codexPermissions}; provide a sandbox/approval or filesystem mapping.`); process.exitCode = 1; return; }
       }
       const choice = opts.rules !== undefined ? { rules } : opts.autoMode !== undefined ? { autoMode } : opts.clearAutoMode ? { autoMode: null }
         : codexPermissions !== undefined ? { codexPermissions }

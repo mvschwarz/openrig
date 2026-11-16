@@ -399,8 +399,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
       }
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
-      return assertSelected ? this.tmux.sendShellCommand(session, staged, assertSelected, { sourceInPane: true })
-        : this.tmux.sendShellCommand(session, staged, undefined, { sourceInPane: true });
+      // The token step is POSIX shell: a fish pane runs the launch with /bin/sh rather than sourcing it.
+      const shellOptions = { sourceInPane: true, ...(seatToken && staged.includes(seatToken.step) ? { posix: true } : {}) };
+      return assertSelected ? this.tmux.sendShellCommand(session, staged, assertSelected, shellOptions)
+        : this.tmux.sendShellCommand(session, staged, undefined, shellOptions);
     };
     const launchNotes = () => (tokenWarnings.length ? { warnings: [...tokenWarnings] } : {});
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);

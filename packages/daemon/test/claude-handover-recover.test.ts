@@ -31,6 +31,8 @@ import { abandonOpenHandoverAttempt, openHandoverAttempt } from "../src/domain/s
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { SessionAddressConflict } from "../src/domain/session-registry.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
+import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.js";
+import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 
 const relay = createRequire(import.meta.url)(path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs")) as {
   buildSessionIdentityPayload(p: unknown, env: Record<string, string>): Record<string, unknown> | null;
@@ -251,6 +253,41 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     db.prepare("UPDATE nodes SET runtime = 'claude-code' WHERE id = ?").run(nodeId);
     expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
     expect(db.prepare("SELECT COUNT(*) AS n FROM activity_grants WHERE node_id = ?").get(nodeId)).toEqual({ n: 0 });
+  });
+
+  // #3044 C3: the retiring occupant's name-keyed cleanup runs at the recovery's commit, after the successor has already
+  // run under the same name. The real invalidator and context store, on a temporary state folder.
+  it.each([
+    ["keeps the context sample the running successor wrote", (generation: string) => generation, true],
+    ["still removes a sample the retiring occupant left", () => "retired-generation", false],
+  ])("#3044 C3: a recovery's cleanup %s, and clears the retiree's compaction state", async (_label, writer, kept) => {
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), "recover-sidecar-"));
+    try {
+      // The readers' generation gate, wired as the daemon wires it.
+      const contextUsage = new ContextUsageStore(db, { stateDir,
+        resolveOccupantBootAt: (node) => sessionRegistry.currentOccupantTenure(node)?.bootAt ?? null,
+        resolveOccupantGeneration: (node) => sessionRegistry.currentOccupantTenure(node)?.generationUuid ?? null });
+      const enforcer = { invalidateOccupant: vi.fn() };
+      const generation = await failedHandover();
+      const sidecar = contextUsage.getSidecarPath(SEAT);
+      mkdirSync(path.dirname(sidecar), { recursive: true });
+      writeFileSync(sidecar, JSON.stringify({ session_name: SEAT, occupant_generation: writer(generation),
+        context_window: { used_percentage: 41 }, sampled_at: "2026-11-10T16:21:30Z" }));
+      // The context monitor read it before the commit, while the successor ran unadopted.
+      contextUsage.persist(nodeId, contextUsage.readAndNormalize(SEAT));
+
+      const result = await service({ occupantInvalidator: new DefaultOccupantInvalidator({ enforcer, contextUsage }) })
+        .recover({ seatRef: SEAT, reason: "adopt the running successor" });
+
+      expect(result).toMatchObject({ ok: true });
+      expect(contextUsage.readSidecar(SEAT).ok).toBe(kept);
+      expect(enforcer.invalidateOccupant).toHaveBeenCalledWith(SEAT);
+      // The sample predates the tenure the commit minted. The successor's own still reads current; the retiree's doesn't.
+      expect(contextUsage.getForNode(nodeId, SEAT)).toMatchObject(kept
+        ? { availability: "known", usedPercentage: 41 } : { availability: "unknown", reason: "stale_generation" });
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("#3044: the recovered successor keeps the applied-launch observation its launch returned", async () => {
@@ -602,6 +639,10 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         sessionRegistry.updateBinding(parentNodeId, { tmuxSession: PARENT, tmuxPane: "%5" });
         sessionRegistry.updateResumeToken(parent.id, "claude_id", parentToken, "hook");
         parentSessionId = parent.id;
+        // The parent's recorded pane (%5, its binding): no process unless a case runs one there (parentRuns), never the
+        // successor's pane; the parent's session (its active pane) has none either.
+        (tmuxRef.getPanePid as ReturnType<typeof vi.fn>).mockImplementation(async (target: string) =>
+          target === "%5" || target === PARENT ? null : 100);
       });
       const parentState = () => ({
         session: db.prepare("SELECT status, resume_token, resume_type, resume_provenance, resume_last_verified, resume_last_probe_status FROM sessions WHERE id = ?").get(parentSessionId),
@@ -671,6 +712,33 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "forked" });
       });
 
+      // #3218 item 1: the successor never left the conversation its launch named, but its fork parent ran /resume on it
+      // since: the recovery classifies that conversation too, so it is not reported as a distinct fork.
+      it("a successor still on its launch's conversation, which its fork parent has since resumed, reports no distinct fork", async () => {
+        await failedFork();
+        sessionRegistry.updateResumeToken(parentSessionId, "claude_id", successorToken, "hook");
+        pidFile({ name: SEAT, sessionId: successorToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(successorToken);
+        expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
+          limit: expect.stringContaining(`its fork parent ${PARENT}`) });
+        const limit = (result.result.sourceOutcome as { limit: string }).limit;
+        expect(limit).toContain("the one its launch named and the process is still on");
+        expect(limit).not.toContain("not the one its launch named");
+        expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+      });
+
+      it("a successor still on its launch's conversation, its fork parent on its own, stays a captured fork", async () => {
+        await failedFork();
+        pidFile({ name: SEAT, sessionId: successorToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(successorToken);
+        expect(result.result.sourceOutcome).toEqual({ mode: "fork", forkedFrom: PARENT, forkId: "captured" });
+        expect(result.result.warnings).toBeUndefined();
+      });
+
       it("records the conversation of a fork whose parent can't be resolved again, saying it was not compared", async () => {
         await failedFork();
         db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(parentNodeId);   // the parent no longer resolves
@@ -678,6 +746,17 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
         if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
         expect(resumeTarget()).toBe(otherToken);
+        expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkId: "captured", limit: expect.stringContaining("could not be resolved again") });
+        expect(result.result.warnings).toBeUndefined();   // said once, in the outcome
+      });
+
+      it("keeps the note of a parent that can't be resolved again when the successor is still on its launch's conversation", async () => {
+        await failedFork();
+        db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(parentNodeId);   // the parent no longer resolves
+        pidFile({ name: SEAT, sessionId: successorToken });
+        const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+        if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+        expect(resumeTarget()).toBe(successorToken);
         expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkId: "captured", limit: expect.stringContaining("could not be resolved again") });
         expect(result.result.warnings).toBeUndefined();   // said once, in the outcome
       });
@@ -855,6 +934,295 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
         expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkId: "none",
           limit: expect.stringContaining(`could not be resolved again, so whether ${PARENT} is on it too was not checked`) });
       });
+
+      // #3218 item 2: the fork parent's telemetry (context_usage) may lag behind its resume token and its process. The
+      // parent's current conversation is read from its own process, as the successor's is, and a disagreement between
+      // its sources is reported instead of one of them being picked silently.
+      describe("a fork parent whose records disagree", () => {
+        const Q = "88888888-8888-4888-8888-888888888888";
+        /** The parent's recorded pane (%5) runs its own Claude (pid 202), whose session file names `parentNow`; no file:
+         *  unread. `activeElsewhere`: the parent's session has another active pane, whose Claude (pid 302) is on `activeElsewhere`. */
+        function parentRuns(parentNow: string | null, changesOnSecondLook = false, activeElsewhere?: string): void {
+          let looks = 0;
+          (tmuxRef.getPanePid as ReturnType<typeof vi.fn>).mockImplementation(async (target: string) => {
+            if (target === PARENT) return activeElsewhere ? 300 : null;
+            if (target !== "%5") return 100;
+            looks += 1;
+            return 200;
+          });
+          const successorPane = paneProcesses;
+          paneProcesses = () => [
+            ...successorPane(),
+            { pid: 200, ppid: 1, pgid: 200, tpgid: 202, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+            { pid: 202, ppid: 200, pgid: 202, tpgid: 202, command: `claude --resume ${parentToken} --name ${PARENT}`, executableName: "claude",
+              startedAt: changesOnSecondLook && looks >= 2 ? "Tue Nov 10 16:22:00 2026" : startedAt } as NativeProcessRow,
+            ...(activeElsewhere ? [
+              { pid: 300, ppid: 1, pgid: 300, tpgid: 302, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
+              { pid: 302, ppid: 300, pgid: 302, tpgid: 302, command: `claude --name ${PARENT}`, executableName: "claude", startedAt } as NativeProcessRow,
+            ] : []),
+          ];
+          if (activeElsewhere) {
+            const other = path.join(configDir, "sessions", "302.json");
+            writeFileSync(other, JSON.stringify({ name: PARENT, sessionId: activeElsewhere }));
+            const mtime = new Date(Date.parse(startedAt) + 60_000);
+            utimesSync(other, mtime, mtime);
+          }
+          if (parentNow) {
+            const file = path.join(configDir, "sessions", "202.json");
+            writeFileSync(file, JSON.stringify({ name: PARENT, sessionId: parentNow }));
+            const mtime = new Date(Date.parse(startedAt) + 60_000);
+            utimesSync(file, mtime, mtime);
+          }
+        }
+        /** The parent's telemetry still names its launch-time conversation; its resume token says `token`. */
+        function parentRecords(telemetry: string, token: string): void {
+          db.prepare("INSERT INTO context_usage (node_id, session_id, session_name) VALUES (?, ?, ?)").run(parentNodeId, telemetry, PARENT);
+          sessionRegistry.updateResumeToken(parentSessionId, "claude_id", token, "hook");
+        }
+
+        it("the issue's case: stale telemetry, the parent's process and the successor both on Q: no distinct fork, the disagreement said", async () => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: Q });
+          const parentBefore = parentState();
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(Q);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
+            limit: expect.stringContaining(`its fork parent ${PARENT}`) });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).toContain("its telemetry names another conversation than its process");
+          expect(limit).not.toContain(Q);   // native ids are never written into the note
+          expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+          expect(parentState()).toEqual(parentBefore);
+        });
+
+        it("the parent's process unread, its telemetry and resume token disagree, the successor on one of them: no distinct fork, neither picked", async () => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(null);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).toContain("its telemetry and its resume token name different conversations");
+          expect(limit).toContain("its process could not be read");
+          expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+        });
+
+        it("a distinct fork stays captured, and the disagreement of its parent's sources is said in its limit", async () => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: otherToken });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(otherToken);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "captured",
+            limit: expect.stringContaining("its telemetry names another conversation than its process") });
+          expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "forked" });
+        });
+
+        it("a successor still on its launch's conversation, distinct from its parent, keeps the disagreement of the parent's sources", async () => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: successorToken });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(successorToken);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "captured",
+            limit: expect.stringContaining("its telemetry names another conversation than its process") });
+          expect(result.result.warnings).toBeUndefined();   // said once, in the outcome
+        });
+
+        it("the parent's process decides against both of its records: both stale, the parent and the successor on Q, no distinct fork", async () => {
+          await failedFork();
+          parentRecords(parentToken, parentToken);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).toContain("its telemetry names another conversation than its process");
+          expect(limit).toContain("its resume token names another conversation than its process");
+          // the parent's restore reads its resume token, which names another: no promise that a restore of either resumes it
+          expect(limit).toContain(`so a restore of ${PARENT} would not resume this one`);
+          expect(limit).not.toContain("restoring both opens it twice");
+          expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+        });
+
+        it("the parent's process on the successor's conversation and no resume token: no claim that its token names another", async () => {
+          await failedFork();
+          parentRecords(parentToken, parentToken);
+          db.prepare("UPDATE sessions SET resume_token = NULL WHERE id = ?").run(parentSessionId);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
+            limit: expect.stringContaining(`its fork parent ${PARENT} is on now`) });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).not.toContain("its resume token names another conversation");
+          expect(limit).toContain(`no resume token is recorded for ${PARENT}, so a restore of ${PARENT} would not resume this one`);
+          expect(limit).not.toContain("restoring both opens it twice");
+        });
+
+        it("only the parent's telemetry is known (its process unread, no resume token): no distinct fork, and no claim that it moved on", async () => {
+          const L = "99999999-9999-4999-8999-999999999999";
+          await failedFork(`fork:${PARENT}`, L);
+          db.prepare("INSERT INTO context_usage (node_id, session_id, session_name) VALUES (?, ?, ?)").run(parentNodeId, parentToken, PARENT);
+          db.prepare("UPDATE sessions SET resume_token = NULL WHERE id = ?").run(parentSessionId);
+          pidFile({ name: SEAT, sessionId: parentToken });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).toContain("could not be established");
+          expect(limit).not.toContain("has moved on since");
+          expect(limit).not.toContain("restoring both opens it twice");
+        });
+
+        it("the parent's process is read from its recorded pane, not from its session's active pane", async () => {
+          await failedFork();
+          parentRecords(parentToken, parentToken);
+          parentRuns(Q, false, otherToken);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          // the recorded pane (%5) holds Q: no distinct fork; the active pane's Claude (on another conversation) is not read
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
+            limit: expect.stringContaining(`its fork parent ${PARENT} is on now`) });
+        });
+
+        it("only the resume token disagrees with the process, and the successor is on it: no distinct fork, the stale token said", async () => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(parentToken);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).toContain("its resume token names another conversation than its process");
+          expect(limit).not.toContain("its telemetry names another conversation");
+        });
+
+        it("a record that still names the successor's conversation keeps it no distinct fork, though the parent's process moved on", async () => {
+          const L = "99999999-9999-4999-8999-999999999999";
+          await failedFork(`fork:${PARENT}`, L);
+          parentRecords(parentToken, parentToken);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: parentToken });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(parentToken);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
+            limit: expect.stringContaining("its telemetry names another conversation than its process") });
+          expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+        });
+
+        it("the parent's process changing between the two looks is not read: its disagreeing records are both kept, and that is said", async () => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q, true);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          expect((result.result.sourceOutcome as { limit: string }).limit).toContain("its process could not be read");
+        });
+
+        it("the parent's process unread, the successor on the conversation only its telemetry names: no distinct fork", async () => {
+          const L = "99999999-9999-4999-8999-999999999999";
+          await failedFork(`fork:${PARENT}`, L);
+          parentRecords(parentToken, Q);
+          pidFile({ name: SEAT, sessionId: parentToken });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
+            limit: expect.stringContaining("its telemetry and its resume token name different conversations") });
+        });
+
+        it("only the parent's stale telemetry names the successor's conversation: no distinct fork, and no promise that a restore of either resumes it", async () => {
+          const L = "99999999-9999-4999-8999-999999999999";
+          await failedFork(`fork:${PARENT}`, L);
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: parentToken });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(parentToken);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).toContain(`which only its telemetry still names (${PARENT} has moved on since)`);
+          expect(limit).not.toContain("restoring both opens it twice");   // the parent's restore reads its resume token
+          expect(limit).toContain("its telemetry names another conversation than its process");
+        });
+
+        it("the successor's session file unread and the parent's records disagreeing: the launch's conversation recorded, unconfirmed, and the disagreement said", async () => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(null);
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(successorToken);
+          expect(result.result.warnings).toEqual([expect.stringContaining("couldn't be read")]);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "captured",
+            limit: expect.stringContaining("its telemetry and its resume token name different conversations") });
+          // the launch's argv was proven, only the successor's session file is unread: its fork parent was read from it
+          expect((result.result.sourceOutcome as { limit: string }).limit).not.toContain("could not be read from its process");
+        });
+
+        it("the successor's session file unread and its parent on its own conversation: a distinct fork captured with no limit, as before", async () => {
+          await failedFork();
+          parentRuns(parentToken);
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(successorToken);
+          expect(result.result.warnings).toEqual([expect.stringContaining("couldn't be read")]);
+          expect(result.result.sourceOutcome).toEqual({ mode: "fork", forkedFrom: PARENT, forkId: "captured" });
+        });
+
+        it("the parent's process unread and its resume token on another conversation: its stale telemetry is not said to have moved on", async () => {
+          await failedFork();
+          parentRecords(Q, parentToken);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).not.toContain("has moved on since");
+          expect(limit).toContain("its resume token names another conversation");
+          expect(limit).toContain("its process could not be read");
+        });
+
+        it("the successor's session file unread and its parent on the launch's conversation: no distinct fork, still said as unconfirmed", async () => {
+          await failedFork();
+          parentRecords(successorToken, successorToken);
+          parentRuns(successorToken);
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(successorToken);
+          expect(result.result.warnings).toEqual([expect.stringContaining("couldn't be read")]);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none",
+            limit: expect.stringContaining("the one the process holds now couldn't be read") });
+          expect(db.prepare("SELECT continuity_outcome FROM nodes WHERE id = ?").get(nodeId)).toEqual({ continuity_outcome: "resumed" });
+        });
+
+        it("sources that agree with the parent's process add nothing: a distinct fork is captured with no limit, as before", async () => {
+          await failedFork();
+          parentRecords(Q, Q);
+          parentRuns(Q);
+          pidFile({ name: SEAT, sessionId: otherToken });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toEqual({ mode: "fork", forkedFrom: PARENT, forkId: "captured" });
+        });
+      });
     });
 
     it.each([
@@ -882,6 +1250,15 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       expect(result.result.warnings).toEqual([expect.stringContaining("a /clear before the recovery would make it stale")]);
     });
 
+    // #3218 item 6: the warning is kept in the seat's history (seat.handover_completed), not only printed.
+    it("an unread session file: the handover_completed event keeps the unconfirmed-conversation warning", async () => {
+      await failedHandover();
+      const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+      if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+      const events = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").all() as Array<{ payload: string }>;
+      expect(JSON.parse(events.at(-1)!.payload)).toMatchObject({ conversationUnconfirmed: expect.stringContaining("couldn't be read") });
+    });
+
     it("the session file confirming the launch's conversation: recorded with no warning", async () => {
       await failedHandover();
       pidFile({ name: SEAT, sessionId: successorToken });
@@ -889,6 +1266,8 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
       if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
       expect(resumeTarget()).toBe(successorToken);
       expect(result.result.warnings).toBeUndefined();
+      const events = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").all() as Array<{ payload: string }>;
+      expect(JSON.parse(events.at(-1)!.payload)).not.toHaveProperty("conversationUnconfirmed");
     });
   });
 

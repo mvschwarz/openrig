@@ -111,7 +111,7 @@ export class AppliedLaunchObservationStore {
 
   private autoModeColumn: boolean | undefined;
 
-  /** Databases without migration 170 have no auto mode column; they still record the permission observation. */
+  /** Databases without migration 171 have no auto mode column; they still record the permission observation. */
   private hasAutoModeColumn(): boolean {
     this.autoModeColumn ??= (this.db.prepare("PRAGMA table_info(applied_launch_observations)").all() as { name: string }[])
       .some(column => column.name === "claude_auto_mode_json");

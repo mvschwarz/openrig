@@ -1,4 +1,5 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import type { readSendOutcome } from "./connection-contract.js";
 import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record-types.js";
 
 export interface Rig {
@@ -129,6 +130,25 @@ export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unkno
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
 
+/** Facts a runner reports about its own process; launch authentication is not independent native verification. */
+export interface RunnerObservations {
+  session?: { nativeRef: string };
+  model?: { id: string };
+  context?: { usedTokens?: number; windowTokens?: number; usedPercentage?: number; inputTokens?: number; outputTokens?: number };
+}
+export interface RunnerObservation {
+  nodeId: string;
+  sessionRowId: string;
+  generation: string;
+  runId: string;
+  grantId: string;
+  family: "observation";
+  sequence: number;
+  occurredAt: string;
+  receivedAt: string;
+  observations: RunnerObservations;
+}
+
 export type RigEvent =
   | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
@@ -191,6 +211,7 @@ export type RigEvent =
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
    *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
@@ -202,7 +223,9 @@ export type RigEvent =
       admitted: DeliveryEvidenceAdmitted;
       written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
-      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
+      /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
+      outcome: ReturnType<typeof readSendOutcome> }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
@@ -216,7 +239,7 @@ export type RigEvent =
   | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null; input?: { classification: string; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false } }
   // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
   // from the pi-runner's RPC get_state / typed events, never pane scraping.
-  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" }
+  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" | "launcher" }
   // OPR.0.4.0.22 — append-only audit of a managed resume-token write. Emitted
   // on an operator set (`operator_set`) and on reconcile capture-on-adopt
   // (`reconcile_capture`). NEVER carries the raw token (credential-class);
@@ -278,7 +301,10 @@ export type RigEvent =
        *  session. The seat list marks the seat while this session is its current one. */
       startedWithoutRequired?: string[]; successorSessionId?: string;
       /** #2985: the handover adopted the running successor of an earlier failed one (`rig seat handover --recover`). */
-      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string } }
+      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
+      /** #3218 item 6: the recovery recorded the conversation its launch named because the successor's current one could
+       *  not be read (Claude's session file for its process); the warning the command printed, kept in the history. */
+      conversationUnconfirmed?: string }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -378,7 +404,7 @@ export type RigEvent =
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string }
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string; actorSession?: string; reason?: string; oldPacketId?: string; newPacketId?: string }
   // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
   // deletion path. Emitted once per workflow_specs cache row removed
   // because its source file disappeared from the scanned workflows folder.
@@ -500,7 +526,9 @@ export interface RestoreSnapshotSelection extends RestoreSnapshotSummary {
 export interface RestoreExcludedNode {
   nodeId: string;
   logicalId: string;
-  reason: "historical_not_in_intended_roster";
+  /** Historical: no longer a node of the rig. Current: still a node of the rig (a seat claimed after the rig's topology was
+   *  recorded), which this restore skipped. */
+  reason: "historical_not_in_intended_roster" | "current_seat_not_in_intended_roster";
 }
 
 export interface Snapshot {
@@ -537,6 +565,8 @@ export interface RestoreResult {
   snapshotSelection?: RestoreSnapshotSelection;
   intendedRoster?: Array<{ nodeId: string; logicalId: string }>;
   excludedNodes?: RestoreExcludedNode[];
+  /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
+  harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
@@ -553,6 +583,8 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
+  stage?: "harness_not_started";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
@@ -836,6 +868,8 @@ export interface NodeInventoryEntry {
   resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
+  /** The stage of this session's own startup failure, read only while startup needs attention (`harness_not_started`: no harness). */
+  latestErrorStage?: string | null;
   // Extended fields
   model: string | null;
   /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
@@ -1078,6 +1112,8 @@ export interface StartupBlock {
 }
 
 export type StartupFailureStage =
+  /** Restore didn't start the harness at all (no startup context or no adapter): the pane holds only a shell. */
+  | "harness_not_started"
   | "permission_selection"
   | "proof_selection"
   | "projection"
@@ -1679,6 +1715,7 @@ export type ContextAvailability = "known" | "unknown";
 
 export type ContextUnknownReason =
   | "unsupported_runtime"
+  | "window_capacity_unknown"
   | "not_managed"
   | "missing_sidecar"
   | "parse_error"
@@ -1690,7 +1727,7 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | null;
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;
@@ -1704,4 +1741,6 @@ export interface ContextUsage {
   fresh: boolean;
   /** Claude only: the statusline's cumulative client-side cost estimate for `sessionId` (USD); null when not reported. */
   clientCostEstimateUsd?: number | null;
+  /** Claude only: the occupant generation the status-line collector recorded with this sample; null when none. */
+  occupantGeneration?: string | null;
 }

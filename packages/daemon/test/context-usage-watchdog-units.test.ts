@@ -104,6 +104,17 @@ describe("context-usage-threshold token/percent units", () => {
     });
   }
 
+  it("never treats a cached runner report as existing watchdog authority", () => {
+    const sampleAt = new Date().toISOString();
+    db.prepare(`INSERT INTO context_usage(node_id,session_name,availability,source,used_percentage,context_window_size,sampled_at)
+      VALUES ('node-1','target@rig','known','runner_reported',99,1000000,?)`).run(sampleAt);
+    expect(repo.findContextUsageForSession("target@rig", "gen-1")).toBeNull();
+    for (const source of ["claude_statusline_json", null]) {
+      db.prepare("UPDATE context_usage SET source=? WHERE node_id='node-1'").run(source);
+      expect(repo.findContextUsageForSession("target@rig", "gen-1")).toMatchObject({ usedPercentage: 99, fresh: true });
+    }
+  });
+
   it("fires once when the sampled token estimate crosses the token threshold", async () => {
     const job = register({ thresholdTokens: 400_000 });
     const outcome = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
