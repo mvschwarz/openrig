@@ -660,7 +660,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // clean config on EVERY path a fresh Codex process reads config (launch/adopt/reconcile)
     // — without a blanket native trust keystroke. If native identity/hash semantics
     // change, the remaining review is surfaced for a decision. Idempotent
-    // + non-clobbering; only touches our 4 keys. See applyCodexActivityHookTrust for the RTFM.
+    // + non-clobbering; only touches our four hooks' source aliases. See applyCodexActivityHookTrust below.
     const trusted = this.applyCodexActivityHookTrust(withHooks, configPath, relay);
     if (trusted !== withHooks) {
       this.fs.mkdirp(nodePath.dirname(configPath));
@@ -684,7 +684,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     const command = `node "${relay}"`;
-    const keySource = codexHookSourcePath(hooksPath);
+    const keySources = codexHookSourcePaths(hooksPath);
     const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing, command));
     let before: unknown = null;
     let expected: { hooks?: { state?: CodexHookState } } | null = null;
@@ -694,7 +694,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     if (!expected) return;
-    const inlineSource = codexHookSourcePath(configPath);
+    const inlineSources = codexHookSourcePaths(configPath);
+    const beforeState = codexHookStateOf(before);
     let config = stripped;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
       const groups = document.hooks[event] ?? [];
@@ -702,15 +703,19 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const groupIndex = found < 0 ? groups.length : found;
       groups[groupIndex] = openRigActivityGroup(command);
       document.hooks[event] = groups;
-      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex, statusMessage: OPENRIG_ACTIVITY_STATUS });
-      config = upsertCodexHookTrust(config, key, hash);
-      // A person's disable of OpenRig's inline hook moves with it; an existing choice at the new key is kept as it is.
+      const label = CODEX_HOOK_EVENT_KEY_LABEL[event];
       const inlineIndex = openRigInlineGroupIndex(before, event);
-      const disabled = inlineIndex >= 0
-        && codexHookStateOf(before)[`${inlineSource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:${inlineIndex}:0`]?.enabled === false;
-      if (disabled) config = upsertCodexHookDisabled(config, key);
+      const disabled = keySources.some(source => beforeState[`${source}:${label}:${groupIndex}:0`]?.enabled === false)
+        || (inlineIndex >= 0 && inlineSources.some(source => beforeState[`${source}:${label}:${inlineIndex}:0`]?.enabled === false));
       const state = ((expected.hooks ??= {}).state ??= {});
-      state[key] = { ...state[key], trusted_hash: hash, ...(disabled ? { enabled: false } : {}) };
+      for (const keySource of keySources) {
+        const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex, statusMessage: OPENRIG_ACTIVITY_STATUS });
+        config = upsertCodexHookTrust(config, key, hash);
+        // A disable can fill an absent choice, never replace an explicit enable at another spelling.
+        const carryDisable = disabled && state[key]?.enabled === undefined;
+        if (carryDisable) config = upsertCodexHookDisabled(config, key);
+        state[key] = { ...state[key], trusted_hash: hash, ...(carryDisable ? { enabled: false } : {}) };
+      }
     }
     // The line writers must give exactly the planned fields in valid TOML (they don't read every TOML spelling);
     // otherwise neither file changes, and OpenRig's old inline block, if any, stays working.
@@ -730,13 +735,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * OPR.0.4.3.33 — compute + splice Codex's `[hooks.state."<key>"] trusted_hash` for our 4
-   * authored activity hooks into `content`. Codex 0.167.2 resolves the source folder but
-   * keeps the file name, including a linked file, as returned by app-server hooks/list. The command
+   * authored activity hooks into `content`. Keep the supplied, resolved-folder and resolved-file
+   * spellings compatible without choosing one native identity for every Codex release. The command
    * string is the value Codex deserializes from our TOML literal `'node "<relay>"'` — i.e.
    * `node "<relay>"` WITHOUT the outer TOML quote delimiters. Timeout=5, matcher/status None.
    */
   private applyCodexActivityHookTrust(content: string, configPath: string, relay: string): string {
-    const keySource = codexHookSourcePath(configPath);
+    const keySources = codexHookSourcePaths(configPath);
+    const state = codexHookStateOf(parseToml(content));
     const command = `node "${relay}"`;
     // upsertCodexActivityHooks has just written our marked block. Codex keys by the
     // group's position among this event's groups, not its position inside our block.
@@ -751,8 +757,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
       const groupIndex = begin >= 0 ? parsed.hooks?.[event]?.length ?? 0 : openRigInlineGroupIndex(parsed, event);
       if (groupIndex < 0) continue;
-      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
-      next = upsertCodexHookTrust(next, key, hash);
+      const label = CODEX_HOOK_EVENT_KEY_LABEL[event];
+      const disabled = keySources.some(source => state[`${source}:${label}:${groupIndex}:0`]?.enabled === false);
+      for (const keySource of keySources) {
+        const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
+        next = upsertCodexHookTrust(next, key, hash);
+        if (disabled && state[key]?.enabled === undefined) next = upsertCodexHookDisabled(next, key);
+      }
     }
     return next;
   }
@@ -779,7 +790,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       try {
         const original = this.fs.readFile(hooksPath);
         const document = parseCodexHooksJson(original);
-        const keySource = codexHookSourcePath(hooksPath);
+        const keySources = codexHookSourcePaths(hooksPath);
         let config = updated ?? "";
         const expected = parseToml(config) as { hooks?: { state?: CodexHookState } };
         for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
@@ -787,10 +798,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           if (!groups) continue;
           const kept = groups.flatMap((group, index) => isOpenRigActivityGroup(group) ? [] : [index]);
           if (kept.length === groups.length) continue;
-          const prefix = `${keySource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:`;
           const newIndexOf = (index: number) => { const at = kept.indexOf(index); return at < 0 ? null : at; };
-          config = rekeyCodexHookStateText(config, prefix, newIndexOf);
-          if (expected.hooks?.state) expected.hooks.state = rekeyCodexHookState(expected.hooks.state, prefix, newIndexOf);
+          for (const keySource of keySources) {
+            const prefix = `${keySource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:`;
+            config = rekeyCodexHookStateText(config, prefix, newIndexOf);
+            if (expected.hooks?.state) expected.hooks.state = rekeyCodexHookState(expected.hooks.state, prefix, newIndexOf);
+          }
           if (kept.length > 0) document.hooks[event] = kept.map((index) => groups[index]!);
           else delete document.hooks[event];
         }
@@ -2491,10 +2504,12 @@ function tomlSections(text: string, current?: string): TomlSection[] {
   return sections;
 }
 
-function codexHookSourcePath(file: string): string {
-  // Resolve a linked home folder, but retain a linked config.toml/hooks.json file's own name.
-  try { return nodePath.join(fs.realpathSync.native(nodePath.dirname(file)), nodePath.basename(file)); }
-  catch { return file; } // The folder may not exist yet, including with an injected filesystem.
+function codexHookSourcePaths(file: string): string[] {
+  // Only our existing activity hooks get compatibility aliases; no person's hook or plugin is approved here.
+  const sources = new Set([file]);
+  try { sources.add(nodePath.join(fs.realpathSync.native(nodePath.dirname(file)), nodePath.basename(file))); } catch { /* folder may not exist yet */ }
+  try { sources.add(fs.realpathSync.native(file)); } catch { /* file may not exist yet */ }
+  return [...sources];
 }
 
 /** A hooks.json document as Codex reads it: `hooks` maps each event to matcher groups, each with a `hooks` list. */

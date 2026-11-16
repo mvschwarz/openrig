@@ -1,6 +1,7 @@
 // A Codex home that keeps its hooks in hooks.json gets OpenRig's activity hooks there too, so Codex never sees both formats in
 // one layer. The user's hooks stay where they are; only OpenRig's own groups are written, moved or removed.
 import { describe, it, expect, vi } from "vitest";
+import nodeFs from "node:fs";
 import { parse as parseToml } from "smol-toml";
 import { CodexRuntimeAdapter, computeCodexHookTrust, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -161,6 +162,68 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
     const m = inlineThenJson(false);
     expect(state(m.store[CONFIG]!)[`${HOOKS}:stop:1:0`]).toEqual({ trusted_hash: trustOf("Stop", 1).hash });
   });
+
+  it("does not replace an explicit JSON enable with an old inline disable", () => {
+    const first = mockCodexFs({ [RELAY]: "// relay" });
+    adapter(first.fs).ensureCodexActivityHooks();
+    const config = first.store[CONFIG]!
+      + `\n[hooks.state."${HOOKS}:stop:0:0"]\nenabled = true\n`;
+    const disabled = config.replace(`[hooks.state."${CONFIG}:stop:0:0"]\n`,
+      `[hooks.state."${CONFIG}:stop:0:0"]\nenabled = false\n`);
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: disabled, [HOOKS]: JSON.stringify({ hooks: {} }) });
+    adapter(m.fs).ensureCodexActivityHooks();
+    expect(state(m.store[CONFIG]!)[`${HOOKS}:stop:0:0`]?.enabled).toBe(true);
+  });
+
+  it("does not re-disable a JSON hook after the person re-enables it", () => {
+    const m = inlineThenJson(true);
+    m.store[CONFIG] = m.store[CONFIG]!.replace(`[hooks.state."${HOOKS}:stop:1:0"]\nenabled = false\n`,
+      `[hooks.state."${HOOKS}:stop:1:0"]\nenabled = true\n`);
+    expect(state(m.store[CONFIG]!)[`${HOOKS}:stop:1:0`]?.enabled).toBe(true);
+    adapter(m.fs).ensureCodexActivityHooks();
+    expect(state(m.store[CONFIG]!)[`${HOOKS}:stop:1:0`]?.enabled).toBe(true);
+  });
+
+  const linkedSources = (run: (sources: string[]) => void) => {
+    const sources = [HOOKS, "/resolved/home/hooks.json", "/storage/hooks-source.json"];
+    const realpath = vi.spyOn(nodeFs.realpathSync, "native").mockImplementation(path => {
+      if (path === HOME) return "/resolved/home";
+      if (path === HOOKS) return "/storage/hooks-source.json";
+      throw new Error("fixture path not linked");
+    });
+    try { run(sources); } finally { realpath.mockRestore(); }
+  };
+
+  it("copies a disable only to aliases with no choice and keeps conflicting explicit choices", () => linkedSources(sources => {
+    const config = sources.slice(0, 2).map((source, index) =>
+      `[hooks.state."${source}:stop:0:0"]\nenabled = ${index === 0 ? "true" : "false"}\n`).join("\n");
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config, [HOOKS]: JSON.stringify({ hooks: {} }) });
+    adapter(m.fs).ensureCodexActivityHooks();
+    const after = state(m.store[CONFIG]!);
+    expect(sources.map(source => after[`${source}:stop:0:0`]?.enabled)).toEqual([true, false, false]);
+    for (const source of sources) {
+      const expected = computeCodexHookTrust("Stop", { keySource: source, command: `node "${RELAY}"`, timeoutSec: 5,
+        groupIndex: 0, statusMessage: "OpenRig activity" });
+      expect(after[expected.key]?.trusted_hash).toBe(expected.hash);
+      expect(after[`${source}:session_start:0:0`]?.enabled).toBeUndefined();
+    }
+  }));
+
+  it("moves every alias of a later person's state when OpenRig's JSON group is removed", () => linkedSources(sources => {
+    const later = { hooks: [{ type: "command", command: "echo later", timeout: 7 }] };
+    const config = sources.map((source, index) =>
+      `[hooks.state."${source}:stop:1:0"]\ntrusted_hash = "ours"\n\n`
+      + `[hooks.state."${source}:stop:2:0"]\ntrusted_hash = "person-${index}"\nenabled = ${index === 0 ? "true" : "false"}\n`).join("\n");
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config,
+      [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP, ours(), later] } }) });
+    adapter(m.fs).removeCodexActivityHooks();
+    expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([USER_GROUP, later]);
+    const after = state(m.store[CONFIG]!);
+    sources.forEach((source, index) => {
+      expect(after[`${source}:stop:1:0`]).toEqual({ trusted_hash: `person-${index}`, enabled: index === 0 });
+      expect(after[`${source}:stop:2:0`]).toBeUndefined();
+    });
+  }));
 
   it("removing OpenRig's group keeps a later user hook's trust and disable with it (F2)", () => {
     const later = { hooks: [{ type: "command", command: "echo later", timeout: 7 }] };

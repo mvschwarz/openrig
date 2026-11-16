@@ -268,17 +268,36 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
     expect(fs._store[CONFIG]).toBe(before);
   });
 
-  it("resolves the source folder while retaining the config file name", () => {
+  it("trusts inline source aliases while keeping conflicting enabled choices", () => {
     const canonicalHome = nodePath.join("/resolved", "codex");
-    const nativeRealpath = vi.spyOn(nodeFs.realpathSync, "native").mockReturnValue(canonicalHome);
+    const canonicalFile = nodePath.join("/storage", "source.toml");
+    const parentSource = nodePath.join(canonicalHome, "config.toml");
+    const nativeRealpath = vi.spyOn(nodeFs.realpathSync, "native").mockImplementation(file => {
+      if (file === nodePath.dirname(CONFIG)) return canonicalHome;
+      if (file === CONFIG) return canonicalFile;
+      throw new Error("unexpected realpath");
+    });
     try {
-      const fakeFs = mockCodexFs({ [RELAY]: "// relay" });
-      makeAdapter(fakeFs).ensureCodexActivityHooks();
-      const configPath = Object.keys(fakeFs._store).find((path) => path.endsWith("config.toml"))!;
-      const config = fakeFs._store[configPath]!;
-
-      expect(config).toContain(`[hooks.state.${JSON.stringify(`${nodePath.join(canonicalHome, "config.toml")}:session_start:0:0`)}]`);
-      expect(config).not.toContain(`[hooks.state.${JSON.stringify(`${configPath}:session_start:0:0`)}]`);
+      const choices = `[hooks.state.${JSON.stringify(`${CONFIG}:stop:0:0`)}]\nenabled = true\n`
+        + `[hooks.state.${JSON.stringify(`${parentSource}:stop:0:0`)}]\nenabled = false\n`;
+      const fakeFs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: choices });
+      const adapter = makeAdapter(fakeFs);
+      adapter.ensureCodexActivityHooks();
+      const config = fakeFs._store[CONFIG]!;
+      const parsed = parseToml(config).hooks;
+      if (!parsed || typeof parsed !== "object") throw new Error("missing hooks");
+      const state: unknown = Reflect.get(parsed, "state");
+      if (!state || typeof state !== "object") throw new Error("missing state");
+      for (const [index, source] of [CONFIG, parentSource, canonicalFile].entries()) {
+        for (const event of EVENTS) {
+          const { key, hash } = computeCodexHookTrust(event, { keySource: source, command: COMMAND, timeoutSec: 5 });
+          expect(Reflect.get(state, key)).toEqual({ trusted_hash: hash,
+            ...(event === "Stop" ? { enabled: index === 0 } : {}) });
+        }
+      }
+      expect(Object.keys(state)).toHaveLength(12);
+      adapter.ensureCodexActivityHooks();
+      expect(fakeFs._store[CONFIG]).toBe(config);
     } finally {
       nativeRealpath.mockRestore();
     }
@@ -287,7 +306,7 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
   it.skipIf(process.platform === "win32").each([
     { json: false, linkedHome: false }, { json: true, linkedHome: false },
     { json: false, linkedHome: true }, { json: true, linkedHome: true },
-  ])("trusts file names inside the resolved home (JSON: $json, linked home: $linkedHome)", ({ json, linkedHome }) => {
+  ])("trusts source aliases without replacing links (JSON: $json, linked home: $linkedHome)", ({ json, linkedHome }) => {
     const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "codex-linked-trust-"));
     try {
       const home = nodePath.join(root, "home"); nodeFs.mkdirSync(home);
@@ -309,9 +328,14 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
       if (!hooks || typeof hooks !== "object") throw new Error("missing hook table");
       const states: unknown = Reflect.get(hooks, "state");
       if (!states || typeof states !== "object") throw new Error("missing trust table");
-      expect(Object.keys(states).sort()).toEqual(["permission_request", "session_start", "stop", "user_prompt_submit"]
-        .map(event => `${nodePath.join(nodeFs.realpathSync.native(home), json ? "hooks.json" : "config.toml")}:${event}:0:0`).sort());
+      const file = nodePath.join(selectedHome, json ? "hooks.json" : "config.toml");
+      const sources = [...new Set([file,
+        nodePath.join(nodeFs.realpathSync.native(home), nodePath.basename(file)), nodeFs.realpathSync.native(file)])];
+      expect(Object.keys(states).sort()).toEqual(sources.flatMap(source =>
+        ["permission_request", "session_start", "stop", "user_prompt_submit"].map(event => `${source}:${event}:0:0`)).sort());
       expect(nodeFs.lstatSync(nodePath.join(home, "config.toml")).isSymbolicLink()).toBe(true);
+      if (json) expect(nodeFs.lstatSync(file).isSymbolicLink()).toBe(true);
+      if (linkedHome) expect(nodeFs.lstatSync(selectedHome).isSymbolicLink()).toBe(true);
     } finally { nodeFs.rmSync(root,{recursive:true,force:true}); }
   });
 
