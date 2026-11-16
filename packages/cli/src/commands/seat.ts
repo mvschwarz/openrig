@@ -40,9 +40,9 @@ interface SeatStatusResponse {
   compaction?: { stage: string; detail: string };
   current_occupant: string | null;
   /** #3253: the seat's process limits, read back from its process (applied; requested, not applied; unsupported; unknown;
-   *  or invalid: the stored value can't be read). */
+   *  or invalid: the stored value can't be read). `readFrom` says which process was read. */
   processLimits?: { state: "applied" | "not_applied" | "unsupported" | "unknown" | "invalid"; requested?: { tasksMax: number };
-    reason?: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number; scope?: string };
+    reason?: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number; scope?: string; readFrom?: string };
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
   terminalPolicy?: {
@@ -249,7 +249,7 @@ function printHuman(status: SeatStatusResponse): void {
     const read = l.pidsMax !== undefined ? ` (pids.max ${l.pidsMax}, current ${l.pidsCurrent ?? "?"}, limit hit ${l.limitHits ?? 0} times)` : "";
     const state = l.state === "not_applied" ? "requested, not applied" : l.state === "invalid" ? "stored value invalid" : l.state;
     const asked = l.requested ? `tasks_max ${l.requested.tasksMax}` : "process_limits";
-    console.log(`Process limits: ${asked}: ${state}${read}${l.reason ? `; ${l.reason}` : ""}`);
+    console.log(`Process limits: ${asked}: ${state}${read}${l.reason ? `; ${l.reason}` : ""}${l.readFrom ? ` (read from ${l.readFrom})` : ""}`);
   }
   if (status.runtime_home) {
     const h = status.runtime_home;
@@ -1926,6 +1926,26 @@ function printEffortReport(data: Record<string, unknown>): void {
   if (!precedence.decided) console.log(`Note: ${precedence.detail}`);
 }
 
+/** #3253: a restart in place that can't keep or re-apply the seat's process limit says so, by what the restart did. */
+function restartProcessLimitsLine(data: Record<string, unknown>): string | null {
+  const notice = data["processLimits"] as { state: "not_applied" | "unknown"; kind: string; reason: string;
+    requested?: { tasksMax: number }; ageSeconds?: number; retryable?: boolean } | undefined;
+  if (!notice) return null;
+  const asked = notice.requested ? `tasks_max ${notice.requested.tasksMax}` : "process_limits";
+  const why = `${notice.kind}: ${notice.reason}${notice.ageSeconds !== undefined ? `, observed ${notice.ageSeconds}s ago` : ""}` +
+    (notice.retryable ? "; this may be temporary" : "");
+  const outcome = data["outcome"] as string | undefined;
+  if (notice.state === "unknown") {
+    return `Process limits: ${asked}: unknown (${why}); whether the restarted seat runs under the limit can't be told, and ` +
+      "nothing was run a second time. rig seat status reads where it stands; the request stays stored, and a fresh launch applies it.";
+  }
+  const what = !outcome ? "this restart would go on without it"
+    : outcome === "not_started" ? "nothing was restarted, so the seat keeps the process it had; a restart would go on without it"
+    : outcome === "restarted_account_unverified" || outcome === "moved" ? "the restart went on without it"
+    : "the restart did not finish; what it started runs without it";
+  return `Process limits: ${asked}: requested, not applied; ${what} (${why}). The request stays stored, and a fresh launch applies it.`;
+}
+
 function printRestartReport(data: Record<string, unknown>): void {
   const seat = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
   console.log(`${data["outcome"] ? String(data["outcome"]) : "preview"}: ${seat?.logicalId}@${seat?.rigName} (${String(data["sessionName"])}, pane ${String(data["pane"])}, ${String(data["paneShape"])}).`);
@@ -1951,6 +1971,8 @@ function printRestartReport(data: Record<string, unknown>): void {
   if (held) console.log(`Pane held (remain-on-exit on): ${held.detail}`);
   const seen = data["observedAfterStop"] as { detail: string } | undefined;
   if (seen) console.log(`Observed after the stop: ${seen.detail}.`);
+  const limits = restartProcessLimitsLine(data);
+  if (limits) console.log(limits);
   if (data["remainingStep"]) console.log(`Remaining step: ${String(data["remainingStep"])}`);
   if (data["recoveryCommand"]) console.log(`Recovery command: ${String(data["recoveryCommand"])}`);
   for (const item of (data["couldNotSee"] as string[] | undefined) ?? []) console.log(`Could not see: ${item}`);

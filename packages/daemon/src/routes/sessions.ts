@@ -387,6 +387,9 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     const status = result.code === "node_not_found" ? 404
       : result.code === "already_bound" ? 409
       : result.code === "invalid_session_name" ? 400
+      // #3253: a seat whose process limit can't be applied; only an unverified check may pass on retry.
+      : result.code === "process_limits_unverified" ? 409
+      : /^process_limits_/.test(result.code) ? 422
       : 500;
     return c.json(result, status);
   }

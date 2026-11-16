@@ -11,6 +11,17 @@ export interface RigDeps extends StatusDeps {
   readFile: (path: string) => string;
 }
 
+/** The daemon's error message from a failed response body (JSON `{ error }`, or its text), e.g. an export refused for
+ *  a seat whose stored process_limits can't be read (#3253). */
+export function daemonErrorText(data: unknown): string {
+  let body = data;
+  if (typeof data === "string") {
+    try { body = JSON.parse(data); } catch { return data.trim() || "no detail from the daemon"; }
+  }
+  const error = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+  return typeof error === "string" && error ? error : JSON.stringify(body);
+}
+
 export function rigCommand(depsOverride?: RigDeps): Command {
   const cmd = new Command("spec").description("Manage rig specs");
   const getDeps = (): RigDeps => depsOverride ?? {
@@ -33,7 +44,7 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       if (opts.json && !opts.asTemplate) {
         const res = await client.get<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(rigId)}/spec.json`);
         if (res.status >= 400) {
-          console.error(`Rig ${rigId} was not found.`);
+          console.error(res.status === 404 ? `Rig ${rigId} was not found.` : `Export of rig ${rigId} failed: ${daemonErrorText(res.data)}`);
           process.exitCode = 1;
           return;
         }
@@ -43,7 +54,7 @@ export function rigCommand(depsOverride?: RigDeps): Command {
 
       const res = await client.getText(`/api/rigs/${encodeURIComponent(rigId)}/spec`);
       if (res.status >= 400) {
-        console.error(`Rig ${rigId} was not found.`);
+        console.error(res.status === 404 ? `Rig ${rigId} was not found.` : `Export of rig ${rigId} failed: ${daemonErrorText(res.data)}`);
         process.exitCode = 1;
         return;
       }

@@ -1631,6 +1631,20 @@ describe("SeatHandoverService", () => {
     expect(durableRows()).toBe(before);
   });
 
+  it.each([["readiness", true], ["launch", false]] as const)(
+    "#3253: a handover whose %s fails after a respawn without the limit forwards the notice", async (_step, launched) => {
+      seedSeat();
+      const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+      respawnPane.mockResolvedValue({ ok: true, processLimits: notice });
+      if (launched) checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+      else launchHarness.mockResolvedValue({ ok: false, error: "codex binary not found" });
+
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+      expect(result).toMatchObject({ ok: false, code: "successor_create_failed", processLimits: notice });
+      expect((result as { guidance: string }).guidance).toMatch(/process_limits requested, not applied: .*the user manager timed out.*went on without the limit/);
+    });
+
   it("maps a listPanes THROW resolving the departing pane to a loud successor_create_failed (no rejection, seat untouched)", async () => {
     const { node } = seedSeat();
     // The departing-pane probe rethrows BEFORE any respawn — the live retiree is wholly untouched.

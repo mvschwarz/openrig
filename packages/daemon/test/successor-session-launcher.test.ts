@@ -346,6 +346,29 @@ describe("SuccessorSessionLauncher", () => {
     expect(respawn).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ processLimitsMode: "recovery" }));
   });
 
+  it("#3253: readiness failure after a respawn without the limit forwards the notice", async () => {
+    const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+    respawnPane.mockResolvedValue({ ok: true, processLimits: notice });
+    checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, step: "start_agent", successorLaunched: true, processLimits: notice });
+  });
+
+  it("#3253: the staged successor (provider switch) is created in recovery mode and carries the notice, also when it fails", async () => {
+    const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+    const line = "process_limits requested, not applied: the user manager timed out";
+    createSession.mockResolvedValue({ ok: true, processLimits: notice, warnings: [line] });
+    const stage = () => launcher().stageSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, canonicalSession: "a@r",
+      stagingSession: "openrig-switch-1", occupantGeneration: "gen-1", onPaneCreated: () => {}, staged: { prepare: async () => [] } });
+    const res = await stage();
+    expect(createSession).toHaveBeenCalledWith("openrig-switch-1", "/w", expect.anything(), { processLimitsMode: "recovery" });
+    expect(res).toMatchObject({ ok: true, processLimits: notice });
+    expect((res as { notes?: string[] }).notes).toContain(line);
+
+    checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+    expect(await stage()).toMatchObject({ ok: false, processLimits: notice });
+  });
+
   it("retiree NEVER exits (survives TERM and KILL) → structured retiree_not_terminated, NO respawn (never clobber a live retiree)", async () => {
     isPaneDead.mockResolvedValue(false); // never becomes dead
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });

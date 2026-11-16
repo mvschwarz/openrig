@@ -1058,45 +1058,74 @@ members:
   launches exactly as before. `tasks_max` is the only supported key; any other key, such as a memory or CPU limit, is
   refused by name rather than accepted and ignored.
 - **The boundary:** The seat's pane command starts in a transient `systemd-run --user --scope` of its own, in
-  `openrig-seats.slice`, with `TasksMax=N` as its only limit. The seat's processes leave the terminal server's scope:
+  `openrigseats.slice`, with `TasksMax=N` as its only limit. The seat's processes leave the terminal server's scope:
   a limit an operator put on that scope no longer covers this seat. The other seats, the daemon and the terminal server
   stay where they were, outside this seat's limit. Processes the seat itself starts through `systemd-run --user` land
-  in units of their own and are not counted against it.
+  in units of their own and are not counted against it. The limit guards the host against a seat's runaway forks; it
+  is not isolation. The seat's environment names the shared terminal server (`TMUX`), so a pane, window, popup or
+  `run-shell` the seat asks that server for (a harness's teammate panes too) is forked by the server, outside this
+  seat's scope and its limit. The limit is also cooperative: a process in the seat that reaches the user manager can
+  raise its own scope's `TasksMax` with `systemctl --user set-property`. The short-lived terminal OpenRig opens to
+  check that a Claude conversation can be resumed runs without the seat's identity, outside any seat scope.
 - **A fresh launch that can't get the limit is not started:** A fresh launch (first launch, `rig seat launch --fresh`,
-  relaunch, restore and resume) says it couldn't apply the limit instead of starting the seat without it:
-  - `process_limits_unsupported` for a positive inability of the host or setup: not Linux, no `XDG_RUNTIME_DIR` to
-    reach the user manager, no `systemd-run`, no user manager running for the user, a throwaway scope whose `pids.max`
-    is not the value (the pids controller is not delegated), or `terminal.inherit_tmux_environment` on (a seat with a
-    limit needs the scoped launch environment);
-  - `process_limits_unverified` (retryable) when it isn't known either way: the user manager timed out, the probe read
-    nothing, an error not recognized, or a failed check from the last minute, reported with its age. The first launch
-    after that minute checks again, so a setup fixed meanwhile is seen.
-  A daemon that is not itself a systemd user service is no reason: the probe decides. Remove the key to launch the seat
-  as before.
+  and a relaunch without a snapshot) says it couldn't apply the limit instead of starting the seat without it, with
+  one of four codes:
+  - `process_limits_unsupported` for a positive inability of the host: not Linux, `systemd-run` or `systemctl` not on
+    the daemon's `PATH`, a systemd too old for seat scopes (it needs 236 or later), no user manager running for the
+    user (no socket to reach it), or a throwaway scope with no cgroup v2 path, no `pids.max`, or a `pids.max` that is
+    not the value (the pids controller is not delegated);
+  - `process_limits_setup` when this setup can't use a scope, with the way out: no `XDG_RUNTIME_DIR` and no
+    `/run/user/<uid>` (start the daemon with `XDG_RUNTIME_DIR` set, or as a systemd user service), coreutils' `timeout`
+    not on the daemon's `PATH`, `terminal.inherit_tmux_environment` on (a seat with a limit needs the scoped launch
+    environment: set it to false), a daemon that gives seats no launch environment, or a seat placed in an environment
+    guest (its agent runs in the guest, and a scope on this host would hold only the local viewer);
+  - `process_limits_unverified` (retryable) when it isn't known either way: the user manager timed out or its socket
+    refused the connection (starting or restarting), the probe read nothing, an error not recognized, a launch setting
+    that couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
+    didn't see in time (its new session is removed, and the seat is never started again without the limit). The first
+    launch after that minute checks again, so a setup fixed meanwhile is seen;
+  - `process_limits_invalid` when the seat's stored value can't be read: only this seat is affected, and the value is
+    kept until a re-applied spec replaces or clears it.
+  Over HTTP, `process_limits_unverified` answers 409 and the other three 422, with `retryable` and `processLimits` (the
+  kind, the reason and the requested value). A daemon that is not itself a systemd user service is no reason: the probe
+  decides. Remove the key to launch the seat as before.
 - **A recovery goes ahead without it, and says so:** A handover, a runtime switch and a restart in place choose their
-  path before anything is stopped. Where the limit can't be applied, they go on without it and return a structured
+  path before anything is stopped. A restore and a resume (`rig up` from a snapshot, an auto-rehydrate, a resume of the
+  seat's own conversation) are recoveries too: nothing of the seat runs then, and right after a reboot the user manager
+  may not answer yet. Where the limit can't be applied, they go on without it and return a structured
   warning (`processLimits`: `state: "not_applied"`, the kind, the reason, whether a retry may help); the request stays
-  stored, and the seat's status reads "requested, not applied" until a fresh launch applies it. A scope failure late in
-  the path (after the check) ends the same way: a recovery never stops a seat and then fails for its limit. A restart in
-  place keeps the process tree it has (and a limit already applied to it); a bare agent pane's respawn carries no seat
-  environment, so it comes back without the limit, with the warning.
+  stored, and the seat's status reads "requested, not applied" until a fresh launch applies it. A recovery never stops a
+  seat and then fails for its limit. A scope failure late in the path (after the check) starts the seat again without
+  the limit only when the seat's command is seen not to have started in the scope; when that can't be told (the start
+  wasn't seen in time, or the command started in the scope and ended), nothing is run a second time, and the warning
+  reads `state: "unknown"`. A restart in place keeps the process tree it has (and a limit already applied to it); when
+  that process's limit can't be read back, its warning reads `unknown`. A bare agent pane's respawn carries no seat
+  environment: it keeps the limit, in a new scope, only when the running process reads back as `applied` and a new
+  scope can be made; otherwise it comes back without the limit, with the warning.
 - **When it applies:** Each launch reads the stored value and starts the seat's new pane in a new scope. A seat that is
   already running is never moved or stopped: a changed value applies at that seat's next launch. A daemon restart
   relaunches nothing, so running seats keep the scope they started in.
 - **Status:** `rig seat status <seat>` reads the limit back from the seat's running process, never from the spec
-  alone: `applied` (its process is in a seat scope whose `pids.max` is the value), "requested, not applied" (known not
-  under it: not running, launched before the key or by a recovery without it, or another `pids.max`, with the reason),
-  `unsupported` (not under it, and the host or setup positively can't make the scope), `unknown` (the readback failed)
-  or "stored value invalid" (the stored request can't be read; only this seat is affected, and the value is kept). It
-  also shows `pids.current` and how many times a fork hit the limit (`pids.events` `max`). Never stop a seat's scope by
-  hand: that kills every process in it; use `rig seat stop`.
+  alone. It reads the seat's own pane or, when no pane is recorded for the seat, its session's active pane, and says
+  which (`readFrom`). The states: `applied` (its process is in a seat scope whose `pids.max` is the value), "requested,
+  not applied" (known not under it: not running, launched before the key or by a recovery without it, another
+  `pids.max`, or placed in an environment guest, whose pane holds only a local viewer, with the reason), `unsupported`
+  (not under it, and the host positively can't make the scope), `unknown` (the readback failed), "stored value invalid"
+  (the stored request can't be read; only this seat is affected, and the value is kept). A seat with no limit stored
+  shows nothing and is not read at all, so a seat whose limit was cleared while it ran stays in its launch's scope,
+  unreported, until its next fresh launch starts it without one. It also shows `pids.current` and how many times a fork hit the limit (`pids.events` `max`). Never
+  stop a seat's scope by hand: that kills every process in it; use `rig seat stop`. Stopping a seat ends its session,
+  not its scope: a process the seat left running detached stays in that old scope, under its limit, until it exits,
+  and the status, which reads only the running seat's pane, doesn't show it.
 - **Values:** `tasks_max` takes any count from 1 (systemd's own minimum) to 4194304 (the kernel's `PID_MAX_LIMIT`). No
   floor is imposed for every runtime: how many tasks a harness needs is the operator's choice, and a fork past the
   limit fails visibly as a limit hit.
 - **Persistence and clear:** On new seats, absent or `process_limits: {}` stores no limit. Applying an authored spec to
   an existing seat retains the stored limit when the key is absent, clears it with `process_limits: {}`, and replaces it
-  otherwise; the new value is stored before that launch. First-start retry refuses a changed limit. Export includes the
-  configured value.
+  otherwise; the new value is stored before that launch. First-start retry refuses a changed limit, and keeps a stored
+  value it can't read as it is (that launch reports `process_limits_invalid`). Export includes the configured value; a
+  seat whose stored value can't be read stops the export (HTTP 409, `export_refused`), naming the seat and how to fix
+  or clear it, rather than dropping the request.
 
 ### Pi (`runtime: pi`)
 

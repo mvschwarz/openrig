@@ -1278,6 +1278,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const environmentDriver = new OpenShellDriver();
   const environmentPlatform = new EnvironmentPlatform(db, environmentDriver);
+  // #3253: a seat placed in an environment guest can't get a host scope for its agent (the scope would hold only the
+  // local viewer). The session name finds a placement its node has not claimed yet, before the seat's first launch.
+  tmuxAdapter.seatInEnvironmentGuest = (nodeId, session) => environmentPlatform.forNode(nodeId, session) !== null;
   const checkGuestActivityEndpoint = (origin: string) => {
     const url = new URL(origin);
     if (!opts?.guestActivityPort || Number(url.port || (url.protocol === "https:" ? 443 : 80)) !== opts.guestActivityPort)

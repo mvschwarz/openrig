@@ -110,22 +110,32 @@ seatRoutes.get("/status/:seatRef", async (c) => {
   if (result.ok) {
     const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
     const target = guard?.maybeTarget(c.req.param("seatRef")!);
-    const nodeId = rigRepo.getRig(result.status.rig_id)?.nodes.find((node) => node.logicalId === result.status.logical_id)?.id;
+    const node = rigRepo.getRig(result.status.rig_id)?.nodes.find((candidate) => candidate.logicalId === result.status.logical_id);
+    const nodeId = node?.id;
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
     // #3253: a seat with process limits says where they stand, read back from its process, never from the spec alone. A
-    // stored value that can't be read is this seat's `invalid`, never a failed status read.
+    // stored value that can't be read is this seat's `invalid`, never a failed status read. Whether it runs decides
+    // (a stopped seat keeps its last session name); the read is of the seat's own pane, or, when none is recorded, of its
+    // session's active pane, and the report says which.
     let limits: import("../adapters/tmux.js").SeatProcessLimits | undefined;
     let limitsError: string | undefined;
     try { limits = nodeId ? rigRepo.getNodeProcessLimits(nodeId) : undefined; }
     catch (error) { limitsError = (error as Error).message; }
     const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
+    const running = result.status.session_status === "running";
+    const pane = node?.binding?.tmuxPane ?? null;
+    const readTarget = pane ?? result.status.current_occupant;
+    const readFrom = pane ? "the seat's pane" : "the session's active pane (no pane is recorded for the seat)";
     const processLimits: import("../adapters/tmux.js").SeatProcessLimitsReport | null = limitsError
       ? { state: "invalid", reason: `${limitsError}; the stored value is kept` }
       : limits
-        ? result.status.current_occupant
-          ? tmux ? await tmux.readSeatProcessLimits(result.status.current_occupant, limits)
+        ? running && readTarget
+          ? tmux ? { ...(await tmux.readSeatProcessLimits(readTarget, limits, nodeId)),
+            // A guest seat's report is not read from its pane at all.
+            ...(nodeId && tmux.seatInEnvironmentGuest?.(nodeId) ? {} : { readFrom }) }
             : { state: "unknown", requested: { tasksMax: limits.tasksMax }, reason: "this daemon has no terminal adapter to read the seat's process" }
           : { state: "not_applied", requested: { tasksMax: limits.tasksMax }, reason: "the seat is not running; the limit applies at its next fresh launch" }
+        // No limit stored: nothing is read, so a seat without process_limits is unchanged.
         : null;
     return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
@@ -405,7 +415,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
   });
 }
 
-function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
+function seatLifecycleStatus(code: string): 400 | 404 | 409 | 422 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
     || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
     || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
@@ -413,6 +423,8 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
     || code === "missing_home" || code === "invalid_home" || code === "missing_expectation" || code === "invalid_operation_id") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
+  // #3253: a seat whose process limit can't be applied; only an unverified check may pass on retry (409).
+  if (code === "process_limits_unsupported" || code === "process_limits_setup" || code === "process_limits_invalid") return 422;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
     || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
     || code === "permissions_to_unavailable" || code === "runtime_home_unavailable") return 500;

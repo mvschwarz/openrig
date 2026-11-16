@@ -1374,10 +1374,13 @@ export class PodRigInstantiator {
       return refuse("First-start retry does not accept unretained member startup, continuity or session-source overrides.");
     }
     const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
+    // #3253: a stored limit that can't be read is not compared, and the retry never writes over it (not even with `{}`):
+    // it stays as stored, and the launch reports it `process_limits_invalid`.
+    const limitsReadable = !node.processLimitsError;
     if (`${pod.id}.${member.id}` !== node.logicalId || !same(member.agentRef, node.agentRef) || !same(member.profile, node.profile)
       || !same(member.runtime, node.runtime) || !same(member.role, node.role) || !same(member.label, node.label) || !same(member.codexConfigProfile, node.codexConfigProfile)
       || !same(member.permissionPolicy, node.permissionPolicy) || !same(member.claudeMcp, node.claudeMcp) || !sameLaunchWrapper(member.launchWrapper, node.launchWrapper)
-      || !sameProcessLimits(member.processLimits, node.processLimits)) return refuse("Member source disagrees with the retained seat identity or policy.");
+      || (limitsReadable && !sameProcessLimits(member.processLimits, node.processLimits))) return refuse("Member source disagrees with the retained seat identity or policy.");
     const resolved = resolveAgentRef(member.agentRef, rigRoot, this.deps.fsOps);
     if (!resolved.ok) return refuse(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
     if (!node.resolvedSpecHash || resolved.resolved.hash !== node.resolvedSpecHash) return refuse("Agent source hash differs from the failed first start.");
@@ -1405,7 +1408,8 @@ export class PodRigInstantiator {
     } catch { return refuse("Session liveness could not be determined; no retry was attempted."); }
     const finalRefusal = eligible();
     if (finalRefusal) return refuse(finalRefusal);
-    const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member,
+    const launchMember = limitsReadable ? member : { ...member, processLimits: undefined };
+    const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member: launchMember,
       resolveResult: resolved, configResult: launchConfig, keepRecordedAdditions: true });
     if (result.status !== "launched") return { ok: false, code: result.status, message: result.error ?? "First-start retry did not reach readiness." };
     // The preflight above covers the whole rig and isn't returned; this member's agent spec advisories are.
@@ -2029,6 +2033,8 @@ export class PodRigInstantiator {
           agentRef: member.agentRef,
           profile: member.profile,
           label: member.label,
+          // #3253: stored with the node, as for agent members, so a seat that never launches still shows its request.
+          processLimits: effectiveProcessLimits(member.processLimits),
         });
         recordCreated?.(rigId, node.id);
         return node.id;

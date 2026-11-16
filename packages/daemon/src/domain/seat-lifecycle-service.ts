@@ -8,7 +8,8 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import { problemText, type TmuxAdapter, type SessionProbe, type StopPhase } from "../adapters/tmux.js";
+import { problemText, type TmuxAdapter, type SessionProbe, type StopPhase, type SeatProcessLimitsNotice,
+  type SeatProcessLimitsProblem } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
@@ -189,13 +190,16 @@ export interface SeatRefusal {
     | "stop_uncertain"
     | "missing_permissions_to"
     /** #3253: an explicit fresh launch whose process limit can't be applied, refused before anything is stopped. */
-    | "process_limits_unsupported" | "process_limits_setup" | "process_limits_unverified" | "process_limits_invalid"
+    | ProcessLimitsCode
     | "runtime_home_unsupported"
     | "permissions_to_not_a_person"
     | "permissions_to_unavailable";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
+  /** #3253: with a `process_limits_*` code, whether a retry may succeed, and the limit's problem. */
+  retryable?: boolean;
+  processLimits?: SeatProcessLimitsProblem;
 }
 
 export type RestartInPlaceResult = InPlaceRestartReport | InPlaceRestartRefusal | SeatRefusal;
@@ -293,6 +297,20 @@ function validStopPrecondition(value: unknown): value is StopPrecondition {
 export type CleanSeatResult =
   | { ok: true; seat: SeatDescriptor; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | SeatRefusal;
+
+type ProcessLimitsCode = "process_limits_unsupported" | "process_limits_setup" | "process_limits_unverified" | "process_limits_invalid";
+
+/** #3253: a launch refused because the seat's process limit can't be applied. */
+function isProcessLimitsCode(code: string): code is ProcessLimitsCode {
+  return code === "process_limits_unsupported" || code === "process_limits_setup" || code === "process_limits_unverified"
+    || code === "process_limits_invalid";
+}
+
+/** The problem of a plan's warning, as a refused launch returns it. */
+function processLimitsProblem(notice: SeatProcessLimitsNotice): SeatProcessLimitsProblem {
+  const { state: _state, retryable: _retryable, ...problem } = notice;
+  return problem;
+}
 
 export type LaunchFreshResult =
   | {
@@ -1614,6 +1632,16 @@ export class SeatLifecycleService {
     const { seat, node, adapter, startup, canonicalSessionName, nodeLauncher, startupOrchestrator } = prepared;
     const historyRefusal = await this.validateFreshHistory(seat, canonicalSessionName, input.seatRef);
     if (historyRefusal) return historyRefusal;
+    // #3253: an explicit fresh launch that can't get the seat's limit says so before anything is probed, stopped,
+    // cleaned or superseded, for a running seat and a stopped one alike (a stop or clean followed by a refused launch
+    // would leave the seat with no process, or its history retired for nothing).
+    const limits = await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(resolved.nodeId);
+    if (limits) {
+      return { ok: false, code: `process_limits_${limits.kind}`,
+        message: `Nothing was stopped or cleaned: process_limits is set for this seat, but ${problemText(limits)}.` +
+          (limits.retryable ? " This may be temporary: retry." : ""),
+        retryable: limits.retryable, processLimits: processLimitsProblem(limits) };
+    }
     const retiringRows = this.nonTerminalSessions(node.id);
     // Detached is terminal for process cleanup, but remains a reboot candidate.
     // A deliberate fresh launch must retire that prior history as well.
@@ -1679,14 +1707,6 @@ export class SeatLifecycleService {
     if (canonicalProbe.state === "present") {
       const currentSession = await this.validateFreshCollision(resolved, canonicalSessionName, input.stop === true);
       if ("code" in currentSession) return currentSession;
-      // #3253: an explicit fresh launch that can't get the seat's limit says so before the running seat is stopped,
-      // never after (a stop followed by a refused launch would leave the seat with no process).
-      const limits = await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(resolved.nodeId);
-      if (limits) {
-        return { ok: false, code: `process_limits_${limits.kind}`,
-          message: `Nothing was stopped: process_limits is set for this seat, but ${problemText(limits)}.` +
-            (limits.retryable ? " This may be temporary: retry." : "") };
-      }
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,
@@ -1748,6 +1768,12 @@ export class SeatLifecycleService {
       occupantKind: "fresh",
     });
     if (!launch.ok) {
+      // #3253: a launch refused for the seat's limit (its check failed after the plan passed) keeps its code.
+      if (isProcessLimitsCode(launch.code)) {
+        return { ok: false, code: launch.code, message: launch.message, warnings: viewWarnings,
+          ...(launch.retryable !== undefined ? { retryable: launch.retryable } : {}),
+          ...(launch.processLimits ? { processLimits: launch.processLimits } : {}) };
+      }
       return { ok: false, code: "launch_failed", message: launch.message, warnings: viewWarnings };
     }
     // #2426: the launch's own notes (such as what became of openrig-core's earlier skill copies) reach the result.

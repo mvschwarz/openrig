@@ -538,6 +538,17 @@ describe("RigRepository process_limits persistence (#3253)", () => {
     expect("processLimits" in repo.getRig(rig.id)!.nodes[0]!).toBe(false);
   });
 
+  it("refuses a limit without tasksMax instead of storing '{}', on a node and at creation", () => {
+    const rig = repo.createRig("limits-rig");
+    const node = repo.addNode(rig.id, "seat", { runtime: "codex", processLimits: { tasksMax: 512 } });
+    const noTasksMax = { tasksMax: undefined } as unknown as { tasksMax: number };
+    expect(() => repo.setNodeProcessLimits(node.id, noTasksMax)).toThrow(/tasks_max is required \(pass null to clear\)/);
+    expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(node.id) as { process_limits: string })
+      .process_limits).toBe('{"tasks_max":512}');
+    expect(() => repo.addNode(rig.id, "partial", { runtime: "codex", processLimits: noTasksMax })).toThrow(/tasks_max is required/);
+    expect(repo.getRig(rig.id)!.nodes.map((n) => n.logicalId)).toEqual(["seat"]);
+  });
+
   it("refuses an out-of-range limit, and a malformed stored value throws for that seat's own read", () => {
     const rig = repo.createRig("limits-rig");
     const node = repo.addNode(rig.id, "seat", { runtime: "codex" });

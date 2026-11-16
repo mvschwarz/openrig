@@ -112,6 +112,8 @@ export interface RuntimeSwitchRefusal {
   committed?: boolean;
   /** The uncommitted successor/pane exchange still needs recovery; do not retry the switch. */
   recoveryPending?: boolean;
+  /** #3253: the staged successor had gone on without the seat's requested process limit before the switch failed. */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
 }
 
 export interface RuntimeSwitchPlan {
@@ -420,13 +422,15 @@ export class SeatRuntimeSwitchService {
         ctx.input.reason, ctx.input.requestedBy ?? null, JSON.stringify(ctx.plan), deadlineAt, stamp(), stamp());
     let successorPane: string | null = null;
     let activityGrantId: string | undefined;
+    let stagedLimits: import("../adapters/tmux.js").SeatProcessLimitsNotice | undefined;
     const abandon = async (why: string): Promise<RuntimeSwitchRefusal> => {
       if (activityGrantId) new ActivityGrantStore(db).revoke({ grantId: activityGrantId }, "cutover_abandoned");
       const retired = await this.retireStaging(row.staging_session, node.id, "Uncommitted successor");
       db.prepare(`UPDATE seat_runtime_switches SET phase = 'abandoned', outcome = ?, attention = ?, updated_at = ? WHERE id = ? AND committed_at IS NULL`)
         .run(why, retired.ok ? null : `The staged successor couldn't be retired: ${retired.message}`, stamp(), id);
       tmux.finishLaunchBinding(row.staging_session);
-      return { ...failed(`${why}${retired.ok ? "" : ` The staged successor couldn't be retired (${retired.message}); recover with rig seat set-runtime ${ctx.seatRef} --recover.`}`, retired.ok ? undefined : `Recovery is pending for ${ctx.seatRef}. Run rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, ...(!retired.ok ? { recoveryPending: true } : {}) };
+      return { ...failed(`${why}${retired.ok ? "" : ` The staged successor couldn't be retired (${retired.message}); recover with rig seat set-runtime ${ctx.seatRef} --recover.`}`, retired.ok ? undefined : `Recovery is pending for ${ctx.seatRef}. Run rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, ...(!retired.ok ? { recoveryPending: true } : {}),
+        ...(stagedLimits ? { processLimits: stagedLimits } : {}) };
     };
 
     // 1. The successor, on the target runtime, beside the predecessor.
@@ -487,6 +491,7 @@ export class SeatRuntimeSwitchService {
           ...(ctx.input.accountHome !== undefined ? { accountHome: ctx.input.accountHome, accountToken: ctx.input.accountToken ?? null }
           : ctx.input.clearAccountHome || node.accountHome ? { accountHome: null, ...(node.accountHome ? { accountToken: null } : {}) } : {}), runtimeSwitchFrom: { runtime: node.runtime!, session: sessionName, pane: ctx.predecessorPane, generation: ctx.predecessorGeneration } } },
     });
+    stagedLimits = launch.processLimits;
     if (!launch.ok) {
       const attention = launch.code === "successor_attention_required" ? " It is waiting at a login, trust or approval prompt." : "";
       return abandon(`The ${target} successor didn't start: ${launch.message}.${attention}`);

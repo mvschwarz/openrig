@@ -1481,6 +1481,9 @@ export class RestoreOrchestrator {
     const onSessionLaunched = opts?.onSessionLaunched;
     const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId, {
       ...launchOpts,
+      // #3253: a restore or resume is a recovery: nothing of the seat runs, so a limit that can't be applied doesn't stop
+      // it. It goes ahead with a structured warning, and the request stays stored for a fresh launch to apply.
+      processLimitsMode: "recovery",
       ...(selectedHistory ? { expectedNodeId: nodeId, beforeEffect: selectedHistory.beforeNative,
         beforeRegistration: selectedHistory.beforeRegistration } : {}),
       ...(savedStartup ? { pluginPaths: pluginPathsOf(savedStartup.projectionEntries) } : {}),
@@ -1517,7 +1520,8 @@ export class RestoreOrchestrator {
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
-      ...(keptPane ? { launchStarted: true as const } : {}) };
+      ...(keptPane ? { launchStarted: true as const } : {}),
+      ...(launchResult.processLimits ? { processLimits: launchResult.processLimits } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id,
       ...(compensation.ran ? { compensated: true as const } : {}) } : checked;
   }

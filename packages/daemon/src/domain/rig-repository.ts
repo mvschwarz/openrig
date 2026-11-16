@@ -936,8 +936,13 @@ export class RigRepository {
   /** Persist or clear (null) a seat's process limits (spec `process_limits`, #3253). The terminal reads them as it
    *  creates the seat's pane, so a re-applied spec must write them before that launch. */
   setNodeProcessLimits(nodeId: string, value: ProcessLimits | null): boolean {
-    const stored = value === null ? null
-      : serializeProcessLimits({ tasksMax: validateProcessLimits({ tasks_max: value.tasksMax }).tasksMax! });
+    let stored: string | null = null;
+    if (value !== null) {
+      // A value without tasks_max would store `{}`, which reads back as invalid: null is the only way to clear.
+      const checked = validateProcessLimits({ tasks_max: value.tasksMax });
+      if (checked.tasksMax === undefined) throw new Error("process_limits: tasks_max is required (pass null to clear)");
+      stored = serializeProcessLimits({ tasksMax: checked.tasksMax });
+    }
     if (!this.hasNodeColumn("process_limits")) {
       if (stored !== null) throw new Error("Cannot persist process_limits: database migration is required");
       return false;

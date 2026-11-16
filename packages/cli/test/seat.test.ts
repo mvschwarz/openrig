@@ -206,6 +206,12 @@ describe("seat typing guard commands", () => {
     const deps4 = makeDeps({ status: 200, data: { ...STATUS, processLimits: invalid } }, []);
     const result4 = await captureLogs(() => makeCommand(deps4).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
     expect(result4.logs).toContain("Process limits: process_limits: stored value invalid; Seat n process_limits: stored value is not valid JSON; the stored value is kept");
+    // Which process the status read.
+    const fallback = { ...applied, readFrom: "the session's active pane (no pane is recorded for the seat)" };
+    const deps6 = makeDeps({ status: 200, data: { ...STATUS, processLimits: fallback } }, []);
+    const result6 = await captureLogs(() => makeCommand(deps6).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result6.logs).toContain("Process limits: tasks_max 512: applied (pids.max 512, current 37, limit hit 2 times) " +
+      "(read from the session's active pane (no pane is recorded for the seat))");
     // Without limits, no line.
     const deps3 = makeDeps({ status: 200, data: STATUS }, []);
     const result3 = await captureLogs(() => makeCommand(deps3).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));

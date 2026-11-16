@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import { noticeLine, type TmuxAdapter } from "../adapters/tmux.js";
+import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { PersistedEvent } from "./types.js";
 import { validateSessionName, deriveSessionName, boundSessionNameProblem } from "./session-name.js";
@@ -27,7 +27,9 @@ export type LaunchResult =
   | { ok: true; sessionName: string; session: Session; binding: Binding; warnings?: string[];
     /** #3253: a takeover that went ahead without the seat's requested process limit (the request stays stored). */
     processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
-  | { ok: false; code: string; message: string };
+  | { ok: false; code: string; message: string;
+    /** #3253: a refused launch's limit problem (`process_limits_*`), and whether a retry may succeed. */
+    retryable?: boolean; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsProblem };
 
 interface LaunchOpts {
   /** Startup selected-history only: refuse a same-name replacement. */
@@ -60,6 +62,9 @@ interface LaunchOpts {
   /** `sessionName` is the name this seat was bound to (restore keeps it). It is launched under that name even outside
    *  OpenRig's naming pattern, as an adopted seat's own tmux session name is, when boundSessionNameProblem finds none. */
   keepsBoundSessionName?: boolean;
+  /** #3253: how the new session treats the seat's process limit it can't apply (default "fresh": refused). A restore or
+   *  resume passes "recovery": it goes ahead without the limit, with a structured warning. */
+  processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode;
 }
 
 interface NodeLauncherDeps {
@@ -104,6 +109,10 @@ export const NOTHING_STOPPED_LAUNCH_CODES: ReadonlySet<string> = new Set([
 export const NO_TERMINAL_LAUNCH_CODES: ReadonlySet<string> = new Set([
   "node_not_found", "selection_changed", "already_bound", "invalid_session_name", "address_conflict",
   "session_not_created",
+  // #3253: refused by the scope check before tmux is asked for a session. `process_limits_unverified` is not here: it
+  // can also come after the session was made, when its scope start isn't confirmed, and that session's removal is
+  // best effort.
+  "process_limits_unsupported", "process_limits_setup", "process_limits_invalid",
 ]);
 
 export class NodeLauncher {
@@ -243,9 +252,12 @@ export class NodeLauncher {
     }
     const tmuxResult = opts?.keepPane
       ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv, node.id)
-      : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
+      : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv,
+        opts?.processLimitsMode ? { processLimitsMode: opts.processLimitsMode } : undefined);
     if (!tmuxResult.ok) {
-      return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
+      return { ok: false, code: tmuxResult.code, message: tmuxResult.message,
+        ...(tmuxResult.retryable !== undefined ? { retryable: tmuxResult.retryable } : {}),
+        ...(tmuxResult.processLimits ? { processLimits: tmuxResult.processLimits } : {}) };
     }
     // A replacement during the awaited terminal creation must never receive
     // this attempt's new session row. The pane's present owner cannot be
@@ -394,16 +406,16 @@ export class NodeLauncher {
    *  touched when the pane isn't in the session. */
   private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string):
     Promise<{ ok: true; warnings?: string[]; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
-      | { ok: false; code: string; message: string }> {
+      | { ok: false; code: string; message: string; retryable?: boolean; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsProblem }> {
     let panes: Array<{ id: string }> = [];
     try { panes = await this.tmuxAdapter.listPanes(sessionName); } catch { /* an unreadable session holds no pane to keep */ }
     if (!panes.some((candidate) => candidate.id === pane)) {
       return { ok: false, code: "pane_not_found", message: `Pane ${pane} isn't in tmux session "${sessionName}", so nothing was stopped.` };
     }
-    // #3253: the recovery path is chosen before the running process is ended: with the seat's limit, or without it and
-    // a structured warning. The respawn below runs in recovery mode, so a limit never stops the takeover after the stop.
-    const limitsPlan = await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(nodeId);
-    if (limitsPlan) console.warn(`[seat takeover] ${nodeId}: ${noticeLine(limitsPlan)}`);
+    // #3253: the seat's scope is checked before the running process is ended, so the respawn after the stop reuses that
+    // check. The respawn runs in recovery mode: a limit never stops the takeover after the stop, and a warning that it
+    // went on without the limit is logged only once it has.
+    await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(nodeId);
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
     const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);

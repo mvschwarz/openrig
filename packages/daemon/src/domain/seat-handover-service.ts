@@ -11,7 +11,7 @@ import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, savedSessionName, type SessionRegistry } from "./session-registry.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { EventBus } from "./event-bus.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { noticeLine, type TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./seat-status-service.js";
@@ -190,7 +190,9 @@ export type SeatHandoverResult =
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
   | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string }
   // #2985: once the successor was launched in the respawned pane, the failure says so and names the pane.
-  | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string }
+  | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string;
+    /** #3253: the respawned pane went on without the seat's requested process limit before the failure. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
   // #2985: `--recover` found nothing to adopt, or could not prove the pane's process is the failed handover's successor.
   | { ok: false; code: "no_handover_to_recover" | "handover_attempt_superseded" | "successor_identity_unproven" | "recover_runtime_unsupported"; message: string; guidance: string }
   | Extract<SeatStatusResult, { ok: false }>;
@@ -680,6 +682,9 @@ export class SeatHandoverService {
       },
     });
     if (!launch.ok) {
+      // #3253: a respawn that went on without the seat's limit says so in the failure too.
+      const limitsFailure = launch.processLimits ? { processLimits: launch.processLimits } : {};
+      const limitsGuidance = launch.processLimits ? ` ${noticeLine(launch.processLimits)}.` : "";
       // #2985: the harness was launched into the respawned pane and only readiness failed. The previous occupant is
       // already ended and the successor may come up (or already be working) there, but the handover never commits,
       // so its generation is never registered. Retrying the handover would end it, so the guidance says what may be
@@ -705,9 +710,10 @@ export class SeatHandoverService {
           message: `Handover failed at step "${launch.step}": ${launch.message}`,
           replacementStarted: true,
           ...(launch.tmuxPane ? { successorPane: launch.tmuxPane } : {}),
-          guidance: recorded
+          ...limitsFailure,
+          guidance: (recorded
             ? `${this.recoverLine(quoted)} ${unadoptedNote}`
-            : unadoptedNote,
+            : unadoptedNote) + limitsGuidance,
         };
       }
       return {
@@ -717,9 +723,10 @@ export class SeatHandoverService {
         // The registry binding is unchanged (commit never ran). A resolve_pane failure leaves the live
         // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
-        guidance: launch.code === "successor_preflight_failed"
+        ...limitsFailure,
+        guidance: (launch.code === "successor_preflight_failed"
           ? `The predecessor is still running and its binding is unchanged. ${launch.message}`
-          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
+          : "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.") + limitsGuidance,
       };
     }
 

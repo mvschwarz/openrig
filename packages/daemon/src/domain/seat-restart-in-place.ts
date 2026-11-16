@@ -39,7 +39,7 @@ export type InPlaceRestartTmux = Pick<TmuxAdapter,
   | "getPanePid" | "getPaneCommand" | "listPanes" | "getSessionEnv" | "signalPid" | "setRemainOnExit"
   | "signalPaneProcess" | "isPaneDead" | "respawnPane" | "getPaneLocalOption" | "restorePaneOption"
   | "capturePaneHistory" | "capturePaneHistoryParts">
-  & Partial<Pick<TmuxAdapter, "getDefaultShell" | "seatProcessLimitsSet" | "seatProcessLimitsNotApplied">>;
+  & Partial<Pick<TmuxAdapter, "getDefaultShell" | "seatProcessLimitsSet" | "seatProcessLimitsNotApplied" | "seatProcessLimitsKeepPlan">>;
 
 /** The Codex runtime adapter's resume surface this operation reuses. */
 export interface InPlaceCodexLauncher {
@@ -281,10 +281,14 @@ export class CodexInPlaceRestart {
     return result;
   }
 
-  /** #3253: the restart's structured warning, on the report (and every result built from it), and in the log. */
+  /** #3253: the restart's structured warning, on the report (and every result built from it). It is logged only once
+   *  the restart has gone on (logProcessLimits). */
   private noteProcessLimits(report: InPlaceRestartReport, notice: SeatProcessLimitsNotice): void {
     report.processLimits = notice;
-    console.warn(`[restart in place] ${report.seat.nodeId}: ${noticeLine(notice)}`);
+  }
+
+  private logProcessLimits(report: InPlaceRestartReport): void {
+    if (report.processLimits) console.warn(`[restart in place] ${report.seat.nodeId}: ${noticeLine(report.processLimits)}`);
   }
 
   /** The restart after its started event. Updates `progress` so a throw is reported at its stage. */
@@ -316,16 +320,21 @@ export class CodexInPlaceRestart {
       // The relaunch runs in the home the running Codex used (anything else refused as drift), so the proof reads that one.
       launch = await this.deps.codex.sendResumeCommand(sessionName, relaunch.command, report.conversationId, target.seat.nodeId, report.codexHome);
       if (!launch.ok) return this.incomplete(report, launch, recoveryCommand);
+      this.logProcessLimits(report);
       progress.stage = "identity check";
       return this.verifyReplacement(target, report, oldExe);
     }
 
-    // #3253: this respawn carries no seat environment, so a seat with a limit comes back without its scope. Chosen
-    // before anything is stopped: it goes ahead with a structured warning, and a fresh launch re-applies the limit.
-    if (this.deps.tmux.seatProcessLimitsSet?.(target.seat.nodeId)) {
-      this.noteProcessLimits(report, notAppliedNotice({ kind: "setup",
-        reason: "a restart in place respawns a bare pane without the seat's environment, so it can't keep or re-apply the limit; a fresh launch applies it" }));
-    }
+    // #3253: this respawn carries no seat environment. Chosen before anything is stopped: a seat whose process reads
+    // back under its limit is respawned in a new scope with it; otherwise it goes ahead with a structured warning, and a
+    // fresh launch re-applies the limit.
+    const keepPlan = this.deps.tmux.seatProcessLimitsKeepPlan
+      ? await this.deps.tmux.seatProcessLimitsKeepPlan(target.seat.nodeId, pane)
+      : this.deps.tmux.seatProcessLimitsSet?.(target.seat.nodeId)
+        ? { keep: false as const, notice: notAppliedNotice({ kind: "setup",
+          reason: "a restart in place respawns a bare pane without the seat's environment, so it can't keep or re-apply the limit; a fresh launch applies it" }) }
+        : null;
+    if (keepPlan && !keepPlan.keep) this.noteProcessLimits(report, keepPlan.notice);
     // Hold the pane before any signal: without remain-on-exit, Codex exiting would destroy the pane and
     // there would be nothing to respawn into. The hold counts only once tmux reads it back as on.
     progress.stage = "pane hold";
@@ -346,11 +355,15 @@ export class CodexInPlaceRestart {
     if (!terminated.ok) return this.afterFailedStop(target, report, observed, held, recoveryCommand, terminated.message, progress);
     // Respawn the dead pane WITHOUT -k (scrollback stays) with the resume command as its own command.
     progress.stage = "respawn";
-    const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command, { cwd });
+    const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command,
+      { cwd, ...(keepPlan?.keep ? { keepLimitOf: target.seat.nodeId, processLimitsMode: "recovery" as const } : {}) });
     if (!respawned.ok) {
       return this.afterFailedStop(target, report, observed, held, recoveryCommand, `the pane could not be respawned: ${respawned.message}`, progress);
     }
     if (respawned.warnings) report.warnings.push(...respawned.warnings);
+    // The respawn logs its own notice (a kept scope that failed late, or a start it can't tell); the plan's is logged here.
+    if (respawned.processLimits) this.noteProcessLimits(report, respawned.processLimits);
+    else this.logProcessLimits(report);
     progress.stage = "resume";
     launch = await this.deps.codex.verifyResumeInPane(sessionName, report.conversationId, target.seat.nodeId, report.codexHome);
     if (!launch.ok) return this.incomplete(report, launch, recoveryCommand, held);
