@@ -4660,7 +4660,7 @@ export class QueueRepository {
    */
   recordHumanAnswer(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; primaryUser?: boolean;
     /** The click's Slack action_ts: a decision parked on the person it asked takes the click only from after its current question posted. */
-    clickedTs?: string; identityProvenance?: string; identityPrincipal?: string }): RecordHumanAnswerResult {
+    clickedTs?: string; onlyIfUnanswered?: boolean; identityProvenance?: string; identityPrincipal?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
     if (this.closeStaleRunnerPermission(input.qitemId)) return { status: "not-applicable", reason: "state-canceled" };
     // Set inside the transaction when this click changed the answers (a declared type, so the closure's write is seen).
@@ -4686,6 +4686,15 @@ export class QueueRepository {
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};
+      // A retained click fills a missing answer; it never replaces a committed choice in this ask or park.
+      // A previous park's saved values do not count as answers to the current park.
+      if (input.onlyIfUnanswered && Object.prototype.hasOwnProperty.call(recorded, input.questionId)
+        && (item.state === "pending" || (episodeKey && this.transitionLog.listForQitem(item.qitemId).some((transition) =>
+          transition.transitionId > Number(episodeKey.slice(episodeKey.lastIndexOf(":") + 1))
+          && transition.transitionNote === `human-answer-recorded: ${JSON.stringify({ questionId: input.questionId, optionId: recorded[input.questionId] })}`)))) {
+        return { status: "recorded" as const, answers: recorded,
+          complete: unansweredQuestions(item.humanQuestions, recorded).length === 0, questions: item.humanQuestions };
+      }
       // A park's set is final once this park has its answer: until then a complete set is an earlier park's, and a click
       // on the re-park records over it.
       if (unansweredQuestions(item.humanQuestions, recorded).length === 0

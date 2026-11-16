@@ -127,6 +127,35 @@ describe("structured human questions (#193)", () => {
     } finally { record.mockRestore(); }
   });
 
+  it("keeps a newer partial answer when an older failed click retries", async () => {
+    const { qitemId } = await repo.create({ ...request, humanIntent: "decision", humanQuestions: questions });
+    const payload = { type: "block_actions", user: { id: "UFOUNDER" }, channel: { id: "C-TEST" },
+      container: { message_ts: "1.1" },
+      actions: [{ block_id: "or-q:db", action_id: "or-opt:pg", action_ts: "1000.5" }] };
+    const actions = new DeadLetterStore<typeof payload>(join(home, "actions.jsonl"));
+    const acknowledge = vi.fn(async () => true);
+    const record = vi.spyOn(repo, "recordHumanAnswer").mockImplementationOnce(() => { throw new Error("answer write failed"); });
+    try {
+      const router = new InboundRouter({
+        queue: makeQueuePorts(repo, { loadHumanRegistry: () => registry }),
+        seen: new SeenStore(join(home, "seen.jsonl")), deadLetter: new DeadLetterStore(join(home, "events.jsonl")),
+        actionDeadLetter: actions, destination: request.sourceSession,
+        resolveSender: () => ({ admitted: true, source: human }),
+        resolveRoute: () => ({ destination: request.sourceSession, correlationQitemId: qitemId }),
+        recordHumanAnswer: (input) => repo.recordHumanAnswer(input), acknowledgeAnswer: acknowledge,
+      });
+      expect(await router.routeAction(payload)).toMatchObject({ status: "handler-failed" });
+      await router.routeAction({ ...payload, actions: [{ ...payload.actions[0]!, action_id: "or-opt:sqlite", action_ts: "1001.5" }] });
+      expect(repo.getById(qitemId)?.humanAnswers).toEqual({ db: "sqlite" });
+      await expect(router.retryDeadLetters()).resolves.toMatchObject({ retried: 1, landed: 1 });
+      expect(repo.getById(qitemId)?.humanAnswers).toEqual({ db: "sqlite" });
+      expect(actions.readAll()).toEqual([]);
+      expect(acknowledge).toHaveBeenCalledWith(expect.objectContaining({ text: "Your answer reached OpenRig but wasn't recorded yet. OpenRig will retry." }));
+      await router.routeAction({ ...payload, actions: [{ ...payload.actions[0]!, action_ts: "1002.5" }] });
+      expect(repo.getById(qitemId)?.humanAnswers).toEqual({ db: "pg" });
+    } finally { record.mockRestore(); }
+  });
+
   describe("recording answers", () => {
     const answer = (qitemId: string, questionId: string, optionId: string, actorSession = human) => repo.recordHumanAnswer({ qitemId, actorSession, questionId, optionId });
 

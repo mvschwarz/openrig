@@ -70,7 +70,7 @@ export interface SlackBlockActions {
   actions?: Array<{ block_id?: string; action_id?: string; value?: string; action_ts?: string }>;
 }
 
-export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string; clickedTs?: string; identityProvenance?: string; identityPrincipal?: string }) => RecordHumanAnswerResult;
+export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string; clickedTs?: string; onlyIfUnanswered?: boolean; identityProvenance?: string; identityPrincipal?: string }) => RecordHumanAnswerResult;
 
 /** What a person reads in the thread when OpenRig refuses a click or can't record it. Plain words: what happened, and
  *  who may answer or what to do instead. The same clicks are refused as before; they just aren't silent. */
@@ -602,9 +602,11 @@ export class InboundRouter {
     let recorded: RecordHumanAnswerResult | undefined;
     try {
       recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts,
+        onlyIfUnanswered: !live,
         ...(who.entityId ? { identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId } : {}) });
     } catch (e) {
       this.deps.log?.(`answer recording failed qitem=${qitemId}: ${(e as Error).message}`);
+      if (live) await acknowledge("Your answer reached OpenRig but wasn't recorded yet. OpenRig will retry.");
       return { status: "handler-failed", reason: "answer-recording-failed" };
     }
     if (!recorded || recorded.status !== "recorded") {
