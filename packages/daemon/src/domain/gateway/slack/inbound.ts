@@ -606,7 +606,7 @@ export class InboundRouter {
         ...(who.entityId ? { identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId } : {}) });
     } catch (e) {
       this.deps.log?.(`answer recording failed qitem=${qitemId}: ${(e as Error).message}`);
-      if (live) await acknowledge("Your answer reached OpenRig but wasn't recorded yet. OpenRig will retry.");
+      if (live) await acknowledge("Your answer reached OpenRig but wasn't recorded yet. OpenRig will retry it if this question has no answer yet; to change an answer you already gave, click it again.");
       return { status: "handler-failed", reason: "answer-recording-failed" };
     }
     if (!recorded || recorded.status !== "recorded") {

@@ -4688,10 +4688,11 @@ export class QueueRepository {
       const recorded = item.humanAnswers ?? {};
       // A retained click fills a missing answer; it never replaces a committed choice in this ask or park.
       // A previous park's saved values do not count as answers to the current park.
+      const recordedInCurrentPark = episodeKey && this.transitionLog.listForQitem(item.qitemId).some((transition) =>
+        transition.transitionId > Number(episodeKey.slice(episodeKey.lastIndexOf(":") + 1))
+        && transition.transitionNote === `human-answer-recorded: ${JSON.stringify({ questionId: input.questionId, optionId: recorded[input.questionId] })}`);
       if (input.onlyIfUnanswered && Object.prototype.hasOwnProperty.call(recorded, input.questionId)
-        && (item.state === "pending" || (episodeKey && this.transitionLog.listForQitem(item.qitemId).some((transition) =>
-          transition.transitionId > Number(episodeKey.slice(episodeKey.lastIndexOf(":") + 1))
-          && transition.transitionNote === `human-answer-recorded: ${JSON.stringify({ questionId: input.questionId, optionId: recorded[input.questionId] })}`)))) {
+        && (item.state === "pending" || recordedInCurrentPark)) {
         return { status: "recorded" as const, answers: recorded,
           complete: unansweredQuestions(item.humanQuestions, recorded).length === 0, questions: item.humanQuestions };
       }
@@ -4703,7 +4704,7 @@ export class QueueRepository {
       }
       const answers: HumanAnswers = { ...(item.humanAnswers ?? {}), [input.questionId]: input.optionId };
       const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
-      if (item.humanAnswers?.[input.questionId] !== input.optionId) {
+      if (item.humanAnswers?.[input.questionId] !== input.optionId || (episodeKey && !recordedInCurrentPark)) {
         const transition = this.transitionLog.append({ qitemId: input.qitemId, state: item.state, actorSession: input.actorSession,
           transitionNote: `human-answer-recorded: ${JSON.stringify({ questionId: input.questionId, optionId: input.optionId })}`,
           identityProvenance: input.identityProvenance, identityPrincipal: input.identityPrincipal });

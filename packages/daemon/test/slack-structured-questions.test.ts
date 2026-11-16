@@ -150,9 +150,55 @@ describe("structured human questions (#193)", () => {
       await expect(router.retryDeadLetters()).resolves.toMatchObject({ retried: 1, landed: 1 });
       expect(repo.getById(qitemId)?.humanAnswers).toEqual({ db: "sqlite" });
       expect(actions.readAll()).toEqual([]);
-      expect(acknowledge).toHaveBeenCalledWith(expect.objectContaining({ text: "Your answer reached OpenRig but wasn't recorded yet. OpenRig will retry." }));
+      expect(acknowledge).toHaveBeenCalledWith(expect.objectContaining({ text: "Your answer reached OpenRig but wasn't recorded yet. OpenRig will retry it if this question has no answer yet; to change an answer you already gave, click it again." }));
       await router.routeAction({ ...payload, actions: [{ ...payload.actions[0]!, action_ts: "1002.5" }] });
       expect(repo.getById(qitemId)?.humanAnswers).toEqual({ db: "pg" });
+    } finally { record.mockRestore(); }
+  });
+
+  it("retains a same-value acceptance in the current park when another click retries", async () => {
+    const { qitemId } = await repo.create({ ...request, humanIntent: "decision", humanQuestions: questions });
+    const park = (messageTs: string) => {
+      repo.update({ qitemId, actorSession: request.sourceSession, state: "blocked", blockedOn: human });
+      const episode = repo.currentHumanRequiredEpisode(qitemId)!;
+      repo.update({ qitemId, actorSession: "openrig-slack",
+        transitionNote: `slack-owner-notification-posted notification_key=${episode.key} kind=human-required thread_ts=${messageTs} message_ts=${messageTs}` });
+      return Number(episode.key.slice(episode.key.lastIndexOf(":") + 1));
+    };
+    park("1.0");
+    repo.recordHumanAnswer({ qitemId, actorSession: human, questionId: "db", optionId: "sqlite", clickedTs: "1.1" });
+    repo.update({ qitemId, actorSession: request.sourceSession, state: "in-progress" });
+    const episodeStart = park("2.0");
+    const trail = () => repo.transitionLog.listForQitem(qitemId)
+      .filter(t => t.transitionId > episodeStart && t.transitionNote?.startsWith("human-answer-recorded:"));
+    const payload = { type: "block_actions", user: { id: "UFOUNDER" }, channel: { id: "C-TEST" },
+      container: { message_ts: "2.0" },
+      actions: [{ block_id: "or-q:db", action_id: "or-opt:sqlite", action_ts: "2.1" }] };
+    const actions = new DeadLetterStore<typeof payload>(join(home, "actions.jsonl"));
+    const router = new InboundRouter({
+      queue: makeQueuePorts(repo, { loadHumanRegistry: () => registry }),
+      seen: new SeenStore(join(home, "seen.jsonl")), deadLetter: new DeadLetterStore(join(home, "events.jsonl")),
+      actionDeadLetter: actions, destination: request.sourceSession,
+      resolveSender: () => ({ admitted: true, source: human }),
+      resolveRoute: () => ({ destination: request.sourceSession, correlationQitemId: qitemId }),
+      recordHumanAnswer: (input) => repo.recordHumanAnswer(input),
+    });
+    expect(await router.routeAction(payload)).toMatchObject({ status: "accepted" });
+    const firstAcceptanceCount = trail().length;
+    const firstAcceptanceTime = repo.getById(qitemId)!.tsUpdated;
+    await router.routeAction(payload);
+    expect(repo.getById(qitemId)!.tsUpdated).toBe(firstAcceptanceTime);
+    const duplicateCount = trail().length;
+    const record = vi.spyOn(repo, "recordHumanAnswer").mockImplementationOnce(() => { throw new Error("answer write failed"); });
+    try {
+      expect(await router.routeAction({ ...payload, actions: [{ ...payload.actions[0]!, action_id: "or-opt:pg", action_ts: "2.2" }] }))
+        .toMatchObject({ status: "handler-failed" });
+      await expect(router.retryDeadLetters()).resolves.toMatchObject({ retried: 1, landed: 1 });
+      expect(repo.getById(qitemId)?.humanAnswers).toEqual({ db: "sqlite" });
+      expect(firstAcceptanceCount).toBe(1);
+      expect(duplicateCount).toBe(1);
+      expect(trail()).toHaveLength(1);
+      expect(actions.readAll()).toEqual([]);
     } finally { record.mockRestore(); }
   });
 
