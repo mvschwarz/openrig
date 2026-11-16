@@ -260,14 +260,26 @@ function h2Body(content: string, heading: string): string | null {
 const R_ITEM_START = /^\s*[-*+]\s+(?:\*{1,2}|_{1,2})?(R\d+)[.:]/;
 const R_ITEM_OBSERVABLE = /\bObservable\b(?:\*{1,2}|_{1,2})?\s*:\s*(?:\*{1,2}|_{1,2})?\s*[^\s*_]/i;
 
-/** The R items in a `## Requirements` body that carry no observable proof, or null when it names no R item. */
+const LIST_ITEM_START = /^\s*(?:[-*+]|\d+[.)])\s+/;
+
+/** The R items in a `## Requirements` body that carry no observable proof, or null when it names no R item. An item
+ *  runs as a Markdown list item does: its deeper-indented lines and its lazy continuation lines, until a sibling or
+ *  outer list item, or text back at its margin after a blank line. */
 function requirementsRList(body: string | null): { withoutProof: string[] } | null {
   if (body === null) return null;
   const items: Array<{ id: string; text: string }> = [];
+  let open: { indent: number; afterBlank: boolean } | null = null;
   for (const line of body.split("\n")) {
     const start = R_ITEM_START.exec(line);
-    if (start) items.push({ id: start[1]!, text: line });
-    else if (items.length > 0) items[items.length - 1]!.text += `\n${line}`;
+    const indent = line.length - line.trimStart().length;
+    if (start) {
+      items.push({ id: start[1]!, text: line });
+      open = { indent, afterBlank: false };
+    } else if (open) {
+      if (line.trim() === "") open.afterBlank = true;
+      else if (indent <= open.indent && (LIST_ITEM_START.test(line) || open.afterBlank)) open = null;
+      else items[items.length - 1]!.text += `\n${line}`;
+    }
   }
   if (items.length === 0) return null;
   return { withoutProof: items.filter((item) => !R_ITEM_OBSERVABLE.test(item.text)).map((item) => item.id) };
@@ -553,9 +565,13 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
         // token in the proof contract. Generic prose containing the word
         // "mockup" (the scaffold placeholder says "name their planned
         // mockup") is NOT a reference and must not suppress the advisory.
+        // An accepted R list stands in for the proof contract here too.
+        const rListBody = rList ? requirementsSource?.body ?? "" : "";
         const hasMockupRef = /!\[/.test(visualBody ?? "")
           || /plannedRef/i.test(contractBody ?? "")
-          || /!\[/.test(contractBody ?? "");
+          || /!\[/.test(contractBody ?? "")
+          || /plannedRef/i.test(rListBody)
+          || /!\[/.test(rListBody);
         if (isUiSlice && !hasMockupRef) {
           findings.push({
             kind: "ui_slice_missing_mockup",
