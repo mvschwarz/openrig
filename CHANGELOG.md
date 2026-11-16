@@ -33,7 +33,7 @@ including contributions from people using OpenRig.
   rig daemon stop &&
   DB="$(rig config get db.path)" &&
   BACKUP="$DB.before-0.7.17-$(date -u +%Y%m%dT%H%M%SZ)" &&
-  [ ! -e "$BACKUP" ] &&
+  { [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists and is kept; run the block again." >&2; false; }; } &&
   cp "$DB" "$BACKUP" &&
   { [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
   echo "Database backed up to $BACKUP" &&
@@ -43,9 +43,9 @@ including contributions from people using OpenRig.
 
   If a step fails, nothing after it runs: fix what it reports, then run the
   whole block again. If `rig daemon stop` fails and `rig daemon status` then
-  says "Daemon stopped" or "Daemon PID is absent", run the block from the
-  `DB=` line. Keep the backup, and its `-wal` file, until 0.7.17 is running
-  well.
+  says "Daemon stopped", run the block from the `DB=` line. If it says
+  "Daemon PID is absent", run `rig daemon start`, then the whole block again.
+  Keep the backup, and its `-wal` file, until 0.7.17 is running well.
 
 - **Two migrations run before the daemon listens** (168 and 170). Going back to
   0.7.16 after them isn't established; keep the backup. ([#3260](https://github.com/mvschwarz/openrig/pull/3260))
