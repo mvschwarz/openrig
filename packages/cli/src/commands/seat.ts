@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { accountHomePlanMatches } from "../lib/account-home-switch.js";
 import { readFileSync } from "node:fs";
 import { Command } from "commander";
-import { DaemonClient, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -177,7 +178,7 @@ interface SeatHandoverMutationResult {
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
         model?: { requested: string | null; predecessorCompared: false } };
   /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
-  restorePacket?: { status: "unconfirmed"; reason: string };
+  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). */
@@ -409,7 +410,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       console.log(`Codex rebuild model: ${outcome.model.requested ? `requested ${outcome.model.requested}` : "runtime configuration/default"}. The predecessor's in-pane model was not compared or carried.`);
     }
     if (outcome.primedArtifacts.length > 0) {
-      const heading = result.restorePacket?.status === "unconfirmed" ? "Rebuild packet includes" : "Rebuild primed from";
+      const heading = result.restorePacket ? "Rebuild packet includes" : "Rebuild primed from";
       console.log(`${heading} ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
       for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);
     }
@@ -427,7 +428,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       return;
     }
   }
-  if (result.sideEffects.startupContextDelivered) {
+  if (result.sideEffects.startupContextDelivered && result.restorePacket?.status === "accepted") {
+    // Typed and submitted on a runtime whose input box isn't read: delivered as far as OpenRig can tell, no further.
+    console.log(`The ${result.source.mode === "rebuild" ? "rebuild priming packet" : "captured startup context (restore packet)"} was typed and submitted to the successor; ${result.restorePacket.reason}.`);
+    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
+  } else if (result.sideEffects.startupContextDelivered) {
     if (result.source.mode === "rebuild") {
       console.log("The rebuild priming packet was delivered to the successor.");
     } else {
@@ -783,7 +788,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "record-runtime-home" | "set-effort" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -805,8 +810,20 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: (body as Record<string, unknown>)["codexProfile"] !== undefined ? 30_000 : 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
-      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart" && path !== "set-cwd") || !(err instanceof DaemonTimeoutError)) throw err;
-      const error = path === "restart" ? {
+      // A record's answer can be lost in more ways than a timeout: a connection lost after the request was sent, or a
+      // response that couldn't be read. Each may follow a recorded home, so each keeps the operation id.
+      const recordAnswerLost = path === "record-runtime-home" && (err instanceof DaemonConnectionError || err instanceof DaemonResponseError);
+      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart" && path !== "set-cwd"
+        && path !== "record-runtime-home") || !(err instanceof DaemonTimeoutError || recordAnswerLost)) throw err;
+      const lost = err instanceof DaemonTimeoutError ? "The CLI timed out waiting for the daemon"
+        : err instanceof DaemonResponseError ? "The daemon's answer couldn't be read" : "The connection to the daemon was lost";
+      const error = path === "record-runtime-home" ? {
+        ok: false as const,
+        code: "record_runtime_home_outcome_unknown",
+        status: "unknown",
+        message: `${lost}; the runtime home may or may not have been recorded.`,
+        guidance: `Run the same command again with --operation-id ${String(body["operationId"])}: it returns what was recorded, or records it once.`,
+      } : path === "restart" ? {
         ok: false as const,
         code: "restart_outcome_unknown",
         status: "unknown",
@@ -882,13 +899,13 @@ identity remains unverified; a version number alone cannot clear it.
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
     .option("--rules <file>", "JSON allow/deny lists for this Claude seat; replaces its recorded rules without changing its mode")
-    .option("--codex-permissions <file>", "JSON sandbox/approval envelope for this Codex seat; replaces its recorded mode")
+    .option("--codex-permissions <file>", "JSON sandbox/approval envelope, or filesystem policy, for this Codex seat; replaces its recorded mode")
     .option("--codex-profile <name>", "Codex config profile for this seat, or inherit to clear it; approval stays with the envelope or session")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")
-    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
+    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. Or, in place of sandbox and those fields, filesystem: a nonempty mapping of absolute paths, ~/paths or native special paths such as :minimal and :workspace_roots to read, write or deny, with approval never or on-request and an optional network_access. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
     .action(async (seat: string, opts: { mode?: string; rules?: string; codexPermissions?: string; codexProfile?: string; reason: string; operator?: string; json?: boolean }) => {
       if ([opts.mode, opts.rules, opts.codexPermissions, opts.codexProfile].filter(value => value !== undefined).length !== 1) {
         console.error("Choose exactly one of --mode, --rules <file>, --codex-permissions <file> or --codex-profile <name>."); process.exitCode = 1; return;
@@ -901,7 +918,7 @@ identity remains unverified; a version number alone cannot clear it.
       let codexPermissions: unknown;
       if (opts.codexPermissions !== undefined) {
         try { codexPermissions = JSON.parse(readFileSync(opts.codexPermissions, "utf8")); }
-        catch { console.error(`Cannot read JSON from ${opts.codexPermissions}; provide a sandbox/approval mapping.`); process.exitCode = 1; return; }
+        catch { console.error(`Cannot read JSON from ${opts.codexPermissions}; provide a sandbox/approval or filesystem mapping.`); process.exitCode = 1; return; }
       }
       const choice = opts.rules !== undefined ? { rules } : codexPermissions !== undefined ? { codexPermissions }
         : opts.codexProfile !== undefined ? { codexProfile: opts.codexProfile } : { mode: opts.mode };
@@ -1082,6 +1099,97 @@ Examples:
         return;
       }
       printEffortReport(res.data);
+    });
+
+  cmd
+    .command("runtime-home")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--json", "JSON output for agents")
+    .description("Show the runtime home a seat's next launch uses, and what a recorded correction is made against")
+    .addHelpText("after", `
+Read-only, for Claude Code and Codex seats. Shows the home (CLAUDE_CONFIG_DIR or
+CODEX_HOME) the seat's next launch, restore or resume uses and where it comes from,
+the seat's current occupant generation and original conversation, and the revision
+of its latest recorded home (0 when none). It's configuration: whether the running
+process uses that home isn't checked. Pass these values to record-runtime-home.
+Example:
+  rig seat runtime-home dev-impl@my-rig`)
+    .action(async (seat: string, opts: { json?: boolean }) => {
+      const deps = getDeps();
+      const daemon = await getDaemonStatus(deps.lifecycleDeps);
+      if (!daemonStatusGuard(daemon)) return;
+      const client = deps.clientFactory(getDaemonUrl(daemon));
+      const res = await client.get<Record<string, unknown>>(`/api/seat/runtime-home/${encodeURIComponent(seat)}`);
+      if (opts.json) {
+        console.log(JSON.stringify(res.data, null, 2));
+        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      if (res.status >= 400) {
+        printSeatError(res.data as unknown as SeatStatusError, `Seat runtime-home failed (HTTP ${res.status})`);
+        process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      const d = res.data;
+      const s = d["seat"] as { logicalId?: string; rigName?: string } | undefined;
+      const record = d["record"] as { revision: number; home: string; recordedAt: string } | null;
+      console.log(`${s?.logicalId}@${s?.rigName} (${String(d["runtime"])}): ${String(d["variable"])}=${d["home"] === null ? "(native default)" : String(d["home"])} from ${String(d["source"])}`);
+      const ignored = d["ignored"] as { source: string; value: string } | undefined;
+      if (ignored) console.log(`  Ignored ${ignored.source} value (not an absolute path): ${ignored.value}`);
+      console.log(`  Occupant generation: ${String(d["occupantGeneration"] ?? "none")}`);
+      console.log(`  Original conversation: ${String(d["original"] ?? "none")}`);
+      console.log(`  Recorded revision: ${String(d["revision"])}${record ? ` (${record.home}, ${record.recordedAt})` : ""}`);
+      console.log(`To record a different home for this original:\n  rig seat record-runtime-home ${shellQuote(seat)} --home <absolute path> --expect-occupant ${String(d["occupantGeneration"] ?? "none")} --expect-original ${String(d["original"] ?? "none")} --expect-revision ${String(d["revision"])} --reason <text>`);
+    });
+
+  cmd
+    .command("record-runtime-home")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--home <directory>", "Absolute runtime home on the daemon's host (CLAUDE_CONFIG_DIR or CODEX_HOME)")
+    .requiredOption("--expect-occupant <generation>", "The occupant generation you read with runtime-home, or none")
+    .requiredOption("--expect-original <id>", "The original conversation you read with runtime-home, or none")
+    .requiredOption("--expect-revision <n>", "The recorded revision you read with runtime-home (0 when none)")
+    .requiredOption("--reason <text>", "Audit reason")
+    .option("--operation-id <id>", "Reuse to retry safely after an unknown result; generated when omitted")
+    .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
+    .option("--json", "JSON output for agents")
+    .description("Record the runtime home an existing seat's original conversation lives under, for its next launch")
+    .addHelpText("after", `
+Records where an existing seat's conversation lives, so its next resume or restore
+launches from that home without a fresh conversation. Only that home and an audit
+record change: no running process, pane, login, credential, conversation, model,
+effort or cwd changes, nothing is copied and nothing is launched.
+
+It's recorded against the occupant, original conversation and revision you read
+with rig seat runtime-home. If any of them changed since, nothing is applied and
+the current values are shown: read them again and decide for the current one.
+
+It goes where the seat's home is decided today, so its credential handling is
+unchanged: a seat on an account switch's home keeps that (provider credentials
+unset at launch) with the new path; any other seat gets its own env value for the
+home variable, as a seat that declares one in its spec has.
+
+The result says whether the home exists and whether the original conversation's
+record was found there. That doesn't show one copy is fresher than another, and
+whether a running process uses the home isn't checked. A restore review shows the
+recorded home, and a newer recording changes the review's revision, so a resume
+reviewed before it doesn't run.
+Example:
+  rig seat record-runtime-home dev-impl@my-rig --home /home/me/.codex-b \\
+    --expect-occupant 0f3c... --expect-original 019a... --expect-revision 0 --reason "home after recovery"`)
+    .action(async (seat: string, opts: { home: string; expectOccupant: string; expectOriginal: string; expectRevision: string;
+      reason: string; operationId?: string; operator?: string; json?: boolean }) => {
+      const revision = /^\d+$/.test(opts.expectRevision) ? Number(opts.expectRevision) : Number.NaN;
+      const orNull = (value: string) => value === "none" ? null : value;
+      const operationId = opts.operationId ?? `runtime-home-${randomUUID()}`;
+      await runLifecycleVerb("record-runtime-home", seat, { home: opts.home, expectedOccupant: orNull(opts.expectOccupant),
+        expectedOriginal: orNull(opts.expectOriginal), expectedRevision: revision, operationId, reason: opts.reason, operator: opts.operator }, opts, data => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const observation = data["observation"] as { home: string; original: string } | undefined;
+        console.log(`Runtime home for ${s?.logicalId}@${s?.rigName}: ${String(data["to"])} (revision ${String(data["revision"])}, ${data["replayed"] ? "already recorded by this operation" : data["changed"] === false ? "same home, recorded" : "recorded"}; next launch).`);
+        console.log(`  Home ${observation?.home ?? "unknown"}; original conversation ${observation?.original ?? "unknown"} there. The running process isn't checked.`);
+        console.log(`  Operation id: ${operationId}`);
+      });
     });
 
   cmd

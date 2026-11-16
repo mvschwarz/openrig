@@ -96,7 +96,7 @@ it("takes the participant's item over the wire, carries pickup and the result ba
   expect(local!.body!.split("\n")[0]).toBe(`From lead@team through the network hub ${hubUrl}, as alex@team (hub item ${task.qitemId}).`);
   expect(local!.body).toContain(body);
   expect(hubRepo.getById(task.qitemId)!.state).toBe("in-progress");
-  expect(notes().at(-1)).toBe(`Queued for the connected local seat as ${local!.qitemId}. Not picked up yet.`);
+  expect(notes().at(-1)).toBe("Queued for the connected local seat. Not picked up yet.");
   expect(hubRepo.listTransitions(task.qitemId).find((t) => t.state === "in-progress")?.actorSession).toMatch(/^alex@team/);
 
   expect(await pass()).toMatchObject({ taken: 0, pickupsSent: 0 });
