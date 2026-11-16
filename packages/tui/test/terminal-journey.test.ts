@@ -7,12 +7,22 @@ import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
 import { renderScreen } from "../src/render.js";
-import { terminalLines } from "../src/terminals/terminal-model.js";
+import { readTerminals, terminalLines } from "../src/terminals/terminal-model.js";
 import { terminalWindowNotice } from "../src/terminals/open-window.js";
 import { parseCommand } from "../src/grammar.js";
 import type { FleetSnapshot, ViewStateStore } from "../src/types.js";
 
 let snap: FleetSnapshot, view: ViewStateStore, client: DaemonClient, service: TerminalService;
+
+it("keeps same-name rig catalog selections separate by their stable IDs", async () => {
+  const read = await readTerminals({ baseUrl: "http://catalog.invalid", terminalViews: async () => ({
+    saved: [], rigs: ["alpha", "alpha"], rigIdentities: [{ id: "stopped-id", name: "alpha" }, { id: "live-id", name: "alpha" }],
+  }) } as unknown as DaemonClient);
+  expect(read.error).toBeUndefined();
+  expect(read.catalog.map(({ view, name }) => ({ view, name }))).toEqual([
+    { view: "rig:stopped-id", name: "alpha" }, { view: "rig:live-id", name: "alpha" },
+  ]);
+});
 let effects: Array<{ method: string; params: any }>, requests: string[], alive: boolean, providerAlive: boolean, failPage: boolean, unconfirmed: "none" | "idless" | "listing" | "second-page";
 beforeEach(() => {
   effects = []; requests = []; alive = true; providerAlive = true; failPage = false; unconfirmed = "none";

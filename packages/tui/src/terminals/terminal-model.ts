@@ -49,7 +49,8 @@ export async function readTerminals(client: DaemonClient, view?: string | null,
     if (!Array.isArray(listing.saved) || !Array.isArray(listing.rigs)) throw new Error("Terminal names could not be read.");
     result.catalog = [
       ...listing.saved.map(s => ({ view: `saved:${s.id}`, name: s.name, kind: "saved" as const, members: s.members.map(m => m.seat) })),
-      ...listing.rigs.map(name => ({ view: `rig:${name}`, name, kind: "derived" as const, members: [] })),
+      ...(listing.rigIdentities ?? listing.rigs.map(name => ({ id: name, name })))
+        .map(({ id, name }) => ({ view: `rig:${id}`, name, kind: "derived" as const, members: [] })),
     ].map(entry => ({ ...entry, readinessUnverified: true, ready: 0, absent: 0, degraded: 0, pages: 0 }));
     result.catalogLoaded = true;
     if (view) {
