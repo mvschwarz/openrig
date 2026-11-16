@@ -102,11 +102,11 @@ describe("ClaudeResumeAdapter", () => {
       expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: saved } });
     });
 
-    it("records unknown, not the saved block, when the running settings are a file", async () => {
-      const { result, sent } = await resumeWith(saved, ["--settings", "/custom/settings.json", "--model", "opus"]);
+    it.each([["a saved block", saved], ["no saved block", undefined]])("records unknown when the running settings are a file, with %s", async (_label, block) => {
+      const { result, sent } = await resumeWith(block, ["--settings", "/custom/settings.json", "--model", "opus"]);
       expect(sent).toContain("/custom/settings.json");
-      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringContaining("can't set or check its auto mode block")]) });
-      expect((result as { appliedLaunch: object }).appliedLaunch).not.toHaveProperty("claudeAutoMode");
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringContaining("can't set or check its auto mode block")]),
+        appliedLaunch: { claudeAutoMode: { unknown: "settings_file" } } });
     });
   });
 

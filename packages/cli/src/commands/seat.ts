@@ -54,7 +54,7 @@ interface SeatStatusResponse {
     nativeEffect: "unverified";
     claudeAutoMode?: {
       saved: { state: "recorded"; block: Record<string, unknown> } | { state: "none" } | { state: "unavailable"; error: string };
-      lastLaunch: { state: "sent" | "none" | "unknown"; block?: Record<string, unknown> };
+      lastLaunch: { state: "sent" | "none" | "unknown"; block?: Record<string, unknown>; reason?: "settings_file" };
       matchesLastLaunch: boolean | null; advisories: string[]; notes: string[]; inspect?: string;
     };
     error?: string;
@@ -246,7 +246,8 @@ function autoModeCounts(block: Record<string, unknown>): string {
 function printClaudeAutoMode(m: SeatAutoModeStatus): void {
   const saved = m.saved.state === "recorded" ? autoModeCounts(m.saved.block) : m.saved.state === "none" ? "none" : `unavailable: ${m.saved.error}`;
   const last = m.lastLaunch.state === "sent" && m.lastLaunch.block ? autoModeCounts(m.lastLaunch.block)
-    : m.lastLaunch.state === "none" ? "none" : "unknown";
+    : m.lastLaunch.state === "none" ? "none"
+    : m.lastLaunch.reason === "settings_file" ? "unknown (that launch read --settings from a file OpenRig can't check)" : "unknown";
   const match = m.matchesLastLaunch === true ? "same as saved" : m.matchesLastLaunch === false ? "differs from saved" : "unknown whether it matches saved";
   console.log(`  Claude auto mode block (saved): ${saved}`);
   console.log(`  Claude auto mode block (last launch, observed): ${last}; ${match}`);

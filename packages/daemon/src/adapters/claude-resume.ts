@@ -147,7 +147,7 @@ export class ClaudeResumeAdapter {
     // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
     const sentAutoMode = managed || (continuation?.args && executable) ? sentClaudeAutoMode(nativeArgs) : autoMode.block ?? null;
     if (sentAutoMode === undefined) tokenWarnings.push("The running Claude's --settings is a file, so this relaunch can't set or check its auto mode block; status shows the block as unknown.");
-    const appliedLaunch = { ...observeClaudePermission(posture), ...(sentAutoMode === undefined ? {} : { claudeAutoMode: sentAutoMode }) };
+    const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: sentAutoMode === undefined ? { unknown: "settings_file" as const } : sentAutoMode };
 
     const assertSelected = beforeNativeDispatch ? () => { if (!beforeNativeDispatch()) throw new Error("Selected history changed before Claude resume input"); } : undefined;
     const beforeManagedInput = beforeNativeDispatch ? () => { assertSelected?.(); managed?.assertCurrent?.(); } : managed?.assertCurrent;

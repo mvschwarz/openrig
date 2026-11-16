@@ -478,6 +478,15 @@ describe("rig seat status", () => {
     expect(output).toContain("  Claude auto mode block (last launch, observed): none; unknown whether it matches saved");
   });
 
+  it("prints a launch that read --settings from a file as unknown, with nothing saved", async () => {
+    const claudeAutoMode = { saved: { state: "none" }, lastLaunch: { state: "unknown", reason: "settings_file" }, matchesLastLaunch: null, notes: [], advisories: [] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", claudeAutoMode } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    expect(logs.join("\n")).toContain("  Claude auto mode block (last launch, observed): unknown (that launch read --settings from a file OpenRig can't check); unknown whether it matches saved");
+  });
+
   it("prints each advisory the account carries, after the summary", async () => {
     const advisory = 'Claude Code answers plan-mode turns with Sonnet when the model is the alias "haiku". To keep Haiku, set a full Haiku model id: '
       + 'rig seat set-model dev-impl@seat-rig --model <full Haiku id> --reason "<why>".';

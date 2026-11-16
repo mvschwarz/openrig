@@ -408,9 +408,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const autoMode = claudeAutoModeForLaunch(binding.claudeAutoMode);
     if (autoMode.warning) tokenWarnings.push(autoMode.warning);
-    // An undefined block is unknown: the observation leaves it out.
-    const appliedWith = (claudeAutoMode: import("../domain/claude-auto-mode.js").ClaudeAutoMode | null | undefined) =>
-      ({ ...observeClaudePermission(posture), ...(claudeAutoMode === undefined ? {} : { claudeAutoMode }) });
+    const appliedWith = (claudeAutoMode: import("../domain/claude-auto-mode.js").AppliedClaudeAutoMode) =>
+      ({ ...observeClaudePermission(posture), claudeAutoMode });
     const appliedLaunch = appliedWith(autoMode.block ?? null);
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
@@ -494,7 +493,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
     const sentAutoMode = sentNative ? sentClaudeAutoMode(nativeArgs) : autoMode.block ?? null;
     if (sentAutoMode === undefined) tokenWarnings.push("The running Claude's --settings is a file, so this relaunch can't set or check its auto mode block; status shows the block as unknown.");
-    const launchApplied = appliedWith(sentAutoMode);
+    const launchApplied = appliedWith(sentAutoMode === undefined ? { unknown: "settings_file" } : sentAutoMode);
 
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Claude launch preparation; no native command was sent.", recovery: "attention_required" };
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, beforeManagedInput)

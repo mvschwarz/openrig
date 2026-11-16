@@ -6,6 +6,9 @@ export type ClaudeAutoModeList = typeof CLAUDE_AUTO_MODE_LISTS[number];
 /** A seat's Claude `autoMode` settings block, passed to the classifier verbatim through the launch's --settings. */
 export type ClaudeAutoMode = Partial<Record<ClaudeAutoModeList, string[]>> & { classifyAllShell?: boolean };
 
+/** What a launch recorded as sent: a block, null for none, or unknown when it read --settings from a file OpenRig can't see. */
+export type AppliedClaudeAutoMode = ClaudeAutoMode | null | { unknown: "settings_file" };
+
 /** A saved block that can't be read. The launch goes ahead without it and warns with `unreadable`. */
 export interface UnreadableClaudeAutoMode { unreadable: string }
 export type ClaudeAutoModeChoice = ClaudeAutoMode | UnreadableClaudeAutoMode;
@@ -63,8 +66,9 @@ export function claudeAutoModeAdvisories(block: ClaudeAutoMode, label = "claude_
 export interface ClaudeAutoModeStatus {
   /** The seat's record: what its next managed launch or resume composes. */
   saved: { state: "recorded"; block: ClaudeAutoMode } | { state: "none" } | { state: "unavailable"; error: string };
-  /** The block the current occupant's launch sent; unknown when it wasn't recorded. */
-  lastLaunch: { state: "sent"; block: ClaudeAutoMode } | { state: "none" } | { state: "unknown" };
+  /** The block the current occupant's launch sent; unknown when it wasn't recorded, or (with a reason) when the launch
+   *  read --settings from a file. */
+  lastLaunch: { state: "sent"; block: ClaudeAutoMode } | { state: "none" } | { state: "unknown"; reason?: "settings_file" };
   /** Whether the next launch would compose what the last one did; null when either side can't be read. */
   matchesLastLaunch: boolean | null;
   /** Whether the next fresh launch is planned in auto mode; null when the plan can't be read. */
@@ -76,15 +80,16 @@ export interface ClaudeAutoModeStatus {
 }
 
 /** Saved against applied, for seat status. `applied` is the observation's field: absent when not recorded. `plannedAuto` is undefined when the plan can't be read. */
-export function claudeAutoModeStatus(db: Database.Database, nodeId: string, applied: ClaudeAutoMode | null | undefined, plannedAuto: boolean | undefined): ClaudeAutoModeStatus | undefined {
+export function claudeAutoModeStatus(db: Database.Database, nodeId: string, applied: AppliedClaudeAutoMode | undefined, plannedAuto: boolean | undefined): ClaudeAutoModeStatus | undefined {
   let saved: ClaudeAutoModeStatus["saved"];
   try {
     const block = readClaudeAutoMode(db, nodeId);
     saved = block === undefined ? { state: "none" } : { state: "recorded", block };
   } catch (error) { saved = { state: "unavailable", error: (error as Error).message }; }
   const lastLaunch: ClaudeAutoModeStatus["lastLaunch"] = applied === undefined ? { state: "unknown" }
-    : applied === null ? { state: "none" } : { state: "sent", block: applied };
-  if (saved.state === "none" && lastLaunch.state !== "sent") return undefined;
+    : applied === null ? { state: "none" } : "unknown" in applied ? { state: "unknown", reason: applied.unknown } : { state: "sent", block: applied };
+  // Shown with nothing saved when the last launch sent a block, or when a launch recorded that it couldn't tell.
+  if (saved.state === "none" && lastLaunch.state !== "sent" && !(lastLaunch.state === "unknown" && lastLaunch.reason)) return undefined;
   const savedJson = saved.state === "recorded" ? JSON.stringify(saved.block) : saved.state === "none" ? "null" : undefined;
   const appliedJson = lastLaunch.state === "sent" ? JSON.stringify(lastLaunch.block) : lastLaunch.state === "none" ? "null" : undefined;
   const matchesLastLaunch = savedJson === undefined || appliedJson === undefined ? null : savedJson === appliedJson;

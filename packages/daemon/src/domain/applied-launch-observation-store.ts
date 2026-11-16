@@ -5,11 +5,11 @@ import type {
   AppliedLaunchState,
   CodexObservedApprovalPolicy,
 } from "./permission-drift.js";
-import type { ClaudeAutoMode } from "./claude-auto-mode.js";
+import type { AppliedClaudeAutoMode } from "./claude-auto-mode.js";
 
 /** "null" records a launch that sent no block; anything unreadable reads as unknown. */
-function parseAppliedAutoMode(json: string): ClaudeAutoMode | null | undefined {
-  try { return JSON.parse(json) as ClaudeAutoMode | null; } catch { return undefined; }
+function parseAppliedAutoMode(json: string): AppliedClaudeAutoMode | undefined {
+  try { return JSON.parse(json) as AppliedClaudeAutoMode; } catch { return undefined; }
 }
 
 export interface StoredAppliedLaunchObservation extends AppliedLaunchObservation {

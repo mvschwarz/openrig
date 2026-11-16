@@ -179,6 +179,15 @@ describe("a seat's Claude autoMode block", () => {
     expect(launches.readCurrent(f.a.id)).not.toHaveProperty("claudeAutoMode");
   });
 
+  it("shows a launch that read --settings from a file as unknown, even with no saved block", () => {
+    const f = fixture(), status = () => new SeatStatusService({ rigRepo: f.rigRepo }).getStatus("dev-a@team") as { ok: true; status: { permissions: { claudeAutoMode?: Record<string, unknown> } } };
+    const launches = new AppliedLaunchObservationStore(f.db), generation = f.registry.currentOccupantTenure(f.a.id)!.generationUuid;
+    launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: { unknown: "settings_file" } });
+    expect(status().status.permissions.claudeAutoMode).toMatchObject({ saved: { state: "none" }, lastLaunch: { state: "unknown", reason: "settings_file" }, matchesLastLaunch: null });
+    launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: null });
+    expect(status().status.permissions.claudeAutoMode).toBeUndefined();
+  });
+
   it("replaces the applied block with each re-recorded observation of the generation", () => {
     const f = fixture(), launches = new AppliedLaunchObservationStore(f.db), generation = f.registry.currentOccupantTenure(f.a.id)!.generationUuid;
     launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: block });
