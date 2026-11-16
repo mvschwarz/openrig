@@ -30,9 +30,10 @@ pane, so don't ask them here or give them an attach command:
   seat's prompt there as a task while the work is with that seat or your row waits on it. Hand the work over, or block
   your row on the seat or its row (`rig queue block <id> --on <seat or row id>`). When more than one return route is
   involved (another goal waiting on that seat names a different address), nothing chooses between them, so a task may
-  not come: look for one at each address first (`rig queue list --destination <address> --state pending,in-progress`),
-  and if there's none, ask as in the next item, through the return address of the goal the seat is working on. One
-  answer goes to the seat, and you pass it on.
+  not come: look for one at each address first
+  (`rig queue list --destination <address> --state pending,in-progress,blocked`), and if there's none, ask as in the
+  next item, through the return address of the goal the seat is working on. One answer goes to the seat, and you pass
+  it on.
 - **A choice menu** (a list of options, such as a usage-limit dialog), **or a route that names another machine**
   (`<member>@<rig>@<host>`): nothing brings it there, so ask the person yourself, as your goal's reply paragraph says.
   Create a question task to the `returnRoute` exactly as written, with the seat, the prompt's own text and its choices
