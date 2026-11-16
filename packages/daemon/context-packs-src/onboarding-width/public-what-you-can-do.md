@@ -615,8 +615,11 @@ conversation, the installer is instructed to hand their goal over as a task from
 address, and the kernel operator to bring a seat's prompt there as a task, with its choices verbatim,
 to relay only the person's recorded words, and to offer a pane only as their choice. Nothing wakes
 that conversation, so a question waits until the person returns; a prompt that changes between its
-capture and the key can take the key; and this guidance isn't yet confirmed with a person using it end
-to end. The skill also follows a task handed on to another
+capture and the key can take the key. In 0.7.17's first trial, with Claude Code and a simulated
+person, a reviewer's permission question never reached the person, the person's agent twice offered a
+bare terminal attachment as a way to answer a seat's prompt, and the work didn't reach a reviewed
+commit; this guidance doesn't reliably complete that journey, and a second trial wasn't run. The
+skill also follows a task handed on to another
 host with `rig queue show <id> --host <host>`.
 
 `starter` and `factory` are built in: preview the team, inspect `rig up <team> --cwd . --plan`,
