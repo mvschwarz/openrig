@@ -524,6 +524,8 @@ def main():
     parser.add_argument("--topology-start")
     parser.add_argument("--work-start")
     parser.add_argument("--work-root", action="append", default=[], help="an extra root the work trace may ascend to, for a catalogued project outside workspace.root; repeatable (also OPENRIG_REFOCUS_WORK_ROOT, separated by the OS path separator)")
+    parser.add_argument("--work-project", help="the root of the project selected for this seat (as work-install selects it); the broad orientation when there is no current typed baton")
+    parser.add_argument("--work-project-unknown", help="why no single project was selected for this seat")
     parser.add_argument("--work-basis", help="the daemon's reason no current work node was named")
     parser.add_argument("--work-unknown", help="why the current work node could not be read")
     parser.add_argument("--unresolved-work-advisory", action="store_true", help="show unresolved typed work as an advisory with broad orientation")
@@ -568,10 +570,18 @@ def main():
                 sections.append(render_candidates(evidence, root, args.depth, failures, extra_roots))
             elif args.work_candidates:
                 pass  # the unreadable-evidence gap above is the answer; never fall back to the root
+            elif args.work_basis == NO_CURRENT_BATON_BASIS and args.work_project:
+                # The seat's selected project, which may live outside workspace.root (#3320).
+                project = Path(args.work_project).expanduser().resolve()
+                sections.append(render_work(project, project, args.depth, failures, packet=args.packet, fallback=(
+                    f"no current typed baton ({args.work_basis}). Showing the selected project's chain from its root: "
+                    "a broad orientation, not evidence of a current mission")))
             elif args.work_basis == NO_CURRENT_BATON_BASIS:
+                unselected = (f"\nPROJECT UNSELECTED — {args.work_project_unknown}; showing the work root instead"
+                              if args.work_project_unknown else "")
                 sections.append(render_work(root, root, args.depth, failures, packet=args.packet, fallback=(
                     f"no current typed baton ({args.work_basis}). Showing the project-level chain from the work root: "
-                    "a broad orientation, not evidence of a current mission")))
+                    "a broad orientation, not evidence of a current mission" + unselected)))
             elif args.unresolved_work_advisory and args.work_basis and args.work_basis.startswith("typed work did not resolve: "):
                 sections.append(f"## WORK TRACE\nTRACE GAP — no single current work node: {args.work_basis}")
                 sections.append(render_work(root, root, args.depth, failures, packet=args.packet, fallback=(

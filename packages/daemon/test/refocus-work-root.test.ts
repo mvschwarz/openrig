@@ -86,6 +86,29 @@ describe("refocus trace work roots (#2693)", () => {
   });
 });
 
+// #3320: with no typed baton, the broad orientation is the seat's selected project, not workspace.root.
+const NO_BATON = "no typed in-progress work (only in-progress rows are considered; a typed row that is pending or blocked is not current work)";
+
+describe("refocus trace with no typed baton (#3320)", () => {
+  it("orients from the selected project when it lives outside workspace.root", () => {
+    const w = world();
+    const result = w.trace(["--work-basis", NO_BATON, "--work-root", w.projectB, "--work-project", w.projectB]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain(`root: ${w.projectB}`);
+    expect(result.stdout).toContain("FALLBACK — no current typed baton");
+    expect(result.stdout).toContain("intent: ship project b");
+    expect(result.stdout).not.toContain("intent: run the workspace");
+  });
+
+  it("names why no project was selected and keeps the workspace orientation", () => {
+    const w = world();
+    const result = w.trace(["--work-basis", NO_BATON, "--work-project-unknown", "multiple projects are declared (candidates: a, b)"]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain(`root: ${w.workspace}`);
+    expect(result.stdout).toContain("PROJECT UNSELECTED — multiple projects are declared (candidates: a, b)");
+  });
+});
+
 describe("refocus hook forwards the daemon's catalogued work roots (#2693)", () => {
   const HOOK = resolve(HERE, "../assets/plugins/openrig-core/hooks/scripts/refocus.cjs");
 
@@ -97,12 +120,18 @@ describe("refocus hook forwards the daemon's catalogued work roots (#2693)", () 
 
   /** Runs the shipped hook with a stub `rig` whose `queue whoami` names a node in project-b; `slowPythonSeconds`
    *  puts a python3 that waits that long first on the hook's PATH, as a slow runner would. */
-  function fireHook(sendWorkRoots: boolean, slowPythonSeconds = 0) {
+  function fireHook(sendWorkRoots: boolean, slowPythonSeconds = 0, noBaton = false) {
     const w = world();
     const workRoots = sendWorkRoots ? [w.projectB] : undefined;
     const bin = join(root!, "bin");
     mkdirSync(bin, { recursive: true });
-    const whoami = {
+    const whoami = noBaton ? {
+      currentWork: null,
+      currentWorkBasis: NO_BATON,
+      role: { state: "not-declared", files: [] },
+      workRoots: [w.projectB],
+      workProject: { id: "project-b", root: w.projectB, selectedBy: "rig" },
+    } : {
       currentWork: { mission: "m1", slice: "", workNodePath: w.mission, basis: "one typed in-progress work node" },
       currentWorkBasis: "one typed in-progress work node",
       role: { state: "not-declared", files: [] },
@@ -148,5 +177,12 @@ exit 1
     const { w, out } = fireHook(true, 3);
     expect(out).not.toContain("ETIMEDOUT");
     expect(out).toContain(`root: ${w.projectB}`);
+  }, HOOK_TEST_TIMEOUT_MS);
+
+  it("orients from the daemon's selected project when there is no typed baton (#3320)", () => {
+    const { w, out } = fireHook(true, 0, true);
+    expect(out).toContain(`root: ${w.projectB}`);
+    expect(out).toContain("FALLBACK — no current typed baton");
+    expect(out).toContain("intent: ship project b");
   }, HOOK_TEST_TIMEOUT_MS);
 });

@@ -2747,6 +2747,27 @@ describe("queue routes", () => {
       expect((candidateBody.workCandidates as { missionsOnHost: string[] }).missionsOnHost).toEqual(["release"]);
     });
 
+    it("selects the seat's project as work-install does, or says why none was selected (#3320)", async () => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-work-project-")));
+      const catalog = path.join(temporaryWorkspace, "workspace.yaml");
+      for (const project of ["alpha", "beta"]) fs.mkdirSync(path.join(temporaryWorkspace, project));
+      app = buildApp({
+        eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+        settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? catalog : temporaryWorkspace }) },
+      });
+      const workProject = async (session: string) =>
+        ((await (await app.request(`/api/queue/whoami?session=${session}`)).json()) as { workProject?: unknown }).workProject;
+
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n    rigs: [r]\n  - id: beta\n    root: beta\n    rigs: [other]\n");
+      expect(await workProject("bob@r")).toEqual({ id: "alpha", root: path.join(temporaryWorkspace, "alpha"), selectedBy: "rig" });
+
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+      expect(await workProject("bob@r")).toEqual({ error: "multiple projects are declared; select one with --project (candidates: alpha, beta)" });
+
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n");
+      expect(await workProject("bob@r")).toEqual({ id: "alpha", root: path.join(temporaryWorkspace, "alpha"), selectedBy: "single" });
+    });
+
     it.each([
       {
         name: "an unknown project tag",

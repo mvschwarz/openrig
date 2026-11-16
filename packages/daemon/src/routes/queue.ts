@@ -42,7 +42,8 @@ import {
   type RoleOrientation,
 } from "../domain/current-work.js";
 import { listProjects, projectCatalogPaths } from "../domain/workspace/project-read.js";
-import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
+import { inferCatalogProject, ProjectReadError, readProjectCatalog, rigFromSession, selectCatalogProject } from "../domain/workspace/project-catalog.js";
+import { physicalSessionName } from "../domain/session-registry.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope, type HostClass } from "../domain/queue-erasure.js";
@@ -1402,6 +1403,33 @@ export function queueRoutes(): Hono {
     } catch {
       catalogStatus = "unavailable";
     }
+    // The project this seat's broad refocus orientation belongs to when no typed baton names
+    // one (#3320), chosen as work-install chooses: the only catalog entry, then the rig's
+    // association, the seat's working folder, the only unclaimed entry. No unique answer is
+    // reported with its reason, never guessed.
+    let workProject: { id: string; root: string; selectedBy: string } | { error: string } | undefined;
+    if (catalogPath && catalogStatus === "usable") {
+      const unselected = (error: unknown) => {
+        const candidates = error instanceof ProjectReadError && error.candidates?.length ? ` (candidates: ${error.candidates.join(", ")})` : "";
+        return { error: `${(error as Error).message}${candidates}` };
+      };
+      try {
+        const only = selectCatalogProject(catalogPath);
+        if (only) workProject = { ...only, selectedBy: "single" };
+      } catch (error) {
+        if (error instanceof ProjectReadError && error.code === "project_required") {
+          let cwd: string | null = null;
+          try {
+            const db = c.get("db" as never) as Database.Database | undefined;
+            const seat = db && db.prepare("SELECT n.cwd FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.session_name = ? ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1")
+              .get(physicalSessionName(db, session)) as { cwd: string | null } | undefined;
+            cwd = seat?.cwd ?? null;
+          } catch { /* No recorded working folder: selection continues without it. */ }
+          try { workProject = inferCatalogProject(catalogPath, error, { rigName: rigFromSession(session), cwd }, []); }
+          catch (inferred) { workProject = unselected(inferred); }
+        } else workProject = unselected(error);
+      }
+    }
     const currentWorkRoot: MissionsRootResolver = (row: CurrentWorkRow) => {
       const projectIds = [...new Set((row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
         .filter((tag) => tag.startsWith("project:") && tag.slice("project:".length).trim())
@@ -1458,11 +1486,11 @@ export function queueRoutes(): Hono {
         },
         missionsRoot,
       );
-      return c.json({ ...position, ...derived, ...choiceField, role, workRoots,
+      return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}),
         // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
         workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, ...choiceField, role, workRoots });
+    return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}) });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
