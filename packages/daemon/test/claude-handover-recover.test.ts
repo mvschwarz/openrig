@@ -1136,6 +1136,31 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
           expect(result.result.warnings).toEqual([expect.stringContaining("couldn't be read")]);
           expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "captured",
             limit: expect.stringContaining("its telemetry and its resume token name different conversations") });
+          // the launch's argv was proven, only the successor's session file is unread: its fork parent was read from it
+          expect((result.result.sourceOutcome as { limit: string }).limit).not.toContain("could not be read from its process");
+        });
+
+        it("the successor's session file unread and its parent on its own conversation: a distinct fork captured with no limit, as before", async () => {
+          await failedFork();
+          parentRuns(parentToken);
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(resumeTarget()).toBe(successorToken);
+          expect(result.result.warnings).toEqual([expect.stringContaining("couldn't be read")]);
+          expect(result.result.sourceOutcome).toEqual({ mode: "fork", forkedFrom: PARENT, forkId: "captured" });
+        });
+
+        it("the parent's process unread and its resume token on another conversation: its stale telemetry is not said to have moved on", async () => {
+          await failedFork();
+          parentRecords(Q, parentToken);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error(`expected a committed recovery: ${JSON.stringify(result)}`);
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          const limit = (result.result.sourceOutcome as { limit: string }).limit;
+          expect(limit).not.toContain("has moved on since");
+          expect(limit).toContain("its resume token names another conversation");
+          expect(limit).toContain("its process could not be read");
         });
 
         it("the successor's session file unread and its parent on the launch's conversation: no distinct fork, still said as unconfirmed", async () => {

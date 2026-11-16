@@ -1097,14 +1097,14 @@ export class SeatHandoverService {
       const current = readClaudePidSessionId({ configDir, pid: native.process.pid, startedAt: native.process.startedAt, sessionName: attempt.canonicalSession });
       // #3044 review (:1050): a file that confirms the launch's conversation changes nothing; one that can't be read (missing,
       // older than the process, of another session, or a Claude that writes none) leaves the launch's conversation as the
-      // record, said as unconfirmed, never a refusal.
-      if (!current) return { ok: true, currentUnread: true };
+      // record, said as unconfirmed, never a refusal. The fork parent its launch named comes from the proven argv either
+      // way: only the session file is unread (#3246 review).
+      const launched = claudeCommandForkParent(native.process.command ?? "");
+      const launchParent = launched ? { launchForkParent: launched } : {};
+      if (!current) return { ok: true, currentUnread: true, ...launchParent };
       // #3218 item 1: a successor still on its launch's conversation is classified too (a fork parent may have run
-      // /resume on it since); the fork parent its launch named comes from the same proven argv.
-      if (current === token) {
-        const launched = claudeCommandForkParent(native.process.command ?? "");
-        return { ok: true, onLaunchConversation: true, ...(launched ? { launchForkParent: launched } : {}) };
-      }
+      // /resume on it since).
+      if (current === token) return { ok: true, onLaunchConversation: true, ...launchParent };
       const again = await observeClaudePaneProcess(proofInput);
       if (again?.fingerprint !== native.fingerprint) {
         return { ok: false, message: `Pane "${attempt.pane}" of ${attempt.canonicalSession} changed while its successor's current conversation was being read.` };
@@ -1172,11 +1172,14 @@ export class SeatHandoverService {
         ? `No distinct fork was recovered: the successor holds the conversation of its fork parent ${forkRef}${retiree}. ${target} ${forkRef} keeps its own binding and its process, so both seats now name the same conversation: a restore of either resumes it, and restoring both opens it twice.`
         : parentNow?.process === current
           ? `No distinct fork was recovered: the successor holds the conversation its fork parent ${forkRef} is on now${retiree}. ${target} ${forkRef} keeps its own binding and its process; ${parentNow.resumeToken ? "its resume token names another conversation" : `no resume token is recorded for ${forkRef}`}, so a restore of ${forkRef} would not resume this one.`
-          : parentNow?.telemetry === current && (parentNow.process || parentNow.resumeToken)
+          : parentNow?.telemetry === current && parentNow.process
             ? `No distinct fork was recovered: the successor holds a conversation its fork parent ${forkRef} was on, which only its telemetry still names (${forkRef} has moved on since)${retiree}. ${target}`
-            : parentNow?.telemetry === current
-              ? `No distinct fork was recovered: the successor holds the conversation its fork parent ${forkRef}'s telemetry names${retiree}; the conversation ${forkRef} is on now could not be established (its process could not be read and it has no resume token). ${target}`
-              : `No distinct fork was recovered: the successor holds the conversation of its fork parent ${forkRef}${retiree}. ${target} ${forkRef} keeps its own binding and its process.`;
+            : parentNow?.telemetry === current && parentNow.resumeToken
+              // its process unread: only its records, which disagree, so it is not said to have moved on (#3246 review)
+              ? `No distinct fork was recovered: the successor holds the conversation its fork parent ${forkRef}'s telemetry names, while its resume token names another conversation${retiree}. ${target}`
+              : parentNow?.telemetry === current
+                ? `No distinct fork was recovered: the successor holds the conversation its fork parent ${forkRef}'s telemetry names${retiree}; the conversation ${forkRef} is on now could not be established (its process could not be read and it has no resume token). ${target}`
+                : `No distinct fork was recovered: the successor holds the conversation of its fork parent ${forkRef}${retiree}. ${target} ${forkRef} keeps its own binding and its process.`;
       return mark({ token: current, shared: "fork_parent", forkRef, note: `${note}${said}` });
     }
     if (current === launchForkParent) {
