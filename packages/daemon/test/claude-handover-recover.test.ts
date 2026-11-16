@@ -583,13 +583,15 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     };
     const resumeTarget = () => (db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(nodeId) as { resume_token: string }).resume_token;
 
-    it("adopts the successor with the conversation it holds now (T2), not the launch's", async () => {
+    it.each([{ name: "Renamed conversation" }, {}])("adopts the successor's current conversation with title %j", async (title) => {
       const generation = await failedHandover();
       expect(await sessionStart(generation, successorToken, "startup")).toMatchObject({ code: "generation_uncommitted" });
       expect(await sessionStart(generation, T2, "clear")).toMatchObject({ code: "generation_uncommitted" });
-      pidFile({ name: SEAT, sessionId: T2 });
+      pidFile({ ...title, sessionId: T2 });
       const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
       expect(result).toMatchObject({ ok: true });
+      if (!result.ok || !("result" in result)) throw new Error("expected a committed recovery");
+      expect(result.result.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("couldn't be read")]));
       expect(resumeTarget()).toBe(T2);
     });
 
@@ -998,6 +1000,21 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
           expect(parentState()).toEqual(parentBefore);
         });
 
+        it.each([{ name: "Renamed conversation" }, {}])("reads the fork parent's current conversation with title %j", async (title) => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          const file = path.join(configDir, "sessions", "202.json");
+          writeFileSync(file, JSON.stringify({ ...title, sessionId: Q }));
+          const mtime = new Date(Date.parse(startedAt) + 60_000);
+          utimesSync(file, mtime, mtime);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error("expected a committed recovery");
+          expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
+          expect((result.result.sourceOutcome as { limit: string }).limit).not.toContain("its process could not be read");
+        });
+
         it("the parent's process unread, its telemetry and resume token disagree, the successor on one of them: no distinct fork, neither picked", async () => {
           await failedFork();
           parentRecords(parentToken, Q);
@@ -1227,7 +1244,6 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
 
     it.each([
       ["a file older than the process (a reused pid)", () => pidFile({ name: SEAT, sessionId: T2 }, new Date(Date.parse(startedAt) - 86_400_000))],
-      ["a file of another session", () => pidFile({ name: "someone@else", sessionId: T2 })],
       ["no file", () => {}],
     ])("keeps the launch's conversation with %s, said as unconfirmed", async (_name, write) => {
       await failedHandover();

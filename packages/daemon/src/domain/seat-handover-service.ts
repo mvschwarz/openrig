@@ -1103,9 +1103,9 @@ export class SeatHandoverService {
       // proven process says the current one (read only, as the resume refresher reads it), bracketed by a third equal
       // observation of the same process.
       const configDir = nodePath.resolve(cwd ?? process.cwd(), claudeConfigRootFor(this.db, attempt.nodeId));
-      const current = readClaudePidSessionId({ configDir, pid: native.process.pid, startedAt: native.process.startedAt, sessionName: attempt.canonicalSession });
+      const current = readClaudePidSessionId({ configDir, pid: native.process.pid, startedAt: native.process.startedAt });
       // #3044 review (:1050): a file that confirms the launch's conversation changes nothing; one that can't be read (missing,
-      // older than the process, of another session, or a Claude that writes none) leaves the launch's conversation as the
+      // older than the process, or a Claude that writes none) leaves the launch's conversation as the
       // record, said as unconfirmed, never a refusal. The fork parent its launch named comes from the proven argv either
       // way: only the session file is unread (#3246 review).
       const launched = claudeCommandForkParent(native.process.command ?? "");
@@ -1242,7 +1242,7 @@ export class SeatHandoverService {
       const first = await observeClaudePaneRuntime(input);
       if (first) {
         const configDir = nodePath.resolve(records.nodeCwd ?? process.cwd(), claudeConfigRootFor(this.db, records.nodeId));
-        const read = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt, sessionName: records.sessionName });
+        const read = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt });
         const again = read ? await observeClaudePaneRuntime(input) : null;
         if (read && again?.fingerprint === first.fingerprint) processNow = read;
       }
