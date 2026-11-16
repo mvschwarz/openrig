@@ -187,6 +187,7 @@ Examples:
   rig start --last                  Headless: restore everything that was running, except rigs stopped on purpose
   rig start --all                   Headless: restore all rigs with restore-usable snapshots
   rig start --rigs prod-rig dev-rig Headless: restore only the named rigs
+  rig start --last --fresh dev.impl@prod-rig  Restore this seat with a fresh conversation
 
 When the daemon is restoring a kernel a reboot left down, rig start goes on to
 your other rigs. Exit 0 then does not mean the kernel is ready (check rig
@@ -206,8 +207,9 @@ back with rig up kernel --existing.
     .option("--last", "Headless: restore all rigs that were last running; a rig stopped on purpose (with rig down or rig seat stop) stays down (zero prompts)")
     .option("--all", "Headless: restore all rigs with restore-usable snapshots (zero prompts)")
     .option("--rigs <names...>", "Headless: restore only the named rigs (zero prompts)")
+    .option("--fresh <seats...>", "Fresh-prime only named logical-id@rig seats instead of resuming them")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { last?: boolean; all?: boolean; rigs?: string[]; json?: boolean }) => {
+    .action(async (opts: { last?: boolean; all?: boolean; rigs?: string[]; fresh?: string[]; json?: boolean }) => {
       const deps = getDepsF();
 
       // ---- PHASE 1: ensure daemon is running ----
@@ -399,6 +401,11 @@ back with rig up kernel --existing.
       }
 
       if (candidates.length === 0) {
+        if (opts.fresh?.length) {
+          console.error("No selected restore candidates contain the requested --fresh seats; no rigs were restored.");
+          process.exitCode = 1;
+          return;
+        }
         if (opts.json) {
           console.log(JSON.stringify({
             status: previewErrors.length > 0 ? "started_with_errors" : "started",
@@ -484,6 +491,11 @@ back with rig up kernel --existing.
       }
 
       if (selectedCandidates.length === 0) {
+        if (opts.fresh?.length) {
+          console.error("No selected rigs contain the requested --fresh seats; no rigs were restored.");
+          process.exitCode = 1;
+          return;
+        }
         if (!opts.json) console.log("No rigs selected for restore.");
         else if (lastOnly) {
           console.log(JSON.stringify({
@@ -498,6 +510,30 @@ back with rig up kernel --existing.
         }
         if (lastOnly && previewErrors.length > 0) process.exitCode = 1;
         return;
+      }
+
+      // Resolve every explicit seat before the first restore. A logical ID may repeat across rigs,
+      // and duplicate rig names must not silently fresh-prime more than the person selected.
+      const freshByRig = new Map<string, string[]>();
+      for (const ref of opts.fresh ?? []) {
+        const separator = ref.lastIndexOf("@");
+        const logicalId = ref.slice(0, separator), rigName = ref.slice(separator + 1);
+        const matches = selectedCandidates.filter(candidate => candidate.rigName === rigName);
+        if (separator <= 0 || !rigName || matches.length !== 1) {
+          console.error(`--fresh seat '${ref}' must name one selected rig as logical-id@rig; no rigs were restored.`);
+          process.exitCode = 1;
+          return;
+        }
+        const candidate = matches[0]!;
+        const nodes = candidate.preview?.nodes.filter(node => node.logicalId === logicalId) ?? [];
+        if (nodes.length !== 1 || nodes[0]!.intendedAction === "leave-attached") {
+          console.error(`--fresh seat '${ref}' is not a unique restorable seat in the selected rig; no rigs were restored.`);
+          process.exitCode = 1;
+          return;
+        }
+        const seats = freshByRig.get(candidate.rigId) ?? [];
+        if (!seats.includes(logicalId)) seats.push(logicalId);
+        freshByRig.set(candidate.rigId, seats);
       }
 
       // ---- PHASE 5: restore each selected rig via id-based route (compose slice-02 path) ----
@@ -525,7 +561,7 @@ back with rig up kernel --existing.
           // name-based /api/up which 409s on same-name rigs).
           const res = await client.post<Record<string, unknown>>(
             `/api/rigs/${encodeURIComponent(rigId)}/up`,
-            { plan: false },
+            { plan: false, ...(freshByRig.has(rigId) ? { freshLogicalIds: freshByRig.get(rigId) } : {}) },
             { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS },
           );
 

@@ -390,6 +390,12 @@ leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
 
+To deliberately start individual seats with fresh conversations during a multi-rig
+restore, name each logical ID and rig: `rig start --last --fresh dev.impl@my-rig`.
+Every named seat must belong to one selected rig with a unique name; an unknown,
+ambiguous or externally attached seat stops the command before any rig restore.
+Other seats use their normal restore behavior.
+
 An explicit `rig up kernel --existing --fresh <seat...>` waits for startup's
 restore to finish, then replaces only the named seats that still hold the exact
 sessions startup launched. Other seats keep running. An operator's conversation

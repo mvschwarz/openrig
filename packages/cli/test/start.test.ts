@@ -8,6 +8,7 @@ import { Command } from "commander";
 import { startCommand, lastStopState } from "../src/commands/start.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
+import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
 
 function mockLifecycleDeps(): LifecycleDeps {
   return {
@@ -130,9 +131,10 @@ describe("rig start (OPR.0.3.4.1)", () => {
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => { server.close(); });
+  afterAll(() => { server.close(); resetFetchAllowlist(); });
 
   beforeEach(() => {
+    allowFetchTarget(`http://127.0.0.1:${port}`);
     upBodies = [];
     launches = [];
     nodesReads = 0;
@@ -200,6 +202,41 @@ describe("rig start (OPR.0.3.4.1)", () => {
   }
 
   // ---- HEADLESS FLAGS ----
+
+  it("fresh-primes only the selected logical seat in the named rig", async () => {
+    routes["/api/rigs/summary"] = () => [
+      { id: "rig-1", name: "one", nodeCount: 1, lifecycleState: "recoverable" },
+      { id: "rig-2", name: "two", nodeCount: 1, lifecycleState: "recoverable" },
+    ] as unknown as Record<string, unknown>;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", mode: "restore", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }], mutated: false }
+      : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@one"]); });
+    const applies = upBodies.filter(body => body.plan === false);
+    expect(applies).toHaveLength(2);
+    expect(applies.find(body => body._rigIdRoute === "rig-1")).toMatchObject({ freshLogicalIds: ["dev.impl"] });
+    expect(applies.find(body => body._rigIdRoute === "rig-2")).not.toHaveProperty("freshLogicalIds");
+  });
+
+  it.each(["dev.impl", "dev.missing@one", "dev.impl@absent", "dev.external@one"])("rejects unsafe fresh selector %s before any restore", async ref => {
+    setupCandidateRig("one");
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", mode: "restore", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" },
+        { logicalId: "dev.external", intendedAction: "leave-attached" }], mutated: false }
+      : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    const { exitCode } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", ref]); });
+    expect(exitCode).toBe(1);
+    expect(upBodies.filter(body => body.plan === false)).toHaveLength(0);
+  });
+
+  it("rejects a fresh selector when two selected rigs share its name", async () => {
+    routes["/api/rigs/summary"] = () => ["rig-1", "rig-2"].map(id =>
+      ({ id, name: "same", nodeCount: 1, lifecycleState: "recoverable" })) as unknown as Record<string, unknown>;
+    routes["/api/rigs/:id/up"] = () => ({ status: "plan", mode: "restore", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }], mutated: false });
+    const { exitCode } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@same"]); });
+    expect(exitCode).toBe(1);
+    expect(upBodies.filter(body => body.plan === false)).toHaveLength(0);
+  });
 
   it("--last restores all candidates with ZERO prompts", async () => {
     setupCandidateRig("my-rig");
