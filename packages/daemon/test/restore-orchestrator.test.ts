@@ -3031,6 +3031,27 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.warnings).toContain("Restore: The notice to lead@r for dev-moved@r wasn't recorded (queue refused it).");
   });
 
+  // The subset event is emitted before the notice runs, so it carries the launch's warnings and none of the notice's.
+  it("keeps the notice's warnings out of the restore.subset_completed event a subscriber holds", async () => {
+    const { node, snap } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e55");
+    const report = { notices: [], unrouted: [{ seat: "dev-moved@r", outcome: "none", reason: "no parent" }],
+      warnings: ["The notice to lead@r for dev-moved@r wasn't recorded (queue refused it)."] };
+    const orch = createOrchestrator({ harnessNotStartedNotice: async () => report });
+    // The seat's own restore leaves it a bare shell; the subset launch, its event and its notice run as they do.
+    vi.spyOn(orch as unknown as { restoreNodeWithCompensation: (...args: unknown[]) => Promise<unknown> }, "restoreNodeWithCompensation")
+      .mockResolvedValue({ nodeId: node.id, logicalId: "dev.moved", status: "attention_required", error: "Harness not started: no startup context for dev.moved.", stage: "harness_not_started" });
+    const held: Array<{ result?: { warnings?: string[] } }> = [];
+    const unsub = eventBus.subscribe((e) => { if (e.type === "restore.subset_completed") held.push(e as unknown as { result?: { warnings?: string[] } }); });
+    const result = await orch.launchNodeSubset(node.rigId, ["dev.moved"], { snapshotId: snap.id });
+    unsub();
+
+    expect(result.ok).toBe(true);
+    expect(result.launched?.[0]).toMatchObject({ stage: "harness_not_started" });
+    expect(result.warnings).toContain("Restore: The notice to lead@r for dev-moved@r wasn't recorded (queue refused it).");
+    expect(held).toHaveLength(1);
+    expect(held[0]!.result?.warnings ?? []).not.toContain("Restore: The notice to lead@r for dev-moved@r wasn't recorded (queue refused it).");
+  });
+
   it("keeps the restore's result when the notice itself throws, with a warning", async () => {
     const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
     const orch = createOrchestrator({ harnessNotStartedNotice: async () => { throw new Error("queue unavailable"); } });
