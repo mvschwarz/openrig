@@ -38,10 +38,11 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   as a task,** with the prompt and its choices verbatim, the seat, what it was
   doing and the escalation's id, and to relay only the person's recorded words:
   the key from a fresh capture, the reason starting `task <id>:`, and the effect
-  checked. It is to tell the person the lead has their goal and that questions
-  and the result come to that conversation, and to offer the team's space or a
-  seat's terminal only if they choose to watch or answer in the pane. A person
-  who chose the panes gets the earlier instructions unchanged.
+  checked. It is to tell the person the lead has their goal, that the team is
+  instructed to bring its questions and the result to that conversation but a
+  seat's prompt may still wait without reaching it, and to offer the team's
+  space or a seat's terminal only if they choose to watch or answer in the pane.
+  A person who chose the panes gets the earlier instructions unchanged.
 - **If you're the person's agent,** check your address while work is open, show
   a forwarded prompt whole, and read the newest review before saying the work is
   done (the `rigs` skill and `working-with-an-openrig-team`).
