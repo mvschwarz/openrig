@@ -1838,14 +1838,14 @@ export class RestoreOrchestrator {
    *  attempt's, and a failure to send it is a warning too: it never changes or blocks the attempt's own result. Seats not
    *  positively left as shells stay in the roll call. */
   private async noticeBareShells(rigId: string, attempt: string, results: RestoreNodeResult[], warnings: string[]): Promise<HarnessNotStartedReport | undefined> {
-    // The launcher finds a seat by its logical id in the live rig, so a seat recreated since the snapshot was launched
-    // under its live node, while its result keeps the snapshot's node id: the notice reads the node the shell is on.
-    const liveNodes = this.rigRepo.getRig(rigId)?.nodes ?? [];
-    const seats = results.filter((n) => n.stage === "harness_not_started")
-      .map(({ nodeId, logicalId, error }) => ({ nodeId: liveNodes.find((node) => node.logicalId === logicalId)?.id ?? nodeId,
-        logicalId, ...(error ? { cause: error } : {}) }));
-    if (seats.length === 0 || !this.harnessNotStartedNotice) return undefined;
+    const shells = results.filter((n) => n.stage === "harness_not_started");
+    if (shells.length === 0 || !this.harnessNotStartedNotice) return undefined;
     try {
+      // The launcher finds a seat by its logical id in the live rig, so a seat recreated since the snapshot was launched
+      // under its live node, while its result keeps the snapshot's node id: the notice reads the node the shell is on.
+      const liveNodes = this.rigRepo.getRig(rigId)?.nodes ?? [];
+      const seats = shells.map(({ nodeId, logicalId, error }) => ({ nodeId: liveNodes.find((node) => node.logicalId === logicalId)?.id ?? nodeId,
+        logicalId, ...(error ? { cause: error } : {}) }));
       const report = await this.harnessNotStartedNotice({ rigId, attempt, seats });
       for (const warning of report.warnings ?? []) warnings.push(`Restore: ${warning}`);
       return report;
@@ -1856,7 +1856,8 @@ export class RestoreOrchestrator {
   }
 
   /** Restore left this pane as a bare shell, which the launcher registered as a running session. Mark that session, with
-   *  the stage that says no harness started, so nothing counts the shell as a running seat. Nothing is stopped. */
+   *  the stage that says no harness started, so nothing counts the shell as a running seat. Nothing is stopped. The node
+   *  is the session's own: a seat recreated since the snapshot is launched under its live node. */
   private markHarnessNotStarted(rigId: string, nodeId: string, sessionId: string, error: string): void {
     this.sessionRegistry.updateStartupStatus(sessionId, "attention_required");
     this.eventBus.emit({ type: "node.startup_failed", rigId, nodeId, error, sessionId, stage: "harness_not_started" });
@@ -2301,7 +2302,7 @@ export class RestoreOrchestrator {
         if (this.freshLaunchAvailable && !this.freshLaunchAvailable(rigId, node.id)) {
           const error = `Harness not started: no usable persisted launch recipe for ${node.logicalId}.`;
           warnings?.push(`Restore: ${error}`);
-          this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
+          this.markHarnessNotStarted(rigId, launchResult.session.nodeId, launchResult.session.id, error);
           return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
         }
         const retired = await this.retireProvisionalSession(node.id, sessionName, launchResult.session.id);
@@ -2334,7 +2335,7 @@ export class RestoreOrchestrator {
       const cause = replayCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
-      this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
+      this.markHarnessNotStarted(rigId, launchResult.session.nodeId, launchResult.session.id, error);
       return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
     }
 
