@@ -2,7 +2,7 @@
 // backfill, driven end-to-end through the commander tree against a tmp
 // substrate fixture.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -100,26 +100,32 @@ describe("rig scope slice progress (FR-3 add/set)", () => {
     const slice = await createSlice(env, "malformed-state");
     const file = path.join(slice, "PROGRESS.md");
     fs.writeFileSync(file, "---\nowner: [invalid\n---\n# Progress\n\n## Current state\n\nOld\n\n## Other\n\nKeep\n");
-    const result = await run(["slice", "progress", slice, "--current-state", "Ready", "--json"], env.missionsRoot);
-    expect(result.exitCode).toBe(0);
-    const content = fs.readFileSync(file, "utf8");
-    expect(content).toContain("## Current state\n\nReady");
-    expect(content).toContain("## Other\n\nKeep");
-    expect(content).toContain("current_state_updated:");
-    expect(result.stderr).toContain("frontmatter isn't valid YAML");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await run(["slice", "progress", slice, "--current-state", "Ready", "--json"], env.missionsRoot);
+      expect(result.exitCode).toBe(0);
+      const content = fs.readFileSync(file, "utf8");
+      expect(content).toContain("## Current state\n\nReady");
+      expect(content).toContain("## Other\n\nKeep");
+      expect(content).toContain("current_state_updated:");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("frontmatter isn't valid YAML"));
+    } finally { warn.mockRestore(); }
   });
 
   it("updates an unterminated header without adding a timestamp block", async () => {
     const slice = await createSlice(env, "unterminated-state");
     const file = path.join(slice, "PROGRESS.md");
     fs.writeFileSync(file, "---\nowner: alice\n# Progress\n\n## Current state\n\nOld\n\n## Other\n\nKeep\n");
-    const result = await run(["slice", "progress", slice, "--current-state", "Ready", "--json"], env.missionsRoot);
-    expect(result.exitCode).toBe(0);
-    const content = fs.readFileSync(file, "utf8");
-    expect(content.match(/^---$/gm)).toHaveLength(1);
-    expect(content).not.toContain("current_state_updated:");
-    expect(content).toContain("## Other\n\nKeep");
-    expect(result.stderr).toContain("without a timestamp");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await run(["slice", "progress", slice, "--current-state", "Ready", "--json"], env.missionsRoot);
+      expect(result.exitCode).toBe(0);
+      const content = fs.readFileSync(file, "utf8");
+      expect(content.match(/^---$/gm)).toHaveLength(1);
+      expect(content).not.toContain("current_state_updated:");
+      expect(content).toContain("## Other\n\nKeep");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("without a timestamp"));
+    } finally { warn.mockRestore(); }
   });
 
   it("recognizes closing hashes and does not rewrite an identical state", async () => {
