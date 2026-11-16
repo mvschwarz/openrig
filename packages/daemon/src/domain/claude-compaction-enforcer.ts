@@ -1021,8 +1021,9 @@ export class ClaudeCompactionEnforcer {
       // The awaited lifecycle has settled: notice work must not inherit its active lease.
       const lastDelivery = record?.record.lastDelivery;
       const deliveredUnreadable = lastDelivery?.reason === "delivered_over_unreadable_pane";
-      // Unknown readiness before #2818's bounded fallback has been tried is waiting for that fallback: the next poll sends
-      // over it. Only a refusal once it was tried, or any other repeated failure, says the stage couldn't be delivered.
+      // Unknown readiness from an attempt without #2818's bounded fallback waits for that fallback to be tried. It opens after
+      // two consecutive unknown polls of this stage, and the busy, prompt, draft, typing and beforeWrite guards still apply.
+      // Only a refusal once it was tried, or any other repeated failure, says the stage couldn't be delivered.
       const awaitingFallback = lastDelivery?.reason === "target_activity_unknown" && !lastDelivery.unknownAllowed;
       if (record && lastDelivery && lastDelivery !== previous && ((lastDelivery.failures >= 2 && !awaitingFallback) || deliveredUnreadable)
         && this.onRestoreDeliveryFailure) {

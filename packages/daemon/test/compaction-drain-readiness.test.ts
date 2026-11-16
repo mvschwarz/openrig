@@ -305,8 +305,8 @@ describe.each([false, true])("post-compact drain readiness (guarded=%s)", (guard
     expect(tmux.sendText).toHaveBeenCalledTimes(3);
   });
 
-  // Unknown readiness before #2818's bounded fallback has been tried is waiting for that fallback, not an undeliverable
-  // stage: no person is told it failed while the next poll is the one that delivers over it.
+  // Unknown readiness from an attempt without #2818's bounded fallback waits for that fallback, not an undeliverable
+  // stage: no person is told it failed before the fallback attempt (still subject to the ordinary guards) has run.
   const failureNotices = () => restoreNotice.mock.calls.filter(([failure]) => !failure.lastDelivery.ok);
 
   it("two unknown polls and then the fallback delivering file no undeliverable notice", async () => {
