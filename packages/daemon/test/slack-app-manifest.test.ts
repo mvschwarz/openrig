@@ -17,9 +17,73 @@ const admits = (type: string) => {
   return d.ingest || d.reason !== "type";
 };
 
+const PUBLIC_MANIFEST = {
+  display_information: {
+    name: "OpenRig",
+    description: "Connects an OpenRig instance to Slack over Socket Mode.",
+  },
+  features: { bot_user: { display_name: "OpenRig", always_online: false } },
+  oauth_config: { scopes: { bot: [
+    "app_mentions:read", "channels:history", "channels:read", "chat:write",
+    "files:read", "files:write", "reactions:read", "users:read",
+  ] } },
+  settings: {
+    event_subscriptions: { bot_events: ["app_mention", "message.channels", "reaction_added"] },
+    interactivity: { is_enabled: true },
+    org_deploy_enabled: false,
+    socket_mode_enabled: true,
+    token_rotation_enabled: false,
+  },
+};
+const PUBLIC_MANIFEST_YAML = [
+  "display_information:",
+  "  name: OpenRig",
+  "  description: Connects an OpenRig instance to Slack over Socket Mode.",
+  "features:",
+  "  bot_user:",
+  "    display_name: OpenRig",
+  "    always_online: false",
+  "oauth_config:",
+  "  scopes:",
+  "    bot:",
+  "      - app_mentions:read",
+  "      - channels:history",
+  "      - channels:read",
+  "      - chat:write",
+  "      - files:read",
+  "      - files:write",
+  "      - reactions:read",
+  "      - users:read",
+  "settings:",
+  "  event_subscriptions:",
+  "    bot_events:",
+  "      - app_mention",
+  "      - message.channels",
+  "      - reaction_added",
+  "  interactivity:",
+  "    is_enabled: true",
+  "  org_deploy_enabled: false",
+  "  socket_mode_enabled: true",
+  "  token_rotation_enabled: false",
+].join("\n") + "\n";
+
 describe("shipped Slack app manifest — canonical sources", () => {
   const bundle = buildSlackAppManifest();
   const scopeSet = setOf(bundle.scopes);
+
+  it("pins the existing public manifest byte-shape before private opt-in", () => {
+    expect(bundle.manifest).toEqual(PUBLIC_MANIFEST);
+    expect(bundle.yaml).toBe(PUBLIC_MANIFEST_YAML);
+    expect(bundle.url).toBe("https://api.slack.com/apps?new_app=1&manifest_yaml=" + encodeURIComponent(PUBLIC_MANIFEST_YAML));
+    expect(bundle.scopes).toEqual([
+      "app_mentions:read", "channels:history", "channels:read", "chat:write",
+      "files:read", "files:write", "reactions:read", "users:read",
+    ]);
+    expect(bundle.events).toEqual(["app_mention", "message.channels", "reaction_added"]);
+    expect(bundle.manifest.oauth_config.scopes.bot).toEqual(bundle.scopes);
+    expect(bundle.manifest.settings.event_subscriptions.bot_events).toEqual(bundle.events);
+    expect(JSON.stringify(bundle.manifest)).not.toMatch(/groups:|message\.groups|im:history|im:read/);
+  });
 
   it("requests exactly the baseline required scopes plus the feature scopes (order-independent)", () => {
     expect(scopeSet).toEqual(setOf([...BASELINE_REQUIRED_SCOPES, ...FEATURE_SCOPES.map((f) => f.scope)]));
@@ -74,6 +138,35 @@ describe("shipped Slack app manifest — canonical sources", () => {
 });
 
 describe("shipped Slack app manifest — mutation controls", () => {
+  it("adds only private-channel grants and the message.groups subscription when explicitly requested", () => {
+    const bundle = buildSlackAppManifest(undefined, { privateChannel: true });
+    expect(bundle.scopes).toEqual([
+      "app_mentions:read", "channels:history", "channels:read", "chat:write",
+      "files:read", "files:write", "groups:history", "groups:read", "reactions:read", "users:read",
+    ]);
+    expect(bundle.events).toEqual(["app_mention", "message.channels", "message.groups", "reaction_added"]);
+    expect(bundle.manifest.oauth_config.scopes.bot).toEqual(bundle.scopes);
+    expect(bundle.manifest.settings.event_subscriptions.bot_events).toEqual(bundle.events);
+    expect(bundle.scopes).toEqual(expect.arrayContaining(["groups:read", "groups:history"]));
+    expect(bundle.events).not.toContain("message.im");
+    expect(bundle.scopes).not.toContain("im:history");
+    expect(parse(bundle.yaml)).toEqual(bundle.manifest);
+    const prefix = "https://api.slack.com/apps?new_app=1&manifest_yaml=";
+    expect(decodeURIComponent(bundle.url.slice(prefix.length))).toBe(bundle.yaml);
+  });
+
+  it("keeps custom sources compatible when private grants are requested without a message event", () => {
+    const bundle = buildSlackAppManifest({
+      ...CANONICAL_MANIFEST_SOURCES,
+      admittedEventTypes: ["app_mention", "reaction_added"],
+    }, { privateChannel: true });
+    expect(bundle.scopes).toEqual([
+      "app_mentions:read", "channels:history", "channels:read", "chat:write",
+      "files:read", "files:write", "groups:history", "groups:read", "reactions:read", "users:read",
+    ]);
+    expect(bundle.events).toEqual(["app_mention", "reaction_added"]);
+  });
+
   it("refuses an admitted payload type that has no subscription mapping", () => {
     expect(() => buildSlackAppManifest({ ...CANONICAL_MANIFEST_SOURCES, admittedEventTypes: ["message", "app_mention", "member_joined_channel"] }))
       .toThrow(/"member_joined_channel" has no subscription mapping/);

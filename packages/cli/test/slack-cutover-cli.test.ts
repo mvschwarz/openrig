@@ -35,8 +35,9 @@ function makeDeps(overrides: Partial<SlackDeps> = {}): { deps: SlackDeps; logs: 
       resolveSecret: () => null,
       checkEnvFilePermissions: () => null,
       verifyScopes: async () => ({ ok: true, granted: [], missing: [] }),
-      verifyChannelMembership: async () => ({ ok: true, isMember: true }),
+      verifyChannelMembership: async () => ({ ok: true, isMember: true, isPrivate: null }),
       buildSlackAppManifest, FEATURE_SCOPES, BASELINE_REQUIRED_SCOPES,
+      PRIVATE_CHANNEL_SCOPES: ["groups:history", "groups:read"],
     }),
     clientFactory: () => ({
       post: async <T>(path: string) => {
@@ -165,19 +166,32 @@ describe("S10 CLI cutover — config surfaces survive on the daemon-homed module
 
 
 describe("Slack verify reports optional capabilities from granted scopes", () => {
-  const cases = [
-    { name: "baseline grants", grants: BASELINE_REQUIRED_SCOPES, ready: true, known: true },
-    { name: "all feature grants", grants: [...BASELINE_REQUIRED_SCOPES, ...FEATURE_SCOPES.map(f => f.scope)], ready: true, known: true },
-    { name: "absent grant header", grants: null, ready: false, known: false },
-    { name: "empty grant header", grants: [], ready: false, known: false },
-    { name: "failed authentication", grants: BASELINE_REQUIRED_SCOPES, ready: false, known: false, error: "invalid_auth" },
+  const cases: Array<{
+    name: string; grants: string[] | null; ready: boolean; known: boolean; error?: string;
+    privacy: boolean | null | "malformed"; privateStatus: "not-applicable" | "unknown" | "missing" | "complete";
+    privateMissing?: string[]; requiredScopes?: string[]; conversationError?: string;
+  }> = [
+    { name: "baseline grants", grants: BASELINE_REQUIRED_SCOPES, ready: true, known: true, privacy: false, privateStatus: "not-applicable" },
+    { name: "all feature grants", grants: [...BASELINE_REQUIRED_SCOPES, ...FEATURE_SCOPES.map(f => f.scope)], ready: true, known: true, privacy: false, privateStatus: "not-applicable" },
+    { name: "public channel without group grants", grants: BASELINE_REQUIRED_SCOPES, ready: true, known: true, privacy: false, privateStatus: "not-applicable" },
+    { name: "private channel missing both grants", grants: BASELINE_REQUIRED_SCOPES, ready: true, known: true, privacy: true, privateStatus: "missing", privateMissing: ["groups:history", "groups:read"] },
+    { name: "private channel missing one grant", grants: [...BASELINE_REQUIRED_SCOPES, "groups:read"], ready: true, known: true, privacy: true, privateStatus: "missing", privateMissing: ["groups:history"] },
+    { name: "synthetic private channel missing only groups:read", grants: [...BASELINE_REQUIRED_SCOPES, "groups:history"], ready: true, known: true, privacy: true, privateStatus: "missing", privateMissing: ["groups:read"] },
+    { name: "private channel with both grants", grants: [...BASELINE_REQUIRED_SCOPES, "groups:history", "groups:read"], ready: true, known: true, privacy: true, privateStatus: "complete" },
+    { name: "unknown channel privacy", grants: BASELINE_REQUIRED_SCOPES, ready: true, known: true, privacy: null, privateStatus: "unknown" },
+    { name: "malformed channel privacy", grants: BASELINE_REQUIRED_SCOPES, ready: true, known: true, privacy: "malformed", privateStatus: "unknown" },
+    { name: "absent grant header", grants: null, ready: false, known: false, privacy: true, privateStatus: "unknown" },
+    { name: "empty grant header", grants: [], ready: false, known: false, privacy: true, privateStatus: "unknown" },
+    { name: "failed authentication", grants: BASELINE_REQUIRED_SCOPES, ready: false, known: false, error: "invalid_auth", privacy: true, privateStatus: "unknown" },
+    { name: "failed conversations.info lookup keeps privacy unknown", grants: BASELINE_REQUIRED_SCOPES, ready: false, known: true, privacy: null, privateStatus: "unknown", conversationError: "missing_scope" },
+    { name: "custom one-scope baseline remains ready with private grants missing", grants: ["chat:write"], ready: true, known: true, privacy: true, privateStatus: "missing", privateMissing: ["groups:history", "groups:read"], requiredScopes: ["chat:write"] },
   ];
   for (const json of [false, true]) {
-    it.each(cases)(`$name (${json ? "JSON" : "human"}) retains baseline readiness and shows only known missing features`, async ({ grants, ready, known, error }) => {
+    it.each(cases)(`$name (${json ? "JSON" : "human"}) retains readiness and diagnoses private grants only from known inputs`, async ({ grants, ready, known, error, privacy, privateStatus, privateMissing, requiredScopes, conversationError }) => {
       const surface = await import("@openrig/daemon/gateway-slack");
       const home = mkdtempSync(join(tmpdir(), "slack-scopes-"));
       homes.push(home);
-      surface.saveConfig({ ...surface.DEFAULT_CONFIG, channel: "C-fixture" }, home);
+      surface.saveConfig({ ...surface.DEFAULT_CONFIG, channel: "C-fixture", ...(requiredScopes ? { requiredScopes } : {}) }, home);
       vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-local-fixture-only");
       const requests: string[] = [];
       const server = createServer((request, response) => {
@@ -185,9 +199,12 @@ describe("Slack verify reports optional capabilities from granted scopes", () =>
         requests.push(`${request.method} ${pathname}`);
         response.setHeader("content-type", "application/json");
         if (grants !== null) response.setHeader("x-oauth-scopes", grants.join(", "));
+        const channel: Record<string, unknown> = { is_member: true, name: "fixture" };
+        if (typeof privacy === "boolean") channel.is_private = privacy;
+        else if (privacy === "malformed") channel.is_private = "true";
         response.end(JSON.stringify(pathname === "/api/auth.test"
           ? error ? { ok: false, error } : { ok: true }
-          : { ok: true, channel: { is_member: true, name: "fixture" } }));
+          : conversationError ? { ok: false, error: conversationError } : { ok: true, channel }));
       });
       server.listen(0, "127.0.0.1");
       await once(server, "listening");
@@ -203,14 +220,37 @@ describe("Slack verify reports optional capabilities from granted scopes", () =>
         expect(process.exitCode).toBe(ready ? 0 : 1);
         expect(requests).toEqual(["POST /api/auth.test", "GET /api/conversations.info"]);
         const missing = known ? FEATURE_SCOPES.filter(f => !grants!.includes(f.scope)) : null;
+        const isPrivate = typeof privacy === "boolean" ? privacy : null;
+        const missingPrivateScopes = privateMissing ?? [];
         if (json) {
-          expect(JSON.parse(logs[0]!)).toMatchObject({ ready, missingFeatures: missing });
-          expect(JSON.parse(logs[0]!)).not.toHaveProperty("receipt");
+          const out = JSON.parse(logs[0]!);
+          expect(out).toMatchObject({ ready, missingFeatures: missing, member: { isPrivate, privateScopes: { status: privateStatus, missing: missingPrivateScopes } } });
+          if (conversationError) expect(out.member).toMatchObject({ ok: false, isMember: false, isPrivate: null, error: conversationError });
+          expect(out).not.toHaveProperty("receipt");
         } else {
           expect(logs.at(-1)).toBe(ready ? "READY" : "NOT ready");
-          const warnings = logs.filter(line => line.startsWith("⚠"));
+          const warnings = logs.filter(line => line.startsWith("⚠") && !line.startsWith("⚠ private channel"));
           expect(warnings).toHaveLength(missing?.length ?? 0);
           for (const feature of missing ?? []) expect(warnings.join("\n")).toContain(`${feature.scope} missing: ${feature.usedBy}`);
+          const privateLines = logs.filter(line => line.toLowerCase().includes("private channel"));
+          if (privateStatus === "missing") {
+            expect(privateLines).toHaveLength(1);
+            expect(privateLines[0]).toContain(missingPrivateScopes.join(", "));
+            expect(privateLines[0]).toContain("rig slack manifest --private-channel");
+          } else if (privateStatus === "unknown") {
+            expect(logs.filter(line => line.startsWith("⚠ private channel"))).toEqual([]);
+            if (typeof privacy === "boolean") {
+              expect(privateLines).toEqual(["… private channel grant status unknown for C-fixture; Slack did not return an available scope list."]);
+              expect(logs.filter(line => line.startsWith("… channel privacy unknown"))).toEqual([]);
+            } else {
+              expect(privateLines).toEqual([]);
+              expect(logs.filter(line => line.startsWith("… channel privacy unknown"))).toEqual([
+                "… channel privacy unknown for C-fixture; private-channel scopes were not assessed.",
+              ]);
+            }
+          } else {
+            expect(privateLines).toHaveLength(0);
+          }
         }
         const ledger = join(home, "state", "human-channel-operations.jsonl");
         const rows = existsSync(ledger) ? readFileSync(ledger, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
