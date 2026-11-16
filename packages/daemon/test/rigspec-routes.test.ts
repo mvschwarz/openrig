@@ -74,6 +74,19 @@ describe("Rigspec export routes", () => {
       .toEqual([{ logicalId: "dev.old", reason: "source unavailable" }]);
   });
 
+  it("names an unreadable claude_auto_mode in the export warnings header of both formats, and exports without it", async () => {
+    const rig = rigRepo.createRig("auto-mode-export");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    db.prepare("UPDATE nodes SET claude_auto_mode_json='broken' WHERE id=?").run(node.id);
+    const warning = [{ logicalId: "worker", reason: "claude_auto_mode can't be read; not carried" }];
+    for (const path of ["spec", "spec.json"]) {
+      const response = await app.request(`/api/rigs/${rig.id}/${path}`);
+      expect(response.status).toBe(200);
+      expect(JSON.parse(decodeURIComponent(response.headers.get("X-OpenRig-Export-Warnings")!))).toEqual(warning);
+      expect(await response.text()).not.toMatch(/claude_auto_mode:|"claudeAutoMode"/);
+    }
+  });
+
   it("GET /api/rigs/:rigId/spec -> 200 + YAML content-type", async () => {
     const rig = rigRepo.createRig("r99");
     rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });

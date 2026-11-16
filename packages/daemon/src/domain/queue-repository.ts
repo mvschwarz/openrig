@@ -1968,7 +1968,8 @@ export class QueueRepository {
         JOIN queue_items q ON q.qitem_id = o.audit_pointer AND (q.state = 'pending' OR substr(o.outbox_id, 1, ?) = ?)
           AND q.destination_session = o.destination_session
         WHERE o.rowid > ? AND o.rowid <= ? AND substr(o.outbox_id, 1, ?) = ?
-          AND o.delivery_state IN ('pending','failed','indeterminate') ORDER BY o.rowid LIMIT ?`)
+          AND o.delivery_state IN ('pending','failed','indeterminate')
+          AND json_extract(o.guard_delivery,'$.runner') IS NULL AND json_extract(o.guard_delivery,'$.nativeRequestId') IS NULL ORDER BY o.rowid LIMIT ?`)
         .all(CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX, cursor, horizon, WAKE_INTENT_PREFIX.length,
           WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;

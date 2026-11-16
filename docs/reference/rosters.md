@@ -109,6 +109,15 @@ the direction marks are allowed, as names need them. A label that breaks those r
 loading: it's ignored with `label_problem`, and the member is named by its seat as before. An external caller's entry
 carries that `label_problem`, so an unusable label doesn't read as absent.
 
+A member whose owner says it takes no requests declares `takes_requests: false`, with an optional `takes_requests_note`
+saying why in plain text (the label rule). `rig_team` shows it as `takesRequests: false` and `takesRequestsNote` on that
+entry, so a sender's assistant can choose another before sending. Work sent to it is still written:
+`rig_queue_create` and `rig_queue_handoff` answer as before, and add `requestsAdvisory` with the note, so the sender
+can send it elsewhere. When some rosters can't be read, or this daemon's host id isn't known yet, `requestsAdvisory`
+says whether it takes requests isn't known, and the write goes ahead. A `takes_requests` that isn't `true` or `false`,
+or a note that breaks the label rule or comes without `takes_requests: false`, doesn't stop the roster loading:
+`takes_requests_problem` says why, and an unusable note leaves the flag in place.
+
 The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
 rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
 external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. The name follows the

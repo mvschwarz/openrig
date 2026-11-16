@@ -937,6 +937,10 @@ work should continue from the SAME step under a new owner. The old
 owner's stale close attempts are structurally rejected afterwards
 (packet_not_on_frontier).
 
+If the step's packet was already passed on with rig queue handoff to that
+same seat, route adopts the one successor there onto the frontier, with or
+without --packet, and writes no queue row; running it again writes nothing.
+
 Examples:
   $ rig workflow route WF01ABC --to dev2-driver@my-rig --reason "owner seat dead"
 `)

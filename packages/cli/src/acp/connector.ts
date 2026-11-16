@@ -92,7 +92,7 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
   const child = spawn(options.agent[0]!, options.agent.slice(1), {
     cwd: options.cwd, stdio: "pipe", env: { ...process.env, [RUN_MARKER]: options.runId },
   });
-  child.stderr.on("data", (data: Buffer) => log({ direction: "stderr", text: data.toString() }));
+  child.stderr.setEncoding("utf8").on("data", (text: string) => log({ direction: "stderr", text }));
   const spawned = new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
   const peer = new StdioJsonRpcPeer(child, (direction, packet) => log({ direction, packet }));
 
