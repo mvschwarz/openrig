@@ -191,6 +191,33 @@ describe("seat typing guard commands", () => {
     expect(result.logs.join("\n")).not.toContain("the native default");
   });
 
+  it("#3253: prints where the seat's process limits stand, from the readback", async () => {
+    const applied = { state: "applied", requested: { tasksMax: 512 }, pidsMax: "512", pidsCurrent: 37, limitHits: 2,
+      scope: "openrig-seat-worker_test-1a2b3c4d.scope" };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, processLimits: applied } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result.logs).toContain("Process limits: tasks_max 512: applied (pids.max 512, current 37, limit hit 2 times)");
+    const notApplied = { state: "not_applied", requested: { tasksMax: 512 }, reason: "the seat is not running; the limit applies at its next fresh launch" };
+    const deps2 = makeDeps({ status: 200, data: { ...STATUS, processLimits: notApplied } }, []);
+    const result2 = await captureLogs(() => makeCommand(deps2).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result2.logs).toContain("Process limits: tasks_max 512: requested, not applied; the seat is not running; the limit applies at its next fresh launch");
+    // A stored value that can't be read: this seat's line, with no tasks_max to show.
+    const invalid = { state: "invalid", reason: "Seat n process_limits: stored value is not valid JSON; the stored value is kept" };
+    const deps4 = makeDeps({ status: 200, data: { ...STATUS, processLimits: invalid } }, []);
+    const result4 = await captureLogs(() => makeCommand(deps4).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result4.logs).toContain("Process limits: process_limits: stored value invalid; Seat n process_limits: stored value is not valid JSON; the stored value is kept");
+    // Which process the status read.
+    const fallback = { ...applied, readFrom: "the session's active pane (no pane is recorded for the seat)" };
+    const deps6 = makeDeps({ status: 200, data: { ...STATUS, processLimits: fallback } }, []);
+    const result6 = await captureLogs(() => makeCommand(deps6).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result6.logs).toContain("Process limits: tasks_max 512: applied (pids.max 512, current 37, limit hit 2 times) " +
+      "(read from the session's active pane (no pane is recorded for the seat))");
+    // Without limits, no line.
+    const deps3 = makeDeps({ status: 200, data: STATUS }, []);
+    const result3 = await captureLogs(() => makeCommand(deps3).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result3.logs.join("\n")).not.toContain("Process limits");
+  });
+
   it("prints the daemon's managed restore delivery failure", async () => {
     const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
     const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
@@ -780,6 +807,50 @@ describe("rig seat status", () => {
     expect(exitCode).toBe(1);
     expect(errors.join("\n")).toContain("Seat \"missing@seat-rig\" not found");
     expect(errors.join("\n")).toContain("List seats with: rig ps --nodes");
+  });
+
+  it("#3253: a plain handover successor_create_failed names the process-limit notice once", async () => {
+    const deps = makeDeps({
+      status: 500,
+      data: {
+        ok: false,
+        code: "successor_create_failed",
+        message: "Handover failed at step \"create-successor\": harness not interactive",
+        guidance: "The seat's registry binding is unchanged.",
+        processLimits: { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true,
+          requested: { tasksMax: 256 } },
+      },
+    }, []);
+    const { errors } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "impl@seat-rig", "--reason", "context-wall"]);
+    });
+    const out = errors.join("\n");
+    expect(out.match(/the user manager timed out/g)).toHaveLength(1);
+    expect(out).toContain("Process limits: tasks_max 256: requested, not applied");
+  });
+
+  it("#3253: a plain handover failure after a recovery launch without the limit names the process-limit notice", async () => {
+    const deps = makeDeps({
+      status: 500,
+      data: {
+        ok: false,
+        code: "context_delivery_failed",
+        message: "Handover failed at step \"deliver-restore-packet\": the pane did not accept the packet",
+        guidance: "The successor candidate was unwound and the seat's binding is unchanged.",
+        processLimits: { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true,
+          requested: { tasksMax: 256 } },
+      },
+    }, []);
+
+    const { errors, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "impl@seat-rig", "--reason", "context-wall"]);
+    });
+
+    expect(exitCode).toBeGreaterThan(0);
+    const out = errors.join("\n");
+    expect(out).toContain("Handover failed at step");
+    expect(out).toContain("Process limits: tasks_max 256: requested, not applied");
+    expect(out).toContain("unverified: the user manager timed out");
   });
 
   it("handover non-dry-run JSON prints mutation result for discovered source", async () => {

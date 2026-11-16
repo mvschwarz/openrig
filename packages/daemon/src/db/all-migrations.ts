@@ -1,3 +1,4 @@
+import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
@@ -349,4 +350,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   claudeAutoModeSchema,
   nodeInputRouteSchema,
   queueReturnRouteSchema,
+  nodeProcessLimitsSchema,
 ];

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
-import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import type { RigSpec } from "../src/domain/types.js";
@@ -244,7 +244,7 @@ describe("persisted pod-aware launch recipes", () => {
   it("restores through the real restore-to-instantiator callback with a fresh instantiator", async () => {
     db = createFullTestDb();
     let setup!: ReturnType<typeof createTestApp>;
-    const freshLaunch = vi.fn(async (rigId: string, nodeId: string) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId));
+    const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
     const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
     const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
     setup = createTestApp(db, {
@@ -298,16 +298,96 @@ describe("persisted pod-aware launch recipes", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id);
+    expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id, { processLimitsMode: "recovery" });
     if (result.ok) {
       expect(result.result.nodes.find((entry) => entry.nodeId === node.id)?.status).toBe("fresh-primed");
     }
   });
 
+  it("#3253: a restore's fresh fallback is a recovery: a limit it can't apply leaves a notice, not a failed seat", async () => {
+    db = createFullTestDb();
+    let setup!: ReturnType<typeof createTestApp>;
+    const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) =>
+      setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
+    const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
+    const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
+    // The host can't apply the limit (the user manager doesn't answer): a fresh launch refuses, a recovery goes on.
+    const problem = { kind: "unverified" as const, reason: "the user manager timed out", requested: { tasksMax: 8 } };
+    const notice = { state: "not_applied" as const, ...problem, retryable: true };
+    // The provisional shell's start couldn't be told; the replacement's is known not applied: the node reports the
+    // replacement's.
+    const provisional = { state: "unknown" as const, kind: "unverified" as const, reason: "the start was not seen", retryable: true };
+    const tmux = mockTmuxAdapter();
+    let recoveries = 0;
+    const createSession = vi.fn(async (_name: string, _cwd?: string, _env?: Record<string, string>,
+      launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => launchOpts?.processLimitsMode === "recovery"
+      ? { ok: true as const, processLimits: ++recoveries === 1 ? provisional : notice }
+      : { ok: false as const, code: "process_limits_unverified", message: "refused", retryable: true, processLimits: problem });
+    (tmux as unknown as Record<string, unknown>).createSession = createSession;
+    setup = createTestApp(db, {
+      tmux,
+      freshLaunch,
+      freshLaunchAvailable,
+      podInstantiatorFsOps: {
+        exists: (file) => file.replaceAll("\\", "/").endsWith("/agents/impl/agent.yaml"),
+        readFile: () => agentYaml,
+      },
+    });
+    const runtimeAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const rig = setup.rigRepo.createRig("capped-recipe-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)")
+      .run("pod-capped", rig.id, "dev", "Development");
+    const rigRoot = process.cwd();
+    const rigSpec: RigSpec = {
+      version: "0.2",
+      name: "capped-recipe-rig",
+      pods: [{
+        id: "dev",
+        label: "Development",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: ".", processLimits: { tasksMax: 8 } }],
+        edges: [],
+      }],
+      edges: [],
+    };
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", {
+      runtime: "codex",
+      agentRef: "local:agents/impl",
+      profile: "default",
+      cwd: rigRoot,
+      podId: "pod-capped",
+      launchRecipe: { version: 1, rigRoot, rigSpec },
+      processLimits: { tasksMax: 8 },
+    });
+    const session = setup.sessionRegistry.registerSession(node.id, "dev-impl@capped-recipe-rig");
+    setup.sessionRegistry.updateStatus(session.id, "running");
+    setup.sessionRegistry.updateBinding(node.id, { tmuxPane: "%7" });
+    const snapshot = setup.snapshotCapture.captureSnapshot(rig.id, "capped-recipe");
+    setup.sessionRegistry.updateStatus(session.id, "exited");
+
+    const result = await setup.restoreOrchestrator.restore(snapshot.id, {
+      adapters: { codex: runtimeAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(createSession).toHaveBeenCalledTimes(2);
+    for (const call of createSession.mock.calls) expect(call[3]).toEqual({ processLimitsMode: "recovery" });
+    expect(result.result.nodes.find((entry) => entry.nodeId === node.id)).toMatchObject({ status: "fresh-primed", processLimits: notice });
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.find((entry) => entry.id === node.id)?.processLimits).toEqual({ tasksMax: 8 });
+  });
+
   it("a fresh restore from the recipe reports the agent spec's advisories, its own and its import's, once each", async () => {
     db = createFullTestDb();
     let setup!: ReturnType<typeof createTestApp>;
-    const freshLaunch = vi.fn(async (rigId: string, nodeId: string) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId));
+    const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
     const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
     const rigRoot = process.cwd();
     const files: Record<string, string> = {
@@ -403,7 +483,7 @@ describe("persisted pod-aware launch recipes", () => {
   ])("keeps the provisional shell and binding for $label", async ({ mutate }) => {
     db = createFullTestDb();
     let setup!: ReturnType<typeof createTestApp>;
-    const freshLaunch = vi.fn(async (rigId: string, nodeId: string) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId));
+    const freshLaunch = vi.fn(async (rigId: string, nodeId: string, launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => setup.podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts));
     const freshLaunchAvailable = vi.fn((rigId: string, nodeId: string) => setup.podInstantiator.canLaunchPersistedFresh(rigId, nodeId));
     setup = createTestApp(db, { freshLaunch, freshLaunchAvailable });
     const rig = setup.rigRepo.createRig("restore-fallback-rig");

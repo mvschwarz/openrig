@@ -64,6 +64,10 @@ interface AgentActivityStoreDeps {
   /** Confirm that a carried generation is registered for this node. A side-effect-free reservation
    * that never committed must remain unresolvable, not become positive mismatch evidence. */
   isRegisteredOccupantGeneration?: (nodeId: string, generation: string) => boolean;
+  /** Whether a registered generation was followed only by no-launch adoptions (reconcile, bind, self-attach). Adoption
+   * registers the same live process again, so its hooks, still carrying the launch-time generation, are the current
+   * occupant's, as the session-identity route already reads them (#2796). A launch after it makes it earlier. */
+  isOccupantContinuedByAdoption?: (nodeId: string, generation: string) => boolean;
 }
 
 interface SessionLookupRow {
@@ -91,6 +95,7 @@ export class AgentActivityStore {
   readonly freshnessMs: number;
   private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
   private readonly isRegisteredOccupantGeneration?: (nodeId: string, generation: string) => boolean;
+  private readonly isOccupantContinuedByAdoption?: (nodeId: string, generation: string) => boolean;
 
   constructor(deps: AgentActivityStoreDeps) {
     this.db = deps.db;
@@ -100,6 +105,7 @@ export class AgentActivityStore {
     this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
     this.resolveOccupantGeneration = deps.resolveOccupantGeneration;
     this.isRegisteredOccupantGeneration = deps.isRegisteredOccupantGeneration;
+    this.isOccupantContinuedByAdoption = deps.isOccupantContinuedByAdoption;
   }
 
   /** Bound at ingress, then checked again here and at read. No event or oracle mutation. */
@@ -326,7 +332,9 @@ export class AgentActivityStore {
     //  (1) the carried generation is REGISTERED FOR THIS NODE and differs from live ⇒ MISMATCH:
     //      positive evidence the claim belongs to a prior, dead tenure ⇒ unknown +
     //      `generation_mismatch`, stale:true, provenance RESOLVED. An unregistered prelaunch
-    //      reservation is absence of evidence and stays UNRESOLVABLE, never mismatch.
+    //      reservation is absence of evidence and stays UNRESOLVABLE, never mismatch. A generation followed
+    //      only by no-launch adoptions isn't a prior tenure: adoption re-registered the same live process,
+    //      so it reads as (2) (#2796, as the session-identity route reads it).
     //  (2) both known and EQUAL (incl. a same-native-session relaunch — the ledger treats it as a
     //      continuation with no new generation) ⇒ provenance RESOLVED, deliver normally (fresh).
     //  (3) null on EITHER side ⇒ UNRESOLVABLE: ABSENCE of evidence, not a dead-tenure finding. State
@@ -363,7 +371,15 @@ export class AgentActivityStore {
           }
         }
         if (recordedGeneration !== liveGeneration) {
-          return this.generationMismatch(activity, referenceTime);
+          // A generation followed only by no-launch adoptions is still the live process's (#2796); a launch after it
+          // is what makes it a prior tenure.
+          let continued: boolean;
+          try {
+            continued = this.isOccupantContinuedByAdoption?.(nodeId, recordedGeneration) === true;
+          } catch {
+            return this.generationDegraded(activity, referenceTime);
+          }
+          if (!continued) return this.generationMismatch(activity, referenceTime);
         }
         generationProvenance = "resolved";
       } else {

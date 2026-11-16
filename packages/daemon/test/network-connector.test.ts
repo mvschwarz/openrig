@@ -498,6 +498,43 @@ describe("network connector", () => {
     expect(hub.items.get("hub-w2")!.resolution).toBe("Done; the notes are in the item.");
   });
 
+  it("a handoff-and-complete close sends the closer's own note, never the note OpenRig writes when it gives none", async () => {
+    const b = bind();
+    hub.add("hub-c1");
+    hub.add("hub-c2");
+    await pass(b.id);
+    const [c1] = runs("hub-c1");
+    const [c2] = runs("hub-c2");
+    // With no note of the closer's, the queue writes "handoff-and-complete to review@lab", which names a local seat.
+    await repo.handoffAndComplete({ qitemId: c1!.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    await repo.handoffAndComplete({ qitemId: c2!.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false,
+      transitionNote: "Done here; the review is a separate step." });
+    await pass(b.id);
+    expect(hub.items.get("hub-c1")!.resolution).toBe("Closed without a stated result.");
+    expect(hub.items.get("hub-c2")!.resolution).toBe("Done here; the review is a separate step.");
+  });
+
+  it("a cross-host handoff-and-complete close sends the closer's own note, never the cross-host note the queue writes", async () => {
+    const b = bind();
+    for (const id of ["hub-x1", "hub-x2", "hub-x3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    // Forwarded to another host and completed here: with no note of the closer's, the queue writes
+    // "cross-host handoff to review@lab", and adds what it overrode when a claim was made while the handoff was forwarded.
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x1").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-1@vps-b", terminalState: "done" });
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x2").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-2@vps-b", terminalState: "done", transitionNote: "Done here; the review runs on the other host." });
+    repo.claim({ qitemId: local("hub-x3").qitemId, destinationSession: "dev-impl@lab" });
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x3").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-3@vps-b", terminalState: "done", claimedAtBeforeForward: null });
+    expect(repo.closingTransition(local("hub-x3").qitemId, "done")?.transitionNote).toMatch(/^cross-host handoff to review@lab \(this overrode /);
+    await pass(b.id);
+    expect.soft(hub.items.get("hub-x1")!.resolution, "hub-x1").toBe("Closed without a stated result.");
+    expect.soft(hub.items.get("hub-x2")!.resolution, "hub-x2").toBe("Done here; the review runs on the other host.");
+    expect.soft(hub.items.get("hub-x3")!.resolution, "hub-x3").toBe("Closed without a stated result.");
+  });
+
   it("a failure here is recorded as local, not as the hub's", async () => {
     const b = bind();
     hub.add("hub-l1");

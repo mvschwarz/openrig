@@ -556,6 +556,7 @@ async function applySelectedHistory(c: Context, original = false) {
       message: redactDiagnostic(outcome?.error ?? result.message ?? (ok ? "Selected native history resumed and joined." : "Selected resume was not confirmed; inspect this seat before retrying."), tokens),
       warnings: result.warnings?.map(warning => redactDiagnostic(warning, tokens)),
       attentionEvidence: redactDiagnostic(outcome?.attentionEvidence, tokens),
+      ...(outcome?.processLimits ? { processLimits: outcome.processLimits } : {}),
       // The home this resume was bound to and attempted, and whether OpenRig registered a terminal session for it. That's
       // not the native resume: whether that ran and took is `ok` and `code`. A written-back home's put-back, or why it
       // stayed. The conversation id itself isn't repeated.

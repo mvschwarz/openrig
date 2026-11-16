@@ -4,3 +4,11 @@ export class RigNotFoundError extends Error {
     this.name = "RigNotFoundError";
   }
 }
+
+/** An export that would drop or alter what a seat stores, refused with the seat named and the way out (#3253). */
+export class ExportRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExportRefusedError";
+  }
+}
