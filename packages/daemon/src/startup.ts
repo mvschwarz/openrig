@@ -1565,7 +1565,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   };
   eventBus.subscribe(event => {
-    if (event.type !== "restore.completed") return;
+    if (event.type !== "restore.completed" && event.type !== "restore.subset_completed") return;
     void seatAttentionReconciler.onRestoreCompleted(event.rigId)
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   });

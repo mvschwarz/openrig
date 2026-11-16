@@ -44,6 +44,23 @@ describe("declared capabilities", () => {
     expect(nobody).toMatchObject({ route: null, reason: "no one has it" });
     expect(new Set(flatten(nobody.capabilities))).toEqual(new Set(["unknown"]));
   });
+
+  // Managed compaction and restore-packet confirmation read Claude Code's screen, so a stopped Claude seat can't use them now.
+  it("a Claude Code seat with no live terminal reads its screen-reading continuity unavailable, and keeps resume and fork", () => {
+    const stopped = memberConnection("dev-impl@r", { kind: "seat", runtime: "claude-code", live: false });
+    expect(stopped.capabilities.continuity).toEqual({ managedCompaction: "unavailable", restorePacketConfirmation: "unavailable",
+      fork: declaredCapabilities("typed", "claude-code").continuity.fork });
+    expect(stopped.capabilities.nativeIdentity).toEqual(declaredCapabilities("typed", "claude-code").nativeIdentity);
+    expect(memberConnection("dev-impl@r", { kind: "seat", runtime: "claude-code", live: true }).capabilities)
+      .toEqual(declaredCapabilities("typed", "claude-code"));
+  });
+
+  // A runtime is a recorded string; one named like an object property must not reach an inherited value.
+  it.each(["constructor", "toString", "__proto__"])("an unlisted runtime named %s takes the route's `*` entry", (runtime) => {
+    expect(declaredCapabilities("typed", runtime)).toEqual(declaredCapabilities("typed", "an-unlisted-runtime"));
+    expect(memberConnection("dev-impl@r", { kind: "seat", runtime, live: false })).toMatchObject({ route: "typed", runtime,
+      capabilities: { control: { submit: "unavailable" }, observe: { dialog: "not-supported" } } });
+  });
 });
 
 describe("GET /api/member-connection/capabilities", () => {
