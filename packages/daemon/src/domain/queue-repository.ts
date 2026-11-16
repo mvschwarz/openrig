@@ -483,6 +483,16 @@ export interface QueueCreateInput {
   identityPrincipal?: string | null;
 }
 
+/** Tags to add to an existing row (`addTags`). */
+export interface QueueTagAddInput {
+  qitemId: string;
+  actorSession: string;
+  /** Exact tags to add; one the row already has adds nothing. */
+  tags: readonly string[];
+  identityProvenance?: string | null;
+  identityPrincipal?: string | null;
+}
+
 export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
@@ -1616,8 +1626,8 @@ export class QueueRepository {
   /** #2789: a wake committed while its seat had no pane froze a binding that can never match once the seat is bound, so
    *  the delivery guard refused it on every retry. Such an intent takes its first live binding, on the same node and
    *  canonical session, only when it is known to have written no input (pending, or failed, which a send records only
-   *  without a write) and carries no expected identity of its own. A binding that ever named a pane is never replaced,
-   *  so a wake can't move to another occupant; the guard's write-time check against this binding still holds.
+   *  without a write) and carries no expected identity of its own. Previously pane-bound intents use the separate,
+   *  proof-only reconciliation at claim below; the guard's write-time check against the selected binding still holds.
    *  `entry` is the intent as read before its claim. Called inside the claim's transaction. */
   private bindFirstTarget(entry: OutboxEntry): void {
     const frozen = entry.guardBinding;
@@ -1651,7 +1661,32 @@ export class QueueRepository {
       return "retained";
     }
     const claim = (entry: OutboxEntry): boolean => {
-      if (this.deliveryDrains.holds(entry.destinationSession) || !eligible(entry) || attempted.has(entry.outboxId) || !this.outbox!.claimForDelivery(entry.outboxId)) return false;
+      if (this.deliveryDrains.holds(entry.destinationSession) || !eligible(entry) || attempted.has(entry.outboxId)) return false;
+      let rebound: NonNullable<OutboxEntry["guardBinding"]> | undefined;
+      const frozen = entry.guardBinding;
+      if (entry.deliveryState === "failed" && entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG) && frozen?.pane) {
+        const live = this.transport?.deliveryTarget?.(entry.destinationSession);
+        if (!live || live.nodeId !== frozen.nodeId || live.session !== frozen.session
+          || live.occupant !== frozen.occupant || live.pane !== frozen.pane) {
+          const row = entry.auditPointer ? this.getById(entry.auditPointer) : undefined;
+          // A proved-unsent queue notification follows its existing seat's current binding. Startup draining shares
+          // this claim, so check current work and restore custody before consuming the failed attempt's proof.
+          if (!entry.outboxId.startsWith(WAKE_INTENT_PREFIX) || !live?.pane || live.nodeId !== frozen.nodeId
+            || this.outbox!.expectedIdentity(entry.outboxId) || !row || row.state !== "pending" || row.handedOffFrom
+            || !this.currentWakeIntent(entry) || !this.reachableWakeRetryable(row, new Date())
+            || [entry.destinationSession, ...this.resolveSessionAddresses(entry.destinationSession), live.session]
+              .some(address => this.hasPendingPostCompactStage?.(address))) return false;
+          rebound = live;
+        }
+      }
+      if (!this.outbox!.claimForDelivery(entry.outboxId)) return false;
+      if (rebound) {
+        this.db.prepare("UPDATE outbox_entries SET guard_binding = ? WHERE outbox_id = ?").run(JSON.stringify(rebound), entry.outboxId);
+        this.transitionLog.append({
+          qitemId: entry.auditPointer!, state: "pending", actorSession: "queue@system",
+          transitionNote: `queue wake binding reconciled ${JSON.stringify({ outboxId: entry.outboxId, from: frozen, to: rebound })}`,
+        });
+      }
       if (entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG)) this.setWakePreInputFailure(entry.outboxId, false);
       this.bindFirstTarget(entry);
       attempted.add(entry.outboxId);
@@ -1717,7 +1752,7 @@ export class QueueRepository {
       const recovered = members.filter(entry => entry.deliveryState !== "pending");
       if (!recovered.length) return "";
       return recovered.every(entry => entry.deliveryState === "failed" && entry.tags?.includes(WAKE_PRE_INPUT_FAILURE_TAG))
-        ? "Recovered queue notification: a wake that failed before input is retried once when the same binding is reachable again.\n"
+        ? "Recovered queue notification: a wake that failed before input is retried once when the current binding is reachable again.\n"
         : "Recovered queue notification: delivery may repeat after an earlier unconfirmed attempt.\n";
     };
     // The group was formed on the first member's outcome, so its own source and urgency reach that same outcome at the
@@ -3464,6 +3499,48 @@ export class QueueRepository {
   } {
     const result = this.updateInTransactionalContext(input);
     return { qitemId: input.qitemId, ...result };
+  }
+
+  /**
+   * Add tags to a row in any state, and change nothing else: its existing tags stay, its state, claim and closure are
+   * untouched, and a closed row isn't reopened. A tag the row already has adds nothing. The tags added are recorded as a
+   * transition naming the actor, like a note; when every tag is already there, nothing is written. Tags are never
+   * removed or rewritten here.
+   */
+  addTags(input: QueueTagAddInput): { item: QueueItem; added: string[] } {
+    const txn = this.db.transaction(() => {
+      const qitem = this.getById(input.qitemId);
+      if (!qitem) throw new QueueRepositoryError("qitem_not_found", `qitem ${input.qitemId} not found`);
+      const existing = qitem.tags ?? [];
+      const added = [...new Set(input.tags)].filter((tag) => !existing.includes(tag));
+      if (added.length === 0) return { added, persistedEvents: [] as PersistedEvent[] };
+      this.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify([...existing, ...added]), input.qitemId);
+      this.transitionLog.append({
+        qitemId: input.qitemId,
+        state: qitem.state,
+        actorSession: input.actorSession,
+        // The values as a JSON array, so a tag holding a comma reads apart from two tags.
+        transitionNote: `tags added: ${JSON.stringify(added)}`,
+        // Like a note append, this keeps a claim's retained park gate for a later state write to end.
+        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
+        identityProvenance: input.identityProvenance ?? null,
+        identityPrincipal: input.identityPrincipal ?? null,
+      });
+      const persistedEvent = this.eventBus.persistWithinTransaction({
+        type: "queue.updated",
+        qitemId: input.qitemId,
+        fromState: qitem.state,
+        toState: qitem.state,
+        closureReason: null,
+        closureTarget: null,
+        actorSession: input.actorSession,
+        summary: qitem.summary ?? null,
+      });
+      return { added, persistedEvents: [persistedEvent] };
+    });
+    const result = txn();
+    for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
+    return { item: this.getByIdOrThrow(input.qitemId), added: result.added };
   }
 
   /** Notify subscribers of events persisted inside a caller's own transaction (updateWithinTransaction), after it commits. */

@@ -29,6 +29,7 @@ import { queueTransitionWakesSchema } from "../src/db/migrations/073_queue_trans
 import { viewsCustomSchema } from "../src/db/migrations/030_views_custom.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { buildExecutionView, type ExecutionViewDeps } from "../src/domain/execution-view.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
 import { ViewProjector, ViewProjectorError } from "../src/domain/view-projector.js";
 import { Hono } from "hono";
 import { viewsRoutes } from "../src/routes/views.js";
@@ -1024,6 +1025,14 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(result.rows[0].q4_ladder).toHaveLength(3);
     expect(result.rows[0].q4_ladder.every((s: {adopted: {value: string}}) => s.adopted.value === "NOT_APPLICABLE")).toBe(true);
     expect(result.rows[0].sources.build_info.basis).toContain("OpenRig daemon");
+  });
+
+  it("shows a lane in its project's view once the project tag is added to its existing row", async () => {
+    const deps = { db, slicesRoot: () => missionsRoot, rigsRoot: () => rigsRoot };
+    const lanesOf = async () => ((await buildExecutionView(deps, { mission: MISSION, project: "demo" })).q1_lanes as Record<string, unknown>[]).map((lane) => lane.slice);
+    expect(await lanesOf()).toEqual([]);
+    new QueueRepository(db, new EventBus(db)).addTags({ qitemId: "qitem-lane-31", actorSession: "desk@exec-fixture", tags: ["project:demo"] });
+    expect(await lanesOf()).toEqual(["OPR.9.9.31"]);
   });
 
   it("uses project-local review drops without joining unbound global artifacts", async () => {

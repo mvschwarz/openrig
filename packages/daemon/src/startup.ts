@@ -213,6 +213,7 @@ import { recoverSeatSkillAttempts } from "./domain/seat-skill-apply.js";
 import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import { lstatLinkInfo } from "./domain/restore-guidance.js";
 import { managedBlockRecords } from "./domain/managed-block-records.js";
+import { noticeHarnessNotStarted } from "./domain/harness-not-started-notice.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -929,6 +930,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     seatSkillSelection: async (rigId, nodeId) => persistedSeatSkillSelection
       ? persistedSeatSkillSelection(rigId, nodeId)
       : { ok: false, reason: "the pod instantiator is not ready" },
+    harnessNotStartedNotice: (input) => noticeHarnessNotStarted(db, queueRepoInstance, input),
   });
 
   // Connect to cmux at startup — degrades gracefully if absent
@@ -1564,7 +1566,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   };
   eventBus.subscribe(event => {
-    if (event.type !== "restore.completed") return;
+    if (event.type !== "restore.completed" && event.type !== "restore.subset_completed") return;
     void seatAttentionReconciler.onRestoreCompleted(event.rigId)
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   });
@@ -2850,6 +2852,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
   // the manual back-half drain through the auto poll loop (no second path).
   deps.compactionEnforcer = compactionEnforcer;
+  const { PiCompactionService } = await import("./domain/pi-compaction-service.js");
+  const { PiCompactionRequestStore } = await import("./domain/pi-compaction-request-store.js");
+  if (sessionTransport) deps.piCompactionService = new PiCompactionService({
+    requestStore: new PiCompactionRequestStore(nodePath.join(OPENRIG_HOME, "state", "pi-compaction-requests")),
+    readSidecar: session => piAdapter.readRunnerSidecar(session).state,
+    // The agent's ordinary guarded send path (session transport + delivery guard),
+    // not a raw tmux write: drafts, holds, prompts and the occupant are respected.
+    send: (session, text, opts) => sessionTransport.send(session, text, opts),
+    terminalPolicies: new TerminalPolicyStore(db),
+  });
 
   // GHOST-STAGE (e/Class-B) — construct the canonical OccupantInvalidator now that both Class-A deps
   // exist (the enforcer's in-mem maps 1a-1f + the context sidecar 2a). Injected into SeatHandoverService

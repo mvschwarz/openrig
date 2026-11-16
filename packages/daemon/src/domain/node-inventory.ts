@@ -478,6 +478,8 @@ function deriveContinuityOutcome(
   if (row.continuity_outcome) {
     return row.continuity_outcome as NodeInventoryEntry["continuityOutcome"];
   }
+  // That restore brought back an earlier occupant's conversation, not this one's.
+  if (restore?.retiredOccupant) return null;
   const restoreOutcome = restore?.outcome ?? "n-a";
   if (restoreOutcome === "n-a") return null;
   // Acknowledgment and responsiveness clear attention, not conversation lineage.
@@ -498,6 +500,8 @@ function deriveContinuityOutcome(
 interface RestoreProjection {
   outcome: NodeRestoreOutcome;
   resumedRuntime?: "claude-code" | "codex";
+  /** The attempt started before the node's latest completed handover, so it restored an earlier occupant. */
+  retiredOccupant?: true;
 }
 
 function restoreKey(rigId: string, nodeId: string): string {
@@ -604,7 +608,27 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
     const fence = fences.get(entry.nodeId);
     if (fence !== undefined && entry.seq < fence) map.delete(key);
   }
+  // A completed handover (a discovered successor included) put a new occupant in the seat. An attempt that started before
+  // it keeps its restore outcome, but its conversation isn't the current occupant's. History is unchanged.
+  const handovers = readHandoverFences(db, rigId);
+  for (const [key, entry] of attemptOf) {
+    const fence = handovers.get(entry.nodeId);
+    const projection = map.get(key);
+    if (projection && fence !== undefined && entry.seq < fence) projection.retiredOccupant = true;
+  }
   return map;
+}
+
+/** Each node's latest completed handover, by event seq. */
+function readHandoverFences(db: Database.Database, rigId?: string): Map<string, number> {
+  // Through each node into its own handover events (idx_events_node_type_seq), as the fresh-launch fence reads.
+  const rows = db.prepare(`
+    SELECT n.id AS nodeId, MAX(e.seq) AS seq FROM nodes n
+    CROSS JOIN events e ON e.node_id = n.id AND e.type = 'seat.handover_completed'
+    ${rigId ? "WHERE n.rig_id = ?" : ""}
+    GROUP BY n.id
+  `).all(...(rigId ? [rigId] : [])) as Array<{ nodeId: string; seq: number }>;
+  return new Map(rows.map((row) => [row.nodeId, row.seq]));
 }
 
 function mapStatus(status: string): NodeRestoreOutcome {

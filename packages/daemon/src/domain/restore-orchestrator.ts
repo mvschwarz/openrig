@@ -1,4 +1,5 @@
 import { captureClaudeContinuation, type ClaudeContinuationLaunch } from "./claude-continuation-launch.js";
+import type { HarnessNotStartedReport } from "./harness-not-started-notice.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
@@ -221,6 +222,8 @@ export interface NarrowLaunchResult {
   launched?: RestoreNodeResult[];
   held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
+  /** The notice for targets this launch left as bare shells: who was told, and the seats with no single destination. */
+  harnessNotStarted?: HarnessNotStartedReport;
   failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   /** In a plan, each target's `permission`: what this launch will start it with (absent for a seat it leaves attached). */
   targetNodes?: Array<{ nodeId: string; logicalId: string; permission?: RestorePermissionPreview }>;
@@ -272,6 +275,8 @@ export interface RestoreOrchestratorDeps {
    *  Absent in older wiring/tests: the current selection is unknown, so a
    *  missing saved marker is reported, never guessed. */
   getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
+  /** Tells the resolved escalation owners which seats an attempt left as bare shells (noticeHarnessNotStarted). */
+  harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
 }
 
 export class RestoreOrchestrator {
@@ -300,6 +305,7 @@ export class RestoreOrchestrator {
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private getDesiredClaudeActivityHooks: RestoreOrchestratorDeps["getDesiredClaudeActivityHooks"];
   private appliedLaunchStore: AppliedLaunchObservationStore;
+  private harnessNotStartedNotice: RestoreOrchestratorDeps["harnessNotStartedNotice"];
 
   constructor(deps: RestoreOrchestratorDeps) {
     if (deps.db !== deps.rigRepo.db) {
@@ -343,6 +349,7 @@ export class RestoreOrchestrator {
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
     this.seatSkillSelection = deps.seatSkillSelection;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
+    this.harnessNotStartedNotice = deps.harnessNotStartedNotice;
     this.routerLineSettings = deps.routerLineSettings;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
@@ -596,6 +603,8 @@ export class RestoreOrchestrator {
         intendedRoster: topology.intendedRoster,
         excludedNodes,
       };
+      const notice = await this.noticeBareShells(rigId, `restore attempt ${attemptId}`, nodeResults, restoreWarnings);
+      if (notice) restoreResult.harnessNotStarted = notice;
 
       // 7. Emit restore.completed
       this.eventBus.emit({ type: "restore.completed", rigId, snapshotId, result: restoreResult });
@@ -802,8 +811,12 @@ export class RestoreOrchestrator {
         }
       }
 
+      // A live session that isn't proven to be a bare shell. Nothing here shows an agent is running in it, so the pane is
+      // kept and reported as a live session, never as a running agent.
       if (isLive) {
-        if (opts.selectedHistory) return { ok: false, code: "seat_running", message: "The selected seat is already running; no resume was started." };
+        if (opts.selectedHistory) {
+          return { ok: false, code: "seat_running", message: "The selected seat has a live session (its agent isn't proven running); no resume was started." };
+        }
         alreadyRunning.push({ nodeId: node.id, logicalId: node.logicalId });
         continue;
       }
@@ -868,6 +881,7 @@ export class RestoreOrchestrator {
     }
 
     // Emit restore.subset_completed for launched targets only
+    let harnessNotStarted: HarnessNotStartedReport | undefined;
     if (launched.length > 0) {
       const subsetResult: RestoreResult = {
         snapshotId: snapshot.id,
@@ -877,7 +891,8 @@ export class RestoreOrchestrator {
         warnings: subsetWarnings,
         snapshotSelection,
       };
-      this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
+      const completed = this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
+      harnessNotStarted = await this.noticeBareShells(rigId, `launch attempt ${completed.seq}`, launched, subsetWarnings);
     }
 
     // Emit node.held for non-running held non-targets (tri-state: running/unknown/held)
@@ -926,6 +941,7 @@ export class RestoreOrchestrator {
       unmatchedIds: unmatchedIds.length > 0 ? unmatchedIds : undefined,
       warnings: subsetWarnings.length > 0 ? subsetWarnings : undefined,
       snapshotSelection,
+      ...(harnessNotStarted ? { harnessNotStarted } : {}),
       nonTargetEffects: {
         mode: opts.nonTargetMode,
         reason: opts.nonTargetMode === "detach_and_hold" ? holdReasonText : null,
@@ -1735,6 +1751,23 @@ export class RestoreOrchestrator {
     return { rolledBack: true, terminalStopped };
   }
 
+  /** The notice for the seats an attempt positively left as bare shells, each with its own cause. Its warnings join the
+   *  attempt's, and a failure to send it is a warning too: it never changes or blocks the attempt's own result. Seats not
+   *  positively left as shells stay in the roll call. */
+  private async noticeBareShells(rigId: string, attempt: string, results: RestoreNodeResult[], warnings: string[]): Promise<HarnessNotStartedReport | undefined> {
+    const seats = results.filter((n) => n.stage === "harness_not_started")
+      .map(({ nodeId, logicalId, error }) => ({ nodeId, logicalId, ...(error ? { cause: error } : {}) }));
+    if (seats.length === 0 || !this.harnessNotStartedNotice) return undefined;
+    try {
+      const report = await this.harnessNotStartedNotice({ rigId, attempt, seats });
+      for (const warning of report.warnings ?? []) warnings.push(`Restore: ${warning}`);
+      return report;
+    } catch (err) {
+      warnings.push(`Restore: the notice for the seats left as a bare shell wasn't recorded (${err instanceof Error ? err.message : String(err)}).`);
+      return undefined;
+    }
+  }
+
   /** Restore left this pane as a bare shell, which the launcher registered as a running session. Mark that session, with
    *  the stage that says no harness started, so nothing counts the shell as a running seat. Nothing is stopped. */
   private markHarnessNotStarted(rigId: string, nodeId: string, sessionId: string, error: string): void {
@@ -2180,7 +2213,7 @@ export class RestoreOrchestrator {
           const error = `Harness not started: no usable persisted launch recipe for ${node.logicalId}.`;
           warnings?.push(`Restore: ${error}`);
           this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
-          return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
+          return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
         }
         const retired = await this.retireProvisionalSession(node.id, sessionName, launchResult.session.id);
         if (!retired.ok) {
@@ -2213,7 +2246,7 @@ export class RestoreOrchestrator {
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
       this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
-      return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
+      return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
     }
 
     // Attempt restore-safe startup replay if context available
@@ -2801,37 +2834,16 @@ export class RestoreOrchestrator {
     rigId: string,
     nodeId: string,
   ): Promise<ReconcileNodeResult> {
-    // Locate the latest restore attempt for this rig.
-    const startedRow = this.db.prepare(
-      "SELECT seq, payload FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1"
-    ).get(rigId) as { seq: number; payload: string } | undefined;
-    if (!startedRow) {
-      return { ok: false, code: "no_attempt", detail: "No restore.started event recorded for this rig." };
+    // Locate the node's latest restore attempt and its outcome there. If the
+    // outcome is not failed or attention_required, there is nothing to upgrade.
+    const attempt = this.currentRestoreAttempt(rigId, nodeId);
+    if (!attempt) {
+      return { ok: false, code: "no_attempt", detail: "No restore.started or restore.subset_completed event recorded for this rig." };
     }
-    const attemptId = startedRow.seq;
-
-    // Find the node's most recent post-attempt outcome from the most-recent
-    // restore.completed event for this rig. If the latest outcome is not
-    // failed or attention_required, the reconciler has nothing to upgrade.
-    const completedRow = this.db.prepare(
-      "SELECT payload FROM events WHERE rig_id = ? AND type = 'restore.completed' AND seq > ? ORDER BY seq DESC LIMIT 1"
-    ).get(rigId, attemptId) as { payload: string } | undefined;
-    let nodeStatus: RestoreNodeResult["status"] | null = null;
-    let nodeLogicalId: string | null = null;
-    if (completedRow) {
-      try {
-        const parsed = JSON.parse(completedRow.payload) as { result: RestoreResult };
-        const found = parsed.result?.nodes?.find((n) => n.nodeId === nodeId);
-        if (found) {
-          nodeStatus = found.status;
-          nodeLogicalId = found.logicalId;
-        }
-      } catch {
-        // payload corruption — treat as no node record found
-      }
-    }
+    const attemptId = attempt.attemptId;
+    const nodeStatus = attempt.status;
     if (!nodeStatus) {
-      return { ok: false, code: "node_not_found", detail: `Node ${nodeId} has no record in the latest restore.completed event for rig ${rigId}.` };
+      return { ok: false, code: "node_not_found", detail: `Node ${nodeId} has no record in its latest restore attempt for rig ${rigId}.` };
     }
     if (nodeStatus !== "failed" && nodeStatus !== "attention_required") {
       return { ok: false, code: "outcome_not_upgradable", detail: `Reconciliation only upgrades failed or attention_required; current outcome is ${nodeStatus}.` };
@@ -2947,18 +2959,16 @@ export class RestoreOrchestrator {
       return { ok: false, code: "pane_not_usable", probe: evidence, attemptId, detail: `Pane state is ${probe.status} (${probe.code}); reconciliation requires resumed.` };
     }
 
-    // The checks above awaited native reads. A restore that started since, or a changed binding or expected token,
-    // makes this proof one for an older subject, so it can't settle the current outcome.
-    const latestStart = this.db.prepare(
-      "SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1"
-    ).get(rigId) as { seq: number } | undefined;
+    // The checks above awaited native reads. A restore or subset launch recorded since, or a changed binding or expected
+    // token, makes this proof one for an older subject, so it can't settle the current outcome.
+    const latestAttempt = this.currentRestoreAttempt(rigId, nodeId);
     const latestBinding = this.db.prepare(
       "SELECT tmux_session FROM bindings WHERE node_id = ?"
     ).get(nodeId) as { tmux_session: string | null } | undefined;
     const latestSession = this.db.prepare(
       "SELECT session_name, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
     ).get(nodeId) as { session_name: string; resume_token: string | null } | undefined;
-    if (latestStart?.seq !== attemptId || latestBinding?.tmux_session !== sessionName
+    if (latestAttempt?.attemptId !== attemptId || latestBinding?.tmux_session !== sessionName
       || latestSession?.session_name !== sessionName || latestSession.resume_token !== expectedResumeToken) {
       return { ok: false, code: "proof_superseded", attemptId, detail: "A newer restore attempt, binding or resume token was recorded while the live seat was checked, so this proof doesn't settle the current outcome." };
     }
@@ -2974,6 +2984,35 @@ export class RestoreOrchestrator {
     }
 
     return { ok: true, attemptId, from: fromStatus, to: "operator_recovered", evidence };
+  }
+
+  /** A node's latest restore attempt and its outcome there (null when that attempt has no record of it). A full restore's
+   *  attempt is its `restore.started`, with the outcome in the `restore.completed` after it. A subset launch
+   *  (`rig launch --seats`) records only its `restore.subset_completed`, which is its attempt; a later one that names the
+   *  node is the node's latest attempt. */
+  private currentRestoreAttempt(rigId: string, nodeId: string): { attemptId: number; status: RestoreNodeResult["status"] | null } | null {
+    const nodeStatusIn = (payload: string): RestoreNodeResult["status"] | null => {
+      try {
+        return (JSON.parse(payload) as { result: RestoreResult }).result?.nodes?.find((n) => n.nodeId === nodeId)?.status ?? null;
+      } catch {
+        return null; // payload corruption — treat as no node record found
+      }
+    };
+    const started = this.db.prepare(
+      "SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1",
+    ).get(rigId) as { seq: number } | undefined;
+    const subsets = this.db.prepare(
+      "SELECT seq, payload FROM events WHERE rig_id = ? AND type = 'restore.subset_completed' AND seq > ? ORDER BY seq DESC",
+    ).all(rigId, started?.seq ?? 0) as Array<{ seq: number; payload: string }>;
+    for (const subset of subsets) {
+      const status = nodeStatusIn(subset.payload);
+      if (status) return { attemptId: subset.seq, status };
+    }
+    if (!started) return null;
+    const completed = this.db.prepare(
+      "SELECT payload FROM events WHERE rig_id = ? AND type = 'restore.completed' AND seq > ? ORDER BY seq DESC LIMIT 1",
+    ).get(rigId, started.seq) as { payload: string } | undefined;
+    return { attemptId: started.seq, status: completed ? nodeStatusIn(completed.payload) : null };
   }
 
   private writeCheckpointFile(cwd: string, checkpoint: Checkpoint): boolean {

@@ -137,6 +137,7 @@ describe("RestoreOrchestrator", () => {
       error?: string;
       warnings?: string[];
     }>;
+    harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
@@ -150,6 +151,7 @@ describe("RestoreOrchestrator", () => {
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
       seatSkillSelection: opts?.seatSkillSelection,
+      harnessNotStartedNotice: opts?.harnessNotStartedNotice,
     });
   }
 
@@ -2995,6 +2997,52 @@ describe("RestoreOrchestrator", () => {
     expect(JSON.parse(failure.payload)).toMatchObject({ stage: "harness_not_started", error: "Harness not started: no startup context for dev.moved." });
   });
 
+  // An attempt that positively leaves a seat as a bare shell hands that seat to the grouped notice once, under the
+  // attempt's own identity, and carries the notice's report. Seats not positively left as shells aren't handed over.
+  it("hands the seats a restore left as bare shells to the notice, with the attempt's identity, and carries its report", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const report = { notices: [{ owner: "lead@r", qitemId: "qitem-harness-not-started-x", seats: ["dev-moved@r"] }], unrouted: [], warnings: [] };
+    const notice = vi.fn(async () => report);
+    const orch = createOrchestrator({ harnessNotStartedNotice: notice });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: expect.stringMatching(/^restore attempt \d+$/),
+      seats: [{ nodeId: result.result.nodes[0]!.nodeId, logicalId: "dev.moved", cause: "Harness not started: no startup context for dev.moved." }],
+    }));
+    expect(result.result.harnessNotStarted).toEqual(report);
+  });
+
+  it("carries a partial notice report, and its warnings join the restore's", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const report = { notices: [], unrouted: [{ seat: "dev-moved@r", outcome: "none", reason: "no parent" }],
+      warnings: ["The notice to lead@r for dev-moved@r wasn't recorded (queue refused it)."] };
+    const orch = createOrchestrator({ harnessNotStartedNotice: async () => report });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(result.result.harnessNotStarted).toEqual(report);
+    expect(result.result.warnings).toContain("Restore: The notice to lead@r for dev-moved@r wasn't recorded (queue refused it).");
+  });
+
+  it("keeps the restore's result when the notice itself throws, with a warning", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const orch = createOrchestrator({ harnessNotStartedNotice: async () => { throw new Error("queue unavailable"); } });
+    const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(result.result.harnessNotStarted).toBeUndefined();
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (queue unavailable).");
+  });
+
   it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-chooser", rig.id, "Dev");
@@ -4961,6 +5009,63 @@ describe("RestoreOrchestrator", () => {
 
       expect(result).toMatchObject({ ok: true, to: "operator_recovered" });
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+    });
+
+    // A subset launch records no restore.started: its completion is its attempt.
+    function seedSubsetAttempt(restoreOutcome: "failed" | "attention_required") {
+      const rigName = `r${nextSeed++}`;
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "codex" });
+      const sessionName = `test-worker@${rigName}`;
+      sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
+      const sess = sessionRegistry.registerSession(node.id, sessionName);
+      db.prepare("UPDATE sessions SET resume_type = 'codex_id', resume_token = 'tok-abc-123' WHERE id = ?").run(sess.id);
+      const completed = eventBus.emit({ type: "restore.subset_completed", rigId: rig.id, snapshotId: "snap-subset", result: {
+        snapshotId: "snap-subset", preRestoreSnapshotId: null, rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: restoreOutcome }], warnings: [],
+      } } as any);
+      return { rig, nodeId: node.id, attemptId: completed.seq };
+    }
+    const resumedCodexPane = (token: string) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("bash");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue("OpenAI Codex (v0.155.1)\n› continue");
+      const listProcesses = async () => [
+        { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "bash", executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: `codex resume ${token}`,
+          argv: ["codex", "resume", token], executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ];
+      return { tmux, listProcesses };
+    };
+
+    it.each(["attention_required", "failed"] as const)("reconciles a subset-launched Codex seat (%s) from the same exact lineage, keeping its outcome and appending the recovery", async (outcome) => {
+      const seeded = seedSubsetAttempt(outcome);
+      const original = db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed'").get();
+      const { tmux, listProcesses } = resumedCodexPane("tok-abc-123");
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: true, attemptId: seeded.attemptId, from: outcome, to: "operator_recovered" });
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.subset_completed'").get()).toEqual(original);
+      const reconciled = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+      expect(reconciled.map((row) => JSON.parse(row.payload))).toEqual([expect.objectContaining({
+        nodeId: seeded.nodeId, attemptId: seeded.attemptId, from: outcome, to: "operator_recovered" })]);
+      // One receipt per attempt: a repeated check reports it without appending another.
+      await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+    });
+
+    it("a subset-launched seat running another conversation keeps its outcome, and nothing is appended", async () => {
+      const seeded = seedSubsetAttempt("attention_required");
+      const { tmux, listProcesses } = resumedCodexPane("tok-other-999");
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: false, code: "process_lineage_mismatch" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toEqual([]);
     });
 
     it.each([

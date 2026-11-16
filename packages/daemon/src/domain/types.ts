@@ -1,4 +1,5 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import type { readSendOutcome } from "./connection-contract.js";
 import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record-types.js";
 
 export interface Rig {
@@ -221,7 +222,9 @@ export type RigEvent =
       admitted: DeliveryEvidenceAdmitted;
       written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
-      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
+      /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
+      outcome: ReturnType<typeof readSendOutcome> }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
@@ -297,7 +300,10 @@ export type RigEvent =
        *  session. The seat list marks the seat while this session is its current one. */
       startedWithoutRequired?: string[]; successorSessionId?: string;
       /** #2985: the handover adopted the running successor of an earlier failed one (`rig seat handover --recover`). */
-      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string } }
+      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
+      /** #3218 item 6: the recovery recorded the conversation its launch named because the successor's current one could
+       *  not be read (Claude's session file for its process); the warning the command printed, kept in the history. */
+      conversationUnconfirmed?: string }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -558,6 +564,8 @@ export interface RestoreResult {
   snapshotSelection?: RestoreSnapshotSelection;
   intendedRoster?: Array<{ nodeId: string; logicalId: string }>;
   excludedNodes?: RestoreExcludedNode[];
+  /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
+  harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
@@ -574,6 +582,8 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
+  stage?: "harness_not_started";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
