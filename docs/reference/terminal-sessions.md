@@ -243,6 +243,9 @@ preflighted, then applying per-rig workspaces), or `--provider tmux --window`
 daemon inventory projection in `toLiveSeatRow` does not populate `host`), and
 stopped/unbound/external seats become `absent`.
 
+Repeated bulk opens through the tmux fallback create another recorded viewer per
+non-empty rig. That path does not confirm or reuse an earlier viewer's current plan.
+
 When a `rig:<name>` (or bare `<name>`) viewer is created cleanly in Herdr with
 complete workspace, tab, tab-label, and pane identity verified post-close — or
 registered before window launch in the plain-tmux `--window` bulk/rig flow —
@@ -260,8 +263,24 @@ unconfirmed viewers are retained with their record preserved and reported as
 
 `rig terminal close --all [--provider herdr|tmux] [--session <name>]` reads the
 recorded ownership ledger per endpoint and refreshes live inventory before
-inspecting and closing each target. Unmodified `rig:` viewers are closed
-(`closed`) and their underlying agent tmux sessions continue running. Viewers
+inspecting each target. Existing Herdr viewers are kept. Herdr has no qualified
+compare-and-close operation, so bulk close never sends `workspace.close`, including
+for a record left in the `closing` phase. An intact viewer returns
+`conditional_close_unavailable` and a manual inspection/close command bound to its
+recorded socket and workspace. Run that command only after inspecting the workspace.
+If the exact endpoint or workspace cannot be qualified, the result asks for manual
+inspection instead of supplying an ambiguous command. Records remain until confirmed
+absence. This does not change the separate single-view `herdr-app` close path.
+
+Unmodified tmux `rig:` viewers are closed (`closed`) while their underlying agent
+sessions continue running. A server-side `if-shell -F` compares session identity,
+nonce and complete window/pane inventory before it selects the close action. Failed
+desktop-launch cleanup also requires zero attached clients in that same condition.
+Viewer IDs must have tmux's numeric `$`, `@` and `%` forms. Session names and nonces
+must contain only ASCII letters, digits, underscore, period, colon or hyphen for
+this command path. Other stored values are retained with `ownership_unconfirmed`
+(or `cleanup: "unknown"`) instead of being interpolated into tmux syntax. No UUID
+shape is required for a nonce. Viewers
 with foreign, modified, or mismatched tabs/labels/panes/nonce (including reused
 short Herdr IDs after restart) are kept whole (`kept`: `not_separable` or
 `ownership_unconfirmed` for Herdr, `ownership_unconfirmed` for tmux). Records

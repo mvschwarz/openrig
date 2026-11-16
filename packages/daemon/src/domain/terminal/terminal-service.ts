@@ -1,6 +1,7 @@
 import type { ScopeViewError } from "./scope-task-terminal-view.js";
 import { tileAttachArgv } from "./tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
+import { qualifiesTmuxViewer, tmuxViewerCloseArgs, TMUX_VIEWER_SNAPSHOT, TMUX_VIEWER_KEPT } from "./tmux-viewer-guard.js";
 import type { ViewerKey, ViewerResult } from "./herdr-viewer.js";
 import { TerminalFollowing, type FollowingSelector } from "./terminal-following.js";
 import type { FollowControls } from "./terminal-follow-policy.js";
@@ -302,6 +303,15 @@ function bulkSeatName(row: BulkSeatRow): string {
     return `${row.logicalId}@${row.rigName}`;
   }
   return row.logicalId || "unknown";
+}
+
+function manualHerdrViewerClose(endpoint: string, workspaceId: string): string {
+  const socket = endpoint.startsWith("herdr:") ? endpoint.slice(6) : "";
+  if (!isAbsolute(socket) || /[\x00-\x1f\x7f]/.test(socket)
+    || !workspaceId || workspaceId.startsWith("-") || /[\x00-\x1f\x7f]/.test(workspaceId)) {
+    return "The exact endpoint or workspace identity cannot be qualified for a manual command. Inspect the workspace in its original endpoint.";
+  }
+  return `After inspecting the workspace, close it manually: env -u HERDR_ENV -u HERDR_SOCKET_PATH -u OPENRIG_HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)} herdr workspace close ${shellQuote(workspaceId)}`;
 }
 
 function partitionRigRowsForBulk(rows: BulkSeatRow[]): {
@@ -941,24 +951,16 @@ export class TerminalService {
         viewers.push({
           view: record.view, provider: "herdr", target: record.workspaceId,
           outcome: "kept", code: labelsMatch ? "not_separable" : "ownership_unconfirmed",
-          reason: labelsMatch ? "Workspace has foreign or modified tabs/panes." : "Workspace tab labels do not match the recorded rig viewer.",
+          reason: `${labelsMatch ? "Workspace has foreign or modified tabs/panes." : "Workspace tab labels do not match the recorded rig viewer."} ${manualHerdrViewerClose(endpoint, record.workspaceId)}`,
         });
         continue;
       }
 
-      tx.setPhase(key, "closing");
-      try {
-        await adapter.closeWorkspace(record.workspaceId);
-        const after = await adapter.readInventory();
-        if (after.workspaces.some(w => w.workspace_id === record.workspaceId)) {
-          viewers.push({ view: record.view, provider: "herdr", target: record.workspaceId, outcome: "failed", code: "close_pending", reason: "Workspace still present after workspace.close." });
-        } else {
-          tx.remove(key);
-          viewers.push({ view: record.view, provider: "herdr", target: record.workspaceId, outcome: "closed" });
-        }
-      } catch (err) {
-        viewers.push({ view: record.view, provider: "herdr", target: record.workspaceId, outcome: "failed", code: "close_pending", reason: err instanceof Error ? err.message : String(err) });
-      }
+      viewers.push({
+        view: record.view, provider: "herdr", target: record.workspaceId,
+        outcome: "kept", code: "conditional_close_unavailable",
+        reason: `Automatic Herdr close has no qualified compare-and-close operation. ${manualHerdrViewerClose(endpoint, record.workspaceId)}`,
+      });
     }
   }
 
@@ -982,6 +984,10 @@ export class TerminalService {
 
     for (const { key, record } of entries) {
       let inv: Map<string, TmuxInventorySession>;
+      if (!qualifiesTmuxViewer(record)) {
+        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "kept", code: "ownership_unconfirmed", reason: "Recorded viewer fields cannot be qualified for tmux format and command syntax." });
+        continue;
+      }
       try {
         inv = await readTmuxInventory(args => this.runDaemonTmux(args));
       } catch (err) {
@@ -1021,7 +1027,13 @@ export class TerminalService {
 
       tx.setPhase(key, "closing");
       try {
-        await this.runDaemonTmux(["kill-session", "-t", record.sessionId]);
+        const snapshot = await this.runDaemonTmux(["display-message", "-p", "-t", record.sessionId, TMUX_VIEWER_SNAPSHOT]);
+        const closeArgs = tmuxViewerCloseArgs(record, snapshot);
+        if (!closeArgs || (await this.runDaemonTmux(closeArgs)).trim() === TMUX_VIEWER_KEPT) {
+          tx.setPhase(key, record.phase);
+          viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "kept", code: "ownership_unconfirmed", reason: "Tmux viewer identity or contents changed before conditional close." });
+          continue;
+        }
         const after = await readTmuxInventory(args => this.runDaemonTmux(args));
         if (after.has(record.sessionId)) {
           viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "close_pending", reason: "Tmux session still present after kill-session." });

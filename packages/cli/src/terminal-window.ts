@@ -5,6 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { reportTmuxServerLimit, tmuxServerStartCommand } from "@openrig/daemon/tmux-server-start";
+import { qualifiesTmuxViewer, tmuxViewerCloseArgs, TMUX_VIEWER_SNAPSHOT, TMUX_VIEWER_KEPT } from "@openrig/daemon/terminal-viewer-guard";
 import { terminalAuthHeaders, type DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
@@ -414,6 +415,7 @@ async function verifyAndCleanupFailedTmuxViewer(
   viewer: CreatedTmuxViewer,
   retireRecord = true,
 ): Promise<"closed" | "already_gone" | "unknown"> {
+  if (!qualifiesTmuxViewer(viewer)) return "unknown";
   try {
     let sessIds: string[] = [];
     try {
@@ -435,7 +437,10 @@ async function verifyAndCleanupFailedTmuxViewer(
     const clients = splitLines(await runTmux(["list-clients", "-t", viewer.sessionId, "-F", "#{client_name}"]));
     if (clients.length > 0) return "unknown";
 
-    await runTmux(["kill-session", "-t", viewer.sessionId]);
+    const snapshot = await runTmux(["display-message", "-p", "-t", viewer.sessionId, TMUX_VIEWER_SNAPSHOT]);
+    const closeArgs = tmuxViewerCloseArgs(viewer, snapshot, true);
+    if (!closeArgs) return "unknown";
+    if ((await runTmux(closeArgs)).trim() === TMUX_VIEWER_KEPT) return "unknown";
     let afterLines: string[] = [];
     try {
       afterLines = splitLines(await runTmux(["list-sessions", "-F", "#{session_id}"]));

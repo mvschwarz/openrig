@@ -15,6 +15,8 @@ const env = { ...process.env }; delete env["TMUX"];
 function tmux(socket: string, args: string[]): string {
   return execFileSync("tmux", ["-L", socket, "-f", "/dev/null", ...args], { encoding: "utf8", env, timeout: 5000 });
 }
+const isViewerClose = (args: string[]) => args.includes("kill-session")
+  || (args.includes("if-shell") && args.some(arg => arg.startsWith("kill-session -t ")));
 afterEach(() => {
   for (const socket of sockets.splice(0)) {
     try { tmux(socket, ["kill-server"]); } catch { /* Already exited after a failing setup. */ }
@@ -159,6 +161,37 @@ it.each([80, 119, 120, 174])("opens the measured %i-column welcome in an owned v
 });
 
 describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cleanup", () => {
+  it.each(["window", "pane", "nonce", "gone"])("keeps the record when a viewer %s changes after cleanup snapshot", async change => {
+    const fixture = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    let changed = false;
+    const result = await openAllTerminalWindows(fixture.client, "tmux", {
+      herdrConfig: () => "", platform: "darwin",
+      env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" }, exists: () => false,
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file === "/usr/bin/osascript") throw new Error("fixture launch failure");
+        if (file !== "tmux") throw new Error(file);
+        const conditional = args.indexOf("if-shell");
+        if (conditional >= 0 && !changed) {
+          changed = true;
+          const sessionId = args[conditional + 3]!;
+          if (change === "window") tmux(fixture.server, ["new-window", "-d", "-t", sessionId, "-n", "person", "sleep 60"]);
+          if (change === "pane") tmux(fixture.server, ["split-window", "-d", "-t", sessionId, "sleep 60"]);
+          if (change === "nonce") tmux(fixture.server, ["set-option", "-t", sessionId, "@openrig_rig_viewer", "person-nonce"]);
+          if (change === "gone") tmux(fixture.server, ["kill-session", "-t", sessionId]);
+        }
+        return tmux(fixture.server, args);
+      },
+      launch: async () => {}, sleep: async () => {}, id: () => "guarded-cleanup",
+    });
+    expect(changed).toBe(true);
+    expect(result.rigs[0]).toMatchObject({ outcome: "failed", cleanup: "unknown" });
+    expect(fixture.registered).toHaveLength(1);
+    expect(fixture.retired).toHaveLength(0);
+    expect(tmux(fixture.server, ["has-session", "-t", "=op@alpha"])).toBe("");
+    if (change !== "gone") expect(tmux(fixture.server, ["has-session", "-t", "=openrig-view-guarded-cleanup"])).toBe("");
+  });
+
   function setupBulkTmux(rigs: Array<{ rig: string; seats: string[] }>) {
     const id = randomUUID().slice(0, 10);
     const server = `bulk-${id}`;
@@ -436,7 +469,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
             attachedClientChecks++;
             return "client-1\n";
           }
-          if (args.includes("kill-session")) {
+          if (isViewerClose(args)) {
             attachedKillCalls.push(args);
             return "";
           }
@@ -490,7 +523,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
         if (file === "/bin/sh") return "tmux";
         if (file === "/usr/bin/osascript") throw new Error("window failed");
         if (file === "tmux") {
-          if (args.includes("kill-session")) {
+          if (isViewerClose(args)) {
             postPermKillCalls.push(args);
             return tmux(postPerm.server, args);
           }
@@ -524,7 +557,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
         if (file === "/bin/sh") return "tmux";
         if (file === "/usr/bin/osascript") throw new Error("window failed");
         if (file === "tmux") {
-          if (args.includes("kill-session")) {
+          if (isViewerClose(args)) {
             stillKillCalls.push(args);
             return "";
           }
@@ -659,7 +692,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       exec: async (file, args) => {
         if (file === "/bin/sh") return "tmux";
         if (file === "tmux") {
-          if (args.includes("kill-session")) throw new Error("kill denied");
+          if (isViewerClose(args)) throw new Error("kill denied");
           return tmux(base.server, args);
         }
         throw new Error(file);
@@ -754,7 +787,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
         if (file === "/bin/sh") return "tmux";
         if (file === "/usr/bin/osascript") return "window";
         if (file === "tmux") {
-          if (args.includes("kill-session")) {
+          if (isViewerClose(args)) {
             killCalls.push(args);
             return tmux(server, args);
           }
@@ -797,7 +830,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
         if (file === "/bin/sh") return "tmux";
         if (file === "/usr/bin/osascript") throw new Error("window failed");
         if (file === "tmux") {
-          if (args.includes("kill-session")) {
+          if (isViewerClose(args)) {
             killCalls.push(args);
             return tmux(server, args);
           }
@@ -961,7 +994,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
         if (file === "/bin/sh") return "tmux";
         if (file === "/usr/bin/osascript") throw new Error("boom");
         if (file === "tmux") {
-          if (args.includes("kill-session")) failCleanKills.push(args);
+          if (isViewerClose(args)) failCleanKills.push(args);
           return tmux(failClean.server, args);
         }
         throw new Error(file);
@@ -990,7 +1023,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
           throw new Error("boom");
         }
         if (file === "tmux") {
-          if (args.includes("kill-session")) {
+          if (isViewerClose(args)) {
             lateKills.push(args);
             return tmux(late.server, args);
           }
@@ -1027,7 +1060,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
           return "window";
         }
         if (file === "tmux") {
-          if (args.includes("kill-session")) aKills.push(args);
+          if (isViewerClose(args)) aKills.push(args);
           const out = tmux(a.server, args);
           if (tmuxSubcommand(args) === "new-session") return "%9\n";
           return out;
@@ -1060,7 +1093,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
           return "window";
         }
         if (file === "tmux") {
-          if (args.includes("kill-session")) bKills.push(args);
+          if (isViewerClose(args)) bKills.push(args);
           const out = tmux(b.server, args);
           if (tmuxSubcommand(args) === "split-window") return "$999|@99|%99\n";
           return out;

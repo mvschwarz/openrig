@@ -506,8 +506,9 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
 
     // Closing must only close rig:alpha, never saved:rig:example or saved:kernel:
     const closed = await svc.closeAll({ provider: "herdr" });
-    expect(closed.viewers.map(v => ({ view: v.view, outcome: v.outcome }))).toEqual([{ view: "rig:alpha", outcome: "closed" }]);
-    expect(h.workspaces).toHaveLength(5);
+    expect(closed.viewers.map(v => ({ view: v.view, outcome: v.outcome }))).toEqual([{ view: "rig:alpha", outcome: "kept" }]);
+    expect(h.calls.some(c => c.method === "workspace.close")).toBe(false);
+    expect(h.workspaces).toHaveLength(6);
   });
 
   it("J02: rejects creation ownership when an unexplained person pane appears in the applied tab between layout.apply and pane.list", async () => {

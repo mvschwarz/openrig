@@ -331,7 +331,8 @@ describe("#3081 bf06 child B01/BT01 — HTTP /close-all and /close with real Ter
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(closedWorkspaces).toEqual(["ws-work"]);
+    expect(closedWorkspaces).toEqual([]);
+    expect(body.viewers.find((v: { target: string }) => v.target === "ws-work")).toMatchObject({ outcome: "kept", code: "conditional_close_unavailable", reason: expect.stringContaining("herdr workspace close 'ws-work'") });
     expect(tmuxExec).not.toHaveBeenCalled();
     expect(body.viewers.some((v: { provider: string }) => v.provider === "tmux")).toBe(false);
     expect(body.viewers.find((v: { target: string }) => v.target === "ws-def")).toMatchObject({ outcome: "kept", code: "different_endpoint" });
