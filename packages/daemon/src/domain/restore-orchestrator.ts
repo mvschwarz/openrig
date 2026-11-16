@@ -1126,11 +1126,11 @@ export class RestoreOrchestrator {
    *  review), taken before any restore mutation: the seats kept attached to an external CLI, from their bindings (the
    *  record that makes restore leave them running, left_attached, instead of launching them), and, only when this
    *  restore would resume a seat with a recorded conversation it can pair (pairableConversation), ONE read of the node inventory of the listed rigs and
-   *  this rig (an archived rig's restore inclusive): this rig's seats' sessionStatus and the partners' records. A session
-   *  of this rig recorded running that classifyRunningSessions found stale (no tmux session) is named detached, the
-   *  status this restore gives it before it launches anything, so the report never calls it running. An inventory that
-   *  cannot be read leaves the partner comparison unavailable; this rig's own statuses then come from a read of this rig
-   *  alone ("unknown" when that fails too). */
+   *  this rig (an archived rig's restore inclusive): this rig's seats' sessionStatus and the partners' records. A seat of
+   *  this rig whose current session is recorded running and was found stale by classifyRunningSessions (no tmux session)
+   *  is named detached, the status this restore gives it before it launches anything, so the report never calls it
+   *  running. An inventory that cannot be read leaves the partner comparison unavailable; this rig's own statuses then
+   *  come from a read of this rig alone ("unknown" when that fails too). */
   private observeConversationRecords(rigId: string, data: SnapshotData, freshLogicalIds: string[] | undefined,
     currentRuntimes: Record<string, string | null | undefined>, staleSessionIds: readonly string[]): ConversationRecords {
     const attachedLogicalIds = (this.rigRepo.getRig(rigId)?.nodes ?? [])
@@ -1140,7 +1140,14 @@ export class RestoreOrchestrator {
       return { currentStatuses: {}, attachedLogicalIds, inventory: [] };
     }
     const staleIds = new Set(staleSessionIds);
-    const staleNodeIds = new Set(this.sessionRegistry.getSessionsForRig(rigId).filter((session) => staleIds.has(session.id)).map((session) => session.nodeId));
+    // An inventory entry is its node's newest session (node-inventory's ORDER BY id DESC). It is named detached only
+    // when that session is a stale one, not when an older session of the node is.
+    const newestByNode = new Map<string, string>();
+    for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
+      const newest = newestByNode.get(session.nodeId);
+      if (newest === undefined || session.id > newest) newestByNode.set(session.nodeId, session.id);
+    }
+    const staleNodeIds = new Set([...newestByNode].filter(([, sessionId]) => staleIds.has(sessionId)).map(([nodeId]) => nodeId));
     const labelled = (entry: NodeInventoryEntry): NodeInventoryEntry =>
       entry.rigId === rigId && entry.sessionStatus === "running" && staleNodeIds.has(entry.nodeId) ? { ...entry, sessionStatus: "detached" } : entry;
     const statusesOf = (entries: readonly NodeInventoryEntry[]) => Object.fromEntries(entries.map((entry) => [entry.logicalId, entry.sessionStatus ?? null]));
