@@ -602,7 +602,7 @@ describe("#3081 bf06 child B01/B02/B03 — CLI bulk close, currentHerdr guards &
       const { client, calls } = makeBugfixClient({
         routes: {
           "GET /api/terminal/status": { status: 200, data: { tmux: { mode: "inherit", serverArgs: [] } } },
-          "GET /api/terminal/views": { status: 200, data: { rigs: ["alpha"] } },
+          "GET /api/terminal/views": { status: 200, data: { rigs: ["alpha"], rigIdentities: [{ id: "alpha", name: "alpha" }] } },
         },
       });
       const { windowDeps, execCalls, launchCalls } = makeBugfixDeps({ env: herdrEnv, hasHerdr: true });
@@ -622,7 +622,7 @@ describe("#3081 bf06 child B01/B02/B03 — CLI bulk close, currentHerdr guards &
       const { client: emptyClient, calls: emptyCalls } = makeBugfixClient({
         routes: {
           "GET /api/terminal/status": { status: 200, data: { tmux: { mode: "inherit", serverArgs: [] } } },
-          "GET /api/terminal/views": { status: 200, data: { rigs: [] } },
+          "GET /api/terminal/views": { status: 200, data: { rigs: [], rigIdentities: [] } },
         },
       });
       const resEmptyTmux = await openAllTerminalWindows(emptyClient, "tmux", windowDeps);
@@ -632,7 +632,7 @@ describe("#3081 bf06 child B01/B02/B03 — CLI bulk close, currentHerdr guards &
 
     // CLI --json surface inside Herdr with --provider tmux --window:
     const { deps } = makeDeps({
-      routes: { "GET /api/terminal/views": { status: 200, data: { rigs: ["alpha"] } } },
+      routes: { "GET /api/terminal/views": { status: 200, data: { rigs: ["alpha"], rigIdentities: [{ id: "alpha", name: "alpha" }] } } },
       windowDeps: { env: { DISPLAY: ":0", HOME: "/tmp/h", HERDR_ENV: "1", HERDR_PANE_ID: "%1", HERDR_SOCKET_PATH: "/tmp/h/.config/herdr/herdr.sock" } },
     });
     const prog = createProgram({ terminalDeps: deps });
@@ -780,7 +780,7 @@ describe("#3081 bf06 child B01/B02/B03 — CLI bulk close, currentHerdr guards &
     const partialThrowClient = makeBugfixClient({
       routes: {
         "GET /api/terminal/status": { status: 200, data: { tmux: { mode: "inherit", serverArgs: [] } } },
-        "GET /api/terminal/views": { status: 200, data: { rigs: ["alpha", "beta"] } },
+        "GET /api/terminal/views": { status: 200, data: { rigs: ["alpha", "beta"], rigIdentities: [{ id: "alpha", name: "alpha" }, { id: "beta", name: "beta" }] } },
         "GET /api/terminal/preview?view=rig%3Aalpha&provider=herdr&bulk=1": {
           status: 200,
           data: {
@@ -797,7 +797,6 @@ describe("#3081 bf06 child B01/B02/B03 — CLI bulk close, currentHerdr guards &
           },
         },
         "GET /api/terminal/preview?view=rig%3Abeta&provider=herdr&bulk=1": new Error("preview beta boom"),
-        "POST /api/terminal/rig-viewers": { status: 200, data: { ok: true } },
       },
     });
     const tmuxDeps = makeBugfixDeps({
