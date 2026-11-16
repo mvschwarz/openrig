@@ -441,6 +441,8 @@ export interface RestoreDeliveryAttempt {
   noticeErrorClass?: string;
   /** Consecutive polls of this owed stage whose readiness could not be determined. */
   unknownReadinessPolls?: number;
+  /** This attempt was sent with #2818's bounded unknown-readiness fallback (allowUnknownWhileIdle). */
+  unknownAllowed?: true;
   /** Legacy unreadable-poll count from records written before restore input followed ordinary delivery defaults. */
   unreadable?: number;
   /** What the input box read: on a hold, the reading held on; on a delivery over a box OpenRig couldn't read (#2575),
@@ -1019,7 +1021,11 @@ export class ClaudeCompactionEnforcer {
       // The awaited lifecycle has settled: notice work must not inherit its active lease.
       const lastDelivery = record?.record.lastDelivery;
       const deliveredUnreadable = lastDelivery?.reason === "delivered_over_unreadable_pane";
-      if (record && lastDelivery && lastDelivery !== previous && (lastDelivery.failures >= 2 || deliveredUnreadable) && this.onRestoreDeliveryFailure) {
+      // Unknown readiness before #2818's bounded fallback has been tried is waiting for that fallback: the next poll sends
+      // over it. Only a refusal once it was tried, or any other repeated failure, says the stage couldn't be delivered.
+      const awaitingFallback = lastDelivery?.reason === "target_activity_unknown" && !lastDelivery.unknownAllowed;
+      if (record && lastDelivery && lastDelivery !== previous && ((lastDelivery.failures >= 2 && !awaitingFallback) || deliveredUnreadable)
+        && this.onRestoreDeliveryFailure) {
         void Promise.resolve().then(() => {
           const current = this.records.get(input.sessionName);
           if ((current !== record && !(deliveredUnreadable && !current && !this.pendingPostCompactRestore.has(input.sessionName)))
@@ -1040,6 +1046,7 @@ export class ClaudeCompactionEnforcer {
     session: string, stage: PendingPostCompactStage | undefined,
     record: { file: string; record: CompactionRecord } | undefined,
     result: Pick<SendResult, "ok" | "reason" | "outcome" | "activity" | "heldInputBox" | "inputReadFailure">, errorClass?: string,
+    sent?: { unknownAllowed: boolean },
   ): void {
     if (!stage || !record || this.records.get(session) !== record || this.pendingPostCompactRestore.get(session) !== stage) return;
     const prior = record.record.lastDelivery;
@@ -1059,6 +1066,7 @@ export class ClaudeCompactionEnforcer {
       ...(errorClass ? { errorClass } : {}), failures: waiting ? 0 : (prior?.failures ?? 0) + 1,
       ...(held ? { inputBox: held } : {}), ...(unreadable ? { unreadable } : {}),
       ...(unknownReadinessPolls ? { unknownReadinessPolls } : {}),
+      ...(sent?.unknownAllowed ? { unknownAllowed: true as const } : {}),
     };
     this.persist(session, record.record.attemptId, { lastDelivery });
   }
@@ -1066,7 +1074,9 @@ export class ClaudeCompactionEnforcer {
   private async sendRestoreStage(session: string, text: string, options: Parameters<SessionTransport["send"]>[2]): Promise<SendResult> {
     const stage = this.pendingPostCompactRestore.get(session), record = this.records.get(session);
     const result = await this.sessionTransport.send(session, text, options);
-    if (!result.ok || result.outcome === "retained") this.recordRestoreFailure(session, stage, record, result);
+    if (!result.ok || result.outcome === "retained") {
+      this.recordRestoreFailure(session, stage, record, result, undefined, { unknownAllowed: options?.allowUnknownWhileIdle === true });
+    }
     return result;
   }
 
