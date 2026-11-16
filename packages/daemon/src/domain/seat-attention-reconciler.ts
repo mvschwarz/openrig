@@ -413,8 +413,8 @@ export class SeatAttentionReconciler {
   /** Each session's last activity state seen by `onSeatActivity`. */
   private readonly lastActivity = new Map<string, string | undefined>();
 
-  /** A seat a full restore stopped at a prompt (a resume-selection picker) keeps that outcome, and needs attention,
-   *  until the strict reconciler proves the resume (#2622). Its activity turning to running or idle is when the person
+  /** A seat a restore or subset launch stopped at a prompt (a resume-selection picker), or couldn't prove resumed at
+   *  launch, keeps that outcome, and needs attention, until the strict reconciler proves the resume (#2622). Its activity turning to running or idle is when the person
    *  may have answered, so the reconciler runs then, once per such change. Its own proof decides. A failed check leaves
    *  the outcome uncleared, appending no reconciliation and emitting no refusal (unlike clearAttention's), though the
    *  check still records the identity evidence it reads. Returns whether the outcome was reconciled. */
@@ -426,8 +426,8 @@ export class SeatAttentionReconciler {
   }
 
   /** A seat can answer its prompt and settle while the rest of the rig still restores, before its outcome exists, and
-   *  then report no further change. When a full restore completes, check each of the rig's seats last read running or
-   *  idle, once, the same way. Returns how many outcomes were reconciled. */
+   *  then report no further change. When a restore or subset launch completes, check each of the rig's seats last read
+   *  running or idle, once, the same way. Returns how many outcomes were reconciled. */
   async onRestoreCompleted(rigId: string): Promise<number> {
     const checks = [...this.lastActivity]
       .filter(([, state]) => state === "running" || state === "idle")
@@ -440,8 +440,8 @@ export class SeatAttentionReconciler {
     const session = reconcile ? this.findLatestSessionByName(sessionName) : null;
     if (!reconcile || !session || (rigId !== undefined && session.rigId !== rigId)) return false;
     const derived = this.getDerivedAttentionOutcome(session);
-    // Subset restores and an assisted startup's own outcome keep their established paths.
-    if (derived?.source !== "restore.completed" || derived.assistedStartupAttemptId !== undefined) return false;
+    // An assisted startup's own outcome keeps its established path.
+    if (!derived || derived.assistedStartupAttemptId !== undefined) return false;
     const restored = await reconcile(session.rigId, session.nodeId).catch(() => null);
     return restored?.ok === true;
   }
