@@ -23,7 +23,8 @@ interface RigSpecExporterDeps {
  *  export would otherwise drop the request). */
 function processLimitsExportRefused(logicalId: string, error: string): ExportRefusedError {
   return new ExportRefusedError(`Cannot export seat '${logicalId}': ${error}. Fix it by re-applying the spec with ` +
-    "process_limits: { tasks_max: <N> }, or clear it with process_limits: {}; then export again.");
+    "process_limits: { tasks_max: <N> }, or clear it with process_limits: {} (an ordinary re-apply: a first-start retry " +
+    "keeps an unreadable value as stored); then export again.");
 }
 
 export class RigSpecExporter {

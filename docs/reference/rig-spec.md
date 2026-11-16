@@ -1082,16 +1082,20 @@ members:
   - `process_limits_unverified` (retryable) when it isn't known either way: the user manager timed out or its socket
     refused the connection (starting or restarting), the probe read nothing, an error not recognized, a launch setting
     that couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
-    didn't see in time (its new session is removed, and the seat is never started again without the limit). The first
+    didn't see in time (its new session is removed, by the identity tmux printed when it made it, and the seat is never
+    started again without the limit; when it can't be removed, the refusal says the session may still be running and
+    how to stop it). The first
     launch after that minute checks again, so a setup fixed meanwhile is seen;
   - `process_limits_invalid` when the seat's stored value can't be read: only this seat is affected, and the value is
     kept until a re-applied spec replaces or clears it.
   Over HTTP, `process_limits_unverified` answers 409 and the other three 422, with `retryable` and `processLimits` (the
   kind, the reason and the requested value). A daemon that is not itself a systemd user service is no reason: the probe
-  decides. Remove the key to launch the seat as before.
+  decides. To launch an existing seat as before, re-apply its spec with `process_limits: {}`: with the key just
+  removed, the stored limit stays (see "Persistence and clear").
 - **A recovery goes ahead without it, and says so:** A handover, a runtime switch and a restart in place choose their
   path before anything is stopped. A restore and a resume (`rig up` from a snapshot, an auto-rehydrate, a resume of the
-  seat's own conversation) are recoveries too: nothing of the seat runs then, and right after a reboot the user manager
+  seat's own conversation) are recoveries too, the fresh launch a restore falls back to for a seat with no saved startup
+  context included: nothing of the seat runs then, and right after a reboot the user manager
   may not answer yet. Where the limit can't be applied, they go on without it and return a structured
   warning (`processLimits`: `state: "not_applied"`, the kind, the reason, whether a retry may help); the request stays
   stored, and the seat's status reads "requested, not applied" until a fresh launch applies it. A recovery never stops a

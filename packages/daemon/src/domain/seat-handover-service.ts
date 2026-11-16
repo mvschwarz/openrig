@@ -188,7 +188,9 @@ export type SeatHandoverResult =
   | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented" | "source_not_supported" | "resume_token_unavailable" | "fork_source_not_found"; message: string; guidance: string }
   | { ok: false; code: "address_conflict" | "current_occupant_required" | "discovered_not_active" | "successor_tmux_absent" | "successor_already_managed" | "successor_is_current" | "runtime_mismatch"; message: string; guidance: string }
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
-  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string }
+  | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "context_delivery_failed"; message: string; guidance: string;
+    /** #3253: the successor went on without the seat's requested process limit before the failure. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
   // #2985: once the successor was launched in the respawned pane, the failure says so and names the pane.
   | { ok: false; code: "successor_create_failed"; message: string; guidance: string; replacementStarted?: true; successorPane?: string;
     /** #3253: the respawned pane went on without the seat's requested process limit before the failure. */
@@ -778,6 +780,7 @@ export class SeatHandoverService {
           ok: false,
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-restore-packet": ${delivered.message}`,
+          ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
           guidance: recorded
             ? `${this.recoverLine(shellQuote(latestSession.session_name))} The successor candidate was unwound and the seat's binding is unchanged. The successor is live in pane "${launch.tmuxPane}" without its restore packet; ${NO_RETRY}`
             : "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
@@ -861,6 +864,7 @@ export class SeatHandoverService {
           ok: false,
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-rebuild-priming": ${delivered.message}`,
+          ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
           guidance: recorded
             ? `${this.recoverLine(shellQuote(latestSession.session_name))} The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; ${NO_RETRY}`
             : "The discovery candidate was marked vanished and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. The successor may still process the priming packet. Inspect the successor's screen and resolve its state before another attempt; retry only after tmux delivery is healthy.",
@@ -1372,8 +1376,10 @@ export class SeatHandoverService {
     /** #2985: this finalization adopts the running successor of a failed handover (`--recover`). */
     recovered?: { attempt: SeatHandoverAttempt; continuity?: "resumed"; conversationUnconfirmed?: string };
   }): Promise<SeatHandoverResult> {
-    const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
+    const fail = async (refused: SeatHandoverResult): Promise<SeatHandoverResult> => {
       if (input.cleanup) await input.cleanup();
+      // #3253: a successor that went on without the seat's limit says so, also when its finalization fails.
+      const result = !refused.ok && input.processLimits ? { ...refused, processLimits: input.processLimits } as SeatHandoverResult : refused;
       if (!result.ok && input.recordFailure?.(result.code) && "guidance" in result) {
         // #3044 review S6: the refusal's own guidance (retry, or discovered-source advice) would end the running
         // successor; the message already says what refused, so the recovery leads.

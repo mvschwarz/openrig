@@ -367,6 +367,9 @@ describe("SuccessorSessionLauncher", () => {
 
     checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
     expect(await stage()).toMatchObject({ ok: false, processLimits: notice });
+    // a step after the create that throws keeps it too
+    listPanes.mockRejectedValueOnce(new Error("lost server"));
+    expect(await stage()).toMatchObject({ ok: false, code: "successor_launch_failed", processLimits: notice });
   });
 
   it("retiree NEVER exits (survives TERM and KILL) → structured retiree_not_terminated, NO respawn (never clobber a live retiree)", async () => {

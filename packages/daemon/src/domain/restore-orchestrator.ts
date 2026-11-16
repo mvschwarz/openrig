@@ -257,11 +257,13 @@ export interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. */
-  freshLaunch?: (rigId: string, nodeId: string) => Promise<{
+  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. #3253: the restore passes "recovery", so a
+   *  process limit that can't be applied doesn't stop the seat; the notice comes back in `processLimits`. */
+  freshLaunch?: (rigId: string, nodeId: string, opts?: { processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode }) => Promise<{
     status: "launched" | "failed" | "attention_required";
     error?: string;
     warnings?: string[];
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
   }>;
   /** Return whether a persisted fresh launch can be attempted without discarding the current pane. */
   freshLaunchAvailable?: (rigId: string, nodeId: string) => boolean;
@@ -2229,13 +2231,16 @@ export class RestoreOrchestrator {
             && candidate.status === "running"
             && candidate.id !== launchResult.session.id);
         try {
-          const fresh = await this.freshLaunch(rigId, node.id);
+          // #3253: this replaces the provisional shell of a restore, so it is a recovery too: a limit that can't be
+          // applied doesn't stop the seat, and its notice is the node's.
+          const fresh = await this.freshLaunch(rigId, node.id, { processLimitsMode: "recovery" });
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
+          const limits = fresh.processLimits ? { processLimits: fresh.processLimits } : {};
           if (fresh.status === "launched") {
-            return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed" };
+            return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed", ...limits };
           }
           if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
-          return { nodeId: node.id, logicalId: node.logicalId, status: fresh.status, error: fresh.error };
+          return { nodeId: node.id, logicalId: node.logicalId, status: fresh.status, error: fresh.error, ...limits };
         } catch (err) {
           if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
           return {

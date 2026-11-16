@@ -596,10 +596,20 @@ export interface SeatLaunchPolicy { inheritTmuxEnvironment: boolean; env: Readon
   runtimeDir?: string }
 
 /** The launch result of a fresh seat launch whose limit can't be applied. */
-function processLimitsNotAppliedResult(error: SeatProcessLimitsNotApplied): TmuxResult {
-  console.warn(`[seat launch] ${error.message}`);
-  return { ok: false, code: `process_limits_${error.problem.kind}`, message: error.message,
+function processLimitsNotAppliedResult(error: SeatProcessLimitsNotApplied, left?: string | null): TmuxResult {
+  const message = left ? `${error.message} ${left}` : error.message;
+  console.warn(`[seat launch] ${message}`);
+  return { ok: false, code: `process_limits_${error.problem.kind}`, message,
     retryable: error.problem.kind === "unverified", processLimits: error.problem };
+}
+
+/** What a capped launch's new-session prints: its pane, its session's immutable id and its server (pid, start time). */
+const CREATED_IDENTITY_FORMAT = "#{pane_id} #{session_id} #{pid} #{start_time}";
+type CreatedIdentity = { pane: string; session: string; server: { pid: string; start: string } };
+/** The identity a capped new-session printed, or null when it printed something else (or nothing). */
+function createdIdentity(printed: string): CreatedIdentity | null {
+  const m = /^(%\d+) (\$\d+) (\d+) (\d+)$/.exec(printed);
+  return m ? { pane: m[1]!, session: m[2]!, server: { pid: m[3]!, start: m[4]! } } : null;
 }
 
 /** A check's failure, classified (#3253): `unsupported` only on a positive answer that the facility is not there. */
@@ -1718,24 +1728,29 @@ export class TmuxAdapter {
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
     for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
-    // The pane new-session itself made: an after-new-session hook may select another window.
-    argv.push("-P", "-F", "#{pane_id}");
     const legacyParts = ["tmux", "new-session", "-d", "-s", tmuxConfigQuote(name)];
     if (cwd != null) legacyParts.push("-c", tmuxConfigQuote(cwd));
     for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
-    legacyParts.push("-P", "-F", tmuxConfigQuote("#{pane_id}"));
     const warnings: string[] = [];
     let scopedCommand: string[] | null;
     const notices: ScopeNotices = launchOpts?.failedStart ? { failedStart: launchOpts.failedStart } : {};
     try { scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, launchOpts?.processLimitsMode, notices); }
     catch (error) { if (error instanceof SeatProcessLimitsNotApplied) return processLimitsNotAppliedResult(error); throw error; }
+    // The pane new-session itself made: an after-new-session hook may select another window. A capped launch also
+    // prints, from the same command, the session it made and its server (pid and start time), so a refusal below
+    // removes that session and no other: a server that exits and comes back reuses pane and session ids.
+    const printFormat = notices.capped ? CREATED_IDENTITY_FORMAT : "#{pane_id}";
+    argv.push("-P", "-F", printFormat);
+    legacyParts.push("-P", "-F", tmuxConfigQuote(printFormat));
     if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(tmuxConfigQuote)); }
-    let created: string;
+    let printed: string;
     try {
-      created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
+      printed = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
     } catch (err) {
       return classifyWriteError(err);
     }
+    const made = notices.capped ? createdIdentity(printed) : null;
+    const created = notices.capped ? (printed.split(/\s+/)[0] ?? "") : printed;
     // tmux can exit 0 having made nothing: a server that can't create its socket prints its error and quits, and the
     // client still exits 0. new-session prints the pane it made; with none, the session must be read back before the
     // launch counts as created.
@@ -1749,17 +1764,9 @@ export class TmuxAdapter {
     // entering the scope, and the seat starts again without the limit, with the warning (in the same pane when tmux
     // kept it, else in a new session of the same name); when the start can't be told, nothing is run again.
     if (notices.capped) {
-      // The session this launch made, read right away from the pane new-session printed: its immutable id and its
-      // server (a server that exits and comes back reuses pane and session ids), so a refusal below removes that one
-      // and never a session of the same name made meanwhile outside the daemon.
-      const made = /^%\d+$/.test(created) ? await this.sessionOfPane(created) : null;
       const outcome = await this.scopeStartOutcome(/^%\d+$/.test(created) ? created : null, launchOpts?.processLimitsMode, notices, warnings);
       if (outcome && "refuse" in outcome) {
-        // No pane id printed: the session was confirmed by name above, so the name is what is known. A pane already
-        // gone when it was read: its one-pane session went with it, and nothing is removed.
-        if (made) await this.killSessionUnchecked(made.session, undefined, undefined, made.server).catch(() => undefined);
-        else if (!/^%\d+$/.test(created)) await this.killSessionUnchecked(name).catch(() => undefined);
-        return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied(outcome.refuse));
+        return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied(outcome.refuse), await this.removeRefusedSession(name, made));
       }
       if (outcome) {
         const failedStart = outcome.retryUncapped;
@@ -2085,17 +2092,20 @@ export class TmuxAdapter {
     }
   }
 
-  /** The session holding `pane` and its server (pid and start time), in one read; null when the pane is gone or the
-   *  read fails. */
-  private async sessionOfPane(pane: string): Promise<{ session: string; server: { pid: string; start: string } } | null> {
-    try {
-      const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}|#{pid}|#{start_time}"],
-        `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}|#{pid}|#{start_time}'`);
-      const [session = "", pid = "", start = ""] = stdout.trim().split("|");
-      return /^\$\d+$/.test(session) && /^\d+$/.test(pid) && /^\d+$/.test(start) ? { session, server: { pid, start } } : null;
-    } catch {
-      return null;
-    }
+  /** #3253: removes the session a refused fresh launch made, by the identity its new-session printed, and only while
+   *  that id is that session on that server. Null when it is gone (removed now, or already gone with its pane or its
+   *  server); otherwise the sentence the refusal adds: the session may still be running, and how to look and stop it.
+   *  Without a printed identity nothing is removed, never by name (a same-named session may not be this launch's). */
+  private async removeRefusedSession(name: string, made: CreatedIdentity | null): Promise<string | null> {
+    const look = ` Look with \`${tmuxOnDaemonServer()} attach -t ${shellQuote(`=${name}`)}\` and stop it with `
+      + `\`${tmuxOnDaemonServer()} kill-session -t ${shellQuote(`=${name}`)}\` if it is this launch's.`;
+    if (!made) return `Its session "${name}" may still be running: tmux didn't print the session it made, so it was not removed.${look}`;
+    const removed = await this.killSessionUnchecked(made.session, undefined, undefined, made.server)
+      .catch((err: unknown) => classifyWriteError(err));
+    // Gone either way: removed now, no longer there (session_not_found), or its server was replaced (guard_target_changed:
+    // the id names another terminal now, and the server that held this session is gone with it).
+    if (removed.ok || removed.code === "session_not_found" || removed.code === "guard_target_changed") return null;
+    return `Its session "${name}" (${made.session}) may still be running: it could not be removed (${removed.message.trim()}).${look}`;
   }
 
   /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill.

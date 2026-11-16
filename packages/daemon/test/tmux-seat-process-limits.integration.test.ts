@@ -85,7 +85,7 @@ describe.runIf(enabled)("seat process limits on a real user manager (#3253)", ()
         // A seat's own bus is off and no runtime directory is set for it: the scope's restore has to unset one and set
         // the other (the combination env reads wrong when an assignment comes before -u).
         env: { PATH: process.env.PATH, HOME: process.env.HOME, DBUS_SESSION_BUS_ADDRESS: "disabled:" },
-        runtimeDir: seatRuntimeDir(process.env) });
+        runtimeDir: undefined });
       adapter.seatProcessLimits = (nodeId) => (nodeId === "it-a" ? { tasksMax: TASKS_MAX } : undefined);
 
       expect(await adapter.startServer()).toEqual({ ok: true });
@@ -123,7 +123,7 @@ describe.runIf(enabled)("seat process limits on a real user manager (#3253)", ()
         const file = join(dir, `${seat}.rc`);
         return existsSync(file) ? readFileSync(file, "utf8").trim() : null;
       });
-      const pids = (seat: string) => (existsSync(join(dir, `${seat}.pids`)) ? readFileSync(join(dir, `${seat}.pids`), "utf8").trim().split("\n") : []);
+      const pids = (seat: string) => (existsSync(join(dir, `${seat}.pids`)) ? readFileSync(join(dir, `${seat}.pids`), "utf8").trim().split("\n").filter(Boolean) : []);
       const [rcA, rcB] = [await rc("it-a"), await rc("it-b")];
 
       // A: the limit refused forks inside its scope, and its batch stopped short.
@@ -134,7 +134,7 @@ describe.runIf(enabled)("seat process limits on a real user manager (#3253)", ()
       expect(limitHits(cgroupA)).toBeGreaterThan(0);
       expect(readFileSync(`/sys/fs/cgroup${cgroupA}/pids.max`, "utf8").trim()).toBe(String(TASKS_MAX));
       expect(rcA).not.toBe("0");
-      expect(pids("it-a").length).toBeGreaterThan(0);  // it forked up to the limit, then was refused
+      expect(pids("it-a").filter(pid => /^\d+$/.test(pid)).length).toBeGreaterThan(0);  // it forked up to the limit, then was refused
       expect(pids("it-a").length).toBeLessThan(FORKS);
       expect(pids("it-a")).not.toContain("done");
 

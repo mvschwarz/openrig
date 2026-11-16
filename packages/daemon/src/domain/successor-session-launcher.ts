@@ -408,13 +408,14 @@ export class SuccessorSessionLauncher {
       ...(input.node.seatProjectDir && (input.node.runtime === "codex" || input.node.runtime === "claude-code") ? { [SEAT_NODE_ENV]: process.execPath } : {}),
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration,
     });
+    // #3253: the staging launch's own warning (a limit it went ahead without) reaches the switch's result, also when
+    // the successor then fails, a later step throwing included.
+    let limitsNotice: { processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice } = {};
     try {
       const created = await this.tmuxAdapter.createSession(input.stagingSession, input.node.cwd ?? undefined, env,
         { processLimitsMode: "recovery" });
       if (!created.ok) return { ok: false, code: created.code ?? "successor_create_failed", message: created.message ?? "The staging session couldn't be created." };
-      // #3253: the staging launch's own warning (a limit it went ahead without) reaches the switch's result, also when
-      // the successor then fails.
-      const limitsNotice = created.processLimits ? { processLimits: created.processLimits } : {};
+      if (created.processLimits) limitsNotice = { processLimits: created.processLimits };
       const panes = await this.tmuxAdapter.listPanes(input.stagingSession);
       if (panes.length !== 1) return { ok: false, code: "pane_unresolved", message: "The staging session should have exactly one new pane.", ...limitsNotice };
       const pane = panes[0]!.id;
@@ -431,7 +432,7 @@ export class SuccessorSessionLauncher {
       const notes = [...(started.notes ?? []), ...(created.warnings ?? [])];
       return { ...started, tmuxPane: pane, ...(notes.length ? { notes } : {}), ...limitsNotice };
     } catch (err) {
-      return { ok: false, code: "successor_launch_failed", message: (err as Error).message };
+      return { ok: false, code: "successor_launch_failed", message: (err as Error).message, ...limitsNotice };
     }
   }
 

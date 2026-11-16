@@ -910,11 +910,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Filled after the pod-aware instantiator is constructed below. Keeping this
   // callback late-bound avoids making restore depend on construction order while
   // still giving fresh restores the same full launch path as `rig up`.
-  let persistedFreshPodLaunch: ((rigId: string, nodeId: string) => Promise<{
-    status: "launched" | "failed" | "attention_required";
-    error?: string;
-    warnings?: string[];
-  }>) | undefined;
+  let persistedFreshPodLaunch: RestoreOrchestratorDeps["freshLaunch"];
   let persistedFreshPodLaunchAvailable: ((rigId: string, nodeId: string) => boolean) | undefined;
   let persistedSeatSkillSelection: RestoreOrchestratorDeps["seatSkillSelection"];
 
@@ -925,8 +921,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     getDesiredClaudeActivityHooks: createDesiredClaudeActivityHooksReader(db, {
       exists: (p: string) => fs.existsSync(p), readFile: (p: string) => fs.readFileSync(p, "utf-8"),
     }),
-    freshLaunch: async (rigId, nodeId) => persistedFreshPodLaunch
-      ? persistedFreshPodLaunch(rigId, nodeId)
+    freshLaunch: async (rigId, nodeId, launchOpts) => persistedFreshPodLaunch
+      ? persistedFreshPodLaunch(rigId, nodeId, launchOpts)
       : { status: "failed", error: "Pod instantiator is not ready for a fresh launch." },
     freshLaunchAvailable: (rigId, nodeId) => persistedFreshPodLaunchAvailable?.(rigId, nodeId) ?? false,
     seatSkillSelection: async (rigId, nodeId) => persistedSeatSkillSelection
@@ -1322,7 +1318,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
     skillReconciler: reconcileSkillLoadout,
   });
-  persistedFreshPodLaunch = (rigId, nodeId) => podInstantiator.launchPersistedFresh(rigId, nodeId);
+  persistedFreshPodLaunch = (rigId, nodeId, launchOpts) => podInstantiator.launchPersistedFresh(rigId, nodeId, launchOpts);
   persistedFreshPodLaunchAvailable = (rigId, nodeId) => podInstantiator.canLaunchPersistedFresh(rigId, nodeId);
   persistedSeatSkillSelection = (rigId, nodeId) => podInstantiator.seatSkillSelection(rigId, nodeId);
 

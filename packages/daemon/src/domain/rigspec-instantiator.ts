@@ -339,7 +339,7 @@ import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, SkillResource
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { ProcessLimitsMode, SeatProcessLimitsNotice, TmuxAdapter } from "../adapters/tmux.js";
 import { installTopologyDefaults } from "./topology-defaults-installer.js";
 import type {
   CompactionStrategy,
@@ -2158,6 +2158,7 @@ export class PodRigInstantiator {
     cwdOverride?: string;
     envOverride?: SeatEnv;
     resolveResult?: ReturnType<typeof resolveAgentRef>;
+    processLimitsMode?: ProcessLimitsMode;
   }) {
     return this.launchBinding(input);
   }
@@ -2184,7 +2185,10 @@ export class PodRigInstantiator {
     keepRecordedAdditions?: boolean;
     /** An agent spec the caller already resolved for this launch. */
     resolveResult?: ReturnType<typeof resolveAgentRef>;
-  }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+    /** #3253: how the launch treats a process limit it can't apply (default fresh: refused). A restore passes "recovery". */
+    processLimitsMode?: ProcessLimitsMode;
+  }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
+    processLimits?: SeatProcessLimitsNotice }> {
     return input.member.agentRef === "builtin:terminal"
       ? this.launchExistingTerminalMember(input)
       : this.launchExistingAgentMember(input);
@@ -2200,7 +2204,9 @@ export class PodRigInstantiator {
   async launchPersistedFresh(
     rigId: string,
     nodeId: string,
-  ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+    opts?: { processLimitsMode?: ProcessLimitsMode },
+  ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
+    processLimits?: SeatProcessLimitsNotice }> {
     const rig = this.deps.rigRepo.getRig(rigId);
     const node = rig?.nodes.find((candidate) => candidate.id === nodeId);
     if (!rig || !node) {
@@ -2240,6 +2246,7 @@ export class PodRigInstantiator {
       // --cwd-override, rather than silently falling back to process cwd.
       cwdOverride: node.cwd ?? undefined,
       resolveResult,
+      ...(opts?.processLimitsMode ? { processLimitsMode: opts.processLimitsMode } : {}),
     });
     const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
     return advisories.length ? { ...launched, warnings: [...advisories, ...(launched.warnings ?? [])] } : launched;
@@ -2460,7 +2467,9 @@ export class PodRigInstantiator {
     /** The first-start retry's member carries only retained fields, not the launch additions: keep the ones the first
      *  start recorded rather than read an empty request as "none". */
     keepRecordedAdditions?: boolean;
-  }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+    processLimitsMode?: ProcessLimitsMode;
+  }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
+    processLimits?: SeatProcessLimitsNotice }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingAgentMember(input));
@@ -2616,10 +2625,13 @@ export class PodRigInstantiator {
       silenceWindowSeconds: configResult.config.activity?.silenceWindowSeconds,
       env: input.envOverride,
       pluginPaths: selectedPluginPaths(configResult.config.selectedResources),
+      ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}),
     });
     if (!launchResult.ok) {
       return { status: "failed", code: launchResult.code, error: launchResult.message };
     }
+    // #3253: a recovery that went on without the limit says so in the result, whatever happens after the terminal.
+    const limitsNotice = launchResult.processLimits ? { processLimits: launchResult.processLimits } : {};
 
     try {
       this.db.prepare("UPDATE sessions SET restore_policy = ? WHERE id = ?")
@@ -2628,7 +2640,7 @@ export class PodRigInstantiator {
 
     const adapter = this.deps.adapters[input.member.runtime];
     if (!adapter) {
-      return { status: "failed", error: `No adapter for runtime "${input.member.runtime}"`, sessionName: canonicalSessionName, warnings: launchResult.warnings };
+      return { status: "failed", error: `No adapter for runtime "${input.member.runtime}"`, sessionName: canonicalSessionName, ...limitsNotice, warnings: launchResult.warnings };
     }
 
     // P20 — the projection manifest: consulted so a divergent target is
@@ -2668,7 +2680,7 @@ export class PodRigInstantiator {
       lastHashLookup: (targetPath) => projectionManifest.lastHash(targetPath),
     });
     if (!planResult.ok) {
-      return { status: "failed", error: planResult.errors.join("; "), sessionName: canonicalSessionName, warnings: launchResult.warnings };
+      return { status: "failed", error: planResult.errors.join("; "), sessionName: canonicalSessionName, ...limitsNotice, warnings: launchResult.warnings };
     }
     // P17: a divergent target is never SILENT again — each conflict rides the
     // instantiate warnings surface with the file, reason, and consequence.
@@ -2767,7 +2779,7 @@ export class PodRigInstantiator {
       const { resolveRebuildArtifacts } = await import("./session-source-rebuild-resolver.js");
       const resolved = resolveRebuildArtifacts(input.member.sessionSource);
       if (!resolved.ok) {
-        return { status: "failed", error: resolved.error, sessionName: canonicalSessionName };
+        return { status: "failed", error: resolved.error, sessionName: canonicalSessionName, ...limitsNotice };
       }
       rebuildArtifactsOpt = { rebuildArtifacts: resolved.files };
     } else if (input.member.sessionSource?.mode === "agent_image") {
@@ -2780,7 +2792,7 @@ export class PodRigInstantiator {
         return {
           status: "failed",
           error: `session_source: mode: agent_image requires the daemon AgentImageLibraryService to be wired; restart the daemon or check ~/.openrig/agent-images/ exists.`,
-          sessionName: canonicalSessionName,
+          sessionName: canonicalSessionName, ...limitsNotice,
         };
       }
       const ref = input.member.sessionSource.ref;
@@ -2790,14 +2802,14 @@ export class PodRigInstantiator {
         return {
           status: "failed",
           error: `Agent image '${ref.value}' v${version} not found in library. Run 'rig agent-image list' to see what's installed.`,
-          sessionName: canonicalSessionName,
+          sessionName: canonicalSessionName, ...limitsNotice,
         };
       }
       if (image.runtime !== input.member.runtime) {
         return {
           status: "failed",
           error: `Agent image '${ref.value}' v${version} runtime '${image.runtime}' does not match member '${input.member.id}' runtime '${input.member.runtime}'.`,
-          sessionName: canonicalSessionName,
+          sessionName: canonicalSessionName, ...limitsNotice,
         };
       }
       forkSourceOpt = {
@@ -2836,7 +2848,7 @@ export class PodRigInstantiator {
         return {
           status: "failed",
           error: `Agent Starter resolver failed: ${(err as Error).message}`,
-          sessionName: canonicalSessionName,
+          sessionName: canonicalSessionName, ...limitsNotice,
           warnings: launchResult.warnings,
         };
       }
@@ -2918,7 +2930,7 @@ export class PodRigInstantiator {
     if (startupResult.ok) {
       return {
         status: "launched",
-        sessionName: canonicalSessionName,
+        sessionName: canonicalSessionName, ...limitsNotice,
         warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
       };
     }
@@ -2926,7 +2938,7 @@ export class PodRigInstantiator {
       status: startupResult.startupStatus === "attention_required" ? "attention_required" : "failed",
       error: startupResult.errors.join("; "),
       evidence: startupResult.evidence,
-      sessionName: canonicalSessionName,
+      sessionName: canonicalSessionName, ...limitsNotice,
       warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
   }
@@ -2941,7 +2953,9 @@ export class PodRigInstantiator {
     nodeId: string;
     cwdOverride?: string;
     envOverride?: SeatEnv;
-  }): Promise<{ status: "launched" | "failed"; code?: string; error?: string; sessionName?: string; warnings?: string[] }> {
+    processLimitsMode?: ProcessLimitsMode;
+  }): Promise<{ status: "launched" | "failed"; code?: string; error?: string; sessionName?: string; warnings?: string[];
+    processLimits?: SeatProcessLimitsNotice }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingTerminalMember(input));
@@ -2964,10 +2978,12 @@ export class PodRigInstantiator {
     if (input.member.processLimits !== undefined) {
       this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
     }
-    const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, env: input.envOverride });
+    const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, env: input.envOverride,
+      ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });
     if (!launchResult.ok) {
       return { status: "failed", code: launchResult.code, error: launchResult.message };
     }
+    const limitsNotice = launchResult.processLimits ? { processLimits: launchResult.processLimits } : {};
 
     try {
       this.db.prepare("UPDATE nodes SET restore_policy = ? WHERE id = ?")
@@ -3006,7 +3022,7 @@ export class PodRigInstantiator {
     };
     const adapter = this.deps.adapters["terminal"];
     if (!adapter) {
-      return { status: "failed", error: 'No adapter for runtime "terminal"', sessionName: canonicalSessionName, warnings: launchResult.warnings };
+      return { status: "failed", error: 'No adapter for runtime "terminal"', sessionName: canonicalSessionName, ...limitsNotice, warnings: launchResult.warnings };
     }
 
     const emptyPlan = {
@@ -3033,7 +3049,7 @@ export class PodRigInstantiator {
     return {
       status: startupResult.ok ? "launched" : "failed",
       error: startupResult.ok ? undefined : startupResult.errors.join("; "),
-      sessionName: canonicalSessionName,
+      sessionName: canonicalSessionName, ...limitsNotice,
       warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
   }

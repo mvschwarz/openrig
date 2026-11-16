@@ -34,7 +34,11 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid">; inheri
   /** tmux's session and global environment listings. */
   sessionEnv?: string; globalEnv?: string;
   /** A tmux call that fails. */
-  failTmux?: (args: string[]) => boolean; paneGone?: boolean } = {}) {
+  failTmux?: (args: string[]) => boolean;
+  /** What a capped new-session prints instead of its identity (default "%1 $3 4242 1700000000"). */
+  printed?: string;
+  /** The error a kill-session (and its detach) of the refused launch's session throws. */
+  killError?: string } = {}) {
   const shellCalls: string[] = [];
   const argvCalls: string[][] = [];
   const get = (k: keyof Probe, fallback: string): Answer => (opts.probe && k in opts.probe ? opts.probe[k]! : fallback);
@@ -54,7 +58,10 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid">; inheri
     if (args.includes("show-environment")) return (args.includes("-g") ? opts.globalEnv : opts.sessionEnv) ?? "";
     if (args.some(arg => arg.includes("default-shell"))) return "/bin/bash";
     if (args.includes("#{pane_pid}")) return "4321";
-    if (args.includes("#{session_id}|#{pid}|#{start_time}")) return opts.paneGone ? "" : "$3|4242|1700000000";
+    if (opts.killError && args.some(arg => arg.includes("kill-session") || arg.includes("detach-client"))) throw new Error(opts.killError);
+    // A capped new-session prints its pane, its session and its server, from the same command.
+    const capped = args.includes("source-file") ? writes.at(-1)?.includes("#{session_id} #{pid} #{start_time}") : args.some(arg => arg.includes("#{session_id} #{pid}"));
+    if (capped) return opts.printed ?? "%1 $3 4242 1700000000";
     return args.includes("new-session") || args.includes("source-file") ? "%1" : "";
   };
   let n = 0;
@@ -269,12 +276,16 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true,
       processLimits: { kind: "unverified", requested: { tasksMax: 256 }, reason: expect.stringContaining("did not start") } });
     expect(h.newSessions()).toHaveLength(1);
-    // the session it made, by the pane id new-session printed: never by name (a same-named session made meanwhile
+    // the session it made, by the identity new-session printed: never by name (a same-named session made meanwhile
     // outside the daemon stays)
     expect(h.tmuxCalls("kill-session")).toEqual([expect.stringContaining("kill-session -t '$3'")]);
     expect(h.tmuxCalls("kill-session").join("\n")).toContain("#{==:#{pid},4242}");
     expect(h.tmuxCalls("kill-session").join("\n")).not.toContain("impl-a@demo");
     expect(h.tmuxCalls("respawn-pane")).toEqual([]);
+    // no second read of the identity: new-session printed it
+    expect(h.argvCalls.filter(a => a[1] === "display-message" && a.some(x => x.includes("#{session_id}")))).toEqual([]);
+    expect(h.writes.at(-1)).toContain("-P -F '#{pane_id} #{session_id} #{pid} #{start_time}'");
+    expect((result as { message: string }).message).not.toContain("may still be running");
   });
 
   it("a fresh launch whose start is not confirmed in time is refused and its session removed", async () => {
@@ -288,11 +299,34 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     expect(h.tmuxCalls("kill-session")).toEqual([expect.stringContaining("kill-session -t '$3'")]);
   });
 
-  it("a refused fresh launch whose pane was already gone when read removes nothing (never by name)", async () => {
-    const h = makeAdapter({ limits: { "node-a": 256 }, paneGone: true });
+  it("a refused fresh launch whose session is already gone says nothing remains", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 }, killError: "can't find session: $3" });
     seen(h, true, "pending\n");
-    expect(await h.adapter.createSession("impl-a@demo", "/work", A)).toMatchObject({ ok: false, code: "process_limits_unverified" });
-    expect(h.tmuxCalls("kill-session")).toEqual([]);
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified" });
+    expect((result as { message: string }).message).not.toContain("may still be running");
+  });
+
+  it("a refused fresh launch whose session can't be removed says it may still be running, and how to stop it", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 }, killError: "lost server: timed out" });
+    seen(h, true, "pending\n");
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true });
+    expect((result as { message: string }).message).toContain(`Its session "impl-a@demo" ($3) may still be running`);
+    expect((result as { message: string }).message).toContain("kill-session -t '=impl-a@demo'");
+  });
+
+  it("a refused fresh launch whose new-session printed no identity removes nothing (never by name) and says so", async () => {
+    for (const printed of ["", "%1"]) {
+      const h = makeAdapter({ limits: { "node-a": 256 }, printed });
+      seen(h, true, "pending\n");
+      // with nothing printed, the session is confirmed by name first
+      if (printed === "") h.adapter.probeSession = async () => ({ state: "present" as const });
+      const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+      expect(result).toMatchObject({ ok: false, code: "process_limits_unverified" });
+      expect(h.tmuxCalls("kill-session")).toEqual([]);
+      expect((result as { message: string }).message).toContain(`Its session "impl-a@demo" may still be running`);
+    }
   });
 
   it("a fresh launch whose command started in its scope and ended counts as started (the scope was seen)", async () => {

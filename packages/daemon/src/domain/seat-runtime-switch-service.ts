@@ -565,7 +565,8 @@ export class SeatRuntimeSwitchService {
         db.prepare("UPDATE seat_runtime_switches SET attention = ?, updated_at = ? WHERE id = ?")
           .run(`The commit failed (${(error as Error).message}) and the panes couldn't be exchanged back: ${back.message}`, stamp(), id);
         return { ...failed(`The commit failed (${(error as Error).message}), and the panes couldn't be put back (${back.message}).`,
-          `The ${node.runtime} occupant still holds ${ctx.seatRef} by record. Recover with rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, recoveryPending: true };
+          `The ${node.runtime} occupant still holds ${ctx.seatRef} by record. Recover with rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, recoveryPending: true,
+          ...(stagedLimits ? { processLimits: stagedLimits } : {}) };
       }
       return abandon(`The commit failed: ${(error as Error).message}.`);
     }

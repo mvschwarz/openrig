@@ -1056,7 +1056,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const { rigId, nodeIds, freshLaunch, launch } = guarded();
       const result = await launch();
       expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
-      expect(freshLaunch).toHaveBeenCalledWith(rigId, nodeIds[0]);
+      expect(freshLaunch).toHaveBeenCalledWith(rigId, nodeIds[0], { processLimitsMode: "recovery" });
       expect(tmux.killSession).toHaveBeenCalledOnce();
       expect(tmux.createSession).toHaveBeenCalledTimes(2);
       const sessions = sessionRegistry.getSessionsForRig(rigId).filter((session) => session.nodeId === nodeIds[0]);

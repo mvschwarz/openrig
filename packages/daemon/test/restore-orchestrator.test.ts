@@ -132,11 +132,7 @@ describe("RestoreOrchestrator", () => {
     pi?: PiResumeAdapter;
     omp?: OmpResumeAdapter;
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
-    freshLaunch?: (rigId: string, nodeId: string) => Promise<{
-      status: "launched" | "failed" | "attention_required";
-      error?: string;
-      warnings?: string[];
-    }>;
+    freshLaunch?: RestoreOrchestratorDeps["freshLaunch"];
     harnessNotStartedNotice?: RestoreOrchestratorDeps["harnessNotStartedNotice"];
   }) {
     const tmux = opts?.tmux ?? mockTmux();
@@ -3956,7 +3952,7 @@ describe("RestoreOrchestrator", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id);
+      expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id, { processLimitsMode: "recovery" });
       expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "fresh-primed" });
       expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
     }
