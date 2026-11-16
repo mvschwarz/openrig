@@ -18,6 +18,8 @@ export function validatePreRestore(
     currentRuntimes?: Record<string, string | null | undefined>;
     /** Current explicit seat selections; a missing key is unknown, null is an explicit absence. */
     currentCodexProfiles?: Record<string, string | null>;
+    /** This run's `--cwd` (already resolved): every seat launches and receives its checkpoint there instead. */
+    cwdOverride?: string;
   },
 ): { blockers: RestoreValidationBlocker[]; warnings: string[] } {
   const blockers: RestoreValidationBlocker[] = [];
@@ -100,7 +102,7 @@ export function validatePreRestore(
       warnings.push(`Restore pre-validation: ${node.logicalId} had Codex profile ${node.codexConfigProfile} in this snapshot, but its current seat selection has no named profile. Restore uses the current selection; an ordinary floor launch uses workspace-write instead. Review rig seat set-permissions before restoring if this change is unintended. The snapshot does not prove what a prior process enforced.`);
     }
     const checkpoint = checkpoints[node.id] ?? null;
-    if (checkpoint && !node.cwd) {
+    if (checkpoint && !(opts.cwdOverride || node.cwd)) {
       add({
         code: "checkpoint_missing_node_cwd",
         severity: "critical",

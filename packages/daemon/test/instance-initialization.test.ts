@@ -131,6 +131,24 @@ describe("canonical OpenRig instance initialization", () => {
     expect(statSync(join(home, "workspace", "exhaust")).isDirectory()).toBe(true);
   });
 
+  // 0.5.7 and 0.5.8 wrote SPEC.md and a project.yaml with no id, and no catalog (it came in 0.5.9); a first scaffold
+  // stopped between its writes leaves the same shape. Neither declares an id of its own, so it's completed as `default`.
+  it("completes a workspace whose project.yaml declares no id, as 0.5.8 left it, with the default catalog", () => {
+    const home = join(freshRoot(), "home");
+    const workspace = join(home, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(workspace, "project.yaml"), "schema: openrig.project/v0alpha1\nkind: project\nmissions:\n  root: missions\n");
+    writeFileSync(join(workspace, "SPEC.md"), "# Project\n");
+
+    const result = ensureOpenRigInstance({ home });
+
+    expect(result.ok).toBe(true);
+    expect(result.workspaceExistingProject).toBeUndefined();
+    expect(readFileSync(join(workspace, "workspace.yaml"), "utf8")).toContain("- id: default");
+    expect(statSync(join(workspace, "exhaust")).isDirectory()).toBe(true);
+    expect(readFileSync(join(workspace, "SPEC.md"), "utf8")).toBe("# Project\n");
+  });
+
   it("reports exact type conflicts and performs no partial writes", () => {
     const home = join(freshRoot(), "home");
     mkdirSync(home, { recursive: true });

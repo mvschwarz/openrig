@@ -2180,6 +2180,8 @@ export class PodRigInstantiator {
   async launchPersistedFresh(
     rigId: string,
     nodeId: string,
+    /** A restore run's `--cwd`, used ahead of the saved folder for this launch only; the saved folder is unchanged. */
+    cwdOverride?: string,
   ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     const rig = this.deps.rigRepo.getRig(rigId);
     const node = rig?.nodes.find((candidate) => candidate.id === nodeId);
@@ -2218,7 +2220,7 @@ export class PodRigInstantiator {
       nodeId,
       // Preserve the resolved cwd from materialization, including a prior
       // --cwd-override, rather than silently falling back to process cwd.
-      cwdOverride: node.cwd ?? undefined,
+      cwdOverride: cwdOverride ?? node.cwd ?? undefined,
       resolveResult,
     });
     const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];

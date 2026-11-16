@@ -257,8 +257,8 @@ export interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. */
-  freshLaunch?: (rigId: string, nodeId: string) => Promise<{
+  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe (in `cwdOverride` when this run has one). */
+  freshLaunch?: (rigId: string, nodeId: string, cwdOverride?: string) => Promise<{
     status: "launched" | "failed" | "attention_required";
     error?: string;
     warnings?: string[];
@@ -461,6 +461,7 @@ export class RestoreOrchestrator {
         currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
           .filter((current) => current.codexConfigProfile !== undefined)
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
+        ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}),
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
       // A seat that is still a node of this rig but isn't in the snapshot's intended roster isn't started by this restore:
@@ -1829,7 +1830,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -2237,7 +2238,8 @@ export class RestoreOrchestrator {
             && candidate.status === "running"
             && candidate.id !== launchResult.session.id);
         try {
-          const fresh = await this.freshLaunch(rigId, node.id);
+          // The replacement launches where the provisional shell did: this run's `--cwd`, else the saved folder.
+          const fresh = await (opts?.cwdOverride ? this.freshLaunch(rigId, node.id, opts.cwdOverride) : this.freshLaunch(rigId, node.id));
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
           if (fresh.status === "launched") {
             return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed" };

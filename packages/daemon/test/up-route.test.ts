@@ -237,10 +237,14 @@ describe("Up API route", () => {
 
   // A workspace restored onto another home (the lost-host exercise): `rig up <rig> --existing --cwd <dir>` launches the
   // restored seats there for this run, and a saved directory this machine doesn't have is named with that way out.
-  it.each([true, false])("restores into --cwd (%s), and names a saved working directory this machine doesn't have", async (withOverride) => {
+  // A remote `rig up --host` sends --cwd as typed: a relative one is resolved on the daemon, as a fresh launch resolves it.
+  it.each(["absolute", "relative", "none"] as const)("restores into --cwd (%s), and names a saved working directory this machine doesn't have", async (given) => {
     const moved = "/home/lhs1116/project-that-moved";
     expect(fs.existsSync(moved)).toBe(false);
     const here = fs.mkdtempSync(path.join(os.tmpdir(), "restore-cwd-"));
+    const withOverride = given !== "none";
+    const cwdOverride = given === "relative" ? path.relative(process.cwd(), here) : here;
+    if (given === "relative") expect(path.isAbsolute(cwdOverride)).toBe(false);
     try {
       const rig = rigRepo.createRig("moved-home");
       const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: moved });
@@ -255,7 +259,7 @@ describe("Up API route", () => {
 
       const res = await app.request("/api/up", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceRef: rig.name, ...(withOverride ? { cwdOverride: here } : {}) }),
+        body: JSON.stringify({ sourceRef: rig.name, ...(withOverride ? { cwdOverride } : {}) }),
       });
       expect(res.status).toBe(200);
       const body = await res.json() as { status: string; warnings?: string[] };

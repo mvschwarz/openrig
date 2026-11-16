@@ -2197,6 +2197,30 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  // `rig up <rig> --existing --cwd <dir>`: the seat launches there, so its checkpoint has a folder to land in. The saved
+  // node keeps having no cwd: the override is for this run only.
+  it("checkpoint + null cwd + this run's --cwd -> checkpoint written there, nothing saved", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
+    try {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], // no cwd
+        resumeType: "none",
+        edges: [],
+        withCheckpoint: "worker",
+      });
+      const result = await createOrchestrator().restore(snap.id, { freshLogicalIds: ["worker"], cwdOverride: tmpDir });
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (result.ok) {
+        expect(result.result.nodes[0]!.status).toBe("rebuilt");
+        expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint.md"), "utf-8")).toContain("Was working on feature X");
+      }
+      expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.cwd).toBeNull();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("no checkpoint -> status 'fresh'", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
@@ -3959,6 +3983,43 @@ describe("RestoreOrchestrator", () => {
       expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id);
       expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "fresh-primed" });
       expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
+    }
+  });
+
+  // The provisional shell launched in this run's --cwd, so the recipe launch that replaces it does too; the saved folder
+  // (here one this machine doesn't have) is unchanged.
+  it("rebuilds the recipe launch in this run's --cwd, not the saved folder", async () => {
+    const here = fs.mkdtempSync(path.join(os.tmpdir(), "recipe-cwd-"));
+    try {
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-recipe-cwd", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-recipe-cwd", cwd: "/home/lhs1116/moved" });
+      const session = sessionRegistry.registerSession(node.id, "dev-design@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+      const freshLaunch = vi.fn(async () => ({ status: "launched" as const }));
+      const mockAdapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true as const })),
+      };
+      const result = await createOrchestrator({ freshLaunch }).restore(snap.id, {
+        adapters: { "claude-code": mockAdapter },
+        freshLogicalIds: [node.logicalId],
+        cwdOverride: here,
+      });
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id, here);
+      expect(rigRepo.getRig(rig.id)!.nodes[0]!.cwd).toBe("/home/lhs1116/moved");
+    } finally {
+      fs.rmSync(here, { recursive: true, force: true });
     }
   });
 

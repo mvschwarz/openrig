@@ -1,8 +1,9 @@
 // Canonical project-workspace scaffold. S01 owns these bytes; S05's instance
 // initializer calls this owner rather than copying its behavior.
 
-import { lstatSync, mkdirSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { parse } from "yaml";
 
 const WORKSPACE_DIRS = ["missions", "exhaust"] as const;
 
@@ -59,6 +60,9 @@ export interface InitializationFsOps {
   pathKind(path: string): ManagedPathKind;
   mkdirp(path: string): void;
   writeFile(path: string, content: string): void;
+  /** A file's text, or null when it can't be read. Without it a root's own project.yaml isn't read, and the root is
+   *  completed as before. */
+  readFile?(path: string): string | null;
 }
 
 export interface InitializationConflict {
@@ -75,7 +79,8 @@ export interface InitWorkspaceResult {
   files: Array<{ relPath: string; absPath: string; created: boolean; skipped: "exists" | "existing_project" | null }>;
   conflicts: InitializationConflict[];
   dryRun: boolean;
-  /** The root already holds a project of its own (this `project.yaml`, with no `workspace.yaml`): nothing was written. */
+  /** The root already holds a project of its own (this `project.yaml`, declaring an id other than `default`, with no
+   *  `workspace.yaml`): nothing was written. */
   existingProject?: string;
 }
 
@@ -93,7 +98,21 @@ export function nodeInitializationFs(): InitializationFsOps {
     },
     mkdirp: (path) => mkdirSync(path, { recursive: true }),
     writeFile: (path, content) => writeFileSync(path, content, "utf8"),
+    readFile: (path) => readFileSync(path, "utf8"),
   };
+}
+
+/** The id a project.yaml declares (`id`, else `metadata.id`), read as the project readers read it; undefined when it
+ *  declares none or can't be read or parsed. */
+function declaredProjectId(fs: InitializationFsOps, manifest: string): unknown {
+  try {
+    const value: unknown = parse(fs.readFile?.(manifest) ?? "");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as { id?: unknown; metadata?: { id?: unknown } | null };
+    return record.id ?? record.metadata?.id;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Additively reconcile the S01 project workspace. All collisions are found
@@ -107,12 +126,15 @@ export function ensureDefaultWorkspace(options: {
   const fs = options.fs ?? nodeInitializationFs();
   const dryRun = options.dryRun ?? false;
   const rootKind = fs.pathKind(options.root);
-  // A root that already holds a project of its own (its project.yaml with no workspace.yaml beside it, such as a
-  // project folder set as workspace.root on a restored machine) is left as it is: a catalog written here would name it
-  // `default` against its own id, and without one the project readers take that project.yaml's id.
+  // A root that already holds a project of its own is left as it is: no workspace.yaml, and a project.yaml declaring an
+  // id other than `default` (such as a project folder set as workspace.root on a restored machine). A catalog written
+  // here would name it `default` against that id, the readers' project_identity_conflict; without one they take its id.
+  // A project.yaml with no id (OpenRig's own from 0.5.7 and 0.5.8, or a first scaffold stopped between its writes) is
+  // completed as before.
   const ownProject = join(options.root, "project.yaml");
-  const existingProject = rootKind === "directory" && fs.pathKind(ownProject) === "file"
-    && fs.pathKind(join(options.root, "workspace.yaml")) === "missing" ? ownProject : undefined;
+  const declared = rootKind === "directory" && fs.pathKind(ownProject) === "file"
+    && fs.pathKind(join(options.root, "workspace.yaml")) === "missing" ? declaredProjectId(fs, ownProject) : undefined;
+  const existingProject = declared && declared !== "default" ? ownProject : undefined;
   const subdirs = workspaceScaffoldDirs().map((name) => {
     const path = join(options.root, name);
     return { name, path, created: !existingProject && fs.pathKind(path) === "missing" };

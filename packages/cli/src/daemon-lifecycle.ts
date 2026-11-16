@@ -339,6 +339,7 @@ function lifecycleInitializationFs(deps: LifecycleDeps): InitializationFsOps {
     }),
     mkdirp: deps.mkdirp,
     writeFile: deps.writeFile,
+    readFile: (candidate) => deps.readFile(candidate),
   };
 }
 

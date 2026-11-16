@@ -11,6 +11,7 @@ import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { chooseRestoreSnapshot, joinAutomaticRestore, JOINED_AUTOMATIC_RESTORE_WARNING, runExistingRigRestore, type ExistingRigRestoreOutcome } from "../domain/existing-rig-restore.js";
+import { normalizeCwdOverride } from "../domain/cwd-resolution.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows, type RestorePermissionSeat } from "../domain/restore-plan-preview.js";
 import { planRestorePermission } from "../domain/permission-account.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
@@ -99,8 +100,10 @@ function getDeps(c: { get: (key: string) => unknown }) {
  * Used by /api/up (rig_name). The Explorer's /api/rigs/:rigId/up keeps its own request and response
  * contract and shares joinAutomaticRestore.
  */
-async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }, freshLogicalIds?: string[], plan?: boolean, nonInterruptive?: boolean, cwdOverride?: string) {
+async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }, freshLogicalIds?: string[], plan?: boolean, nonInterruptive?: boolean, requestedCwd?: string) {
   const { snapshotRepo } = deps;
+  // Read once, as a fresh launch reads it: a remote `rig up --host` sends --cwd as typed, and a blank value is no override.
+  const cwdOverride = normalizeCwdOverride(requestedCwd);
   // Daemon start restores a kernel a reboot left down. A request for that same restore, made while it
   // runs or just after, gets its outcome instead of a second launch or a refusal; see
   // joinAutomaticRestore for when the seats still count as that restore's. A request for something
