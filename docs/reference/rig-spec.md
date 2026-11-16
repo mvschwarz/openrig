@@ -1067,9 +1067,10 @@ members:
   seat's scope and its limit. The limit is also cooperative: a process in the seat that reaches the user manager can
   raise its own scope's `TasksMax` with `systemctl --user set-property`. The short-lived terminal OpenRig opens to
   check that a Claude conversation can be resumed runs without the seat's identity, outside any seat scope.
-- **A fresh launch that can't get the limit is not started:** A fresh launch (first launch, `rig seat launch --fresh`,
-  and a relaunch without a snapshot) says it couldn't apply the limit instead of starting the seat without it, with
-  one of four codes:
+- **A fresh launch that can't get the limit is not started:** A fresh launch (first launch by `rig up`, `rig seat launch
+  --fresh`, and a relaunch without a snapshot; a first start through the restore path, such as a never-occupied seat's
+  start or auto-rehydrate, is a recovery, below) says it couldn't apply the limit instead of starting the seat without
+  it, with one of four codes:
   - `process_limits_unsupported` for a positive inability of the host: not Linux, `systemd-run` or `systemctl` not on
     the daemon's `PATH`, a systemd too old for seat scopes (it needs 236 or later), no user manager running for the
     user (no socket to reach it), or a throwaway scope with no cgroup v2 path, no `pids.max`, or a `pids.max` that is
@@ -1080,11 +1081,11 @@ members:
     environment: set it to false), a daemon that gives seats no launch environment, or a seat placed in an environment
     guest (its agent runs in the guest, and a scope on this host would hold only the local viewer);
   - `process_limits_unverified` (retryable) when it isn't known either way: the user manager timed out or its socket
-    refused the connection (starting or restarting), the probe read nothing, an error not recognized, a launch setting
+    refused the connection (starting or restarting), the probe read nothing or output it could not understand, an error not recognized, a launch setting
     that couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
     didn't see in time (its new session is removed, by the identity tmux printed when it made it, and the seat is never
     started again without the limit; when it can't be removed, the refusal says the session may still be running and
-    how to stop it). The first
+    how to stop it, without a retry, and its `processLimits` carries `possiblyRunning: true` and `retryable` false). The first
     launch after that minute checks again, so a setup fixed meanwhile is seen;
   - `process_limits_invalid` when the seat's stored value can't be read: only this seat is affected, and the value is
     kept until a re-applied spec replaces or clears it.

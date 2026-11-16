@@ -314,10 +314,14 @@ describe("persisted pod-aware launch recipes", () => {
     // The host can't apply the limit (the user manager doesn't answer): a fresh launch refuses, a recovery goes on.
     const problem = { kind: "unverified" as const, reason: "the user manager timed out", requested: { tasksMax: 8 } };
     const notice = { state: "not_applied" as const, ...problem, retryable: true };
+    // The provisional shell's start couldn't be told; the replacement's is known not applied: the node reports the
+    // replacement's.
+    const provisional = { state: "unknown" as const, kind: "unverified" as const, reason: "the start was not seen", retryable: true };
     const tmux = mockTmuxAdapter();
+    let recoveries = 0;
     const createSession = vi.fn(async (_name: string, _cwd?: string, _env?: Record<string, string>,
       launchOpts?: { processLimitsMode?: "fresh" | "recovery" }) => launchOpts?.processLimitsMode === "recovery"
-      ? { ok: true as const, processLimits: notice }
+      ? { ok: true as const, processLimits: ++recoveries === 1 ? provisional : notice }
       : { ok: false as const, code: "process_limits_unverified", message: "refused", retryable: true, processLimits: problem });
     (tmux as unknown as Record<string, unknown>).createSession = createSession;
     setup = createTestApp(db, {
@@ -374,7 +378,7 @@ describe("persisted pod-aware launch recipes", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(createSession).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.anything(), undefined);
+    expect(createSession).toHaveBeenCalledTimes(2);
     for (const call of createSession.mock.calls) expect(call[3]).toEqual({ processLimitsMode: "recovery" });
     expect(result.result.nodes.find((entry) => entry.nodeId === node.id)).toMatchObject({ status: "fresh-primed", processLimits: notice });
     expect(setup.rigRepo.getRig(rig.id)?.nodes.find((entry) => entry.id === node.id)?.processLimits).toEqual({ tasksMax: 8 });

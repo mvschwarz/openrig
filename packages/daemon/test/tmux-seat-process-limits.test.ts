@@ -299,21 +299,38 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     expect(h.tmuxCalls("kill-session")).toEqual([expect.stringContaining("kill-session -t '$3'")]);
   });
 
+  it("a capped new-session whose output has a line after the identity still removes that session (the first line)", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 }, printed: "%1 $3 4242 1700000000\nsomething a hook printed" });
+    seen(h, true, "pending\n");
+    expect(await h.adapter.createSession("impl-a@demo", "/work", A)).toMatchObject({ ok: false, retryable: true });
+    expect(h.tmuxCalls("kill-session")).toEqual([expect.stringContaining("kill-session -t '$3'")]);
+  });
+
   it("a refused fresh launch whose session is already gone says nothing remains", async () => {
     const h = makeAdapter({ limits: { "node-a": 256 }, killError: "can't find session: $3" });
     seen(h, true, "pending\n");
     const result = await h.adapter.createSession("impl-a@demo", "/work", A);
-    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified" });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true });
+    // the guarded removal of the printed identity was tried (its detach found the session gone)
+    expect(h.tmuxCalls("detach-client").join("\n")).toContain("detach-client -s '$3'");
+    expect(h.tmuxCalls("detach-client").join("\n")).toContain("#{==:#{pid},4242}");
     expect((result as { message: string }).message).not.toContain("may still be running");
+    expect((result as { processLimits: object }).processLimits).not.toHaveProperty("possiblyRunning");
   });
 
   it("a refused fresh launch whose session can't be removed says it may still be running, and how to stop it", async () => {
-    const h = makeAdapter({ limits: { "node-a": 256 }, killError: "lost server: timed out" });
+    const h = makeAdapter({ limits: { "node-a": 256 }, killError: "Command failed: tmux if-shell -F -t $3\nlost server: timed out" });
     seen(h, true, "pending\n");
     const result = await h.adapter.createSession("impl-a@demo", "/work", A);
-    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true });
-    expect((result as { message: string }).message).toContain(`Its session "impl-a@demo" ($3) may still be running`);
-    expect((result as { message: string }).message).toContain("kill-session -t '=impl-a@demo'");
+    // unknown, possibly running: no blind retry
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false,
+      processLimits: { kind: "unverified", possiblyRunning: true } });
+    const message = (result as { message: string }).message;
+    expect(message).toContain("whether its terminal is running is unknown");
+    expect(message).toContain(`Its session "impl-a@demo" ($3) may still be running: it could not be removed (lost server: timed out)`);
+    expect(message).toContain("kill-session -t '=impl-a@demo'");
+    expect(message).not.toContain("retry the launch");
+    expect(message).not.toContain("Command failed");
   });
 
   it("a refused fresh launch whose new-session printed no identity removes nothing (never by name) and says so", async () => {
@@ -323,7 +340,7 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
       // with nothing printed, the session is confirmed by name first
       if (printed === "") h.adapter.probeSession = async () => ({ state: "present" as const });
       const result = await h.adapter.createSession("impl-a@demo", "/work", A);
-      expect(result).toMatchObject({ ok: false, code: "process_limits_unverified" });
+      expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false, processLimits: { possiblyRunning: true } });
       expect(h.tmuxCalls("kill-session")).toEqual([]);
       expect((result as { message: string }).message).toContain(`Its session "impl-a@demo" may still be running`);
     }
@@ -468,6 +485,7 @@ describe("not known either way: process_limits_unverified, retryable, never read
   const cases: Array<[string, Probe, RegExp]> = [
     ["the user bus timed out", { bus: fail("", 124) }, /timed out/],
     ["the probe read nothing", { scope: "\n" }, /read no pids\.max/],
+    ["the probe printed something that isn't a limit", { scope: "Running as unit: openrig-seat-probe-1.scope\n" }, /could not be understood/],
     ["an error not recognized", { scope: fail("Failed to start transient scope unit: Access denied") }, /Access denied/],
     ["the user bus refused the connection (a manager starting or restarting)", { bus: fail("Failed to connect to bus: Connection refused") }, /refused the connection/],
     ["an exit status of 127 that names no systemd tool", { scope: fail("", 127) }, /failed/],

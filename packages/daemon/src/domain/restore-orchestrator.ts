@@ -1523,7 +1523,8 @@ export class RestoreOrchestrator {
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}),
-      ...(launchResult.processLimits ? { processLimits: launchResult.processLimits } : {}) };
+      // #3253: the provisional shell's notice, unless a replacement retired it and reported its own (the key is set).
+      ...(launchResult.processLimits && !("processLimits" in restored) ? { processLimits: launchResult.processLimits } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id,
       ...(compensation.ran ? { compensated: true as const } : {}) } : checked;
   }
@@ -2235,7 +2236,9 @@ export class RestoreOrchestrator {
           // applied doesn't stop the seat, and its notice is the node's.
           const fresh = await this.freshLaunch(rigId, node.id, { processLimitsMode: "recovery" });
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
-          const limits = fresh.processLimits ? { processLimits: fresh.processLimits } : {};
+          // The replacement's own outcome, also when it applied the limit (no notice): the retired provisional shell's
+          // notice no longer describes the seat (the key is set either way, so the caller doesn't fall back to it).
+          const limits = { processLimits: fresh.processLimits };
           if (fresh.status === "launched") {
             return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed", ...limits };
           }
@@ -2247,6 +2250,7 @@ export class RestoreOrchestrator {
             nodeId: node.id,
             logicalId: node.logicalId,
             status: "failed",
+            processLimits: undefined,
             error: `Fresh launch failed: ${(err as Error).message}`,
           };
         }

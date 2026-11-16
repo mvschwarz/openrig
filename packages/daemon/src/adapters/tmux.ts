@@ -491,6 +491,9 @@ export interface SeatProcessLimitsProblem {
   requested?: { tasksMax: number };
   /** For a cached observation: how old it is. */
   ageSeconds?: number;
+  /** A refused fresh launch whose terminal couldn't be removed (or wasn't identified): it may be running, so the
+   *  outcome is unknown and a retry isn't suggested until it is stopped. */
+  possiblyRunning?: true;
 }
 
 /** The structured warning of a recovery (handover, provider switch, restart in place) that went ahead without the
@@ -597,10 +600,16 @@ export interface SeatLaunchPolicy { inheritTmuxEnvironment: boolean; env: Readon
 
 /** The launch result of a fresh seat launch whose limit can't be applied. */
 function processLimitsNotAppliedResult(error: SeatProcessLimitsNotApplied, left?: string | null): TmuxResult {
-  const message = left ? `${error.message} ${left}` : error.message;
+  // A refusal whose terminal may still be running is not "not started": its outcome is unknown, and a blind retry
+  // could start a second one beside it.
+  const problem: SeatProcessLimitsProblem = left ? { ...error.problem, possiblyRunning: true } : error.problem;
+  const message = left
+    ? `process_limits is set for this seat, but ${problemText(error.problem)}; the launch was refused, and whether its ` +
+      `terminal is running is unknown. ${left} Stop it before launching this seat again.`
+    : error.message;
   console.warn(`[seat launch] ${message}`);
   return { ok: false, code: `process_limits_${error.problem.kind}`, message,
-    retryable: error.problem.kind === "unverified", processLimits: error.problem };
+    retryable: !left && error.problem.kind === "unverified", processLimits: problem };
 }
 
 /** What a capped launch's new-session prints: its pane, its session's immutable id and its server (pid, start time). */
@@ -898,6 +907,10 @@ export class TmuxAdapter {
       if (got === "nocgroup2") return { ok: false, problem: { kind: "unsupported", reason: "the user manager's scopes have no cgroup v2 path (a cgroup v1 host)" } };
       if (got === "nopids") {
         return { ok: false, problem: { kind: "unsupported", reason: "a throwaway seat scope has no pids.max: the pids controller is not delegated to the user manager" } };
+      }
+      // Only a readable limit that isn't the one asked for is a positive answer; anything else can't be read.
+      if (!/^(\d+|max)$/.test(got)) {
+        return { ok: false, problem: { kind: "unverified", reason: `a throwaway seat scope's pids.max read could not be understood ("${got.slice(0, 80)}")` } };
       }
       if (got !== String(tasksMax)) {
         return { ok: false, problem: { kind: "unsupported",
@@ -1749,8 +1762,10 @@ export class TmuxAdapter {
     } catch (err) {
       return classifyWriteError(err);
     }
-    const made = notices.capped ? createdIdentity(printed) : null;
-    const created = notices.capped ? (printed.split(/\s+/)[0] ?? "") : printed;
+    // A capped launch reads its pane and identity from the same, first, printed line (a hook may print more after it).
+    const firstLine = notices.capped ? (printed.split("\n")[0] ?? "").trim() : printed;
+    const made = notices.capped ? createdIdentity(firstLine) : null;
+    const created = notices.capped ? (firstLine.split(" ")[0] ?? "") : printed;
     // tmux can exit 0 having made nothing: a server that can't create its socket prints its error and quits, and the
     // client still exits 0. new-session prints the pane it made; with none, the session must be read back before the
     // launch counts as created.
@@ -2105,7 +2120,10 @@ export class TmuxAdapter {
     // Gone either way: removed now, no longer there (session_not_found), or its server was replaced (guard_target_changed:
     // the id names another terminal now, and the server that held this session is gone with it).
     if (removed.ok || removed.code === "session_not_found" || removed.code === "guard_target_changed") return null;
-    return `Its session "${name}" (${made.session}) may still be running: it could not be removed (${removed.message.trim()}).${look}`;
+    // tmux's own words, without an exec wrapper's "Command failed: <command>" line.
+    const said = removed.message.split("\n").map(line => line.trim()).filter(line => line && !line.startsWith("Command failed:")).join(" ")
+      || removed.message.trim();
+    return `Its session "${name}" (${made.session}) may still be running: it could not be removed (${said}).${look}`;
   }
 
   /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill.
