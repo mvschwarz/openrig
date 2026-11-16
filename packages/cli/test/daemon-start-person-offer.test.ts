@@ -13,7 +13,8 @@ vi.mock("../src/daemon-lifecycle.js", async (original) => {
 vi.mock("../src/system-preflight.js", () => ({ SystemPreflight: class { run = async () => ({ ready: true, checks: [] }); }, quietPreflightExec: async () => "" }));
 
 const OFFER = [
-  "No person is registered yet, so OpenRig's questions to a person, such as another machine asking to pair, can't reach anyone.",
+  "No person is registered yet, so OpenRig can't reach anyone with its questions to a person, such as a team seat's permission prompt or another machine asking to pair.",
+  "An agent the person is talking to can still bring them the team's questions. Registering gives OpenRig its own way to reach them: the TUI's Feed and Steering, and Slack if it's added.",
   "If you're setting OpenRig up for someone, offer to register them now. Ask the name to use, and only on their yes run:",
   '  rig gateway human add <id> --display-name "<name>" --delivery-class B --default',
 ];

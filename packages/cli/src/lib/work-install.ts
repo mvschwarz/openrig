@@ -412,9 +412,12 @@ export function resolveWorkPosition(opts: {
   let sliceName: string | null = null;
   let frontier: WorkInstallAltitude = "project";
   if (opts.mission !== undefined) {
-    missionRoot = join(missionsRoot, opts.mission);
-    if (existsSync(missionRoot)) {
-      const canonicalMissionRoot = canonicalExisting(missionRoot);
+    const nominalMissionRoot = join(missionsRoot, opts.mission);
+    if (!existsSync(nominalMissionRoot)) {
+      // Not a refusal: the project's context still serves. Say so, and never report a folder that doesn't exist.
+      warnings.push(`mission '${opts.mission}' not found under ${missionsRoot}${opts.slice !== undefined ? `, so slice '${opts.slice}' wasn't looked up` : ""}; using the project's context`);
+    } else {
+      const canonicalMissionRoot = canonicalExisting(nominalMissionRoot);
       if (!canonicalMissionRoot || !inside(projectRoot, canonicalMissionRoot)) {
         return failure("mission_root_escape", `mission '${opts.mission}' resolves outside the selected project root`);
       }

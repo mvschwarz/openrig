@@ -14,6 +14,13 @@ interface Result {
   stderr: string;
 }
 
+// A create waits on nothing (each claim is one exclusive file create), so one still running after a minute is hung; a
+// slow start on a loaded CI runner took over 15 s. A batch's creates run together, so the batch tests allow each batch the
+// full limit plus one for setup and checks, and a hung create there is reported by its own limit. A single-create test
+// keeps the suite's default timeout, which reports a hang first.
+const CREATE_LIMIT_MS = 60_000;
+const batchesTimeout = (batches: number) => (batches + 1) * CREATE_LIMIT_MS;
+
 describe("public slice creation ordinal claims", () => {
   let root: string;
   let workspace: string;
@@ -49,7 +56,7 @@ describe("public slice creation ordinal claims", () => {
     ];
     try {
       const result = await promisify(execFile)(process.execPath, args, {
-        env: ownedEnv, encoding: "utf8", timeout: 15000,
+        env: ownedEnv, encoding: "utf8", timeout: CREATE_LIMIT_MS,
       });
       return { exitCode: 0, ...result };
     } catch (error) {
@@ -95,7 +102,7 @@ describe("public slice creation ordinal claims", () => {
     expect(fs.readdirSync(path.join(mission, "slices"), { withFileTypes: true }).filter((entry) => entry.isDirectory())).toHaveLength(33);
     expect(fs.readFileSync(path.join(mission, "README.md"), "utf8")).toBe(original);
     expect(fs.existsSync(path.join(mission, ".openrig-slice-create-lock"))).toBe(false);
-  }, 30000);
+  }, batchesTimeout(4));
 
   it("twenty eight-process manifest-backed batches preserve the admitted concurrency contract", async () => {
     const ref = "slices/01-existing/slice.yaml";
@@ -144,7 +151,7 @@ describe("public slice creation ordinal claims", () => {
     expect(new Set(successful(results).map((slice) => slice.id)).size).toBe(160);
     expect(fs.readFileSync(path.join(unrelated, "PROOF.md"), "utf8")).toBe("# unrelated authored proof\n");
     expect(fs.existsSync(path.join(mission, ".openrig-slice-create-lock"))).toBe(false);
-  }, 180000);
+  }, batchesTimeout(20));
 
   it("a later create repairs only pending complete registrations and preserves authored membership", async () => {
     const ref = "slices/01-existing/slice.yaml";

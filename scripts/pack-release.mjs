@@ -28,6 +28,29 @@ export function launcherMismatches(root) {
   ].filter(([, actual, wanted]) => actual !== wanted).map(([where, actual, wanted]) => `${where} is ${JSON.stringify(actual)}, not ${JSON.stringify(wanted)}`);
 }
 
+// The pages a newcomer copies install commands from. Each links the rigs skill, and the README and getting started
+// also link the install script, at a release tag, so a copied command fetches that release's skill or install script
+// (the script itself installs the latest published CLI): never a placeholder, a stale tag or main's unreleased skill.
+// build:package copies docs/reference into the assembled CLI, and npm packs that copy, so both copies are checked.
+const INSTALL_PAGES = ['README.md', 'docs/reference/getting-started.md', 'docs/reference/quickstart.md',
+  'packages/cli/daemon/docs/reference/getting-started.md', 'packages/cli/daemon/docs/reference/quickstart.md'];
+const INSTALL_LINK = /github(?:usercontent)?\.com\/mvschwarz\/openrig\/(?:tree\/)?([^/\s"'`]+)\/(skills\/rigs|scripts\/install\.sh)/g;
+
+/** Where an install page links the rigs skill or the install script at anything but this release's tag, each named by
+ *  file and line. A page with no rigs-skill link is named too, so a rewritten page can't pass by linking nothing. */
+export function installTagMismatches(root, version) {
+  const tag = `v${version}`;
+  return INSTALL_PAGES.flatMap(rel => {
+    if (!existsSync(join(root, rel))) return [`${rel} is missing`];
+    const links = readFileSync(join(root, rel), 'utf8').split('\n')
+      .flatMap((line, i) => [...line.matchAll(INSTALL_LINK)].map(([, ref, target]) => ({ line: i + 1, ref, target })));
+    return [
+      ...(links.some(link => link.target === 'skills/rigs') ? [] : [`${rel} has no rigs-skill install link`]),
+      ...links.filter(link => link.ref !== tag).map(link => `${rel}:${link.line} links ${link.target} at ${JSON.stringify(link.ref)}, not ${JSON.stringify(tag)}`),
+    ];
+  });
+}
+
 const BASELINE = 'scripts/fixtures/packaged-plugins-last-release.json';
 // The openrig plugin in source, and as the assembled CLI packs it.
 const OPENRIG_PLUGIN_DIRS = ['packages/daemon/assets/plugins/openrig', 'packages/cli/daemon/assets/plugins/openrig'];
@@ -73,6 +96,8 @@ export function packRelease(root, dest) {
   if (mismatches.length > 0) throw new Error(`The launcher must match @openrig/cli ${version}:\n- ${mismatches.join('\n- ')}`);
   // This catches a build that never ran, not a partial one: a successful build:package is the precondition.
   if (!existsSync(join(root, 'packages/cli/daemon/dist'))) throw new Error('packages/cli has no daemon/dist, so build:package hasn\'t run: run npm run build:package first');
+  const links = installTagMismatches(root, version);
+  if (links.length > 0) throw new Error(`The install pages must link this release's tag, v${version}, in source and in the assembled CLI; set them in the release preparation, then run npm run build:package again:\n- ${links.join('\n- ')}`);
   const stamp = openrigPluginMismatches(root, version);
   if (stamp.length > 0) throw new Error(`The openrig plugin's four manifests must carry @openrig/cli ${version}, in source and in the assembled CLI; set them in the release preparation, then run npm run build:package again:\n- ${stamp.join('\n- ')}`);
   // The assembled CLI's plugins are what's packed: changed plugin bytes need a greater version than the last release's.

@@ -10,7 +10,9 @@
 >   runner is qualified beyond that.
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
-> - **Unchanged:** plain community presets and the built-in runtimes (Claude Code, Codex, Pi, OMP, terminal).
+> - **Current source:** per-launch credentials for hosted Pi, Pi-RPC presets and declared community runners (section 4).
+>   This credential does not qualify new native input or cancellation behavior.
+> - **Unchanged:** plain community presets and the other built-in runtimes (Claude Code, Codex, OMP, terminal).
 >
 > **What has run natively, in 0.7.8's release testing, against a Claude Haiku model:**
 > - **dsh-seat 0.3.0**, an outside runner for dsh 0.2.1-rc.2 over ACP: launch and first input, useful queue work, a
@@ -126,6 +128,29 @@ immediately before the preset's native command, after OpenRig's launcher assignm
 - **OpenRig shows this identity as launcher-reported.** It doesn't observe the conversation itself.
 
 ## 4. Activity: report turn boundaries
+
+Managed hosted Pi, Pi-RPC presets and declared community runners can receive an actual-launch credential in
+`OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`. Keep this credential in the runner's own
+process; remove it from the native agent and tool environment. It is delivered through tmux's private environment,
+never as a literal launch argument or launch-result field. A report that supplies `runId` requires this bound
+credential; knowing a generation or the install token does not supply run authority.
+
+Issuing or delivering this optional credential never blocks an otherwise supported launch or restore. If the launch
+anchor, PID, generation or private credential channel is unavailable, the existing unbound install-token path remains;
+that path adds no new run-authority claim and is not attributed to a selected run. A refused bound report stays
+refused: it is never silently retried with the install token. If native dispatch already occurred before activation
+failed, Core preserves the dispatched outcome and does not replay input; cleanup addresses only that launch's grant.
+Unreadable observations cannot revoke a grant. Confirmed exit/replacement or intentional lifecycle cleanup still can.
+
+Core activates a pending credential after dispatch against its selected session, pane and recorded runner. A staged
+successor waits for the existing binding cutover; pending posts receive `activity_grant_pending` and must retry.
+An unreadable binding is `activity_grant_unverified` (409, retryable): it could not be verified now, not proven stale.
+Nothing is recorded and the grant is retained; retry when its binding can be checked again.
+Failed launches revoke their own credential. Relaunch replaces the active run; an explicit no-launch adoption can
+retain it only with the original concrete pane/process evidence and an adoption-only tenure continuation. These
+checks bind a runner's reports to its launch; they do not independently verify its claimed native identity. Existing
+host hooks, contained guest grants and install-token Pi usage keep their legacy behavior. Pi usage also accepts a
+current bound Pi credential. No native input channel or cancellation capability is implied by this credential.
 
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
 - **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to
@@ -401,6 +426,7 @@ answer. Only the seat's opt-in refuses and holds attention.
 | `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. | answers `cancelled` |
 | `activity_grant_wrong_seat` | 403 | The grant speaks for another seat. | answers `cancelled` |
 | `activity_grant_stale` | 409 | The grant's launch generation no longer occupies the seat. | answers `cancelled` |
+| `activity_grant_unverified` | 409 | The binding could not be verified now; this is retryable, not evidence of replacement or cancellation. | permits under the existing unavailable-answer policy |
 | `activity_grant_revoked` | 401 | The grant was revoked while its launch generation still occupies the seat, or before it has registered, so this may still be the live request; a replaced occupant's grant reads `activity_grant_stale` instead, even once revoked. | permits |
 | `activity_grant_pending` | 409 | The grant's launch hasn't registered its occupant yet. | permits |
 | `duplicate_request` | 409 | This request id was already submitted in another turn; an agent may reuse an id. | permits |

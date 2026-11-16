@@ -18,13 +18,13 @@ const runFile = promisify(execFile);
 const roots: string[] = [];
 afterAll(() => { for (const root of roots) fs.rmSync(root, { recursive: true, force: true }); });
 
-/** The file node spawns for each child started while `fn` runs. */
-async function spawnedFiles(fn: () => Promise<void>): Promise<string[]> {
+/** The executable and argv node spawns for each child started while `fn` runs. */
+async function spawnedCommands(fn: () => Promise<void>): Promise<{ file: string; args: string[] }[]> {
   const children: ChildProcess[] = [];
   const onChild = (message: unknown) => { children.push((message as { process: ChildProcess }).process); };
   diagnostics.subscribe("child_process", onChild);
   try { await fn(); } finally { diagnostics.unsubscribe("child_process", onChild); }
-  return children.map((child) => child.spawnfile);
+  return children.map((child) => ({ file: child.spawnfile, args: child.spawnargs.slice(1) }));
 }
 
 async function scenario(mode: "shell" | "argv") {
@@ -43,12 +43,14 @@ async function scenario(mode: "shell" | "argv") {
   await runFile("tmux", ["-f", "/dev/null", "new-session", "-d", "-s", "anchor", "sleep 600"], { env: anchorEnv });
   vi.stubEnv("TMUX", undefined);
   vi.stubEnv("TMUX_TMPDIR", serverDir);
+  // Exercise the direct server-start path independently of an inherited systemd service environment.
+  vi.stubEnv("MANAGERPID", undefined);
   let calls = 0;
   const counted = <A,>(fn: (arg: A) => Promise<string>) => (arg: A) => { calls++; return fn(arg); };
   const adapter = new TmuxAdapter(counted(execCommand), undefined, mode === "argv" ? counted(execArgvCommand) : undefined);
   try {
     let result: Record<string, unknown> = {};
-    const files = await spawnedFiles(async () => {
+    const commands = await spawnedCommands(async () => {
       const created = await adapter.createSession("seat a", root);
       const duplicate = await adapter.createSession("seat a", root);
       // Wait for the fixture's /bin/sh login prompt. Input typed during system profile startup can be echoed before
@@ -93,7 +95,7 @@ async function scenario(mode: "shell" | "argv") {
       result.noServerCause = probe.state === "transport_unavailable" ? probe.cause : null;
       result.noServerSessions = await adapter.listSessions();
     });
-    return { result, files, calls, root: fs.realpathSync(root) };
+    return { result, files: commands.map((command) => command.file), commands, calls, root: fs.realpathSync(root) };
   } finally {
     vi.unstubAllEnvs();
     await runFile("tmux", ["kill-server"], { env: anchorEnv }).catch(() => {});
@@ -150,11 +152,26 @@ describe.skipIf(!nativeAvailable)("tmux shell and argv transports against a real
     expect(comparable(argv.result)).toEqual(comparable(shell.result));
   });
 
-  it("the shell transport starts /bin/sh for every call, the argv transport starts tmux by its path, or /bin/sh when PATH leaves it to the shell", () => {
+  it("the argv transport uses a limit-setting shell for creation and a direct tmux path for ordinary calls", () => {
     const tmux = resolveOnPath("tmux", process.env.PATH);
     if (tmux) expect(tmux).toMatch(/^\/.*\/tmux$/);
     expect(shell.calls).toBeGreaterThan(15);
     expect(shell.files).toEqual(Array(shell.calls).fill("/bin/sh"));
-    expect(argv.files).toEqual(Array(argv.calls).fill(tmux ?? "/bin/sh"));
+    expect(argv.commands).toHaveLength(argv.calls);
+    // Both createSession attempts issue start-server ; source-file for their private config.
+    // Only those clients' child shells raise their soft limit;
+    // the executable and original arguments follow the fixed script as positional parameters.
+    const creating = argv.commands.filter((command) => command.args.includes("start-server"));
+    expect(creating).toHaveLength(2);
+    for (const command of argv.commands) {
+      if (creating.includes(command)) {
+        expect(command.file).toBe("/bin/sh");
+        expect(command.args[0]).toBe("-c");
+        expect(command.args[1]).toContain('exec "$0" "$@"');
+        expect(command.args.slice(2, 6)).toEqual(["tmux", "start-server", ";", "source-file"]);
+      } else {
+        expect(command.file).toBe(tmux ?? "/bin/sh");
+      }
+    }
   });
 });

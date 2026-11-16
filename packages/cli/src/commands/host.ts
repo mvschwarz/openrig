@@ -975,8 +975,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         }
         if (opts.json) return;
         console.log(decision === "approve"
-          ? `Approved pairing ${res.data.code} from ${res.data.requester}, as ${res.data.by}. The requesting machine receives this host's token when it next checks.`
-          : `Denied pairing ${res.data.code} from ${res.data.requester}, as ${res.data.by}. Nothing was handed over.`);
+          ? `Approved pairing ${res.data.code} from ${JSON.stringify(res.data.requester)}, as ${res.data.by}. The requesting machine receives this host's token when it next checks.`
+          : `Denied pairing ${res.data.code} from ${JSON.stringify(res.data.requester)}, as ${res.data.by}. Nothing was handed over.`);
       });
   }
 

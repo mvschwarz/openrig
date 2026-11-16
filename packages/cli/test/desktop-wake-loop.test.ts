@@ -95,7 +95,8 @@ async function fixture(onTestFinished: TestContext["onTestFinished"]) {
   return { runLoop, assign, queue, state };
 }
 
-describe.skipIf(process.platform === "win32").concurrent("the skill's opt-in wake loop", () => {
+// Each short deadline includes real CLI startup; independent cases must not compete for that budget.
+describe.skipIf(process.platform === "win32")("the skill's opt-in wake loop", () => {
   it("has a built CLI to run the loop with", ({ expect }) => {
     // Not a silent skip: the loop runs against this checkout's built `rig`.
     expect(fs.existsSync(CLI), `build the CLI first (npm run build): ${fileURLToPath(CLI)} is missing`).toBe(true);

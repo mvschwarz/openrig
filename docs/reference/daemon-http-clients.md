@@ -20,7 +20,8 @@ The CLI itself finds the daemon in these orders:
   `$OPENRIG_HOME/daemon.json` when it holds a valid `pid` and `port`; else the config keys `daemon.host` and
   `daemon.port` (environment `OPENRIG_HOST` and `OPENRIG_PORT`), which default to `127.0.0.1:7433`.
 - **Status** (`rig status`, `rig daemon status`): `OPENRIG_URL` (or `RIGGED_URL`) first, probed directly; else
-  the state file below.
+  the state file below. If no state is read, probe the configured `daemon.host` and `daemon.port` instead (defaulting
+  to `127.0.0.1:7433`).
 - **Start and stop** (`rig daemon start`, `stop`): the state file, `$OPENRIG_HOME/daemon.json`, then the legacy
   `~/.rigged/daemon.json`.
 
@@ -82,6 +83,13 @@ All of them are server-sent events (`text/event-stream`):
   `?replay=all`, no `replay`, or any other value sends the whole log first. A `Last-Event-ID` header (what
   `EventSource` sends when it reconnects) sends the events after that id instead, whatever `replay` says.
   Live events that arrive during the replay follow it, without duplicates.
+  When a person clicks an answer on an ask with questions (in Steering, the Feed, Slack or an MCP client), the stream
+  carries `queue.answer_recorded`: `{ qitemId, actorSession, questionId, answered, questions, complete, summary }`.
+  `complete: false` means the set is still partial: the ask stays open, and its answers haven't gone back yet. The
+  event carries ids and counts, not the choice; read the ask for its `humanAnswers`. A click that changes nothing (the
+  same option again) has no event, and neither does a typed reply, which settles the ask through its own
+  `queue.updated`. The event is recorded after the answer: if it can't be recorded, the answer still stands, so a
+  client that re-reads the ask after a gap still sees it.
 - **`GET /api/activity/events`**: live only, no replay or ids. Each message is named after its event type:
   `seat.activity_changed`, `seat.rung_health`, `proof.judged` or `proof.sources_changed`. It tells a view to read
   again; it carries no derived state.
@@ -151,6 +159,84 @@ An outbox entry's `deliveryState` reports the send attempt; only `delivered` con
 an open FYI, or a closed ask is not that receipt. The rig-wide reads and their limits are described below; the existing
 `outbox/list?senderSession=<session>` read remains available.
 
+### What needs a person, and how their answers link back (`team-operations.v1`)
+
+`GET /api/team-operations/capabilities` says which team-operations jobs this daemon supports, separately from its
+build:
+
+```json
+{ "contract": "team-operations.v1",
+  "capabilities": { "needs-me.read": "supported", "needs-me.answer": "not-supported", "needs-me.follow": "not-supported" },
+  "build": { "semver": "…", "commit": "…" } }
+```
+
+A capability reads `supported`, `not-supported` or `unknown`, and a missing key means `unknown`. A daemon without the
+route (HTTP 404) predates the contract: keep reading what it already returns. In a source run, `build` is
+`{ semver: null, commit: null }`.
+
+With `needs-me.read` supported:
+
+- **What needs the person:** `GET /api/attention?view=<person-id>` (the same read as the Feed). Each queue item adds
+  `revision` and `about`. `revision` is the request's opaque decision revision: the same value as that row's
+  `decisionRevision`, and what an answer can name as `expectedRevision` so it applies only to the version the person
+  read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
+  about the open rows blocked on it (the newest 100, with `aboutTruncated: true` when there are more). An empty `about`
+  isn't proof that it's about nothing: a request that names it only in its text isn't counted.
+- **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
+  `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
+  already reflected in it. A click that records or changes an answer emits `queue.answer_recorded` even while the set
+  is partial. An identical repeated choice, or a later click after a pending ask's answer set is complete, records
+  nothing new and emits none. Events are best effort; re-read the snapshot or row after a stream gap.
+- **The answers returned to a request:** `GET /api/queue/<qitemId>` adds `answers`, oldest first, each
+  `{ qitemId, by, at, text, episode, recordedIdentity }`. They are found by the answer row's link to the request, not
+  by its text, so don't parse the `In reply to:` line in an answer's body. `text` is the person's answer without that
+  footer. `episode` names the park an answer belongs to, or is null. `recordedIdentity` is the identity provenance
+  recorded when the answer row was created. An answer row's own read has `replyTo`, the request it answers. A partial
+  set of choices stays on the request's `humanAnswers` until the whole set is returned. A runner's permission request
+  or a host pairing request is answered in place, with no answer row. `answersFrom: "this-daemon"` says where they were
+  read: an answer another host holds isn't among them, so an empty list isn't proof that nobody answered.
+
+### What a connection supports, and what happened to a delivery (`member-connection.v1`)
+
+`GET /api/member-connection/capabilities` lists each delivery route this daemon declares, with what it supports in four
+groups: `observe` (`dialog`, `turnStart`), `control` (`submit`), `nativeIdentity` (`sessionId`, `resume`) and
+`continuity` (`managedCompaction`, `restorePacketConfirmation`, `fork`). The routes are `typed` (OpenRig types into the
+member's terminal; capabilities by runtime, with `*` for any other), `codex-queue` (Codex's own queue command), a hosted
+member's `hosted-trigger`, and a person's `gateway`. A route with `armed: false` is declared but not used: nothing is
+delivered on it until a setting arms it.
+
+Each capability reads `supported`, `not-supported`, `unavailable` (the route has it, but this member can't use it now,
+such as a seat with no session recorded as current), `not-applicable` (it means nothing on this route) or `unknown`. A
+missing key means `unknown`. None of them means idle or success, and a declaration isn't readiness: whether a seat has a
+current session comes from what OpenRig has recorded, not from looking at its pane or process. A daemon without the route (HTTP 404) predates the contract: treat
+every capability as unknown and keep using what works today.
+
+`?session=<address>` adds `member`: `{ member, route, runtime, capabilities, reason? }` for the member that address
+names: a person the human registry resolves (or the terminal person's own `human@host`), a hosted member, or a seat. An
+address shaped like a person's, such as `<id>@external`, is a person only when the registry resolves it. A person is
+resolved first, so when the registry can't be read, any address it could resolve to a person (`<id>@external`, or any
+`member@rig`, since a person's id can be spelled that way) comes back unknown, even if a seat or hosted member has that name. That
+answer, and an address none of them has, comes back with `route: null`, every capability `unknown`, and the reason.
+
+Each typed send also records what happened to it, in the daemon's `transport.delivery_evidence` event, as
+`outcome: { fact, reporter, route }`. `fact` is `accepted` (typed and submitted, with `renderVerified: true` when
+the screen showed it), `held`, `not-delivered`, `failed-effect-unknown` or `unknown`. A prompt answer typed without Enter on a send that
+succeeded is `unknown`: whether the prompt took it isn't known; if the send failed after typing, it's
+`failed-effect-unknown`. `reporter` says who established it.
+None of them means the member read the work: picking it up is a claim on the row.
+
+What reads these declarations:
+- **A handover's packet.** Only a runtime declared with `continuity.restorePacketConfirmation` has its input box read
+  until the restore or priming packet leaves it. On any other runtime the handover's result carries
+  `restorePacket: { status: "accepted", reason }`: typed and submitted, not seen consumed. `sideEffects.startupContextDelivered`
+  stays `true` there for existing readers and means the same thing, accepted; read `restorePacket` for what was seen.
+- **A send's dialog check.** After a fresh hook, the dialog and picker checks run before typing only on a runtime
+  declared with `observe.dialog`. The other screen checks before a send don't read the declaration.
+- **A watchdog's history.** When a send returns, the watchdog's history records its `deliveryFact` and, when the screen
+  showed it, `deliveryRenderVerified: true`. Exceptions and receipt reconciliation may have no fact; absence of a fact
+  or render flag establishes no positive delivery or verification claim. These are outcome words, not a capability
+  gate: the reminder's status, receipts and retries don't change with them.
+
 ## Route details
 
 - **A rig's queue history:** `GET /api/queue/list?rig=<rig>&updatedSince=<ISO time>&sort=updated` returns the
@@ -189,6 +275,7 @@ an open FYI, or a closed ask is not that receipt. The rig-wide reads and their l
   Success is 201 with `instance`, `spec`, `entryQitemId` and `entryOwnerSession`, any `advisories`, and
   `scopeIgnored` when a scope wasn't applied. The instance keeps `rootObjective`, which every instance read returns
   (`/api/workflow/list`, `/api/workflow/<id>` and its `trace`). An instance started before it was kept reads `null`.
+- **`GET /api/workflow/list`** accepts exact `project`, `mission`, `slice`, `rig` (the bound rig), and `name` (the workflow name) filters, repeatable `tag` filters on the instance's free-form scope tags, and `limit` from 1 to 10,000. Filters combine with AND and apply before the limit; results keep their existing oldest-first order. Instances without the requested scope or binding do not match. Without these filters, existing list behavior is unchanged.
 - **`GET /api/provider/usage`** returns `{ hostUsage }`, this host's usage rows (`host: "local"`, a `provider`
   and a `state`). A Claude row's `windows` are the seats' status-line readings, one entry per reading, each with
   its `window`, `usedPercent`, `resetsAt`, `asOf` and `seatSession`. A Codex row has `windows: []`. Treating the
@@ -224,3 +311,76 @@ an open FYI, or a closed ask is not that receipt. The rig-wide reads and their l
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+
+
+## Resume one banked original conversation
+
+The opt-in original-only operation reuses `startup-history.v1`. It targets one exact rig and node,
+with a retained snapshot and captured history. Platform boot enrollment remains an operator step.
+These routes use the existing terminal bearer token.
+
+1. Read `GET /api/startup/<rigId>/nodes/<nodeId>/original?snapshotId=<id>&historySessionId=<id>`.
+   The preview uses that explicitly retained usable snapshot, even when a newer snapshot exists.
+   It returns `revision`, the selected history and current model, effort, cwd and permission.
+   `settingsSource.accountHome` describes the seat's current effective home configuration;
+   `settingsSource.runtimeHome.uses` describes the home bound to this reviewed attempt, which can differ.
+   Neither home selection proves an authenticated account; `accountHome.authentication` remains
+   `"unconfirmed"`. A `daemon_environment` home is the daemon fallback, not a seat setting;
+   `native_default` means the runtime default.
+2. POST to the same `/original` path, without query fields, with `action: "resume"`, `snapshotId`,
+   `historySessionId`, that `revision`, an `operationId` UUID, and `expectedOriginal` containing the banked
+   `nodeId`, `sessionName`, `runtime` (`claude-code` or `codex`) and `nativeId`.
+   Keep native conversation IDs in the private bank and request body. They are not returned in diagnostics.
+
+The operation keeps the current model, cwd, effort and permission choices. The reviewed
+`settingsSource.runtimeHome.uses` plan can first apply the selected original's recorded home as a new
+revision before launch, rather than using the current home reported by `settingsSource.accountHome`.
+Its original-only native effect uses the retained history and existing selected-history ownership checks.
+A positively established matching original already running returns `code: "already_running_original"`
+and `nativeEffect: false`. A confirmed resume returns
+`code: "resumed"`, with `sourceSessionId`, `resultSessionId` and `operationId`.
+
+An unavailable source, changed selection, different occupant, restoring-only result or unconfirmed native
+identity returns a partial result. Existing occupants stay in place. This selected operation never substitutes
+a fresh conversation. Its current-original check needs the existing qualified occupant, pane and native-record
+evidence; a stored resume token by itself is insufficient. A legacy named history that cannot establish the
+banked native identity remains partial. For Codex, the PID/start-time log and transcript are resolved in the
+current selected runtime home used for launch. With no explicit home, the existing default-home and PID-bound
+process-HOME reader supplies the home; the transcript lookup uses that same positively resolved home. Another
+home's copy of the same thread UUID is not selected. These checks also serve conditional sends and record reads.
+If a recorded explicit home changes before its running process is relaunched, its record may be unavailable;
+the check does not borrow another home's copy or change the running process's account.
+
+Retain the operation ID after a timeout. Repeating that same request first reconciles current native identity;
+it reports a matching running original or `operation_unconfirmed`, and never dispatches that operation again.
+The correlation survives daemon restart. An operation ID reused with different input returns
+`operation_conflict`. Inspect the recorded operation and seat before selecting any new attempt.
+
+A source-level fixture pass establishes the tested ownership, selection and reporting paths. Actual native
+conversation usefulness and authenticated-account continuity need a qualified runtime observation.
+
+## Per-rig delivery drain
+
+A maintenance owner can hold automatic queue wakes, watchdog delivery and stuck-sweep findings directed to one rig:
+
+- `GET /api/rigs/:rigId/delivery-drain` reads its current control and retained-notice counts.
+- `POST /api/rigs/:rigId/delivery-drain` begins a window, or renews the same window's review deadline:
+
+  ```json
+  {"drainId":"maintenance-window-1","owner":"maintainer@example","reviewAt":"2026-12-01T12:30:00Z"}
+  ```
+
+- `POST /api/rigs/:rigId/delivery-drain/end` with `{"drainId":"maintenance-window-1"}` explicitly ends that window.
+
+Status includes the owner, start, review deadline and drain ID, `retainedWorkCount`, and `nativeStartsDeferred: false`.
+The retained count is pending queue-wake intents plus due watchdog jobs, excluding maintenance review jobs; it is a count of notifications, not unique tasks. Work keeps its existing queue/outbox/job identities. Other destination rigs continue normally; a row's source rig and a watchdog's registering rig are provenance, not drain admission criteria.
+
+A deadline prompts the recorded owner through the existing watchdog; it never ends a drain automatically. Review checks and repeat prompts have a five-minute minimum interval, including a past or near deadline. Its review job remains usable even if its owner's rig also has a delivery drain. Repeating BEGIN with the same ID and settings keeps the same window and job; renewal preserves the start. An active window is returned as status if a different ID is requested. A completed window's ID never starts it again.
+
+END changes only the named current window and schedules one existing recovery pass for its pending queue notices. Repeating END does not schedule another pass. A delayed END for an earlier window cannot end a later one. `releaseScheduled` reports scheduling, not successful delivery: notices still use current queue state, recipient checks and normal receipts. The END pass adds no retry of failed, uncertain, in-flight, delivered or manually retained input. Completed work reconciles normally; existing failed or uncertain outcomes keep their ordinary recovery and visibility.
+
+This is delivery-only maintenance. Direct sends, control/END requests and ordinary reads stay usable. Automatic native starts are **not deferred**, and input already in flight can finish. Coordinate native or daemon lifecycle work separately; this control does not promise all-activity quiet or graceful stop.
+
+The automatic wake ladder also waits before attempt budgets, rung markers and escalation for work whose destination rig is drained, including a held escalation target. It resumes at the retained rung after END. Legacy workflow packets without outbox intents remain owed: their existing keepalive resumes after END, and the sweep reports them if they stay unclaimed. END's scoped recovery pass covers pending intents. Diagnosis re-presentations wait before spending their presentation receipt. An explicit resolve notification remains an explicit action and can pass through the delivery hold.
+
+All watchdog evaluation for the held rig waits, including the context-usage watchdog's managed-compaction action. This does not add a native-start hold. If a drain admission read fails, automatic delivery proceeds and reports the uncertainty. Control/status failures remain errors, and failed BEGIN/END writes never report success.

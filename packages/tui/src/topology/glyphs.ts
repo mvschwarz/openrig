@@ -43,6 +43,9 @@ export function statusGlyph(data: GraphNodeData): StatusGlyph {
     // S19 MR3: ACTIVITY splits the ● bucket by color ROLE (glyph honesty
     // unchanged) — actively-working vs idle are visibly distinct
     const working = activity === "running" || data.terminalActive === true;
+    // The daemon's activity word decides when it's served, as in the seat table and `rig ps`: a quiet seat it reads as
+    // unknown is the honest-unknown ○, never idle. When no activity word is served, the screen fallback remains.
+    if (!working && activity != null && activity !== "idle") return { glyph: "○", token: "actDetached", overlay: null };
     return { glyph: "●", token: working ? "actActive" : "actIdle", overlay: null };
   }
   // everything else — pending, queued, detached, no session — is the honest

@@ -23,6 +23,10 @@ import { HEALTHZ_RESPONSIVENESS_BUDGET_MS } from "../src/domain/event-loop-monit
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
 const CHILD = path.resolve(HERE, "fixtures/ps-stall-http-child.ts");
+// The nodes wave repeats until its probes have this many /healthz samples (the ps+summary burst takes about 20),
+// so its worst probe is a measurement, not one tick; the cap keeps it inside the run's watchdog.
+const NODES_MIN_PROBES = 20;
+const NODES_BURST_CAP_MS = 20_000;
 
 // exact SQL signatures (normalized, lowercased) of the two per-node fold scans
 const STARTUP_SIG = "type in ('node.startup_challenged','node.startup_proof_skipped','node.startup_proof_verified','node.startup_proof_rejected')";
@@ -256,26 +260,39 @@ describe("slice-04 ps/summary event-loop regression", () => {
       })();
       if (!nodes) probe = startProbe();
 
-      const reqs: Promise<unknown>[] = [];
-      for (let i = 0; i < 24; i++) {
-        if (nodes) {
-          const rig = `rig-act-${String(i % ACTIVE_RIGS).padStart(2, "0")}`;
-          reqs.push(fetch(`${base}/api/rigs/${rig}/nodes`).then(async (r) => {
-            psStatuses.push(r.status);
-            const rows = await r.json();
-            nodeCounts.push(Array.isArray(rows) && rows.every((n: { rigId: string }) => n.rigId === rig) ? rows.length : 0);
-          }));
-          continue;
+      if (nodes) {
+        // One wave of 24 nodes reads ends before a second probe can start, so one sample decided the budget. The same
+        // wave is sent again, each one probed only while it runs, until the probes number NODES_MIN_PROBES (or the cap).
+        const burstUntil = performance.now() + NODES_BURST_CAP_MS;
+        do {
+          const reqs: Promise<unknown>[] = [];
+          for (let i = 0; i < 24; i++) {
+            const rig = `rig-act-${String(i % ACTIVE_RIGS).padStart(2, "0")}`;
+            reqs.push(fetch(`${base}/api/rigs/${rig}/nodes`).then(async (r) => {
+              psStatuses.push(r.status);
+              const rows = await r.json();
+              nodeCounts.push(Array.isArray(rows) && rows.every((n: { rigId: string }) => n.rigId === rig) ? rows.length : 0);
+            }));
+          }
+          // Queue the competing reads after the wave's requests, not ahead of all of them.
+          stop = false;
+          probe = startProbe();
+          await Promise.all(reqs);
+          stop = true;
+          await probe;
+          probe = null;
+        } while (health.length < NODES_MIN_PROBES && performance.now() < burstUntil);
+      } else {
+        const reqs: Promise<unknown>[] = [];
+        for (let i = 0; i < 24; i++) {
+          reqs.push(fetch(base + "/api/ps").then((r) => { psStatuses.push(r.status); return r.text(); }));
+          reqs.push(fetch(base + "/api/rigs/summary").then((r) => { sumStatuses.push(r.status); return r.text(); }));
         }
-        reqs.push(fetch(base + "/api/ps").then((r) => { psStatuses.push(r.status); return r.text(); }));
-        reqs.push(fetch(base + "/api/rigs/summary").then((r) => { sumStatuses.push(r.status); return r.text(); }));
+        await Promise.all(reqs);
+        stop = true;
+        await probe;
+        probe = null;
       }
-      // For nodes, queue the competing reads after the burst requests, not ahead of all of them.
-      if (nodes) probe = startProbe();
-      await Promise.all(reqs);
-      stop = true;
-      await probe;
-      probe = null;
     } finally {
       // Stop + ABORT the probe first so its in-flight fetch cannot stall the drain.
       stop = true;
@@ -306,7 +323,7 @@ describe("slice-04 ps/summary event-loop regression", () => {
         ? `${Math.max(...health.map((h) => h.ms))} ms over ${health.length} probes`
         : "no probes completed";
       console.log(`[${nodes ? "nodes" : "ps-summary"} D2] worst /healthz ${measured} (budget ${HEALTHZ_RESPONSIVENESS_BUDGET_MS} ms; `
-        + `${nodes ? "nodes" : "ps"} 200s ${psStatuses.filter((st) => st === 200).length}/24`
+        + `${nodes ? "nodes" : "ps"} 200s ${psStatuses.filter((st) => st === 200).length}/${nodes ? psStatuses.length : 24}`
         + (nodes ? ")" : `, summary 200s ${sumStatuses.filter((st) => st === 200).length}/24)`));
       if (nodes) {
         const stats = (samples: typeof health) => ({ count: samples.length, worstMs: Math.max(0, ...samples.map(s => s.ms)), statuses: samples.map(s => s.status) });
@@ -315,10 +332,13 @@ describe("slice-04 ps/summary event-loop regression", () => {
     }
 
     // Teardown is guaranteed done above; now assert (the budget pin is the LAST assertion).
-    expect(psStatuses).toHaveLength(24);
+    if (nodes) expect(psStatuses.length).toBeGreaterThanOrEqual(24);
+    else expect(psStatuses).toHaveLength(24);
     expect(psStatuses.every((s) => s === 200)).toBe(true);
     if (nodes) {
-      expect(nodeCounts).toHaveLength(24);
+      expect(nodeCounts).toHaveLength(psStatuses.length);
+      // Fewer means the burst ended (or hit its cap) before enough probes ran, and the worst below is too few samples.
+      expect(health.length, `the nodes burst took only ${health.length} /healthz probes`).toBeGreaterThanOrEqual(NODES_MIN_PROBES);
       expect(nodeCounts.every(n => n > 0)).toBe(true);
       expect(baselineHealth).toHaveLength(8);
       expect(baselineQueue).toHaveLength(8);

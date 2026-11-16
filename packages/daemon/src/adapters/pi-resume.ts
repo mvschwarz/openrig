@@ -1,3 +1,4 @@
+import type { RunnerGrantLaunch } from "../domain/runner-grant-launch.js";
 // OPR.0.4.6.PI1 FR-6 — Pi seat resume (mirrors codex-resume.ts).
 //
 // Resume is HONEST session-file continuation: relaunch the pi-runner with
@@ -29,6 +30,8 @@ export interface PiResumeFsOps {
 }
 
 interface PiResumeOptions {
+  /** Core resolves the registered restore binding; the runner never supplies it. */
+  runnerGrant?: (session: string, runId: string, cwd: string) => Promise<RunnerGrantLaunch>;
   /** Resolve the persisted/configured account without relying on live tmux metadata. */
   accountHomeForSession?: (session: string) => string | undefined;
   stateRootForSession?: (session: string) => string;
@@ -105,64 +108,92 @@ export class PiResumeAdapter {
     // only states stamped with THIS attempt's launchId. The prior record is
     // read FIRST so the durable catch-up cursor (lastEntryId, FR-5) survives.
     const launchId = (this.options.newLaunchId ?? (() => randomUUID()))();
-    const prior = this.fs.exists(seat.runnerStatePath) ? parsePiRunnerState(this.readSafe(seat.runnerStatePath)) : null;
-    this.fs.writeFile(
-      seat.runnerStatePath,
-      JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
-    );
+    let authority: RunnerGrantLaunch | undefined;
+    let authorityUnavailable = false;
+    let dispatchedWithoutAuthority = false;
+    if (this.runtime === "pi") {
+      try { authority = await this.options.runnerGrant?.(tmuxSessionName, launchId, cwd); }
+      catch { authorityUnavailable = true; }
+    }
+    let launchSucceeded = false;
+    try {
+      const prior = this.fs.exists(seat.runnerStatePath) ? parsePiRunnerState(this.readSafe(seat.runnerStatePath)) : null;
+      this.fs.writeFile(
+        seat.runnerStatePath,
+        JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
+      );
 
-    const trust = this.runtime === "omp"
-      ? (yoloEnabled(process.env, resolvedPosture) ? "approve" : "no-approve")
-      : piTrust(this.options.trustPosture, process.env, resolvedPosture);
-    const appliedLaunch = this.runtime === "omp"
-      ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
-      : observePiResourceTrust(trust);
-    let nodeId: string | undefined;
-    if (this.runtime === "pi" && this.options.seatLaunchEnvironment) {
-      try { nodeId = await this.tmux.getSessionEnv(tmuxSessionName, "OPENRIG_NODE_ID") ?? undefined; }
-      catch { /* Account-free resume retains best-effort identity correction. */ }
-    }
-    const accountHome = this.runtime === "pi" ? this.options.accountHomeForSession?.(tmuxSessionName)
-      ?? (nodeId ? this.options.seatLaunchEnvironment?.accountHome(nodeId, this.runtime) : undefined) : undefined;
-    if (!nodeId && this.runtime === "pi" && (accountHome || this.fs.exists(`${seat.agentDir}/.openrig-account`))) {
-      return { ok: false, code: "resume_failed", message: "Pi resume needs seat identity to preserve its selected account; restore identity and retry resume." };
-    }
-    if (!nodeId && this.runtime === "pi" && this.options.seatLaunchEnvironment) console.warn("[pi-resume] Seat identity unavailable; account-free resume continues with best-effort routing.");
-    const cmd = buildPiRunnerCommand({
-      accountHome,
-      runtime: this.runtime,
-      runnerEntryPath: this.paths.runnerEntryPath,
-      sessionName: tmuxSessionName,
-      stateRoot: this.options.stateRootForSession?.(tmuxSessionName) ?? this.paths.stateRoot,
-      cwd,
-      // The model declaration must survive resume: the runner's provider-key
-      // allowlist keys off the declared provider (VM leg finding).
-      model: model ?? undefined,
-      thinking: this.runtime === "pi" ? effort ?? undefined : undefined,
-      // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). Same decision as the launch path:
-      // YOLO forces `approve` on every restored seat; otherwise the configured posture.
-      trust,
-      sessionFile,
-      launchId,
-      usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
-      openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
-      ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
-    });
+      const trust = this.runtime === "omp"
+        ? (yoloEnabled(process.env, resolvedPosture) ? "approve" : "no-approve")
+        : piTrust(this.options.trustPosture, process.env, resolvedPosture);
+      const appliedLaunch = this.runtime === "omp"
+        ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
+        : observePiResourceTrust(trust);
+      let nodeId: string | undefined;
+      if (this.runtime === "pi" && this.options.seatLaunchEnvironment) {
+        try { nodeId = await this.tmux.getSessionEnv(tmuxSessionName, "OPENRIG_NODE_ID") ?? undefined; }
+        catch { /* Account-free resume retains best-effort identity correction. */ }
+      }
+      const accountHome = this.runtime === "pi" ? this.options.accountHomeForSession?.(tmuxSessionName)
+        ?? (nodeId ? this.options.seatLaunchEnvironment?.accountHome(nodeId, this.runtime) : undefined) : undefined;
+      if (!nodeId && this.runtime === "pi" && (accountHome || this.fs.exists(`${seat.agentDir}/.openrig-account`))) {
+        return { ok: false, code: "resume_failed", message: "Pi resume needs seat identity to preserve its selected account; restore identity and retry resume." };
+      }
+      if (!nodeId && this.runtime === "pi" && this.options.seatLaunchEnvironment) console.warn("[pi-resume] Seat identity unavailable; account-free resume continues with best-effort routing.");
+      const cmd = buildPiRunnerCommand({
+        accountHome,
+        runtime: this.runtime,
+        runnerEntryPath: this.paths.runnerEntryPath,
+        sessionName: tmuxSessionName,
+        stateRoot: this.options.stateRootForSession?.(tmuxSessionName) ?? this.paths.stateRoot,
+        cwd,
+        // The model declaration must survive resume: the runner's provider-key
+        // allowlist keys off the declared provider (VM leg finding).
+        model: model ?? undefined,
+        thinking: this.runtime === "pi" ? effort ?? undefined : undefined,
+        // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). Same decision as the launch path:
+        // YOLO forces `approve` on every restored seat; otherwise the configured posture.
+        trust,
+        sessionFile,
+        launchId,
+        usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
+        openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
+        ...(resolvedWrapper ? { launchWrapper: resolvedWrapper } : {}),
+      });
 
-    const fallback = cmd;
-    const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, nodeId, accountHome })
-      : fallback;
-    // Short commands retain the direct path; long commands exec from a private script.
-    let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== fallback && accountHome === undefined) {
-      textResult = await this.tmux.sendShellCommand(tmuxSessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
+      const fallback = cmd;
+      let command = this.runtime === "pi" && this.options.seatLaunchEnvironment
+        ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime, nodeId, accountHome, ...(authority ? { generation: authority.generation } : {}) })
+        : fallback;
+      const originalCommand = command;
+      if (authority) command = authority.wrap(command);
+      // Short commands retain the direct path; long commands exec from a private script.
+      let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
+      if (!textResult.ok && textResult.code === "launch_path_too_long" && authority && command !== originalCommand) {
+        try { await authority.finish(false); } catch { /* optional authority cleanup cannot prevent the original resume */ }
+        authority = undefined; authorityUnavailable = true;
+        textResult = await this.tmux.sendShellCommand(tmuxSessionName, originalCommand, undefined, { stageIfLong: true, execInScript: true });
+      }
+      if (!textResult.ok && textResult.code === "launch_path_too_long" && originalCommand !== fallback && accountHome === undefined) {
+        textResult = await this.tmux.sendShellCommand(tmuxSessionName, fallback, undefined, { stageIfLong: true, execInScript: true });
+      }
+      if (!textResult.ok) {
+        return { ok: false, code: "resume_failed", message: textResult.message };
+      }
+      try { authority?.dispatched(); }
+      catch {
+        try { await authority?.finish(false); } catch { /* native dispatch already happened; never replay */ }
+        authority = undefined; authorityUnavailable = true; dispatchedWithoutAuthority = true;
+      }
+      const result = await this.verifyResume(tmuxSessionName, sessionFile, launchId);
+      launchSucceeded = result.ok;
+      return result.ok ? { ...result, appliedLaunch,
+        ...(authorityUnavailable ? { warnings: [dispatchedWithoutAuthority
+          ? "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed."
+          : "Run-bound reporting unavailable; using existing unbound install-token reporting."] } : {}) } : result;
+    } finally {
+      try { await authority?.finish(launchSucceeded); } catch { /* optional reporting cannot turn a completed resume into failure */ }
     }
-    if (!textResult.ok) {
-      return { ok: false, code: "resume_failed", message: textResult.message };
-    }
-    const result = await this.verifyResume(tmuxSessionName, sessionFile, launchId);
-    return result.ok ? { ...result, appliedLaunch } : result;
   }
 
   // Poll the runner's launch-scoped sidecar ONLY — never stale pane

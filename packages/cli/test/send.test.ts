@@ -241,6 +241,8 @@ describe("Send CLI", () => {
     // (Hermetic-gate default is env-UNSET, so without this env-less delivery would render the unknown
     // marker.) Nested describes that stub their own envs re-run after this; the block afterEach restores.
     vi.stubEnv("OPENRIG_SESSION_NAME", "sender@my-rig");
+    // A runner inside tmux would otherwise let the managed-pane fallback recover the runner's own seat.
+    vi.stubEnv("TMUX_PANE", "");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
   });
   afterEach(() => { vi.unstubAllEnvs(); });
@@ -250,6 +252,24 @@ describe("Send CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello world"]);
     });
     expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+  });
+
+  it.each([{ json: false, remote: false }, { json: true, remote: false }, { json: false, remote: true }, { json: true, remote: true }])("a recorded send never prints sent or probes delivery (%j)", async ({ json, remote }) => {
+    const data = { ok: true, outcome: "recorded", persisted: true, sent: false, verified: false,
+      outboxIds: ["outbox-fixture"], warning: "Message recorded in the sender outbox, not delivered.",
+      destinationStatus: { status: "missing", message: "No live seat by this name." } };
+    const post = vi.fn(async () => ({ status: 200, data }));
+    const client = { post } as unknown as DaemonClient;
+    const testDeps: SendDeps = { ...runningDeps(port), clientFactory: () => client,
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "remote-fixture", transport: "http", url: "http://fixture.test:7433" }] } }) };
+    const result = await captureChannels(() => makeCmd(testDeps).parseAsync([
+      "node", "rig", "send", "reader@missing-rig", "keep work", "--verify", ...(json ? ["--json"] : []), ...(remote ? ["--host", "remote-fixture"] : []),
+    ]));
+    expect(result.exitCode).toBe(1);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(result.stdout.join("\n")).not.toContain("Sent to");
+    if (json) { expect(result.stdout).toHaveLength(1); const encoded = JSON.parse(result.stdout[0]!); expect(remote ? encoded.result.data : encoded).toEqual(data); }
+    else { expect(result.stdout.join("\n")).toContain("Recorded, not delivered"); expect(result.stderr.join("\n")).toContain("No live seat"); }
   });
 
   it("a terminal seat: sends exactText beside the envelope, prints the note, and --verify checks the exact text", async () => {
@@ -1340,6 +1360,7 @@ describe("Send CLI", () => {
     expect(output).toContain("a@r: sent\nNotice: a@r was mid-restore (as recorded). This doesn't mean the restore has finished.\nb@r: sent\n");
     expect(output).toContain("c@r: FAILED — paste failed\nNotice: c@r was mid-restore");
     expect(output).toContain("d@r: retained, not delivered; inspect with rig seat held-messages\nNotice: d@r was mid-restore");
+    expect(output).toContain("2/4 delivered, 1 held");
     expect(output.match(/^Notice: /gm)).toHaveLength(3); // none for b@r
     expect(exitCode).toBe(1); // a failed recipient, as before
   });

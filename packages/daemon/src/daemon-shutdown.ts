@@ -2,6 +2,12 @@ import { writeFileSync, renameSync } from "node:fs";
 
 export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
 export const DAEMON_STOP_WAIT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS + 2_000;
+// Shared lifecycle budgets: an async command caller must outlive the owned-child
+// readiness wait, one probe, shutdown cleanup, and a small process/I/O margin.
+export const DAEMON_START_READINESS_WAIT_MS = 180_000;
+export const DAEMON_START_PROBE_TIMEOUT_MS = 2_000;
+export const DAEMON_START_COMMAND_TIMEOUT_MS = DAEMON_START_READINESS_WAIT_MS
+  + DAEMON_START_PROBE_TIMEOUT_MS + DAEMON_STOP_WAIT_MS + 5_000;
 export const DAEMON_HTTP_CONNECTION_GRACE_MS = 250;
 export const DAEMON_SHUTDOWN_RECEIPT = "daemon-shutdown.json";
 export interface DaemonShutdownReceipt {

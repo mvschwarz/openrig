@@ -1,4 +1,5 @@
 import { modelObservation, formatModelObservation, type ModelObservation } from "../lib/model-observation.js";
+import { formatCheckIn } from "../lib/check-in.js";
 import { Command } from "commander";
 import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
@@ -66,11 +67,17 @@ export interface NodeEntry {
   intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
+  /** The conversation outcome restore or handover recorded for the current occupant: `resumed` when a restore's resume
+   *  launch, or a strict operator-recovered proof, brought back this occupant's conversation. */
+  continuityOutcome?: string | null;
+  /** The stage of this session's own startup failure while startup needs attention (`harness_not_started`: no harness). */
+  latestErrorStage?: string | null;
   // OPR.0.4.3.06 — challenge-verified orientation, distinct from startupStatus.
   oriented?: string;
   lifecycleState?: "running" | "detached" | "recoverable" | "attention_required";
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
+  resumeCommandLabel?: string | null;
   latestError: string | null;
   /** Slice 15 — `terminal-active` primitive. true=producing output,
    *  false=silent past threshold, null=no signal. NEVER derived from
@@ -83,7 +90,7 @@ export interface NodeEntry {
     needsInput: { count: number; reason: string | null };
     decidedBy: string | null;
   } | null;
-  identityVerdict?: { verdict?: string; reason?: string | null; observedAt?: string | null } | null;
+  identityVerdict?: { verdict?: string; reason?: string | null; observedAt?: string | null; evidence?: { observedCommand?: string | null } | null } | null;
   /** The registry's recorded session status, kept when the served sessionStatus is corrected. */
   storedSessionStatus?: string | null;
   /** A community harness's seat: its label, maintainer and declared limits. */
@@ -230,6 +237,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "lifecycleState",
   "tmuxAttachCommand",
   "resumeCommand",
+  "resumeCommandLabel",
   "latestError",
   "terminalActive",
   "hasAssignedWork",
@@ -238,6 +246,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "inProgressWorkCount",
   "blockedWorkCount",
   "agentActivity",
+  "activityState",
   "needsAttention",
   "arbitratedNeedsInput",
   "needsInputEvidence",
@@ -826,10 +835,72 @@ function summarizeRigs(entries: PsEntry[]): {
   return { totalRigs: entries.length, totalRunning, byLifecycle, byStatus };
 }
 
+/** A roll call of agent seats, read from facts the daemon already reports: no probe, no wait. Each bucket says what it
+ *  counts, so a person can tell which conversations came back and which seats didn't start. The running counts above
+ *  are unchanged. */
+export const ROLL_CALL_EVIDENCE = {
+  originalConversation: "a runtime hook reports the agent, and its original conversation is recorded as resumed for this occupant, "
+    + "with no failed identity proof. An ambiguous or unavailable identity check doesn't outweigh the hook",
+  agentRunningConversationUnproven: "a runtime hook reports the agent, but its original conversation isn't proven for this occupant: "
+    + "no resume is recorded, or the identity proof for its process failed or couldn't be retained. "
+    + "An ambiguous or unavailable identity check doesn't outweigh the hook",
+  bareShell: "the pane holds a shell, not the agent: restore's harness-not-started marker, or the current identity check saw a shell",
+  sessionMissing: "no running session, or tmux reports the session missing",
+  unknown: "a running session with no current runtime hook report of an agent in it, or whose current identity check sees the "
+    + "other runtime's agent in the seat's pane, which conflicts with any hook report",
+} as const;
+export type RollCallBucket = keyof typeof ROLL_CALL_EVIDENCE;
+
+// The shells the daemon's identity check reads as "no agent" (seat-identity-reconciler.ts, SHELL_COMMANDS).
+const IDENTITY_SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash", "tcsh", "csh", "-bash", "-zsh", "-fish", "-sh", "-dash", "-tcsh", "-csh"]);
+
+/** How the served identity verdict (the daemon serves only one that applies to the current session and pane) contradicts
+ *  the seat: a shell where its agent should be, the other runtime's agent, or a failed proof of the seat's own agent's
+ *  process (restore writes the same reason when the proved process isn't the joined one, or its session metadata conflicts
+ *  or couldn't be retained). An ambiguous or unavailable check contradicts nothing: it's missing evidence. */
+function identityContradiction(n: NodeEntry): "shell" | "otherRuntime" | "proofFailed" | null {
+  const verdict = n.identityVerdict;
+  const command = verdict?.evidence?.observedCommand?.trim().toLowerCase();
+  if (verdict?.verdict !== "mismatch" || verdict.reason !== "process_identity_mismatch" || !command) return null;
+  if (IDENTITY_SHELLS.has(command)) return "shell";
+  // The identity check's own order: the seat's runtime matches first, then the other runtime contradicts it.
+  if (n.runtime === "claude-code" && !command.includes("claude") && command.includes("codex")) return "otherRuntime";
+  if (n.runtime === "codex" && !command.includes("codex") && command.includes("claude")) return "otherRuntime";
+  return "proofFailed";
+}
+
+export function rollCallBucket(n: NodeEntry): RollCallBucket {
+  // The daemon serves an applicable session_missing check as a detached session.
+  if (n.sessionStatus !== "running") return "sessionMissing";
+  if (n.startupStatus === "attention_required" && n.latestErrorStage === "harness_not_started") return "bareShell";
+  const contradiction = identityContradiction(n);
+  // A positive shell outranks a hook report, which may predate the agent's exit.
+  if (contradiction === "shell") return "bareShell";
+  // The other runtime's agent in the pane conflicts with any hook report, and conflicting evidence reads unknown.
+  if (contradiction === "otherRuntime") return "unknown";
+  const a = n.agentActivity;
+  if (!a || a.evidenceSource !== "runtime_hook" || a.state === "unknown" || a.stale || a.fallback) return "unknown";
+  // A recorded resume whose process proof failed doesn't prove the conversation.
+  return n.continuityOutcome === "resumed" && contradiction !== "proofFailed" ? "originalConversation" : "agentRunningConversationUnproven";
+}
+
+export function rollCall(entries: NodeEntry[]): { agentSeats: number } & Record<RollCallBucket, { count: number; seats: string[]; evidence: string }> {
+  const buckets = Object.fromEntries((Object.keys(ROLL_CALL_EVIDENCE) as RollCallBucket[])
+    .map((bucket) => [bucket, { count: 0, seats: [] as string[], evidence: ROLL_CALL_EVIDENCE[bucket] }])) as Record<RollCallBucket, { count: number; seats: string[]; evidence: string }>;
+  const agents = entries.filter((n) => n.nodeKind === "agent");
+  for (const n of agents) {
+    const bucket = buckets[rollCallBucket(n)];
+    bucket.count += 1;
+    bucket.seats.push(n.canonicalSessionName ?? n.logicalId);
+  }
+  return { agentSeats: agents.length, ...buckets };
+}
+
 function summarizeNodes(entries: NodeEntry[]): {
   totalNodes: number;
   byLifecycle: Record<string, number>;
   bySessionStatus: Record<string, number>;
+  rollCall: ReturnType<typeof rollCall>;
 } {
   const byLifecycle: Record<string, number> = {};
   const bySessionStatus: Record<string, number> = {};
@@ -839,7 +910,7 @@ function summarizeNodes(entries: NodeEntry[]): {
     const ss = n.sessionStatus ?? "unknown";
     bySessionStatus[ss] = (bySessionStatus[ss] ?? 0) + 1;
   }
-  return { totalNodes: entries.length, byLifecycle, bySessionStatus };
+  return { totalNodes: entries.length, byLifecycle, bySessionStatus, rollCall: rollCall(entries) };
 }
 
 // Compact rig-level lifecycle codes for the rig table header (3-char fixed width).
@@ -956,9 +1027,9 @@ latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
 podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, launchWrapper, model, sessionStatus,
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
-resumeCommand, latestError, terminalActive, hasAssignedWork,
+resumeCommand, resumeCommandLabel, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
-agentActivity, needsAttention, arbitratedNeedsInput, needsInputEvidence,
+agentActivity, activityState, needsAttention, arbitratedNeedsInput, needsInputEvidence,
 contextUsage, heldReason, startedWithoutRequired, storedSessionStatus, identityVerdict.
 
 --host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
@@ -980,7 +1051,7 @@ Exit codes:
     .option("--verbose", "Alias for --full")
     .option("--limit <n>", "Limit number of entries (rigs or nodes)")
     .option("--fields <list>", "Comma-separated field list to project (JSON only)")
-    .option("--summary", "Emit aggregate-only output (counts by status/lifecycle)")
+    .option("--summary", "Emit aggregate-only output (counts by status/lifecycle). With --nodes, also a roll call of agent seats: original conversation back, agent running with its conversation unproven, bare shell, session missing, unknown, each with what it counts")
     .option("--filter <key=value>", "Filter entries; supported keys: status, lifecycleState, name-prefix, name, agentActivity.state, contextUsage.percent, contextUsage.state")
     .option("--active", "Shortcut for --filter agentActivity.state=running (PL-019)")
     .option("--running", "Alias for --active")
@@ -1163,15 +1234,22 @@ Exit codes:
       }
 
       if (limited.length === 0) {
+        // The daemon identity rides on every empty-fleet line: with more than
+        // one daemon in a house (OPENRIG_URL, hosts.yaml), a targetless "No rigs"
+        // invites reading another daemon's answer as this one's — an empty fleet
+        // read from the wrong daemon reads as a dead fleet.
+        const daemonLabel = ` · daemon ${client.baseUrl}`;
         if (parsedFilter) {
-          console.log(`No rigs match --filter ${parsedFilter.key}=${parsedFilter.value}`);
+          console.log(`No rigs match --filter ${parsedFilter.key}=${parsedFilter.value}${daemonLabel}`);
         } else if (archivedCount > 0 && !opts.includeArchived) {
           // Proven-empty with the history pointer, never a bare "No rigs"
           // while archived history exists.
-          console.log(`No active rigs · ${archivedCount} archived (rig ps --include-archived)`);
+          console.log(`No active rigs · ${archivedCount} archived (rig ps --include-archived)${daemonLabel}`);
         } else {
-          console.log("No rigs");
+          console.log(`No rigs${daemonLabel}`);
         }
+        // A host can have connected assistants and no terminal rigs at all.
+        await printConnectedAssistants(client, opts.rig);
         return;
       }
 
@@ -1187,7 +1265,7 @@ Exit codes:
       // FR-1 display element 1: the host rollup line.
       const rollupSeats = tableRows.reduce((n, e) => n + e.nodeCount, 0);
       const rollupAttention = tableRows.reduce((n, e) => n + (e.attentionCount ?? 0), 0);
-      console.log(`${tableRows.length} rig${tableRows.length === 1 ? "" : "s"} · ${rollupSeats} seat${rollupSeats === 1 ? "" : "s"} · ${rollupAttention} need${rollupAttention === 1 ? "s" : ""} attention`);
+      console.log(`${tableRows.length} rig${tableRows.length === 1 ? "" : "s"} · ${rollupSeats} seat${rollupSeats === 1 ? "" : "s"} · ${rollupAttention} need${rollupAttention === 1 ? "s" : ""} attention · daemon ${client.baseUrl}`);
 
       // Human output: apply default truncation budget unless --full.
       const humanList = (opts.full || limit !== null) ? tableRows : tableRows.slice(0, HUMAN_RIG_BUDGET);
@@ -1243,9 +1321,41 @@ Exit codes:
         const remaining = filtered.length - (limit ?? 0);
         console.log(`... and ${remaining} more rig${remaining === 1 ? "" : "s"} (--limit ${limit}).`);
       }
+      await printConnectedAssistants(client, opts.rig);
     });
 
   return cmd;
+}
+
+/** Connected assistants (roster members outside any terminal) and whether each is checking its queue. They're on the
+ *  team but aren't nodes, so the human view lists them in their own short section, every one it's given; `--json` output
+ *  is unchanged (read `/api/queue/hosted-members` for them). The local rig and node views print it, empty or not, and so
+ *  does an HTTP host's node view; an SSH host runs its own `rig ps`. An HTTP host's rig view and the multi-host fan-out
+ *  leave it out. Nothing when there are none. A list that can't be read isn't an empty one, so it gets one line saying
+ *  check-in is unavailable, and the view's exit status stays as it was. */
+async function printConnectedAssistants(client: DaemonClient, rig?: string, requestHeaders?: Record<string, string>): Promise<void> {
+  let members: Array<Record<string, unknown>>;
+  let unavailable: string | null = null;
+  try {
+    const res = await client.get<{ members?: unknown }>("/api/queue/hosted-members", requestHeaders ? { headers: requestHeaders } : undefined);
+    if (res.status === 404) unavailable = "this daemon doesn't serve it";
+    else if (res.status >= 400) unavailable = `the read failed: HTTP ${res.status}`;
+    else if (!Array.isArray(res.data?.members)) unavailable = "the daemon's answer couldn't be read";
+    members = unavailable ? [] : (res.data.members as unknown[]).filter((m): m is Record<string, unknown> => !!m && typeof m === "object" && typeof (m as Record<string, unknown>).seat === "string");
+  } catch (err) {
+    unavailable = `the read failed: ${(err as Error).message}`;
+    members = [];
+  }
+  if (unavailable) {
+    console.log("");
+    console.log(`Connected assistants: check-in unavailable (${unavailable})`);
+    return;
+  }
+  if (rig) members = members.filter((m) => (m.seat as string).endsWith(`@${rig}`));
+  if (members.length === 0) return;
+  console.log("");
+  console.log("Connected assistants (outside the terminal; each checks its own queue):");
+  for (const m of members) console.log(`  ${m.seat as string}  ${formatCheckIn(m)}`);
 }
 
 async function handleNodes(
@@ -1328,6 +1438,11 @@ async function handleNodes(
       console.log(`totalNodes: ${summary.totalNodes}`);
       console.log(`bySessionStatus: ${JSON.stringify(summary.bySessionStatus)}`);
       console.log(`byLifecycle: ${JSON.stringify(summary.byLifecycle)}`);
+      console.log(`rollCall (${summary.rollCall.agentSeats} agent seats; what each line counts is in brackets):`);
+      for (const bucket of Object.keys(ROLL_CALL_EVIDENCE) as RollCallBucket[]) {
+        const { count, seats, evidence } = summary.rollCall[bucket];
+        console.log(`  ${bucket}: ${count}${seats.length > 0 ? ` (${seats.join(", ")})` : ""} [${evidence}]`);
+      }
     }
     return;
   }
@@ -1381,6 +1496,8 @@ async function handleNodes(
     } else {
       console.log("No nodes");
     }
+    // A rig with no terminal seats can still have connected assistants.
+    await printConnectedAssistants(client, opts.rig, requestHeaders);
     return;
   }
 
@@ -1448,6 +1565,7 @@ async function handleNodes(
   for (const n of humanList as NodeEntry[]) {
     if (n.communityHarness) console.log(formatCommunityHarnessLine(n.canonicalSessionName ?? n.logicalId, n.communityHarness));
   }
+  await printConnectedAssistants(client, opts.rig, requestHeaders);
   for (const n of humanList as NodeEntry[]) {
     if (livenessUnconfirmed(n)) console.log(livenessLine(n.canonicalSessionName ?? n.logicalId, n));
   }

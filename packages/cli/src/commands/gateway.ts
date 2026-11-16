@@ -1,3 +1,4 @@
+import { nobodyRegistered, REGISTRATION_OFFER } from "../person-registration-offer.js";
 import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
@@ -775,6 +776,8 @@ Removing a connector binding (binding.<n> unset):
       console.log(defaultPerson.id ? `default: ${defaultPerson.id} (${defaultPerson.source === "chosen" ? "chosen" : "the only person"})` : `default: none — ${defaultPerson.reason}`);
       for (const warning of view.warnings) console.log(`warning: ${warning}`);
       if (view.sideFile.error) console.log(`participant file: ${view.sideFile.error}`);
+      // The same offer `rig daemon start` prints, for an agent meeting the person first (such as the kernel operator).
+      if (!opts.organization && nobodyRegistered(view.participants)) for (const line of REGISTRATION_OFFER) console.log(line);
     });
 
   cmd

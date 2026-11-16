@@ -43,6 +43,8 @@ and becomes standing infrastructure instead of a hand-built probe.
 - `scripts/` — only its README, on the scripted-response contract.
 - `evals/` — the live-model eval harness, a separate gate from these scenarios (see
   `evals/README.md`).
+- `delivery/` — the delivery conformance suite for real Claude Code and Codex programs. So far it has the stand-in
+  model servers (see `delivery/README.md`).
 - `ROUTING.md` — the runner, stub and format capabilities this set depends on, and which
   of them have landed. Per 51-03 mini-req 2 these are ROUTED, never shimmed here.
 

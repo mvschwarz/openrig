@@ -25,6 +25,14 @@ export interface AttentionItem {
   /** The settings page where the person decides this request directly, without an agent (a pairing request's Approve and
    *  Deny): a TUI settings category, and the request it opens on there. */
   settingsLink?: { category: string; focus: string; label: string };
+  /** A queue request's decision revision: the same opaque token its single-row read returns and a settling act can name. */
+  revision?: string;
+  /** The requests this is about, by ID: a parked row is itself the request; an ask is about the open rows blocked on it
+   *  (at most 100). Empty when no request is recorded as waiting on it, which isn't proof that it's about nothing: a
+   *  request that names it only in its text isn't counted. */
+  about?: string[];
+  /** Present when more than 100 open rows are blocked on this ask: `about` is the newest 100, not all of them. */
+  aboutTruncated?: true;
 }
 export interface AttentionDetail {
   item: AttentionItem;
@@ -38,6 +46,9 @@ export interface AttentionRead {
   sources: Array<{ source: string; state: "available" | "unavailable" | "partial"; detail: string }>;
   detail: AttentionDetail | null;
   detailError: string | null;
+  /** The event log's newest seq, read before this snapshot: following /api/events from it (Last-Event-ID) replays every
+   *  event since, possibly some already reflected here, never one missed. Absent without an event log. */
+  watermark?: number;
   /** Whose queue this Feed shows (`view`), and who acts on it. A view, never an identity: acts on what it shows carry the
    *  primary user's authority, the person at the terminal, whoever's queue it is. `requested` names a view that matched no
    *  registered person. Absent when no person is registered. */

@@ -32,8 +32,8 @@
 //      specimen class) is gateway-routable: a PANELLESS virtual identity whose
 //      delivery rides the gateway, exactly like its @external address.
 //   4. A hosted member whose roster entry declares a trigger is hosted. One with no
-//      trigger stays unroutable, so its person is told; its teaching says it reads the
-//      queue when its owner next starts a session, not to fix the address.
+//      trigger stays unroutable, so its person is told; its teaching says it picks up its
+//      work when its person asks it to or on a schedule they set, not to fix the address.
 //   5. Anything else is unroutable, with teaching that names BOTH checks.
 import { parseSessionName } from "../session-name.js";
 import type { RosterWake } from "../rosters.js";
@@ -57,6 +57,13 @@ export interface ClassifyDeps {
   isHostedMember?: (destination: string) => boolean;
 }
 
+/** Whether a recorded wake result says no transport could take the wake: an address nothing holds (`unroutable:`), or a
+ *  hosted member with no wake trigger, whose work waits until it reads its queue (`awaiting-pickup:`). Every reader of a
+ *  recorded no-route result reads both the same way. */
+export function recordsNoWakeRoute(recorded: string | null | undefined): boolean {
+  return !!recorded && (recorded.startsWith("unroutable:") || recorded.startsWith("awaiting-pickup:"));
+}
+
 export function classifyDestination(destination: string, deps: ClassifyDeps): DestinationClass {
   const parsed = parseSessionName(destination);
   if (parsed.kind === "external") {
@@ -73,11 +80,12 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
   const wake = deps.hostedWake?.(destination) ?? null;
   if (wake) return { class: "hosted", wake };
   if (deps.isHostedMember?.(destination)) {
-    // The member reads this teaching too: the address is right, and it isn't a person to register.
+    // The member reads this teaching too: the address is right, and it isn't a person to register. A requester's
+    // assistant repeats it, so it says the work waits, not that it can't be delivered.
     return {
       class: "unroutable",
-      teaching: `unroutable: '${destination}' is a hosted member with no wake trigger, so nothing can push work to it. ` +
-        `It reads the queue when its owner next starts a session.`,
+      teaching: `awaiting-pickup: '${destination}' is a hosted member with no wake trigger, so no wake is sent. The work waits ` +
+        `in its queue until the member reads it: when its person asks it to, on a schedule they set, or through a local seat connected to it.`,
     };
   }
   return {

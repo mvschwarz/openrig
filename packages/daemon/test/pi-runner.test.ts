@@ -1372,3 +1372,24 @@ describe("cursor refresh via get_entries (QA RED, qitem-20260707020922)", () => 
     expect(f.sidecars.at(-1)!.lastEntryId).toBe("e5");
   });
 });
+
+describe("managed run identity retries", () => {
+  it("retries a pending run identity until Core confirms persistence, then stops", async () => {
+    const f = fakeIo();
+    let persisted = false;
+    f.io.postActivity = vi.fn(async (payload) => { f.activity.push(payload); return persisted ? { tokenPersisted: true } : null; });
+    const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "actual-run", runId: "actual-run" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", data: { sessionFile: SESSION_FILE, sessionId: "native" } }));
+    await new Promise(resolve => setImmediate(resolve));
+    const count = () => f.activity.filter(p => p.eventFamily === "session_identity").length;
+    const initial = count();
+    persisted = true;
+    core.retrySessionIdentity();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(count()).toBe(initial + 1);
+    expect(f.activity.filter(p => p.eventFamily === "session_identity").at(-1)).toMatchObject({ runId: "actual-run" });
+    core.retrySessionIdentity();
+    expect(count()).toBe(initial + 1);
+  });
+});

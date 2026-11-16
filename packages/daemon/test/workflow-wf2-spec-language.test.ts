@@ -577,6 +577,23 @@ describe("OPR.0.4.6.WF2 — spec language", () => {
       ).rejects.toMatchObject({ code: "harness_pin_unsatisfied" });
     });
 
+    it("validate warns that a harness pin is unchecked instead of reporting a clean result (#3087)", () => {
+      const spec = parseWorkflowSpec(HARNESS_SPEC, "harness.yaml");
+      const result = new WorkflowValidator().validate(spec);
+      expect(result.ok).toBe(true);
+      const unchecked = result.issues.filter((i) => i.code === "harness_pin_unchecked");
+      expect(unchecked).toHaveLength(1);
+      expect(unchecked[0]).toMatchObject({ severity: "warning", field: "workflow.steps[0].harness" });
+      expect(unchecked[0]!.message).toContain('"codex"');
+      expect(unchecked[0]!.message).toContain("no rig is bound");
+    });
+
+    it("validate adds no pin warning to a spec without harness pins", () => {
+      const spec = parseWorkflowSpec(LINEAR_SPEC, "linear.yaml");
+      const result = new WorkflowValidator().validate(spec);
+      expect(result.issues.some((i) => i.code === "harness_pin_unchecked")).toBe(false);
+    });
+
     it("steps with no pin resolve preferred_targets[0] unchanged (zero regression)", async () => {
       const specPath = writeSpec(tmp, "linear.yaml", LINEAR_SPEC);
       const result = await runtime.instantiate({

@@ -368,12 +368,14 @@ describe("queue create scope advisories preserve admission and output", () => {
     const createdId = (data.created as { qitemId: string }).qitemId;
     const created = source.daemon.deps.queueRepo.getById(createdId);
     expect(data.advisories).toEqual([destinationAdvice, expect.objectContaining({ code: "unresolved_scope" })]);
+    expect(data.handoffScopeCheckAcknowledged).toBe(true);
     expect(handoffTransportHeaders).toEqual({ "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" });
     expect(handoffRequestBody).not.toHaveProperty("X-OpenRig-CLI-Handoff-Scope-Advisory");
     expect(scopeLines()).toContain("Warning:");
     expect(scopeLines()).toContain("mission:missing-mission");
     expect(stdout).toEqual([JSON.stringify({ closed: JSON.parse(JSON.stringify(closed)),
       created: JSON.parse(JSON.stringify(created)), advisories: [destinationAdvice] })]);
+    expect(JSON.parse(stdout[0]!)).not.toHaveProperty("handoffScopeCheckAcknowledged");
     expect(closed).toMatchObject({ state: verb === "handoff" ? "handed-off" : "done", closureReason: "handed_off_to" });
     expect(created).toMatchObject({ destinationSession: destination, tags: ["mission:missing-mission", "project:alpha"] });
     expect(process.exitCode ?? 0).toBe(0);
@@ -411,6 +413,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(response.status).toBe(201);
     expect(data.advisories).toEqual([expect.objectContaining({ code: "scope_check_skipped",
       message: expect.stringContaining("self-id re-drive") })]);
+    expect(data.handoffScopeCheckAcknowledged).toBe(true);
     expect(senderReads).toEqual([]);
     expect(data.created).toEqual(before);
     const [advisory] = handoffScopeAdvisories(data);
@@ -465,7 +468,10 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(advisories[0]!.message).toContain("inherited from the source item");
     expect(scopeLines()).toContain("Warning:");
     expect(scopeLines()).toContain("inherited from the source item");
-    if (row.code === "scope_check_unavailable") expect(scopeLines()).not.toMatch(/unresolved|resolves to 0/i);
+    if (row.code === "scope_check_unavailable") {
+      expect(scopeLines()).not.toMatch(/unresolved|resolves to 0/i);
+      expect(stderr.join("\n")).not.toContain("didn't report a scope check");
+    }
 
     const closed = source.daemon.deps.queueRepo.getById(original.qitemId);
     const created = data.created as { qitemId: string; tags: string[] | null; state: string };
@@ -511,6 +517,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     const created = data.created as { qitemId: string; tags: string[] | null };
 
     expect(handoffResponses[0]!.status).toBe(201);
+    expect(data.handoffScopeCheckAcknowledged).toBe(true);
     expect(handoffScopeAdvisories(data)).toEqual([]);
     expect(scopeLines()).toBe("");
     expect(created.tags).toEqual(row.tags);
@@ -542,6 +549,21 @@ describe("queue create scope advisories preserve admission and output", () => {
     expectHandoffJsonProjection(data, 2);
   });
 
+  it.each(handoffVerbs)("acknowledges the opted-in $verb scope check for absent tags and keeps it out of stdout", async ({ verb }) => {
+    const original = await seedHandoffSource(null);
+    await handoff(source.app, original.qitemId, verb, { json: true });
+    const data = handoffResponses[0]!.data;
+
+    expect(handoffResponses[0]!.status).toBe(201);
+    expect(data.handoffScopeCheckAcknowledged).toBe(true);
+    expect(handoffScopeAdvisories(data)).toEqual([]);
+    expect(stderr.join("\n")).not.toMatch(/didn't report a scope check|scope_check_unavailable/i);
+    expect(stdout).toHaveLength(1);
+    expect(JSON.parse(stdout[0]!)).not.toHaveProperty("handoffScopeCheckAcknowledged");
+    expectHandoffJsonProjection(data);
+    expect(process.exitCode ?? 0).toBe(0);
+  });
+
   it.each(handoffVerbs)("queue handoff scope reports cross-host $verb as skipped without sender scope reads", async ({ verb, closedState }) => {
     const receiver = await fixture("receiver");
     const original = await seedHandoffSource(["mission:missing-mission", "slice:MISSING.SLICE", "project:alpha"]);
@@ -556,6 +578,7 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(observation.forwardedBodies[0]).not.toHaveProperty("X-OpenRig-CLI-Handoff-Scope-Advisory");
     expect(handoffResponses[0]!.status).toBe(201);
     const data = handoffResponses[0]!.data;
+    expect(data.handoffScopeCheckAcknowledged).toBe(true);
     const [advisory] = handoffScopeAdvisories(data);
     expect(handoffResponses[0]!.status, JSON.stringify(data, null, 2)).toBe(201);
     expect(advisory).toMatchObject({ code: "scope_check_skipped",
@@ -900,6 +923,7 @@ describe("queue create scope advisories preserve admission and output", () => {
   it.each(handoffVerbs)("queue handoff scope emits no advice when local $verb fails", async ({ verb }) => {
     await handoff(source.app, "qitem-does-not-exist", verb, { json: true });
     expect(handoffResponses[0]!.status).toBe(404);
+    expect(handoffResponses[0]!.data).not.toHaveProperty("handoffScopeCheckAcknowledged");
     expect(handoffScopeAdvisories(handoffResponses[0]!.data)).toEqual([]);
     expect(scopeLines()).toBe("");
     expect(process.exitCode).toBe(1);
@@ -914,6 +938,7 @@ describe("queue create scope advisories preserve admission and output", () => {
 
     expect(observation.forwards).toBe(1);
     expect(handoffResponses[0]!.status).toBe(502);
+    expect(handoffResponses[0]!.data).not.toHaveProperty("handoffScopeCheckAcknowledged");
     expect(source.daemon.deps.queueRepo.getById(original.qitemId)?.state).toBe("pending");
     expect(handoffScopeAdvisories(handoffResponses[0]!.data)).toEqual([]);
     expect(scopeLines()).toBe("");
@@ -936,6 +961,7 @@ describe("queue create scope advisories preserve admission and output", () => {
 
     expect(observation.forwards).toBe(0);
     expect(handoffResponses[0]!.status).toBe(409);
+    expect(handoffResponses[0]!.data).not.toHaveProperty("handoffScopeCheckAcknowledged");
     expect(handoffScopeAdvisories(handoffResponses[0]!.data)).toEqual([]);
     expect(scopeLines()).toBe("");
     expect(process.exitCode).toBe(1);

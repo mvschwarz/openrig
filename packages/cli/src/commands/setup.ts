@@ -788,9 +788,10 @@ export function goldenPathNextSteps(): string[] {
     "     Send the goal and folder, or have the person type them in the operator pane; show where it answers",
     "     Include any choice the person made that the operator must keep, such as a trust or hook-review prompt they declined",
     "     In the message, say: This is the agent that installed OpenRig. The person will answer in your pane",
+    "     If the person stays with you instead, hand the goal over as a queue task from your own address, not that message: the rigs skill's \"If the person stays with you\"",
     "     Do not implement the person's project yourself. The operator helps them choose and start a team",
-    "     If the person gives you a goal later, forward it and the folder with rig send; leave the work with the operator's team",
-    "     Finish installation when the operator is ready and the person is talking to it; daemon health alone is not completion",
+    "     If the person gives you a goal later, forward it and the folder by the route they chose; leave the work with the operator's team",
+    "     Finish installation when the operator is ready and the person is talking to it, or, when they stay with you, once the goal has reached it as a task from your address; daemon health alone is not completion",
     "     If they choose to talk later, leave the exact connection step and name the pending handoff",
     "     The operator handles team choice, launch and goal delivery. The installing agent stops at the handoff",
     "  Manual path (without the operator):",
@@ -954,9 +955,10 @@ tmux scrollback:
           if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
         }
         listChecks();
-        console.log("Only the harnesses selected for your project need a login; an unused harness does not (rerun with --providers to leave it out).");
         console.log("Run `rig doctor` to recheck the system and provider authentication.");
       }
+      // Every run, as doctor says it: a setup that's ready for the providers chosen can still meet a built-in team's other one.
+      console.log("A harness needs a login only when a seat you start runs on it (rerun with --providers to leave it out). A built-in team can use one you didn't select: starter runs its reviewer on Codex.");
       // Keep the conversation route available even after a dry run or incomplete setup,
       // before the optional menu so a short output read still includes the handoff.
       console.log("");

@@ -65,7 +65,7 @@ describe("terminal open desktop default", () => {
   it("forwards a preview binding to the explicit existing-workspace route", async () => {
     const f = fixture({ platform: "linux", env: {} });
     await f.run(["saved:kernel", "--provider", "herdr", "--expected-plan", "one-plan", "--json"]);
-    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: "one-plan" }, { timeoutMs: 45_000 });
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: "one-plan", reuseLive: true }, { timeoutMs: 45_000 });
     expect(f.exec).not.toHaveBeenCalled();
   });
 
@@ -110,12 +110,23 @@ describe("terminal open desktop default", () => {
     const f = fixture({ platform: "linux", env: {} });
     await f.run(["saved:kernel", "--provider", provider]);
     expect(process.exitCode).toBeUndefined();
-    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider }, { timeoutMs: 45_000 });
+    // #3052: only herdr asks the daemon to reuse a workspace that still shows the view live.
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider, ...(provider === "herdr" ? { reuseLive: true } : {}) }, { timeoutMs: 45_000 });
     expect(f.get).not.toHaveBeenCalled();
     expect(f.exec).not.toHaveBeenCalled();
     expect(f.windowDeps.launch).not.toHaveBeenCalled();
     expect(logs[0]).toContain("Prepared 3 tile(s)");
     expect(logs[0]).not.toMatch(/window requested|Terminal:/i);
+  });
+
+  it("a headless --provider herdr open that reused a live workspace succeeds without claiming a window (#3052)", async () => {
+    const f = fixture({ platform: "linux", env: {} });
+    f.post.mockResolvedValueOnce({ status: 200, data: { provider: "herdr", ok: true, opened: [], absent: [], degraded: [], pages: 0,
+      reusedWorkspace: { id: "w1", tabId: "w1:t1", view: "saved:kernel" } } } as never);
+    await f.run(["saved:kernel", "--provider", "herdr"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(logs[0]).toMatch(/^Reused herdr workspace w1 for view "saved:kernel"\./);
+    expect(f.windowDeps.launch).not.toHaveBeenCalled();
   });
 
   it.each([
