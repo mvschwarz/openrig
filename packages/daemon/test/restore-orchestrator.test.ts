@@ -305,15 +305,81 @@ describe("RestoreOrchestrator", () => {
     const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.result.nodes).toHaveLength(2);
-    const named = result.result.warnings.filter((line) => line.includes("carry the same"));
+    // Both seats get the outcome the shared token would not change (none dropped, failed or picked over the other).
+    const statuses = result.result.nodes.map((node) => node.status);
+    expect(new Set(statuses).size).toBe(1);
+    expect(statuses[0]).not.toBe("failed");
+    const named = result.result.warnings.filter((line) => line.includes("have the same recorded"));
     if (shared) {
       expect(named).toHaveLength(1);
-      expect(named[0]).toContain("conv-shared");
-      expect(named[0]).toContain("dev.a and dev.b");
+      expect(named[0]).toContain("dev.a and dev.b have the same recorded claude_id conversation");
+      expect(result.result.warnings.join("\n")).not.toContain("conv-shared");
     } else {
       expect(named).toEqual([]);
     }
+  });
+
+  // #3218 item 3, B1 of its review: the restore also compares what it resumes with the agents it does not touch.
+  it.each([["running", "running"], ["stopped", "exited"]])("names a %s agent of another rig that holds the conversation it resumes", async (state, status) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "dev.impl", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "conv-x" });
+    const other = rigRepo.createRig("other-rig");
+    const parent = rigRepo.addNode(other.id, "dev.parent", { runtime: "claude-code" });
+    const held = sessionRegistry.registerSession(parent.id, "dev-parent@other-rig");
+    sessionRegistry.updateStatus(held.id, status);
+    sessionRegistry.updateResumeToken(held.id, "claude_id", "conv-x", "scrape");
+    sessionRegistry.updateBinding(parent.id, { tmuxSession: "dev-parent@other-rig", tmuxPane: "%9" });
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]!.status).not.toBe("failed");
+    const named = result.result.warnings.filter((line) => line.includes("outside this restore"));
+    expect(named).toHaveLength(1);
+    expect(named[0]).toContain(`dev.impl@r99 has the same recorded claude_id conversation as dev-parent@other-rig (${state}), outside this restore`);
+    expect(result.result.warnings.join("\n")).not.toContain("conv-x");
+    expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe(status);
+  });
+
+  it("names the running seat of the same rig whose conversation a corrected replacement resumes", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-shared", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-shared" });
+    const parent = rigRepo.addNode(rig.id, "dev.parent", { runtime: "claude-code", podId: "pod-shared" });
+    const name = "dev-impl@test-rig";
+    const live = sessionRegistry.registerSession(node.id, name);
+    sessionRegistry.updateStatus(live.id, "running");
+    sessionRegistry.updateResumeToken(live.id, "claude_id", "snapshot-token", "scrape");
+    const held = sessionRegistry.registerSession(parent.id, "dev-parent@test-rig");
+    sessionRegistry.updateStatus(held.id, "running");
+    sessionRegistry.updateResumeToken(held.id, "claude_id", "parent-conv", "scrape");
+    for (const id of [node.id, parent.id]) {
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(id, "[]", "[]", "[]", "claude-code");
+    }
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateResumeToken(live.id, "claude_id", "parent-conv", "operator");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
+    sessionRegistry.updateBinding(parent.id, { tmuxSession: "dev-parent@test-rig", tmuxPane: "%2" });
+    let up = true;
+    const tmux = mockTmux();
+    const killSession = vi.fn(async () => { up = false; return { ok: true as const }; });
+    Object.assign(tmux, {
+      hasSession: vi.fn(async () => up),
+      probeSession: vi.fn(async () => ({ state: up ? "present" : "absent" })),
+      killSession,
+      createSession: vi.fn(async () => { up = true; return { ok: true as const }; }),
+      startServer: vi.fn(async () => ({ ok: true as const })),
+      listSessions: vi.fn(async () => up ? [{ name }] : []),
+    });
+    const result = await createOrchestrator({ tmux }).restore(snap.id, {
+      automaticReplacements: [{ nodeId: node.id, sessionId: live.id, resumeType: "claude_id", resumeToken: "parent-conv", corrected: true }] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const named = result.result.warnings.filter((line) => line.includes("outside this restore"));
+    expect(named).toHaveLength(1);
+    expect(named[0]).toContain("dev.impl@test-rig has the same recorded claude_id conversation as dev-parent@test-rig (running)");
+    expect(result.result.warnings.join("\n")).not.toContain("parent-conv");
+    expect(killSession.mock.calls.map((call) => call[0])).not.toContain("dev-parent@test-rig");
+    expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe("running");
   });
 
   it("refuses an explicit snapshot for a recreated logical seat before changing state", async () => {

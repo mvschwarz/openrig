@@ -55,12 +55,15 @@ import type {
   RestoreSnapshotSelection,
   NodeStartupSnapshot,
   RestoreExcludedNode,
+  NodeInventoryEntry,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
+import { SEAT_STARTUP_BLOCKERS, validatePreRestore, resumingConversationSeats } from "./restore-preconditions.js";
+import { describePartners } from "./shared-conversation.js";
+import { getNodeInventoryForAllRigs } from "./node-inventory.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 
 // L3: result shape for runtime-truth reconciliation. A reconciliation that
@@ -573,6 +576,7 @@ export class RestoreOrchestrator {
       // 5. Execute restore with compensating pattern per node
       const nodeResults: RestoreNodeResult[] = [];
       const restoreWarnings: string[] = [...validation.warnings];
+      restoreWarnings.push(...this.conversationPartners(rigId, snapshot.data, opts?.freshLogicalIds));
       if (this.rigRepo.getRigNonInterruptive(rigId)) restoreWarnings.push(nonInterruptiveSummary(true));
       else if (opts?.nonInterruptive === false) restoreWarnings.push(nonInterruptiveSummary(false));
       for (const entry of plan) {
@@ -1072,6 +1076,37 @@ export class RestoreOrchestrator {
     for (const sess of priorState.sessions) {
       this.sessionRegistry.updateStatus(sess.id, sess.status);
     }
+  }
+
+  /**
+   * #3218 item 3 (B1 of its review; points 3 to 5 of the maintainer's): the agents this restore resumes, compared with
+   * the known agents outside it, running or stopped (in this rig outside a replacement's selection, or in another rig),
+   * from the same inventory rig restore-check reads. Named in the restore's warnings; nothing is refused, stopped or
+   * picked, and an inventory that cannot be read says the comparison is unavailable.
+   */
+  private conversationPartners(rigId: string, data: SnapshotData, freshLogicalIds?: string[]): string[] {
+    const currentRuntimes = Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime]));
+    const resuming = resumingConversationSeats(data, { freshLogicalIds, currentRuntimes });
+    if (!resuming.length) return [];
+    const inRestore = new Set(resolveSnapshotRestoreTopology(data).intendedNodes.map((node) => node.logicalId));
+    let inventory: NodeInventoryEntry[];
+    try {
+      inventory = [...getNodeInventoryForAllRigs(this.db).values()].flat();
+    } catch (err) {
+      return [`Restore pre-validation: the shared-conversation comparison with agents outside this restore is unavailable (${err instanceof Error ? err.message : String(err)}).`];
+    }
+    const others = inventory
+      .filter((entry) => !(entry.rigId === rigId && inRestore.has(entry.logicalId))
+        && entry.runtime !== "terminal" && (entry.restorePolicy ?? "resume_if_possible") === "resume_if_possible")
+      .map((entry) => ({
+        seat: entry.canonicalSessionName ?? `${entry.logicalId}@${entry.rigName}`,
+        state: entry.sessionStatus === "running" ? "running" : "stopped",
+        resumeType: entry.resumeType,
+        resumeToken: entry.resumeToken,
+      }));
+    const rigName = data.rig?.name ?? rigId;
+    return describePartners(resuming.map((entry) => ({ ...entry, seat: `${entry.seat}@${rigName}` })), others)
+      .map((warning) => `Restore pre-validation: ${warning}`);
   }
 
   private computeRestorePlan(data: SnapshotData): PlanEntry[] {

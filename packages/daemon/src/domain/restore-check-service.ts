@@ -8,7 +8,7 @@ import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
-import { describeSharedConversation, findSharedConversations } from "./shared-conversation.js";
+import { describeSharedConversation, findSharedConversations, compareConversations, describeUnavailable } from "./shared-conversation.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -1733,42 +1733,53 @@ export class RestoreCheckService {
   }
 
   /**
-   * #3218 item 3: running seats that would resume the same conversation, named on each evaluated seat with the
-   * conversation and the other seats (also those of a rig left out by --rig). A caveat with no remediation: restore is
-   * not refused, no seat is stopped and none is picked.
+   * #3218 item 3: agents with the same recorded, resumable conversation, running or stopped, named on each evaluated
+   * agent with the others (also those of a rig left out by --rig). A caveat with no remediation: restore is not
+   * refused, no agent is stopped and none is picked. A rig whose agents cannot be read, or an agent whose saved resume
+   * data is not readable, is named as an unavailable comparison.
    */
   private checkSharedConversations(inputs: RigRollupInput[], allRigs: Array<{ rigId: string; name: string }>): CheckEntry[] {
     const label = (node: NodeInventoryEntry) => node.canonicalSessionName ?? `${node.logicalId}@${node.rigName}`;
-    const live = (node: NodeInventoryEntry) => node.sessionStatus === "running" && seatResumes(node);
     const evaluated = new Set(inputs.map((input) => input.rig.rigId));
     const seats: Array<{ node: NodeInventoryEntry; input?: RigRollupInput }> = [];
+    const out: CheckEntry[] = [];
     for (const input of inputs) {
-      for (const node of input.nodes) if (live(node)) seats.push({ node, input });
+      for (const node of input.nodes) if (seatResumes(node)) seats.push({ node, input });
     }
     for (const rig of allRigs) {
       if (evaluated.has(rig.rigId)) continue;
-      let nodes: NodeInventoryEntry[] = [];
+      let nodes: NodeInventoryEntry[];
       try {
         nodes = this.deps.getNodeInventory(rig.rigId);
-      } catch {
-        continue;   // a partner rig that cannot be read only narrows the report
+      } catch (err) {
+        out.push({
+          check: `rig.${rig.name}.shared-conversation`,
+          status: "yellow",
+          evidence: `The shared-conversation comparison with ${rig.name}'s agents is unavailable: ${err instanceof Error ? err.message : String(err)}`,
+          remediation: "",
+        });
+        continue;
       }
-      for (const node of nodes) if (live(node)) seats.push({ node });
+      for (const node of nodes) if (seatResumes(node)) seats.push({ node });
     }
-    const out: CheckEntry[] = [];
-    const groups = findSharedConversations(seats.map(({ node }) => ({ seat: label(node), resumeType: node.resumeType, resumeToken: node.resumeToken })));
+    const { groups, unavailable } = compareConversations(seats.map(({ node }) => ({
+      seat: label(node),
+      state: node.sessionStatus === "running" ? "running" : "stopped",
+      resumeType: node.resumeType,
+      resumeToken: node.resumeToken,
+    })));
+    const emit = (node: NodeInventoryEntry, input: RigRollupInput | undefined, evidence: string) => {
+      const check: CheckEntry = { check: `seat.${node.canonicalSessionName ?? node.logicalId}.shared-conversation`, status: "yellow", evidence, remediation: "" };
+      input?.checks.push(check);
+      out.push(check);
+    };
     for (const group of groups) {
       for (const { node, input } of seats) {
-        if (!input || !group.seats.includes(label(node))) continue;
-        const check: CheckEntry = {
-          check: `seat.${node.canonicalSessionName ?? node.logicalId}.shared-conversation`,
-          status: "yellow",
-          evidence: describeSharedConversation(group),
-          remediation: "",
-        };
-        input.checks.push(check);
-        out.push(check);
+        if (input && group.seats.some((entry) => entry.seat === label(node))) emit(node, input, describeSharedConversation(group));
       }
+    }
+    for (const { node, input } of seats) {
+      if (unavailable.includes(label(node))) emit(node, input, describeUnavailable([label(node)]));
     }
     return out;
   }
