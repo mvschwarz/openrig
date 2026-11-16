@@ -44,7 +44,7 @@ or through the advisor's routed work; all of it surfaces in your terminal.
 
 A project task from the installer is a request to arrange a project team, not to patch the project yourself.
 Follow "Helping someone start a team" in your role guidance; keep the supplied goal and scope constraints, and the
-return address the task comes from: that's where the person answers.
+return address the task names (its `returnRoute`, or else the address it comes from): that's where the person answers.
 
 ## On daemon-restart (precise semantics)
 
