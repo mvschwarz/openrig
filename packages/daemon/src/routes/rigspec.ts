@@ -28,6 +28,15 @@ function getDeps(c: { get: (key: string) => unknown }) {
   };
 }
 
+/** What an export leaves out, for the X-OpenRig-Export-Warnings header on both formats. */
+function exportWarnings(exporter: RigSpecExporter, rigId: string, podAware: boolean): Record<string, string> {
+  const warnings: Array<{ logicalId: string; reason: string }> = [
+    ...(podAware ? exporter.memberStartupNotCarried(rigId) : []),
+    ...exporter.claudeAutoModeNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "claude_auto_mode can't be read; not carried" })),
+  ];
+  return warnings.length ? { "X-OpenRig-Export-Warnings": encodeURIComponent(JSON.stringify(warnings)) } : {};
+}
+
 // GET /api/rigs/:rigId/spec -> YAML
 export function handleExportYaml(c: Context): Response {
   const rigId = c.req.param("rigId")!;
@@ -51,7 +60,7 @@ export function handleExportYaml(c: Context): Response {
       .map(({ logicalId, reason }) => `# Member startup not carried for ${JSON.stringify(logicalId)} (${reason}); inspect the source before importing.\n`) : [];
     const yaml = notCarried.join("") + memberStartupOmissions.join("") + serialized;
     const startupLayers = rigRepo.getRigStartupLayers(rigId);
-    const headers: Record<string, string> = { "Content-Type": "text/yaml" };
+    const headers: Record<string, string> = { "Content-Type": "text/yaml", ...exportWarnings(exporter, rigId, isPodAware) };
     if (startupLayers?.root) {
       headers["X-Rig-Root"] = encodeURIComponent(startupLayers.root);
     }
@@ -74,8 +83,7 @@ export function handleExportJson(c: Context): Response {
 
   try {
     const spec = exporter.exportRig(rigId);
-    const omissions = "pods" in spec ? exporter.memberStartupNotCarried(rigId) : [];
-    return c.json(spec, 200, omissions.length ? { "X-OpenRig-Export-Warnings": encodeURIComponent(JSON.stringify(omissions)) } : {});
+    return c.json(spec, 200, exportWarnings(exporter, rigId, "pods" in spec));
   } catch (err) {
     if (err instanceof RigNotFoundError) {
       return c.json({ error: err.message }, 404);

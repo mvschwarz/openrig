@@ -67,7 +67,7 @@ export class AppliedLaunchObservationStore {
           return true;
         })();
       } catch {
-        // The upsert reset the block to unknown, so a failed block write never leaves an older block as "sent".
+        // A failed block write re-records the block as unknown. If that fallback also fails, the previous observation stays.
         return this.upsert(generationUuid, observation, true);
       }
     } catch {

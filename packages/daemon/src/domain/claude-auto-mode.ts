@@ -67,6 +67,8 @@ export interface ClaudeAutoModeStatus {
   lastLaunch: { state: "sent"; block: ClaudeAutoMode } | { state: "none" } | { state: "unknown" };
   /** Whether the next launch would compose what the last one did; null when either side can't be read. */
   matchesLastLaunch: boolean | null;
+  /** Whether the next fresh launch is planned in auto mode; null when the plan can't be read. */
+  plannedAutoMode: boolean | null;
   advisories: string[];
   notes: string[];
   /** Prints the classifier's effective lists for this block, beside the user and managed settings where it runs. */
@@ -88,8 +90,9 @@ export function claudeAutoModeStatus(db: Database.Database, nodeId: string, appl
   const matchesLastLaunch = savedJson === undefined || appliedJson === undefined ? null : savedJson === appliedJson;
   const notes = ["Claude adds these entries to your user and managed auto mode settings; OpenRig doesn't read or change those."];
   if (matchesLastLaunch === false) notes.push("The saved block differs from the last launch's; it applies at the next managed launch or resume.");
+  if (plannedAuto === undefined) notes.push("Whether the next launch uses auto mode: unknown, because its permission plan can't be read.");
   if (saved.state === "recorded" && plannedAuto === false) notes.push("The next launch isn't planned in auto mode, so the classifier won't read this block unless the session switches to auto mode.");
-  return { saved, lastLaunch, matchesLastLaunch, notes,
+  return { saved, lastLaunch, matchesLastLaunch, plannedAutoMode: plannedAuto ?? null, notes,
     advisories: saved.state === "recorded" ? claudeAutoModeAdvisories(saved.block) : [],
     ...(saved.state === "recorded" ? { inspect: `claude --settings '${JSON.stringify({ autoMode: saved.block }).replace(/'/g, "'\\''")}' auto-mode config` } : {}) };
 }

@@ -326,8 +326,7 @@ Each change is audited. It applies at the next managed launch or resume, and it 
 permission mode, running process and history unchanged. Restore and same-seat handover read the
 same record. A fork copies the source's current block. Export writes the current record for
 Claude members only. On another runtime, the block stays dormant and applies again if the seat
-switches back to Claude. An unreadable record refuses that seat's launch or fork, with a repair
-message.
+switches back to Claude.
 
 How Claude combines the block with your other settings:
 

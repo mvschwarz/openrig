@@ -71,12 +71,16 @@ describe("S03 policy permissions compatibility", () => {
     expect(set.logs).toEqual(["Claude auto mode block recorded and audited.", `Warning: ${advisories[0]}`, "Next launch."]);
     const cleared = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--clear-auto-mode", "--reason", "back"]);
     expect(cleared.logs[0]).toBe("Claude auto mode block cleared and audited.");
-    expect(posts.map(p => p[1])).toEqual([{ autoMode: block, reason: "team" }, { autoMode: null, reason: "back" }]);
+    const nullFile = join(mkdtempSync(join(tmpdir(), "auto-mode-")), "null.json");
+    writeFileSync(nullFile, "null");
+    const clearedByFile = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--auto-mode", nullFile, "--reason", "file"]);
+    expect(clearedByFile.logs[0]).toBe("Claude auto mode block cleared and audited.");
+    expect(posts.map(p => p[1])).toEqual([{ autoMode: block, reason: "team" }, { autoMode: null, reason: "back" }, { autoMode: null, reason: "file" }]);
     const both = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--clear-auto-mode", "--auto-mode", file, "--reason", "x"]);
     expect(both.exit).toBe(1); expect(both.errors.join(" ")).toContain("Choose exactly one of");
     const unreadable = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--auto-mode", join(tmpdir(), "missing-auto-mode.json"), "--reason", "x"]);
     expect(unreadable.exit).toBe(1); expect(unreadable.errors.join(" ")).toContain("autoMode mapping");
-    expect(posts).toHaveLength(2);
+    expect(posts).toHaveLength(3);
   });
   it("seat command posts one explicit selection and preserves refusal JSON/exit", async () => {
     const posts: unknown[] = []; const response = { ok: false, code: "permission_selection_refused", message: "native options unavailable" };

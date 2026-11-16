@@ -1,4 +1,4 @@
-import { continuationChoiceNotes, resumedClaudeArguments } from "../domain/claude-continuation-launch.js";
+import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
@@ -406,7 +406,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const autoMode = claudeAutoModeForLaunch(binding.claudeAutoMode);
     if (autoMode.warning) tokenWarnings.push(autoMode.warning);
-    const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: autoMode.block ?? null };
+    // An undefined block is unknown: the observation leaves it out.
+    const appliedWith = (claudeAutoMode: import("../domain/claude-auto-mode.js").ClaudeAutoMode | null | undefined) =>
+      ({ ...observeClaudePermission(posture), ...(claudeAutoMode === undefined ? {} : { claudeAutoMode }) });
+    const appliedLaunch = appliedWith(autoMode.block ?? null);
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
@@ -475,7 +478,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
     const permissionMode = permissionArg(launchArgs);
     const nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture);
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null);
     const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
       : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
@@ -485,6 +488,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}exec ${wrapperPrefix}${shellQuote(binding.claudeExecutable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
     if (!managed && binding.claudeLaunch?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(binding.claudeLaunch, posture, model));
+    // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
+    const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
+    const sentAutoMode = sentNative ? sentClaudeAutoMode(nativeArgs) : autoMode.block ?? null;
+    if (sentAutoMode === undefined) tokenWarnings.push("The running Claude's --settings is a file, so this relaunch can't set or check its auto mode block; status shows the block as unknown.");
+    const launchApplied = appliedWith(sentAutoMode);
 
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Claude launch preparation; no native command was sent.", recovery: "attention_required" };
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, beforeManagedInput)
@@ -509,12 +517,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // The process readiness pinned first, if it observed one: the caller records it, not a later read.
       const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
       if (!verification.ok) return { ...verification, ...launchedProcess };
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch, ...launchedProcess, ...launchedExecutable, ...launchNotes() };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch: launchApplied, ...launchedProcess, ...launchedExecutable, ...launchNotes() };
     }
 
     // Fresh launches already have an explicit --session-id. A same-name file
     // can belong to another seat sharing the Claude config directory.
-    return { ok: true, resumeToken: generatedSessionId!, resumeType: "claude_id", appliedLaunch, ...launchedExecutable, ...launchNotes() };
+    return { ok: true, resumeToken: generatedSessionId!, resumeType: "claude_id", appliedLaunch: launchApplied, ...launchedExecutable, ...launchNotes() };
   }
 
   async checkReady(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult> {

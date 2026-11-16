@@ -61,6 +61,55 @@ describe("ClaudeResumeAdapter", () => {
     expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
   });
 
+  describe("a continuation from captured arguments sends and records the seat's current auto mode block", () => {
+    const running = { permissions: { allow: ["Read(/a b)"] }, autoMode: { environment: ["$defaults", "Running A"] } };
+    const saved = { environment: ["$defaults", "Saved B"] };
+    const resumeWith = async (block: unknown, args = ["--settings", JSON.stringify(running), "--model", "opus"]) => {
+      const tmux = mockTmux();
+      tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+      const nativeCommand = vi.fn((_args: string[]) => "retained-launch");
+      const prepare = vi.fn(async () => ({ command: nativeCommand, warnings: [], assertCurrent: () => {} }));
+      const adapter = new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: { prepare } as unknown as ClaudeManagedLaunch });
+      const result = await adapter.resume("seat@rig", "claude_id", "same", "/repo", "auto", undefined, "auto", "node",
+        ...Array(8).fill(undefined), "/native/claude", undefined, undefined, { args, configDir: null, warnings: [] }, block as never);
+      const sent = nativeCommand.mock.calls[0]![0];
+      const value = sent.includes("--settings") ? sent[sent.indexOf("--settings") + 1]! : undefined;
+      return { result, sent, settings: value?.startsWith("{") ? JSON.parse(value) : value };
+    };
+
+    it("replaces the running block with the saved one and keeps the other settings", async () => {
+      const { result, settings } = await resumeWith(saved);
+      expect(settings).toEqual({ permissions: running.permissions, autoMode: saved });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: saved } });
+    });
+
+    it("drops the running block after a clear and records that none was sent", async () => {
+      const { result, settings } = await resumeWith(undefined);
+      expect(settings).toEqual({ permissions: running.permissions });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: null } });
+    });
+
+    it("drops the running block when the saved one can't be read, and warns", async () => {
+      const unreadable = "Seat n1: the saved claude_auto_mode can't be read (broken), so launches don't send it.";
+      const { result, settings } = await resumeWith({ unreadable });
+      expect(settings).toEqual({ permissions: running.permissions });
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([unreadable]), appliedLaunch: { claudeAutoMode: null } });
+    });
+
+    it("adds the saved block when the running process had no settings", async () => {
+      const { result, settings } = await resumeWith(saved, ["--model", "opus"]);
+      expect(settings).toEqual({ autoMode: saved });
+      expect(result).toMatchObject({ ok: true, appliedLaunch: { claudeAutoMode: saved } });
+    });
+
+    it("records unknown, not the saved block, when the running settings are a file", async () => {
+      const { result, sent } = await resumeWith(saved, ["--settings", "/custom/settings.json", "--model", "opus"]);
+      expect(sent).toContain("/custom/settings.json");
+      expect(result).toMatchObject({ ok: true, warnings: expect.arrayContaining([expect.stringContaining("can't set or check its auto mode block")]) });
+      expect((result as { appliedLaunch: object }).appliedLaunch).not.toHaveProperty("claudeAutoMode");
+    });
+  });
+
   it.each([false, true])("carries the retained executable and wrapper through restore preparation (managed: %s)", async managed => {
     const tmux = mockTmux();
     tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));

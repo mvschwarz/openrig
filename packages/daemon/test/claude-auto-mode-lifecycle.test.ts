@@ -108,13 +108,24 @@ describe("a seat's Claude autoMode block", () => {
     expect(operationalLaunchArgs("claude-code", override).join(" ")).not.toContain("autoMode");
     const status = new SeatStatusService({ rigRepo: f.rigRepo }).getStatus("dev-a@team") as { ok: true; status: { permissions: Record<string, unknown> & { claudeAutoMode?: Record<string, unknown> } } };
     expect(status.status.permissions).toMatchObject({ selectionState: "inherit", account: expect.any(Object), effective: expect.any(Object),
-      claudeAutoMode: { saved: { state: "unavailable" }, matchesLastLaunch: null } });
+      claudeAutoMode: { saved: { state: "unavailable" }, matchesLastLaunch: null, plannedAutoMode: false } });
     expect(status.status.permissions).not.toHaveProperty("error");
     const exporter = new RigSpecExporter({ rigRepo: f.rigRepo, sessionRegistry: f.registry });
     expect(JSON.stringify(exporter.exportRig(f.a.rigId))).not.toContain("claudeAutoMode");
     expect(exporter.claudeAutoModeNotCarried(f.a.rigId)).toEqual([f.a.logicalId]);
     expect(await f.service.setPermissions(update)).toMatchObject({ ok: true, from: { state: "invalid", stored: "broken" } });
     expect(readClaudeAutoMode(f.db, f.a.id)).toEqual(block);
+  });
+
+  it("shows whether the next launch uses auto mode as unknown when the permission plan can't be read", async () => {
+    const f = fixture(); await f.service.setPermissions(update);
+    f.db.prepare("UPDATE nodes SET claude_permissions_json='broken' WHERE id=?").run(f.a.id);
+    const status = new SeatStatusService({ rigRepo: f.rigRepo }).getStatus("dev-a@team") as { ok: true; status: { permissions: Record<string, unknown> & { claudeAutoMode?: Record<string, unknown> } } };
+    expect(status.status.permissions).toMatchObject({ error: expect.stringContaining("claude_permissions"), claudeAutoMode: { saved: { state: "recorded" }, plannedAutoMode: null } });
+    expect(status.status.permissions).not.toHaveProperty("account");
+    const notes = (status.status.permissions.claudeAutoMode!["notes"] as string[]).join(" ");
+    expect(notes).toContain("Whether the next launch uses auto mode: unknown");
+    expect(notes).not.toMatch(/isn't planned in auto mode/);
   });
 
   it("stays dormant on another runtime and applies again on return to Claude", async () => {
