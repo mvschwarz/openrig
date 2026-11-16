@@ -552,7 +552,7 @@ async function main() {
     }
     await finish(code);
   };
-  const postIdle = (subtype) => activity.post("Stop", subtype, { livenessSeconds: LIVENESS_SECONDS });
+  const postIdle = (subtype, turnId) => activity.post("Stop", subtype, { livenessSeconds: LIVENESS_SECONDS, ...(turnId ? { turnId } : {}) });
   const withdraw = (askId, reason) => track(callOpenRig("POST", `/api/activity/permission-requests/${encodeURIComponent(askId)}/withdraw`, { reason }, POST_TIMEOUT_MS));
 
   child.once("error", (error) => { agentExited = true; void fatal(`dsh couldn't be started (${error.message}); is it on PATH?`, 1); });
@@ -771,6 +771,7 @@ async function main() {
     void reportTurn(nativeScope, "closed", turnId);
     if (cancellation?.target.nativeTurnId === nativeScope?.nativeTurnId)
       finishCancel(cancellation.submitted ? stopReason === "cancelled" ? "cancelled" : "requested" : "not-this-turn", stopReason === "cancelled" ? undefined : "native_end_without_cancellation_proof");
+    if (nativeScope) peer.recheckCancellation(nativeScope.nativeTurnId);
     if (entry && !entry.rejected) {
       const completion = !entry.submitted ? "unknown" : stopReason === "cancelled" ? "interrupted"
         : stopReason === "end_turn" && (entry.frame.kind !== "wake" || entry.answer.some(text => text.length > 0)) ? "completed"
@@ -785,7 +786,7 @@ async function main() {
     for (const ask of state.asks) ask.end("turn_ended");
     say(`\n── turn end (${stopReason}) ──`);
     if (state.holding) say("[openrig-dsh] a permission request was refused, so the seat reads needs input until the next prompt");
-    else postIdle(stopReason);
+    else postIdle(stopReason, turnId);
     pump();
   };
 

@@ -41,7 +41,7 @@ export class RunnerChannel {
   capable(nodeId: string, kind: "input" | "wake" | "cancel"): boolean {
     const grant = this.grants.activeForNode(nodeId);
     return !!grant?.runId && this.standing(grant.grantId) === "current" && (this.connections.get(grant.grantId) ?? 0) > 0 && this.live.get(grant.grantId)?.[kind] === true
-      && !this.outbox.runnerReceipts(nodeId, grant.runId).some(receipt => receipt.kind !== "cancel" && receipt.reconciliation);
+      && !this.outbox.hasRunnerReconciliation(nodeId, grant.runId);
   }
 
   admit(nodeId: string, input: Omit<RunnerAdmission, "nodeId" | "runId">): RunnerReceipt {
@@ -183,18 +183,7 @@ export class RunnerChannel {
   /** Receipt evidence across runs; history is not a claim that all later input is blocked. */
   unresolved(nodeId: string): Record<string, unknown>[] {
     const runId = this.grants.activeForNode(nodeId)?.runId;
-    return this.outbox.runnerReceipts(nodeId).filter(receipt => (receipt.reconciliation
-      || !["completed", "rejected"].includes(receipt.stage)
-      || receipt.kind === "cancel" && receipt.result?.outcome === "requested" && receipt.result.confirmed !== true)).map(receipt => {
-      const entry = this.outbox.getById(receipt.requestId);
-      return { requestId: receipt.requestId, runId: receipt.runId, inCurrentRun: receipt.runId === runId,
-        kind: receipt.kind, stage: receipt.stage, ...(receipt.erasedAt ? { erasedAt: receipt.erasedAt } : {}), sender: entry?.senderSession, destination: entry?.destinationSession,
-        ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}),
-        ...(receipt.kind === "cancel" ? { target: receipt.payload.target } : {}),
-        ...(receipt.withdrawal ? { withdrawal: { stage: receipt.withdrawal.stage, startedAt: receipt.withdrawal.startedAt, ...(receipt.withdrawal.confirmedAt ? { confirmedAt: receipt.withdrawal.confirmedAt } : {}), pendingSubmissions: receipt.withdrawal.pendingSubmissions } } : {}),
-        ...(receipt.reconciliation ? { reconciliation: receipt.reconciliation } : {}),
-        ...(receipt.result?.outcome ? { outcome: receipt.result.outcome, confirmed: receipt.result.confirmed } : {}) };
-    });
+    return this.outbox.runnerRecovery(nodeId).map(receipt => ({ ...receipt, inCurrentRun: receipt.runId === runId }));
   }
 
   /** Current authenticated invocation evidence, never a claim that absence means idle. */
@@ -217,7 +206,7 @@ export class RunnerChannel {
       if (requireKnown) throw new RunnerChannelError("runner_unavailable", `Native turn ownership is unknown for the rest of run ${grant.runId}; only a new run clears this cancellation-target refusal.`);
       return null;
     }
-    if (this.outbox.runnerReceipts(nodeId, grant.runId).some(receipt => receipt.kind !== "cancel" && receipt.reconciliation)) {
+    if (this.outbox.hasRunnerReconciliation(nodeId, grant.runId)) {
       if (requireKnown) throw new RunnerChannelError("runner_unavailable", "Native turn ownership is unknown; no cancellation outcome was inferred.");
       return null;
     }

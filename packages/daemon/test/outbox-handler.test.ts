@@ -18,6 +18,10 @@ describe("OutboxHandler", () => {
 
   afterEach(() => db.close());
 
+  it("recovery metadata reads are empty without the existing native receipt column", () => {
+    expect(outbox.runnerRecovery("node-1")).toEqual([]);
+    expect(outbox.hasRunnerReconciliation("node-1", "run-1")).toBe(false);
+  });
   it("record creates entry in pending state", () => {
     const e = outbox.record({
       senderSession: "alice@rig",
@@ -157,6 +161,42 @@ describe("native runner receipts", () => {
     outbox = new OutboxHandler(db);
   });
   afterEach(() => db.close());
+  it("projects only unresolved metadata with exact old JSON semantics and keeps reconciliation guards run-local", () => {
+    const raw = (id: string, patch: Record<string, unknown>) => {
+      db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ runner: { ...outbox.runnerReceipt(id), ...patch } }), id);
+    };
+    for (const runId of ["run-1", "old-run"]) for (const kind of ["input", "wake"] as const) {
+      const id = `${runId}-${kind}`, text = "PRIVATE LARGE CONTENT".repeat(50000);
+      outbox.admitRunner({ ...input(id, runId), body: text, kind, payload: kind === "input" ? { text } : { question: text } });
+      raw(id, { stage: "completed" });
+    }
+    outbox.admitRunner(input("group")); raw("group", { memberIds: ["group", "member"], withdrawal: { stage: "pending", startedAt: "2026-11-16T00:00:00Z", pendingSubmissions: 1 } });
+    const confirmations = [undefined, null, false, true, 0, 1, "true"];
+    confirmations.forEach((confirmed, index) => {
+      const id = `cancel-${index}`; outbox.admitRunner({ ...input(id, "old-run"), kind: "cancel", payload: { target: { runId: "old-run", nativeTurnId: id } } });
+      raw(id, { stage: "completed", result: { outcome: "requested", ...(confirmed === undefined ? {} : { confirmed }), detail: "PRIVATE DETAIL" }, ...(index === 1 ? { payload: { target: null }, erasedAt: "2026-11-16T01:00:00Z", withdrawal: { stage: "confirmed", startedAt: "start", confirmedAt: "confirmed", pendingSubmissions: 0 } } : {}) });
+      if (index === 1) db.prepare("UPDATE outbox_entries SET sender_session='',destination_session='' WHERE outbox_id=?").run(id);
+    });
+    for (const [id, stage] of [["missing-stage", undefined], ["null-stage", null]] as const) { outbox.admitRunner(input(id)); raw(id, { stage }); }
+    outbox.admitRunner(input("old-reconciled", "old-run")); raw("old-reconciled", { reconciliation: "receiver_state_lost" });
+    outbox.admitRunner({ ...input("cancel-reconciled"), kind: "cancel", payload: { target: { runId: "run-1", nativeTurnId: "E" } } }); raw("cancel-reconciled", { reconciliation: "receiver_state_lost" });
+    expect(outbox.hasRunnerReconciliation("node-1", "run-1")).toBe(false);
+    expect(outbox.hasRunnerReconciliation("node-1", "old-run")).toBe(true);
+    const reference = outbox.runnerReceipts("node-1").filter(receipt => receipt.reconciliation || !["completed", "rejected"].includes(receipt.stage)
+      || receipt.kind === "cancel" && receipt.result?.outcome === "requested" && receipt.result.confirmed !== true).map(receipt => {
+      const entry = outbox.getById(receipt.requestId)!;
+      return { requestId: receipt.requestId, runId: receipt.runId, kind: receipt.kind, stage: receipt.stage,
+        ...(receipt.erasedAt ? { erasedAt: receipt.erasedAt } : {}), sender: entry.senderSession, destination: entry.destinationSession,
+        ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}), ...(receipt.kind === "cancel" ? { target: receipt.payload.target } : {}),
+        ...(receipt.withdrawal ? { withdrawal: { stage: receipt.withdrawal.stage, startedAt: receipt.withdrawal.startedAt, ...(receipt.withdrawal.confirmedAt ? { confirmedAt: receipt.withdrawal.confirmedAt } : {}), pendingSubmissions: receipt.withdrawal.pendingSubmissions } } : {}),
+        ...(receipt.reconciliation ? { reconciliation: receipt.reconciliation } : {}), ...(receipt.result?.outcome ? { outcome: receipt.result.outcome, confirmed: receipt.result.confirmed } : {}) };
+    });
+    expect(outbox.runnerRecovery("node-1")).toEqual(reference);
+    expect(outbox.runnerRecovery("other-node")).toEqual([]);
+    expect(JSON.stringify(outbox.runnerRecovery("node-1"))).not.toContain("PRIVATE");
+    outbox.admitRunner(input("current-erased-reconciled")); raw("current-erased-reconciled", { kind: null, reconciliation: "receiver_state_lost", erasedAt: "2026-11-16T01:00:00Z" });
+    expect(outbox.hasRunnerReconciliation("node-1", "run-1")).toBe(true);
+  });
   it("binds immutable IDs and allocates order once per run while preserving receipt keys", () => {
     outbox.record(input());
     db.prepare("UPDATE outbox_entries SET guard_delivery=?").run(JSON.stringify({ ids: ["native-1"], watchdog: { nextAction: "inspect" } }));

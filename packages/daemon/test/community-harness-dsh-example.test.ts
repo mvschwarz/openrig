@@ -299,7 +299,7 @@ describe("the documented dsh example runner", () => {
     const seat = start(openrig, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_test", OPENRIG_RUN_ID: "run" });
     await waitFor(seat.launch, "launch"); seat.type("first ordinary input"); seat.type("second ordinary input");
     await waitFor(() => requests(seat.log(), "session/prompt").length === 2, "both ordinary native prompts", 5_000);
-    await waitFor(() => openrig.hooks.filter(hook => hook.body.hookEvent === "Stop").length >= 2, "both turn ends", 5_000);
+    await waitFor(() => ["1", "2"].every(turnId => openrig.hooks.some(hook => hook.body.hookEvent === "Stop" && hook.body.subtype === "end_turn" && hook.body.turnId === turnId)), "both turn ends", 5_000);
     expect(requests(seat.log(), "session/prompt").map(frame => (frame.params as { prompt: unknown }).prompt)).toEqual([
       [{ type: "text", text: "first ordinary input" }], [{ type: "text", text: "second ordinary input" }],
     ]);

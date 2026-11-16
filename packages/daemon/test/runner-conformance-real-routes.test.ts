@@ -385,12 +385,25 @@ describe("run-bound native channel custody", () => {
     const cancel = f.channel.cancel(f.node.id, { requestId: "uncertain-E", sender: "requester", destination: "dev@channel", target: { runId: "run-one", nativeTurnId: "E" } });
     for (const stage of ["offered", "accepted", "submitted"] as const) f.outbox.updateRunner(f.node.id, "run-one", cancel.requestId, cancel.sequence, stage);
     f.outbox.updateRunner(f.node.id, "run-one", cancel.requestId, cancel.sequence, "completed", { result: { kind: "cancel", outcome: "requested", confirmed: false } });
+    f.db.prepare("UPDATE outbox_entries SET guard_delivery=json_set(guard_delivery,'$.runner.reconciliation','receiver_state_lost') WHERE outbox_id=?").run(cancel.requestId);
     f.admit("later-private-body");
     const old = f.outbox.admitRunner({ outboxId: "old-unknown", nodeId: f.node.id, runId: "older-run", senderSession: "old-requester", destinationSession: "dev@channel", body: "SECRET OLD BODY", inputRoute: "native", kind: "cancel", payload: { target: { runId: "older-run", nativeTurnId: "old-E" } } });
     for (const stage of ["offered", "accepted"] as const) f.outbox.updateRunner(f.node.id, "older-run", old.requestId, old.sequence, stage);
     f.outbox.forgetRunnerMap(f.node.id, "older-run");
+    for (const runId of ["run-one", "historical-run"]) for (const kind of ["input", "wake"] as const) {
+      const id = `${runId}-${kind}-resolved`, text = "PRIVATE RESOLVED PAYLOAD".repeat(50000);
+      const resolved = f.outbox.admitRunner({ outboxId: id, nodeId: f.node.id, runId, senderSession: "sender", destinationSession: "dev@channel", body: text, inputRoute: "native", kind, payload: kind === "input" ? { text } : { question: text } });
+      for (const stage of ["offered", "accepted", "submitted", "completed"] as const) f.outbox.updateRunner(f.node.id, runId, id, resolved.sequence, stage);
+    }
+    const reference = f.channel.unresolved(f.node.id);
+    const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
+    const fullReads = vi.spyOn(OutboxHandler.prototype, "runnerReceipts"), bodyReads = vi.spyOn(OutboxHandler.prototype, "getById");
+    cleanups.push(() => { fullReads.mockRestore(); bodyReads.mockRestore(); });
     const response = await f.app.request("/api/seat/status/dev%40channel"); expect(response.status).toBe(200);
     const data = await response.json();
+    expect(data.nativeInput.unresolved).toEqual(reference);
+    expect(data.nativeInput).toMatchObject({ input: true, wake: true, cancel: true, target: { runId: "run-one", nativeTurnId: "E" } });
+    expect(fullReads).not.toHaveBeenCalled(); expect(bodyReads).not.toHaveBeenCalled();
     expect(data.nativeInput.unresolved).toEqual(expect.arrayContaining([
       expect.objectContaining({ requestId: "uncertain-E", inCurrentRun: true, sender: "requester", destination: "dev@channel", outcome: "requested" }),
       expect.objectContaining({ requestId: "old-unknown", inCurrentRun: false, reconciliation: "receiver_state_lost", destination: "dev@channel" }),
@@ -403,6 +416,11 @@ describe("run-bound native channel custody", () => {
     const erased = await (await f.app.request("/api/seat/status/dev%40channel")).json();
     expect(erased.nativeInput.unresolved).toContainEqual(expect.objectContaining({ requestId: cancel.requestId, erasedAt: expect.any(String), target: { runId: "run-one", nativeTurnId: "E" } }));
     expect(JSON.stringify(erased.nativeInput.unresolved)).not.toContain("SECRET OLD BODY");
+    f.db.prepare("UPDATE outbox_entries SET guard_delivery=json_set(guard_delivery,'$.runner.reconciliation','receiver_state_lost') WHERE outbox_id=?").run("later-private-body");
+    fullReads.mockClear(); bodyReads.mockClear();
+    const guarded = await (await f.app.request("/api/seat/status/dev%40channel")).json();
+    expect(guarded.nativeInput).toMatchObject({ input: false, wake: false, cancel: false, target: null });
+    expect(fullReads).not.toHaveBeenCalled(); expect(bodyReads).not.toHaveBeenCalled();
   });
   it("missing permission correlation is accepted diagnostically while claimed cancelled-E hints still deny", async () => {
     const f = await fixture(); f.channel.post(f.grant.token, f.hello);
@@ -789,6 +807,24 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
       }
     }
     expect(h.entries().filter(entry => entry.method === "session/cancel")).toHaveLength(["native exit", "target end"].includes(mode) ? 0 : 1);
+  });
+  it("dsh clears an already-finished cancellation fence only after its still-outstanding native prompt ends", async () => {
+    const h = await nativeProcess("dsh"), child = h.start(); await h.ready(); child.stdin!.write("HOLD E\n");
+    const target = await waitFor(() => h.f.channel.currentTurn(h.f.node.id)); expect(target).toBeTruthy();
+    const prepare = h.f.channel.prepareCancellation.bind(h.f.channel);
+    const coreEnded = vi.spyOn(h.f.channel, "prepareCancellation").mockImplementationOnce((...args) => {
+      h.f.channel.post(h.f.grant.token, { type: "turn", runId: target!.runId, nativeTurnId: target!.nativeTurnId, sequence: 2, state: "closed", acceptedTurnIds: target!.acceptedTurnIds });
+      return prepare(...args);
+    }); cleanups.push(() => coreEnded.mockRestore());
+    expect((await h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "cancel", requestId: "core-ended-E", target }) })).status).toBe(202);
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("core-ended-E")?.result?.outcome === "not-this-turn"), h.output).toBe(true);
+    const ePrompt = h.entries().find(entry => entry.method === "session/prompt")!;
+    expect(h.entries().some(entry => (entry.native as { id?: unknown } | undefined)?.id === ePrompt.id)).toBe(false);
+    child.stdin!.write("PERSON F\n"); await h.f.transport.sendNativeWake("dev@channel", "MANAGED F", "managed-after-E", "sender");
+    expect(h.prompts()).toEqual(["HOLD E"]); expect(h.entries().filter(entry => entry.method === "session/cancel")).toEqual([]);
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("managed-after-E")?.result?.completion === "completed"), h.output).toBe(true);
+    expect(h.prompts()).toEqual(["HOLD E", "PERSON F", "MANAGED F"]);
+    expect(h.entries().filter(entry => entry.method === "session/cancel")).toEqual([]);
   });
   it("dsh target end releases locally before a delayed accepted ACK, then reports only after custody acceptance", async () => {
     const h = await nativeProcess("dsh"), child = h.start(); await h.ready(); child.stdin!.write("SLOW E\n");
