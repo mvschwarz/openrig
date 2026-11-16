@@ -498,6 +498,22 @@ describe("network connector", () => {
     expect(hub.items.get("hub-w2")!.resolution).toBe("Done; the notes are in the item.");
   });
 
+  it("a handoff-and-complete close sends the closer's own note, never the note OpenRig writes when it gives none", async () => {
+    const b = bind();
+    hub.add("hub-c1");
+    hub.add("hub-c2");
+    await pass(b.id);
+    const [c1] = runs("hub-c1");
+    const [c2] = runs("hub-c2");
+    // With no note of the closer's, the queue writes "handoff-and-complete to review@lab", which names a local seat.
+    await repo.handoffAndComplete({ qitemId: c1!.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    await repo.handoffAndComplete({ qitemId: c2!.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false,
+      transitionNote: "Done here; the review is a separate step." });
+    await pass(b.id);
+    expect(hub.items.get("hub-c1")!.resolution).toBe("Closed without a stated result.");
+    expect(hub.items.get("hub-c2")!.resolution).toBe("Done here; the review is a separate step.");
+  });
+
   it("a failure here is recorded as local, not as the hub's", async () => {
     const b = bind();
     hub.add("hub-l1");

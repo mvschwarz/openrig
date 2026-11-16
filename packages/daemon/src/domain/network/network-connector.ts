@@ -234,11 +234,13 @@ function finalItem(repo: QueueRepository, start: QueueItem): QueueItem | null {
 
 /** What the hub hears as the result: the resolution, else the closer's own note on the close itself. The close is read
  *  with `closingTransition`, since later notes on a closed item repeat its state. Other notes on the item can be
- *  OpenRig's or another seat's, and name local seats, so they're never sent. */
+ *  OpenRig's or another seat's, and name local seats, so they're never sent. A handoff-and-complete with no note of the
+ *  closer's carries the queue's own `handoff-and-complete to <seat>`, which isn't the closer's either. */
 function closingWords(repo: QueueRepository, item: QueueItem): string {
   if (item.resolution) return item.resolution;
   const close = repo.closingTransition(item.qitemId, item.state);
-  return close?.transitionNote && close.actorSession === item.destinationSession ? close.transitionNote : "Closed without a stated result.";
+  const queueWrote = close?.closureReason === "handed_off_to" && close.transitionNote === `handoff-and-complete to ${close.closureTarget}`;
+  return close?.transitionNote && !queueWrote && close.actorSession === item.destinationSession ? close.transitionNote : "Closed without a stated result.";
 }
 
 /** The hub items a binding's result never reached because someone else closed them first, for status. */
