@@ -64,6 +64,23 @@ describe.skipIf(!tmuxBin || !flagsAtRuntime)("the generated herdr-app viewer (re
     expect(await windowSize()).toBe(before);
   }, 30_000);
 
+  it("after the seat session is replaced, the hidden viewer's new client still leaves the person's window size alone", async () => {
+    await person();
+    await viewer(200, 120, "h3");
+    await settle();
+    // The seat is replaced (same name and node id): the tile attaches a NEW tmux client on the same terminal, which the
+    // terminal's size never changed for. The person attaches first, so the viewer's new client is the latest one.
+    await tmux(seat, "kill-session", "-t", "=seat1");
+    await tmux(view, "kill-session", "-t", "p1").catch(() => {});
+    await tmux(seat, "-f", "/dev/null", "new-session", "-d", "-s", "seat1", "-x", "80", "-y", "20", "cat");
+    await tmux(seat, "set-environment", "-t", "seat1", "OPENRIG_NODE_ID", "node-1");
+    const before = await person();
+    expect(await until(async () => (await clients()).length === 2)).toBe(true); // the viewer's tile attached again
+    expect(await until(async () => (await windowSize()) === before)).toBe(true);
+    await settle();
+    expect(await windowSize()).toBe(before);
+  }, 40_000);
+
   it("once the cell is shown and typed in, the seat follows the viewer's own size again", async () => {
     const before = await person();
     await viewer(200, 120, "h2");

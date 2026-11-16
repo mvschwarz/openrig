@@ -57,8 +57,11 @@ const HEADLESS_WATCH = [
   'w=; t=$(tty 2>/dev/null) || t=;',
   'case "$t" in /dev/*) (p=$$; x=$3; shift 3;',
   'case "$("$x" -V 2>/dev/null)" in "tmux "[12].*|"tmux 3.0"*|"tmux 3.1"*) exit 0;; esac;',
-  'd=; while kill -0 "$p" 2>/dev/null; do n=$(stty size <"$t" 2>/dev/null) || break;',
-  `if [ "$n" != "$d" ]; then if [ "$n" = "${HEADLESS_SIZE.rows} ${HEADLESS_SIZE.cols}" ]; then k=ignore-size; else k=!ignore-size; fi;`,
+  // tmux keeps flags per client, and the tile attaches a new client on the same terminal when the seat is replaced: while the
+  // cell is at the headless size the flag is set again about once a second, so a new client never sizes the seat for long. At any
+  // other size a new client already sizes it, as a client a person types in should.
+  'd=; c=0; while kill -0 "$p" 2>/dev/null; do n=$(stty size <"$t" 2>/dev/null) || break; c=$((c + 1));',
+  `if [ "$n" != "$d" ] || { [ "$n" = "${HEADLESS_SIZE.rows} ${HEADLESS_SIZE.cols}" ] && [ "$c" -ge 5 ]; }; then c=0; if [ "$n" = "${HEADLESS_SIZE.rows} ${HEADLESS_SIZE.cols}" ]; then k=ignore-size; else k=!ignore-size; fi;`,
   '"$x" "$@" refresh-client -t "$t" -f "$k" 2>/dev/null && d=$n; fi;',
   'sleep 0.2 2>/dev/null || sleep 1; done) </dev/null >/dev/null 2>&1 & w=$!;; esac;',
 ].join(" ");
