@@ -17,7 +17,7 @@
 export interface ConversationSeat {
   /** How the agent is named in the report. */
   seat: string;
-  /** What is known about it now, said in the report when present ("running", "stopped"). */
+  /** Its recorded session status as it is ("running", "exited", "detached"; "unknown" when none), said in the report. */
   state?: string;
   resumeType: unknown;
   resumeToken: unknown;
@@ -37,7 +37,7 @@ export interface ConversationComparison {
 
 /**
  * Whether a known agent counts as holding its recorded conversation: a running agent holds it now, whatever its
- * restore policy; a stopped one only if it would resume it. A terminal never does.
+ * restore policy; one that is not running only if it would resume it. A terminal never does.
  */
 export function holdsRecordedConversation(entry: { runtime?: string | null; sessionStatus?: string | null; restorePolicy?: string | null }): boolean {
   if (entry.runtime === "terminal") return false;
@@ -93,7 +93,7 @@ export function describeUnavailable(seats: readonly string[]): string {
 
 /**
  * The restore side: agents a restore resumes, compared with known agents outside it (in the same rig outside a
- * replacement's selection, or in another rig; running or stopped). Only groups that mix the two are reported here; a
+ * replacement's selection, or in another rig; whatever their recorded status). Only groups that mix the two are reported here; a
  * group of the restore's own agents is validatePreRestore's.
  */
 export function describePartners(resuming: readonly ConversationSeat[], others: readonly ConversationSeat[]): string[] {

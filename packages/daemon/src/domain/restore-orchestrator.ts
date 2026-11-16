@@ -63,7 +63,7 @@ import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { SEAT_STARTUP_BLOCKERS, validatePreRestore, resumingConversationSeats } from "./restore-preconditions.js";
 import { describePartners, holdsRecordedConversation } from "./shared-conversation.js";
-import { getNodeInventoryForAllRigs } from "./node-inventory.js";
+import { getNodeInventoryForRigs } from "./node-inventory.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 
 // L3: result shape for runtime-truth reconciliation. A reconciliation that
@@ -1080,9 +1080,10 @@ export class RestoreOrchestrator {
 
   /**
    * #3218 item 3 (B1 of its review; points 3 to 5 of the maintainer's): the agents this restore resumes, compared with
-   * the known agents outside it, running or stopped (in this rig outside a replacement's selection, or in another rig),
-   * from the same inventory rig restore-check reads. Named in the restore's warnings; nothing is refused, stopped or
-   * picked, and an inventory that cannot be read says the comparison is unavailable.
+   * the known agents outside it, with their recorded status (in this rig outside a replacement's selection, or in another
+   * rig), from the same rigs rig restore-check reads: the listed ones, archived rigs left out. Named in the restore's
+   * warnings; nothing is refused, stopped or picked, and an inventory that cannot be read says the comparison is
+   * unavailable.
    */
   private conversationPartners(rigId: string, data: SnapshotData, freshLogicalIds?: string[]): string[] {
     const currentRuntimes = Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime]));
@@ -1091,7 +1092,7 @@ export class RestoreOrchestrator {
     const inRestore = new Set(resolveSnapshotRestoreTopology(data).intendedNodes.map((node) => node.logicalId));
     let inventory: NodeInventoryEntry[];
     try {
-      inventory = [...getNodeInventoryForAllRigs(this.db).values()].flat();
+      inventory = [...getNodeInventoryForRigs(this.db, new Set(this.rigRepo.listRigs().map((rig) => rig.id))).values()].flat();
     } catch (err) {
       return [`Restore pre-validation: the shared-conversation comparison with agents outside this restore is unavailable (${err instanceof Error ? err.message : String(err)}).`];
     }
@@ -1099,7 +1100,7 @@ export class RestoreOrchestrator {
       .filter((entry) => !(entry.rigId === rigId && inRestore.has(entry.logicalId)) && holdsRecordedConversation(entry))
       .map((entry) => ({
         seat: entry.canonicalSessionName ?? `${entry.logicalId}@${entry.rigName}`,
-        state: entry.sessionStatus === "running" ? "running" : "stopped",
+        state: entry.sessionStatus ?? "unknown",
         resumeType: entry.resumeType,
         resumeToken: entry.resumeToken,
       }));

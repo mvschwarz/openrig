@@ -195,7 +195,20 @@ describe("rig restore-check names agents that hold the same recorded conversatio
     })).check(check());
     const shared = result.checks.filter((c) => c.check.endsWith(".shared-conversation"));
     expect(shared.map((c) => c.check).sort()).toEqual(["seat.dev-a@r1.shared-conversation", "seat.dev-b@r2.shared-conversation"]);
-    expect(shared[0]!.evidence).toContain("dev-a@r1 (stopped) and dev-b@r2 (stopped)");
+    expect(shared[0]!.evidence).toContain("dev-a@r1 (exited) and dev-b@r2 (exited)");
+  });
+
+  // The maintainer's review of #3250: each agent is named with its recorded status as it is (a detached one may still
+  // be live), and "unknown" when there is none; never "stopped" for every status that is not running.
+  it("names a detached partner as detached, and an agent with no recorded status as unknown", () => {
+    const noStatus = { ...seat("r2", "dev.c", "conv-x"), sessionStatus: null } as NodeInventoryEntry;
+    const result = new RestoreCheckService(liveDeps({
+      r1: [seat("r1", "dev.a", "conv-x")],
+      r2: [seat("r2", "dev.b", "conv-x", "detached"), noStatus],
+    })).check(check({ rig: "r1" }));
+    const shared = result.checks.find((c) => c.check === "seat.dev-a@r1.shared-conversation");
+    expect(shared?.evidence).toContain("dev-a@r1 (running), dev-b@r2 (detached) and dev-c@r2 (unknown) have the same recorded claude_id conversation");
+    expect(shared?.evidence).not.toContain("stopped");
   });
 
   it("counts a running agent whatever its restore policy, and a stopped one only if it would resume", () => {

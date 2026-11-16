@@ -1733,7 +1733,8 @@ export class RestoreCheckService {
   }
 
   /**
-   * #3218 item 3: agents with the same recorded conversation (running, whatever their policy, or stopped and resumable),
+   * #3218 item 3: agents with the same recorded conversation (running, whatever their policy, or not running and
+   * resumable), each named with its recorded status as it is ("unknown" when there is none),
    * named on each evaluated agent with the others (also those of a rig left out by --rig). A caveat with no remediation:
    * restore is not refused, no agent is stopped and none is picked. A rig whose agents cannot be read, or an agent whose saved resume
    * data is not readable, is named as an unavailable comparison.
@@ -1764,7 +1765,7 @@ export class RestoreCheckService {
     }
     const { groups, unavailable } = compareConversations(seats.map(({ node }) => ({
       seat: label(node),
-      state: node.sessionStatus === "running" ? "running" : "stopped",
+      state: node.sessionStatus ?? "unknown",
       resumeType: node.resumeType,
       resumeToken: node.resumeToken,
     })));

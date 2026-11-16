@@ -311,6 +311,7 @@ describe("RestoreOrchestrator", () => {
     expect(statuses[0]).not.toBe("failed");
     const named = result.result.warnings.filter((line) => line.includes("have the same recorded"));
     if (shared) {
+      expect(result.result.nodes.map((node) => node.logicalId).sort()).toEqual(["dev.a", "dev.b"]);
       expect(named).toHaveLength(1);
       expect(named[0]).toContain("dev.a and dev.b have the same recorded claude_id conversation");
       expect(result.result.warnings.join("\n")).not.toContain("conv-shared");
@@ -320,7 +321,9 @@ describe("RestoreOrchestrator", () => {
   });
 
   // #3218 item 3, B1 of its review: the restore also compares what it resumes with the agents it does not touch.
-  it.each([["running", "running"], ["stopped", "exited"]])("names a %s agent of another rig that holds the conversation it resumes", async (state, status) => {
+  // The maintainer's review of #3250: the outside agent is named with its recorded status as it is, never "stopped" for
+  // every status that is not running (a detached agent may still be live).
+  it.each([["running", "running"], ["exited", "exited"], ["detached", "detached"]])("names a %s agent of another rig that holds the conversation it resumes", async (state, status) => {
     const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "dev.impl", role: "worker", runtime: "claude-code" }], edges: [],
       resumeType: "claude_id", resumeToken: "conv-x" });
     const other = rigRepo.createRig("other-rig");
@@ -338,6 +341,24 @@ describe("RestoreOrchestrator", () => {
     expect(named[0]).toContain(`dev.impl@r99 has the same recorded claude_id conversation as dev-parent@other-rig (${state}), outside this restore`);
     expect(result.result.warnings.join("\n")).not.toContain("conv-x");
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe(status);
+  });
+
+  // The maintainer's review of #3250: restore compares with the rigs rig restore-check reads, so an archived rig's agent
+  // is left out of both.
+  it("does not name an agent of an archived rig that holds the conversation it resumes", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "dev.impl", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "conv-x" });
+    const other = rigRepo.createRig("old-rig");
+    const parent = rigRepo.addNode(other.id, "dev.parent", { runtime: "claude-code" });
+    const held = sessionRegistry.registerSession(parent.id, "dev-parent@old-rig");
+    sessionRegistry.updateStatus(held.id, "running");
+    sessionRegistry.updateResumeToken(held.id, "claude_id", "conv-x", "scrape");
+    sessionRegistry.updateBinding(parent.id, { tmuxSession: "dev-parent@old-rig", tmuxPane: "%9" });
+    expect(rigRepo.archiveRig(other.id)).toBe(true);
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.warnings.filter((line) => line.includes("outside this restore"))).toEqual([]);
   });
 
   it("names a running agent of another rig whatever its restore policy, and not a stopped one that would relaunch fresh", async () => {
