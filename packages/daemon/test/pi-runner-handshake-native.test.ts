@@ -9,6 +9,89 @@ import { piSeatPaths, PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER } from "../
 
 // Real runner + real offline JSONL child, never a provider API or installed Pi.
 describe.skipIf(process.platform === "win32")("Pi startup RPC handshake", () => {
+  it.each([
+    { boundary: "ack", code: "runner_receipt_erased", status: 409, later: true },
+    { boundary: "ack", code: "runner_grant_revoked", status: 401, later: false },
+    { boundary: "ack", code: "runner_grant_stale", status: 409, later: false },
+    ...["hello", "subscription"].flatMap(boundary => [
+      { boundary, code: "runner_grant_revoked", status: 401, later: false },
+      { boundary, code: "forbidden", status: 403, later: false },
+      { boundary, code: "runner_grant_stale", status: 409, later: false },
+      { boundary, code: "runner_grant_pending", status: 409, later: true },
+      { boundary, code: "runner_grant_unverified", status: 409, later: true },
+      { boundary, code: "unavailable", status: 503, later: true },
+    ]),
+  ])("$boundary refusal $code preserves the run boundary and person input", async ({ boundary, code, status, later }) => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ack-")), bin = path.join(temp, "bin");
+    fs.mkdirSync(bin);
+    const log = path.join(temp, "rpc.jsonl");
+    fs.writeFileSync(path.join(bin, "pi"), `#!${process.execPath}
+const fs=require('node:fs');
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+const cmd=JSON.parse(line); fs.appendFileSync(${JSON.stringify(log)},line+'\\n');
+console.log(JSON.stringify({type:'response',id:cmd.id,success:true,data:cmd.type==='get_state'?{sessionId:'offline',isStreaming:false,pendingMessageCount:0}:{disposition:'handled'}}));
+if (${JSON.stringify(boundary)}!=='ack' && (cmd.type==='get_state' && cmd.id==='pi-runner-get-state' || cmd.message==='person input')) console.log(JSON.stringify({type:cmd.message==='person input'?'agent_end':'agent_start'}));
+});
+`, { mode: 0o700 });
+    let stream: import("node:http").ServerResponse | undefined, pending: import("node:http").ServerResponse | undefined;
+    let refused = false, subscriptions = 0, hellos = 0;
+    const endpoint = createServer((req, res) => {
+      if (req.method === "GET" && req.url === "/api/activity/runner-channel") {
+        subscriptions++;
+        if (boundary === "subscription" && subscriptions === 2) {
+          res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify({ code })); refused = true; return;
+        }
+        stream = res; res.writeHead(200, { "content-type": "text/event-stream" }); res.flushHeaders();
+        if (subscriptions === 1) for (const [index, id] of ["first", "later"].entries()) res.write(`event: request\nid: ${index + 1}\ndata: ${JSON.stringify({ version: 1, runId: "run", requestId: id, sequence: index + 1,
+          kind: boundary === "ack" ? "input" : "wake", payload: boundary === "ack" ? { text: id } : { question: id } })}\n\n`);
+        return;
+      }
+      let raw = ""; req.on("data", chunk => { raw += chunk; }); req.on("end", () => {
+        const body = JSON.parse(raw || "{}");
+        if (body.type === "hello" && ++hellos === 2 && boundary === "hello") {
+          res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify({ code })); refused = true; return;
+        }
+        if (boundary === "ack" && body.type === "ack" && body.requestId === "first") { pending = res; return; }
+        res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ tokenPersisted: true, receipts: [] }));
+        if (body.type === "ack" && body.requestId === "later") {
+          if (boundary === "ack") { pending!.writeHead(status, { "content-type": "application/json" }); pending!.end(JSON.stringify({ code })); refused = true; }
+          else stream!.end();
+        }
+      });
+    });
+    await new Promise<void>(resolve => endpoint.listen(0, "127.0.0.1", resolve));
+    const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/adapters/pi-runner.ts", import.meta.url)),
+      "--session-name", "fixture", "--state-root", path.join(temp, "state"), "--cwd", temp, "--launch-id", "run", "--no-approve"], {
+      env: { PATH: bin + path.delimiter + path.dirname(process.execPath), HOME: temp, OPENRIG_HOME: path.join(temp, "home"),
+        OPENRIG_URL: `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`, OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_fixture", OPENRIG_RUN_ID: "run" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let output = ""; child.stdout.on("data", d => { output += d; }); child.stderr.on("data", d => { output += d; });
+    const commands = () => fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+    const wait = async (probe: () => boolean) => {
+      const until = Date.now() + 8000;
+      while (!probe() && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(probe(), output).toBe(true);
+    };
+    try {
+      await wait(() => refused);
+      if (later && boundary === "ack") await wait(() => commands().some(cmd => cmd.message === "later"));
+      if (later && boundary !== "ack") await wait(() => boundary === "hello" ? hellos >= 3 : subscriptions >= 3);
+      child.stdin.write("person input\n");
+      await wait(() => commands().some(cmd => cmd.message === "person input"));
+      // Person preflight completes after the refusal and pumps again; a revoked run stays fenced.
+      await new Promise(resolve => setTimeout(resolve, 100));
+      if (later) await wait(() => commands().some(cmd => cmd.message === "later"));
+      expect(commands().filter(cmd => cmd.message === "first")).toHaveLength(boundary !== "ack" && later ? 1 : 0);
+      expect(commands().filter(cmd => cmd.message === "later")).toHaveLength(later ? 1 : 0);
+    } finally {
+      child.kill("SIGTERM"); stream?.destroy(); pending?.destroy(); endpoint.closeAllConnections();
+      await new Promise<void>(resolve => { if (child.exitCode !== null || child.signalCode !== null) resolve(); else child.once("exit", () => resolve()); });
+      await new Promise<void>(resolve => endpoint.close(() => resolve()));
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  }, 15000);
+
   it.each(["missing", "old"])("reports the pane's actual %s executable failure", async kind => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-startup-"));
     const bin = path.join(temp, "bin");

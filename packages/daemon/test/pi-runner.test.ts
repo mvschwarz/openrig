@@ -1396,14 +1396,14 @@ describe("managed run identity retries", () => {
 
 
 describe("managed Pi input and attributed wake", () => {
-  function managed() {
+  function managed(postRunner?: RunnerIo["postRunner"]) {
     const f = fakeIo(), posts: Record<string, unknown>[] = [];
     let nativeBusy = false;
     const core = new RunnerCore({ ...f.io, sendRpc: command => {
       f.rpc.push(command);
       if (command.type === "get_state" && String(command.id).startsWith("openrig-native-idle-"))
         queueMicrotask(() => core.handlePiLine(JSON.stringify({ type: "response", id: command.id, success: true, data: { isStreaming: nativeBusy, pendingMessageCount: 0 } })));
-    }, postActivity: async body => { f.activity.push(body); return { tokenPersisted: true }; }, postRunner: async (body: Record<string, unknown>) => { posts.push(body); return true; } },
+    }, postActivity: async body => { f.activity.push(body); return { tokenPersisted: true }; }, postRunner: async (body: Record<string, unknown>) => { posts.push(body); return postRunner ? postRunner(body) : true; } },
       { sessionName: SESSION, runId: "run" });
     core.start(); core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionId: "native", isStreaming: false, pendingMessageCount: 0 } }));
     const frame = (id: string, sequence: number, kind: "input" | "wake") => ({ version: 1, requestId: id, runId: "run", sequence, kind,
@@ -1415,6 +1415,51 @@ describe("managed Pi input and attributed wake", () => {
     const response = (id: string, success = true) => event("response", { id: `openrig-native-${id}`, command: "prompt", success, data: { disposition: "started" } });
     return { ...f, posts, core, frame, event, response };
   }
+  it("a request-local ACK refusal releases a later accepted request", async () => {
+    let release!: (accepted: boolean) => void;
+    const f = managed(body => body.type === "ack" && body.requestId === "first"
+      ? new Promise<boolean>(resolve => { release = resolve; }) : Promise.resolve(true));
+    const first = f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    expect(f.rpc.filter(command => command.type === "prompt")).toHaveLength(0);
+    release(false); await first;
+    expect(f.rpc.filter(command => command.type === "prompt")).toEqual([expect.objectContaining({ message: "later" })]);
+  });
+  it("a permanently unavailable run holds later managed work while person input remains usable", async () => {
+    let release!: (accepted: boolean) => void;
+    const f = managed(body => body.type === "ack" && body.requestId === "first"
+      ? new Promise<boolean>(resolve => { release = resolve; }) : Promise.resolve(true));
+    const first = f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    f.core.quarantineManagedChannel(); release(false); await first;
+    f.core.handleUserBlock("person still usable");
+    expect(f.rpc.filter(command => command.type === "prompt")).toEqual([expect.objectContaining({ message: "person still usable" })]);
+    expect(f.core.nativeChannelCapabilities()).toEqual({ input: false, wake: false, cancel: false });
+  });
+  it("reporting-authority loss preserves in-flight native custody and its terminal receipt", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start"); f.core.quarantineManagedChannel();
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "existing work" }], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: "existing work", completion: "completed" }) }));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(0);
+  });
+  it("a rejected person preflight reports the existing diagnostic once and releases queued work", async () => {
+    const f = managed(); f.core.handleUserBlock("person startup");
+    await f.core.acceptRunnerRequest(f.frame("later", 1, "input"));
+    const person = f.rpc.find(command => command.message === "person startup")!;
+    f.event("response", { id: person.id, success: false, error: "person prompt failed" });
+    expect(f.lines.filter(line => line.includes("ERROR rpc: person prompt failed"))).toHaveLength(1);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(1);
+  });
+  it.each(["handled", "queued", "started", "unknown"])("input disposition %s releases pending start only when explicitly handled", async disposition => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    f.event("response", { id: "openrig-native-first", success: true, data: { disposition } });
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(disposition === "handled" ? 1 : 0);
+  });
   it("a person/startup preflight cannot race a dedicated wake before agent_start", async () => {
     const f = managed(); f.core.handleUserBlock("person startup");
     await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));

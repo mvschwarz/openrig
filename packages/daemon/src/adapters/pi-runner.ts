@@ -1024,6 +1024,9 @@ export class RunnerCore {
   }
   /** Runner readiness is the sidecar's acknowledged get_state, not RPC transport ready. */
   isReady(): boolean { return this.ready; }
+  /** A permanent reporting-authority refusal fences new managed dispatch, not person input or native work already in flight. */
+  quarantineManagedChannel(): void { this.managedQuarantined = true; }
+
   nativeChannelCapabilities() { return { input: this.ready && !this.managedQuarantined && this.runtime === "pi", wake: this.ready && !this.managedQuarantined && this.nativeQueueStateAvailable && this.runtime === "pi", cancel: false }; }
 
   /** Kick off identity capture. Called once pi's RPC stream is up; for OMP, with its `ready` frame. */
@@ -1125,7 +1128,7 @@ export class RunnerCore {
     this.managed.set(frame.requestId, entry);
     entry.acceptance = (async () => {
       const accepted = await this.io.postRunner!({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" });
-      if (!accepted) { entry.state = "unavailable"; return; }
+      if (!accepted) { entry.state = "unavailable"; this.pumpManaged(); return; }
       entry.state = "queued"; this.managedQueue.push(entry); this.managedQueue.sort((a, b) => a.frame.sequence - b.frame.sequence); this.pumpManaged();
     })();
     await entry.acceptance;
@@ -1265,7 +1268,8 @@ export class RunnerCore {
     }
     if (typeof record.id === "string" && this.personPreflights.delete(record.id)) {
       if (record.success !== true || (record.data as { disposition?: string } | undefined)?.disposition === "handled") this.pendingManagedStart = false;
-      this.pumpManaged(); return;
+      this.pumpManaged();
+      if (record.success !== false && record.error == null) return;
     }
     const managed = typeof record.id === "string" ? this.managedRpc.get(record.id) : undefined;
     if (managed) {
@@ -1279,7 +1283,12 @@ export class RunnerCore {
           if (managed.nativeTerminal || managed.disposition !== "started" && !this.streaming) this.finishManagedWake(managed);
           else if (managed.terminalResult) this.reportManaged(managed, "result", managed.terminalResult);
           if (this.managedWake !== managed && !this.streaming) { this.pendingManagedStart = false; this.pumpManaged(); }
-        } else { managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true }); }
+        } else {
+          managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true });
+          if ((record.data as { disposition?: string } | undefined)?.disposition === "handled") {
+            this.pendingManagedStart = false; this.pumpManaged();
+          }
+        }
       } else {
         managed.state = "terminal"; this.pendingManagedStart = false;
         this.reportManaged(managed, "rejected", { kind: managed.frame.kind, reason: "native_prompt_rejected" });
@@ -2156,6 +2165,11 @@ export function piLaunchCapabilityError(
   return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
 }
 
+function isPermanentPiRunRefusal(status: number, code?: string): boolean {
+  if (![401, 403, 404, 409, 410].includes(status) || ["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(code ?? "")) return false;
+  return status === 401 || status === 403 || ["runner_grant_required", "runner_grant_revoked", "runner_grant_stale"].includes(code ?? "");
+}
+
 /** Pi's HTTP/SSE wire loop; it owns no native executor or durable receiver journal. */
 export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseUrl: string; token: string }, runId: string, signal: AbortSignal): Promise<void> {
   let retained = false, cursor = 0;
@@ -2165,12 +2179,20 @@ export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseU
       const hello = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { method: "POST", signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]),
         headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" },
         body: JSON.stringify({ type: "hello", version: 1, runId, retained, capabilities: core.nativeChannelCapabilities() }) });
-      if (hello.status === 401 || hello.status === 403) return;
-      if (!hello.ok) throw new Error("Channel handshake unavailable");
+      if (!hello.ok) {
+        const failure = await hello.json().catch(() => null) as { code?: string } | null;
+        if (isPermanentPiRunRefusal(hello.status, failure?.code)) { core.quarantineManagedChannel(); return; }
+        throw new Error("Channel handshake unavailable");
+      }
       retained = true;
       const response = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { signal,
         headers: { authorization: `Bearer ${endpoint.token}`, "Last-Event-ID": String(cursor) } });
-      if (!response.ok || !response.body) throw new Error("Channel subscription unavailable");
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null) as { code?: string } | null;
+        if (isPermanentPiRunRefusal(response.status, failure?.code)) { core.quarantineManagedChannel(); return; }
+        throw new Error("Channel subscription unavailable");
+      }
+      if (!response.body) throw new Error("Channel subscription unavailable");
       const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
       let buffer = "";
       try {
@@ -2196,14 +2218,17 @@ export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseU
   }
 }
 
-async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string }, body: Record<string, unknown>, signal: AbortSignal): Promise<boolean> {
+async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string }, body: Record<string, unknown>, signal: AbortSignal, onPermanentRunRefusal: () => void): Promise<boolean> {
   while (!signal.aborted) {
     try {
       const response = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { method: "POST",
         signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]), headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
       if (response.ok) return true;
       const failure = await response.json().catch(() => null) as { code?: string } | null;
-      if ([401, 403, 404, 409, 410].includes(response.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(failure?.code ?? "")) return false;
+      if ([401, 403, 404, 409, 410].includes(response.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(failure?.code ?? "")) {
+        if (isPermanentPiRunRefusal(response.status, failure?.code)) onPermanentRunRefusal();
+        return false;
+      }
     } catch { /* A lost response retries the saved receipt, never the native operation. */ }
     if (!signal.aborted) await new Promise(resolve => setTimeout(resolve, 250));
   }
@@ -2395,7 +2420,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   child.once("exit", () => { nativeStream.abort(); setTimeout(() => nativePosts.abort(), 2000).unref(); });
   child.once("error", () => { nativeStream.abort(); nativePosts.abort(); });
   const io: RunnerIo = {
-    ...(runtime === "pi" && endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal) } : {}),
+    ...(runtime === "pi" && endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal, () => core.quarantineManagedChannel()) } : {}),
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
     },

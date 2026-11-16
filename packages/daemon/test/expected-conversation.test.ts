@@ -292,7 +292,7 @@ it("expected input does not answer a native selection prompt", async () => {
   expect(f.commands.some(command => command.includes("paste-buffer") || command.includes("send-keys"))).toBe(false);
 });
 
-it.each(["claude-code", "codex"] as const)("conditional native %s send rechecks original identity after waiting for the lease", async runtime => {
+it.each([["claude-code", false], ["codex", false], ["claude-code", true], ["codex", true]] as const)("conditional native %s send rechecks identity and caller after lease wait (abort=%s)", async (runtime, abort) => {
   const f = fixture(runtime, true);
   const { ActivityGrantStore } = await import("../src/domain/activity-grants.js");
   const { RunnerChannel } = await import("../src/domain/runner-channel.js");
@@ -315,10 +315,14 @@ it.each(["claude-code", "codex"] as const)("conditional native %s send rechecks 
   vi.spyOn(f.guard!, "operation").mockImplementation((name, fn, retained) => {
     queued(); return operation(name, fn, retained);
   });
-  const pending = transport.send(f.expected.sessionName, "for original A", { expectedIdentity: f.expected, deliveryId: "native-original" } as never);
-  await atLease; f.replace(); release(); await held;
+  const caller = new AbortController();
+  const pending = transport.send(f.expected.sessionName, "for original A", { expectedIdentity: f.expected, deliveryId: "native-original", signal: caller.signal } as never);
+  await atLease;
+  if (abort) vi.mocked(f.tmux.getPanePid).mockImplementation(async () => { caller.abort(); return 10; });
+  else f.replace();
+  release(); await held;
   const result = await pending;
-  expect(result).toMatchObject({ ok: false, sent: false, reason: "expected_identity_mismatch" });
+  expect(result).toMatchObject({ ok: false, sent: false, reason: abort ? "caller_cancelled" : "expected_identity_mismatch" });
   expect(outbox.runnerReceipt("native-original")).toBeNull();
   expect(f.commands.some(command => command.includes("paste-buffer") || command.includes("send-keys"))).toBe(false);
 });

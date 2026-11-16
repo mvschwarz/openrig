@@ -58,7 +58,7 @@ function seatDeps(runner: WakeRunner, resolution: unknown, httpStatus = 200): St
       ),
       fetch: vi.fn(async () => ({ ok: true })),
     },
-    clientFactory: () => ({ post, get: vi.fn(async () => ({ status: 404, data: {} })) }) as never,
+    clientFactory: () => ({ post, get: vi.fn(async () => ({ status: 200, data: { inputRoute: "typed" } })) }) as never,
     wakeRunner: runner,
     wakeFileLocator: () => null,
     __post: post,
@@ -293,6 +293,19 @@ describe("rig ask --wake (L3 CLI)", () => {
 
 });
 
+
+it.each(["http", "missing", "unknown", "throw"])("an unavailable or unknown wake route refuses without a legacy request (%s)", async failure => {
+  const runner: WakeRunner = vi.fn(); const deps = seatDeps(runner, {});
+  const post = vi.fn();
+  deps.clientFactory = () => ({ post, get: async () => {
+    if (failure === "throw") throw new Error("status unavailable");
+    return { status: failure === "http" ? 503 : 200, data: failure === "unknown" ? { inputRoute: "future" } : {} };
+  } }) as never;
+  const result = await captureLogs(() => makeCmd(deps).parseAsync(["node", "rig", "ask", "r", "question", "--wake", "dev@r", "--json"]).catch(error => { console.log(JSON.stringify({ thrown: error.message })); }));
+  expect(post).not.toHaveBeenCalled(); expect(runner).not.toHaveBeenCalled();
+  expect(result.exitCode).toBe(2);
+  expect(JSON.parse(result.logs[0]!)).toMatchObject({ unavailable: true });
+});
 
 it("uses a live declared native wake and polls its exact request instead of a saved-session runner", async () => {
   const vendor: WakeRunner = vi.fn(); const deps = seatDeps(vendor, {});

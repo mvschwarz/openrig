@@ -1128,9 +1128,13 @@ describe("members-scope native custody without queue ownership", () => {
     const held = { outboxId: "held-native", senderSession: A, destinationSession: B, body: "private held prompt" };
     outbox.retain(held, { nodeId: "seat", session: B, occupant: "generation", pane: "%1" });
     outbox.bindInputRoute(held, "native");
+    outbox.retire(held.outboxId, "operator", "private retirement explanation");
+    const retiredAt = outbox.getById(held.outboxId)!.retiredAt;
     const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
     expect(report.unlinked).toMatchObject({ outbox: 0, nativeCustodyRetained: 1 });
     expect(outbox.getById(held.outboxId)).toMatchObject({ body: "", senderSession: "", destinationSession: "" });
+    expect(outbox.getById(held.outboxId)).toMatchObject({ retirementReason: null, retiredAt, retiredBy: "operator" });
+    expect(everything()).not.toContain("private retirement explanation");
     expect(outbox.runnerPrimary(held.outboxId)).toBe(held.outboxId);
     expect(outbox.runnerReceipt(held.outboxId)).toBeNull();
     expect(outbox.claimForDelivery(held.outboxId)).toBe(false);

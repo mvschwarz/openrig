@@ -352,6 +352,7 @@ async function main() {
   };
   const inflight = new Set();
   const track = (promise) => { inflight.add(promise); promise.finally(() => inflight.delete(promise)); return promise; };
+  let activeTurn = Promise.resolve();
   let agentExited = false;
   let stopping = false;
   let heartbeat;
@@ -371,7 +372,10 @@ async function main() {
     clearInterval(heartbeat);
     clearInterval(workBeat);
     restoreTty();
-    await Promise.race([Promise.allSettled([...inflight, activity.flushed(), ...[...managed.values()].map(entry => entry.reports)]), sleep(2_000)]);
+    await Promise.race([(async () => {
+      await activeTurn;
+      await Promise.allSettled([...inflight, activity.flushed(), ...[...managed.values()].map(entry => entry.reports)]);
+    })(), sleep(2_000)]);
     channelStop.abort();
     process.exit(code);
   };
@@ -609,7 +613,7 @@ async function main() {
     if (state.running || agentExited || state.queue.length === 0) return;
     const next = state.queue[0];
     if (typeof next !== "string" && [...managed.values()].some(prior => prior.state === "accepting" && prior.frame.sequence < next.frame.sequence)) return;
-    void runTurn(state.queue.shift());
+    activeTurn = runTurn(state.queue.shift());
   };
 
   const submit = (text) => {

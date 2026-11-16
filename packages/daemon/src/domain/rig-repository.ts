@@ -834,6 +834,12 @@ export class RigRepository {
     }
   }
 
+  getNodeInputRoute(nodeId: string): "typed" | "native" {
+    if (!this.hasNodeColumn("input_route")) return "typed";
+    const row = this.db.prepare("SELECT input_route FROM nodes WHERE id=?").get(nodeId) as { input_route: string | null } | undefined;
+    return row?.input_route === "native" ? "native" : "typed";
+  }
+
   setNodeInputRoute(nodeId: string, route: "typed" | "native"): boolean {
     if (!["typed", "native"].includes(route)) throw new Error("Invalid input route.");
     return this.db.prepare("UPDATE nodes SET input_route=? WHERE id=?").run(route, nodeId).changes > 0;

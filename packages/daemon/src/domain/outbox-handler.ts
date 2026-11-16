@@ -348,7 +348,7 @@ export class OutboxHandler {
     this.db.transaction(() => {
       // Every erasure entry point removes this selected source's content/endpoints. Other group source histories
       // stay governed by their own scope; the composed native payload/result is always sanitized for the whole group.
-      this.db.prepare("UPDATE outbox_entries SET body='',tags=NULL,sender_session='',destination_session='',guard_binding=NULL,audit_pointer=NULL WHERE outbox_id=?").run(id);
+      this.db.prepare("UPDATE outbox_entries SET body='',tags=NULL,sender_session='',destination_session='',guard_binding=NULL,audit_pointer=NULL,retirement_reason=NULL WHERE outbox_id=?").run(id);
       if (!receipt || !tombstone) {
         // A native request held before run admission has no run or sequence to invent. Keep its opaque erased-route
         // identity; the same unavailable shape also fences a surviving pointer whose primary evidence is missing.

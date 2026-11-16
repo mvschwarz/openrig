@@ -257,8 +257,49 @@ describe("run-bound native channel custody", () => {
     const hello = { type: "hello", version: 1, runId: "run-one", retained: true, capabilities: { input: true, wake: true, cancel: true } };
     const admit = (id: string) => channel.admit(grant.nodeId, { outboxId: id, senderSession: "sender", destinationSession: "dev@channel", body: id,
       kind: "input", inputRoute: "native", payload: { text: id } });
-    return { db, node, grant, grants, outbox, channel, hello, admit, app, guard, transport };
+    return { db, node, grant, grants, outbox, channel, hello, admit, app, guard, transport, tmux };
   }
+  it.each([false, true])("a native wake rechecks its route after waiting for the lease without typing or retaining the question (held=%s)", async held => {
+    const f = await fixture(); f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    if (held) await f.guard.set(f.node.id, true, "operator", "hold input");
+    const writes = vi.fn(async () => ({ ok: true }));
+    Object.assign(f.tmux, { sendText: writes, sendKeys: writes });
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const holder = f.guard.custody([f.node.id], async () => { entered(); await gate;
+      f.db.prepare("UPDATE nodes SET input_route='typed' WHERE id=?").run(f.node.id); });
+    await ready;
+    const queued = vi.spyOn(f.guard, "operation");
+    const pending = f.transport.sendNativeWake("dev@channel", "question", "route-race", "sender");
+    await vi.waitFor(() => expect(queued).toHaveBeenCalled()); release(); await holder;
+    expect(await pending).toMatchObject({ ok: false, sent: false, reason: "native_route_required" });
+    expect(writes).not.toHaveBeenCalled(); expect(f.outbox.runnerReceipt("route-race")).toBeNull();
+    expect(f.outbox.getById("route-race")).toBeNull();
+  });
+
+  it.each(["caller", "queue", "committed"])("native admission respects cancellation ownership after lease wait (%s)", async owner => {
+    const f = await fixture(); f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    const controller = new AbortController();
+    const id = `cancel-${owner}`;
+    if (owner === "committed") f.outbox.record({ outboxId: id, senderSession: "sender", destinationSession: "dev@channel", body: "question" });
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const holder = f.guard.operation("dev@channel", async () => { entered(); await gate; });
+    await ready;
+    const queued = vi.spyOn(f.guard, "operation");
+    const pending = f.transport.send("dev@channel", "question", { deliveryId: id, actorSession: "sender", signal: controller.signal,
+      ...(owner === "queue" ? { queueWake: true } : {}), ...(owner === "committed" ? { committedOutboxIds: [id] } : {}) });
+    await vi.waitFor(() => expect(queued).toHaveBeenCalled()); controller.abort(); release(); await holder;
+    const result = await pending;
+    if (owner === "caller") {
+      expect(result).toMatchObject({ ok: false, sent: false, reason: "caller_cancelled" });
+      expect(f.outbox.runnerReceipt(id)).toBeNull();
+    } else expect(result).toMatchObject({ ok: true, runnerReceipt: { requestId: id } });
+  });
+
   async function nativeProcess(kind: "pi" | "dsh", program?: { bin: string; providerUrl: string }) {
     const dir = mkdtempSync(join(tmpdir(), `native-recovery-${kind}-`)), file = join(dir, "core.sqlite"), log = join(dir, "native.log");
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));

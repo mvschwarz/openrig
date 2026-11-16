@@ -739,7 +739,7 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
 });
 
 
-async function nativeChannelFixture() {
+async function nativeChannelFixture(lostResultId = "WAKE:A") {
   const frames: Array<Record<string, unknown>> = [], stages = new Map<string, string>(), posts: Array<Record<string, unknown>> = [];
   const streams = new Set<import("node:http").ServerResponse>();
   let lostAck = false, lostResult = false;
@@ -760,7 +760,7 @@ async function nativeChannelFixture() {
       if (body.type === "hello") return reply({ capabilities: { input: true, wake: true, cancel: false }, receipts: [] });
       stages.set(String(body.requestId), String(body.type));
       if (body.type === "ack") { offer(); if (!lostAck) { lostAck = true; res.destroy(); return; } }
-      if (body.type === "result" && body.requestId === "WAKE:A" && !lostResult) { lostResult = true; res.destroy(); return; }
+      if (body.type === "result" && body.requestId === lostResultId && !lostResult) { lostResult = true; res.destroy(); return; }
       reply({ receipt: { stage: body.type } });
     });
   });
@@ -773,6 +773,17 @@ async function nativeChannelFixture() {
 }
 
 describe("the actual dsh runner native channel", () => {
+  it("flushes an active managed turn's terminal receipt after child exit and a lost result reply", async () => {
+    const channel = await nativeChannelFixture("WAKE:EXIT"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["WAKE:EXIT"]);
+    await waitFor(() => channel.posts.filter(post => post.type === "result" && post.requestId === "WAKE:EXIT").length === 2, "terminal receipt retry before exit", 3000);
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "WAKE:EXIT",
+      result: expect.objectContaining({ completion: "unknown", answer: null, submissionUnknown: true }) }));
+    expect(await runner.exited).toBe(0);
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(1);
+  });
+
   it("uses one native prompt per request, queues busy wakes, and returns only dedicated answers despite lost receipt replies", async () => {
     const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
     await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);

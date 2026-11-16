@@ -2873,6 +2873,18 @@ describe("SessionTransport", () => {
       expect(new Set(facts.map((fact) => fact.attemptId)).size).toBe(2);
     });
 
+    it.each([
+      ["pending", {}, "none"], ["offered", {}, "unknown"], ["accepted", {}, "unknown"],
+      ["rejected", {}, "none"], ["submitted", {}, "submitted"], ["completed", {}, "submitted"],
+      ["completed", { result: { completion: "failed" } }, "submitted"],
+      ["completed", { result: { submissionUnknown: true } }, "uncertain"],
+      ["accepted", { reconciliation: "receiver_state_lost" }, "uncertain"],
+      ["submitted", { reconciliation: "native_ownership_unknown" }, "uncertain"],
+      ["pending", { erasedAt: "2026-11-16" }, "unknown"],
+    ])("native written evidence follows %s and its uncertainty (%j)", (stage, extra, fact) => {
+      expect(writtenFact({ ok: true, sessionName: "native@r", runnerReceipt: { stage, ...extra as object } } as Parameters<typeof writtenFact>[0])).toBe(fact);
+    });
+
     it("reads what was written from each result shape, and nothing the result doesn't show", () => {
       const s = "dev-impl@my-rig";
       expect([

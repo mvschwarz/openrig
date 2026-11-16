@@ -9,8 +9,16 @@ import { runWake, DEFAULT_WAKE_TIMEOUT_MS, defaultWakeRunner, defaultWakeFileLoc
 
 interface NativeWakeReceipt { requestId: string; stage: string; erasedAt?: string; result?: { kind?: string; completion?: string; answer?: string | null } }
 async function askLiveRunner(client: DaemonClient, seat: string, question: string, timeoutMs: number, json: boolean): Promise<boolean> {
-  const view = await client.get<{ inputRoute?: string; nativeInput?: { wake?: boolean } }>(`/api/seat/status/${encodeURIComponent(seat)}`);
-  if (view.status >= 400 || view.data.inputRoute !== "native") return false;
+  try {
+    const view = await client.get<{ inputRoute?: string; nativeInput?: { wake?: boolean } }>(`/api/seat/status/${encodeURIComponent(seat)}`);
+    if (view.status < 400 && view.data.inputRoute === "typed") return false;
+    if (view.status >= 400 || view.data.inputRoute !== "native") throw new Error("Seat input route is unavailable; no wake submitted.");
+  } catch (error) {
+    if (json) console.log(JSON.stringify({ unavailable: true, error: (error as Error).message }));
+    else console.error(`Wake unavailable: ${(error as Error).message}`);
+    process.exitCode = 2;
+    return true;
+  }
   const requestId = `wake-${randomUUID()}`, path = `/api/seat/command/${encodeURIComponent(seat)}`;
   let receipt: NativeWakeReceipt | undefined;
   const show = (extra: Record<string, unknown> = {}) => {

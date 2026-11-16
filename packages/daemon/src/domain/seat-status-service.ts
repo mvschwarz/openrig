@@ -169,7 +169,7 @@ export class SeatStatusService {
       ...this.compactionStatus(entry),
       ...this.refocusStatus(entry),
       seat_ref: seatRef,
-      inputRoute: this.rigRepo.getRig(entry.rigId)?.nodes.find(node => node.id === entry.nodeId)?.inputRoute ?? "typed",
+      inputRoute: this.rigRepo.getNodeInputRoute(entry.nodeId),
       rig_id: entry.rigId,
       rig_name: entry.rigName,
       logical_id: entry.logicalId,

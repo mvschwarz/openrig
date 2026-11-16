@@ -183,6 +183,14 @@ function enterWithheld(reason: string | undefined): boolean {
  *  Enter, and otherwise text with the submission unknown, since Enter may have been attempted. A send that wrote
  *  nothing says so. Anything else the result doesn't establish is unknown, never a guess. */
 export function writtenFact(result: SendResult): WrittenFact {
+  const native = result.runnerReceipt;
+  if (native) {
+    if (native.erasedAt) return "unknown";
+    if (native.reconciliation || native.result?.submissionUnknown) return "uncertain";
+    if (native.stage === "submitted" || native.stage === "completed") return "submitted";
+    if (native.stage === "pending" || native.stage === "rejected") return "none";
+    return "unknown"; // An offer or custody ACK establishes no native submission.
+  }
   if (result.ok && result.outcome !== "retained") {
     if (result.submitOnly) return "submit_only";
     return result.promptInteraction === "unverified" ? "text_only" : "submitted";
@@ -3012,12 +3020,15 @@ export class SessionTransport {
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
         const currentIds = memberOpts?.committedOutboxIds ?? ids;
         const route = inputRoute(guard.target(sessionName).nodeId);
+        if (memberOpts?.nativeWake && route !== "native")
+          return { ok: false, sessionName, sent: false, reason: "native_route_required", error: "A live native wake requires this seat's native input route." };
         checkRetainedRoutes(route, currentIds);
         if (route === "native") {
           if (memberOpts?.expectedIdentity) {
             const original = await resolveExpectedConversation(memberOpts.expectedIdentity, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
             original.assertCurrent();
           }
+          if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.admitNative(sessionName, memberText, memberOpts, currentIds);
         }
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
@@ -3032,7 +3043,10 @@ export class SessionTransport {
         if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
         const members = recheck(true);
         if (members) ids = members.outboxIds;
-        checkRetainedRoutes(inputRoute(target.nodeId), ids);
+        const route = inputRoute(target.nodeId);
+        if (opts?.nativeWake && route !== "native")
+          return { ok: false, sessionName, sent: false, reason: "native_route_required", error: "A live native wake requires this seat's native input route." };
+        checkRetainedRoutes(route, ids);
         this.db.transaction(() => {
           for (const id of ids) {
             const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;

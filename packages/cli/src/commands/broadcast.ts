@@ -137,7 +137,7 @@ selection, not the agent@rig@host sugar.`)
       if (opts.json) {
         console.log(JSON.stringify(res.data));
         const results = ((res.data as Record<string, unknown>)["results"] as Array<{ ok: boolean }> | undefined) ?? [];
-        if (res.status >= 400 || results.some((r) => !r.ok)) process.exitCode = 1;
+        if (res.status >= 400 || (res.data["indeterminateNative"] as number) > 0 || results.some((r) => !r.ok)) process.exitCode = 1;
         return;
       }
 
@@ -205,7 +205,7 @@ async function runCrossHostBroadcast(
       result,
     }));
     const results = ((result.data as Record<string, unknown> | undefined)?.["results"] as Array<{ ok: boolean }> | undefined) ?? [];
-    if (!result.ok || results.some((r) => !r.ok)) process.exitCode = 1;
+    if (!result.ok || ((result.data as Record<string, unknown> | undefined)?.["indeterminateNative"] as number) > 0 || results.some((r) => !r.ok)) process.exitCode = 1;
     return;
   }
 
