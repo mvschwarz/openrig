@@ -252,8 +252,10 @@ export class NodeLauncher {
     }
     const tmuxResult = opts?.keepPane
       ? await this.takeOverPane(sessionName, opts.keepPane, sessionCwd, openRigEnv, node.id)
-      : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv,
-        opts?.processLimitsMode ? { processLimitsMode: opts.processLimitsMode } : undefined);
+      // #3253: the launch mode is passed only when there is one, so a launch without it calls createSession as before.
+      : opts?.processLimitsMode
+        ? await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv, { processLimitsMode: opts.processLimitsMode })
+        : await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message,
         ...(tmuxResult.retryable !== undefined ? { retryable: tmuxResult.retryable } : {}),
