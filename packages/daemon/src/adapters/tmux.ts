@@ -1749,9 +1749,16 @@ export class TmuxAdapter {
     // entering the scope, and the seat starts again without the limit, with the warning (in the same pane when tmux
     // kept it, else in a new session of the same name); when the start can't be told, nothing is run again.
     if (notices.capped) {
+      // The session this launch made, read right away from the pane new-session printed: its immutable id and its
+      // server (a server that exits and comes back reuses pane and session ids), so a refusal below removes that one
+      // and never a session of the same name made meanwhile outside the daemon.
+      const made = /^%\d+$/.test(created) ? await this.sessionOfPane(created) : null;
       const outcome = await this.scopeStartOutcome(/^%\d+$/.test(created) ? created : null, launchOpts?.processLimitsMode, notices, warnings);
       if (outcome && "refuse" in outcome) {
-        await this.killSessionUnchecked(name).catch(() => undefined);
+        // No pane id printed: the session was confirmed by name above, so the name is what is known. A pane already
+        // gone when it was read: its one-pane session went with it, and nothing is removed.
+        if (made) await this.killSessionUnchecked(made.session, undefined, undefined, made.server).catch(() => undefined);
+        else if (!/^%\d+$/.test(created)) await this.killSessionUnchecked(name).catch(() => undefined);
         return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied(outcome.refuse));
       }
       if (outcome) {
@@ -2075,6 +2082,19 @@ export class TmuxAdapter {
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
+    }
+  }
+
+  /** The session holding `pane` and its server (pid and start time), in one read; null when the pane is gone or the
+   *  read fails. */
+  private async sessionOfPane(pane: string): Promise<{ session: string; server: { pid: string; start: string } } | null> {
+    try {
+      const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}|#{pid}|#{start_time}"],
+        `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}|#{pid}|#{start_time}'`);
+      const [session = "", pid = "", start = ""] = stdout.trim().split("|");
+      return /^\$\d+$/.test(session) && /^\d+$/.test(pid) && /^\d+$/.test(start) ? { session, server: { pid, start } } : null;
+    } catch {
+      return null;
     }
   }
 

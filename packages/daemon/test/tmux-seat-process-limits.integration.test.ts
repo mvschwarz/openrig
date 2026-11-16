@@ -82,7 +82,10 @@ describe.runIf(enabled)("seat process limits on a real user manager (#3253)", ()
 
       const adapter = new TmuxAdapter(execTmuxCommand, undefined, execArgvCommand, ["-f", "/dev/null", "-S", sock]);
       adapter.launchEnvironment = () => ({ inheritTmuxEnvironment: false,
-        env: { PATH: process.env.PATH, HOME: process.env.HOME }, runtimeDir: seatRuntimeDir(process.env) });
+        // A seat's own bus is off and no runtime directory is set for it: the scope's restore has to unset one and set
+        // the other (the combination env reads wrong when an assignment comes before -u).
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, DBUS_SESSION_BUS_ADDRESS: "disabled:" },
+        runtimeDir: seatRuntimeDir(process.env) });
       adapter.seatProcessLimits = (nodeId) => (nodeId === "it-a" ? { tasksMax: TASKS_MAX } : undefined);
 
       expect(await adapter.startServer()).toEqual({ ok: true });
@@ -129,7 +132,9 @@ describe.runIf(enabled)("seat process limits on a real user manager (#3253)", ()
       expect(report.limitHits).toBeGreaterThan(0);
       expect(report.pidsCurrent).toBeLessThanOrEqual(TASKS_MAX);
       expect(limitHits(cgroupA)).toBeGreaterThan(0);
+      expect(readFileSync(`/sys/fs/cgroup${cgroupA}/pids.max`, "utf8").trim()).toBe(String(TASKS_MAX));
       expect(rcA).not.toBe("0");
+      expect(pids("it-a").length).toBeGreaterThan(0);  // it forked up to the limit, then was refused
       expect(pids("it-a").length).toBeLessThan(FORKS);
       expect(pids("it-a")).not.toContain("done");
 
@@ -142,10 +147,9 @@ describe.runIf(enabled)("seat process limits on a real user manager (#3253)", ()
       expect(await adapter.hasSession("it-a@scope")).toBe(true);
       expect(await adapter.hasSession("it-b@scope")).toBe(true);
       // The capture a reviewer reads: what each seat got, as observed.
-      console.info(`seat A: ${scopeA}, pids.max ${report.pidsMax}, limit hits ${limitHits(cgroupA)}, ` +
-        `${pids("it-a").length}/${FORKS} sleeps forked, exit ${rcA}; seat B: in the server's cgroup ${serverCgroup}, ` +
-        `${pids("it-b").length - 1}/${FORKS} sleeps forked, exit ${rcB}; server limit hits ${serverHitsBefore ?? "n/a"} -> ` +
-        `${serverHitsBefore === undefined ? "n/a" : limitHits(serverCgroup)}`);
+      console.info(`seat A: ${scopeA}, pids.max ${readFileSync(`/sys/fs/cgroup${cgroupA}/pids.max`, "utf8").trim()}, ` +
+        `limit hits ${limitHits(cgroupA)}, ${pids("it-a").length}/${FORKS} sleeps forked, exit ${rcA}; seat B: in the ` +
+        `tmux server's cgroup (not a seat scope), ${pids("it-b").length - 1}/${FORKS} sleeps forked, exit ${rcB}`);
     } finally {
       await tmux("kill-server").catch(() => undefined);
       if (scopeA) {
