@@ -1,5 +1,6 @@
 import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
+import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
@@ -297,7 +298,7 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;
   const grantStore = new ActivityGrantStore(sessionRegistry.db);
   const grant = grantStore.authenticate(bearerToken) ?? grantStore.authenticate(headerToken);
-  if (bearerToken !== expectedToken && headerToken !== expectedToken && !grant?.runId) {
+  if (!constantTimeEqual(bearerToken ?? "", expectedToken) && !constantTimeEqual(headerToken ?? "", expectedToken) && !grant?.runId) {
     return { error: c.json({ ok: false, code: "activity_hook_unauthorized", error: `${what} require the configured local hook token.` }, 401) };
   }
   let body: Record<string, unknown>;
@@ -372,7 +373,7 @@ function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken:
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;
-  if (expectedToken && (bearerToken === expectedToken || headerToken === expectedToken)) return { grant: null };
+  if (expectedToken && (constantTimeEqual(bearerToken ?? "", expectedToken) || constantTimeEqual(headerToken ?? "", expectedToken))) return { grant: null };
   const grants = new ActivityGrantStore(store.db);
   const grant = grants.authenticate(bearerToken) ?? grants.authenticate(headerToken);
   if (!grant) {
