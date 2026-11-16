@@ -972,6 +972,28 @@ export function queueRoutes(): Hono {
     }
   });
 
+  // POST /:qitemId/tags — add tags to a row, in any state ({ add: [...] }). Add-only: existing tags stay, a tag the
+  // row already has adds nothing, and nothing else about the row changes. The actor is the transport-derived sender,
+  // as for update, and the tags added are recorded on a transition naming it.
+  app.post("/:qitemId/tags", async (c) => {
+    const qitemId = c.req.param("qitemId");
+    const body = await c.req.json<{ add?: unknown; actorSession?: string }>().catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "queue tag", bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
+    const actorSession = identity.session;
+    { const held = switchCustody(c, actorSession); if (held) return held; }
+    const add = body.add;
+    if (!Array.isArray(add) || add.length === 0 || !add.every((tag) => typeof tag === "string" && tag.trim().length > 0)) {
+      return c.json({ error: "tags_required", message: "add takes one or more non-blank tags; nothing was written" }, 400);
+    }
+    try {
+      const { item, added } = getRepo(c).addTags({ qitemId, actorSession, tags: add as string[], ...resolveRecordedIdentity(c, identity) });
+      return c.json({ ...item, added });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
   // POST /:qitemId/handoff — transactional close+create (local); cross-host
   // message-passing choreography when a registered hostId is enveloped
   // (OPR.0.4.6.MH3 FR-4, C2).
