@@ -465,9 +465,6 @@ function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptCo
   return !full && compactOutputEnabled() ? ctx : null;
 }
 
-/** A handoff whose outcome is unknown may have committed. This names the source row to read before any retry, on the
- *  daemon the command used, and where a successor would be. It never says the handoff failed, names a successor id, or
- *  asks for the handoff to be repeated. */
 /** A cross-host handoff whose return route couldn't go with the work says so, as a warning beside the result. */
 function warnRouteNotCarried(status: number, data: unknown): void {
   const advisories = status < 400 ? (data as { advisories?: unknown } | null)?.advisories : undefined;
@@ -476,6 +473,9 @@ function warnRouteNotCarried(status: number, data: unknown): void {
   }
 }
 
+/** A handoff whose outcome is unknown may have committed. This names the source row to read before any retry, on the
+ *  daemon the command used, and where a successor would be. It never says the handoff failed, names a successor id, or
+ *  asks for the handoff to be repeated. */
 function handoffRecoveryHint(qitemId: string, hostId: string | undefined): string {
   const remote = remoteHostOf(hostId);
   return `Before any retry, read source row ${qitemId} at the same endpoint and OPENRIG_HOME: `

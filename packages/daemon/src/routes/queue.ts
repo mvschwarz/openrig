@@ -816,9 +816,12 @@ export function queueRoutes(): Hono {
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
-      const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
-        ...(routeNotCarried ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
       const payload = fwd.payload;
+      // A same-id retry returns the row the receiver already stored: say the route wasn't carried only when it has none.
+      const returnedRoute = payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        && typeof (payload as { returnRoute?: unknown }).returnRoute === "string";
+      const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
+        ...(routeNotCarried && !returnedRoute ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
       if (!added.length || payload === null || typeof payload !== "object" || Array.isArray(payload))
         return c.json(payload, fwd.status as 200);
       const objectPayload = payload as Record<string, unknown>;
@@ -853,7 +856,8 @@ export function queueRoutes(): Hono {
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
       const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory,
-        routeNotKept ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
+        // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
+        routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);

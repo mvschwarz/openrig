@@ -1604,7 +1604,13 @@ async function advancePromptRefusals(
     const addedKeys = [...keys, ...waiterTags].filter(key => !row.tags?.includes(key));
     // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
     const kindChanged = choiceOnly !== Boolean(row.tags?.includes(PROMPT_CHOICE_TAG));
-    if (addedKeys.length || kindChanged) {
+    // Routed work that left the group (finished, handed on, no longer waiting) leaves the alert too, or the engine's route
+    // lookup still reads its route. Only while no operator delivery has gone out: an episode already dispatched, or one the
+    // engine already holds, keeps its record and its custody.
+    const departedWaiters = (row.tags ?? []).filter(t => t.startsWith(PROMPT_ROUTED_WORK_PREFIX) && !waiterTags.includes(t));
+    const pruneDeparted = departedWaiters.length > 0 && !readLadder(deps.db, row.qitemId, 0).opEngineDispatched
+      && !(deps.deliveryEngine?.hasAcceptedEscalation?.(row) ?? false);
+    if (addedKeys.length || kindChanged || pruneDeparted) {
       const events = deps.db.transaction(() => {
         // The original body and its delivery receipt stay immutable. Publish newly
         // observed hook guidance on this same readable record before any exhausted
@@ -1613,7 +1619,8 @@ async function advancePromptRefusals(
           ? deps.queueRepo.updateWithinTransaction({ qitemId: row.qitemId, actorSession: LADDER_ACTOR,
               summary: reason, transitionNote: `hook-review observed: ${reason}` }).persistedEvents
           : [];
-        const nextTags = [...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys];
+        const nextTags = [...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG && !(pruneDeparted && departedWaiters.includes(t))),
+          ...kindTags, ...addedKeys];
         deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(nextTags), row.qitemId);
         // The rungs below read this row: routed work that just joined must reach the engine's route lookup.
         row.tags = nextTags;

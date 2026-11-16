@@ -28,11 +28,17 @@ first (`rig queue show <id> --full`). With a `returnRoute`, the person answers f
 pane, so don't ask them here or give them an attach command:
 - **A permission prompt, with a route on this machine** (`<member>@<rig>`, nothing after the rig): OpenRig brings that
   seat's prompt there as a task while the work is with that seat or your row waits on it. Hand the work over, or block
-  your row on the seat or its row (`rig queue block <id> --on <seat or row id>`).
+  your row on the seat or its row (`rig queue block <id> --on <seat or row id>`). When more than one return route is
+  involved (another goal waiting on that seat names a different address), nothing chooses between them, so a task may
+  not come: look for one at each address first (`rig queue list --destination <address> --state pending,in-progress`),
+  and if there's none, ask as in the next item, through the return address of the goal the seat is working on. One
+  answer goes to the seat, and you pass it on.
 - **A choice menu** (a list of options, such as a usage-limit dialog), **or a route that names another machine**
   (`<member>@<rig>@<host>`): nothing brings it there, so ask the person yourself, as your goal's reply paragraph says.
   Create a question task to the `returnRoute` exactly as written, with the seat, the prompt's own text and its choices
-  and what the seat was doing, then block your row on it. You pass their answer on to the seat, and no one else does. If
+  and what the seat was doing, then block your row on it (for a question on another machine,
+  `--on external:<host>/<question id> --wake-after <duration>`: a plain `--on <question id>` is refused there, because
+  that row lives on the other host). You pass their answer on to the seat, and no one else does. If
   that create is refused because the machine isn't reachable from here, say so on your goal row
   (`rig queue update <id> --note '<the seat, what it asks, and that the question did not reach them>'`), the record the
   person's agent follows; your pane doesn't reach them.

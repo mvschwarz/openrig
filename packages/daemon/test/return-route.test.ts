@@ -132,6 +132,18 @@ describe("first-user return route", () => {
       expect(kept.tags ?? []).not.toContain("return-route-not-carried");
     });
 
+    it("a same-id retry that now reads a person returns the row it stored, route kept, with no warning that contradicts it", async () => {
+      people = { ok: false, error: "unreadable" } as unknown as LoadResult; // the first create can't classify, so it keeps the route
+      const first = await (await create({ qitemId: "qitem-retry-kept", returnRoute: "sam@kernel" }, "front@kernel")).json() as Record<string, unknown>;
+      expect(first).toMatchObject({ returnRoute: "sam@kernel" });
+      people = slackPerson; // the retry reads sam@kernel as a person
+      const retry = await (await create({ qitemId: "qitem-retry-kept", returnRoute: "sam@kernel" }, "front@kernel")).json() as
+        { returnRoute?: string; tags?: string[]; advisories?: Array<{ code: string }> };
+      expect(retry.returnRoute).toBe("sam@kernel");
+      expect((retry.advisories ?? []).map(a => a.code)).not.toContain("return_route_not_carried");
+      expect(retry.tags ?? []).not.toContain("return-route-not-carried");
+    });
+
     it("without the flag the create is unchanged and the row carries no route", async () => {
       const row = await (await create({ qitemId: "qitem-plain" }, "front@kernel")).json() as Record<string, unknown>;
       expect(row).not.toHaveProperty("returnRoute");
@@ -205,6 +217,40 @@ describe("first-user return route", () => {
       expect(sent[0]!.tags).toContain("return-route-not-carried");
       expect((await person.json() as { advisories: Array<{ code: string; message: string }> }).advisories
         .find(a => a.code === "return_route_not_carried")?.message).toContain("sam@kernel wasn't kept: it's a registered person's address");
+    });
+
+    it("a forwarded same-id retry whose receiver kept the route isn't told it wasn't carried, for a person or with no host id", async () => {
+      const sent: Array<Record<string, unknown>> = [];
+      let stored: Record<string, unknown> = {};
+      const remote = new Hono();
+      remote.use("*", async (c, next) => {
+        c.set("queueRepo" as never, repo);
+        c.set("hostRegistryLoader" as never, () => ({ ok: true, registry: { hosts: [{ id: "host-b", transport: "http", url: "http://host-b.invalid" }] } }));
+        c.set("hostBindingsLoader" as never, () => ({ ok: true, bindings: [] }));
+        c.set("remoteFetchImpl" as never, (async (_url: string, init?: RequestInit) => {
+          sent.push(JSON.parse(String(init?.body)));
+          return new Response(JSON.stringify(stored), { status: 201, headers: { "content-type": "application/json" } });
+        }) as typeof fetch);
+        await next();
+      });
+      remote.route("/api/queue", queueRoutes());
+      const post = async () => (await (await remote.request("/api/queue/create", { method: "POST",
+        headers: { "content-type": "application/json", "x-openrig-session": "front@kernel" },
+        body: JSON.stringify({ qitemId: "qitem-fwd-retry", destinationSession: lead, body: "goal", nudge: false, returnRoute: "sam@kernel", hostId: "host-b" }) }))
+        .json() as { advisories?: Array<{ code: string }> }).advisories?.map(a => a.code) ?? [];
+      // The receiver returns the row the first forward stored, with the route it carried.
+      stored = { qitemId: "qitem-fwd-retry", returnRoute: "sam@kernel@host-a", returnRouteBasis: "named" };
+      setSelfHostId("host-a");
+      people = slackPerson; // this retry reads a person, so it sends no route ...
+      expect(await post()).not.toContain("return_route_not_carried");
+      expect(sent.at(-1)).not.toHaveProperty("returnRoute");
+      setSelfHostId(null);
+      people = nobody; // ... nor does one without this host's id
+      expect(await post()).not.toContain("return_route_not_carried");
+      expect(sent.at(-1)).not.toHaveProperty("returnRoute");
+      // A receiver row without the route still gets the warning.
+      stored = { qitemId: "qitem-fwd-retry" };
+      expect(await post()).toContain("return_route_not_carried");
     });
 
     it.each(["handoff", "handoff-and-complete"] as const)("a %s to another host carries the route naming this host; without a host id it goes without the route and says so", async verb => {
@@ -626,6 +672,33 @@ describe("first-user return route", () => {
       expect(relays()[0]).toMatchObject({ state: "done", closureReason: "canceled" });
       expect(repo.getById(decoy.qitemId)).toMatchObject({ state: "pending" });
       expect(repo.listTransitions(decoy.qitemId).some(t => t.transitionNote?.includes("superseded"))).toBe(false);
+    });
+
+    it("routed work that leaves an alert takes its route with it: when one of two conflicting goals leaves, the other's route relays", async () => {
+      const leaving = await waitingGoal("front-2@kernel");
+      await waitingGoal("front@kernel");
+      const wake = vi.fn(async () => "verified");
+      await tick(undefined, wake);
+      expect(wake).toHaveBeenCalledWith(alerts()[0]!.qitemId, lead); // two routes: nothing chooses, so the lead is woken
+      expect(repo.list({ limit: 1000 }).filter(r => r.tags?.includes("return-route-relay"))).toEqual([]);
+      await repo.update({ qitemId: leaving.qitemId, actorSession: lead, state: "done", closureReason: "no-follow-on" });
+      await tick(new Date(Date.now() + 400_000), wake);
+      expect(alerts()).toHaveLength(1);
+      expect(relays()).toHaveLength(1); // the conversation that's still waiting gets the prompt
+      expect(alerts()[0]!.tags).not.toContain(`prompt-routed-work:${leaving.qitemId}`);
+      expect(wake).toHaveBeenCalledTimes(1);
+    });
+
+    it("an alert that already went to a relay keeps it, and its record, when routed work joins and then leaves", async () => {
+      await waitingGoal("front@kernel");
+      await tick();
+      const relay = relays()[0]!;
+      const passing = await waitingGoal("front-2@kernel");
+      await tick(new Date(Date.now() + 400_000));
+      await repo.update({ qitemId: passing.qitemId, actorSession: lead, state: "done", closureReason: "no-follow-on" });
+      await tick(new Date(Date.now() + 800_000));
+      expect(alerts()[0]!.tags).toContain(`prompt-routed-work:${passing.qitemId}`); // a dispatched episode keeps its record
+      expect(repo.list({ limit: 1000 }).filter(r => r.tags?.includes("return-route-relay")).map(r => r.qitemId)).toEqual([relay.qitemId]);
     });
 
     it("an unknown prompt state neither starts an episode nor clears one", async () => {
