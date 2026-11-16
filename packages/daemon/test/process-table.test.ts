@@ -3,10 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readProcessTable, readProcTable } from "../src/domain/process-table.js";
+import { readProcessTable, readProcTable, readProcessTableCensus, readProcCensus } from "../src/domain/process-table.js";
 import { claudeCommandSessionToken, listNativeProcesses, processArgv, verifyCodexPaneProcess, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 import { defaultListProcessesStrict } from "../src/domain/resume-metadata-refresher.js";
-import { restoreProc, serveProcRoot, writeFakeProc } from "./helpers/fake-proc.js";
+import { restoreProc, serveProcRoot, writeFakeProc, readPermissionHiddenProc } from "./helpers/fake-proc.js";
 
 let scratch: string | undefined;
 afterEach(() => {
@@ -151,6 +151,20 @@ describe("readProcTable", () => {
     await expect(readProcTable(root)).rejects.toThrow(/8\/stat: EISDIR/);
   });
 
+  it("reports permission-hidden stats without changing the row-only listing", async () => {
+    const root = fakeProc(0, {
+      7: { stat: stat(7, "bash", "S", 1, 7, 7, 0), cmdline: "bash\0" },
+      8: { stat: stat(8, "node", "S", 7, 7, 7, 0), cmdline: "node\0" },
+    });
+    fs.chmodSync(path.join(root, "8", "stat"), 0);
+    const census = await readPermissionHiddenProc(root, 8);
+    expect(census.permissionHiddenPids).toEqual([8]);
+    expect(census.rows.map((row: { pid: number }) => row.pid)).toEqual([7]);
+    if (process.getuid?.() !== 0) expect((await readProcTable(root)).map(row => row.pid)).toEqual([7]);
+    fs.rmSync(path.join(root, "8", "stat"));
+    expect((await readProcCensus(root)).permissionHiddenPids).toEqual([]);
+  });
+
   it("rejects when there is no process table to read", async () => {
     await expect(readProcTable(path.join(os.tmpdir(), "openrig-no-proc-here"))).rejects.toThrow();
   });
@@ -168,10 +182,28 @@ describe("readProcessTable", () => {
   it("shares one read among the callers that ask while it runs, and reads again after", async () => {
     const first = readProcessTable();
     expect(readProcessTable()).toBe(first);
-    await first;
+    const census = readProcessTableCensus();
+    expect(readProcessTableCensus()).toBe(census);
+    expect((await census).rows).toBe(await first);
     const second = readProcessTable();
     expect(second).not.toBe(first);
     await second;
+  });
+
+  it("clears both shared accessors after a failed census so a later read can recover", async () => {
+    const root = fakeProc(0, { 7: { stat: stat(7, "bash", "S", 1, 7, 7, 0), cmdline: "bash\0" } });
+    serveProcRoot(path.join(root, "missing"));
+    const rows = readProcessTable(), census = readProcessTableCensus();
+    expect(readProcessTable()).toBe(rows);
+    expect(readProcessTableCensus()).toBe(census);
+    const failures = await Promise.allSettled([rows, census]);
+    expect(failures.map(result => result.status)).toEqual(["rejected", "rejected"]);
+    serveProcRoot(root);
+    const recoveredRows = readProcessTable(), recoveredCensus = readProcessTableCensus();
+    expect(recoveredRows).not.toBe(rows);
+    expect(recoveredCensus).not.toBe(census);
+    expect((await recoveredCensus).rows).toBe(await recoveredRows);
+    expect((await recoveredRows).map(row => row.pid)).toEqual([7]);
   });
 
   it.runIf(process.platform === "linux")("spawns no ps for either lister on Linux", async () => {

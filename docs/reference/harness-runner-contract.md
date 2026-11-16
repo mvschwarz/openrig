@@ -11,7 +11,8 @@
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
 > - **Current source:** per-launch credentials for hosted Pi, Pi-RPC presets and declared community runners (section 4).
->   This credential does not qualify new native input or cancellation behavior.
+>   Optional run-bound observations retain receipts and project current runner-reported context/community model facts.
+>   Credentials and reports do not qualify new native input, cancellation or independently verified program identity.
 > - **Unchanged:** plain community presets and the other built-in runtimes (Claude Code, Codex, OMP, terminal).
 >
 > **What has run natively, in 0.7.8's release testing, against a Claude Haiku model:**
@@ -153,6 +154,66 @@ host hooks, contained guest grants and install-token Pi usage keep their legacy 
 current bound Pi credential. No native input channel or cancellation capability is implied by this credential.
 
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
+
+The same endpoint accepts an observation-only report from a current run-bound credential:
+
+```json
+{"runId":"<OPENRIG_RUN_ID>","sequence":1,"occurredAt":"2026-11-12T00:00:00Z",
+ "observations":{"model":{"id":"provider/model"},"context":{"usedTokens":1000,"windowTokens":10000}}}
+```
+
+Send this separately from activity and identity posts, without `hookEvent` or `eventFamily`. It records no activity
+or verified identity. Core stores a receipt with the authenticated run/session binding in its existing event log;
+retrying the same observation sequence and payload returns that receipt, while conflicting reuse returns 409.
+Observation ordering is separate from activity/turn ordering. Omitted components keep their own ages; a new run
+cannot inherit an earlier run's reports. Counts without capacity or an explicit percentage remain reported counts,
+not an inferred context occupancy (`availability: unknown`, `reason: window_capacity_unknown`). A valid
+`usedTokens/windowTokens` pair or explicit percentage supplies reported occupancy. The current context reader
+uses accepted events, rechecking run/binding, sequence and the existing ten-minute freshness policy; it never
+revives a runner sample from the context cache. Community model reads use the same current-report boundary.
+Observation model IDs and session references retain Unicode format characters (`\p{Cf}`), including bidi formatting,
+zero-width joiners and non-joiners, where the existing identifier/path format permits. CLI/UI displays escape these
+characters visibly in human CLI model output and UI event previews. These display boundaries use the existing terminal
+JSON escape set: DEL/C1 controls, format characters, line/paragraph separators and default-ignorable code points.
+Stored values, JSON/API payloads and identity
+comparisons retain the original spelling. Observation Pi paths opt into format characters without changing ordinary
+launch/resume validation; their absolute-path, traversal, length and `.jsonl` checks remain.
+Their source is `runner_reported`, displayed as “runner-reported”; existing Claude/Codex/Pi native model
+readers retain their evidence paths and labels. Omitted components retain their own sample times.
+An unreadable binding or report is unknown (`binding_unverified`), not evidence of replacement. The grant and
+existing receipt remain intact; retrying after verification recovers the same accepted receipt. A standing that becomes
+unverified during observation admission, including a failed standing read, returns retryable `409 runner_observation_unverified`.
+`runner_observation_unavailable` remains for a positively stale/revoked run or no bound session; invalid reports and
+conflicting sequence reuse retain their existing refusal codes. No refusal revokes credentials or fabricates observed state.
+
+Report changed components rather than repeating unchanged high-rate samples. Retry the same report with its original
+sequence, timestamp and payload. If unchanged facts must remain current, renew them deliberately with a new sequence
+and sample time before the existing freshness window expires; change-only reporting without renewal eventually becomes
+stale. This reduces unnecessary event growth, but does not bound retention or worst-case history query cost. No default
+physical pruning of observation events is provided.
+
+A fresh current session component can fill an absent resume reference through the existing report-only
+persistence path with `launcher` provenance, below Core scrape/adoption evidence. Pi and Pi-based community references
+are promoted only if the adapter's default session-file check accepts them. A reference outside that resume format stays
+in the accepted observation, with model/context facts and its receipt intact, but writes no resume token or identity event.
+Generic community harnesses retain their pass-through reference behavior. A promoted reference emits the existing session-identity event once after
+commit; it does not stamp independent verification or resumability. A known conflicting Core reference stays
+unchanged and makes current observations unknown. A retry returns its original receipt without repeating
+identity effects. Community process identity remains unconfirmed without independent Core evidence.
+Runner context does not provision a collector or enable legacy watchdog/compaction enforcement; that
+watchdog's raw cache path excludes runner-reported entries.
+
+Core observes launch-recorded community runners independently of session reports. Once the existing startup
+readiness is committed, a concrete foreground shell with no live child can establish the existing process
+mismatch and end only the sampled run credential, even before any native reference was reported. A shell
+wrapper with a live descendant, incomplete/unreadable census or changed pane/binding stays unconfirmed;
+unknown evidence never ends a run. On Linux, a permission-hidden process (`EPERM`/`EACCES` reading its stat)
+makes this absence check unconfirmed, even when the hidden process might be unrelated: its parent cannot be read.
+Processes that disappeared (`ENOENT`/`ESRCH`) do not mark the census permission-incomplete; macOS retains its existing
+`ps` listing. Other process-table consumers retain their row-only listing behavior. Pending launch remains unconfirmed until readiness. Explicit same-process
+adoption retains the observed pane anchor and its existing ready state. Native Claude/Codex/Pi checks and
+Pi-RPC report routing keep their existing paths. A report plus a live Node process does not independently
+verify the native conversation.
 - **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to
   `127.0.0.1`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`, or else from `$OPENRIG_HOME/activity-endpoint.json`.
 - **Posting:** post one at a time, in order, with a short timeout. Never make the agent wait on a post.
