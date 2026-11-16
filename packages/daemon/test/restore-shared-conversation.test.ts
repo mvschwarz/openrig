@@ -258,6 +258,37 @@ describe("rig restore-check names agents that hold the same recorded conversatio
     expect(unavailable?.evidence).toBe(describeUnavailable(["dev-a@r1"]));
   });
 
+  // The maintainer's 2nd review of #3250: the seats the snapshot would resume are named by their current record; a
+  // snapshot taken by rig down records them running, before it marks them exited.
+  it("names the seats the snapshot would resume by their current record, not the running the snapshot recorded", () => {
+    const data = twoSeatSnapshot("conv-x", "conv-x");
+    for (const sess of data.sessions as Array<{ status: string }>) sess.status = "running";
+    const deps = liveDeps({ r1: [seat("r1", "dev.a", "conv-x", "exited"), seat("r1", "dev.b", "conv-x", "exited")] });
+    const result = new RestoreCheckService({
+      ...deps,
+      getRestoreInputs: () => ({ snapshot: { id: "snap-r1", kind: "manual", data }, servicesRecord: null }),
+    } as RestoreCheckDeps).check(check());
+    const evidence = result.checks.map((c) => c.evidence).filter((e) => e.includes("have the same recorded"));
+    expect(evidence.some((e) => e.includes("dev.a (exited) and dev.b (exited) have the same recorded claude_id conversation"))).toBe(true);
+    expect(evidence.some((e) => e.includes("dev-a@r1 (exited) and dev-b@r1 (exited)"))).toBe(true);
+    expect(evidence.join("\n")).not.toContain("(running)");
+  });
+
+  // Sol's review of the 2nd round: a seat kept attached to an external CLI is not one restore launches, so the
+  // snapshot's own comparison leaves it out; the fleet comparison still names it with the seat it shares with.
+  it("leaves a seat kept attached to an external CLI out of the snapshot's own comparison", () => {
+    const data = twoSeatSnapshot("conv-x", "conv-x");
+    const attached = { ...seat("r1", "dev.b", "conv-x"), attachmentType: "external_cli" } as NodeInventoryEntry;
+    const deps = liveDeps({ r1: [seat("r1", "dev.a", "conv-x", "exited"), attached] });
+    const result = new RestoreCheckService({
+      ...deps,
+      getRestoreInputs: () => ({ snapshot: { id: "snap-r1", kind: "manual", data }, servicesRecord: null }),
+    } as RestoreCheckDeps).check(check());
+    const evidence = result.checks.map((c) => c.evidence);
+    expect(evidence.some((e) => /dev\.a \([a-z]+\) and dev\.b/.test(e))).toBe(false);
+    expect(evidence.some((e) => e.includes("dev-a@r1 (exited) and dev-b@r1 (running) have the same recorded claude_id conversation"))).toBe(true);
+  });
+
   it("stays out of the recovery-only status poll", () => {
     const result = new RestoreCheckService(liveDeps({
       r1: [seat("r1", "dev.a", "conv-x"), seat("r1", "dev.b", "conv-x")],

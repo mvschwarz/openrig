@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
+import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 import { compareConversations, describeSharedConversation, describeUnavailable, holdsRecordedConversation } from "./shared-conversation.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
@@ -505,6 +506,12 @@ export class RestoreCheckService {
         currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
         currentCodexProfiles: Object.fromEntries(inventory.filter((current) => current.codexConfigProfile !== undefined)
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
+        // the shared-conversation report names the seats a restore would resume by their current record, as it names
+        // every other agent (the maintainer's review of #3250)
+        currentStatuses: Object.fromEntries(inventory.map((current) => [current.logicalId, current.sessionStatus ?? null])),
+        // a seat kept attached to an external CLI is not launched by restore: it is not one of the seats it resumes
+        attachedLogicalIds: inventory.filter((current) => seatProcessOwner(resolveSeatKind(current.attachmentType)) === "external")
+          .map((current) => current.logicalId),
       });
       // The membership restore itself uses: the snapshot's roster, or a pre-roster snapshot's own nodes.
       const roster = new Set(resolveSnapshotRestoreTopology(input.snapshot.data).intendedRoster.map((entry) => entry.nodeId));

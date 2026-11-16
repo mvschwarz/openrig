@@ -461,6 +461,7 @@ export class RestoreOrchestrator {
         currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
           .filter((current) => current.codexConfigProfile !== undefined)
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
+        ...this.currentSeatRecords(rigId),
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
       // A seat that is still a node of this rig but isn't in the snapshot's intended roster isn't started by this restore:
@@ -1087,17 +1088,23 @@ export class RestoreOrchestrator {
    */
   private conversationPartners(rigId: string, data: SnapshotData, freshLogicalIds?: string[]): string[] {
     const currentRuntimes = Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime]));
-    const resuming = resumingConversationSeats(data, { freshLogicalIds, currentRuntimes });
-    if (!resuming.length) return [];
-    const inRestore = new Set(resolveSnapshotRestoreTopology(data).intendedNodes.map((node) => node.logicalId));
+    if (!resumingConversationSeats(data, { freshLogicalIds, currentRuntimes }).length) return [];
     let inventory: NodeInventoryEntry[];
     try {
-      inventory = [...getNodeInventoryForRigs(this.db, new Set(this.rigRepo.listRigs().map((rig) => rig.id))).values()].flat();
+      // the listed rigs, as rig restore-check reads, and always this restore's own (an archived rig's restore too)
+      inventory = [...getNodeInventoryForRigs(this.db, new Set([...this.rigRepo.listRigs().map((rig) => rig.id), rigId])).values()].flat();
     } catch (err) {
       return [`Restore pre-validation: the shared-conversation comparison with agents outside this restore is unavailable (${err instanceof Error ? err.message : String(err)}).`];
     }
+    const own = this.currentSeatRecords(rigId);
+    const resuming = resumingConversationSeats(data, { freshLogicalIds, currentRuntimes, ...own });
+    if (!resuming.length) return [];
+    // Left out: only the seats restore launches. One kept attached to an external CLI (left_attached) stays running
+    // with its conversation, so it is compared as an agent outside the restore (the maintainer's review of #3250).
+    const launched = new Set(resolveSnapshotRestoreTopology(data).intendedNodes.map((node) => node.logicalId)
+      .filter((logicalId) => !own.attachedLogicalIds.includes(logicalId)));
     const others = inventory
-      .filter((entry) => !(entry.rigId === rigId && inRestore.has(entry.logicalId)) && holdsRecordedConversation(entry))
+      .filter((entry) => !(entry.rigId === rigId && launched.has(entry.logicalId)) && holdsRecordedConversation(entry))
       .map((entry) => ({
         seat: entry.canonicalSessionName ?? `${entry.logicalId}@${entry.rigName}`,
         state: entry.sessionStatus ?? "unknown",
@@ -1107,6 +1114,22 @@ export class RestoreOrchestrator {
     const rigName = data.rig?.name ?? rigId;
     return describePartners(resuming.map((entry) => ({ ...entry, seat: `${entry.seat}@${rigName}` })), others)
       .map((warning) => `Restore pre-validation: ${warning}`);
+  }
+
+  /** This rig's current seat records for the shared-conversation report, read for this rig alone (an archived rig's
+   *  restore inclusive): each seat's sessionStatus from the node inventory ("unknown" for all when it cannot be read),
+   *  and the seats kept attached to an external CLI from their bindings, the same record that makes restore leave
+   *  them running (left_attached) instead of launching them. */
+  private currentSeatRecords(rigId: string): { currentStatuses: Record<string, string | null>; attachedLogicalIds: string[] } {
+    let currentStatuses: Record<string, string | null> = {};
+    try {
+      currentStatuses = Object.fromEntries((getNodeInventoryForRigs(this.db, new Set([rigId])).get(rigId) ?? [])
+        .map((entry) => [entry.logicalId, entry.sessionStatus ?? null]));
+    } catch { /* every seat "unknown" */ }
+    const attachedLogicalIds = (this.rigRepo.getRig(rigId)?.nodes ?? [])
+      .filter((node) => seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external")
+      .map((node) => node.logicalId);
+    return { currentStatuses, attachedLogicalIds };
   }
 
   private computeRestorePlan(data: SnapshotData): PlanEntry[] {

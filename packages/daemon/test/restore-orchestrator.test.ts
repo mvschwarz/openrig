@@ -338,9 +338,54 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes[0]!.status).not.toBe("failed");
     const named = result.result.warnings.filter((line) => line.includes("outside this restore"));
     expect(named).toHaveLength(1);
-    expect(named[0]).toContain(`dev.impl@r99 (running) has the same recorded claude_id conversation as dev-parent@other-rig (${state}), outside this restore`);
+    expect(named[0]).toContain(`dev.impl@r99 (detached) has the same recorded claude_id conversation as dev-parent@other-rig (${state}), outside this restore`);
     expect(result.result.warnings.join("\n")).not.toContain("conv-x");
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe(status);
+  });
+
+  // The maintainer's 2nd review of #3250: the seats a restore resumes are named by their current record, as the agents
+  // outside it are; a snapshot taken by rig down records them running, before it marks them exited.
+  it("names the seats it resumes by their current record, not the running the snapshot recorded", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "dev.a", role: "worker", runtime: "claude-code" }, { logicalId: "dev.b", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "conv-shared",
+    });
+    expect(snap.data.sessions.every((sess: { status: string }) => sess.status === "running")).toBe(true);
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?)").run(snap.rigId);
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const named = result.result.warnings.filter((line) => line.includes("have the same recorded"));
+    expect(named).toHaveLength(1);
+    expect(named[0]).toContain("dev.a (exited) and dev.b (exited) have the same recorded claude_id conversation");
+    expect(named[0]).not.toContain("running");
+  });
+
+  // The maintainer's 2nd review of #3250 (CodeRabbit's 2nd item on conversationPartners): only the seats restore
+  // launches are left out of the comparison; one kept attached to an external CLI stays running with its conversation.
+  it.each([["active", false], ["archived", true]])("compares a seat it keeps attached to an external CLI as an agent outside the restore (%s rig)", async (_mode, archived) => {
+    const rig = rigRepo.createRig("r99");
+    const worker = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const desk = rigRepo.addNode(rig.id, "desk", { role: "worker", runtime: "claude-code" });
+    const old = sessionRegistry.registerSession(worker.id, "r99-worker");
+    sessionRegistry.updateStatus(old.id, "running");
+    sessionRegistry.updateResumeToken(old.id, "claude_id", "conv-x", "scrape");
+    sessionRegistry.updateBinding(desk.id, { attachmentType: "external_cli", externalSessionName: "desk-app@r99" });
+    const claimed = sessionRegistry.registerClaimedSession(desk.id, "desk-app@r99");
+    sessionRegistry.updateResumeToken(claimed.id, "claude_id", "conv-x", "scrape");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    // Sol's review of the 2nd round: the restore's own seats are read for this rig alone, so an archived rig's
+    // restore still knows which seat stays attached (listRigs, the partners' set, leaves archived rigs out)
+    if (archived) expect(rigRepo.archiveRig(rig.id)).toBe(true);
+    const tmux = { ...mockTmux(), hasSession: vi.fn(async () => false) } as unknown as TmuxAdapter;
+    const result = await createOrchestrator({ tmux }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.find((n) => n.logicalId === "desk")?.status).toBe("left_attached");
+    const named = result.result.warnings.filter((line) => line.includes("conversation"));
+    expect(named).toHaveLength(1);
+    expect(named[0]).toMatch(/worker@r99 \([a-z]+\) has the same recorded claude_id conversation as desk-app@r99 \(running\), outside this restore/);
+    expect(result.result.warnings.join("\n")).not.toContain("conv-x");
   });
 
   // The maintainer's review of #3250: restore compares with the rigs rig restore-check reads, so an archived rig's agent

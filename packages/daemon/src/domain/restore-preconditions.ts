@@ -19,6 +19,13 @@ export function validatePreRestore(
     currentRuntimes?: Record<string, string | null | undefined>;
     /** Current explicit seat selections; a missing key is unknown, null is an explicit absence. */
     currentCodexProfiles?: Record<string, string | null>;
+    /** The current recorded session status of each seat, by logical id (the node inventory's sessionStatus): how the
+     *  shared-conversation report names the seats it would resume. A seat not listed is "unknown"; without the map, the
+     *  snapshot's own record. */
+    currentStatuses?: Record<string, string | null | undefined>;
+    /** Seats kept attached to an external CLI: restore does not launch them, so they are not among the seats it
+     *  resumes (restore compares them as agents outside it). */
+    attachedLogicalIds?: string[];
   },
 ): { blockers: RestoreValidationBlocker[]; warnings: string[] } {
   const blockers: RestoreValidationBlocker[] = [];
@@ -250,14 +257,19 @@ const UNREADABLE = Object.freeze({ unreadable: true });
 
 export function resumingConversationSeats(
   data: SnapshotData,
-  opts: { freshLogicalIds?: string[]; currentRuntimes?: Record<string, string | null | undefined> },
+  opts: {
+    freshLogicalIds?: string[];
+    currentRuntimes?: Record<string, string | null | undefined>;
+    currentStatuses?: Record<string, string | null | undefined>;
+    attachedLogicalIds?: string[];
+  },
 ): ConversationSeat[] {
   if (!Array.isArray(data.nodes)) return [];
   const sessions = Array.isArray(data.sessions) ? data.sessions : [];
   const resuming: ConversationSeat[] = [];
   for (const node of resolveSnapshotRestoreTopology(data).intendedNodes) {
     try {
-      if (opts.freshLogicalIds?.includes(node.logicalId)) continue;
+      if (opts.freshLogicalIds?.includes(node.logicalId) || opts.attachedLogicalIds?.includes(node.logicalId)) continue;
       const currentRuntime = opts.currentRuntimes?.[node.logicalId] ?? node.runtime;
       if (currentRuntime === "terminal") continue;
       const resolution = resolveActiveSnapshotSession({ ...data, sessions }, node.id);
@@ -270,7 +282,9 @@ export function resumingConversationSeats(
       if (policy !== "resume_if_possible") continue;
       resuming.push({
         seat: node.logicalId,
-        state: resolution.session.status ?? "unknown",   // its recorded status as it is, as for the agents outside it
+        // the current record, as for the agents outside it: the snapshot's own says "running" for a seat rig down
+        // stopped after taking it (the maintainer's review of #3250)
+        state: (opts.currentStatuses ? opts.currentStatuses[node.logicalId] : resolution.session.status) ?? "unknown",
         resumeType: resolution.session.resumeType,
         resumeToken: resolution.session.resumeToken,
       });
