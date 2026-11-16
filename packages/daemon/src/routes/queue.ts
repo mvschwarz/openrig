@@ -100,7 +100,7 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
  *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
 export const HANDOFF_SUCCESSOR_LIMIT = 20;
-export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
   try {
     // Newest first, one past the bound so a cut list is known.
     const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
@@ -972,6 +972,28 @@ export function queueRoutes(): Hono {
     }
   });
 
+  // POST /:qitemId/tags — add tags to a row, in any state ({ add: [...] }). Add-only: existing tags stay, a tag the
+  // row already has adds nothing, and nothing else about the row changes. The actor is the transport-derived sender,
+  // as for update, and the tags added are recorded on a transition naming it.
+  app.post("/:qitemId/tags", async (c) => {
+    const qitemId = c.req.param("qitemId");
+    const body = await c.req.json<{ add?: unknown; actorSession?: string }>().catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "queue tag", bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
+    const actorSession = identity.session;
+    { const held = switchCustody(c, actorSession); if (held) return held; }
+    const add = body.add;
+    if (!Array.isArray(add) || add.length === 0 || !add.every((tag) => typeof tag === "string" && tag.trim().length > 0)) {
+      return c.json({ error: "tags_required", message: "add takes one or more non-blank tags; nothing was written" }, 400);
+    }
+    try {
+      const { item, added } = getRepo(c).addTags({ qitemId, actorSession, tags: add as string[], ...resolveRecordedIdentity(c, identity) });
+      return c.json({ ...item, added });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
   // POST /:qitemId/handoff — transactional close+create (local); cross-host
   // message-passing choreography when a registered hostId is enveloped
   // (OPR.0.4.6.MH3 FR-4, C2).
@@ -1436,7 +1458,8 @@ export function queueRoutes(): Hono {
       if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
         repo.recordInboxCheckIn(sender);
       }
-      return c.json(items);
+      return c.json(items.map((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
+        ? { ...item, ...handoffSuccessors(repo, item) } : item));
     }
 
     // OPR.0.3.2.20 — attention path goes through
@@ -1601,8 +1624,10 @@ export function queueRoutes(): Hono {
       ...item,
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
-      // The answer rows returned to this row, read by their link rather than their text; empty when none came back.
+      // The answer rows returned to this row, read by their link rather than their text; empty when none came back here.
+      // Only this daemon's rows are read: an answer another host holds isn't in them, so empty isn't proof of none.
       answers: repo.answersForAsk(qitemId),
+      answersFrom: "this-daemon",
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,

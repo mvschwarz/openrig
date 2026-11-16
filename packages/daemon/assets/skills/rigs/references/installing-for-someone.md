@@ -36,10 +36,10 @@ Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use 
 or have the person type the goal and folder in the operator's pane. (If the person stays with you, the skill's step 2 hands the goal over
 as a queue task from your own address instead.) Show where the operator answers and let it
 help them choose a team before any starter launch.
-If the person gives you a goal later, forward it, the folder and constraints with `rig send`; leave implementation
-with the operator's team instead of taking over the work yourself.
-Installation is complete when the operator is ready and the person is talking to it, not merely when the daemon is
-healthy. If they choose to talk later, leave the exact connection step and say that the handoff is still pending.
+If the person gives you a goal later, forward it, the folder and constraints the same way, by the route they chose;
+leave implementation with the operator's team instead of taking over the work yourself.
+Installation is complete when the operator is ready and the person is talking to it or, when they stay with you, once
+the goal has reached it as a task from your address, not merely when the daemon is healthy. If they choose to talk later, leave the exact connection step and say that the handoff is still pending.
 
 Read `rig context get reference/getting-started.md#open-the-kernel-conversations` for the commands and manual
 path. Without a working daemon, the same guide is `daemon/docs/reference/getting-started.md` in the installed

@@ -130,7 +130,8 @@ export function makeOperatorDeliveryEngine(deps: {
       } catch {
         return { decision: "unavailable:human-registry", resolved: false, dispatched: false };
       }
-      if (!reg.ok) return { decision: "unavailable:human-registry", resolved: false, dispatched: false };
+      // Nobody registered yet is its own refusal (noHumans), not a broken registry: say so, as the empty list below does.
+      if (!reg.ok) return { decision: reg.noHumans ? "undeliverable:no-registered-human" : "unavailable:human-registry", resolved: false, dispatched: false };
       // The escalation goes to the default person, never simply the first file: with several people and none chosen,
       // it's undeliverable and says so.
       const human = resolveDefaultPerson(reg.entities, deps.home).person;

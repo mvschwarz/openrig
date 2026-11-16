@@ -130,6 +130,17 @@ describe("51-06 D2 — real CLI->loopback HTTP->queueRoutes/QueueRepository acce
     else expect(out).toContain(`The summary was blank, so it wasn't stored: ${id} keeps its summary`);
   });
 
+  // The daemon keeps the row's own evidence ref for a blank one, so the read-back has nothing of it to compare.
+  it.each([false, true])("a blank --evidence-ref is applied without it and reported as not stored (json=%s)", async (json) => {
+    db.prepare("UPDATE queue_items SET evidence_ref = ? WHERE qitem_id = ?").run("/proof/original.md", id);
+    const { out, exit } = await runCli(["update", id, "--state", "in-progress", "--evidence-ref", " ", ...(json ? ["--json"] : [])]);
+    expect(exit).toBeFalsy();
+    expect(out).not.toContain("queue_update_readback_failed");
+    expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "in-progress", evidenceRef: "/proof/original.md" });
+    if (json) expect(JSON.parse(out).advisories).toEqual([expect.objectContaining({ code: "evidence_ref_not_stored", field: "evidenceRef" })]);
+    else expect(out).toContain(`The evidence ref was blank, so it wasn't stored: ${id} keeps its evidence ref`);
+  });
+
   it("CONTROL: real-CLI human-seat park PERSISTS summary + evidence (exit 0)", async () => {
     const { exit } = await runCli(["update", id, "--actor", "orch@rig", "--state", "blocked", "--blocked-on", "human@kernel", "--summary", "PARK-KEEP", "--evidence-ref", "/proof/park.md"]);
     expect(exit).toBeFalsy(); // success

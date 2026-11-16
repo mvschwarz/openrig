@@ -31,6 +31,7 @@ import {
 } from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler, OutboxHandlerError } from "./outbox-handler.js";
+import { declaredCapabilities, readSendOutcome, type WrittenFact } from "./connection-contract.js";
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -180,7 +181,7 @@ function enterWithheld(reason: string | undefined): boolean {
  *  write that may have landed is uncertain. Text that was written reads text only when a pre-Enter check refused the
  *  Enter, and otherwise text with the submission unknown, since Enter may have been attempted. A send that wrote
  *  nothing says so. Anything else the result doesn't establish is unknown, never a guess. */
-export function writtenFact(result: SendResult): "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown" {
+export function writtenFact(result: SendResult): WrittenFact {
   if (result.ok && result.outcome !== "retained") {
     if (result.submitOnly) return "submit_only";
     return result.promptInteraction === "unverified" ? "text_only" : "submitted";
@@ -1923,16 +1924,21 @@ function codexSeatIdle(pane: string): boolean {
 // (`Update available! 0.160.0 -> 0.162.1`). These are only what the frames show; nothing here discovers a version. A frame where one of them names another version is not read as these
 // layouts. Most frames name no version (the banner and header scroll away), and then a matching layout is evidence
 // about the layout only, not proof of the client version: another version that draws the same rows reads the same.
-const RECORDED_CLIENT_VERSION: Record<"claude-code" | "codex", string> = { "claude-code": "2.1.296", codex: "0.160.0" };
+// Codex 0.167.1 and 0.167.2 count as 0.167.0: they changed no TUI code from it (openai/codex
+// rust-v0.167.0...rust-v0.167.2). A later patch, a prerelease or a later minor is another version until it's checked.
+const RECORDED_CLIENT_VERSIONS: Record<"claude-code" | "codex", RegExp> = {
+  "claude-code": /^2\.1\.296$/,
+  codex: /^(?:0\.160\.0|0\.167\.[0-2])$/,
+};
 const VISIBLE_CLIENT_VERSION: Record<"claude-code" | "codex", RegExp[]> = {
   "claude-code": [/Claude Code v(\d[\w.+-]*)/g],
   codex: [/OpenAI Codex \(v(\d[\w.+-]*)\)/g, /Update available! (\d[\w.+-]*) -> /g],
 };
 
-/** Whether a frame visibly names a client version other than the recorded one (see RECORDED_CLIENT_VERSION). */
+/** Whether a frame visibly names a client version other than the recorded ones (see RECORDED_CLIENT_VERSIONS). */
 export function namesAnotherClientVersion(pane: string, runtime: "claude-code" | "codex"): boolean {
   return VISIBLE_CLIENT_VERSION[runtime].some((pattern) =>
-    [...pane.matchAll(pattern)].some((match) => match[1] !== RECORDED_CLIENT_VERSION[runtime]));
+    [...pane.matchAll(pattern)].some((match) => !RECORDED_CLIENT_VERSIONS[runtime].test(match[1]!)));
 }
 
 /** The seat before the paste (see SeatReading), read from the capture the transport already takes before it.
@@ -1950,7 +1956,7 @@ export function readSeatBeforePaste(pane: string | null, runtime: "claude-code" 
  *  placeholders (Claude's queued label and Try suggestion, collapsed pastes, Codex's empty-box placeholder) are
  *  checked before the sent text, so none of them can read as `exact`. The sent text is `exact` only with its word
  *  boundaries kept, and `ambiguous` where the box's row breaks leave them uncertain (boxHoldsText). A frame that
- *  names another client version reads `unrecognized` (RECORDED_CLIENT_VERSION).
+ *  names another client version reads `unrecognized` (RECORDED_CLIENT_VERSIONS).
  *
  *  An empty box also reads `queued` where the frames say the message may wait behind a turn: Codex's
  *  pending-input rows above the box, rows between Codex's running-turn status row and the box, or
@@ -2765,7 +2771,7 @@ export class SessionTransport {
         pane: seat.pane, occupantGeneration: seat.occupant, messageId: opts?.deliveryId ?? outboxIds[0] ?? attemptId, attemptId,
         admitted: admissionUnknown ? "unknown" : admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
-        ...wireFingerprint(wire),
+        ...wireFingerprint(wire), outcome: readSendOutcome(result, writtenFact(result)),
       });
     } catch (err) {
       if (!this.evidenceFailureLogged) {
@@ -4226,8 +4232,12 @@ export class SessionTransport {
       // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
       // hook gets the same current-dialog check as a fresh running one.
       if (this.hookFreshForSend(hookActivity, now)) {
+        // These fresh-hook dialog and picker checks run only on a runtime declared to support reading a dialog
+        // (member-connection.v1, observe.dialog); the runtime then says which screen reader it is. The stale-idle veto and
+        // the pane probe below don't read the declaration.
+        const dialogRead = declaredCapabilities("typed", input.runtime).observe.dialog === "supported";
         // A fresh SessionStart reads unknown, and a picker can open after it just as after Stop.
-        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && input.runtime === "claude-code") {
+        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && dialogRead && input.runtime === "claude-code") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
@@ -4247,7 +4257,7 @@ export class SessionTransport {
         // Codex's /model picker fires no hook either, and Codex opens it during a running turn too. After any fresh
         // hook short of a permission request, only a current selector recognized in full refuses (the dialogue-only
         // read skips the numbered-row scan, so history, drafts and a busy pane with no picker still deliver).
-        if ((hookActivity.state === "idle" || hookActivity.state === "running" || hookActivity.state === "unknown") && input.runtime === "codex") {
+        if ((hookActivity.state === "idle" || hookActivity.state === "running" || hookActivity.state === "unknown") && dialogRead && input.runtime === "codex") {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,

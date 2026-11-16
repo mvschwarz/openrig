@@ -384,6 +384,7 @@ function withoutDaemonLinkedRows<T>(row: T): T {
   delete fields.successorsTruncated;
   delete fields.successorNote;
   delete fields.answers;
+  delete fields.answersFrom;
   return fields as T;
 }
 
@@ -1813,7 +1814,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // An authenticated caller sees only the rows in its scope, whatever the filters matched.
         if (scope && res.status < 400 && Array.isArray(res.data)) {
           const view = externalView(scope);
-          const rows = res.data.filter((row) => scope.item(row));
+          const rows = res.data.filter((row) => scope.item(row)).map(withoutDaemonLinkedRows);
           const result = mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
           // An external caller's empty inbox says so in a line its assistant can repeat, naming the team as the person
           // knows it. The rows keep their shape; the line rides beside them, only when nothing narrowed the list. The
