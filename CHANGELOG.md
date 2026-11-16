@@ -76,8 +76,8 @@ including contributions from people using OpenRig.
   its file changed, within a two-second settle window, or when that can't be
   read. This release makes no speed claim. ([#3285](https://github.com/mvschwarz/openrig/pull/3285), [#3295](https://github.com/mvschwarz/openrig/pull/3295), [#3296](https://github.com/mvschwarz/openrig/pull/3296))
 - **Draft-aware delivery** reads an empty input box under Claude Code 2.1.322 or
-  2.1.323's wide paste hint and auto-update failure as empty (shown by its
-  tests; not yet checked with Claude Code itself). ([#3231](https://github.com/mvschwarz/openrig/pull/3231))
+  2.1.323's wide paste hint and auto-update failure as empty (checked with
+  Claude Code 2.1.322 and 2.1.323 in a test run). ([#3231](https://github.com/mvschwarz/openrig/pull/3231))
 - **Claude's question dialog,** in the several-question, editor-shortcut and
   preview layouts OpenRig recognizes, refuses an ordinary send (shown by its
   tests; not yet checked with Claude Code itself). ([#3256](https://github.com/mvschwarz/openrig/pull/3256))
