@@ -49,6 +49,15 @@ describe("tmux argv exec path", () => {
     expect(seen).toEqual([["tmux", "send-keys", "-t", "dev'qa@rig", "Enter; rm -rf /", "C-c"]]);
   });
 
+  it("sendKeys escapes a trailing semicolon on the argv path too, so both transports agree", async () => {
+    const seen: string[][] = [];
+    const { adapter } = argvAdapter(seen);
+    // The same escaped argument reaches exec's argv and the spawned client's command line: one key,
+    // one argument, on either transport.
+    await adapter.sendKeys("dev'qa@rig", ["x;", "C-c"]);
+    expect(seen).toEqual([["tmux", "send-keys", "-t", "dev'qa@rig", "x\\;", "C-c"]]);
+  });
+
   it("pipe-pane sink travels as ONE unit with inner quoting intact", async () => {
     const seen: string[][] = [];
     const { adapter } = argvAdapter(seen);

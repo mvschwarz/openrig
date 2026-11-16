@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { TmuxAdapter, defaultTmuxFileOps } from "../src/adapters/tmux.js";
+import { TmuxAdapter, defaultTmuxFileOps, escapeTmuxCommandSeparator } from "../src/adapters/tmux.js";
 import type { ExecFn, TmuxResult, TmuxFileOps, ArgvExecFn } from "../src/adapters/tmux.js";
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 
@@ -600,6 +600,53 @@ describe("TmuxAdapter", () => {
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
         "tmux send-keys -t 'r01-dev1-impl' 'Enter; rm -rf /' 'C-c'"
+      );
+    });
+
+    // tmux ends its command at an argument ending in an unescaped `;` (commandsOf in
+    // adapters/tmux-control.ts, pinned against real tmux in test/tmux-control-native.test.ts). Quoting
+    // protects the shell, not tmux, so a trailing `;` is escaped rather than the key being refused.
+    it("escapes a key that ends in a semicolon, so tmux keeps it as one argument", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.sendKeys("r01-dev1-impl", ["x;", "run-shell", "C-c"]);
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux send-keys -t 'r01-dev1-impl' 'x\\;' 'run-shell' 'C-c'"
+      );
+    });
+
+    it("escapes every trailing semicolon unconditionally, so each key arrives byte for byte", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      // tmux checks only the character before a final `;`: backslash means it drops the `;` and turns
+      // that backslash into `;`, anything else ends the command. One backslash added either way, so
+      // `x\;` arrives as `x\;` rather than losing its backslash. Raw strings here so the backslashes
+      // in this expectation are the ones the transport carries.
+      await adapter.sendKeys("r01-dev1-impl", [String.raw`x\;`, String.raw`x\\;`]);
+
+      expect(exec.mock.calls[0]![0]).toBe(String.raw`tmux send-keys -t 'r01-dev1-impl' 'x\\;' 'x\\\;'`);
+
+      // And the property that matters: what tmux's own parser makes of each escaped argument is the
+      // key that was sent. tmux drops the final `;` and turns the one backslash before it into `;`.
+      const asTmuxReads = (arg: string) => (arg.endsWith("\\;") ? `${arg.slice(0, -2)};` : arg);
+      for (const key of ["x;", String.raw`x\;`, String.raw`x\\;`, ";", "Enter"]) {
+        expect(asTmuxReads(escapeTmuxCommandSeparator(key)), key).toBe(key);
+      }
+    });
+
+    it("keeps the vocabulary a caller may send, punctuation included", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.sendKeys("r01-dev1-impl", ["/", "?", ":", "M-Left", "F12", "a-b"]);
+
+      expect(result).toEqual({ ok: true });
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux send-keys -t 'r01-dev1-impl' '/' '?' ':' 'M-Left' 'F12' 'a-b'"
       );
     });
 
