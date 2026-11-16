@@ -129,6 +129,8 @@ export interface StartupContextProjectionEntry {
   category?: string | null;
   sourcePath?: string | null;
   resourceType?: string | null;
+  /** The resource as the spec named it; a plugin selected under the OpenRig home reads `openrig-home:<path>`. */
+  resourcePath?: string | null;
 }
 
 export interface QueueStoreProbeResult {
@@ -1097,7 +1099,7 @@ export class RestoreCheckService {
       )),
       projectionEntries: probe.projectionEntries.map((entry) => (
         typeof entry.sourcePath === "string"
-          ? reanchorShippedProjectionEntry({ ...entry, sourcePath: entry.sourcePath }, undefined, this.deps.exists)
+          ? reanchorShippedProjectionEntry({ ...entry, sourcePath: entry.sourcePath }, undefined, this.deps.exists, this.deps.stateDir)
           : entry
       )),
     };
@@ -1305,9 +1307,10 @@ export class RestoreCheckService {
   }
 
   private inspectCorePlugin(entries: StartupContextProjectionEntry[]): { status: "green" | "yellow"; evidence: string } | null {
+    // A plugin selected under the OpenRig home is read in this instance's home, as restore will launch it.
     const dir = selectedCorePluginDir(pluginPathsOf(entries.map(entry => ({
-      category: entry.category ?? "", absolutePath: entry.absolutePath,
-    }))), this.deps.stateDir ? join(this.deps.stateDir, "plugins") : undefined);
+      category: entry.category ?? "", absolutePath: entry.absolutePath, resourcePath: entry.resourcePath, sourcePath: entry.sourcePath,
+    })), this.deps.stateDir), this.deps.stateDir ? join(this.deps.stateDir, "plugins") : undefined);
     if (!dir) return null;
     try {
       const manifest: unknown = JSON.parse(this.deps.readFile(join(dir, ".claude-plugin", "plugin.json")));
