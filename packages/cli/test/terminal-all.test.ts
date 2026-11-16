@@ -60,6 +60,41 @@ function makeDeps(opts?: {
 }
 
 describe("#3081 rig terminal open/close --all CLI", () => {
+  it.each([
+    { label: "different endpoint", sockets: ["/tmp/other.sock"], ok: false, polls: 20 },
+    { label: "missing endpoint", sockets: [undefined], ok: false, polls: 20 },
+    { label: "selected endpoint", sockets: ["/tmp/selected.sock"], ok: true, polls: 1 },
+    { label: "different then selected endpoint", sockets: ["/tmp/other.sock", "/tmp/selected.sock"], ok: true, polls: 2 },
+  ])("CR: bulk desktop readiness requires the $label", async ({ sockets, ok, polls }) => {
+    let launched = false;
+    let pollCount = 0;
+    const sleep = vi.fn(async () => {});
+    const post = vi.fn(async () => ({ status: 200, data: { provider: "herdr", session: "work", ok: true, rigs: [] } }));
+    const get = vi.fn(async () => {
+      const socketPath = launched ? sockets[Math.min(pollCount++, sockets.length - 1)] : "/tmp/selected.sock";
+      return { status: 200, data: { session: "work", providers: [{ name: "herdr", liveness: { alive: true }, status: { available: true, launch: { socketPath, session: "work" } } }] } };
+    });
+    const client = { baseUrl: "http://localhost:7433", isLocalInstance: async () => true, get, post } as unknown as DaemonClient;
+    const exec = vi.fn(async (file: string) => {
+      if (file === "/usr/bin/osascript") { launched = true; return "window"; }
+      return "/usr/local/bin/herdr";
+    });
+    const windowDeps: WindowDeps = {
+      platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" },
+      exists: file => file.endsWith("/herdr"), exec, launch: async () => {}, sleep,
+      id: () => "readiness", herdrConfig: () => "/fixture/herdr.cfg",
+    };
+    const result = await openAllTerminalWindows(client, "herdr", windowDeps, "work");
+    expect(result.ok).toBe(ok);
+    expect(pollCount).toBe(polls);
+    expect(sleep).toHaveBeenCalledTimes(ok ? polls - 1 : 20);
+    if (ok) expect(post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open-all", { provider: "herdr", reuseLive: true, session: "work" }, expect.any(Object));
+    else {
+      expect(result.code).toBe("herdr_unavailable");
+      expect(post).not.toHaveBeenCalled();
+    }
+  });
+
   let logs: string[];
   let errors: string[];
   const prevToken = process.env["OPENRIG_TERMINAL_BEARER_TOKEN"];

@@ -213,6 +213,57 @@ function readRecords(dir: string) {
 }
 
 describe("#3081 TerminalService.openAll + rig viewer ownership recording", () => {
+  it("CR: preserves pod identity for excluded seats without canonical names", async () => {
+    const h = makeInMemoryHerdr();
+    const hasSession = vi.fn(() => true);
+    const svc = new TerminalService({
+      resolveProvider: n => n === "herdr" ? h.adapter : null,
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["alpha"],
+      listRigSeats: rig => [
+        makeRigSeat(rig, "live"),
+        ...["dev.driver", "qa.driver"].map(logicalId => makeRigSeat(rig, "driver", { logicalId, canonicalSessionName: "", attachmentType: "none" })),
+        ...["dev.remote", "qa.remote"].map(logicalId => makeRigSeat(rig, "remote", { logicalId, canonicalSessionName: "", host: "edge" })),
+      ],
+      listPodSeats: () => null, resolveHost: () => null, hasSession,
+      rigViewersDir: tempDir("rig-viewers-"),
+    });
+    const result = await svc.openAll({});
+    expect(result.rigs[0]?.opened).toEqual(["live@alpha"]);
+    expect(result.rigs[0]?.absent.map(row => row.seat)).toEqual(["dev.driver@alpha", "qa.driver@alpha"]);
+    expect(result.rigs[0]?.skipped.map(row => row.seat)).toEqual(["dev.remote@alpha", "qa.remote@alpha"]);
+    expect(hasSession).toHaveBeenCalledExactlyOnceWith("live@alpha");
+  });
+
+  it.each(["seat listing", "liveness"])("CR: contains a middle-rig %s failure and preserves earlier and later results", async failure => {
+    const h = makeInMemoryHerdr();
+    const svc = new TerminalService({
+      resolveProvider: n => n === "herdr" ? h.adapter : null,
+      viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => ["gamma", "beta", "alpha"],
+      listRigSeats: rig => {
+        if (rig === "beta" && failure === "seat listing") throw new Error("fixture composition failed");
+        return [makeRigSeat(rig, "op")];
+      },
+      listPodSeats: () => null, resolveHost: () => null,
+      hasSession: session => {
+        if (session === "op@beta" && failure === "liveness") throw new Error("fixture liveness failed");
+        return true;
+      },
+      rigViewersDir: tempDir("rig-viewers-"),
+    });
+    const result = await svc.openAll({});
+    expect(result.ok).toBe(true);
+    expect(result.rigs).toMatchObject([
+      { rig: "alpha", outcome: "opened", opened: ["op@alpha"] },
+      { rig: "beta", outcome: "failed", opened: [], absent: [], degraded: [], skipped: [] },
+      { rig: "gamma", outcome: "opened", opened: ["op@gamma"] },
+    ]);
+    expect(result.rigs).toHaveLength(3);
+    expect(result.rigs[1]?.error).toBe(failure === "seat listing" ? "fixture composition failed" : "fixture liveness failed");
+    expect(h.workspaces.map(workspace => workspace.label)).toEqual(["alpha", "gamma"]);
+  });
+
   it("opens rigs in sorted name order including rig:kernel once and never opens 'openrig kernel'", async () => {
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr();
@@ -284,7 +335,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     });
     expect(result.rigs.find(r => r.rig === "all-stopped")!.absent.map(a => a.seat).sort()).toEqual([
       "ext@all-stopped",
-      "unbound@all-stopped",
+      "pod.unbound@all-stopped",
     ]);
 
     expect(result.rigs.find(r => r.rig === "all-remote")).toMatchObject({
@@ -299,7 +350,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     expect(mixed.outcome).toBe("opened");
     expect(mixed.opened).toEqual(["alive@mixed"]);
     expect(mixed.skipped).toEqual([{ seat: "remote@mixed", reason: expect.stringMatching(/remote/i) }]);
-    expect(mixed.absent.map(a => a.seat).sort()).toEqual(["ext@mixed", "stopped@mixed"]);
+    expect(mixed.absent.map(a => a.seat).sort()).toEqual(["ext@mixed", "pod.stopped@mixed"]);
 
     expect(hasSession).toHaveBeenCalledTimes(1);
     expect(hasSession).toHaveBeenCalledWith("alive@mixed");

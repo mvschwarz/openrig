@@ -154,6 +154,24 @@ describe("measured welcome width at the HTTP boundary", () => {
 });
 
 describe("#3081 POST /api/terminal/open-all, /close-all, and /rig-viewers", () => {
+  it.each([{ provider: null }, { provider: ["tmux"] }, { provider: {} }, { provider: 23 }, { provider: true }])("CR: refuses a non-string close-all provider $provider without delegation", async ({ provider }) => {
+    const closeAll = vi.fn(async () => ({ ok: true, viewers: [] }));
+    const { app } = makeApp({ service: { closeAll } });
+    const response = await post(app, "/api/terminal/close-all", { provider });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "body_invalid", viewers: [] });
+    expect(closeAll).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "tmux", "herdr"])("CR: preserves valid close-all provider %j", async provider => {
+    const closeAll = vi.fn(async () => ({ ok: true, viewers: [] }));
+    const { app } = makeApp({ service: { closeAll } });
+    const body = provider === undefined ? {} : { provider };
+    const response = await post(app, "/api/terminal/close-all", body);
+    expect(response.status).toBe(200);
+    expect(closeAll).toHaveBeenCalledExactlyOnceWith(body);
+  });
+
   it("delegates /open-all and maps unsupported_provider / body_invalid / 503", async () => {
     const openAll = vi.fn(async () => ({ provider: "herdr", ok: true, rigs: [{ rig: "a", view: "rig:a", outcome: "opened", opened: ["op@a"], absent: [], degraded: [], skipped: [] }] }));
     const { app } = makeApp({ service: { openAll } });

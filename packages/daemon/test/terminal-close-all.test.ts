@@ -615,6 +615,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     await otherSvc.openAll({ provider: "herdr" });
 
     const defaultHerdr = makeCloseHerdr({ socketPath: "/tmp/herdr-default.sock" });
+    const defaultTmux = vi.fn(async (): Promise<string> => { throw new Error("fixture tmux endpoint unavailable"); });
     const defaultSvc = new TerminalService({
       resolveProvider: (n) => (n === "herdr" ? defaultHerdr.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
@@ -624,6 +625,8 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       resolveHost: () => null,
       hasSession: () => true,
       rigViewersDir,
+      tmuxServerArgs: () => ["-L", "j12-default-fixture"],
+      tmuxExec: defaultTmux,
     });
     await defaultSvc.registerRigViewer({
       kind: "tmux", view: "rig:beta", sessionName: "openrig-view-other", sessionId: "$9",
@@ -634,6 +637,8 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const herdrRes = closeDefault.viewers.find(v => v.provider === "herdr");
     expect(herdrRes).toMatchObject({ outcome: "kept", code: "different_endpoint" });
     expect(herdrRes?.reason).not.toMatch(/unreachable/i);
+    expect(closeDefault.viewers.find(v => v.provider === "tmux")).toMatchObject({ outcome: "failed", code: "provider_unreachable" });
+    expect(defaultTmux).toHaveBeenCalled();
 
     const closeOtherTmux = await new TerminalService({
       resolveProvider: () => null,

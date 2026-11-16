@@ -299,8 +299,7 @@ function normalizeTerminalSession(raw: unknown): { ok: true; session: string } |
 function bulkSeatName(row: BulkSeatRow): string {
   if (row.canonicalSessionName && row.canonicalSessionName.trim()) return row.canonicalSessionName.trim();
   if (row.logicalId && row.rigName) {
-    const suffix = row.logicalId.includes(".") ? row.logicalId.split(".").slice(1).join(".") : row.logicalId;
-    return `${suffix}@${row.rigName}`;
+    return `${row.logicalId}@${row.rigName}`;
   }
   return row.logicalId || "unknown";
 }
@@ -759,7 +758,16 @@ export class TerminalService {
     reuseLive?: boolean,
   ): Promise<OpenAllRigResult> {
     const view = `rig:${rig}`;
-    const bulk = await this.composeRigBulk(rig, provider.panesPerPage, viewportColumns);
+    let bulk: Awaited<ReturnType<TerminalService["composeRigBulk"]>>;
+    try {
+      bulk = await this.composeRigBulk(rig, provider.panesPerPage, viewportColumns);
+    } catch (err) {
+      // No composed view exists yet, so absent/degraded/skipped details are unknown.
+      return {
+        rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [],
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
     if (!bulk) {
       return { rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [], code: "view_not_found", error: `unknown rig '${rig}'` };
     }

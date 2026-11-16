@@ -172,6 +172,7 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable", viewers: [] }, 503);
     const raw = await c.req.json().catch(() => null) as Record<string, unknown> | null;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return c.json({ error: "body_invalid", viewers: [] }, 400);
+    if (raw["provider"] !== undefined && typeof raw["provider"] !== "string") return c.json({ error: "body_invalid", detail: "provider must be a provider name string.", viewers: [] }, 400);
     const parsed = readOpenBody(raw);
     if ("error" in parsed) return c.json({ error: "body_invalid", detail: parsed.error, viewers: [] }, 400);
     const result = await svc.closeAll({

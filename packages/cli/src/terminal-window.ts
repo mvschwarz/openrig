@@ -823,8 +823,9 @@ async function openAllHerdrWindow(
     }
     let alive = false;
     for (let attempt = 0; attempt < 20; attempt++) {
-      const probe = await client.get<{ providers: Array<{ liveness: { alive: boolean } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
-      if (probe.data.providers?.[0]?.liveness.alive) { alive = true; break; }
+      const probe = await client.get<{ providers: Array<{ liveness: { alive: boolean }; status?: { launch?: { socketPath?: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
+      const ready = probe.data.providers?.[0];
+      if (ready?.liveness.alive && ready.status?.launch?.socketPath === socket) { alive = true; break; }
       await deps.sleep(250);
     }
     if (!alive) {
