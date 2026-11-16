@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { statSync } from "node:fs";
 import nodePath from "node:path";
 import type { ToolAnnotations } from "@modelcontextprotocol/server";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, remoteDaemonClient, terminalAuthHeaders, type DaemonResponse } from "./client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, operatorAuthHeaders, remoteDaemonClient, terminalAuthHeaders, type DaemonResponse } from "./client.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer, type HostRegistryLoadResult } from "./host-registry.js";
 import { loadHostBindings, type HostBindingsFile } from "./host-bindings.js";
 import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
@@ -2383,13 +2383,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           return refuse(code, `${why} ${said}`.trim(), { ...partial, ...extra });
         };
         // The daemon's operator gate guards this route (401 without it on a daemon started with OPENRIG_AUTH_BEARER_TOKEN).
-        // As in the person's answer of acp.ts, this process's operator bearer goes on this call only, never on the client:
-        // the person's other calls and the seat's never carry it, and the actor stays the person's session. A value that is
-        // not one line of visible ASCII is not sent: fetch would reject it quoting the value, and that error would reach this
-        // tool's caller.
-        const operatorBearer = process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim();
-        const operatorAuth = operatorBearer && /^[\x21-\x7E]+$/.test(operatorBearer)
-          ? { headers: { Authorization: `Bearer ${operatorBearer}` } } : undefined;
+        // The credential is the operator one the CLI's other operator writes send (operatorAuthHeaders: this process's
+        // OPENRIG_AUTH_BEARER_TOKEN, else the terminal's own), on this call only, never on the client: the person's other
+        // calls and the seat's never carry it, and the actor stays the person's session. A value that is not one line of
+        // visible ASCII is not sent: fetch would reject it quoting the value, and that error would reach this tool's caller.
+        const operatorHeaders = operatorAuthHeaders();
+        const operatorAuth = /^Bearer [\x21-\x7E]+$/.test(operatorHeaders.Authorization ?? "")
+          ? { headers: operatorHeaders } : undefined;
         let expected = revision;
         let next = 0;
         let fresh = 0;

@@ -693,12 +693,10 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       }
     });
 
-    it("answers through a daemon whose operator routes need a bearer: the Authorization goes only on the answer, and its value reaches no reply or log", async () => {
-      // A daemon on the same database whose operator gate takes only TOKEN (as one started with OPENRIG_AUTH_BEARER_TOKEN).
-      // The values are made at run time, and only whether a request carried an Authorization is recorded.
-      const TOKEN = `fake-${randomBytes(12).toString("hex")}`;
-      const OTHER = `fake-${randomBytes(12).toString("hex")}`;
-      const gated = createTestApp(db, { appDeps: { ...appDeps, missionControlBearerToken: TOKEN } });
+    /** A daemon on the same database whose operator gate takes only `token` (as one started with
+     *  OPENRIG_AUTH_BEARER_TOKEN). Only whether a request carried an Authorization is recorded, never its value. */
+    const serveGatedDaemon = async (token: string): Promise<Array<[string, string, boolean]>> => {
+      const gated = createTestApp(db, { appDeps: { ...appDeps, missionControlBearerToken: token } });
       const carried: Array<[string, string, boolean]> = [];
       const gatedDaemon = await new Promise<ServerType>((resolve) => {
         const s = serve({ fetch: (...args: Parameters<typeof gated.app.fetch>) => {
@@ -708,6 +706,14 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       });
       closers.push(() => new Promise<void>((resolve) => gatedDaemon.close(() => resolve())));
       daemonUrl = `http://127.0.0.1:${(gatedDaemon.address() as AddressInfo).port}`;
+      return carried;
+    };
+
+    it("answers through a daemon whose operator routes need a bearer: the Authorization goes only on the answer, and its value reaches no reply or log", async () => {
+      // The values are made at run time.
+      const TOKEN = `fake-${randomBytes(12).toString("hex")}`;
+      const OTHER = `fake-${randomBytes(12).toString("hex")}`;
+      const carried = await serveGatedDaemon(TOKEN);
       const printed: string[] = [];
       for (const m of ["log", "error", "warn", "info"] as const) {
         vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { printed.push(a.map(String).join(" ")); });
@@ -752,6 +758,40 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       }
       const everything = JSON.stringify(results) + printed.join("\n");
       for (const value of [TOKEN, OTHER]) expect(everything).not.toContain(value);
+    });
+
+    it("with no operator bearer set, answers with the terminal's own credential, under the same visible-ASCII guard", async () => {
+      // A daemon whose operator token and terminal token are the same value (it aliases them).
+      const TOKEN = `fake-${randomBytes(12).toString("hex")}`;
+      const carried = await serveGatedDaemon(TOKEN);
+      const results: unknown[] = [];
+      try {
+        vi.stubEnv("OPENRIG_AUTH_BEARER_TOKEN", "");
+        register(PERSON, true);
+        answer = () => [200, grantFor(PERSON)];
+        const asPerson = await connect((await listen()).url);
+        const row = await ask(`${PERSON}@external`);
+        const listed = await asPerson("rig_question_list");
+        const item = listed.structured.items.find((entry: any) => entry.qitemId === row.qitemId);
+        const choose = async () => {
+          const r = await asPerson("rig_question_answer", { qitemId: row.qitemId, revision: item.revision, choices: [{ questionId: "layout", optionId: "b" }] });
+          results.push(r);
+          return r;
+        };
+        // a terminal credential that is not one line of visible ASCII is not sent either
+        vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", `${TOKEN}\nx`);
+        expect((await choose()).structured).toMatchObject({ ok: false, code: "unauthorized" });
+        expect(audit(row.qitemId)).toEqual([]);
+        // the terminal credential: the answer is recorded, as the person, and it rode only on the answer's writes
+        vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", TOKEN);
+        expect((await choose()).structured).toMatchObject({ ok: true, outcome: "answered" });
+        expect(audit(row.qitemId)).toEqual([expect.objectContaining({ actor: `${PERSON}@external` })]);
+        const withAuth = carried.filter(([, , auth]) => auth).map(([method, pathname]) => `${method} ${pathname}`);
+        expect(new Set(withAuth)).toEqual(new Set(["POST /api/mission-control/action"]));
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      expect(JSON.stringify(results)).not.toContain(TOKEN);
     });
 
     it("records the person's choice as theirs, through this connection: the same in Steering, the asker woken once, and a repeat answered from the record", async () => {

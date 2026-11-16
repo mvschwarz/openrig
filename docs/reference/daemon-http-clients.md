@@ -63,8 +63,9 @@ The daemon reads two tokens from its environment at start:
 A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
 `GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
 or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it. `rig host
-approve|deny` and the TUI's answers to asks send `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also
-takes `--bearer`), and otherwise the terminal token; refused for want of it, they say what to set.
+approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` (on the answer's writes only) send
+`OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
+refused for want of it, `rig host` and the TUI say what to set.
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
