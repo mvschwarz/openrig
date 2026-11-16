@@ -59,6 +59,8 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   let panes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
   /** Panes of the seat's session in its other windows: tmux lists them only with `-s` (listPanes(target, true)). */
   let otherWindowPanes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
+  /** The other window is the session's current one: a listing by the session's name answers with its panes. */
+  let otherWindowCurrent: boolean;
   const calls = { respawnPane: vi.fn(), sendText: vi.fn(), sendKeys: vi.fn(), killSession: vi.fn(), signalPaneProcess: vi.fn() };
   const startedAtMs = Date.parse("2026-11-10T16:21:00Z");
   const startedAt = "Tue Nov 10 16:21:00 2026";
@@ -75,7 +77,13 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     return {
       hasSession: vi.fn(async () => true),
       createSession: vi.fn(async () => ({ ok: true })),
-      listPanes: vi.fn(async (_target: string, allWindows = false) => (allWindows ? [...panes(), ...otherWindowPanes()] : panes())),
+      // By target, as tmux answers: -s lists every window of the session; a pane id, that pane's own window; the session
+      // name alone, its current window.
+      listPanes: vi.fn(async (target: string, allWindows = false) => {
+        if (allWindows) return [...panes(), ...otherWindowPanes()];
+        if (target.startsWith("%")) return [panes(), otherWindowPanes()].find((window) => window.some((pane) => pane.id === target)) ?? [];
+        return otherWindowCurrent ? otherWindowPanes() : panes();
+      }),
       killSession: vi.fn(async (...a: unknown[]) => { calls.killSession(...a); return { ok: true }; }),
       respawnPane: vi.fn(async (...a: unknown[]) => { calls.respawnPane(...a); return { ok: true }; }),
       setRemainOnExit: vi.fn(async () => ({ ok: true })),
@@ -185,6 +193,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     managedLaunch = null;
     panes = () => [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     otherWindowPanes = () => [];
+    otherWindowCurrent = false;
     paneProcesses = () => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 102 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
       ...(running() ? [claudeIn(successorToken)] : []),
@@ -346,6 +355,22 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     await failedHandover();
     otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
+  });
+
+  // The launch's own rule: the successor is the only pane of the session's current window, the one a send to the session's
+  // name reaches and its readiness check reads. One alone in another window, not the current one, isn't adopted: the
+  // person selects that window and runs the recovery again. Nothing changes their tmux layout.
+  it("refuses a successor alone in a window that isn't the session's current one, and says to select that window", async () => {
+    await failedHandover();
+    const before = state();
+    otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+    otherWindowCurrent = true;
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.message).toContain("isn't the session's current window");
+    expect(result.message).toContain("select the successor's window");
+    expect(state()).toEqual(before);
   });
 
   it("refuses when the recorded pane isn't in the seat's session any more, even with a pane alone in another window", async () => {
