@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { noticeLine, type TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { PersistedEvent } from "./types.js";
 import { validateSessionName, deriveSessionName, boundSessionNameProblem } from "./session-name.js";
@@ -24,7 +24,9 @@ import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js"
 import type { Session, Binding } from "./types.js";
 
 export type LaunchResult =
-  | { ok: true; sessionName: string; session: Session; binding: Binding; warnings?: string[] }
+  | { ok: true; sessionName: string; session: Session; binding: Binding; warnings?: string[];
+    /** #3253: a takeover that went ahead without the seat's requested process limit (the request stays stored). */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
   | { ok: false; code: string; message: string };
 
 interface LaunchOpts {
@@ -383,6 +385,7 @@ export class NodeLauncher {
       session: session!,
       binding: binding!,
       warnings: launchWarnings.length > 0 ? launchWarnings : undefined,
+      ...(tmuxResult.ok && "processLimits" in tmuxResult && tmuxResult.processLimits ? { processLimits: tmuxResult.processLimits } : {}),
     };
   }
 
@@ -390,28 +393,28 @@ export class NodeLauncher {
    *  scrollback), then a shell starts in it with this launch's environment, for the runtime to launch into. Nothing is
    *  touched when the pane isn't in the session. */
   private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string):
-    Promise<{ ok: true; warnings?: string[] } | { ok: false; code: string; message: string }> {
+    Promise<{ ok: true; warnings?: string[]; processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
+      | { ok: false; code: string; message: string }> {
     let panes: Array<{ id: string }> = [];
     try { panes = await this.tmuxAdapter.listPanes(sessionName); } catch { /* an unreadable session holds no pane to keep */ }
     if (!panes.some((candidate) => candidate.id === pane)) {
       return { ok: false, code: "pane_not_found", message: `Pane ${pane} isn't in tmux session "${sessionName}", so nothing was stopped.` };
     }
-    // #3253: a seat whose process limits this host can't apply is refused before its running process is ended.
-    const refusal = await this.tmuxAdapter.seatProcessLimitsRefusal?.(nodeId);
-    if (refusal) {
-      return { ok: false, code: "process_limits_unsupported",
-        message: `process_limits is set for this seat, but it can't get a systemd user scope here (${refusal}); nothing was stopped.` };
-    }
+    // #3253: the recovery path is chosen before the running process is ended: with the seat's limit, or without it and
+    // a structured warning. The respawn below runs in recovery mode, so a limit never stops the takeover after the stop.
+    const limitsPlan = await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(nodeId);
+    if (limitsPlan) console.warn(`[seat takeover] ${nodeId}: ${noticeLine(limitsPlan)}`);
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
     const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
     if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
     const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env });
+    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env, processLimitsMode: "recovery" });
     if (!respawned.ok) {
       return { ok: false, code: "pane_not_respawned", message: `The seat's process in pane ${pane} ended, but a shell couldn't start there: ${respawned.message}` };
     }
-    return { ok: true, ...(respawned.warnings ? { warnings: respawned.warnings } : {}) };
+    return { ok: true, ...(respawned.warnings ? { warnings: respawned.warnings } : {}),
+      ...(respawned.ok && respawned.processLimits ? { processLimits: respawned.processLimits } : {}) };
   }
 
   /**

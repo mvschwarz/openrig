@@ -1,4 +1,4 @@
-import { nodeProcessLimitsSchema } from "../../src/db/migrations/171_node_process_limits.js";
+import { nodeProcessLimitsSchema } from "../../src/db/migrations/173_node_process_limits.js";
 import { rigDeliveryDrainsSchema } from "../../src/db/migrations/170_rig_delivery_drains.js";
 import { runBoundActivityGrantsSchema } from "../../src/db/migrations/165_run_bound_activity_grants.js";
 import { seatRuntimeHomeRecordsSchema } from "../../src/db/migrations/169_seat_runtime_home_records.js";

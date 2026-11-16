@@ -175,6 +175,8 @@ export interface SeatHandoverMutationResult {
   startedWithoutRequired?: string[];
   /** What the successor was told on taking the seat: its held messages, which are never replayed (#2431). */
   warnings?: string[];
+  /** #3253: the handover went ahead without the seat's requested process limit (the request stays stored). */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). Nothing was typed into
    *  its pane; a context or priming packet the failed handover didn't deliver was not delivered either. */
   recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
@@ -888,6 +890,7 @@ export class SeatHandoverService {
       launchAdditionNotes,
       startedWithoutRequired,
       launchWarnings: [...coreCopyNotes, ...(launch.warnings ?? [])],
+      ...(launch.processLimits ? { processLimits: launch.processLimits } : {}),
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId, launch.activityGrantId),
       // #2861 item 2: finalization can still fail once the successor is ready in the respawned pane.
       recordFailure: (failureCode) => RECOVERABLE_FINALIZE_CODES.has(failureCode) && this.recordUnadoptedSuccessor({ node,
@@ -1354,6 +1357,8 @@ export class SeatHandoverService {
     startedWithoutRequired?: string[];
     /** #2426: what the successor's preparation named, as a launch's warnings (what became of openrig-core's earlier copies). */
     launchWarnings?: string[];
+    /** #3253: the launch went ahead without the seat's requested process limit. */
+    processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
     cleanup: (() => Promise<void>) | null;
     /** #2861 item 2: records the failed attempt of a composer-launched successor (returns whether it was recorded). */
     recordFailure?: (failureCode: string) => boolean;
@@ -1505,6 +1510,7 @@ export class SeatHandoverService {
     }
     // #2426: the successor's preparation is named on the result, as a launch names it.
     if (input.launchWarnings?.length && "result" in committed) committed.result.warnings = [...(committed.result.warnings ?? []), ...input.launchWarnings];
+    if (input.processLimits && "result" in committed) committed.result.processLimits = input.processLimits;
     return committed;
   }
 

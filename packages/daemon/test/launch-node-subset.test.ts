@@ -771,17 +771,23 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(live.id)).toEqual({ status: "superseded" });
     });
 
-    it("#3253: a seat whose process limits this host can't apply is refused before its process is ended", async () => {
+    it("#3253: a takeover chooses its path before the process is ended, and goes ahead without a limit it can't apply", async () => {
       const { rigId, nodeIds } = seedPodAwareRig();
       seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
       liveDriver(rigId, nodeIds[0]!);
-      Object.assign(tmux, { seatProcessLimitsRefusal: vi.fn(async () => "the daemon is not a systemd user service: MANAGERPID is unset") });
+      const order: string[] = [];
+      const notice = { state: "not_applied", kind: "unverified", reason: "asking the systemd user manager timed out", retryable: true,
+        requested: { tasksMax: 256 } };
+      const plan = vi.fn(async () => { order.push("plan"); return notice; });
+      const signal = (tmux as any).signalPaneProcess;
+      (tmux as any).signalPaneProcess = vi.fn(async (...a: unknown[]) => { order.push("signal"); return signal(...a); });
+      Object.assign(tmux, { seatProcessLimitsRecoveryPlan: plan });
       const adapter = readyAdapter("claude-code");
-      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true });
-      expect(JSON.stringify(result)).toContain("process_limits");
-      expect((tmux as any).signalPaneProcess).not.toHaveBeenCalled();
-      expect((tmux as any).respawnPane).not.toHaveBeenCalled();
-      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true });
+      expect(order[0]).toBe("plan");
+      // the respawn runs in recovery mode: a limit can't stop it once the process has ended
+      expect((tmux as any).respawnPane).toHaveBeenCalledWith(expect.anything(), expect.anything(),
+        expect.objectContaining({ processLimitsMode: "recovery" }));
     });
 
     it("launches a kept running effort in place of the saved one, without saving it as the seat's choice", async () => {

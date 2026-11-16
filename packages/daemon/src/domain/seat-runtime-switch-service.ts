@@ -134,7 +134,9 @@ export type SetRuntimeResult =
   /** The seat already runs that runtime and no settings were given: nothing to do. */
   | ({ ok: true; dryRun: boolean; changed: false } & Pick<RuntimeSwitchPlan, "seat" | "from" | "to">)
   | ({ ok: true; dryRun: false; changed: true; switchId: string; generation: string; previousGeneration: string;
-      claimsMoved: number; openRows: number; confirmation: { note: string; at: string }; recoveryPending: boolean } & RuntimeSwitchPlan);
+      claimsMoved: number; openRows: number; confirmation: { note: string; at: string }; recoveryPending: boolean;
+      /** #3253: the switch went ahead without the seat's requested process limit (the request stays stored). */
+      processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice } & RuntimeSwitchPlan);
 
 interface SwitchRow {
   id: string; node_id: string; canonical_session: string; staging_session: string;
@@ -491,6 +493,7 @@ export class SeatRuntimeSwitchService {
     }
     activityGrantId = launch.activityGrantId;
     const warnings = [...ctx.plan.warnings, ...(launch.notes ?? [])];
+    const processLimits = launch.processLimits;
 
     // 2. The handover, as the successor's first turn; the confirmation it asks for is the evidence it can carry on.
     const queue = db.prepare(`SELECT qitem_id, state, priority, source_session FROM queue_items WHERE destination_session = ?
@@ -573,6 +576,7 @@ export class SeatRuntimeSwitchService {
     if (held) warnings.push(held);
     return { ok: true, dryRun: false, changed: true, ...ctx.plan, switchId: id, generation: successorGeneration, previousGeneration: ctx.predecessorGeneration,
       claimsMoved: committed.claimsMoved, openRows: queue.length, confirmation, recoveryPending: !finished.ok,
+      ...(processLimits ? { processLimits } : {}),
       warnings: finished.ok ? warnings : [...warnings, `The switch committed, but ${finished.message} Finish it with rig seat set-runtime ${ctx.seatRef} --recover.`] };
   }
 

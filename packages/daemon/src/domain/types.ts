@@ -44,6 +44,8 @@ export interface Node {
   launchWrapper?: string[] | null;
   /** The seat's own process limits (spec `process_limits`, #3253): applied to its new launches; null/absent = none. */
   processLimits?: import("./process-limits.js").ProcessLimits | null;
+  /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
+  processLimitsError?: string;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */

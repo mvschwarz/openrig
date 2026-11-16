@@ -39,8 +39,9 @@ interface SeatStatusResponse {
   runtimeSwitch?: { id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; attention: string | null; outcome: string | null };
   compaction?: { stage: string; detail: string };
   current_occupant: string | null;
-  /** #3253: the seat's process limits, read back from its process (requested, applied, unsupported or unknown). */
-  processLimits?: { state: "requested" | "applied" | "unsupported" | "unknown"; requested: { tasksMax: number };
+  /** #3253: the seat's process limits, read back from its process (applied; requested, not applied; unsupported; unknown;
+   *  or invalid: the stored value can't be read). */
+  processLimits?: { state: "applied" | "not_applied" | "unsupported" | "unknown" | "invalid"; requested?: { tasksMax: number };
     reason?: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number; scope?: string };
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
@@ -246,7 +247,9 @@ function printHuman(status: SeatStatusResponse): void {
   if (status.processLimits) {
     const l = status.processLimits;
     const read = l.pidsMax !== undefined ? ` (pids.max ${l.pidsMax}, current ${l.pidsCurrent ?? "?"}, limit hit ${l.limitHits ?? 0} times)` : "";
-    console.log(`Process limits: tasks_max ${l.requested.tasksMax}: ${l.state}${read}${l.reason ? `; ${l.reason}` : ""}`);
+    const state = l.state === "not_applied" ? "requested, not applied" : l.state === "invalid" ? "stored value invalid" : l.state;
+    const asked = l.requested ? `tasks_max ${l.requested.tasksMax}` : "process_limits";
+    console.log(`Process limits: ${asked}: ${state}${read}${l.reason ? `; ${l.reason}` : ""}`);
   }
   if (status.runtime_home) {
     const h = status.runtime_home;

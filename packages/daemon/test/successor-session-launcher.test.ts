@@ -326,22 +326,24 @@ describe("SuccessorSessionLauncher", () => {
     expect(launchHarness).toHaveBeenCalledTimes(1);
   });
 
-  it("#3253: a seat whose process limits this host can't apply is refused before the retiree is signalled", async () => {
-    const seatProcessLimitsRefusal = vi.fn(async (nodeId: string) => (nodeId === "n" ? "not Linux" : null));
-    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell,
-      getPaneCommand, seatProcessLimitsRefusal } as unknown as TmuxAdapter;
+  it("#3253: a handover chooses its path before the retiree is signalled, and a limit never stops it after that", async () => {
+    const order: string[] = [];
+    const notice = { state: "not_applied", kind: "unsupported", reason: "not Linux", retryable: false, requested: { tasksMax: 256 } };
+    const seatProcessLimitsRecoveryPlan = vi.fn(async (nodeId: string) => { order.push("plan"); return nodeId === "n" ? notice : null; });
+    const signal = vi.fn(async (...a: unknown[]) => { order.push("signal"); return (signalPaneProcess as any)(...a); });
+    // the respawn goes ahead without the limit, with the warning (the adapter's recovery mode), never a refusal
+    const respawn = vi.fn(async (...a: unknown[]) => ({ ...(await (respawnPane as any)(...a)), processLimits: notice,
+      warnings: ["process_limits requested, not applied: …"] }));
+    const tmux = { createSession, listPanes, killSession, respawnPane: respawn, setRemainOnExit, signalPaneProcess: signal, isPaneDead,
+      getDefaultShell, getPaneCommand, seatProcessLimitsRecoveryPlan } as unknown as TmuxAdapter;
     const l = new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_HOME: "/home" }, newId: () => "01ABCDEFG", runtimeAdapters: { codex: fakeAdapter("codex") },
       readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
     });
     const res = await l.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
-    expect(res).toMatchObject({ ok: false, code: "process_limits_unsupported", replacementStarted: false });
-    expect(signalPaneProcess).not.toHaveBeenCalled();
-    expect(respawnPane).not.toHaveBeenCalled();
-    // A seat without limits on the same host goes ahead as before.
-    const other = await l.createSuccessor({ node: { id: "m", runtime: "codex", cwd: "/w" }, departingSessionName: "b@r" });
-    expect(other).not.toMatchObject({ code: "process_limits_unsupported" });
-    expect(signalPaneProcess).toHaveBeenCalled();
+    expect(res).toMatchObject({ ok: true, processLimits: notice });  // the structured warning reaches the caller
+    expect(order[0]).toBe("plan");
+    expect(respawn).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ processLimitsMode: "recovery" }));
   });
 
   it("retiree NEVER exits (survives TERM and KILL) → structured retiree_not_terminated, NO respawn (never clobber a live retiree)", async () => {

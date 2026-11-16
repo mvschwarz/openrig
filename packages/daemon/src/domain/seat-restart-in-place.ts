@@ -3,7 +3,7 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import Database from "better-sqlite3";
 import type BetterSqlite3 from "better-sqlite3";
-import { isStagedSendScriptPath, type TmuxAdapter } from "../adapters/tmux.js";
+import { isStagedSendScriptPath, noticeLine, notAppliedNotice, type SeatProcessLimitsNotice, type TmuxAdapter } from "../adapters/tmux.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -150,6 +150,9 @@ export interface InPlaceRestartReport {
   peers: PeerReport[];
   oldProcess: { pid: number; startedAt: string | null };
   newProcess?: { pid: number; startedAt: string | null; sameExecutable: boolean | null };
+  /** #3253: the restart went ahead without the seat's requested process limit (it stays stored; a fresh launch
+   *  applies it). Absent when the seat has no limit, or keeps it. */
+  processLimits?: SeatProcessLimitsNotice;
   paneHeld?: { option: "remain-on-exit"; value: "on"; previous: string | null; detail: string };
   /** After a failed direct-native stop or respawn: the pane and the original process, as observed. */
   observedAfterStop?: { pane: "present" | "gone" | "unknown"; process: "running" | "exited" | "unknown"; detail: string };
@@ -278,6 +281,12 @@ export class CodexInPlaceRestart {
     return result;
   }
 
+  /** #3253: the restart's structured warning, on the report (and every result built from it), and in the log. */
+  private noteProcessLimits(report: InPlaceRestartReport, notice: SeatProcessLimitsNotice): void {
+    report.processLimits = notice;
+    console.warn(`[restart in place] ${report.seat.nodeId}: ${noticeLine(notice)}`);
+  }
+
   /** The restart after its started event. Updates `progress` so a throw is reported at its stage. */
   private async restart(target: InPlaceRestartTarget, observed: Observed, progress: RestartProgress): Promise<InPlaceRestartReport> {
     const { report, codexPid, codexStartedAt, panePid, relaunch, priorRemainOnExit, cwd, oldExe } = observed;
@@ -288,13 +297,11 @@ export class CodexInPlaceRestart {
 
     let launch: HarnessLaunchResult;
     if (report.paneShape === "shell_backed") {
-      // #3253: the resume is typed into the running shell, so the seat keeps the process tree it has: refused before
-      // anything is stopped unless that shell is proven to be under the seat's process limits.
+      // #3253: the resume is typed into the running shell, so the seat keeps the process tree it has, and any limit
+      // already applied to it. Chosen before anything is stopped: a shell not under the limit goes ahead with a
+      // structured warning (a recovery never stops for a limit), and the request stays stored.
       const notApplied = await this.deps.tmux.seatProcessLimitsNotApplied?.(target.seat.nodeId, pane);
-      if (notApplied) {
-        return { ...report, outcome: "not_started", recoveryCommand,
-          message: `Nothing was stopped: this seat has process_limits, and its running shell is not proven to be under them (${notApplied}). Use rig seat launch --fresh.` };
-      }
+      if (notApplied) this.noteProcessLimits(report, notApplied);
       const stopped = await this.stopUnderShell(pane, panePid, codexPid, codexStartedAt, report.oldProcess);
       if (stopped === "running") {
         return { ...report, outcome: "not_started", recoveryCommand, message: "Codex did not exit after TERM and KILL; nothing was restarted and the original process is still running." };
@@ -313,11 +320,11 @@ export class CodexInPlaceRestart {
       return this.verifyReplacement(target, report, oldExe);
     }
 
-    // #3253: this respawn carries no seat environment, so a seat with process limits would come back without its scope.
-    // Refused before anything is stopped; a fresh launch re-applies the limit.
-    if (await this.deps.tmux.seatProcessLimitsSet?.(target.seat.nodeId)) {
-      return { ...report, outcome: "not_started", recoveryCommand,
-        message: "Nothing was stopped: this seat has process_limits, and a restart in place can't re-apply them to a bare pane. Use rig seat launch --fresh." };
+    // #3253: this respawn carries no seat environment, so a seat with a limit comes back without its scope. Chosen
+    // before anything is stopped: it goes ahead with a structured warning, and a fresh launch re-applies the limit.
+    if (this.deps.tmux.seatProcessLimitsSet?.(target.seat.nodeId)) {
+      this.noteProcessLimits(report, notAppliedNotice({ kind: "setup",
+        reason: "a restart in place respawns a bare pane without the seat's environment, so it can't keep or re-apply the limit; a fresh launch applies it" }));
     }
     // Hold the pane before any signal: without remain-on-exit, Codex exiting would destroy the pane and
     // there would be nothing to respawn into. The hold counts only once tmux reads it back as on.

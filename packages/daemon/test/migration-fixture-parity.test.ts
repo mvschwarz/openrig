@@ -108,13 +108,13 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
     }
   });
 
-  it("171_node_process_limits adds a nullable process_limits column and guards pre-171 databases", () => {
-    expect(ALL_MIGRATIONS.some((m) => m.name === "171_node_process_limits.sql")).toBe(true);
+  it("173_node_process_limits adds a nullable process_limits column and guards pre-173 databases", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "173_node_process_limits.sql")).toBe(true);
     const db = new Database(":memory:");
     try {
-      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "171_node_process_limits.sql"));
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "173_node_process_limits.sql"));
       const repo = new RigRepository(db);
-      const rig = repo.createRig("pre-171");
+      const rig = repo.createRig("pre-173");
       const legacyNode = repo.addNode(rig.id, "legacy", { runtime: "codex" });
       expect("processLimits" in legacyNode).toBe(false);
       expect(repo.getNodeProcessLimits(legacyNode.id)).toBeUndefined();

@@ -538,13 +538,29 @@ describe("RigRepository process_limits persistence (#3253)", () => {
     expect("processLimits" in repo.getRig(rig.id)!.nodes[0]!).toBe(false);
   });
 
-  it("refuses an out-of-range limit and fails closed on a malformed stored value", () => {
+  it("refuses an out-of-range limit, and a malformed stored value throws for that seat's own read", () => {
     const rig = repo.createRig("limits-rig");
     const node = repo.addNode(rig.id, "seat", { runtime: "codex" });
-    expect(() => repo.setNodeProcessLimits(node.id, { tasksMax: 10 })).toThrow(/tasks_max/);
-    for (const raw of ["not json", "{}", '{"tasks_max":10}', '{"memory_max":"1G"}']) {
+    expect(() => repo.setNodeProcessLimits(node.id, { tasksMax: 0 })).toThrow(/tasks_max/);
+    for (const raw of ["not json", "{}", '{"tasks_max":0}', '{"memory_max":"1G"}']) {
       db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run(raw, node.id);
       expect(() => repo.getNodeProcessLimits(node.id), raw).toThrow(/process_limits/);
     }
+  });
+
+  it("a malformed stored value doesn't break the rig read: that node says why, the others read, the value is kept", () => {
+    const rig = repo.createRig("limits-rig");
+    const bad = repo.addNode(rig.id, "bad", { runtime: "codex", processLimits: { tasksMax: 512 } });
+    const good = repo.addNode(rig.id, "good", { runtime: "codex", processLimits: { tasksMax: 256 } });
+    const plain = repo.addNode(rig.id, "plain", { runtime: "codex" });
+    db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("not json", bad.id);
+    const nodes = repo.getRig(rig.id)!.nodes;
+    const byId = (id: string) => nodes.find((n) => n.id === id)!;
+    expect(byId(bad.id).processLimitsError).toMatch(/process_limits: stored value is not valid JSON/);
+    expect("processLimits" in byId(bad.id)).toBe(false);
+    expect(byId(good.id).processLimits).toEqual({ tasksMax: 256 });
+    expect("processLimitsError" in byId(plain.id)).toBe(false);
+    expect((db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(bad.id) as { process_limits: string })
+      .process_limits).toBe("not json");
   });
 });

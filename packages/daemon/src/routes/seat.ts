@@ -112,14 +112,21 @@ seatRoutes.get("/status/:seatRef", async (c) => {
     const target = guard?.maybeTarget(c.req.param("seatRef")!);
     const nodeId = rigRepo.getRig(result.status.rig_id)?.nodes.find((node) => node.logicalId === result.status.logical_id)?.id;
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
-    // #3253: a seat with process limits says where they stand, read back from its process, never from the spec alone.
-    const limits = nodeId ? rigRepo.getNodeProcessLimits(nodeId) : undefined;
+    // #3253: a seat with process limits says where they stand, read back from its process, never from the spec alone. A
+    // stored value that can't be read is this seat's `invalid`, never a failed status read.
+    let limits: import("../adapters/tmux.js").SeatProcessLimits | undefined;
+    let limitsError: string | undefined;
+    try { limits = nodeId ? rigRepo.getNodeProcessLimits(nodeId) : undefined; }
+    catch (error) { limitsError = (error as Error).message; }
     const tmux = c.get("tmuxAdapter" as never) as TmuxAdapter | undefined;
-    const processLimits = limits
-      ? result.status.current_occupant && tmux
-        ? await tmux.readSeatProcessLimits(result.status.current_occupant, limits)
-        : { state: "requested" as const, requested: { tasksMax: limits.tasksMax }, reason: "the seat is not running; the limit applies at its next launch" }
-      : null;
+    const processLimits: import("../adapters/tmux.js").SeatProcessLimitsReport | null = limitsError
+      ? { state: "invalid", reason: `${limitsError}; the stored value is kept` }
+      : limits
+        ? result.status.current_occupant
+          ? tmux ? await tmux.readSeatProcessLimits(result.status.current_occupant, limits)
+            : { state: "unknown", requested: { tasksMax: limits.tasksMax }, reason: "this daemon has no terminal adapter to read the seat's process" }
+          : { state: "not_applied", requested: { tasksMax: limits.tasksMax }, reason: "the seat is not running; the limit applies at its next fresh launch" }
+        : null;
     return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });

@@ -665,6 +665,20 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(alive.has(adoptedName)).toBe(true);
   });
 
+  it("#3253: an explicit fresh --stop whose process limit can't be applied refuses before anything is stopped", async () => {
+    const live = seedSeat();
+    const plan = vi.fn(async () => ({ state: "not_applied" as const, kind: "unverified" as const, retryable: true,
+      reason: "asking the systemd user manager timed out", requested: { tasksMax: 256 } }));
+    (tmux as unknown as { seatProcessLimitsRecoveryPlan: typeof plan }).seatProcessLimitsRecoveryPlan = plan;
+    const result = await service.launchFresh({ seatRef: live.sessionName, fresh: true, stop: true, reason: "x" });
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified",
+      message: expect.stringMatching(/^Nothing was stopped: .*timed out.*retry/) });
+    expect(plan).toHaveBeenCalledWith(live.node.id);
+    expect(killed).toEqual([]);
+    expect(alive.has(live.sessionName)).toBe(true);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
   it("checks historical occupants before stopping the current managed seat", async () => {
     const seat = seedSeat({ clean: true });
     const historical = sessionRegistry.registerSession(seat.node.id, "old-impl@fresh-rig");

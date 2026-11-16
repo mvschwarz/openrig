@@ -241,6 +241,21 @@ describe("RigSpecExporter", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("#3253: exports a seat's process limits, and refuses (naming that seat) when its stored value can't be read", () => {
+    const rig = rigRepo.createRig("legacy-limits-export");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "codex", cwd: "/repo", processLimits: { tasksMax: 512 } });
+    rigRepo.addNode(rig.id, "other", { runtime: "codex", cwd: "/repo" });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "worker")?.processLimits).toEqual({ tasksMax: 512 });
+    expect(exported.nodes.find((n) => n.id === "other")?.processLimits).toBeUndefined();
+    db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", node.id);
+    // an export that silently left it out would drop the request on re-import
+    expect(() => exporter.exportRig(rig.id)).toThrow(new RegExp(`Seat ${node.id} process_limits.*fix or clear it before exporting`));
+    const unrelated = rigRepo.createRig("legacy-limits-unrelated");
+    rigRepo.addNode(unrelated.id, "worker", { runtime: "codex", cwd: "/repo" });
+    expect(() => exporter.exportRig(unrelated.id)).not.toThrow();
+  });
+
   it("exports launch_wrapper on legacy flat pi, codex and claude-code nodes, omits cleared/absent, and round-trips through codec/schema/reimport", () => {
     const rig = rigRepo.createRig("legacy-wrapper-export");
     const piArgv = ["mtn", "sandbox", "exec", "", "--pi-seat", "alpha", "--"];

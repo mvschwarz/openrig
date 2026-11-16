@@ -197,10 +197,15 @@ describe("seat typing guard commands", () => {
     const deps = makeDeps({ status: 200, data: { ...STATUS, processLimits: applied } }, []);
     const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
     expect(result.logs).toContain("Process limits: tasks_max 512: applied (pids.max 512, current 37, limit hit 2 times)");
-    const requested = { state: "requested", requested: { tasksMax: 512 }, reason: "the seat is not running; the limit applies at its next launch" };
-    const deps2 = makeDeps({ status: 200, data: { ...STATUS, processLimits: requested } }, []);
+    const notApplied = { state: "not_applied", requested: { tasksMax: 512 }, reason: "the seat is not running; the limit applies at its next fresh launch" };
+    const deps2 = makeDeps({ status: 200, data: { ...STATUS, processLimits: notApplied } }, []);
     const result2 = await captureLogs(() => makeCommand(deps2).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
-    expect(result2.logs).toContain("Process limits: tasks_max 512: requested; the seat is not running; the limit applies at its next launch");
+    expect(result2.logs).toContain("Process limits: tasks_max 512: requested, not applied; the seat is not running; the limit applies at its next fresh launch");
+    // A stored value that can't be read: this seat's line, with no tasks_max to show.
+    const invalid = { state: "invalid", reason: "Seat n process_limits: stored value is not valid JSON; the stored value is kept" };
+    const deps4 = makeDeps({ status: 200, data: { ...STATUS, processLimits: invalid } }, []);
+    const result4 = await captureLogs(() => makeCommand(deps4).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result4.logs).toContain("Process limits: process_limits: stored value invalid; Seat n process_limits: stored value is not valid JSON; the stored value is kept");
     // Without limits, no line.
     const deps3 = makeDeps({ status: 200, data: STATUS }, []);
     const result3 = await captureLogs(() => makeCommand(deps3).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));

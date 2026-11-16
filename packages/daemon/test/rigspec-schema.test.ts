@@ -989,6 +989,14 @@ describe("member process_limits (#3253)", () => {
     expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ tasksMax: 256 });
   });
 
+  it("takes any positive count, with no floor for every runtime (systemd's own minimum is 1)", () => {
+    for (const tasksMax of [1, 2, 63]) {
+      const spec = withMember({ process_limits: { tasks_max: tasksMax } });
+      expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+      expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ tasksMax });
+    }
+  });
+
   it("keeps an absent key undefined and normalizes {} to an explicit clear", () => {
     expect(RigSpecSchema.normalize(withMember({})).pods[0]!.members[0]!.processLimits).toBeUndefined();
     const cleared = withMember({ process_limits: {} });
@@ -999,10 +1007,10 @@ describe("member process_limits (#3253)", () => {
   it.each([
     [{ memory_max: "1G" }, "process_limits.memory_max: not supported"],
     [{ tasks_max: 256, cpu_quota: "50%" }, "process_limits.cpu_quota: not supported"],
-    [{ tasks_max: 63 }, "process_limits.tasks_max: must be an integer from 64 to 4194304"],
-    [{ tasks_max: 4194305 }, "process_limits.tasks_max: must be an integer from 64 to 4194304"],
-    [{ tasks_max: 1.5 }, "process_limits.tasks_max: must be an integer from 64 to 4194304"],
-    [{ tasks_max: "512" }, "process_limits.tasks_max: must be an integer from 64 to 4194304"],
+    [{ tasks_max: 0 }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
+    [{ tasks_max: 4194305 }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
+    [{ tasks_max: 1.5 }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
+    [{ tasks_max: "512" }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
     [512, "process_limits: must be a mapping"],
     [[512], "process_limits: must be a mapping"],
     [null, "process_limits: must be a mapping"],

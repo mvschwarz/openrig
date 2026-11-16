@@ -2,7 +2,7 @@ import { ActivityGrantStore } from "./activity-grants.js";
 import { ulid } from "ulid";
 import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "./claude-core-plugin-env.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { noticeLine, type TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from "./runtime-adapter.js";
@@ -112,6 +112,8 @@ export type SuccessorLaunchResult =
        * shape stays byte-compatible with pre-02 successors.
        */
       warnings?: string[];
+      /** #3253: the handover went ahead without the seat's requested process limit (the request stays stored). */
+      processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
     }
   | {
       ok: false;
@@ -275,12 +277,11 @@ export class SuccessorSessionLauncher {
       }
     }
 
-    // #3253: a seat whose process limits this host can't apply is refused before the retiree is ended.
-    const limitsRefusal = await this.tmuxAdapter.seatProcessLimitsRefusal?.(input.node.id);
-    if (limitsRefusal) {
-      return { ok: false, code: "process_limits_unsupported", step: "create_successor", replacementStarted: false,
-        message: `process_limits is set for this seat, but it can't get a systemd user scope here (${limitsRefusal}); nothing was stopped.` };
-    }
+    // #3253: the recovery path is chosen before the retiree is ended: with the seat's limit, or without it and a
+    // structured warning. The respawn below runs in recovery mode, so a limit never stops the handover after the
+    // retiree has ended (a scope failure late in the path ends in the same warning). The request stays stored.
+    const limitsPlan = await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(input.node.id);
+    if (limitsPlan) console.warn(`[handover] ${input.node.id}: ${noticeLine(limitsPlan)}`);
 
     // 2. Terminate the retiree IN PLACE, then respawn the now-dead pane WITHOUT -k so native scrollback
     //    survives (respawn-pane -k CLEARS the pane history — verified on tmux 3.6a; that would defeat the
@@ -298,7 +299,7 @@ export class SuccessorSessionLauncher {
     // <old-token>`), which is exactly how the 2026-08-22 wave's "fresh" successors booted 14-day-old
     // contexts. An explicit shell also resets the pane's respawn default, self-healing the pane.
     const blankShell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(pane.id, blankShell, { cwd, env });
+    const respawned = await this.tmuxAdapter.respawnPane(pane.id, blankShell, { cwd, env, processLimitsMode: "recovery" });
     if (!respawned.ok) {
       return {
         ok: false,
@@ -368,6 +369,7 @@ export class SuccessorSessionLauncher {
       ...(started.activityGrantId ? { activityGrantId: started.activityGrantId } : {}),
       retireeExit: terminated.path,
       ...(warnings.length ? { warnings } : {}),
+      ...(respawned.ok && respawned.processLimits ? { processLimits: respawned.processLimits } : {}),
     };
   }
 
@@ -385,7 +387,9 @@ export class SuccessorSessionLauncher {
     occupantGeneration: string;
     onPaneCreated: (pane: string) => void;
     staged: Omit<StagedLaunch, "canonicalSession">;
-  }): Promise<{ ok: true; activityGrantId?: string; tmuxPane: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] }
+  }): Promise<{ ok: true; activityGrantId?: string; tmuxPane: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[];
+      /** #3253: the staged successor started without the seat's requested process limit (the request stays stored). */
+      processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice }
     | { ok: false; code: string; message: string }> {
     const env = compactEnv({
       OPENRIG_NODE_ID: input.node.id,
@@ -399,7 +403,8 @@ export class SuccessorSessionLauncher {
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration,
     });
     try {
-      const created = await this.tmuxAdapter.createSession(input.stagingSession, input.node.cwd ?? undefined, env);
+      const created = await this.tmuxAdapter.createSession(input.stagingSession, input.node.cwd ?? undefined, env,
+        { processLimitsMode: "recovery" });
       if (!created.ok) return { ok: false, code: created.code ?? "successor_create_failed", message: created.message ?? "The staging session couldn't be created." };
       const panes = await this.tmuxAdapter.listPanes(input.stagingSession);
       if (panes.length !== 1) return { ok: false, code: "pane_unresolved", message: "The staging session should have exactly one new pane." };
@@ -413,7 +418,11 @@ export class SuccessorSessionLauncher {
       }
       const started = await this.startAgent(input.node, input.stagingSession, pane, input.node.cwd ?? undefined,
         undefined, input.occupantGeneration, { ...input.staged, canonicalSession: input.canonicalSession });
-      return started.ok ? { ...started, tmuxPane: pane } : started;
+      if (!started.ok) return started;
+      // #3253: the staging launch's own warning (a limit it went ahead without) reaches the switch's result.
+      const notes = [...(started.notes ?? []), ...(created.ok ? created.warnings ?? [] : [])];
+      return { ...started, tmuxPane: pane, ...(notes.length ? { notes } : {}),
+        ...(created.ok && created.processLimits ? { processLimits: created.processLimits } : {}) };
     } catch (err) {
       return { ok: false, code: "successor_launch_failed", message: (err as Error).message };
     }

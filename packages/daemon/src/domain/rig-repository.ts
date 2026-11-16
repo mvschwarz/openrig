@@ -1203,7 +1203,12 @@ export class RigRepository {
 
   private rowToNode(row: NodeRow): Node {
     const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.id} launch_wrapper`);
-    const processLimits = parseStoredProcessLimits(row.process_limits, `Seat ${row.id} process_limits`);
+    // #3253: a malformed stored limit stays local to its seat: the rig read goes on, the node says why, and the stored
+    // value is kept (that seat's launch and status read it as invalid).
+    let processLimits: ProcessLimits | undefined;
+    let processLimitsError: string | undefined;
+    try { processLimits = parseStoredProcessLimits(row.process_limits, `Seat ${row.id} process_limits`); }
+    catch (error) { processLimitsError = (error as Error).message; }
     if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
       throw new Error(`Seat ${row.id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
     }
@@ -1219,6 +1224,7 @@ export class RigRepository {
       claudeMcp: row.claude_mcp ?? null,
       ...(launchWrapper ? { launchWrapper } : {}),
       ...(processLimits ? { processLimits } : {}),
+      ...(processLimitsError ? { processLimitsError } : {}),
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),

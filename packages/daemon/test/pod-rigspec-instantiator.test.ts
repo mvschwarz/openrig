@@ -2184,6 +2184,46 @@ state: 2-named
         db.close();
       }
     });
+
+    it("a stored value that can't be read is kept as stored by the first materialized launch and a persisted fresh launch", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const BAD = "{not json";
+        const stored = (nodeId: string) =>
+          (db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as { process_limits: string | null }).process_limits;
+        const corrupt = (nodeId: string) => db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run(BAD, nodeId);
+        const spec = (name: string) => RigSpecCodec.serialize(makeRigSpec({ name, pods: [{ id: "dev", label: "Dev",
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: ".",
+            processLimits: { tasksMax: 512 } }], edges: [] }] }));
+
+        const mat = await inst.materialize(spec("limits-first"), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const matNodeId = rigRepo.getRig(mat.result.rigId)!.nodes[0]!.id;
+        corrupt(matNodeId);
+        expect(rigRepo.getRig(mat.result.rigId)!.nodes[0]!.processLimitsError).toMatch(/process_limits/);
+        await inst.launchFirstMaterializedNode(mat.result.rigId, matNodeId);
+        expect(stored(matNodeId)).toBe(BAD);
+
+        const made = await inst.instantiate(spec("limits-persisted"), RIG_ROOT);
+        expect(made.ok, JSON.stringify(made)).toBe(true);
+        if (!made.ok) return;
+        const nodeId = rigRepo.getRig(made.result.rigId)!.nodes[0]!.id;
+        corrupt(nodeId);
+        for (const s of sessionRegistry.getSessionsForRig(made.result.rigId)) {
+          sessionRegistry.markDetached(s.id);
+          sessionRegistry.clearBinding(s.nodeId);
+        }
+        await inst.launchPersistedFresh(made.result.rigId, nodeId);
+        expect(stored(nodeId)).toBe(BAD);
+      } finally {
+        db.close();
+      }
+    });
   });
 
   describe("launch_wrapper lifecycle and retention", () => {

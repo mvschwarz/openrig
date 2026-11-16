@@ -8,7 +8,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import type { TmuxAdapter, SessionProbe, StopPhase } from "../adapters/tmux.js";
+import { problemText, type TmuxAdapter, type SessionProbe, type StopPhase } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
@@ -188,6 +188,8 @@ export interface SeatRefusal {
     | "selection_changed"
     | "stop_uncertain"
     | "missing_permissions_to"
+    /** #3253: an explicit fresh launch whose process limit can't be applied, refused before anything is stopped. */
+    | "process_limits_unsupported" | "process_limits_setup" | "process_limits_unverified" | "process_limits_invalid"
     | "runtime_home_unsupported"
     | "permissions_to_not_a_person"
     | "permissions_to_unavailable";
@@ -1677,6 +1679,14 @@ export class SeatLifecycleService {
     if (canonicalProbe.state === "present") {
       const currentSession = await this.validateFreshCollision(resolved, canonicalSessionName, input.stop === true);
       if ("code" in currentSession) return currentSession;
+      // #3253: an explicit fresh launch that can't get the seat's limit says so before the running seat is stopped,
+      // never after (a stop followed by a refused launch would leave the seat with no process).
+      const limits = await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(resolved.nodeId);
+      if (limits) {
+        return { ok: false, code: `process_limits_${limits.kind}`,
+          message: `Nothing was stopped: process_limits is set for this seat, but ${problemText(limits)}.` +
+            (limits.retryable ? " This may be temporary: retry." : "") };
+      }
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,

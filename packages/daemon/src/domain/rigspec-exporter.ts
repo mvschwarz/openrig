@@ -151,6 +151,7 @@ export class RigSpecExporter {
       const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.db, node.id) : undefined;
       if (envelope !== undefined) specNode.codexPermissions = envelope;
       if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) specNode.launchWrapper = node.launchWrapper;
+      if (node.processLimitsError) throw new Error(`${node.processLimitsError}: fix or clear it before exporting (an export would drop the request)`);
       if (node.processLimits) specNode.processLimits = { tasksMax: node.processLimits.tasksMax };
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
@@ -236,6 +237,7 @@ export class RigSpecExporter {
         if (node.advisor) member.advisor = node.advisor;
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
         if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
+        if (node.processLimitsError) throw new Error(`${node.processLimitsError}: fix or clear it before exporting (an export would drop the request)`);
         if (node.processLimits) member.processLimits = { tasksMax: node.processLimits.tasksMax };
         // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
         // an export carries the ones its launch passes.

@@ -18,9 +18,11 @@ export interface SpecProcessLimits {
   tasksMax?: number;
 }
 
-/** The accepted `tasks_max` range: below 64 a seat's own harness can't start its helpers; the top is the kernel's
- *  pid_max ceiling (2^22). */
-export const PROCESS_LIMITS_TASKS_MAX_MIN = 64;
+/** The accepted `tasks_max` range, each end from what enforces it: systemd's TasksMax= takes a positive count (0 is
+ *  refused as an assignment), so the floor is 1, and no runtime-wide floor is imposed (how many tasks a harness needs
+ *  is the operator's choice, and a fork past the limit fails with EAGAIN, visible as a limit hit); the top is the
+ *  kernel's PID_MAX_LIMIT (2^22), the most tasks a Linux host can hold. */
+export const PROCESS_LIMITS_TASKS_MAX_MIN = 1;
 export const PROCESS_LIMITS_TASKS_MAX_MAX = 4_194_304;
 
 const KNOWN_KEYS = new Set(["tasks_max"]);
@@ -58,8 +60,9 @@ export function serializeProcessLimits(limits: ProcessLimits | null | undefined)
   return limits ? JSON.stringify({ tasks_max: limits.tasksMax }) : null;
 }
 
-/** Reads `nodes.process_limits`. NULL is none; anything malformed throws (fail closed: a limit the operator set is
- *  never silently dropped). */
+/** Reads `nodes.process_limits`. NULL is none; anything malformed throws (a limit the operator set is never silently
+ *  dropped). The callers keep that error to the one seat: the rig read marks the node (`processLimitsError`), and that
+ *  seat's launch and status say it, while the stored value stays as it is. */
 export function parseStoredProcessLimits(raw: unknown, label = "process_limits"): ProcessLimits | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "string") throw new Error(`${label}: stored value must be a JSON string or null`);
