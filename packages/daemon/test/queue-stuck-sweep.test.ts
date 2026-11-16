@@ -267,6 +267,23 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(repo.getById(prior.qitemId)).toMatchObject({ summary: otherSummary, body: otherBody });
   });
 
+  it("leaves a finding retitled with --summary alone when its kind changes", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep();
+    const prior = (await findingsFor(row.qitemId))[0]!;
+    // `rig queue update <finding> --summary "…"`: the title is its author's now, not the sweep's.
+    await repo.update({ qitemId: prior.qitemId, actorSession: "worker@r", summary: "Waiting on the build host; worker@r has it" });
+    const retitled = repo.getById(prior.qitemId)!;
+    expect(retitled.summary).toBe("Waiting on the build host; worker@r has it");
+    makeOverdue(row.qitemId);
+    await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", transitionNote: "resumed work" });
+    const result = await runSweep();
+    expect(result.result.findings).toContainEqual(expect.objectContaining({ kind: "overdue-claim", findingQitemId: prior.qitemId, action: "refreshed" }));
+    expect(repo.getById(prior.qitemId)).toMatchObject({ summary: retitled.summary, body: retitled.body });
+  });
+
   it("#2278 keeps a local human decision on the attention surface without a false failed-wake finding", async () => {
     const rigs = new RigRepository(db);
     const rig = rigs.createRig("kernel");

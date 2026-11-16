@@ -138,6 +138,7 @@ describe("the stuck sweep on a possibly-posted ask", () => {
       expect(finding?.body).toContain("may have posted");
       expect(finding?.body).toContain("checks Slack for its marker before any resend");
       expect(finding?.body).not.toContain("transport-failed to");
+      expect(finding?.summary).toMatch(new RegExp(`^Checked on ${item.qitemId}: notification to its person is unconfirmed \\(\\d+ minutes?\\)$`));
     } finally { db.close(); }
   });
 });
