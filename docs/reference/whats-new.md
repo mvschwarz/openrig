@@ -163,6 +163,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   option column plus 4-column gap can render differently and read unknown, so
   an ordinary send isn't refused there.
 - **`rig scope` and `rig proof` can't be limited to a rig's own project.**
+- **Reading queue state with `rig queue list`:** the median time was about 22%
+  (about 90 ms) slower than 0.7.16 in a matched test on a pre-release build. The
+  cause wasn't found, and the final build wasn't re-measured.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.14. A change to key it by the file's own name isn't
@@ -172,6 +175,8 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   into `hooks.json`. ([#3078](https://github.com/mvschwarz/openrig/issues/3078))
 - **"Person approved" entries** an agent recorded for its own approvals don't
   establish the person's approval; check the conversation.
+- **Slack buttons:** in 0.7.16's tests, an answer given by button wasn't seen to
+  reach OpenRig, and the cause isn't known. Type the reply instead.
 - **Managed compaction with Claude Code 2.1.322:** typed text in the input box
   can carry `/compact` along as text while `rig compact --state` reports it
   sent, and the draft-aware guard can leave the preparation prompt unsent.

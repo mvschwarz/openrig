@@ -129,6 +129,9 @@ including contributions from people using OpenRig.
 - **A Codex seat resumed on Codex 0.167.1 or 0.167.2** can read `unknown` when
   its resume header or update notice names that version.
 - **`rig scope` and `rig proof` can't be limited to a rig's own project.** ([#3026](https://github.com/mvschwarz/openrig/issues/3026))
+- **Reading queue state with `rig queue list`:** the median time was about 22%
+  (about 90 ms) slower than 0.7.16 in a matched test on a pre-release build. The
+  cause wasn't found, and the final build wasn't re-measured.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.14. A change to key it by the file's own name isn't
@@ -139,6 +142,8 @@ including contributions from people using OpenRig.
 - **Approvals your agent recorded:** in one Claude setup, an agent recorded
   approvals it made itself as "Person approved"; check the conversation to see
   who decided.
+- **Slack buttons:** in 0.7.16's tests, an answer given by button wasn't seen to
+  reach OpenRig, and the cause isn't known. Type the reply instead.
 - **From 0.7.16:** [its known limits](https://github.com/mvschwarz/openrig/releases/tag/v0.7.16)
   still apply unless this release changes them ([#3231](https://github.com/mvschwarz/openrig/pull/3231), [#3260](https://github.com/mvschwarz/openrig/pull/3260)).
 
