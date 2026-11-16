@@ -56,7 +56,9 @@ export type HookBridgeAdmission = AdmissionInput;
 
 type Turn = "idle" | "user" | "woken" | "unknown";
 interface Arm { armId: string; generation: string | null; hookEvent: string; armedAt: number; lastPollAt: number }
-interface SeatState { arm: Arm | null; turn: Turn; turnSince: number; wakes: number; expiredAt: number | null }
+/** `wakePrompt`: a wake was handed over and Claude hasn't yet reported its input's prompt (UserPromptSubmit), which
+ *  belongs to the turn the wake started. */
+interface SeatState { arm: Arm | null; turn: Turn; turnSince: number; wakes: number; expiredAt: number | null; wakePrompt: boolean }
 
 /** What the bridge recorded for a queued message, in its outbox row's guard_delivery. */
 interface BridgeReceipt {
@@ -394,6 +396,7 @@ export class HookBridge {
     seat.turn = boundary ? "idle" : "unknown";
     seat.turnSince = now;
     seat.expiredAt = null;
+    seat.wakePrompt = false;
     this.db.prepare("UPDATE seat_hook_bridge SET armed_generation = ?, armed_at = ? WHERE node_id = ?")
       .run(input.generation, new Date(now).toISOString(), input.nodeId);
     this.deps.emit?.({ type: "transport.hook_bridge_armed", nodeId: input.nodeId, sessionName: input.sessionName, armId, hookEvent: input.hookEvent, generation: input.generation });
@@ -401,9 +404,12 @@ export class HookBridge {
   }
 
   /** A person submitted a prompt: a turn is running, so the bridge holds messages until the turn's Stop re-arms (or the
-   *  turn bound passes). */
+   *  turn bound passes). Claude Code also reports the input a wake delivered as a prompt (2.1.322): that first one after a
+   *  hand-over is the woken turn itself, which stays woken, so messages still wait for its end (#3270 round 9). */
   turnStarted(nodeId: string): void {
     const seat = this.seat(nodeId);
+    if (seat.wakePrompt && seat.turn === "woken") { seat.wakePrompt = false; return; }
+    seat.wakePrompt = false;
     seat.turn = "user";
     seat.turnSince = this.now();
   }
@@ -497,6 +503,7 @@ export class HookBridge {
     if (seat.arm?.armId === armId) seat.arm = null;
     seat.turn = "woken";
     seat.turnSince = this.now();
+    seat.wakePrompt = true;
     seat.wakes += 1;
     const outboxIds = rows.map((r) => r.outbox_id);
     if (outboxIds.length) this.deps.emit?.({ type: "transport.hook_bridge_wake", nodeId, sessionName, armId, outboxIds, hookEvent });
@@ -574,7 +581,7 @@ export class HookBridge {
 
   private seat(nodeId: string): SeatState {
     let seat = this.seats.get(nodeId);
-    if (!seat) { seat = { arm: null, turn: "unknown", turnSince: this.now(), wakes: 0, expiredAt: null }; this.seats.set(nodeId, seat); }
+    if (!seat) { seat = { arm: null, turn: "unknown", turnSince: this.now(), wakes: 0, expiredAt: null, wakePrompt: false }; this.seats.set(nodeId, seat); }
     return seat;
   }
 }

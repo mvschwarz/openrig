@@ -155,6 +155,31 @@ describe("the hook bridge (slice 13)", () => {
     expect(bridge.dueForFallback()).toEqual([{ nodeId, outboxIds: ["m1"], reason: expect.stringMatching(/past the 15-minute bound/) }]);
   });
 
+  // #3270 round 9: Claude Code fires UserPromptSubmit for the input its own wake delivered (2.1.322, R3270-prompt).
+  it("keeps the turn a wake started as that turn when Claude reports the woken input's prompt, so messages wait for its end", () => {
+    optIn();
+    const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    queue("the wake", "m1");
+    const polled = bridge.poll(nodeId, armId) as { batchId: string };
+    bridge.ack(nodeId, session, occupant, armId, polled.batchId);
+    bridge.turnStarted(nodeId); // the woken input's own UserPromptSubmit
+    expect(bridge.status(nodeId, occupant)).toMatchObject({ turn: { state: "woken" } });
+    expect(bridge.live(nodeId)).toBe(true);
+    queue("during the woken turn", "m2");
+    now += HOOK_BRIDGE_LIVE_BOUND_MS * 2;
+    expect(bridge.dueForFallback()).toEqual([]); // held for the turn's end, not typed
+    // Only that one prompt is the wake's: another before a boundary is a person's turn, as before.
+    bridge.turnStarted(nodeId);
+    expect(bridge.status(nodeId, occupant)).toMatchObject({ turn: { state: "user" } });
+    // The turn's Stop re-arms, and the held message is handed over.
+    const next = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "Stop" });
+    const delivered = bridge.poll(nodeId, next.armId);
+    expect(delivered.action === "deliver" && delivered.messages.map((m) => m.outboxId)).toEqual(["m2"]);
+    // A boundary ends the allowance: the next prompt after an arm is a person's turn.
+    bridge.turnStarted(nodeId);
+    expect(bridge.status(nodeId, occupant)).toMatchObject({ turn: { state: "user" } });
+  });
+
   it("treats a daemon restart's re-arm as an unknown turn, within the turn bound, however often it polls", () => {
     optIn();
     const { armId } = bridge.arm({ nodeId, sessionName: session, generation: occupant, hookEvent: "rearm" });
