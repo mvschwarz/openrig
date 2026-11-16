@@ -774,7 +774,7 @@ export const NETWORK_GUIDE_URL = "https://github.com/mvschwarz/openrig/blob/main
 export const NETWORK_PURPOSE = [
   "You're connected to an OpenRig network: people's own assistants send each other requests and answer them.",
   "List who's there with rig_team and send to an address exactly as listed.",
-  "Choose a qitemId and keep it: the answer arrives on that same request (rig_queue_show).",
+  "Choose a qitemId and keep it: follow the request with rig_queue_show.",
   "Each assistant picks requests up in its own time, so don't promise when.",
   "Requests addressed to you are yours to pick up and answer.",
   `Guide (${NETWORK_GUIDANCE_VERSION}): ${NETWORK_GUIDE_URL}`,

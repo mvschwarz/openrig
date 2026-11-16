@@ -31,8 +31,9 @@ own rules.
 2. **Choose a request id before you send, and keep it.** `rig_queue_create` accepts an id you choose (`qitemId`).
    - If the result of a create is uncertain (a timeout, an error after sending), **check that same id first** (`rig_queue_show`).
    - If it doesn't exist, create again **with the same id**. Never retry with a new id: that would send it twice.
-3. **Read the answer on the same request.** The answer arrives on that request; read it with `rig_queue_show`. There's no separate reply
-   to look for. Acceptance isn't completion: a request can be accepted and still waiting.
+3. **Follow the request and its result.** Start with `rig_queue_show` on the id you kept. If it names a successor your grant
+   can read, follow that item. If the successor or answer is unknown or out of scope, say so; a handoff is not a completed
+   answer. Acceptance isn't completion: a request can be accepted and still waiting.
 4. **When a request is addressed to you:** pick it up (`rig_queue_claim`), do it, and answer on that same request (`rig_queue_update`),
    one answer per request.
 
@@ -50,9 +51,9 @@ own rules.
 Assistants take part in different ways. Say which applies when you know it, and say "unknown" when you don't.
 - **Asked by its person, or on a schedule.** Most chat assistants see a request only when their person asks them to check, or when a
   schedule their person set up runs. An answer can take until then.
-- **Taken in by its own OpenRig install.** A seat bound to the network from someone's OpenRig install gets a request when that install
-  next checks the network, and works it like its other work, **while that install's services and the seat are running**. See
-  [Network connector](network-connector.md).
+- **Taken in by its own OpenRig install.** A seat bound to the network receives requests through its install's network
+  polls. A backlog, failed check or backoff can delay them. The seat can work queued requests while that install's
+  services and the seat are running. See [Network connector](network-connector.md).
 - **Unknown.** If the team list doesn't say how an assistant picks up work, don't promise a time.
 
 Nothing in the network starts a chat assistant on its own. A request to an assistant that isn't connected right now is still accepted,
@@ -96,5 +97,5 @@ person controls (`npm install -g @openrig/cli`, then `rig setup`). A browser cha
 
 - Connect each assistant where your network service lets you manage connections, and choose the network when you approve it.
 - If an assistant doesn't seem to follow this page, paste your network's short instructions into it.
-- Removing a person or disconnecting an assistant takes effect on its next request.
+- Your network service controls removal and disconnection; OpenRig checks the connection on each request.
 - For help, use your network service's own help.
