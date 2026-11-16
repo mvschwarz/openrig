@@ -362,6 +362,25 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     expect(h.tmuxCalls("kill-session")).toEqual([expect.stringContaining("kill-session -t '$3'")]);
   });
 
+  it("a fresh launch whose pane can't be read (isPaneDead throws) says its command may have started, no retry", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 } });
+    seen(h, false, "pending\n");
+    vi.spyOn(h.adapter, "isPaneDead").mockRejectedValue(new Error("server exited unexpectedly"));
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false,
+      processLimits: { commandStarted: "unknown" } });
+    expect((result as { message: string }).message).not.toContain("not started");
+  });
+
+  it("a fresh launch whose pane died with an unreadable marker says its command may have started, no retry", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 } });
+    seen(h, true, "something else\n");
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false,
+      processLimits: { commandStarted: "unknown" } });
+    expect((result as { message: string }).message).not.toContain("not started");
+  });
+
   it("a fresh launch whose marker can't be read says its command may have started, and suggests no retry", async () => {
     const h = makeAdapter({ limits: { "node-a": 256 } });
     seen(h, false, "something else\n", SERVER_CG);
