@@ -391,7 +391,7 @@ leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 bring it back with `rig up kernel --existing`.
 
 To deliberately start individual seats with fresh conversations during a multi-rig
-restore, name each logical ID and rig: `rig start --last --fresh dev.impl@my-rig`.
+restore, name each logical ID and rig: `rig start --last --fresh '<logical-id>@<rig-name>'`.
 Every named seat must belong to one selected rig with a unique name; an unknown,
 ambiguous or externally attached seat stops the command before any rig restore.
 Other seats use their normal restore behavior.
