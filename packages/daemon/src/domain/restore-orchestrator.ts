@@ -901,7 +901,8 @@ export class RestoreOrchestrator {
         preRestoreSnapshotId: null as unknown as string,
         rigResult: rollupRestoreRigResult(launched),
         nodes: launched,
-        warnings: subsetWarnings,
+        // A copy: the notice below adds its warnings to the launch's result, not to the event already emitted.
+        warnings: [...subsetWarnings],
         snapshotSelection,
       };
       const completed = this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
