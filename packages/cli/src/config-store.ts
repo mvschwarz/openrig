@@ -83,6 +83,8 @@ export interface RiggedConfig {
   ui: {
     /** Serve the web UI and its terminal WebSocket. Off by default; the daemon reads it at start. */
     enabled: boolean;
+    /** TUI topology: read a remote rig's seats through this daemon instead of the refusal hint. */
+    topologyRemoteSeats: boolean;
     timezone: string;
     terminal: { maxLiveTerminals: number };
     preview: {
@@ -309,6 +311,7 @@ const DEFAULTS = {
   progress: { scanRoots: "" },
   ui: {
     enabled: false,
+    topologyRemoteSeats: false,
     timezone: "America/Los_Angeles",
     // The daemon store leaves its own resolver value unset for this key and the web
     // client falls back to 2 (settings-browser names that fallback), so the CLI reports
@@ -510,6 +513,7 @@ export const VALID_KEYS = [
   "ui.preview.default_lines",
   "ui.timezone",
   "ui.enabled",
+  "ui.topology_remote_seats",
   // The legacy web client's cap on simultaneously-live terminals. The daemon store
   // resolves it (SETTINGS_VALID_KEYS), so `rig config` must accept it too.
   "ui.terminal.max_live_terminals",
@@ -660,6 +664,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS" },
   "ui.timezone": { primary: "OPENRIG_UI_TIMEZONE" },
   "ui.enabled": { primary: "OPENRIG_UI_ENABLED" },
+  "ui.topology_remote_seats": { primary: "OPENRIG_UI_TOPOLOGY_REMOTE_SEATS" },
   "ui.terminal.max_live_terminals": { primary: "OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
@@ -778,6 +783,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.timezone": ["ui", "timezone"],
   "ui.enabled": ["ui", "enabled"],
+  "ui.topology_remote_seats": ["ui", "topologyRemoteSeats"],
   "ui.terminal.max_live_terminals": ["ui", "terminal", "maxLiveTerminals"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
@@ -1437,6 +1443,7 @@ export class ConfigStore {
       },
       ui: {
         enabled: v("ui.enabled") as boolean,
+        topologyRemoteSeats: v("ui.topology_remote_seats") as boolean,
         timezone: v("ui.timezone") as string,
         terminal: { maxLiveTerminals: v("ui.terminal.max_live_terminals") as number },
         preview: {

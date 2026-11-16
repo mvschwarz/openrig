@@ -92,6 +92,45 @@ describe("dependency failure ownership and occurrence-local recovery", () => {
     expect(snapshot()).toEqual(before); expect(sent).toHaveLength(sends);
   });
 
+  // A branch packet an ordinary queue handoff already closed, whose review then failed: the agent's failed exit is
+  // recorded on the workflow and the failure is owned as usual, with no write to the closed row; the same exit again
+  // writes nothing.
+  it("records a failed exit on a branch packet the queue already closed, without writing its row, and once", async () => {
+    const b = await branches(); const sibling = queue.getById(b.right);
+    await queue.handoff({ qitemId: b.left, fromSession: "owner@rig", toSession: "reviewer2@rig" });
+    const closedRow = () => ({ item: queue.getById(b.left),
+      transitions: db.prepare("SELECT * FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid").all(b.left) });
+    const closed = closedRow();
+
+    const projected = await project(b.id, b.left, "failed");
+
+    expect(closedRow()).toEqual(closed); expect(closed.item?.state).toBe("handed-off");
+    expect(projected.advisories).toEqual([`packet ${b.left} was already handed-off in the queue, so the failed exit was recorded on the workflow without writing its queue row`]);
+    expect(runtime.inspect(b.id).instance.status).toBe("active"); expect(queue.getById(b.right)).toEqual(sibling);
+    expect(exceptions()).toHaveLength(1);
+    expect(runtime.inspect(b.id).failures).toMatchObject([{ occurrenceId: b.left, stepId: "left", status: "unresolved" }]);
+    expect(runtime.inspect(b.id).instance.currentFrontier).toEqual([b.right]);
+    // The caller's result note is kept in the projector's record, since no queue row or next packet carries it.
+    expect(runtime.trailLog.listForInstance(b.id).find(t => t.priorQitemId === b.left)?.closureEvidence?.queue_row_already_closed)
+      .toMatchObject({ state: "handed-off", exit: "failed", result_note: "controlled handout mismatch", next_qitem_ids: [] });
+    const before = snapshot(); const sends = sent.length;
+    expect(await project(b.id, b.left, "failed")).toMatchObject({ closureReason: "failed", nextQitemIds: [], absorbedReplay: true, emittedEventTypes: [] });
+    expect(snapshot()).toEqual(before); expect(sent).toHaveLength(sends);
+  });
+
+  // A sole frontier packet the queue already closed stays active on a waiting exit (its unchanged row isn't blocked), so
+  // the waiting replay rule can't absorb the repeat; the projector's record does.
+  it("absorbs a repeated waiting exit on a sole graph packet the queue already closed", async () => {
+    const i = await start(GRAPH.replace("allowed_exits: [done, failed]", "allowed_exits: [done, failed, waiting]"));
+    await queue.handoff({ qitemId: i.entryQitemId, fromSession: "owner@rig", toSession: "reviewer2@rig" });
+    const waiting = { instanceId: i.instance.instanceId, currentPacketId: i.entryQitemId, actorSession: "owner@rig", exit: "waiting" as const,
+      resultNote: "waiting on the reviewer", closureEvidence: {} };
+    expect((await runtime.project(waiting)).instance).toMatchObject({ status: "active", currentFrontier: [i.entryQitemId] });
+    const before = snapshot(); const sends = sent.length;
+    expect(await runtime.project(waiting)).toMatchObject({ absorbedReplay: true, emittedEventTypes: [] });
+    expect(snapshot()).toEqual(before); expect(sent).toHaveLength(sends);
+  });
+
   it("redrives only the selected episode once and preserves a distinct unresolved failure and completed work", async () => {
     const b = await branches(); const completed = queue.getById(b.root);
     await project(b.id, b.left, "failed"); await project(b.id, b.right, "failed");

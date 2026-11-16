@@ -1,4 +1,6 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import type { readSendOutcome } from "./connection-contract.js";
+import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record-types.js";
 
 export interface Rig {
   id: string;
@@ -159,6 +161,9 @@ export type RigEvent =
   | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
   | { type: "node.model_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "seat.runtime_home_recorded"; rigId: string; nodeId: string; logicalId: string; runtime: string; from: string | null; to: string;
+      slot: "account_home" | "member_env"; revision: number; operationId: string; original: string | null; occupantGeneration: string | null;
+      reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -197,7 +202,9 @@ export type RigEvent =
       admitted: DeliveryEvidenceAdmitted;
       written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
-      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
+      /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
+      outcome: ReturnType<typeof readSendOutcome> }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
@@ -267,11 +274,13 @@ export type RigEvent =
        *  record (not just the command response) carries what primed the successor:
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
-        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
+        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending" | "none"; limit?: string }
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string; optional?: true }>; gaps: string[]; emptyChainReason?: string };
       /** #2456: the required startup files the successor started without (a start would have failed), and that successor's
        *  session. The seat list marks the seat while this session is its current one. */
-      startedWithoutRequired?: string[]; successorSessionId?: string }
+      startedWithoutRequired?: string[]; successorSessionId?: string;
+      /** #2985: the handover adopted the running successor of an earlier failed one (`rig seat handover --recover`). */
+      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string } }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -371,7 +380,7 @@ export type RigEvent =
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string }
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string; actorSession?: string; reason?: string; oldPacketId?: string; newPacketId?: string }
   // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
   // deletion path. Emitted once per workflow_specs cache row removed
   // because its source file disappeared from the scanned workflows folder.
@@ -460,6 +469,10 @@ export interface SnapshotData {
   continuityStates?: ContinuityState[];
   nodeStartupContext?: Record<string, NodeStartupSnapshot | null>;
   envReceipt?: EnvReceipt | null;
+  /** Each seat's latest operator-recorded runtime home at capture: the home, the original conversation and occupant it
+   *  was recorded against, and its revision. A restore review shows it beside the seat's current record, so a later
+   *  correction is a visible choice bound by the review's revision. Absent when no seat has one. */
+  runtimeHomeRecordsByNode?: Record<string, RuntimeHomeRecordRef>;
 }
 
 export type SnapshotOccupantState =
@@ -489,7 +502,9 @@ export interface RestoreSnapshotSelection extends RestoreSnapshotSummary {
 export interface RestoreExcludedNode {
   nodeId: string;
   logicalId: string;
-  reason: "historical_not_in_intended_roster";
+  /** Historical: no longer a node of the rig. Current: still a node of the rig (a seat claimed after the rig's topology was
+   *  recorded), which this restore skipped. */
+  reason: "historical_not_in_intended_roster" | "current_seat_not_in_intended_roster";
 }
 
 export interface Snapshot {
@@ -551,6 +566,12 @@ export interface RestoreNodeResult {
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
   sourceSessionId?: string;
   resultSessionId?: string;
+  /** Set only by an explicit selected-history startup: this launch was rolled back, and the seat's binding and sessions
+   *  as they were before it were put back. */
+  compensated?: true;
+  /** Set only by an explicit selected-history startup: this seat's restore returned before its launch, so no terminal was
+   *  started, no session registered and no resume sent. */
+  notStarted?: true;
   // L3: `attention_required` is set when the post-launch probe detects a
   // Claude resume-selection prompt. `operator_recovered` is the terminal
   // outcome after `restore.outcome_reconciled`; never produced directly by
@@ -819,6 +840,8 @@ export interface NodeInventoryEntry {
   resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
+  /** The stage of this session's own startup failure, read only while startup needs attention (`harness_not_started`: no harness). */
+  latestErrorStage?: string | null;
   // Extended fields
   model: string | null;
   /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
@@ -1061,6 +1084,8 @@ export interface StartupBlock {
 }
 
 export type StartupFailureStage =
+  /** Restore didn't start the harness at all (no startup context or no adapter): the pane holds only a shell. */
+  | "harness_not_started"
   | "permission_selection"
   | "proof_selection"
   | "projection"
@@ -1684,4 +1709,6 @@ export interface ContextUsage {
   fresh: boolean;
   /** Claude only: the statusline's cumulative client-side cost estimate for `sessionId` (USD); null when not reported. */
   clientCostEstimateUsd?: number | null;
+  /** Claude only: the occupant generation the status-line collector recorded with this sample; null when none. */
+  occupantGeneration?: string | null;
 }

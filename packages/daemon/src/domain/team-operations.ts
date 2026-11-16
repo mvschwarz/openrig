@@ -1,11 +1,11 @@
 import { BUILD_INFO, type BuildInfo } from "../build-info.js";
+import { TEAM_OPERATIONS_CONTRACT, type Support } from "./connection-contract.js";
 
-/** The team-operations contract an app reads before relying on a job's fields: one contract version with per-job
- *  capabilities, distinct from the build label. A capability is supported, not-supported or unknown; an absent key reads
- *  unknown. */
-export const TEAM_OPERATIONS_CONTRACT = "team-operations.v1";
+export { TEAM_OPERATIONS_CONTRACT };
 
-export type CapabilityValue = "supported" | "not-supported" | "unknown";
+/** A team-operations capability: supported, not-supported or unknown; an absent key reads unknown. The contract an app
+ *  reads before relying on a job's fields is one version with per-job capabilities, distinct from the build label. */
+export type CapabilityValue = Support;
 
 /** needs-me: see what needs me, answer as me, follow it through. This build reads it (what needs the person, each
  *  request's revision and what it's about, the answers returned to it, and a snapshot watermark). Answering under this

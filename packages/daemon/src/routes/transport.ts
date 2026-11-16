@@ -7,6 +7,7 @@ import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runti
 import { runtimeSwitchCommittedSince, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
 import type Database from "better-sqlite3";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
+import type { QueueRepository, QueueDestinationAdvisory } from "../domain/queue-repository.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 
 // S2 (OPR.0.5.4.3) — the sender-side half of two-ended honesty: appended to any
@@ -120,11 +121,42 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     const switchHeld = runtimeSwitchCustodyRefusal(db, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
     if (switchHeld) return c.json(switchHeld.body, switchHeld.status);
 
-    // Check for ambiguity first
     const resolved = await transport.resolveSessions({ session: body.session });
     if (!resolved.ok) {
+      // Status is best-effort teaching only after transport finds no receiver.
+      // Resolved and ambiguous sends never read the roster or human registry.
+      let destinationStatus: QueueDestinationAdvisory | undefined;
+      if (resolved.code === "not_found") {
+        try {
+          destinationStatus = (c.get("queueRepo" as never) as QueueRepository | undefined)?.destinationAdvisory(body.session) ?? undefined;
+        } catch {
+          destinationStatus = { code: "destination_status", status: "unknown", destinationSession: body.session,
+            availableDestinations: [], message: "Destination status unknown: registry lookup unavailable." };
+        }
+      }
+      if (resolved.code === "not_found" && destinationStatus
+        && ["missing", "archived", "hosted", "unknown"].includes(destinationStatus.status ?? "")
+        && !expectedIdentity && !body.submitOnly && !body.typeWithoutChecking) {
+        // Preserve the ordinary message in the existing sender outbox. This is
+        // a failed direct delivery audit, not guard-bound retention or a retry.
+        let recordId: string | undefined;
+        try {
+          const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
+          if (!outbox) throw new Error("outbox unavailable");
+          const entry = outbox.record({ senderSession: derivedActor ?? "unknown", destinationSession: body.session,
+            body: typeof body.exactText === "string" ? body.exactText : body.text, ...sendIdentity });
+          recordId = entry.outboxId;
+          outbox.markFailed(recordId);
+          return c.json({ ok: true, outcome: "recorded", sent: false, verified: false, persisted: true,
+            sessionName: body.session, destinationStatus, outboxIds: [recordId],
+            warning: "Message recorded in the sender outbox, not delivered. No forwarding or automatic reassignment was performed." });
+        } catch {
+          return c.json({ ok: false, outcome: "unconfirmed", sent: false, persisted: null, destinationStatus,
+            ...(recordId ? { outboxIds: [recordId] } : {}), error: "Message-record storage is unconfirmed; no delivery was attempted." }, 503);
+        }
+      }
       const status = resolved.code === "ambiguous" ? 409 : 404;
-      return c.json({ ok: false, error: resolved.error }, status);
+      return c.json({ ok: false, error: resolved.error, ...(destinationStatus ? { destinationStatus } : {}) }, status);
     }
 
     const exactText = typeof body.exactText === "string" ? body.exactText : undefined;

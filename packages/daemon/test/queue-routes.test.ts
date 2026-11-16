@@ -20,6 +20,7 @@ import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { inboxEntriesSchema } from "../src/db/migrations/026_inbox_entries.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { queueTargetRepoSchema } from "../src/db/migrations/039_queue_target_repo.js";
+import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { i3IdentityProvenanceSchema } from "../src/db/migrations/067_i3_identity_provenance.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -75,6 +76,7 @@ describe("queue routes", () => {
       inboxEntriesSchema,
       outboxEntriesSchema,
       queueTargetRepoSchema, // OPR.0.3.2.20: required for attention=1&targetRepo=X composition tests
+      queueItemSummarySchema,
       i3IdentityProvenanceSchema, // P21 §4 era-stamp column on the queue-spine stores (last: needs all 4 tables)
       archiveIdentityProvenanceSchema, // the archive carries the same column, which retention requires
     ]);
@@ -951,6 +953,55 @@ describe("queue routes", () => {
       const done = await show(open.qitemId);
       expect(done).not.toHaveProperty("successors");
       expect(done).not.toHaveProperty("successorNote");
+    });
+  });
+
+  describe("GET /list names handoff successors (#3300)", () => {
+    it.each([false, true])("reports the successor's current state without changing the origin (compact=%s)", async (compact) => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "request", summary: "Review request", nudge: false });
+      const { created } = await queueRepo.handoff({ qitemId: source.qitemId, fromSession: "b@r", toSession: "next@r", nudge: false });
+      queueRepo.claim({ qitemId: created.qitemId, destinationSession: "next@r" });
+      queueRepo.update({ qitemId: created.qitemId, actorSession: "next@r", state: "done", closureReason: "denied", resolution: "Not accepted" });
+
+      const res = await app.request(`/api/queue/list?destinationSession=b@r&compact=${compact ? "1" : "0"}&limit=1`);
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual([expect.objectContaining({
+        qitemId: source.qitemId, state: "handed-off", summary: "Review request", closureTarget: "next@r",
+        successors: [{ qitemId: created.qitemId, destinationSession: "next@r", state: "done", via: "handedOffFrom" }],
+      })]);
+      expect(queueRepo.getById(source.qitemId)).toMatchObject({ state: "handed-off", summary: "Review request", closureTarget: "next@r" });
+    });
+
+    it("includes done handoff-and-complete origins, but not ordinary closed or active rows", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "request", nudge: false });
+      queueRepo.claim({ qitemId: source.qitemId, destinationSession: "b@r" });
+      const { created } = await queueRepo.handoffAndComplete({ qitemId: source.qitemId, fromSession: "b@r", toSession: "next@r", nudge: false });
+
+      const res = await app.request("/api/queue/list?destinationSession=b@r&compact=1");
+
+      expect(await res.json()).toEqual([expect.objectContaining({ state: "done", closureReason: "handed_off_to",
+        successors: [{ qitemId: created.qitemId, destinationSession: "next@r", state: "pending", via: "handedOffFrom" }],
+      })]);
+      const active = await (await app.request("/api/queue/list?activeOnly=1&compact=1")).json();
+      expect(active).toHaveLength(1);
+      expect(active[0]).not.toHaveProperty("successors");
+      queueRepo.claim({ qitemId: created.qitemId, destinationSession: "next@r" });
+      queueRepo.update({ qitemId: created.qitemId, actorSession: "next@r", state: "done", closureReason: "no-follow-on" });
+      const closed = await (await app.request("/api/queue/list?destinationSession=next@r&compact=1")).json();
+      expect(closed[0]).not.toHaveProperty("successors");
+    });
+
+    it("keeps show's remote-successor note on a compact list face", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "request", nudge: false });
+      db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = ? WHERE qitem_id = ?")
+        .run("qitem-example@far-host", source.qitemId);
+
+      const res = await app.request("/api/queue/list?destinationSession=b@r&compact=1");
+
+      expect(await res.json()).toEqual([expect.objectContaining({ successors: [],
+        successorNote: "It was handed to another host; its successor there is qitem-example@far-host. This daemon has no copy.",
+      })]);
     });
   });
 

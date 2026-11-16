@@ -538,14 +538,35 @@ describe("runner → authenticated route → SQLite → cost view", () => {
       const cut = valid.indexOf("\n"); // the header without its newline
       writeFileSync(file, valid.slice(0, cut));
       let grown = false;
-      const p = pipeline(() => forkHeader(at(7), file), () => readPiSessionEntryIds(file, undefined, {
-        afterStat: () => { if (!grown) { grown = true; appendFileSync(file, valid.slice(cut)); } } }));
+      const reads: Array<Promise<ReadonlySet<string> | null>> = []; // each parent read the runner starts
+      const p = pipeline(() => forkHeader(at(7), file), () => {
+        const read = readPiSessionEntryIds(file, undefined, {
+          afterStat: async () => {
+            if (grown) return;
+            grown = true;
+            appendFileSync(file, valid.slice(cut));
+            // Hold this read past the first refresh, as a loaded runner can, so every run meets the read in flight.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          } });
+        reads.push(read);
+        return read;
+      });
       await p.refresh(forkEntries);
+      expect(reads).toHaveLength(1);
       expect(p.view()).toMatchObject({ entries: { own: 2, unknownOrigin: { count: 2 } } });
       expect(p.view().costUsd).toBeCloseTo(0.05, 10); // the copied b1 is not charged
+      // The runner starts no second read while one is in flight, so wait for this one's outcome (the file grew under it,
+      // so it answers nothing) before the next refresh, not for a number of ticks. The runner takes that outcome in
+      // promise callbacks only, so one timer turn runs them all.
+      await expect(reads[0]).resolves.toBeNull();
+      await settle();
+      // Answered with nothing, the tie is still unknown and uncharged.
+      expect(p.view()).toMatchObject({ entries: { own: 2, unknownOrigin: { count: 2 } } });
+      expect(p.view().costUsd).toBeCloseTo(0.05, 10);
       await p.refresh(forkEntries);
       // The parent read is real file I/O; wait for its outcome to reach the store, not for a number of ticks.
       await eventually(() => expect(p.view()).toMatchObject({ entries: { own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } } }));
+      expect(reads).toHaveLength(2);
       expect(p.d.prepare("SELECT origin FROM pi_usage_entries WHERE entry_id = 'b1'").get()).toEqual({ origin: "inherited" });
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

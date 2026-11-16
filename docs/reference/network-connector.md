@@ -83,7 +83,7 @@ rig network connect <seat> --hub <url> --as <participant> --token-file <path>
 - `<participant>` is the participant's address in the hub (`member@rig`), and the token file holds its bearer.
 - The binding follows the seat's node, so a relaunched or renamed seat keeps it.
 - The token is stored at `<OpenRig home>/network-secrets/<binding>/credential.json` (a 0700 folder and a 0600 file). It
-  is never returned by the API or shown in status. A token in the hub URL is refused.
+  is never returned by the API or shown in status. A user name or password in the hub URL is refused: put the token in its token file, not in the URL.
 - A plain-http hub URL needs `--allow-http` (see Limits).
 - One active binding per local seat, and one per hub participant.
 - On a daemon with an operator bearer configured, `connect` and `disconnect` send `OPENRIG_AUTH_BEARER_TOKEN`, as the
@@ -92,7 +92,7 @@ rig network connect <seat> --hub <url> --as <participant> --token-file <path>
 ## What the connector does
 
 The daemon runs the connector for every active binding. It normally polls every 30 seconds
-(`OPENRIG_NETWORK_POLL_SECONDS`, at least 5); a failing hub, backoff or a backlog can delay it. Each binding's pass has
+(`OPENRIG_NETWORK_POLL_SECONDS`; a value under 5 is ignored); a failing hub, backoff or a backlog can delay it. Each binding's pass has
 a deadline of 60 seconds, so one slow hub doesn't hold the others. With no active binding it makes no network call.
 
 1. It lists the participant's own items on the hub, claims each pending one, and creates a local queue item for the
@@ -144,7 +144,8 @@ a replaced installation. `--json` adds the connector's view: each binding's next
 - **The seat has no session:** its hub items stay pending and unclaimed, and the last error says why. They're taken
   once the seat has a session again. A stopped seat still has its session, so it still takes items; they wait for it.
 - **The hub can't be reached, or a pass runs past its deadline:** the binding stays active, the error is recorded, and
-  retries back off, doubling up to 5 minutes. A failure on this machine is recorded as local, not as the hub's.
+  retries back off, doubling to 5 minutes by default, or to the poll interval when that is longer, with up to 20%
+  jitter either way. A failure on this machine is recorded as local, not as the hub's.
 - **The hub refuses the credential** (HTTP 401): the binding is marked revoked and its credential removed. No new work
   comes in; local items and results stay.
 
