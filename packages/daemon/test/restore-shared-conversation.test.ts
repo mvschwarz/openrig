@@ -114,8 +114,21 @@ describe("validatePreRestore names a conversation two resuming agents share", ()
     const result = validatePreRestore(twoSeatSnapshot("conv-shared", "conv-shared"), {});
     expect(result.blockers).toEqual([]);
     expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]).toContain("dev.a and dev.b have the same recorded claude_id conversation");
+    expect(result.warnings[0]).toContain("dev.a (exited) and dev.b (exited) have the same recorded claude_id conversation");
     expect(result.warnings[0]).not.toContain("conv-shared");
+  });
+
+  // The review of #3250's delta: the agents a restore resumes carry their recorded status too ("unknown" when none),
+  // as the agents outside it do; never "stopped" for every status that is not running.
+  it("names each resuming agent with its recorded status, and unknown when none was recorded", () => {
+    const data = twoSeatSnapshot("conv-shared", "conv-shared");
+    const sessions = data.sessions as Array<{ status?: string }>;
+    sessions[0]!.status = "detached";
+    delete sessions[1]!.status;
+    const result = validatePreRestore(data, {});
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("dev.a (detached) and dev.b (unknown) have the same recorded claude_id conversation");
+    expect(result.warnings[0]).not.toContain("stopped");
   });
 
   it("stays quiet for distinct conversations", () => {
@@ -184,7 +197,8 @@ describe("rig restore-check names agents that hold the same recorded conversatio
     expect(shared?.evidence).not.toContain("conv-x");
     expect(shared?.remediation).toBe("");
     expect(result.verdict).toBe("restorable_with_caveats");
-    expect(result.repairPacket ?? []).toEqual([]);
+    // the caveat adds no repair step (the roster note of a seat outside the recorded roster is main's, not this one)
+    expect((result.repairPacket ?? []).filter((step) => /conversation/i.test(`${step.command} ${step.rationale}`))).toEqual([]);
     expect(result.recovery.actions).toEqual([]);
   });
 

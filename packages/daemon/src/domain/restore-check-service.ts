@@ -8,7 +8,7 @@ import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
-import { describeSharedConversation, findSharedConversations, compareConversations, describeUnavailable, holdsRecordedConversation } from "./shared-conversation.js";
+import { compareConversations, describeSharedConversation, describeUnavailable, holdsRecordedConversation } from "./shared-conversation.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 

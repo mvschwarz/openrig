@@ -268,7 +268,12 @@ export function resumingConversationSeats(
         recordedSessions: sessions.filter((recorded) => recorded.nodeId === node.id),
       }, resolution.session.restorePolicy);
       if (policy !== "resume_if_possible") continue;
-      resuming.push({ seat: node.logicalId, resumeType: resolution.session.resumeType, resumeToken: resolution.session.resumeToken });
+      resuming.push({
+        seat: node.logicalId,
+        state: resolution.session.status ?? "unknown",   // its recorded status as it is, as for the agents outside it
+        resumeType: resolution.session.resumeType,
+        resumeToken: resolution.session.resumeToken,
+      });
     } catch {
       // malformed saved data never stops a restore: the comparison is unavailable for this agent
       resuming.push({ seat: node.logicalId, resumeType: UNREADABLE, resumeToken: UNREADABLE });

@@ -313,7 +313,7 @@ describe("RestoreOrchestrator", () => {
     if (shared) {
       expect(result.result.nodes.map((node) => node.logicalId).sort()).toEqual(["dev.a", "dev.b"]);
       expect(named).toHaveLength(1);
-      expect(named[0]).toContain("dev.a and dev.b have the same recorded claude_id conversation");
+      expect(named[0]).toContain("dev.a (running) and dev.b (running) have the same recorded claude_id conversation");
       expect(result.result.warnings.join("\n")).not.toContain("conv-shared");
     } else {
       expect(named).toEqual([]);
@@ -338,7 +338,7 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes[0]!.status).not.toBe("failed");
     const named = result.result.warnings.filter((line) => line.includes("outside this restore"));
     expect(named).toHaveLength(1);
-    expect(named[0]).toContain(`dev.impl@r99 has the same recorded claude_id conversation as dev-parent@other-rig (${state}), outside this restore`);
+    expect(named[0]).toContain(`dev.impl@r99 (running) has the same recorded claude_id conversation as dev-parent@other-rig (${state}), outside this restore`);
     expect(result.result.warnings.join("\n")).not.toContain("conv-x");
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe(status);
   });
@@ -418,7 +418,7 @@ describe("RestoreOrchestrator", () => {
     if (!result.ok) return;
     const named = result.result.warnings.filter((line) => line.includes("outside this restore"));
     expect(named).toHaveLength(1);
-    expect(named[0]).toContain("dev.impl@test-rig has the same recorded claude_id conversation as dev-parent@test-rig (running)");
+    expect(named[0]).toContain("dev.impl@test-rig (running) has the same recorded claude_id conversation as dev-parent@test-rig (running)");
     expect(result.result.warnings.join("\n")).not.toContain("parent-conv");
     expect(killSession.mock.calls.map((call) => call[0])).not.toContain("dev-parent@test-rig");
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe("running");

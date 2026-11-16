@@ -61,7 +61,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { SEAT_STARTUP_BLOCKERS, validatePreRestore, resumingConversationSeats } from "./restore-preconditions.js";
+import { SEAT_STARTUP_BLOCKERS, resumingConversationSeats, validatePreRestore } from "./restore-preconditions.js";
 import { describePartners, holdsRecordedConversation } from "./shared-conversation.js";
 import { getNodeInventoryForRigs } from "./node-inventory.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
