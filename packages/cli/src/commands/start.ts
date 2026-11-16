@@ -187,6 +187,7 @@ Examples:
   rig start --last                  Headless: restore everything that was running, except rigs stopped on purpose
   rig start --all                   Headless: restore all rigs with restore-usable snapshots
   rig start --rigs prod-rig dev-rig Headless: restore only the named rigs
+  rig start --last --concurrency 2  Restore up to two rigs at a time
 
 When the daemon is restoring a kernel a reboot left down, rig start goes on to
 your other rigs. Exit 0 then does not mean the kernel is ready (check rig
@@ -206,8 +207,15 @@ back with rig up kernel --existing.
     .option("--last", "Headless: restore all rigs that were last running; a rig stopped on purpose (with rig down or rig seat stop) stays down (zero prompts)")
     .option("--all", "Headless: restore all rigs with restore-usable snapshots (zero prompts)")
     .option("--rigs <names...>", "Headless: restore only the named rigs (zero prompts)")
+    .option("--concurrency <n>", "Maximum concurrent rig restores (default: 1)", "1")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { last?: boolean; all?: boolean; rigs?: string[]; json?: boolean }) => {
+    .action(async (opts: { last?: boolean; all?: boolean; rigs?: string[]; concurrency: string; json?: boolean }) => {
+      if (!/^[1-9]\d*$/.test(opts.concurrency) || !Number.isSafeInteger(Number(opts.concurrency))) {
+        console.error("--concurrency must be a positive integer.");
+        process.exitCode = 1;
+        return;
+      }
+      const concurrency = Number(opts.concurrency);
       const deps = getDepsF();
 
       // ---- PHASE 1: ensure daemon is running ----
@@ -503,9 +511,18 @@ back with rig up kernel --existing.
       // ---- PHASE 5: restore each selected rig via id-based route (compose slice-02 path) ----
       if (!opts.json) console.log(`\nRestoring ${selectedCandidates.length} rig(s)...\n`);
 
-      const results: Array<{ rigName: string; status: string; nodes: Array<{ logicalId: string; status: string; error?: string }> }> = [];
+      const results: Array<{ rigName: string; status: string; nodes: Array<{ logicalId: string; status: string; error?: string }> }> = new Array(selectedCandidates.length);
+      // Prompts may not overlap even when restores do. Release the next prompt on every exit path.
+      let promptTail = Promise.resolve();
+      const serializePrompt = async <T>(fn: () => Promise<T>): Promise<T> => {
+        const previous = promptTail;
+        let release!: () => void;
+        promptTail = new Promise<void>(resolve => { release = resolve; });
+        await previous;
+        try { return await fn(); } finally { release(); }
+      };
 
-      for (const candidate of selectedCandidates) {
+      const restore = async (candidate: StartCandidate, index: number): Promise<void> => {
         const rigName = candidate.rigName;
         const rigId = candidate.rigId;
 
@@ -514,9 +531,9 @@ back with rig up kernel --existing.
           const freshSummary = await client.get<RigSummary[]>("/api/rigs/summary");
           const current = (freshSummary.data ?? []).find((r) => r.id === rigId);
           if ((current?.restoreLifecycleState ?? current?.lifecycleState) === "running") {
-            if (!opts.json) console.log(`  ${rigName}: already running (skipping)`);
-            results.push({ rigName, status: "already_running", nodes: [] });
-            continue;
+            if (!opts.json) await serializePrompt(async () => { console.log(`  ${rigName}: already running (skipping)`); });
+            results[index] = { rigName, status: "already_running", nodes: [] };
+            return;
           }
         } catch { /* proceed with restore attempt */ }
 
@@ -535,7 +552,7 @@ back with rig up kernel --existing.
           if (res.status >= 400) {
             const code = res.data["code"] as string | undefined;
             const errorText = String(res.data["error"] ?? "restore failed");
-            if (code === "pre_restore_validation_failed") {
+            await serializePrompt(async () => { if (code === "pre_restore_validation_failed") {
               console.error(`  ${rigName}: restore blocked (pre-validation failed)`);
               const blockers = (res.data["blockers"] as Array<{ message: string; remediation: string }>) ?? [];
               for (const b of blockers) {
@@ -544,16 +561,16 @@ back with rig up kernel --existing.
               }
             } else {
               console.error(`  ${rigName}: ${errorText} (${code ?? `HTTP ${res.status}`})`);
-            }
-            results.push({ rigName, status: code ?? "error", nodes: [] });
-            continue;
+            } });
+            results[index] = { rigName, status: code ?? "error", nodes: [] };
+            return;
           }
 
           const resStatus = res.data["status"] as string;
           const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string }>) ?? [];
           const rigResult = res.data["rigResult"] as string | undefined;
 
-          if (!opts.json) {
+          await serializePrompt(async () => { if (!opts.json) {
             console.log(`  ${rigName}: ${rigResult ?? resStatus}`);
             for (const n of nodes) {
               if ((n.status === "awaiting-decision" || n.status === "left_attached") && n.error) {
@@ -595,20 +612,27 @@ back with rig up kernel --existing.
                 if (!opts.json) console.error(`    ${n.logicalId}: awaiting-decision -- to fresh-prime: ${freshSeatCommand(n.logicalId, rigName)}`);
               }
             }
-          }
+          } });
 
-          results.push({ rigName, status: rigResult ?? resStatus, nodes });
+          results[index] = { rigName, status: rigResult ?? resStatus, nodes };
         } catch (err) {
-          if (err instanceof DaemonConnectionError) {
+          await serializePrompt(async () => { if (err instanceof DaemonConnectionError) {
             console.error(`  ${rigName}: timed out; the daemon may still be processing. Verify with: rig ps`);
-            results.push({ rigName, status: "timeout", nodes: [] });
+            results[index] = { rigName, status: "timeout", nodes: [] };
           } else {
             const msg = err instanceof Error ? err.message : String(err);
             console.error(`  ${rigName}: ${msg}`);
-            results.push({ rigName, status: "error", nodes: [] });
-          }
+            results[index] = { rigName, status: "error", nodes: [] };
+          } });
         }
-      }
+      };
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(concurrency, selectedCandidates.length) }, async () => {
+        while (next < selectedCandidates.length) {
+          const index = next++;
+          await restore(selectedCandidates[index]!, index);
+        }
+      }));
 
       if (opts.json) {
         console.log(JSON.stringify({

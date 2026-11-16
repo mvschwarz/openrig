@@ -8,6 +8,7 @@ import { Command } from "commander";
 import { startCommand, lastStopState } from "../src/commands/start.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
+import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
 
 function mockLifecycleDeps(): LifecycleDeps {
   return {
@@ -25,9 +26,8 @@ function mockLifecycleDeps(): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+function captureLogs(fn: () => Promise<void>, logs: string[] = []): Promise<{ logs: string[]; exitCode: number | undefined }> {
   return new Promise(async (resolve) => {
-    const logs: string[] = [];
     const origLog = console.log;
     const origErr = console.error;
     const origExitCode = process.exitCode;
@@ -130,9 +130,10 @@ describe("rig start (OPR.0.3.4.1)", () => {
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => { server.close(); });
+  afterAll(() => { server.close(); resetFetchAllowlist(); });
 
   beforeEach(() => {
+    allowFetchTarget(`http://127.0.0.1:${port}`);
     upBodies = [];
     launches = [];
     nodesReads = 0;
@@ -200,6 +201,83 @@ describe("rig start (OPR.0.3.4.1)", () => {
   }
 
   // ---- HEADLESS FLAGS ----
+
+  it.each([1, 2])("limits restore requests to %i and preserves result order", async limit => {
+    routes["/api/rigs/summary"] = () => ["one", "two", "three"].map((name, i) =>
+      ({ id: `rig-${i}`, name, nodeCount: 1, lifecycleState: "recoverable" })) as unknown as Record<string, unknown>;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", mode: "restore", nodes: [], mutated: false }
+      : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    const waiting: Array<() => void> = [];
+    let active = 0, maximum = 0, entered = 0;
+    const prog = new Command();
+    const options = deps();
+    prog.addCommand(startCommand({ ...options, clientFactory: url => {
+      const client = new DaemonClient(url);
+      const post = client.post.bind(client);
+      client.post = (async (path: string, body: unknown, config?: unknown) => {
+        if (path.endsWith("/up") && (body as { plan?: boolean }).plan === false) {
+          active++; entered++; maximum = Math.max(maximum, active);
+          await new Promise<void>(resolve => waiting.push(resolve));
+          active--;
+        }
+        return post(path, body, config as never);
+      }) as typeof client.post;
+      return client;
+    } }));
+    const run = captureLogs(async () => { await prog.parseAsync(["node", "rig", "start", "--all", "--json", ...(limit === 1 ? [] : ["--concurrency", "2"])]); });
+    let early: { logs: string[]; exitCode: number | undefined } | undefined;
+    void run.then(value => { early = value; });
+    await vi.waitFor(() => { if (early) throw new Error(`start exited early: ${early.logs.join("; ")}`); expect(entered).toBe(limit); }, { timeout: 10000 });
+    for (let count = limit + 1; count <= 3; count++) {
+      waiting.shift()!();
+      await vi.waitFor(() => expect(entered).toBe(count), { timeout: 10000 });
+    }
+    while (waiting.length) waiting.shift()!();
+    const { logs, exitCode } = await run;
+    expect(maximum).toBe(limit);
+    expect(exitCode).toBeUndefined();
+    const result = JSON.parse(logs.find(line => line.startsWith("{"))!);
+    expect(result.restoredRigs.map((entry: { rigName: string }) => entry.rigName)).toEqual(["one", "two", "three"]);
+  });
+
+  it.each(["0", "-1", "1.5", "abc"])("rejects invalid concurrency %s before contacting the daemon", async value => {
+    const options = deps();
+    const clientFactory = vi.fn(options.clientFactory);
+    const prog = new Command();
+    prog.addCommand(startCommand({ ...options, clientFactory }));
+    const { exitCode } = await captureLogs(async () => { await prog.parseAsync(["node", "rig", "start", "--last", `--concurrency=${value}`]); });
+    expect(exitCode).toBe(1);
+    expect(clientFactory).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("keeps other output out of a pending prompt and releases the queue when prompt throws=%s", async throws => {
+    routes["/api/rigs/summary"] = () => ["one", "two"].map((name, i) =>
+      ({ id: `rig-${i}`, name, nodeCount: 1, lifecycleState: "recoverable" })) as unknown as Record<string, unknown>;
+    let secondReturned = false;
+    routes["/api/rigs/:id/up"] = (_req, body) => {
+      if (body.plan) return { status: "plan", mode: "restore", nodes: [], mutated: false };
+      if (body._rigId === "rig-1") secondReturned = true;
+      return { status: "restored", rigResult: "fully_restored", nodes: body._rigId === "rig-0"
+        ? [{ logicalId: "dev.a", status: "awaiting-decision" }] : [] };
+    };
+    let release!: () => void;
+    let prompting = false;
+    const prompt = async () => {
+      prompting = true;
+      await new Promise<void>(resolve => { release = resolve; });
+      if (throws) throw new Error("prompt failed");
+      return false;
+    };
+    const logs: string[] = [];
+    const run = captureLogs(async () => { await makeCmd(prompt).parseAsync(["node", "rig", "start", "--all", "--concurrency", "2"]); }, logs);
+    await vi.waitFor(() => { expect(prompting).toBe(true); expect(secondReturned).toBe(true); });
+    expect(logs.join("\n")).not.toContain("two: fully_restored");
+    release();
+    const result = await run;
+    expect(result.logs.join("\n")).toContain("two: fully_restored");
+    if (throws) expect(result.logs.join("\n")).toContain("prompt failed");
+  });
 
   it("--last restores all candidates with ZERO prompts", async () => {
     setupCandidateRig("my-rig");
