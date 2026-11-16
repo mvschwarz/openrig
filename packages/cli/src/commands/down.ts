@@ -147,8 +147,8 @@ rig down stops every agent OpenRig started in the rig: their sessions end, and a
 with them. For a community harness only its pane stops: its own processes may keep running, and rig down
 names it. A session OpenRig didn't start (adopted, bound, reconciled, or a person's own session joined with
 rig attach --self from a tmux pane) is never ended: rig down releases its seat, as rig unclaim does, and
-names it. A seat joined with rig attach as an external CLI, outside tmux, is neither stopped nor released:
-it keeps its claim, and rig down lists it as not stopped.
+names it. A seat joined with rig attach as an external CLI, outside tmux, is never stopped, and rig down
+lists it as not stopped. It keeps its claim, unless --delete removes the rig record, and the claim with it.
 Before running it, check who is working (rig ps --nodes --rig <rig>) and that the person asked for it;
 don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
 rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With
