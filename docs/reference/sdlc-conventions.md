@@ -121,6 +121,10 @@ Each slice directory carries:
     approval starts here.
   - **`## Proof contract`** — a checkbox list of promised deliverables (see
     B1). The UI's DELIVERED section pairs each item with its proof.
+  - Since 2026-11-15 the scope audit also accepts, in place of those two lists,
+    a single `## Requirements` list of bullets that start `R<n>.` and carry
+    their proof after `Observable:`; the scaffold and `rig proof` still use the
+    two lists.
 - **`PROGRESS.md`** — the slice's current delivery state and retained outcome
   log. Record material changes with links to proof; historical checkboxes are
   testimony, not current acceptance authority. For a selected proof policy,

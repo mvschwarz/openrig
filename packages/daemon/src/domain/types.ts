@@ -1,4 +1,5 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import type { readSendOutcome } from "./connection-contract.js";
 import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record-types.js";
 
 export interface Rig {
@@ -201,7 +202,9 @@ export type RigEvent =
       admitted: DeliveryEvidenceAdmitted;
       written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
-      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
+      /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
+      outcome: ReturnType<typeof readSendOutcome> }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
@@ -837,6 +840,8 @@ export interface NodeInventoryEntry {
   resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
+  /** The stage of this session's own startup failure, read only while startup needs attention (`harness_not_started`: no harness). */
+  latestErrorStage?: string | null;
   // Extended fields
   model: string | null;
   /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
@@ -1079,6 +1084,8 @@ export interface StartupBlock {
 }
 
 export type StartupFailureStage =
+  /** Restore didn't start the harness at all (no startup context or no adapter): the pane holds only a shell. */
+  | "harness_not_started"
   | "permission_selection"
   | "proof_selection"
   | "projection"

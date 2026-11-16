@@ -494,7 +494,9 @@ describe("rig launch --seats", () => {
     const cmd = launchCommand(deps);
     await cmd.parseAsync(["node", "rig", "rig-1", "dev.driver"]);
 
-    expect(logs.some((l) => l.includes("already running"))).toBe(true);
+    // A live session isn't proof its agent is running, so the line says what OpenRig knows.
+    expect(logs.some((l) => l.startsWith("Node dev.driver has a live session in rig ")
+      && l.endsWith(", so it wasn't relaunched. Its agent isn't proven running."))).toBe(true);
     expect(logs.some((l) => l.includes("Launched"))).toBe(false);
   });
 

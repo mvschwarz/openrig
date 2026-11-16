@@ -1711,6 +1711,26 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
     });
 
+  cmd
+    .command("tag <qitemId>")
+    .description("Add tags to a qitem in any state, changing nothing else: its existing tags stay, a tag it already has adds nothing, and a closed row stays closed. The tags added are recorded on the row's history with who added them. Tags are never removed or rewritten.")
+    .requiredOption("--add <tag>", "A tag to add, exact and case-sensitive; repeat for several (commas are literal)", (value: string, previous: string[] = []) => [...previous, value], [] as string[])
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: { add: string[]; json?: boolean }) => {
+      // The actor is the seat itself (X-OpenRig-Session, stamped by DaemonClient), as for update.
+      if (!requireSeatSession("actor")) return;
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{ added?: unknown }>(`/api/queue/${encodeURIComponent(qitemId)}/tags`, { add: opts.add });
+        const added = res.status < 400 && Array.isArray(res.data?.added) ? res.data.added as string[] : undefined;
+        if (!added) return printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        if (opts.json) console.log(JSON.stringify(res.data));
+        else console.log(added.length > 0
+          ? `Added to ${qitemId}: ${added.join(", ")}`
+          : `Nothing added: ${qitemId} already has ${[...new Set(opts.add)].join(", ")}`);
+      });
+    });
+
   // OPR.0.4.4.19 FR-6 — the first-class park affordance (C5 leg 1). One verb,
   // both blocker kinds: --on takes a qitem id (today's shipped blocked-on
   // usage, nothing new required) or a human-seat session (the leg-1 park —

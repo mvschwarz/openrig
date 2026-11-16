@@ -168,13 +168,148 @@ describe("a failed queue wake when its seat returns", () => {
     expect(before.tags).toContain(proof);
     expect(f.intentOf(f.row.qitemId)).toMatchObject({ outboxId: before.outboxId, body: before.body, deliveryState: "delivered" });
     expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
-    expect(String(f.send.mock.calls[1]?.[1])).toContain("failed before input is retried once when the same binding is reachable again");
+    expect(String(f.send.mock.calls[1]?.[1])).toContain("failed before input is retried once when the current binding is reachable again");
     expect(String(f.send.mock.calls[1]?.[1])).not.toContain("delivery may repeat");
     await reachable(f);
     await f.repo.drainPendingWakeIntents();
     expect(f.send).toHaveBeenCalledTimes(2); // failed probe, then one input
     expect(f.sendsFor(f.row.qitemId)).toBe(1);
     expect(f.db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE audit_pointer=?").get(f.row.qitemId)).toEqual({ n: 1 });
+  });
+
+  it.each([
+    { name: "a new pane", occupant: "occupant-1", ordinal: 1, pane: "%2" },
+    { name: "an already-bound successor", occupant: "occupant-2", ordinal: 2, pane: "%1" },
+    { name: "a successor in a new pane", occupant: "occupant-2", ordinal: 2, pane: "%2" },
+  ])("reconciles the original proved-unsent intent to $name in the same seat", async ({ occupant, ordinal, pane }) => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    f.relaunch(occupant, ordinal, pane);
+    const tenures = f.db.prepare("SELECT * FROM occupant_tenures ORDER BY id").all();
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await reachable(f);
+    const after = f.intentOf(f.row.qitemId);
+    expect(after).toMatchObject({ outboxId: before.outboxId, senderSession: before.senderSession,
+      destinationSession: before.destinationSession, body: before.body, auditPointer: before.auditPointer,
+      tsDispatched: before.tsDispatched, deliveryState: "delivered",
+      guardBinding: { nodeId: "a", session: "worker@test", occupant, pane } });
+    expect(after.tags).not.toContain(proof);
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+    expect(String(f.send.mock.calls[1]?.[1])).toContain(`Queue handoff: ${f.row.qitemId}`);
+    expect(String(f.send.mock.calls[1]?.[1])).not.toContain("finish work once");
+    const audit = f.db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id=? AND transition_note LIKE 'queue wake binding reconciled %'").all(f.row.qitemId) as Array<{ transition_note: string }>;
+    expect(audit).toHaveLength(1);
+    expect(JSON.parse(audit[0]!.transition_note.slice("queue wake binding reconciled ".length)))
+      .toEqual({ outboxId: before.outboxId, from: before.guardBinding, to: after.guardBinding });
+    await reachable(f);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.db.prepare("SELECT * FROM occupant_tenures ORDER BY id").all()).toEqual(tenures);
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE audit_pointer=?").get(f.row.qitemId)).toEqual({ n: 1 });
+  });
+
+  it("retains the original proof until the same seat has a current pane", async () => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    f.db.prepare("UPDATE bindings SET tmux_pane=NULL WHERE node_id='a'").run();
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await reachable(f);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: before.guardBinding });
+    expect(f.intentOf(f.row.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    f.relaunch("occupant-2", 2, "%2");
+    await reachable(f);
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "delivered", guardBinding: { occupant: "occupant-2", pane: "%2" } });
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+  });
+
+  it("rolls back the claim and binding if its reconciliation audit cannot be recorded", async () => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    f.relaunch("occupant-2", 2, "%2");
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    const log = (f.repo as unknown as { transitionLog: { append(input: { transitionNote?: string }): void } }).transitionLog;
+    const append = log.append.bind(log);
+    vi.spyOn(log, "append").mockImplementation(input => {
+      if (input.transitionNote?.startsWith("queue wake binding reconciled ")) throw new Error("binding audit unavailable");
+      append(input);
+    });
+    await expect(reachable(f)).rejects.toThrow("binding audit unavailable");
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: before.guardBinding });
+    expect(f.intentOf(f.row.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the same proof-only reconciliation when startup draining reaches the intent first", async () => {
+    const f = await failed();
+    f.relaunch("occupant-2", 2, "%2");
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await f.repo.drainPendingWakeIntents();
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "delivered", guardBinding: { nodeId: "a", occupant: "occupant-2", pane: "%2" } });
+    await reachable(f);
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+    expect(f.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the selected binding frozen if it changes again between selection and input", async () => {
+    const f = await failed();
+    f.relaunch("occupant-2", 2, "%2");
+    vi.mocked(f.tmux.probeSession).mockImplementationOnce(async () => {
+      f.relaunch("occupant-3", 3, "%3"); return { state: "present" };
+    });
+    await reachable(f);
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: { nodeId: "a", occupant: "occupant-2", pane: "%2" } });
+    expect(f.repo.getById(f.row.qitemId)!.lastNudgeResult).toMatch(/^failed:.*changed/);
+    expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.sendsFor(f.row.qitemId)).toBe(0);
+  });
+
+  it.each(["claimed", "transferred", "done", "blocked", "handed-off", "quiet", "quiet released", "compaction", "expected identity", "prompt-owned"])
+    ("preserves the old binding and proof during %s custody, including startup draining", async custody => {
+      let compacting = false;
+      const f = await failed(undefined, () => compacting);
+      const before = f.intentOf(f.row.qitemId);
+      f.relaunch("occupant-2", 2, "%2");
+      vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+      if (custody === "claimed") f.repo.claim({ qitemId: f.row.qitemId, destinationSession: "worker@test" });
+      else if (custody === "transferred") f.db.prepare("UPDATE queue_items SET handed_off_from=? WHERE qitem_id=?").run(f.row.qitemId, f.row.qitemId);
+      else if (["done", "blocked", "handed-off"].includes(custody)) f.db.prepare("UPDATE queue_items SET state=? WHERE qitem_id=?").run(custody, f.row.qitemId);
+      else if (custody === "quiet" || custody === "quiet released") {
+        holdForQuiet({ queueRepo: f.repo, jobsRepo: new WatchdogJobsRepository(f.db), qitemId: f.row.qitemId,
+          entityId: "owner", hold: { windowId: "fixture-quiet", occurrence: "until", revision: 1, notificationKey: f.row.qitemId } });
+        if (custody === "quiet released") f.repo.update({ qitemId: f.row.qitemId, actorSession: "quiet@system",
+          transitionNote: `quiet-release-dispatched notification_key=${f.row.qitemId}` });
+      }
+      else if (custody === "compaction") compacting = true;
+      else if (custody === "expected identity") f.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(
+        JSON.stringify({ expectedIdentity: { nodeId: "a", sessionName: "worker@test", runtime: "claude-code", nativeId: "conversation-1" } }), before.outboxId);
+      else f.db.prepare("UPDATE queue_items SET last_nudge_result=? WHERE qitem_id=?").run("failed:target_needs_input", f.row.qitemId);
+      await reachable(f);
+      await f.repo.drainPendingWakeIntents();
+      expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: before.guardBinding });
+      expect(f.intentOf(f.row.qitemId).tags).toContain(proof);
+      expect(f.send).toHaveBeenCalledTimes(1);
+      expect(f.sendsFor(f.row.qitemId)).toBe(0);
+    });
+
+  it("does not reconcile to a different stable seat that reuses the address", async () => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    f.db.exec(`UPDATE nodes SET logical_id='retired' WHERE id='a'; DELETE FROM bindings WHERE node_id='a';
+      INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('b','rig','worker','claude-code');
+      INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('gb','b',1,'other-seat','fresh');
+      INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('bb','b','worker@test','%2');
+      INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sb','b','worker@test','running');`);
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await reachable(f);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: before.guardBinding });
+    expect(f.intentOf(f.row.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.sendsFor(f.row.qitemId)).toBe(0);
   });
 
   it.each(["target_needs_input", "Refused: waiting at an interactive prompt"])("leaves %s to prompt-clear even with a running reading", async reason => {
@@ -217,6 +352,7 @@ describe("a failed queue wake when its seat returns", () => {
     const f = await failed(result === "throw" ? result : { ...result, sessionName: "worker@test" });
     expect(f.intentOf(f.row.qitemId).tags ?? []).not.toContain(proof);
     const before = f.intentOf(f.row.qitemId);
+    f.relaunch("occupant-2", 2, "%2");
     f.send.mockResolvedValue({ ok: true, verified: true, sessionName: "worker@test" });
     await reachable(f);
     expect(f.send).toHaveBeenCalledTimes(1);
@@ -225,8 +361,11 @@ describe("a failed queue wake when its seat returns", () => {
 
   it.each(["sending", "indeterminate", "delivered", "retained", "retired"])("ignores a stale proof tag on a %s intent", async state => {
     const f = await failed();
+    const before = f.intentOf(f.row.qitemId).guardBinding;
     f.db.prepare("UPDATE outbox_entries SET delivery_state=? WHERE outbox_id=?").run(state, f.intentOf(f.row.qitemId).outboxId);
+    f.relaunch("occupant-2", 2, "%2");
     await reachable(f);
+    expect(f.intentOf(f.row.qitemId).guardBinding).toEqual(before);
     expect(f.send).toHaveBeenCalledTimes(1);
     expect(f.intentOf(f.row.qitemId).deliveryState).toBe(state);
   });
@@ -335,6 +474,7 @@ describe("a failed queue wake when its seat returns", () => {
       const entry = f.intentOf(row.qitemId);
       f.db.prepare("UPDATE outbox_entries SET tags=? WHERE outbox_id=?").run(JSON.stringify([...(entry.tags ?? []), "queue:return:paired"]), entry.outboxId);
     }
+    f.relaunch("occupant-2", 2, "%2");
     f.send.mockImplementationOnce(async (_session, _text, opts) => {
       // Under the lease the ordinary member is now held; the urgent peer is removed, not attempted.
       const selected = opts!.recheckMembers!((input) => !input.urgent, true);

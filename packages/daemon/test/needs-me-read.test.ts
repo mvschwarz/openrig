@@ -192,6 +192,21 @@ describe("needs-me.read: the attention snapshot", () => {
     const item = (qitemId: string) => snapshot.items.find((i) => i.id === `queue:${qitemId}`);
     expect(item(id)).toMatchObject({ revision: (await f.read(id)).decisionRevision, about: [waiting.qitemId] });
     expect(item(park.qitemId)).toMatchObject({ revision: (await f.read(park.qitemId)).decisionRevision, about: [park.qitemId] });
+    expect(item(id)).not.toHaveProperty("aboutTruncated");
+  });
+
+  it("says when what it lists is partial: about past 100 dependents, and answers read from this daemon only", async () => {
+    const f = fixture(); const id = await f.ask();
+    const waiting: string[] = [];
+    for (let i = 0; i < 101; i++) {
+      waiting.push((await f.repo.create({ sourceSession: ASKER, destinationSession: "owner@test-rig", body: `Waits ${i}`, nudge: false })).qitemId);
+    }
+    f.db.prepare(`UPDATE queue_items SET state = 'blocked', blocked_on = ? WHERE qitem_id IN (${waiting.map(() => "?").join(",")})`).run(id, ...waiting);
+    const item = (await f.attention()).items.find((i) => i.id === `queue:${id}`);
+    expect(item?.about).toHaveLength(100);
+    expect(item).toMatchObject({ aboutTruncated: true });
+    // No answer here isn't proof of none: another host's answer isn't read.
+    expect(await f.read(id)).toMatchObject({ answers: [], answersFrom: "this-daemon" });
   });
 });
 
