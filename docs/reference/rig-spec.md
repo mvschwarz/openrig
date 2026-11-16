@@ -1141,17 +1141,18 @@ members:
     not on the daemon's `PATH`, `terminal.inherit_tmux_environment` on (a seat with a limit needs the scoped launch
     environment: set it to false), a daemon that gives seats no launch environment, or a seat placed in an environment
     guest (its agent runs in the guest, and a scope on this host would hold only the local viewer);
-  - `process_limits_unverified` (retryable) when it isn't known either way: the user manager timed out or its socket
-    refused the connection (starting or restarting), the probe read nothing or output it could not understand, an error not recognized, a launch setting
-    that couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
+  - `process_limits_unverified` (retryable, save where said below) when it isn't known either way: the user manager
+    timed out or its socket refused the connection (starting or restarting), the probe read nothing or output it could
+    not understand, an error not recognized, a launch setting that couldn't be read, a failed check from the last
+    minute (reported with its age), or a scope start the launch
     didn't see in time (its new session is removed, by the identity tmux printed when it made it, and the seat is never
     started again without the limit; when it can't be removed, the refusal says the session may still be running and
     how to stop it, without a retry, and its `processLimits` carries `possiblyRunning: true` and `retryable` false). What
     was seen of the command is said apart from what became of its terminal: only a start that failed before the command
     (the pane died with its start marker still pending) reads "not started" and retryable. When the command started in
     the scope but its process wasn't seen there in time, when the time ran out with the pane still alive (its wrapper
-    can still start the command after the last look), or when its pane or its start marker couldn't be read, the refusal says the
-    command started (or may have), what became of its terminal, and suggests no retry:
+    can still start the command after the last look), or when its pane or its start marker couldn't be read, the
+    refusal says the command started (or may have), what became of its terminal, and suggests no retry:
     `processLimits.commandStarted` is `true` or `"unknown"`, and `retryable` is false. A capped launch whose `new-session`
     printed no pane and whose session can't be read back is refused the same possibly-running way (a session positively
     absent stays `session_not_created`). The first launch after that minute checks again, so a setup fixed meanwhile is
@@ -1172,7 +1173,8 @@ members:
   seat and then fails for its limit. A scope failure late in the path (after the check) starts the seat again without
   the limit only when the seat's command is seen not to have started in the scope; when that can't be told (the start
   wasn't seen in time, or the command started in the scope and ended), nothing is run a second time, and the warning
-  reads `state: "unknown"`. A restart in place keeps the process tree it has (and a limit already applied to it); when
+  reads `state: "unknown"`, with `commandStarted` (`true` or `"unknown"`) as in the fresh refusal; its `retryable` only
+  says the limit check may pass at the next fresh launch, since nothing is refused or run again. A restart in place keeps the process tree it has (and a limit already applied to it); when
   that process's limit can't be read back, its warning reads `unknown`. A bare agent pane's respawn carries no seat
   environment: it keeps the limit, in a new scope, only when the running process reads back as `applied` and a new
   scope can be made; otherwise it comes back without the limit, with the warning.

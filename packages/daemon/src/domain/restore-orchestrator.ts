@@ -24,7 +24,7 @@ import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { CheckpointStore } from "./checkpoint-store.js";
 import { NO_TERMINAL_LAUNCH_CODES, NOTHING_STOPPED_LAUNCH_CODES, type NodeLauncher } from "./node-launcher.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { noticeLine, type TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import { seatRuntimeHome } from "./seat-runtime-home.js";
@@ -1913,7 +1913,8 @@ export class RestoreOrchestrator {
     rigId: string,
     data: SnapshotData,
     sessionName: string,
-    launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
+    launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding;
+      processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice },
     opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
@@ -2327,6 +2328,11 @@ export class RestoreOrchestrator {
           // #3253: this replaces the provisional shell of a restore, so it is a recovery too: a limit that can't be
           // applied doesn't stop the seat, and its notice is the node's.
           const fresh = await this.freshLaunch(rigId, node.id, { processLimitsMode: "recovery" });
+          // The retired provisional shell's process-limits line no longer describes the seat: the replacement reports its
+          // own (or none, when it applied the limit), so the same notice is never printed twice.
+          const staleLimits = launchResult.processLimits ? noticeLine(launchResult.processLimits) : undefined;
+          const stale = staleLimits && warnings ? warnings.lastIndexOf(staleLimits) : -1;
+          if (stale >= 0) warnings!.splice(stale, 1);
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
           // The replacement's own outcome, also when it applied the limit (no notice): the retired provisional shell's
           // notice no longer describes the seat (the key is set either way, so the caller doesn't fall back to it).
