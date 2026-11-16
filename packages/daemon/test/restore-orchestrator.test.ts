@@ -47,6 +47,8 @@ import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.j
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import type { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { createHash } from "node:crypto";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { noticeHarnessNotStarted } from "../src/domain/harness-not-started-notice.js";
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 
@@ -3015,6 +3017,34 @@ describe("RestoreOrchestrator", () => {
       seats: [{ nodeId: result.result.nodes[0]!.nodeId, logicalId: "dev.moved", cause: "Harness not started: no startup context for dev.moved." }],
     }));
     expect(result.result.harnessNotStarted).toEqual(report);
+  });
+
+  it("a full restore reports a recreated seat's current session to its owner", async () => {
+    const { node: savedNode, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(savedNode.id);
+    const current = rigRepo.addNode(snap.rigId, "dev.moved", { runtime: "claude-code", podId: savedNode.podId! });
+    const lead = rigRepo.addNode(snap.rigId, "lead", { runtime: "claude-code" });
+    sessionRegistry.registerSession(lead.id, "lead@test-rig");
+    rigRepo.addEdge(snap.rigId, lead.id, current.id, "delegates_to");
+    const queue = new QueueRepository(db, eventBus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
+    const result = await createOrchestrator({ harnessNotStartedNotice: input => noticeHarnessNotStarted(db, queue, input) })
+      .restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const shell = sessionRegistry.getSessionsForRig(snap.rigId).find(session => session.nodeId === current.id)!;
+    expect(shell).toMatchObject({ nodeId: current.id, startupStatus: "attention_required" });
+    expect(result.result.harnessNotStarted).toMatchObject({
+      notices: [{ owner: "lead@test-rig", seats: [shell.sessionName] }], unrouted: [], warnings: [],
+    });
+    expect(result.result.nodes[0]).toMatchObject({ nodeId: current.id, stage: "harness_not_started" });
+    const failure = db.prepare("SELECT node_id FROM events WHERE type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1")
+      .get() as { node_id: string };
+    expect(failure.node_id).toBe(current.id);
+    const notice = queue.getById(result.result.harnessNotStarted!.notices[0]!.qitemId)!;
+    expect(notice.body).toContain(`- ${shell.sessionName}: Harness not started: no startup context for dev.moved.`);
+    expect(snapshotRepo.getSnapshot(snap.id)!.data.nodes[0]!.id).toBe(savedNode.id);
+    expect(adapter.launchHarness).not.toHaveBeenCalled();
   });
 
   it("carries a partial notice report, and its warnings join the restore's", async () => {

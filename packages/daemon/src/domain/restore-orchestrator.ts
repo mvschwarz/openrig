@@ -1515,7 +1515,8 @@ export class RestoreOrchestrator {
     const compensation = { ran: false };
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
-    const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
+    // Saved inputs stay keyed by the snapshot; the result names the seat that the launcher actually registered.
+    const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings), nodeId: launchResult.session.nodeId,
       ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id,
@@ -2212,7 +2213,7 @@ export class RestoreOrchestrator {
         if (this.freshLaunchAvailable && !this.freshLaunchAvailable(rigId, node.id)) {
           const error = `Harness not started: no usable persisted launch recipe for ${node.logicalId}.`;
           warnings?.push(`Restore: ${error}`);
-          this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
+          this.markHarnessNotStarted(rigId, launchResult.session.nodeId, launchResult.session.id, error);
           return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
         }
         const retired = await this.retireProvisionalSession(node.id, sessionName, launchResult.session.id);
@@ -2245,7 +2246,7 @@ export class RestoreOrchestrator {
       const cause = replayCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
-      this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
+      this.markHarnessNotStarted(rigId, launchResult.session.nodeId, launchResult.session.id, error);
       return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
     }
 
