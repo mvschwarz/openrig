@@ -307,7 +307,8 @@ function plannedOwnerText(slice: SliceFacts): string {
 function nextText(slice: SliceFacts): string | null {
   const seq = slice.sequencing;
   if (!seq) return null;
-  if (outcomeComplete(slice) || slice.work.length) return null;
+  // The daemon sets next_up without reading the status, so a slice closed in place can still arrive marked next_up.
+  if (outcomeComplete(slice) || slice.work.length || explicitCloseWord(slice)) return null;
   if (seq["next_up"] === true) return "ready to start";
   if (blockerText(seq["blocked_on_rows"])) return null; // the problem column carries it
 
@@ -483,7 +484,7 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   const attributed = slices.some(slice => slice.readiness?.configured);
   const done = slices.filter(outcomeComplete).length;
   const allComplete = slices.length > 0 && done === slices.length;
-  const next = slices.find(slice => nextText(slice) === "ready to start") ?? slices.find(slice => !outcomeComplete(slice) && !slice.work.length);
+  const next = slices.find(slice => nextText(slice) === "ready to start") ?? slices.find(slice => !outcomeComplete(slice) && !slice.work.length && !explicitCloseWord(slice));
   const unknown = slices.filter(slice => !slice.readiness?.configured).length;
   const missionState = allComplete ? "OUTCOMES COMPLETE" : "OUTCOMES OPEN";
   const missionToken: Token = problems ? "warn" : allComplete ? "ok" : "dim";

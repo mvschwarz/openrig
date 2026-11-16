@@ -70,7 +70,7 @@ describe("#2761 execution view on the default flow", () => {
   });
 
   type ReadinessItemState = "accepted" | "rejected" | "withdrawn";
-  type Row = { word: string; bucket: string; items?: ReadinessItemState[] };
+  type Row = { word: string; bucket: string; items?: ReadinessItemState[]; nextUp?: true };
 
   /** A mission whose slices each carry the status word the daemon bucketed, and optionally judged proof items. */
   function missionOf(rows: Row[]) {
@@ -82,7 +82,7 @@ describe("#2761 execution view on the default flow", () => {
       derived_at: "2026-11-11T00:00:00.000Z",
       sources: { git: { basis: "no reachable repo context" }, build_info: { commit: null } },
       q1_lanes: [],
-      q2_sequencing: ids.map((id, i) => ({ slice_id: id, dir: dir(i), depends_on: [], blocked_on_rows: [], next_up: "INDETERMINATE",
+      q2_sequencing: ids.map((id, i) => ({ slice_id: id, dir: dir(i), depends_on: [], blocked_on_rows: [], next_up: rows[i]!.nextUp ?? "INDETERMINATE",
         next_up_basis: "own completion rung INDETERMINATE", next_up_rank: null })),
       q3_care: ids.map((id) => ({ slice_id: id, build_wave: "w1" })),
       q4_ladder: ids.map((id, i) => ({
@@ -135,6 +135,21 @@ describe("#2761 execution view on the default flow", () => {
       expect(strip).toContain(`declared    ${row.word} (slice file)`);
       expect(strip).toContain(`next        none — declared ${row.word}`);
     });
+  });
+
+  it("#2727 keeps an in-place closed-deferred slice whose dependencies are met out of NEXT, so it never reads ready to start", () => {
+    // The daemon's sequencing sets next_up without reading the status, so a slice closed in place with nothing left to wait
+    // on still arrives marked next_up. Neither the ready-to-start pick nor the overview's fallback pick may land on it.
+    const { execution, scopes } = missionOf([
+      { word: "closed-deferred", bucket: "closed", nextUp: true },
+      { word: "active", bucket: "active" },
+    ]);
+    const body = text(executionContentLines(execution, scopes, [], null, 200));
+    expect(body).toContain("NEXT      ND.2 · dependency eligibility unknown");
+    expect(body).not.toContain("ready to start");
+    const page = text(executionContentLines(execution, scopes, [], "slice:ND.1", 200));
+    expect(page).toContain("next:         no next transition derived");
+    expect(page).not.toContain("ready to start");
   });
 
   it("#2727 keeps a delivered slice's accepted proof reading outcome complete and an open slice's rejected proof reading reopened", () => {
