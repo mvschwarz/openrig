@@ -559,6 +559,52 @@ describe("RestoreOrchestrator", () => {
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe("running");
   });
 
+  // #3250's follow-up (CodeRabbit's Minor): an older session of the replaced seat, still recorded running with no tmux
+  // session, is stale; the seat's current session is the live one the replacement targets, so it isn't called detached.
+  it("names a replaced seat by its current session, not by an older stale session of the same seat", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-shared", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-shared" });
+    const parent = rigRepo.addNode(rig.id, "dev.parent", { runtime: "claude-code", podId: "pod-shared" });
+    const name = "dev-impl@test-rig";
+    const older = sessionRegistry.registerSession(node.id, "r01-dev-impl");
+    await new Promise((resolve) => setTimeout(resolve, 5)); // a later ULID millisecond: the live session is the seat's newest
+    const live = sessionRegistry.registerSession(node.id, name);
+    expect(live.id > older.id).toBe(true);
+    sessionRegistry.updateStatus(live.id, "running");
+    sessionRegistry.updateResumeToken(live.id, "claude_id", "snapshot-token", "scrape");
+    const held = sessionRegistry.registerSession(parent.id, "dev-parent@test-rig");
+    sessionRegistry.updateStatus(held.id, "running");
+    sessionRegistry.updateResumeToken(held.id, "claude_id", "parent-conv", "scrape");
+    for (const id of [node.id, parent.id]) {
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(id, "[]", "[]", "[]", "claude-code");
+    }
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(older.id, "running");
+    sessionRegistry.updateResumeToken(live.id, "claude_id", "parent-conv", "operator");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
+    sessionRegistry.updateBinding(parent.id, { tmuxSession: "dev-parent@test-rig", tmuxPane: "%2" });
+    let up = true;
+    const tmux = mockTmux();
+    Object.assign(tmux, {
+      hasSession: vi.fn(async (session: string) => up && session === name),
+      probeSession: vi.fn(async (session: string) => ({ state: up && session === name ? "present" : "absent" })),
+      killSession: vi.fn(async () => { up = false; return { ok: true as const }; }),
+      createSession: vi.fn(async () => { up = true; return { ok: true as const }; }),
+      startServer: vi.fn(async () => ({ ok: true as const })),
+      listSessions: vi.fn(async () => up ? [{ name }] : []),
+    });
+    const result = await createOrchestrator({ tmux }).restore(snap.id, {
+      automaticReplacements: [{ nodeId: node.id, sessionId: live.id, resumeType: "claude_id", resumeToken: "parent-conv", corrected: true }] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const named = result.result.warnings.filter((line) => line.includes("outside this restore"));
+    expect(named).toHaveLength(1);
+    expect(named[0]).toContain("dev.impl@test-rig (running) has the same recorded claude_id conversation as dev-parent@test-rig (running)");
+    // The older session is still the one the restore marks detached.
+    expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(older.id) as { status: string }).status).toBe("detached");
+  });
+
   it("refuses an explicit snapshot for a recreated logical seat before changing state", async () => {
     const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [],
       resumeType: "claude_id", resumeToken: "old-conversation" });
