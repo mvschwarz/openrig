@@ -599,8 +599,14 @@ export class InboundRouter {
         return { status: "handler-failed", reason: "answer-continuation-failed" };
       }
     }
-    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts,
-      ...(who.entityId ? { identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId } : {}) });
+    let recorded: RecordHumanAnswerResult | undefined;
+    try {
+      recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts,
+        ...(who.entityId ? { identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId } : {}) });
+    } catch (e) {
+      this.deps.log?.(`answer recording failed qitem=${qitemId}: ${(e as Error).message}`);
+      return { status: "handler-failed", reason: "answer-recording-failed" };
+    }
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
       // Another person's committed answer is the answer: a park on the person resumes with it through the resolver.

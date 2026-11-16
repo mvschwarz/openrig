@@ -99,6 +99,34 @@ describe("structured human questions (#193)", () => {
     });
   });
 
+  it("dead-letters an answer-recording failure and retries the same click", async () => {
+    const { qitemId } = await repo.create({ ...request, humanIntent: "decision", humanQuestions: questions });
+    const payload = { type: "block_actions", user: { id: "UFOUNDER" }, channel: { id: "C-TEST" },
+      container: { message_ts: "1.1" },
+      actions: [{ block_id: "or-q:db", action_id: "or-opt:pg", action_ts: "1000.5" }] };
+    const actions = new DeadLetterStore<typeof payload>(join(home, "actions.jsonl"));
+    const log = vi.fn();
+    const record = vi.spyOn(repo, "recordHumanAnswer").mockImplementationOnce(() => { throw new Error("answer write failed"); });
+    try {
+      const router = new InboundRouter({
+        queue: makeQueuePorts(repo, { loadHumanRegistry: () => registry }),
+        seen: new SeenStore(join(home, "seen.jsonl")), deadLetter: new DeadLetterStore(join(home, "events.jsonl")),
+        actionDeadLetter: actions, destination: request.sourceSession,
+        resolveSender: () => ({ admitted: true, source: human }),
+        resolveRoute: () => ({ destination: request.sourceSession, correlationQitemId: qitemId }),
+        recordHumanAnswer: (input) => repo.recordHumanAnswer(input), log,
+      });
+      await expect(router.routeAction(payload)).resolves.toEqual({ status: "handler-failed", reason: "answer-recording-failed" });
+      expect(actions.readAll()).toMatchObject([{ ev: payload, attempts: 1 }]);
+      expect(repo.getById(qitemId)?.humanAnswers).toBeNull();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("answer write failed"));
+      await expect(router.retryDeadLetters()).resolves.toMatchObject({ retried: 1, landed: 1 });
+      expect(actions.readAll()).toEqual([]);
+      expect(repo.getById(qitemId)?.humanAnswers).toEqual({ db: "pg" });
+      expect(record).toHaveBeenCalledTimes(2);
+    } finally { record.mockRestore(); }
+  });
+
   describe("recording answers", () => {
     const answer = (qitemId: string, questionId: string, optionId: string, actorSession = human) => repo.recordHumanAnswer({ qitemId, actorSession, questionId, optionId });
 
