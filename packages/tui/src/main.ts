@@ -45,6 +45,7 @@ import type { SpecReviewCache } from "./hydrate.js";
 import { MOTION_FRAME_MS } from "./visual-layout.js";
 import { launchProcess, runSpecLaunch } from "./specs/launch.js";
 import { runCopySession, processCopyTerminal } from "./print-for-copy.js";
+import { isBoundSocketCopy } from "./socket-copy.js";
 import { openTerminalInWindow, terminalWindowNotice } from "./terminals/open-window.js";
 
 function argOf(args: string[], flag: string): string | undefined {
@@ -574,7 +575,7 @@ async function run(): Promise<void> {
       // contexts, whose input handlers otherwise consume the status-row click.
       if (ev.type === "mouse" && ev.button === 0 && lastScreen) {
         const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
-        if (socket && hit?.action.type === "print-for-copy" && hit.action.value === socket.path) {
+        if (socket && hit && isBoundSocketCopy(hit.action as { type: string; value?: string }, socket.path)) {
           perform(hit.action);
           return;
         }

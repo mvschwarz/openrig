@@ -137,7 +137,9 @@ describe("Print link to copy — emitted bytes and normal return", () => {
   });
 
   it("a value that contains a line break is still printed as one line", () => {
-    expect(printForCopyText("l", "a\nb\r\nc").split("\r\n")).toContain("abc");
+    // A line break is a control byte, and control bytes become spaces rather than disappearing: two
+    // fields a break separated must not run together in what the operator copies.
+    expect(printForCopyText("l", "a\nb\r\nc").split("\r\n")).toContain("a b  c");
   });
 });
 
