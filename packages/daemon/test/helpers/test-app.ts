@@ -467,6 +467,8 @@ export function createTestApp(
     resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (nodeId, generation) =>
       sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
+    isOccupantContinuedByAdoption: (nodeId, generation) =>
+      sessionRegistry.isOccupantContinuedByAdoption(nodeId, generation),
   });
   const contextUsageStore = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test", runnerObservations: agentActivityStore });
   const healthProjection = new HealthProjectionService(new LiveContextHealthSource({

@@ -559,6 +559,66 @@ describe("AgentActivityStore — generation identity (W2a-1)", () => {
     });
   });
 
+  // A no-launch adoption (rig adopt, reconcile-session, attach --self) mints a new tenure for the same live process,
+  // whose hooks still carry the launch-time generation (the env is set only at launch). That generation is the current
+  // occupant's, as the session-identity route reads it (#2796); a launch after it is what makes it a prior tenure.
+  it("REAL ledger: a generation followed only by adoptions reads current; a launch after it is a mismatch", () => {
+    const { node, sessionName } = seedGenSession();
+    const store = new AgentActivityStore({
+      db,
+      eventBus,
+      now: () => NOW,
+      resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+      isRegisteredOccupantGeneration: (nodeId, generation) => sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
+      isOccupantContinuedByAdoption: (nodeId, generation) => sessionRegistry.isOccupantContinuedByAdoption(nodeId, generation),
+    });
+    const launched = sessionRegistry.mintOccupantTenure(node.id, "initial", "boot-A").generationUuid;
+    store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "Stop", occurredAt: "2026-04-24T11:59:00.000Z", generation: launched });
+
+    const adopted = sessionRegistry.mintOccupantTenure(node.id, "adopt").generationUuid;
+    sessionRegistry.mintOccupantTenure(node.id, "adopt");
+    expect(sessionRegistry.currentOccupantTenure(node.id)?.generationUuid).not.toBe(launched);
+    expect(adopted).not.toBe(launched);
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({
+      state: "idle",
+      reason: "stop",
+      stale: false,
+      generationProvenance: "resolved",
+    });
+
+    // A launch after the adoptions replaced that process: its launch-time generation is now a prior tenure.
+    sessionRegistry.mintOccupantTenure(node.id, "fresh", "boot-B");
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({
+      state: "unknown",
+      reason: "generation_mismatch",
+      stale: true,
+      generationProvenance: "resolved",
+    });
+  });
+
+  it("an adoption-ledger fault degrades to generation_resolver_error, never fresh or mismatch", () => {
+    const { node, sessionName } = seedGenSession();
+    const launched = sessionRegistry.mintOccupantTenure(node.id, "initial", "boot-A").generationUuid;
+    sessionRegistry.mintOccupantTenure(node.id, "adopt");
+    const store = new AgentActivityStore({
+      db,
+      eventBus,
+      now: () => NOW,
+      resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+      isRegisteredOccupantGeneration: () => true,
+      isOccupantContinuedByAdoption: () => {
+        throw new Error("ledger read failed");
+      },
+    });
+    store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "Stop", generation: launched });
+
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({
+      state: "unknown",
+      reason: "generation_resolver_error",
+      stale: true,
+    });
+  });
+
   // (6) RESOLVER EXCEPTION ⇒ DEGRADE. The live-generation resolver throws (a transient ledger/db
   // fault). The read must NOT crash and must NOT render fresh: a distinct unknown/generation_resolver_
   // error verdict, stale, provenance unresolved. Record does not resolve the generation (source-bound),
