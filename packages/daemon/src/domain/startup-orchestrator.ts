@@ -1,3 +1,4 @@
+import { ActivityGrantStore } from "./activity-grants.js";
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { randomUUID } from "node:crypto";
@@ -414,6 +415,7 @@ export class StartupOrchestrator {
           ? "rebuilt"
           : "fresh";
     let appliedLaunch: AppliedLaunchObservation | undefined;
+    let activityGrantId: string | undefined;
     let resumedProcess: { pid: number; startedAt: string } | undefined;
     const forkContext: PendingForkContext | undefined = input.adapter.runtime === "codex"
       && input.forkSource?.kind === "native_id" && input.forkSource.value?.trim()
@@ -691,6 +693,7 @@ export class StartupOrchestrator {
             warnings.push(`Model "${launchResult.modelInput.model}": the launch command's send is uncertain, so it isn't recorded as passed.`);
           }
           if (launchResult.ok) {
+            activityGrantId = launchResult.activityGrantId;
             appliedLaunch = launchResult.appliedLaunch;
             resumedProcess = launchResult.resumedProcess;
             if (input.adapter.runtime === "claude-code" && launchResumeToken?.trim()) {
@@ -820,6 +823,7 @@ export class StartupOrchestrator {
       const readinessTimeoutMs = resolveReadinessTimeoutMs(input.readinessTimeoutMs, this.readinessSettings);
       const readiness = await this.waitForReady(input.adapter, input.binding, readinessTimeoutMs);
       if (!readiness.ready) {
+        if (activityGrantId) new ActivityGrantStore(this.db).revoke({ grantId: activityGrantId }, "readiness_failed");
         const hasPendingReadinessWork = getPendingReadinessWork();
         if (isAttentionRequiredReadinessCode(readiness.code)) {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
@@ -829,6 +833,7 @@ export class StartupOrchestrator {
         return this.fail(input, forkContext ? "attention_required" : "failed", errors, undefined, forkContext ?? false, undefined, false, "readiness_check", hasPendingReadinessWork);
       }
     } catch (err) {
+      if (activityGrantId) new ActivityGrantStore(this.db).revoke({ grantId: activityGrantId }, "readiness_failed");
       errors.push(`Readiness check error: ${(err as Error).message}`);
       return this.fail(input, "failed", errors, undefined, false, undefined, false, "readiness_check", getPendingReadinessWork());
     }
@@ -994,6 +999,7 @@ export class StartupOrchestrator {
       try {
         const readiness = await input.adapter.checkReady(input.binding);
         if (!readiness.ready && isAttentionRequiredReadinessCode(readiness.code)) {
+          if (activityGrantId) new ActivityGrantStore(this.db).revoke({ grantId: activityGrantId }, "post_delivery_readiness_failed");
           // A fresh Claude start whose last startup turn was refused hasn't read what that turn sent: it's owed too.
           const refusedLast = input.adapter.runtime === "claude-code" && isFreshLaunch && deliveryInput.sendOrder > 0
             ? owed([], readiness) : null;

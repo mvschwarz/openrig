@@ -1,7 +1,14 @@
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { claudePostureFlag, codexPostureArg } from "../adapters/yolo-mode.js";
+import { operationalLaunchArg } from "../adapters/kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "./claude-mcp.js";
+import { codexMemberLaunch, type CodexMemberPermissions } from "./codex-member-permissions.js";
+import {
+  observeCodexSandbox,
+  type AppliedLaunchObservation,
+  type CodexObservedApprovalPolicy,
+} from "./permission-drift.js";
 
 // L3 adds `attention_required` for the Claude resume-selection prompt proxy.
 // Distinct from `inconclusive` (we don't know yet) and `failed` (terminal
@@ -32,6 +39,33 @@ export interface ProbeShellReadyInput {
   paneContent: string | null;
 }
 
+export type CodexResumeLabelStatus =
+  | "recorded_match"
+  | "recorded_difference"
+  | "recorded_uncertain"
+  | "no_recorded_launch";
+
+export interface CodexResumeDisplayInput {
+  codexConfigProfile?: string | null;
+  codexDaemonOptOut?: boolean;
+  codexPermissions?: CodexMemberPermissions;
+  resolvedPosture?: "floor" | "full_bypass" | "auto";
+  /** True when the effective persisted restore posture is the empty string (""), so managed resume falls back to
+   *  daemon OPENRIG_YOLO at restore time while the displayed command uses the normalized floor fallback. */
+  emptySavedPosture?: boolean;
+  nonInterruptive?: boolean;
+  kernelAuthority?: boolean;
+  teamPermissionDefault?: boolean;
+  recordedLaunch?: AppliedLaunchObservation | null;
+  launchWrapper?: readonly string[] | null;
+}
+
+export interface CodexResumeDisplay {
+  command: string;
+  status: CodexResumeLabelStatus;
+  label: string | null;
+}
+
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 // Provider model identifiers are not limited to the default gpt-* family.
 // Keep the fallback structural so ordinary status prose cannot prove readiness.
@@ -44,6 +78,198 @@ const CODEX_RENDERED_SUFFIX = "(?: [A-Z][A-Za-z0-9]*)? (?:default|none|minimal|l
 const CODEX_RENDERED_GPT_FIELD = new RegExp(`^[Gg][Pp][Tt]-\\d[\\w.-]*${CODEX_RENDERED_SUFFIX}$`);
 const CODEX_RENDERED_MODEL_FIELD = new RegExp(`^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\\d[A-Za-z0-9._:/@-]*${CODEX_RENDERED_SUFFIX}(?:\\s+⚠ \\d+ warnings?)?$`);
 
+const CODEX_PERMISSION_PROFILE_VALUE = "permissions:";
+
+// A filesystem choice records its permission profile as the sandbox value; show the flag that selects it.
+function codexSandboxFlag(sandbox: string): string {
+  return sandbox.startsWith(CODEX_PERMISSION_PROFILE_VALUE)
+    ? `-c default_permissions=${JSON.stringify(sandbox.slice(CODEX_PERMISSION_PROFILE_VALUE.length))}`
+    : `-s ${sandbox}`;
+}
+
+function formatCurrentCodexFlags(
+  sandbox: string,
+  approval: CodexObservedApprovalPolicy | null | undefined,
+): string {
+  return approval ? `${codexSandboxFlag(sandbox)} -a ${approval}` : codexSandboxFlag(sandbox);
+}
+
+function formatRecordedCodexFlags(
+  sandbox: string,
+  approval: CodexObservedApprovalPolicy | null | undefined,
+): string {
+  // Historical launch observations (and floor launches without an explicit -a flag) store approval_policy as NULL;
+  // never infer an approval value from current settings or claim NULL proves no -a flag was emitted.
+  return approval ? `${codexSandboxFlag(sandbox)} -a ${approval}` : `${codexSandboxFlag(sandbox)} (approval unrecorded)`;
+}
+
+const CODEX_LAUNCH_WRAPPER_OMISSION_LABEL = "omits launch_wrapper (managed resume uses the wrapper)";
+
+function composeCodexResumeLabel(baseLabel: string | null, hasLaunchWrapper: boolean): string | null {
+  if (!hasLaunchWrapper) return baseLabel;
+  return baseLabel ? `${baseLabel}; ${CODEX_LAUNCH_WRAPPER_OMISSION_LABEL}` : CODEX_LAUNCH_WRAPPER_OMISSION_LABEL;
+}
+
+export function buildCodexResumeDisplay(
+  resumeToken: string,
+  input: CodexResumeDisplayInput = {},
+  opts?: { useLast?: boolean },
+): CodexResumeDisplay {
+  const profile = input.codexConfigProfile ?? null;
+  const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
+  const effectivePosture = input.resolvedPosture ?? "floor";
+  const permissions = input.codexPermissions;
+  const choice = permissions ? codexMemberLaunch(permissions) : undefined;
+  // Derive displayed flags from the same three inputs adapters/codex-resume.ts uses (the member's permission choice,
+  // envelope or filesystem; resolved posture with an empty env so ambient OPENRIG_YOLO never leaks; and operationalLaunchArg).
+  const posture = choice ? profileArg + choice.args : codexPostureArg(profileArg, {}, effectivePosture);
+  const postureArg = posture + operationalLaunchArg(
+    "codex",
+    choice
+      ? { nonInterruptive: input.nonInterruptive }
+      : {
+          kernelAuthority: input.kernelAuthority,
+          teamPermissionDefault: input.teamPermissionDefault,
+          nonInterruptive: input.nonInterruptive,
+          launchPosture: effectivePosture,
+        },
+  );
+  const daemonOptOut = (input.codexDaemonOptOut ?? input.recordedLaunch?.daemonOptOut) === true;
+  const command = buildCodexResumeCore(
+    resumeToken,
+    profile,
+    opts?.useLast,
+    undefined,
+    effectivePosture,
+    undefined,
+    postureArg,
+    daemonOptOut,
+  );
+  const hasLaunchWrapper = Boolean(input.launchWrapper && input.launchWrapper.length > 0);
+
+  let currentSandbox: string | null = null;
+  let currentApproval: CodexObservedApprovalPolicy | null | undefined = null;
+  let currentFlags: string;
+  if (choice && permissions) {
+    currentSandbox = choice.observation.value;
+    // A filesystem on-request launch records no approval, so it can't prove a match; the flags still show it.
+    currentApproval = choice.observation.approvalPolicy ?? null;
+    currentFlags = formatCurrentCodexFlags(currentSandbox!, permissions.approval);
+  } else {
+    const obs = observeCodexSandbox(posture);
+    if (obs.state === "observed" && obs.value) {
+      currentSandbox = obs.value;
+      currentApproval = obs.approvalPolicy ?? null;
+      currentFlags = formatCurrentCodexFlags(currentSandbox, currentApproval);
+    } else {
+      currentFlags = posture.trim();
+    }
+  }
+
+  const recorded = input.recordedLaunch ?? null;
+  const hasObservedRecord = recorded !== null
+    && recorded.runtime === "codex"
+    && recorded.axis === "sandbox"
+    && recorded.state === "observed"
+    && recorded.value !== null;
+
+  if (!choice && input.emptySavedPosture) {
+    const fallbackClause = `saved posture empty, showing fallback ${currentFlags} (managed resume posture unknown)`;
+    if (!hasObservedRecord) {
+      return {
+        command,
+        status: "no_recorded_launch",
+        label: composeCodexResumeLabel(fallbackClause, hasLaunchWrapper),
+      };
+    }
+    const recordedFlags = formatRecordedCodexFlags(recorded.value!, recorded.approvalPolicy ?? null);
+    return {
+      command,
+      status: "recorded_uncertain",
+      label: composeCodexResumeLabel(`launched with ${recordedFlags}; ${fallbackClause}`, hasLaunchWrapper),
+    };
+  }
+
+  if (!hasObservedRecord) {
+    return {
+      command,
+      status: "no_recorded_launch",
+      label: composeCodexResumeLabel("flags from current settings", hasLaunchWrapper),
+    };
+  }
+
+  const recordedApproval = recorded.approvalPolicy ?? null;
+  const recordedFlags = formatRecordedCodexFlags(recorded.value!, recordedApproval);
+  // A filesystem launch records only the profile name, never its entries, so the same name can't prove the same policy.
+  if (permissions && "filesystem" in permissions && recorded.value === currentSandbox && recordedApproval === currentApproval) {
+    return {
+      command,
+      status: "recorded_uncertain",
+      label: composeCodexResumeLabel(
+        `launched with ${recordedFlags}; the launch record doesn't keep the filesystem entries; a resume now uses ${currentFlags}`,
+        hasLaunchWrapper,
+      ),
+    };
+  }
+
+  // A NULL approval_policy cannot distinguish a plain floor launch without -a from a pre-upgrade envelope whose
+  // on-request/untrusted approval was not recorded, so only a non-null recorded approval can prove recorded_match.
+  if (
+    currentSandbox !== null
+    && recorded.value === currentSandbox
+    && recordedApproval !== null
+    && recordedApproval === currentApproval
+  ) {
+    return {
+      command,
+      status: "recorded_match",
+      label: composeCodexResumeLabel(null, hasLaunchWrapper),
+    };
+  }
+
+  const isSameSandboxUnrecordedApproval = currentSandbox !== null
+    && recorded.value === currentSandbox
+    && recorded.value !== "read-only"
+    && recordedApproval === null
+    && currentApproval === null;
+  return {
+    command,
+    status: isSameSandboxUnrecordedApproval ? "recorded_uncertain" : "recorded_difference",
+    label: composeCodexResumeLabel(`launched with ${recordedFlags}; a resume now uses ${currentFlags}`, hasLaunchWrapper),
+  };
+}
+
+export function buildNativeResumeDisplay(
+  runtime: string | null,
+  resumeToken: string | null,
+  sessionName?: string | null,
+  codexConfigProfile?: string | null,
+  /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
+  codexDaemonOptOut?: boolean,
+  claudeMcp?: ClaudeMcp | null,
+  codexDisplay?: CodexResumeDisplayInput,
+  launchWrapper?: readonly string[] | null,
+): { command: string; label: string | null; status?: CodexResumeLabelStatus } | null {
+  if (!resumeToken) return null;
+  if (runtime === "claude-code") {
+    const nameSuffix = sessionName ? ` --name ${shellQuote(sessionName)}` : "";
+    const mcpSuffix = claudeMcpArgs(claudeMcp).map(arg => ` ${shellQuote(arg)}`).join("");
+    return {
+      command: `claude ${claudePostureFlag(process.env)} --resume ${shellQuote(resumeToken)}${nameSuffix}${mcpSuffix}`,
+      label: null,
+    };
+  }
+  if (runtime === "codex") {
+    return buildCodexResumeDisplay(resumeToken, {
+      ...codexDisplay,
+      codexConfigProfile: codexDisplay?.codexConfigProfile !== undefined ? codexDisplay.codexConfigProfile : codexConfigProfile,
+      codexDaemonOptOut: codexDisplay?.codexDaemonOptOut !== undefined ? codexDisplay.codexDaemonOptOut : codexDaemonOptOut,
+      launchWrapper: codexDisplay?.launchWrapper !== undefined ? codexDisplay.launchWrapper : launchWrapper,
+    });
+  }
+  return null;
+}
+
 export function buildNativeResumeCommand(
   runtime: string | null,
   resumeToken: string | null,
@@ -52,17 +278,19 @@ export function buildNativeResumeCommand(
   /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
   codexDaemonOptOut?: boolean,
   claudeMcp?: ClaudeMcp | null,
+  codexDisplay?: CodexResumeDisplayInput,
+  launchWrapper?: readonly string[] | null,
 ): string | null {
-  if (!resumeToken) return null;
-  if (runtime === "claude-code") {
-    const nameSuffix = sessionName ? ` --name ${shellQuote(sessionName)}` : "";
-    const mcpSuffix = claudeMcpArgs(claudeMcp).map(arg => ` ${shellQuote(arg)}`).join("");
-    return `claude ${claudePostureFlag(process.env)} --resume ${shellQuote(resumeToken)}${nameSuffix}${mcpSuffix}`;
-  }
-  if (runtime === "codex") {
-    return buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, codexDaemonOptOut === true);
-  }
-  return null;
+  return buildNativeResumeDisplay(
+    runtime,
+    resumeToken,
+    sessionName,
+    codexConfigProfile,
+    codexDaemonOptOut,
+    claudeMcp,
+    codexDisplay,
+    launchWrapper,
+  )?.command ?? null;
 }
 
 /** Managed Codex seats run tool commands in a non-login shell, so they keep the seat's own environment, including the
@@ -250,7 +478,7 @@ export function assessNativeResumeProbe(
         detail: "Codex reported that the requested saved session does not exist.",
       };
     }
-    if (looksLikeCodexAuthRefusal(paneContent)) {
+    if (currentCodexAuthRefusal(paneContent, paneCommand)) {
       return {
         status: "attention_required",
         code: "codex_auth_refusal",
@@ -726,12 +954,71 @@ function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): 
 //    logged out or signed in to another account. Please sign in again."
 //   "Your access token could not be refreshed. Please log out and sign
 //    in again."
-function looksLikeCodexAuthRefusal(paneContent: string): boolean {
-  if (!paneContent.includes("access token could not be refreshed")) return false;
-  return (
-    paneContent.includes("Please sign in again")
-    || paneContent.includes("Please log out and sign in again")
-  );
+// codex-cli 0.162.1 has those two and three more ("... because your refresh token has expired / was already used / was
+// revoked. Please log out and sign in again."), all starting the same way.
+//
+// The message starts its own row: printed by the CLI, perhaps after `Error:`, or drawn as a TUI error cell (`■`). A row
+// that starts any other way (a reply, a prompt, an indented quote) or sits in a fenced block isn't Codex's message. Its
+// opening words must fit on that first row; the sign-in instruction may wrap onto any number of rows after it.
+const CODEX_AUTH_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )?Your access token could not be refreshed\b/;
+const CODEX_AUTH_INSTRUCTIONS = ["Please sign in again", "Please log out and sign in again"];
+const CODEX_INPUT_ROW = /^\s*[›»](?:\s|$)/;
+const CODEX_MESSAGE_ROW = /^(?:[›»•■]|Error: |ERROR: )/;
+// A shell's own prompt row ends like one. Other prompt endings aren't recognized.
+const SHELL_PROMPT_END = /[$%#>❯]\s?$/;
+const squeeze = (text: string): string => text.replace(/\s+/g, "");
+// Codex's own marks on its message, at column 0: a TUI error cell or the CLI's error label. A row carrying one is Codex's
+// message even inside a fenced block the pane leaves open (a reply cut off mid-block, or one whose opening marker
+// scrolled above the probe's window, which makes its closer read as an opener). An unmarked row there stays a quote.
+const CODEX_MARKED_REFUSAL_ROW = /^(?:■ |Error: |ERROR: )Your access token could not be refreshed\b/;
+// Character wrap at a shell can leave the message's closing period alone on the next row.
+const CLOSING_PUNCTUATION_ROW = /^\.\s*$/;
+
+/** A fence marker row moves fenced-block state: three or more backticks or tildes open a block, and only the same family,
+ *  at least as long, with nothing after it closes it. The state after the row, or undefined when it isn't a marker. */
+function codexFenceAfter(fence: string, line: string): string | undefined {
+  const marker = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!marker) return undefined;
+  if (!fence) return marker[1]!;
+  return marker[1]![0] === fence[0] && marker[1]!.length >= fence.length && !marker[2]!.trim() ? "" : fence;
+}
+
+// A refusal blocks only as the newest thing Codex printed, as Claude's counts only as its latest response
+// (`currentClaudeLoginRefusal`). The message runs from its first row to the row that completes its sign-in instruction;
+// a blank, message or input row before that ends it without one. After it only blank rows may follow, then either
+// Codex's composer (an input row that isn't a numbered option, with its model footer below it and no message), or, for a
+// pane back at its shell, one row that ends like a shell prompt. Anything else (a prompt just submitted, a numbered
+// chooser, a newer reply or error, unrecognized output) means the refusal isn't shown to be current, and the probe goes
+// on to read the rest of the pane.
+function currentCodexAuthRefusal(paneContent: string, paneCommand: string): boolean {
+  const lines = paneContent.split(/\r?\n/);
+  let at = -1;
+  let fence = "";
+  for (let i = 0; i < lines.length; i++) {
+    const next = codexFenceAfter(fence, lines[i]!);
+    if (next !== undefined) fence = next;
+    else if (fence ? CODEX_MARKED_REFUSAL_ROW.test(lines[i]!) : CODEX_AUTH_REFUSAL_ROW.test(lines[i]!)) at = i;
+  }
+  if (at < 0) return false;
+  let end = -1;
+  for (let i = at; i < lines.length && end < 0; i++) {
+    const line = lines[i]!;
+    if (i > at && (line.trim() === "" || CODEX_MESSAGE_ROW.test(line) || CODEX_INPUT_ROW.test(line))) break;
+    const message = squeeze(lines.slice(at, i + 1).join(""));
+    if (CODEX_AUTH_INSTRUCTIONS.some((instruction) => message.includes(squeeze(instruction)))) end = i;
+  }
+  if (end < 0) return false;
+  if (!lines[end]!.trimEnd().endsWith(".") && CLOSING_PUNCTUATION_ROW.test(lines[end + 1] ?? "")) end++;
+  const after = lines.slice(end + 1);
+  let inputAt = -1;
+  for (let i = after.length - 1; i >= 0 && inputAt < 0; i--) if (CODEX_INPUT_ROW.test(after[i]!)) inputAt = i;
+  const below = inputAt < 0 ? [] : after.slice(inputAt + 1);
+  const composer = inputAt >= 0 && hasCodexComposer(after[inputAt]!)
+    && below.some(isCodexModelFooterLine) && !below.some((line) => CODEX_MESSAGE_ROW.test(line));
+  const rows = (composer ? after.slice(0, inputAt) : after).filter((line) => line.trim() !== "");
+  if (rows.length === 0) return true;
+  return !composer && rows.length === 1 && SHELL_COMMANDS.has(paneCommand)
+    && !CODEX_MESSAGE_ROW.test(rows[0]!) && SHELL_PROMPT_END.test(rows[0]!);
 }
 
 function looksLikeCodexLoginPrompt(paneContent: string): boolean {
@@ -740,10 +1027,9 @@ function looksLikeCodexLoginPrompt(paneContent: string): boolean {
   let fence = "";
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    const marker = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
-    if (marker) {
-      if (!fence) fence = marker[1]!;
-      else if (marker[1]![0] === fence[0] && marker[1]!.length >= fence.length && !marker[2]!.trim()) fence = "";
+    const next = codexFenceAfter(fence, line);
+    if (next !== undefined) {
+      fence = next;
       welcome = -1;
     } else if (!fence && line === "  Welcome to Codex, OpenAI's command-line coding agent") {
       welcome = index;

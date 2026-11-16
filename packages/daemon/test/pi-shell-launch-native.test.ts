@@ -127,13 +127,19 @@ setInterval(() => {}, 1000);
         expect(fs.existsSync(path.join(temp, "rc-ready"))).toBe(true);
       }
       const seatLaunchEnvironment = routing ? new SeatLaunchEnvironment(tmux, sessionEnv, cwd, cli) : undefined;
+      const optionalGrant = routing && longTmp ? {
+        grantId: "fixture-grant", generation: launchMode === "resume" ? "existing-generation" : "reserved-generation",
+        wrap: (command: string) => `/bin/sh -c ${quote(`exec ${command}`)}`,
+        dispatched: vi.fn(), finish: vi.fn(async () => {}),
+      } : undefined;
       if (launchMode === "resume") {
         const adapter = new PiResumeAdapter(tmux, fsOps, { stateRoot, runnerEntryPath: runner },
-          { seatLaunchEnvironment, maxWaitMs: 4000, pollMs: 25, newLaunchId: () => "attempt" });
+          { seatLaunchEnvironment, runnerGrant: optionalGrant ? async () => optionalGrant : undefined, maxWaitMs: 4000, pollMs: 25, newLaunchId: () => "attempt" });
         const result = await adapter.resume(session, "pi_session_file", parent, cwd, model);
         expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
       } else {
         const adapter = new PiRuntimeAdapter({ tmux, fsOps, stateRoot, runnerEntryPath: runner, seatLaunchEnvironment,
+          runnerGrants: optionalGrant ? async () => optionalGrant : undefined,
           // The adapter polls 60 times for readiness; 100 ms each gives a loaded runner ~6 s, like the resume path's 4 s.
           sleep: () => new Promise(resolve => setTimeout(resolve, 100)), newLaunchId: () => "attempt" });
         const result = await adapter.launchHarness({ tmuxSession: session, cwd, model, nodeId: "fixture-node", launchGeneration: "reserved-generation" } as never,
@@ -142,10 +148,13 @@ setInterval(() => {}, 1000);
       }
       const received = JSON.parse(fs.readFileSync(path.join(stateRoot, session, "received.json"), "utf8"));
       if (routing && longTmp) {
-        expect(send).toHaveBeenCalledTimes(2);
+        expect(send).toHaveBeenCalledTimes(3); // optional wrapper, original environment command, then main's bare fallback
         expect(Buffer.byteLength(send.mock.calls[0]![1])).toBeGreaterThanOrEqual(1024);
         expect(await send.mock.results[0]!.value).toMatchObject({ ok: false, code: "launch_path_too_long" });
-        expect(send.mock.calls[1]![1]).toBe(expected);
+        expect(await send.mock.results[1]!.value).toMatchObject({ ok: false, code: "launch_path_too_long" });
+        expect(send.mock.calls[2]![1]).toBe(expected);
+        expect(optionalGrant!.finish).toHaveBeenCalledWith(false);
+        expect(optionalGrant!.dispatched).not.toHaveBeenCalled();
         // The supported bare fallback launches; routing correction is best-effort here.
         expect(received.route).toMatchObject({ body: { instance: "wrong-cli" }, home: "/wrong", node: "wrong" });
       } else if (routing) {

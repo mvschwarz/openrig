@@ -279,6 +279,22 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       expect(rows()).toBe(1);
     });
 
+    it("still reads a team whose older seats have no pod, naming them by their recorded session", async () => {
+      namedSeat("team-a", "lead", "lead@team-a");
+      const rig = setup.rigRepo.listRigs().find((r: { name: string }) => r.name === "team-a")!;
+      const flat = setup.rigRepo.addNode(rig.id, "r01-dev", { role: "worker" });
+      setup.sessionRegistry.registerSession(flat.id, "r01-dev@team-a");
+      // No session yet: it can't be named, and it doesn't turn every name into "try again".
+      setup.rigRepo.addNode(rig.id, "r02-qa", { role: "worker" });
+      const { url } = await listen();
+      const ask = await connect(url);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-pod-seat", destination: "lead", body: "Pod seat" })).isError).toBe(false);
+      expect((await ask("rig_queue_create", { qitemId: "qitem-flat-seat", destination: "r01-dev", body: "Flat seat" })).isError).toBe(false);
+      expect(repo.getById("qitem-flat-seat")).toMatchObject({ destinationSession: "r01-dev@team-a" });
+      expect((await ask("rig_queue_create", { destination: "r02-qa", body: "Unnamed" })).structured.code).toBe("destination_not_found");
+      expect(rows()).toBe(2);
+    });
+
     it("an exact name wins over another seat's slug twin, as a name alone and as the configured receiver", async () => {
       namedSeat("team-a", "lead", "pod-lead@team-a");
       namedSeat("team-a", "other", "Pod.Lead@team-a");
@@ -451,6 +467,32 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     expect(created.isError).toBe(false);
     expect(db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM queue_transitions WHERE qitem_id = ?").get(created.structured.qitemId))
       .toEqual({ p: "principal:v1", who: JSON.stringify({ source: "grant-service", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 }) });
+  });
+
+  it("labels who created a row and who made each change apart from this connection, so it doesn't take another's principal as its own", async () => {
+    thisHostsDaemon();
+    const asExternal = await connect((await listen()).url);
+    const you = { seat: CALLER, principal: active().principal.id, grant: active().grant.id, you: true };
+    const own = await asExternal("rig_queue_create", { destination: "lead@team-a", body: "mine" });
+    const shownOwn = await asExternal("rig_queue_show", { qitemId: own.structured.qitemId });
+    expect(shownOwn.structured.viewer).toEqual(you);
+    expect(shownOwn.structured.item.createdBy).toEqual(you);
+    expect(shownOwn.structured.transitions[0].actor).toEqual(you);
+    // A request the team sent to this caller, created under another principal and grant.
+    const sent = await repo.create({ sourceSession: "lead@team-a", destinationSession: CALLER, body: "for you", nudge: false,
+      identityProvenance: "principal:v1", identityPrincipal: JSON.stringify({ source: "grant-service", id: "another-caller-principal", grant: "another-grant-01", version: 2 }) } as never);
+    const shown = await asExternal("rig_queue_show", { qitemId: sent.qitemId });
+    expect(shown.structured.viewer).toEqual(you);
+    expect(shown.structured.item.createdBy).toEqual({ seat: "lead@team-a", principal: "another-caller-principal", grant: "another-grant-01", you: false });
+    expect(shown.structured.transitions.map((t: { actor: { you: boolean } }) => t.actor.you)).not.toContain(true);
+    // This connection's seat with no principal recorded (a write from its terminal) can't be told, and another principal isn't it.
+    await repo.update({ qitemId: sent.qitemId, actorSession: CALLER, transitionNote: "seen from the terminal" } as never);
+    await repo.update({ qitemId: sent.qitemId, actorSession: CALLER, transitionNote: "another connection of this seat", identityProvenance: "principal:v1",
+      identityPrincipal: JSON.stringify({ source: "grant-service", id: "another-caller-principal", grant: "another-grant-01", version: 2 }) } as never);
+    const later = await asExternal("rig_queue_show", { qitemId: sent.qitemId });
+    const actorOf = (note: string) => later.structured.transitions.find((t: { transitionNote?: string }) => t.transitionNote === note)?.actor;
+    expect(actorOf("seen from the terminal")).toEqual({ seat: CALLER, principal: null, grant: null, you: null });
+    expect(actorOf("another connection of this seat")).toEqual({ seat: CALLER, principal: "another-caller-principal", grant: "another-grant-01", you: false });
   });
 
   it("refuses every answer but active, a timeout, an unbound instance and a missing seat, with no fallback and nothing written", async () => {
@@ -1110,10 +1152,11 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     db.prepare("UPDATE queue_items SET destination_session = 'human-x@external' WHERE qitem_id = ?").run(own);
     await repo.createHumanAnswer({ sourceSession: "human-x@external", destinationSession: CALLER, body: "The person's private reasoning",
       inboundReplyTo: own, nudge: false } as never);
-    expect(await (await fetch(`${daemonUrl}/api/queue/${own}`)).json()).toMatchObject({ answers: [{ by: "human-x@external" }] });
+    expect(await (await fetch(`${daemonUrl}/api/queue/${own}`)).json()).toMatchObject({ answers: [{ by: "human-x@external" }], answersFrom: "this-daemon" });
     const shown = await asExternal("rig_queue_show", { qitemId: own });
     expect(shown.isError).toBe(false);
     expect(shown.structured.item).not.toHaveProperty("answers");
+    expect(shown.structured.item).not.toHaveProperty("answersFrom");
     expect(shown.text).not.toContain("private reasoning");
   });
 

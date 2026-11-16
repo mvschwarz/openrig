@@ -15,6 +15,7 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -143,6 +144,34 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(result.launched?.[0]).toMatchObject({ status: "awaiting-decision", error: "No session was started for this seat. Restore a snapshot whose saved startup runtime matches the seat's current runtime." });
     expect(tmux.createSession).not.toHaveBeenCalled();
     expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before);
+  });
+
+  it.each([
+    ["codex", "claude-code"],
+    ["claude-code", "codex"],
+  ])("plans saved startup %s on live %s as unknown with restore's reason, never a definite mode", (saved, live) => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    const snapshotId = seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext(saved) });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(live, nodeIds[0]);
+    const result = orchestrator.planNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    const permission = result.targetNodes?.[0]?.permission;
+    expect(permission).toMatchObject({ basis: "unknown" });
+    expect(permission?.summary).toContain("restore stops for a runtime decision before it starts this seat. No session was started for this seat.");
+    expect(permission?.summary).not.toContain("On restore");
+  });
+
+  it("plans a seat recreated under the saved name as unknown with the launch's own refusal, never the replacement's account", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    // The snapshot saved dev.driver as another node; the current dev.driver has the same runtime and its own choice.
+    const snapshotId = seedSnapshot(rigId, ["saved-driver", nodeIds[1]!], { "saved-driver": emptyStartupContext("claude-code") });
+    new NativePermissionStore(db).write(nodeIds[0]!, { runtime: "claude-code", mode: "plan" }, "person@host", "the replacement's own choice");
+    const target = orchestrator.planNodeSubset(rigId, ["dev.driver"], { snapshotId }).targetNodes?.[0];
+    expect(target).toEqual({ nodeId: "saved-driver", logicalId: "dev.driver", permission: { basis: "unknown", runtime: "claude-code",
+      summary: "Unknown: restore stops before it starts this seat. A snapshot seat was removed or recreated. Select history for the current seat." } });
+    // Execution keeps its existing refusal for the same seat.
+    const launched = await orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    expect(launched).toMatchObject({ ok: false, code: "selection_changed", message: "A snapshot seat was removed or recreated. Select history for the current seat." });
+    expect(tmux.createSession).not.toHaveBeenCalled();
   });
 
   it("returns rig_not_found for unknown rig", async () => {
@@ -309,6 +338,8 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     });
     expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual(before.sessions);
     expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
+    // Each target carries the permission this launch will start it with, from restore's own posture rule.
+    expect(result.targetNodes?.[0]?.permission?.summary).toEqual(expect.any(String));
   });
 
   it("plans single-node subset by node id with nonTargetMode unchanged (#887)", () => {
@@ -977,8 +1008,30 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const freshLaunch = vi.fn(launchFresh);
       (orchestrator as any).freshLaunch = freshLaunch;
       const launch = () => orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId, adapters: { "claude-code": readyAdapter("claude-code") } as any });
-      return { rigId, nodeIds, freshLaunch, launchFresh, launch };
+      return { rigId, nodeIds, freshLaunch, launchFresh, launch, guard };
     }
+
+    it("a paused non-target doesn't refuse the launch: the target starts, and the paused seat keeps its mode", async () => {
+      const { nodeIds, launch, guard } = guarded();
+      await guard.set(nodeIds[1]!, true, "person", "typing a draft");
+      const result = await launch();
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(guard.preference(nodeIds[1]!)).toMatchObject({ desired: true, effective: true });
+    });
+
+    it("a draft-aware non-target with a draft doesn't refuse the launch: the target starts, and the draft and mode stay", async () => {
+      const { nodeIds, launch, guard } = guarded();
+      sessionRegistry.updateBinding(nodeIds[1]!, { tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
+      await guard.set(nodeIds[1]!, { mode: "draft-aware" }, "person", "keep my draft");
+      // Someone is typing in the non-target's pane: its input isn't absent.
+      guard.attachInputInspection(async () => null, async () => false);
+      const result = await launch();
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(guard.preference(nodeIds[1]!)).toMatchObject({ desiredMode: "draft-aware", effectiveMode: "draft-aware" });
+      expect(sessionRegistry.getBindingForNode(nodeIds[1]!)).toMatchObject({ tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
+      const touched = [...(tmux.sendKeys as any).mock.calls, ...(tmux.killSession as any).mock.calls].flat().map(String);
+      expect(touched.filter((arg) => arg.includes("dev-guard") || arg === "%9")).toEqual([]);
+    });
 
     it("starts: retiring the provisional shell rebinds the lease, so the persisted fresh launch owns the seat", async () => {
       const { rigId, nodeIds, freshLaunch, launch } = guarded();

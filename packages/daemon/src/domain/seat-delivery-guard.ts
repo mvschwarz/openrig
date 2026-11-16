@@ -368,11 +368,15 @@ export class SeatDeliveryGuard {
   }
 
   /** Multi-seat restore takes leases in stable order before any rig mutation.
-   * Nested per-seat launch joins these leases; it must not reacquire them. */
-  async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>): Promise<T> {
-    const ids = [...new Set(nodeIds)].sort();
+   * Nested per-seat launch joins these leases; it must not reacquire them.
+   * `custodyIds` are seats the operation only records (metadata, never input): they get a custody lease in the same sorted
+   * pass, so a paused or draft-aware seat isn't refused and its mode, draft and binding stay as they are. */
+  async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>, custodyIds: readonly string[] = []): Promise<T> {
+    const writing = new Set(nodeIds);
+    const ids = [...new Set([...nodeIds, ...custodyIds])].sort();
     const acquire = async (index: number): Promise<T> => {
       const id = ids[index]; if (!id) return fn();
+      if (!writing.has(id)) return this.custodyInPass(id, () => acquire(index + 1));
       if (this.ownsLifecycle(id)) return acquire(index + 1);
       return this.operation(id, async () => {
         const lease = this.scope.getStore()!.get(id)!;
@@ -388,6 +392,28 @@ export class SeatDeliveryGuard {
       });
     };
     return acquire(0);
+  }
+
+  /** One custody lease taken inside lifecycle's sorted pass. Its target is read when the pass reaches this seat, as
+   *  lifecycle's own leases are, not up front the way custody() reads every target before waiting. A target that changed
+   *  while waiting on this seat refuses the whole operation before any effect, as a lifecycle lease's would. */
+  private async custodyInPass<T>(id: string, next: () => Promise<T>): Promise<T> {
+    if (this.ownsCustody(id)) return next();
+    const target = this.target(id);
+    const inherited = this.scope.getStore()?.get(id);
+    const run = async () => {
+      const lease: Lease = { target, active: true, origin: "custody", humanEpoch: this.humanEpochs.get(id) ?? 0 };
+      lease.serialOwner = inherited?.active && inherited.serialOwner?.active ? inherited.serialOwner : lease;
+      try { return await this.scope.run(new Map([...(this.scope.getStore() ?? []), [id, lease]]), next); }
+      finally { lease.active = false; }
+    };
+    const current = () => {
+      if (!this.same(target, this.target(id))) {
+        throw new DeliveryGuardError("guard_target_changed", "Custody target changed while waiting; no cleanup performed for this seat.");
+      }
+    };
+    if (inherited?.active && inherited.serialOwner?.active) { this.assertCurrent(id, inherited); current(); return run(); }
+    return this.serial(id, async () => { current(); return run(); });
   }
 
   /** Called only after an intentional lifecycle binding change, under its lease.
@@ -516,7 +542,8 @@ export class SeatDeliveryGuard {
   /** No recent writable-client activity before a short wait, the input still empty when read again after it, and still
    *  no recent activity after that read. A time tmux can't report holds the paste, as an unreadable input does. The
    *  read it returns is the one the paste goes on. Typing after this final check and before the paste can still leave
-   *  the notice beside the person's draft: the Enter is then refused, nothing is submitted or deleted (#3076). */
+   *  the notice beside the person's draft. In the tested append-mode schedule the Enter is then refused and nothing is
+   *  submitted or deleted; that isn't a guarantee for every interleaving (#3076). */
   private async quietBeforePaste(target: GuardTarget, read: () => Promise<ComposerInput | null>,
     unknown: (reading: ComposerInput | null) => DeliveryGuardError): Promise<ComposerInput> {
     const quiet = async () => {
@@ -648,4 +675,13 @@ export function resolveGuardTarget(db: Database.Database, name: string): GuardTa
   if (pool.length !== 1 || (current && pool[0]!.nodeId !== current.nodeId)) return null;
   const { archivedAt: _archivedAt, physicalName: _physicalName, logicalId: _logicalId, rigName: _rigName, latestStatus: _latestStatus, ...target } = pool[0]!;
   return target;
+}
+
+/** An external-CLI seat's newest occupant generation by its external session name, which resolveGuardTarget's address
+ *  rules don't match: the one unarchived external_cli binding with that name, else null (none or several). */
+export function resolveExternalCliOccupant(db: Database.Database, name: string): string | null {
+  const rows = db.prepare(`SELECT (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id=b.node_id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
+    FROM bindings b JOIN nodes n ON n.id=b.node_id JOIN rigs r ON r.id=n.rig_id
+    WHERE b.attachment_type='external_cli' AND b.external_session_name=? AND r.archived_at IS NULL`).all(name) as Array<{ occupant: string | null }>;
+  return rows.length === 1 ? rows[0]!.occupant : null;
 }

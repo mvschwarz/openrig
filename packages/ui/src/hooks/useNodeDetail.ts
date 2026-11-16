@@ -43,6 +43,7 @@ export interface NodeDetailData {
   restoreOutcome: string;
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
+  resumeCommandLabel?: string | null;
   recoveryGuidance: {
     summary: string;
     commands: string[];

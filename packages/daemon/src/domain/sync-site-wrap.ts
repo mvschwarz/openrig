@@ -1,4 +1,4 @@
-import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
+import { SLOW_OPERATION_THRESHOLD_MS, type SlowOperationInstrumentation } from "./slow-op-recorder.js";
 
 let recorder: SlowOperationInstrumentation | undefined;
 
@@ -40,4 +40,14 @@ export function runSyncSiteWhenSlow<T>(site: string, fn: () => T): T {
  */
 export async function runAsyncSite<T>(site: string, fn: () => Promise<T>): Promise<T> {
   return recorder?.runStage ? recorder.runStage(site, fn) : fn();
+}
+
+/**
+ * Offers one diagnostic record to the configured recorder's bounded log, only when `elapsedMs` reached the slow
+ * threshold, so a hot path adds no record per call. Measurement only: no recorder, a dropped record or a throwing
+ * recorder changes nothing for the caller.
+ */
+export function recordSlowDiagnostic(elapsedMs: number, record: Record<string, unknown>): void {
+  if (!(elapsedMs >= SLOW_OPERATION_THRESHOLD_MS)) return;
+  try { recorder?.recordDiagnostic?.(record); } catch { /* the recorder reports its own health */ }
 }
