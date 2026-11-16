@@ -1238,13 +1238,15 @@ export class SeatHandoverService {
       { tmux_pane: string | null } | undefined)?.tmux_pane?.trim() || null;
     let processNow: string | null = null;
     if (pane) try {
+      const belongsToParent = async () => (await this.tmuxAdapter.listPanes(records.sessionName, true)).some(candidate => candidate.id === pane);
+      if (!(await belongsToParent())) return { process: null, telemetry: records.telemetry, resumeToken: records.resumeToken };
       const input = { target: pane, tmux: this.tmuxAdapter, listProcesses: this.injectedListProcesses };
       const first = await observeClaudePaneRuntime(input);
       if (first) {
         const configDir = nodePath.resolve(records.nodeCwd ?? process.cwd(), claudeConfigRootFor(this.db, records.nodeId));
         const read = readClaudePidSessionId({ configDir, pid: first.process.pid, startedAt: first.process.startedAt });
         const again = read ? await observeClaudePaneRuntime(input) : null;
-        if (read && again?.fingerprint === first.fingerprint) processNow = read;
+        if (read && again?.fingerprint === first.fingerprint && await belongsToParent()) processNow = read;
       }
     } catch { processNow = null; }
     return { process: processNow, telemetry: records.telemetry, resumeToken: records.resumeToken };
