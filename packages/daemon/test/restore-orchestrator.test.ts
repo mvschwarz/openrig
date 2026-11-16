@@ -340,6 +340,27 @@ describe("RestoreOrchestrator", () => {
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe(status);
   });
 
+  it("names a running agent of another rig whatever its restore policy, and not a stopped one that would relaunch fresh", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "dev.impl", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "conv-x" });
+    const other = rigRepo.createRig("other-rig");
+    for (const [logicalId, status] of [["dev.live", "running"], ["dev.idle", "exited"]] as const) {
+      const node = rigRepo.addNode(other.id, logicalId, { runtime: "claude-code", restorePolicy: "relaunch_fresh" });
+      const session = `${logicalId.replace(".", "-")}@other-rig`;
+      const held = sessionRegistry.registerSession(node.id, session);
+      sessionRegistry.updateStatus(held.id, status);
+      sessionRegistry.updateResumeToken(held.id, "claude_id", "conv-x", "scrape");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: session, tmuxPane: status === "running" ? "%8" : "%9" });
+    }
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const named = result.result.warnings.filter((line) => line.includes("outside this restore"));
+    expect(named).toHaveLength(1);
+    expect(named[0]).toContain("as dev-live@other-rig (running), outside this restore");
+    expect(named[0]).not.toContain("dev-idle@other-rig");
+  });
+
   it("names the running seat of the same rig whose conversation a corrected replacement resumes", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-shared", rig.id, "Dev");

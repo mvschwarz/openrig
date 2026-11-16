@@ -62,7 +62,7 @@ import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { SEAT_STARTUP_BLOCKERS, validatePreRestore, resumingConversationSeats } from "./restore-preconditions.js";
-import { describePartners } from "./shared-conversation.js";
+import { describePartners, holdsRecordedConversation } from "./shared-conversation.js";
 import { getNodeInventoryForAllRigs } from "./node-inventory.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 
@@ -1096,8 +1096,7 @@ export class RestoreOrchestrator {
       return [`Restore pre-validation: the shared-conversation comparison with agents outside this restore is unavailable (${err instanceof Error ? err.message : String(err)}).`];
     }
     const others = inventory
-      .filter((entry) => !(entry.rigId === rigId && inRestore.has(entry.logicalId))
-        && entry.runtime !== "terminal" && (entry.restorePolicy ?? "resume_if_possible") === "resume_if_possible")
+      .filter((entry) => !(entry.rigId === rigId && inRestore.has(entry.logicalId)) && holdsRecordedConversation(entry))
       .map((entry) => ({
         seat: entry.canonicalSessionName ?? `${entry.logicalId}@${entry.rigName}`,
         state: entry.sessionStatus === "running" ? "running" : "stopped",

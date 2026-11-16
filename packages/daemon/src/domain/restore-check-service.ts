@@ -8,7 +8,7 @@ import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
-import { describeSharedConversation, findSharedConversations, compareConversations, describeUnavailable } from "./shared-conversation.js";
+import { describeSharedConversation, findSharedConversations, compareConversations, describeUnavailable, holdsRecordedConversation } from "./shared-conversation.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
@@ -1733,9 +1733,9 @@ export class RestoreCheckService {
   }
 
   /**
-   * #3218 item 3: agents with the same recorded, resumable conversation, running or stopped, named on each evaluated
-   * agent with the others (also those of a rig left out by --rig). A caveat with no remediation: restore is not
-   * refused, no agent is stopped and none is picked. A rig whose agents cannot be read, or an agent whose saved resume
+   * #3218 item 3: agents with the same recorded conversation (running, whatever their policy, or stopped and resumable),
+   * named on each evaluated agent with the others (also those of a rig left out by --rig). A caveat with no remediation:
+   * restore is not refused, no agent is stopped and none is picked. A rig whose agents cannot be read, or an agent whose saved resume
    * data is not readable, is named as an unavailable comparison.
    */
   private checkSharedConversations(inputs: RigRollupInput[], allRigs: Array<{ rigId: string; name: string }>): CheckEntry[] {
@@ -1744,7 +1744,7 @@ export class RestoreCheckService {
     const seats: Array<{ node: NodeInventoryEntry; input?: RigRollupInput }> = [];
     const out: CheckEntry[] = [];
     for (const input of inputs) {
-      for (const node of input.nodes) if (seatResumes(node)) seats.push({ node, input });
+      for (const node of input.nodes) if (holdsRecordedConversation(node)) seats.push({ node, input });
     }
     for (const rig of allRigs) {
       if (evaluated.has(rig.rigId)) continue;
@@ -1760,7 +1760,7 @@ export class RestoreCheckService {
         });
         continue;
       }
-      for (const node of nodes) if (seatResumes(node)) seats.push({ node });
+      for (const node of nodes) if (holdsRecordedConversation(node)) seats.push({ node });
     }
     const { groups, unavailable } = compareConversations(seats.map(({ node }) => ({
       seat: label(node),

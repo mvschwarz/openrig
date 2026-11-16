@@ -198,6 +198,17 @@ describe("rig restore-check names agents that hold the same recorded conversatio
     expect(shared[0]!.evidence).toContain("dev-a@r1 (stopped) and dev-b@r2 (stopped)");
   });
 
+  it("counts a running agent whatever its restore policy, and a stopped one only if it would resume", () => {
+    const relaunchFresh = (entry: NodeInventoryEntry) => ({ ...entry, restorePolicy: "relaunch_fresh" }) as NodeInventoryEntry;
+    const result = new RestoreCheckService(liveDeps({
+      r1: [seat("r1", "dev.a", "conv-x")],
+      r2: [relaunchFresh(seat("r2", "dev.b", "conv-x")), relaunchFresh(seat("r2", "dev.c", "conv-x", "exited"))],
+    })).check(check({ rig: "r1" }));
+    const shared = result.checks.find((c) => c.check === "seat.dev-a@r1.shared-conversation");
+    expect(shared?.evidence).toContain("dev-a@r1 (running) and dev-b@r2 (running) have the same recorded claude_id conversation");
+    expect(shared?.evidence).not.toContain("dev-c@r2");
+  });
+
   it("reports nothing for distinct conversations", () => {
     const result = new RestoreCheckService(liveDeps({ r1: [seat("r1", "dev.a", "conv-a"), seat("r1", "dev.b", "conv-b")] })).check(check());
     expect(result.checks.filter((c) => c.check.endsWith(".shared-conversation"))).toEqual([]);

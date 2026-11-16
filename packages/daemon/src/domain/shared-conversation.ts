@@ -35,6 +35,15 @@ export interface ConversationComparison {
   unavailable: string[];
 }
 
+/**
+ * Whether a known agent counts as holding its recorded conversation: a running agent holds it now, whatever its
+ * restore policy; a stopped one only if it would resume it. A terminal never does.
+ */
+export function holdsRecordedConversation(entry: { runtime?: string | null; sessionStatus?: string | null; restorePolicy?: string | null }): boolean {
+  if (entry.runtime === "terminal") return false;
+  return entry.sessionStatus === "running" || (entry.restorePolicy ?? "resume_if_possible") === "resume_if_possible";
+}
+
 export function compareConversations(seats: readonly ConversationSeat[]): ConversationComparison {
   const groups = new Map<string, SharedConversation>();
   const unavailable: string[] = [];
