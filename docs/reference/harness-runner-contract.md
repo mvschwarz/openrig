@@ -331,6 +331,8 @@ Hello supplies `{type:"hello", version:1, runId, retained, capabilities:{input,w
 
 Every seat still defaults to `typed`. When a capable runner is connected, `rig seat set-input-route <seat> --route native --reason ...` explicitly selects native input. Native requests retain the existing sender, original-conversation constraint and interruption/held policy. The saved request ID's route is immutable: a preference change applies to a new ID. A native refusal or uncertain effect never types a fallback, and `--verify` never invokes a terminal-pane verifier for a native receipt.
 
+Explicit terminal interaction, submit-only Enter, exact terminal text and OpenRig's reserved Pi compaction control keep their existing guarded typed path. They are not native model prompts and cannot reuse an ID already bound to native input. Ordinary OpenRig notices still follow the seat's selected input route.
+
 A request frame contains `{version:1, runId, requestId, sequence, kind, payload}`. Input payload is `{text}`; wake payload is `{question}`. The request ID is its existing outbox operation ID. A combined send retains one primary ID plus its ordered source-member links. Sequence is run-local and ordered; an SSE cursor is not acceptance. The live receiver retains every immutable ID/payload and result for its process lifetime, acknowledges custody by POST, and waits for Core's durable acceptance response before writing the native prompt. It retries saved HTTP receipts after lost replies; it never repeats a native write to repair HTTP delivery. Restarting a runner creates a new run, not a persistent receiver command journal.
 
 An unreadable binding, including a failed grant-standing read, returns retryable `409 runner_grant_unverified`.

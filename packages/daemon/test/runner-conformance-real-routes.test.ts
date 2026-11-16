@@ -771,6 +771,10 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
     const sent = await transport.send("dev@channel", "hello", { deliveryId: "native-send", actorSession: "sender" });
     expect(sent).toMatchObject({ ok: true, verified: false, runnerReceipt: { stage: "pending", sequence: 1 } });
     expect((await transport.send("dev@channel", "hello", { deliveryId: "native-send", actorSession: "sender" })).runnerReceipt?.sequence).toBe(1);
+    expect(await transport.send("dev@channel", "ordinary notice", { deliveryId: "native-notice", openrigNotice: true }))
+      .toMatchObject({ ok: true, runnerReceipt: { stage: "pending", sequence: 2 } });
+    expect(await transport.send("dev@channel", "hello", { deliveryId: "native-send", actorSession: "sender", dangerouslyInteract: true, reason: "existing native ID" }))
+      .toMatchObject({ ok: false, sent: false, reason: "delivery_identity_conflict" });
     f.db.prepare("UPDATE nodes SET input_route='typed' WHERE id=?").run(f.node.id);
     expect((await transport.send("dev@channel", "hello", { deliveryId: "native-send", actorSession: "sender" })).runnerReceipt?.sequence).toBe(1);
     expect((await transport.send("dev@channel", "different", { deliveryId: "native-send", actorSession: "sender" })).ok).toBe(false);

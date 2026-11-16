@@ -2901,12 +2901,19 @@ export class SessionTransport {
   }
 
   private async sendClassifiedInput(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // Explicit key/editor operations are not native model prompts. Pi's reserved compaction
+    // control keeps its existing guarded editor path; ordinary OpenRig notices still select native.
+    const typedControl = opts?.dangerouslyInteract === true || opts?.submitOnly === true || opts?.typedExactly === true
+      || opts?.openrigNotice === true && /^\/openrig-compact ([\w-]+)$/.test(text) && this.getSessionMeta(sessionName).runtime === "pi";
+    const inputRoute = (nodeId: string): "typed" | "native" => typedControl ? "typed" : this.inputRoute(nodeId);
     const history = new OutboxHandler(this.db);
     const inputId = opts?.committedOutboxIds?.[0] ?? opts?.deliveryId;
     const primaryId = inputId ? history.runnerPrimary(inputId) : null;
     const previous = primaryId ? history.runnerReceipt(primaryId) : null;
     if (primaryId && !previous) return { ok: false, sessionName, reason: "native_receipt_unavailable", error: "Native operation evidence unavailable; no input offered." };
     if (previous?.erasedAt) return { ok: false, sessionName, reason: "runner_receipt_erased", error: "Native request content was erased; no input offered." };
+    if (previous && typedControl) return { ok: false, sessionName, sent: false, reason: "delivery_identity_conflict",
+      error: "This request ID already selects native input; use a new request ID for terminal control." };
     if (previous) {
       const entry = history.getById(previous.requestId)!;
       if (entry.destinationSession !== sessionName || !opts?.committedOutboxIds && entry.senderSession !== (opts?.actorSession ?? "unknown")
@@ -2926,15 +2933,15 @@ export class SessionTransport {
     };
     const guard = this.tmuxAdapter.deliveryGuard;
     const targetNode = guard?.maybeTarget(sessionName)?.nodeId;
-    if (opts?.nativeWake && (!targetNode || this.inputRoute(targetNode) !== "native"))
+    if (opts?.nativeWake && (!targetNode || inputRoute(targetNode) !== "native"))
       return { ok: false, sessionName, sent: false, reason: "native_route_required", error: "A live native wake requires this seat's native input route." };
-    if (!guard && this.getSessionMeta(sessionName).nodeId && this.inputRoute(this.getSessionMeta(sessionName).nodeId!) === "native")
+    if (!guard && this.getSessionMeta(sessionName).nodeId && inputRoute(this.getSessionMeta(sessionName).nodeId!) === "native")
       return { ok: false, sessionName, sent: false, reason: "guard_unavailable", error: "Native admission requires the delivery guard." };
     const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {
       try {
         const nodeId = this.getSessionMeta(sessionName).nodeId;
-        checkRetainedRoutes(nodeId ? this.inputRoute(nodeId) : "typed", opts?.committedOutboxIds ?? (opts?.deliveryId ? [opts.deliveryId] : []));
+        checkRetainedRoutes(nodeId ? inputRoute(nodeId) : "typed", opts?.committedOutboxIds ?? (opts?.deliveryId ? [opts.deliveryId] : []));
       } catch (error) {
         return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
       }
@@ -2972,7 +2979,7 @@ export class SessionTransport {
       // write. A null return means go through guard.operation exactly as on
       // main (guard held, target unresolvable, or a quick refusal).
       let sendOpts = opts;
-      if (opts?.waitForIdleMs !== undefined && !opts.submitOnly && !opts.preWaitedIdle && this.inputRoute(guard.target(sessionName).nodeId) !== "native") {
+      if (opts?.waitForIdleMs !== undefined && !opts.submitOnly && !opts.preWaitedIdle && inputRoute(guard.target(sessionName).nodeId) !== "native") {
         const pre = await this.preWaitForIdle(sessionName, opts, guard);
         if (pre === null) {
           // Fall through with today's path (in-lease wait / retain / throw).
@@ -3004,7 +3011,7 @@ export class SessionTransport {
         const memberText = members?.text ?? text;
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
         const currentIds = memberOpts?.committedOutboxIds ?? ids;
-        const route = this.inputRoute(guard.target(sessionName).nodeId);
+        const route = inputRoute(guard.target(sessionName).nodeId);
         checkRetainedRoutes(route, currentIds);
         if (route === "native") {
           if (memberOpts?.expectedIdentity) {
@@ -3025,7 +3032,7 @@ export class SessionTransport {
         if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
         const members = recheck(true);
         if (members) ids = members.outboxIds;
-        checkRetainedRoutes(this.inputRoute(target.nodeId), ids);
+        checkRetainedRoutes(inputRoute(target.nodeId), ids);
         this.db.transaction(() => {
           for (const id of ids) {
             const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
@@ -3035,7 +3042,7 @@ export class SessionTransport {
               identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, ...(opts?.urgent ? { urgency: "urgent" } : {}),
             }, target, !!opts?.committedOutboxIds, { sameSend: ids });
             outbox.bindInputRoute({ outboxId: id, senderSession: prior?.senderSession ?? opts?.actorSession ?? "unknown",
-              destinationSession: sessionName, body: prior?.body ?? text }, this.inputRoute(target.nodeId));
+              destinationSession: sessionName, body: prior?.body ?? text }, inputRoute(target.nodeId));
           }
         })();
         // P2: observed only after the retention above committed; a submit-only

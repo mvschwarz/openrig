@@ -107,6 +107,44 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean; a
 }
 
 
+it.each([false, true])("keeps reserved Pi compaction on its guarded typed path with native preference (held=%s)", async held => {
+  const f = fixture(undefined, { runtime: "pi" });
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  if (held) await f.guard.set("a", { mode: "hold" }, "human@test", "quiet");
+  const { PiCompactionService } = await import("../src/domain/pi-compaction-service.js");
+  const service = new PiCompactionService({ readSidecar: () => ({ launchId: "launch" }) as never,
+    newAttemptId: () => "native-preference-compact", send: (session, text, opts) => f.transport.send(session, text, opts) });
+  const result = await service.trigger({ nodeId: "a", sessionName: "worker@test", runtime: "pi" });
+  if (held) {
+    expect(result).toMatchObject({ triggered: false, reason: "held" });
+    const item = f.outbox.heldForNode("a").items[0]!;
+    expect(item.body).toBe("/openrig-compact native-preference-compact");
+    expect(f.outbox.inputRoute(item.outboxId)).toBe("typed");
+    expect(f.submissions).toEqual([]);
+  } else {
+    expect(result).toMatchObject({ triggered: true, stage: "submitted_unconfirmed" });
+    expect(f.submissions).toEqual(["/openrig-compact native-preference-compact"]);
+  }
+});
+
+it("submit-only with native preference presses Enter only onto the existing staged text", async () => {
+  const f = fixture();
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  f.bodies.a = "staged command";
+  expect(await f.send("submit-native", "", { submitOnly: true, expectedStagedText: "staged command", verify: false }))
+    .toMatchObject({ ok: true, submitOnly: true });
+  expect(f.writes.some(write => write.startsWith("paste:"))).toBe(false);
+  expect(f.submissions).toEqual(["staged command"]);
+});
+
+it("a terminal seat's exact text stays terminal input with native preference", async () => {
+  const f = fixture();
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  expect(await f.send("exact-native", "enveloped input", { exactText: "printf exact", verify: false }))
+    .toMatchObject({ ok: true, envelopeOmitted: true });
+  expect(f.submissions).toEqual(["printf exact"]);
+});
+
 // Retained D1 geometry: empty Codex 0.164 at 65x9; after paste the editor
 // shows only the envelope's reply footer and an upward scroll indicator.
 function codexViewport(body: string, width: number, height: number, renderedRows?: string[]): ComposerSnapshot {
@@ -1104,6 +1142,15 @@ describe("supported seat and queue integration", () => {
 
 describe("deliberate override preserves existing input", () => {
   const override = { dangerouslyInteract: true, reason: "fixture interaction", verify: false };
+  it("keeps explicit terminal interaction draft protection with a native input preference", async () => {
+    const f = fixture();
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+    f.bodies.a = "person draft";
+    expect(await f.send("override-native", "incoming", override)).toMatchObject({ ok: false, sent: false,
+      reason: "override_input_present", existingInput: { classification: "typed_or_pasted" } });
+    expect(f.writes).toEqual([]);
+  });
+
   it.each(["off", "draft-aware", "hold", "openrig-urgent", "urgent-only", "sends-only"])("stops and shows typed input under %s without retaining it", async mode => {
     const f = fixture();
     await f.guard.set("a", { mode }, "human@test", "fixture policy");
