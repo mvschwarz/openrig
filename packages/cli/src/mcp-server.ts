@@ -263,22 +263,27 @@ async function requestsAdvisoryFor(folder: string, seat: string, selfHostId: () 
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : unknown;
   }
-  const { rosters, warnings } = readRosters(folder);
+  const { rosters, warnings, files, unreadable } = readRosters(folder);
   // A node's entry can be authored under its other name, so every entry in the seat's rig is a candidate.
   const rig = seat.slice(seat.lastIndexOf("@") + 1);
-  const inRig = rosters.flatMap((roster) => roster.members).filter((member) => member.seat === seat || member.seat.endsWith(`@${rig}`));
+  const inRig = rosters.flatMap((roster, i) => roster.members.map((member) => ({ member, file: files[i]! })))
+    .filter(({ member }) => member.seat === seat || member.seat.endsWith(`@${rig}`));
   if (inRig.length === 0) return warnings.length > 0 ? unknown : null;
   const host = await selfHostId();
   if (!host) return unknown;
-  const here = inRig.filter((member) => member.host === host);
+  const here = inRig.filter(({ member }) => member.host === host);
   if (here.length === 0) return warnings.length > 0 ? unknown : null;
   const node = await nodeOf();
   if (node === "unknown") return unknown;
   // As rig_team applies an entry to a seat: its session's entry, else its logical address's, the first roster by file name
   // supplying each. An address no node has is matched as written.
   const names = node ? [node.session, node.address].filter((name): name is string => !!name) : [seat];
-  const member = names.map((name) => here.find((entry) => entry.seat === name)).find((entry) => entry !== undefined);
-  if (!member) return warnings.length > 0 ? unknown : null;
+  const at = names.findIndex((name) => here.some(({ member }) => member.seat === name));
+  if (at < 0) return warnings.length > 0 ? unknown : null;
+  const { member, file } = here.find((entry) => entry.member.seat === names[at])!;
+  // A roster that couldn't be read may hold the entry that wins: any one, for a name ahead of this one, or one ahead of
+  // this entry's file, for the same name.
+  if ((at > 0 && unreadable.length > 0) || unreadable.some((name) => name < file)) return unknown;
   if (member.takes_requests !== false) return null;
   // rig_team shows a hosted member's flag to every caller, and a node seat's only to an external one.
   const shown = list.offered && (list.nodeEntries || node === null);
@@ -1653,7 +1658,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_create")) server.registerTool(
     "rig_queue_create",
     {
-      ...worded("rig_queue_create", "Hand a task to another seat as a durable queue item. Returns its qitemId: follow the request and its answer with rig_queue_show. Pass a qitemId you choose, so an uncertain create can be checked: if the call times out or errors after sending, check rig_queue_show with that qitemId first, and retry only with the same id, never a new one. When the seat's roster entry says it takes no requests, the item is still written and requestsAdvisory says so, with the owner's note. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", ADDITIVE),
+      ...worded("rig_queue_create", `Hand a task to another seat as a durable queue item. ${offered("rig_queue_show")
+        ? "Returns its qitemId: follow the request and its answer with rig_queue_show. Pass a qitemId you choose, so an uncertain create can be checked: if the call times out or errors after sending, check rig_queue_show with that qitemId first, and retry only with the same id, never a new one."
+        : "Returns its qitemId. Pass a qitemId you choose, and retry an uncertain create (a timeout, or an error after sending) only with that same id, never a new one: a retry of one that landed returns the stored item."} When the seat's roster entry says it takes no requests, the item is still written and requestsAdvisory says so, with the owner's note. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.`, ADDITIVE),
       inputSchema: z.object({
         destination: access?.external
           ? z.string().optional().describe("Destination seat: member@rig, or its name alone as the team shows it (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver")

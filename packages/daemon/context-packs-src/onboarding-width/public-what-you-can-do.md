@@ -135,7 +135,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   before any resend, and don't let a script resend on that exit code alone. Since 0.7.14 an ordinary
   send is refused as needing input while an open Claude Code or Codex `/model` picker is
   positively identified; nothing is typed. That's shown by the change's own tests, not yet checked
-  with the real Claude Code and Codex programs on 0.7.14. A
+  with the real Claude Code and Codex programs on 0.7.14. Since 0.7.17 that refusal says to close the
+  picker (Esc) in that pane and send again, and doesn't offer `--dangerously-interact`, because text
+  typed there picks a model. A
   producer-link advisory reading `no_activity_signal` means activity could not be determined;
   confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
   question waiting for a person is refused with `target_needs_input`, even when its screen
@@ -1020,7 +1022,12 @@ version, from checking the environment to a useful report to the OpenRig team.
   seat its own tool rules, audited, from its next managed launch or resume, even in a shared folder;
   `claude_permissions: { allow: [...], deny: [...] }` on the member declares them. They're native tool
   rules, not OS isolation, an allow list doesn't withdraw broader inherited grants, and member denies
-  aren't claimed to hold in bypass mode. `--codex-permissions <file>` gives one Codex seat its own
+  aren't claimed to hold in bypass mode. `--auto-mode <file>` (JSON `autoMode` block: `environment`,
+  `allow`, `soft_deny`, `hard_deny`, `classifyAllShell`) gives one Claude seat its own auto mode classifier
+  settings, added to user and managed settings; `--clear-auto-mode` clears it, and `claude_auto_mode` on
+  the member declares it. Without `"$defaults"`, a list may replace Claude's built-in entries for that
+  section, unless another scope (user or managed settings) keeps `"$defaults"` there; OpenRig warns
+  but doesn't add it, and `claude auto-mode config` shows the effective lists. `--codex-permissions <file>` gives one Codex seat its own
   sandbox and approval settings (`sandbox`, `approval`, and for `workspace-write` also
   `network_access`, `writable_roots`, `exclude_tmpdir_env_var` and `exclude_slash_tmp`), passed as
   flags on every managed launch, resume, restore and handover; `codex_permissions` on the member
