@@ -21,6 +21,7 @@ import { readNodeStartupSnapshot, seatGuidanceFile } from "./restore-guidance.js
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
 export interface SeatStatus {
+  inputRoute?: "typed" | "native";
   /** Latest bounded observation across actors, not aggregate pending state or proof a guard ran.
    * Completion applies only to the displayed actor; other actors' pending state is unknown. */
   permission_stop?: PermissionStopStatus;
@@ -171,6 +172,7 @@ export class SeatStatusService {
       ...this.compactionStatus(entry),
       ...this.refocusStatus(entry),
       seat_ref: seatRef,
+      inputRoute: this.rigRepo.getNodeInputRoute(entry.nodeId),
       rig_id: entry.rigId,
       rig_name: entry.rigName,
       logical_id: entry.logicalId,

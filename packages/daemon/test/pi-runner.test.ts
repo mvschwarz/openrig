@@ -1393,3 +1393,163 @@ describe("managed run identity retries", () => {
     expect(count()).toBe(initial + 1);
   });
 });
+
+
+describe("managed Pi input and attributed wake", () => {
+  function managed(postRunner?: RunnerIo["postRunner"]) {
+    const f = fakeIo(), posts: Record<string, unknown>[] = [];
+    let nativeBusy = false;
+    const core = new RunnerCore({ ...f.io, sendRpc: command => {
+      f.rpc.push(command);
+      if (command.type === "get_state" && String(command.id).startsWith("openrig-native-idle-"))
+        queueMicrotask(() => core.handlePiLine(JSON.stringify({ type: "response", id: command.id, success: true, data: { isStreaming: nativeBusy, pendingMessageCount: 0 } })));
+    }, postActivity: async body => { f.activity.push(body); return { tokenPersisted: true }; }, postRunner: async (body: Record<string, unknown>) => { posts.push(body); return postRunner ? postRunner(body) : true; } },
+      { sessionName: SESSION, runId: "run" });
+    core.start(); core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionId: "native", isStreaming: false, pendingMessageCount: 0 } }));
+    const frame = (id: string, sequence: number, kind: "input" | "wake") => ({ version: 1, requestId: id, runId: "run", sequence, kind,
+      payload: kind === "wake" ? { question: id } : { text: id } });
+    const event = (type: string, extra = {}) => {
+      if (type === "agent_start") nativeBusy = true; else if (type === "agent_end") nativeBusy = false;
+      core.handlePiLine(JSON.stringify({ type, ...extra }));
+    };
+    const response = (id: string, success = true) => event("response", { id: `openrig-native-${id}`, command: "prompt", success, data: { disposition: "started" } });
+    return { ...f, posts, core, frame, event, response };
+  }
+  it("a request-local ACK refusal releases a later accepted request", async () => {
+    let release!: (accepted: boolean) => void;
+    const f = managed(body => body.type === "ack" && body.requestId === "first"
+      ? new Promise<boolean>(resolve => { release = resolve; }) : Promise.resolve(true));
+    const first = f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    expect(f.rpc.filter(command => command.type === "prompt")).toHaveLength(0);
+    release(false); await first;
+    expect(f.rpc.filter(command => command.type === "prompt")).toEqual([expect.objectContaining({ message: "later" })]);
+  });
+  it("a permanently unavailable run holds later managed work while person input remains usable", async () => {
+    let release!: (accepted: boolean) => void;
+    const f = managed(body => body.type === "ack" && body.requestId === "first"
+      ? new Promise<boolean>(resolve => { release = resolve; }) : Promise.resolve(true));
+    const first = f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    f.core.quarantineManagedChannel(); release(false); await first;
+    f.core.handleUserBlock("person still usable");
+    expect(f.rpc.filter(command => command.type === "prompt")).toEqual([expect.objectContaining({ message: "person still usable" })]);
+    expect(f.core.nativeChannelCapabilities()).toEqual({ input: false, wake: false, cancel: false });
+  });
+  it("reporting-authority loss preserves in-flight native custody and its terminal receipt", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start"); f.core.quarantineManagedChannel();
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "existing work" }], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: "existing work", completion: "completed" }) }));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(0);
+  });
+  it("a rejected person preflight reports the existing diagnostic once and releases queued work", async () => {
+    const f = managed(); f.core.handleUserBlock("person startup");
+    await f.core.acceptRunnerRequest(f.frame("later", 1, "input"));
+    const person = f.rpc.find(command => command.message === "person startup")!;
+    f.event("response", { id: person.id, success: false, error: "person prompt failed" });
+    expect(f.lines.filter(line => line.includes("ERROR rpc: person prompt failed"))).toHaveLength(1);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(1);
+  });
+  it.each(["handled", "queued", "started", "unknown"])("input disposition %s releases pending start only when explicitly handled", async disposition => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("first", 1, "input"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    f.event("response", { id: "openrig-native-first", success: true, data: { disposition } });
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(disposition === "handled" ? 1 : 0);
+  });
+  it("a person/startup preflight cannot race a dedicated wake before agent_start", async () => {
+    const f = managed(); f.core.handleUserBlock("person startup");
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(0);
+    const person = f.rpc.find(command => command.message === "person startup")!;
+    f.event("response", { id: person.id, success: true, data: { disposition: "started" } });
+    f.event("agent_start"); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+  });
+  it("person steering stays usable but mixed output is not returned as the dedicated answer", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start"); f.core.handleUserBlock("person steer");
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "mixed output" }], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person steer" }));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown" }) }));
+  });
+  it.each(["queued", "handled", "started"])("authoritative %s disposition cannot adopt earlier native/extension events", async disposition => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "wake"));
+    f.event("agent_start");
+    if (disposition === "queued") f.event("response", { id: "openrig-native-question", success: true, data: { disposition } });
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "unrelated execution" }], stopReason: "stop" } });
+    f.event("agent_end");
+    // Native terminal alone cannot commit an answer or release a preflight awaiting disposition.
+    await new Promise(resolve => setImmediate(resolve));
+    if (disposition !== "queued") {
+      expect(f.posts.filter(post => post.type === "result")).toHaveLength(0);
+      f.event("response", { id: "openrig-native-question", success: true, data: { disposition } });
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown", ownershipUnknown: true }) }));
+    await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.event("agent_start"); f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "queued followup" }], stopReason: "stop" } }); f.event("agent_end");
+    f.core.handleUserBlock("person still works");
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+    expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "person still works" }));
+    expect(f.core.nativeChannelCapabilities()).toEqual({ input: false, wake: false, cancel: false });
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "question")).toHaveLength(1);
+  });
+  it("a queued disposition holds managed dispatch through native terminal without guessing ownership", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.event("agent_start");
+    f.event("response", { id: "openrig-native-question", success: true, data: { disposition: "queued" } });
+    await f.core.acceptRunnerRequest(f.frame("later", 2, "input"));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts.filter(post => post.type === "result")).toHaveLength(0);
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", result: expect.objectContaining({ completion: "unknown", answer: null }) }));
+    expect(f.rpc.filter(command => command.message === "later")).toHaveLength(0);
+  });
+  it("queues busy wakes, protects the dedicated answer, and deduplicates offers", async () => {
+    const f = managed(); f.event("agent_start");
+    await f.core.acceptRunnerRequest(f.frame("steer", 1, "input"));
+    expect(f.rpc).toContainEqual({ id: "openrig-native-steer", type: "prompt", message: "steer", streamingBehavior: "steer" });
+    f.response("steer");
+    await f.core.acceptRunnerRequest(f.frame("question", 2, "wake"));
+    await f.core.acceptRunnerRequest(f.frame("later", 3, "input"));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(1);
+    f.response("question"); f.event("agent_start");
+    f.event("message_end", { message: { role: "toolResult", content: [{ type: "text", text: "unrelated tool" }] } });
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "actual answer" }], stopReason: "stop" } });
+    expect(f.rpc.filter(r => r.message === "later")).toHaveLength(0);
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await f.core.acceptRunnerRequest(f.frame("question", 2, "wake"));
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ kind: "wake", answer: "actual answer", completion: "completed" }) }));
+    expect(f.rpc.filter(r => r.message === "question")).toHaveLength(1);
+    expect(f.rpc.filter(r => r.message === "later")).toHaveLength(1);
+  });
+  it("a native end without assistant text gives no fabricated wake answer", async () => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start");
+    f.event("message_end", { message: { role: "assistant", content: [], stopReason: "stop" } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: "unknown" }) }));
+  });
+  it.each(["aborted", "error"])("a terminal %s releases the barrier with no fabricated answer", async stopReason => {
+    const f = managed(); await f.core.acceptRunnerRequest(f.frame("question", 1, "wake"));
+    f.response("question"); f.event("agent_start");
+    await f.core.acceptRunnerRequest(f.frame("next", 2, "wake"));
+    f.event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "partial" }], stopReason } });
+    f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "question", result: expect.objectContaining({ answer: null, completion: stopReason === "aborted" ? "interrupted" : "failed" }) }));
+    expect(f.rpc.filter(r => r.message === "next")).toHaveLength(1);
+  });
+});

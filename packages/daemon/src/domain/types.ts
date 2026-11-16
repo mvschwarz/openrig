@@ -29,6 +29,7 @@ export interface ContinuityState {
 }
 
 export interface Node {
+  inputRoute?: "typed" | "native";
   id: string;
   rigId: string;
   logicalId: string;
@@ -170,6 +171,7 @@ export type RigEvent =
       channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
     }
   | { type: "rig.deleted"; rigId: string }
+  | { type: "node.input_route_changed"; rigId: string; nodeId: string; from: "typed" | "native"; to: "typed" | "native"; reason: string; actor: string | null }
   | { type: "node.added"; rigId: string; nodeId: string; logicalId: string }
   | { type: "node.removed"; rigId: string; nodeId: string }
   | { type: "binding.updated"; rigId: string; nodeId: string }

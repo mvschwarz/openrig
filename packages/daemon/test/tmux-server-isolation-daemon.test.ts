@@ -7,6 +7,8 @@ import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-en
 import { runRig, spawnScenarioDaemon, type ScenarioDaemon } from "./helpers/scenario-daemon.js";
 import { stageTopologyRoot } from "./helpers/scenario-stage.js";
 import type { TmuxServerSelection } from "../src/domain/tmux-server-selection.js";
+import Database from "better-sqlite3";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 
 // The scenario grammar has no config-write or socket-inventory surface. Use its
 // normal scaffold, daemon lifecycle, topology staging and stub seat, with native
@@ -22,6 +24,7 @@ const nativeAvailable = process.platform !== "win32" && (() => {
 describe.skipIf(!nativeAvailable)("daemon tmux server selection with a real stub seat", () => {
   let scaffold: HermeticScaffold | undefined;
   let daemon: ScenarioDaemon | undefined;
+  let smokeDb: Database.Database | undefined;
   const sockets = new Set<string>();
   const native = (socket: string, args: string[]) => execFileSync("tmux", ["-S", socket, ...args], {
     encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
@@ -30,6 +33,7 @@ describe.skipIf(!nativeAvailable)("daemon tmux server selection with a real stub
 
   afterEach(async () => {
     await daemon?.sigterm();
+    smokeDb?.close(); smokeDb = undefined;
     if (scaffold) {
       // Even a startup/assertion failure must clean up an owned dedicated socket.
       const record = join(scaffold.openrigHome, "tmux-server.json");
@@ -48,6 +52,99 @@ describe.skipIf(!nativeAvailable)("daemon tmux server selection with a real stub
     scaffold = undefined;
     daemon = undefined;
   });
+
+  it.each(["pi", "dsh"] as const)("a managed %s runner retains its actual run and receiver map across an owned daemon OS crash", async kind => {
+    scaffold = prepareHermeticEnv({ baseEnv: { PATH: process.env.PATH, TERM: "xterm-256color", SHELL: "/bin/sh", MOTD_SHOWN: "update-motd" } });
+    const root = scaffold.root, log = join(root, "native.log"), backend = join(root, "bin", kind === "pi" ? "pi" : "offline-dsh.cjs");
+    const common = `#!${process.execPath}\nif(process.argv.includes('--version')){console.log('offline-${kind}');process.exit(0);}const fs=require('node:fs');const send=x=>console.log(JSON.stringify(x));const log=x=>fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(x)+'\\n');log({pid:process.pid,ppid:process.ppid,token:!!process.env.OPENRIG_ACTIVITY_HOOK_TOKEN});`;
+    writeFileSync(backend, kind === "pi" ? `${common}
+const session=${JSON.stringify(join(root, "native.jsonl"))};fs.writeFileSync(session,'');let busy=false;
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const c=JSON.parse(line);if(c.type==='get_state')return send({type:'response',id:c.id,success:true,data:{sessionId:'fixture',sessionFile:session,isStreaming:busy,pendingMessageCount:0}});if(c.type==='get_entries')return send({type:'response',id:c.id,success:true,data:{entries:[]}});if(c.type!=='prompt')return;log({prompt:c.message});send({type:'response',id:c.id,success:true,data:{disposition:busy?'queued':'started'}});if(busy)return;busy=true;send({type:'agent_start'});setTimeout(()=>{send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'answer '+c.message}],stopReason:'stop'}});busy=false;send({type:'agent_end'});},c.message==='SMOKE:across'?4000:50);});`
+      : `${common}
+if(process.argv.includes('--version')){console.log('offline-dsh');process.exit(0);}require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const c=JSON.parse(line);const reply=result=>send({jsonrpc:'2.0',id:c.id,result});if(c.method==='initialize')return reply({protocolVersion:1,agentCapabilities:{},agentInfo:{name:'dsh',version:'fixture'}});if(c.method==='session/new')return reply({sessionId:'fixture'});if(c.method!=='session/prompt')return;const text=c.params.prompt.map(p=>p.text||'').join('');log({prompt:text});send({jsonrpc:'2.0',method:'session/update',params:{sessionId:'fixture',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'answer '+text}}}});setTimeout(()=>reply({stopReason:'end_turn'}),text==='SMOKE:across'?4000:50);});`, { mode: 0o755 });
+    if (kind === "dsh") {
+      const presets = join(scaffold.openrigHome, "community-harnesses"); mkdirSync(presets, { recursive: true });
+      writeFileSync(join(presets, "smoke-dsh.yaml"), `format: 1\nname: smoke-dsh\ncommand: ${JSON.stringify(`${process.execPath} ${resolve(HERE, "../../../docs/reference/community-harness-examples/dsh/openrig-dsh-runner.mjs")}`)}\nmaintainer: Offline fixture\nrunner: true\nlaunch_result: true\nfirst_input: true\nlimits: [offline ACP fixture]\n`);
+    }
+    const staged = stageTopologyRoot(resolve(HERE, "fixtures/scenarios/topo-stub-baton.yaml"), join(root, "topology"));
+    writeFileSync(staged.topologyPath, readFileSync(staged.topologyPath, "utf8").replace("runtime: stub", kind === "pi" ? "runtime: pi" : `runtime: smoke-dsh\n        env:\n          DSH_SEAT_BIN: ${JSON.stringify(backend)}`));
+    const active = await spawnScenarioDaemon(scaffold, { rigBin: RIG_BIN, timeoutMs: 60000 }); daemon = active;
+    const up = await runRig(["up", staged.topologyPath, "--json", "--yes"], active.readEnv, RIG_BIN, 120000);
+    expect(up.code, `${up.stderr}\n${up.stdout}`).toBe(0);
+    const readLog = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { pid?: number; ppid?: number; prompt?: string; token?: boolean }) : [];
+    const wait = async <T,>(probe: () => T | false | undefined, timeout = 12000): Promise<T | undefined> => {
+      const deadline = Date.now() + timeout;
+      for (;;) { const value = probe(); if (value) return value; if (Date.now() > deadline) return undefined; await new Promise(done => setTimeout(done, 50)); }
+    };
+    const request = async (path: string, body?: unknown) => {
+      const response = await fetch(`${active.baseUrl}${path}`, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      return { status: response.status, body: await response.json() as { nativeInput?: { wake?: boolean }; receipt?: { stage?: string; result?: Record<string, unknown> } } };
+    };
+    let status = await request(`/api/seat/status/${encodeURIComponent(SEAT)}`);
+    for (let attempt = 0; !status.body.nativeInput?.wake && attempt < 100; attempt++) { await new Promise(done => setTimeout(done, 100)); status = await request(`/api/seat/status/${encodeURIComponent(SEAT)}`); }
+    expect(status.body.nativeInput?.wake, JSON.stringify(status.body)).toBe(true);
+    expect((await request(`/api/seat/set-input-route/${encodeURIComponent(SEAT)}`, { route: "native", reason: "owned crash smoke" })).status).toBe(200);
+    const db = new Database(join(scaffold.stateDir, "scenario.db"), { readonly: true });
+    smokeDb = db;
+    const grant = () => db.prepare("SELECT grant_id,node_id,run_id,session_id,generation,revoked_at FROM activity_grants WHERE run_id IS NOT NULL AND activated_at IS NOT NULL AND revoked_at IS NULL").get() as Record<string, unknown> | undefined;
+    const origin = grant(); expect(origin?.run_id).toBeTruthy();
+    const registry = new SessionRegistry(db);
+    expect(registry.findResumeContextByName(SEAT)?.sessionId).toBe(origin!.session_id);
+    const selected = JSON.parse(readFileSync(join(scaffold.openrigHome, "tmux-server.json"), "utf8")) as { socketPath: string };
+    sockets.add(selected.socketPath);
+    const pane = () => native(selected.socketPath, ["display-message", "-p", "-t", `=${SEAT}:`, "#{pane_id}:#{pane_pid}"]);
+    const originalPane = pane();
+    const panePid = Number(originalPane.split(":")[1]);
+    const ancestry = (pid: number) => {
+      const parents: number[] = [];
+      while (pid > 1 && parents.length < 32) {
+        parents.push(pid);
+        pid = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+          encoding: "utf8", timeout: 5000, env: scaffold!.env,
+        }).trim());
+      }
+      return parents;
+    };
+    const wake = (id: string) => request(`/api/seat/command/${encodeURIComponent(SEAT)}`, { requestId: id, type: "wake", question: id });
+    const lookup = (id: string) => request(`/api/seat/command/${encodeURIComponent(SEAT)}?requestId=${encodeURIComponent(id)}`);
+    await wake("SMOKE:before");
+    expect(await wait(() => readLog().some(entry => entry.prompt === "SMOKE:before"))).toBe(true);
+    for (let attempt = 0; (await lookup("SMOKE:before")).body.receipt?.stage !== "completed" && attempt < 100; attempt++) await new Promise(done => setTimeout(done, 50));
+    expect((await lookup("SMOKE:before")).body.receipt?.result).toMatchObject({ completion: "completed", answer: "answer SMOKE:before" });
+    await wake("SMOKE:across");
+    expect(await wait(() => readLog().some(entry => entry.prompt === "SMOKE:across"))).toBe(true);
+    expect((await lookup("SMOKE:across")).body.receipt?.stage).not.toBe("completed");
+    const nativeProcess = readLog().find(entry => entry.pid && !entry.token)!;
+    const nativePid = nativeProcess.pid!, receiverPid = nativeProcess.ppid!;
+    expect(ancestry(nativePid).slice(0, 2)).toEqual([nativePid, receiverPid]);
+    expect(ancestry(receiverPid)).toContain(panePid);
+    process.kill(nativePid, 0); process.kill(receiverPid, 0);
+    const state = JSON.parse(readFileSync(join(scaffold.openrigHome, "daemon.json"), "utf8")) as { pid: number; port: number; db: string };
+    expect(state.port).toBe(active.port); expect(state.db).toBe(join(scaffold.stateDir, "scenario.db")); expect(state.pid).not.toBe(process.pid);
+    process.kill(state.pid, "SIGKILL");
+    await new Promise(done => setTimeout(done, 300)); process.kill(nativePid, 0); process.kill(receiverPid, 0);
+    await active.restart();
+    const restarted = JSON.parse(readFileSync(join(scaffold.openrigHome, "daemon.json"), "utf8")) as { pid: number };
+    expect(restarted.pid).not.toBe(state.pid);
+    expect(grant()).toEqual(origin);
+    expect(pane()).toBe(originalPane);
+    const current = registry.findResumeContextByName(SEAT); expect(current).not.toBeNull();
+    expect(current!.nodeId).toBe(origin!.node_id);
+    if (current!.sessionId !== origin!.session_id) expect(registry.isOccupantContinuedByAdoption(String(origin!.node_id), String(origin!.generation))).toBe(true);
+    process.kill(nativePid, 0); process.kill(receiverPid, 0);
+    expect(ancestry(nativePid).slice(0, 2)).toEqual([nativePid, receiverPid]);
+    expect(ancestry(receiverPid)).toContain(panePid);
+    let across = await lookup("SMOKE:across");
+    for (let attempt = 0; across.body.receipt?.stage !== "completed" && attempt < 150; attempt++) { await new Promise(done => setTimeout(done, 100)); across = await lookup("SMOKE:across"); }
+    expect(across.body.receipt?.result, JSON.stringify(across.body)).toMatchObject({ completion: "completed", answer: "answer SMOKE:across" });
+    expect((await wake("SMOKE:across")).body.receipt?.result ?? (await lookup("SMOKE:across")).body.receipt?.result).toMatchObject({ answer: "answer SMOKE:across" });
+    await wake("SMOKE:after");
+    for (let attempt = 0; (await lookup("SMOKE:after")).body.receipt?.stage !== "completed" && attempt < 100; attempt++) await new Promise(done => setTimeout(done, 50));
+    expect((await lookup("SMOKE:after")).body.receipt?.result).toMatchObject({ completion: "completed", answer: "answer SMOKE:after" });
+    expect(readLog().filter(entry => entry.prompt?.startsWith("SMOKE:")).map(entry => entry.prompt)).toEqual(["SMOKE:before", "SMOKE:across", "SMOKE:after"]);
+    expect(readLog().filter(entry => entry.pid && !entry.token).map(entry => entry.pid)).toEqual([nativePid]);
+    db.close(); smokeDb = undefined;
+  }, 180000);
 
   it("retains live legacy seats, migrates after down, and routes later reads, attachments and destruction to the selected server", async () => {
     scaffold = prepareHermeticEnv({ baseEnv: {
