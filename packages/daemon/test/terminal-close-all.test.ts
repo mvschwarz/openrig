@@ -1,3 +1,4 @@
+import { privateTerminalTmuxDeps, privateTerminalTmuxEnvironment } from "../../../test/terminal-tmux-isolation.js";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,13 +14,11 @@ import type { LiveSeatRow } from "../src/domain/terminal/terminal-views-store.js
 
 const dirs: string[] = [];
 const sockets: string[] = [];
-const tmuxEnv = { ...process.env };
-delete tmuxEnv["TMUX"];
 
 function runTmux(socket: string, args: string[]): string {
   return execFileSync("tmux", ["-L", socket, "-f", "/dev/null", ...args], {
     encoding: "utf8",
-    env: tmuxEnv,
+    env: privateTerminalTmuxEnvironment(),
     timeout: 5000,
   });
 }
@@ -188,10 +187,11 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     let selected = a;
     const tmuxServerArgs = vi.fn(() => { const socket = selected; selected = b; return ["-L", socket]; });
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null,
       resolveHost: () => null, hasSession: () => true, rigViewersDir: tempDir("pinned-viewer-"),
-      tmuxServerArgs, resolveLocalTmux: async () => "tmux",
+      tmuxServerArgs, tmuxExec: undefined, resolveLocalTmux: async () => "tmux",
     });
     seedTmux(a, ["-L", a], { kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-pinned", sessionId,
       nonce: "pinned", windowIds: [windowId], paneIds: [paneId], phase: "created" });
@@ -224,6 +224,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     });
     const dir = tempDir("guarded-record-");
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null,
       resolveHost: () => null, hasSession: () => true, rigViewersDir: dir,
@@ -251,6 +252,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeCloseHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [],
@@ -284,6 +286,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     );
 
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha", "beta"],
@@ -316,6 +319,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeCloseHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -359,6 +363,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeCloseHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha", "beta"],
@@ -394,6 +399,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeCloseHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -442,6 +448,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const serverArgs = ["-L", socket, "-f", "/dev/null"];
     const h = makeCloseHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [],
@@ -451,7 +458,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       hasSession: () => true,
       rigViewersDir,
       tmuxServerArgs: () => serverArgs,
-      tmuxExec: async (args) => execFileSync("tmux", [...serverArgs, ...args], { encoding: "utf8", env: tmuxEnv, timeout: 5000 }),
+      tmuxExec: async (args) => execFileSync("tmux", [...serverArgs, ...args], { encoding: "utf8", env: privateTerminalTmuxEnvironment(), timeout: 5000 }),
     });
 
     seedTmux(socket, serverArgs, {
@@ -488,6 +495,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     let mutatedB = false;
     const h = makeCloseHerdr();
     const herdrSvc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha", "beta"],
@@ -528,6 +536,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const serverArgs = ["-L", socket, "-f", "/dev/null"];
     let tmuxMutatedB = false;
     const tmuxSvc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: () => null,
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [],
@@ -538,7 +547,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       rigViewersDir: tmuxDir,
       tmuxServerArgs: () => serverArgs,
       tmuxExec: async (args) => {
-        const out = execFileSync("tmux", [...serverArgs, ...args], { encoding: "utf8", env: tmuxEnv, timeout: 5000 });
+        const out = execFileSync("tmux", [...serverArgs, ...args], { encoding: "utf8", env: privateTerminalTmuxEnvironment(), timeout: 5000 });
         if (!tmuxMutatedB && args[0] === "if-shell" && args[3] === s1Id) {
           tmuxMutatedB = true;
           runTmux(socket, ["new-window", "-d", "-t", s2Id!, "-n", "person-extra", "sleep 60"]);
@@ -569,6 +578,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const proof = encodeTmuxViewerProof({ view: "rig:alpha", endpoint: tmuxEndpointKey(serverArgs), sessionId: "$1", sessionName: "openrig-view-1", nonce: "nonce-1", windowIds: ["@1"], paneIds: ["%1"] });
     const commands: string[][] = [];
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: () => null,
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [],
@@ -631,6 +641,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const rigViewersDir = tempDir("rig-viewers-j08-");
     const h = makeCloseHerdr({ launchTokenPrefix: "daemon1" });
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -662,6 +673,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
 
     const h = makeCloseHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [],
@@ -683,6 +695,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const rigViewersDir = tempDir("rig-viewers-j12-");
     const otherHerdr = makeCloseHerdr({ socketPath: "/tmp/herdr-other.sock" });
     const otherSvc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? otherHerdr.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -697,6 +710,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const defaultHerdr = makeCloseHerdr({ socketPath: "/tmp/herdr-default.sock" });
     const defaultTmux = vi.fn(async (): Promise<string> => { throw new Error("fixture tmux endpoint unavailable"); });
     const defaultSvc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? defaultHerdr.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [],
@@ -718,6 +732,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     expect(defaultTmux).toHaveBeenCalled();
 
     const closeOtherTmux = await new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: () => null,
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [],
@@ -775,6 +790,7 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
 
   function makeBaseDeps(overrides: Partial<TerminalServiceDeps> & { rigViewersDir: string }): TerminalServiceDeps {
     return {
+      ...privateTerminalTmuxDeps(),
       resolveProvider: () => null,
       viewsStore: { get: () => undefined, list: () => [] },
       listRigSeats: () => [],
@@ -1009,7 +1025,8 @@ it.each([
   ["error connecting to /tmp/fixture.sock (Permission denied)", false],
 ])("classifies selected tmux socket absence without treating permission errors as absence: %s", async (message, absent) => {
   const run = vi.fn(async () => { throw new Error(message); });
-  const svc = new TerminalService({ resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
+  const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(), resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
     listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null, resolveHost: () => null, hasSession: () => true,
     tmuxExec: run, tmuxServerArgs: () => ["-L", "missing-fixture"] });
   const result = await svc.closeAll({ provider: "tmux" });

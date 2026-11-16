@@ -1,3 +1,4 @@
+import { privateTerminalTmuxDeps } from "../../../test/terminal-tmux-isolation.js";
 // OPR.0.4.6.02 C3 — the terminal routes: canonical composer + rig-scoped thin
 // alias. Pins the route wiring + status mapping + the one shared body contract:
 //  - POST /api/terminal/open → the TerminalService result body verbatim;
@@ -273,6 +274,7 @@ describe("#3081 bf06 child B01/BT01 — HTTP /close-all and /close with real Ter
     const closeViewCalls: Array<{ viewId: string; appHome: string }> = [];
     const ledger = new RigViewerLedger(dir);
     const service = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? def : null),
       resolveSessionProvider: (n, s) => (n === "herdr" ? (s === "work" ? work : def) : null),
       resolveHerdrAppProvider: (target) => ({

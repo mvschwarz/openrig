@@ -1,3 +1,4 @@
+import { privateTerminalTmuxDeps } from "../../../test/terminal-tmux-isolation.js";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -217,6 +218,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const h = makeInMemoryHerdr();
     const hasSession = vi.fn(() => true);
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: n => n === "herdr" ? h.adapter : null,
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -238,6 +240,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
   it.each(["seat listing", "liveness"])("CR: contains a middle-rig %s failure and preserves earlier and later results", async failure => {
     const h = makeInMemoryHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: n => n === "herdr" ? h.adapter : null,
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["gamma", "beta", "alpha"],
@@ -268,6 +271,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["beta", "kernel", "alpha"],
@@ -298,6 +302,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const hasSession = vi.fn((s: string) => s === "alive@mixed");
 
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["all-remote", "all-stopped", "mixed"],
@@ -362,6 +367,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr({ failCreateForLabel: /^broken$/ });
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["broken", "healthy"],
@@ -382,6 +388,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr({ reuseLive: true });
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -415,6 +422,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     };
     const hDown = makeInMemoryHerdr({ alive: false });
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => n === "herdr" ? hDown.adapter : n === "cmux" ? cmux : null,
       resolveHerdrAppProvider: () => ({ ...cmux, name: "herdr-app", appHome: "/tmp/app", closeView: async () => ({ provider: "herdr-app", ok: true, opened: [], absent: [], degraded: [], pages: 0 }) }),
       viewsStore: { get: () => null, list: () => [] },
@@ -448,6 +456,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr(mode);
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -469,6 +478,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: {
         get: (id) => {
@@ -516,6 +526,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr({ injectPersonPaneInAppliedTabOnPaneList: true });
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -549,6 +560,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const dir1 = tempDir("rig-viewers-");
     const h1 = makeInMemoryHerdr({ reuseLive: true });
     const svc1 = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h1.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -571,6 +583,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const dir2 = tempDir("rig-viewers-");
     const h2 = makeInMemoryHerdr({ reuseLive: true });
     const svc2 = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h2.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha"],
@@ -597,6 +610,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
 
     const h = makeInMemoryHerdr();
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha", "beta"],
@@ -626,6 +640,7 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr({ failCreateForLabel: /.*/ });
     const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
       resolveProvider: (n) => (n === "herdr" ? h.adapter : null),
       viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => ["alpha", "beta"],
@@ -646,6 +661,7 @@ it("opens the live rig by stable ID when a stopped rig has the same display name
   const h = makeInMemoryHerdr();
   const listRigSeats = vi.fn((id: string) => id === "live-id" ? [makeRigSeat("alpha", "op")] : []);
   const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(),
     resolveProvider: () => h.adapter, viewsStore: { get: () => null, list: () => [] },
     listRigNames: () => ["alpha", "alpha"],
     listRigs: () => [{ id: "stopped-id", name: "alpha" }, { id: "live-id", name: "alpha" }],

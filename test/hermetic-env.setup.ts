@@ -178,3 +178,32 @@ assertFixtureScopedHome(OPENRIG_HOME);
 // in-process fixture registers its origin (allowFetchTarget) when it binds.
 const { installFetchGuard } = await import("../packages/cli/test/fetch-guard.js");
 installFetchGuard();
+
+// Close-all discovers tmux sessions even in an otherwise Herdr-only test.
+// Give each test its own tmux directory and reject any selected socket outside
+// registered fixture roots before the actual service reaches an executor.
+// This is a test-only dependency wrapper; the production class remains real.
+if (process.env["VITEST"]) {
+  const { beforeEach, vi } = await import("vitest");
+  const { beginPrivateTerminalTmux, assertPrivateTerminalTmux } = await import("./terminal-tmux-isolation.js");
+  const privateTmuxBase = createdTmp ?? os.tmpdir();
+  beginPrivateTerminalTmux(privateTmuxBase);
+  beforeEach(() => { beginPrivateTerminalTmux(privateTmuxBase); });
+  vi.doMock("../packages/daemon/src/domain/terminal/terminal-service.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../packages/daemon/src/domain/terminal/terminal-service.js")>();
+    const server = await import("../packages/daemon/src/adapters/tmux-server.js");
+    return { ...actual, TerminalService: class TerminalService extends actual.TerminalService {
+      constructor(deps: import("../packages/daemon/src/domain/terminal/terminal-service.js").TerminalServiceDeps) {
+        // Keep live fixture mutations visible, as the production constructor does.
+        super(new Proxy(deps, { get(target, property, receiver) {
+          if (property !== "tmuxServerArgs") return Reflect.get(target, property, receiver);
+          return () => {
+            const args = target.tmuxServerArgs?.() ?? server.daemonTmuxServerArgs();
+            assertPrivateTerminalTmux(args, process.env);
+            return args;
+          };
+        } }));
+      }
+    } };
+  });
+}

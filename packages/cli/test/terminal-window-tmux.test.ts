@@ -1,3 +1,4 @@
+import { privateTerminalTmuxDeps, privateTerminalTmuxEnvironment } from "../../../test/terminal-tmux-isolation.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -14,8 +15,8 @@ import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 const sockets: string[] = [];
 const dirs: string[] = [];
 const proofObservers = new Map<string, { proofs: unknown[]; closedViewers: string[]; events: string[] }>();
-const env = { ...process.env }; delete env["TMUX"];
 function tmux(socket: string, args: string[]): string {
+  const env = privateTerminalTmuxEnvironment();
   const out = execFileSync("tmux", ["-L", socket, "-f", "/dev/null", ...args], { encoding: "utf8", env, timeout: 5000 });
   const observer = proofObservers.get(socket);
   if (observer && args.includes("set-option") && args.includes(TMUX_VIEWER_PROOF_OPTION)) {
@@ -281,7 +282,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     const notes = "rigs" in result ? result.rigs[0]?.notes : result.notes;
     expect(notes?.join(" ")).toContain("close --all cannot close an unqualified viewer");
     if ("rigs" in result) expect(result.rigs.map(r => r.outcome)).toEqual(["opened", "opened"]);
-    const svc = new TerminalService({ resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
+    const svc = new TerminalService({
+      ...privateTerminalTmuxDeps(), resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
       listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null, resolveHost: () => null, hasSession: () => true,
       tmuxServerArgs: () => ["-L", f.server], tmuxExec: async args => tmux(f.server, args) });
     const closed = await svc.closeAll({ provider: "tmux" });
