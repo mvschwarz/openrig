@@ -1671,6 +1671,8 @@ export function resolveDefaultOwner(
   const candidates = targets.map((t) => ({ session: t, runtime: runtimeOf(t) }));
   const match = candidates.find((c) => c.runtime === step.harness);
   if (match) return match.session;
+  const unresolvedPod = targets.find((target) => target.startsWith("{pod}-"));
+  if (unresolvedPod) return unresolvedPod;
   throw new WorkflowProjectorError(
     "harness_pin_unsatisfied",
     `step "${step.id}" pins harness "${step.harness}" but no preferred_target of role "${step.actor_role}" runs it. Candidates: ${
@@ -1910,7 +1912,8 @@ export function compileGate(
   if (gatedStep.harness) {
     const candidates = handlerTargets.map((t) => ({ session: t, runtime: runtimeOf(t) }));
     const match = candidates.find((c) => c.runtime === gatedStep.harness);
-    if (!match) {
+    const unresolvedPod = handlerTargets.find((target) => target.startsWith("{pod}-"));
+    if (!match && !unresolvedPod) {
       throw new WorkflowProjectorError(
         "harness_pin_unsatisfied",
         `step "${gatedStep.id}" pins harness "${gatedStep.harness}" and gates on handler role "${gate.target}", but no preferred_target of that role runs it. Candidates: ${candidates.map((c) => `${c.session} → ${c.runtime ?? "unknown"}`).join(", ")}. Add a ${gatedStep.harness} seat to the handler role's preferred_targets, or change/remove the pin.`,
@@ -1922,7 +1925,7 @@ export function compileGate(
         },
       );
     }
-    seat = match.session;
+    seat = match?.session ?? unresolvedPod!;
   } else {
     seat = handlerTargets[0]!;
   }

@@ -405,8 +405,26 @@ ${steps}`;
 
   it("starts without a pod and reports the missing binding at the later hop", async () => {
     const yaml = specYaml("pod-later", `    watcher:\n      preferred_targets:\n        - ops-watcher@rig-a\n    finisher:\n      preferred_targets:\n        - "{pod}-finisher@rig-a"\n`, `    - id: watch\n      actor_role: watcher\n      allowed_exits:\n        - handoff\n      next_hop:\n        mode: require\n        suggested_roles:\n          - finisher\n    - id: finish\n      actor_role: finisher\n      allowed_exits:\n        - done\n`);
-    const started = await start(yaml, { targetRig: "rig-a" });
+    const pinned = yaml.replace("    - id: finish\n      actor_role: finisher\n", "    - id: finish\n      actor_role: finisher\n      harness: codex\n");
+    const started = await start(pinned, { targetRig: "rig-a" });
     expect(started.status).toBe(201);
+    const packets = count("queue_items");
+    const response = await daemon.app.request("/api/workflow/project", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instanceId: started.body.instance.instanceId, currentPacketId: started.body.entryQitemId, exit: "handoff", actorSession: "ops-watcher@rig-a", resultNote: "next" }),
+    });
+    const body = await response.json() as { error: string; message: string };
+    expect(response.status, JSON.stringify(body)).toBe(400);
+    expect(body.error).toBe("unbound_destination_pod");
+    expect(body.message).toContain("{pod}-finisher@rig-a");
+    expect(body.message).toContain("--pod");
+    expect(count("queue_items")).toBe(packets);
+  });
+
+  it("defers an unbound pod target on a pinned handler gate until its hop", async () => {
+    const yaml = specYaml("pod-handler", `    watcher:\n      preferred_targets:\n        - ops-watcher@rig-a\n    reviewer:\n      preferred_targets:\n        - ops-reviewer@rig-a\n    guard:\n      preferred_targets:\n        - "{pod}-guard@rig-a"\n`, `    - id: watch\n      actor_role: watcher\n      allowed_exits:\n        - handoff\n      next_hop:\n        mode: require\n        suggested_roles:\n          - reviewer\n    - id: check\n      actor_role: reviewer\n      harness: codex\n      gate:\n        target: guard\n        summary: review\n`);
+    const started = await start(yaml, { targetRig: "rig-a" });
+    expect(started.status, JSON.stringify(started.body)).toBe(201);
     const packets = count("queue_items");
     const response = await daemon.app.request("/api/workflow/project", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -415,8 +433,7 @@ ${steps}`;
     const body = await response.json() as { error: string; message: string };
     expect(response.status).toBe(400);
     expect(body.error).toBe("unbound_destination_pod");
-    expect(body.message).toContain("{pod}-finisher@rig-a");
-    expect(body.message).toContain("--pod");
+    expect(body.message).toContain("{pod}-guard@rig-a");
     expect(count("queue_items")).toBe(packets);
   });
 

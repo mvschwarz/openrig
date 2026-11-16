@@ -582,6 +582,10 @@ export class WorkflowRuntime {
     const runtimeOf = (session: string) => nodeRuntimeOf(this.db, session);
     const declaredTargetsOf = (roleName: string): number =>
       (specRow.spec.roles?.[roleName]?.preferred_targets ?? []).length;
+    const targetsAwaitPod = (roleName: string): boolean => {
+      const targets = specRow.spec.roles?.[roleName]?.preferred_targets ?? [];
+      return boundPod === null && targets.length > 0 && targets.every((target) => target.startsWith("{pod}-"));
+    };
     for (const step of specRow.spec.steps) {
       if (step.harness) {
         // rev1-r2 blocker fix: gated steps are NOT excluded — a pinned
@@ -594,9 +598,12 @@ export class WorkflowRuntime {
           const gateRoleTargets = gateIsHuman
             ? declaredTargetsOf(step.actor_role)
             : declaredTargetsOf(step.gate.target);
+          const gateRole = gateIsHuman ? step.actor_role : step.gate.target;
+          if (targetsAwaitPod(gateRole)) continue;
           if (boundRig !== null && gateRoleTargets === 0) continue; // role-only on a bound rig: projection resolves
           compileGate(specRow.spec, step, runtimeOf);
         } else if (!(step === entryStep && input.entryOwnerSession)) {
+          if (targetsAwaitPod(step.actor_role)) continue;
           if (boundRig !== null && declaredTargetsOf(step.actor_role) === 0) continue;
           resolveDefaultOwner(specRow.spec, step, runtimeOf);
         }
