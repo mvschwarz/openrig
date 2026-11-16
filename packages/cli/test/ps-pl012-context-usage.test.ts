@@ -152,6 +152,14 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
     return prog;
   }
 
+  it("labels a runner context percentage with its reporting source", async () => {
+    nodesByRig["rig-1"] = [{ ...nodeAt("runner", 75), contextUsage: { ...nodeAt("runner", 75).contextUsage, source: "runner_reported" } }];
+    const result = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]); });
+    expect(result.exitCode).toBeUndefined();
+    expect(result.errLogs).toEqual([]);
+    expect(result.logs.join("\n")).toContain("75% (runner-reported)");
+  });
+
   it("--filter contextUsage.percent>=80 narrows to critical seats", async () => {
     nodesByRig["rig-1"] = [
       nodeAt("alpha", 90),
