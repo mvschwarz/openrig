@@ -2291,9 +2291,10 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string,
     return `${prefix}${header}\n${trustLine}\n`;
   }
 
+  const topLevel = lineStartsAtDocumentLevel(content);
   let nextSectionIndex = lines.length;
   for (let i = headerIndex + 1; i < lines.length; i++) {
-    if (lines[i]!.trim().startsWith("[")) {
+    if (topLevel[i] && lines[i]!.trim().startsWith("[")) {
       nextSectionIndex = i;
       break;
     }
@@ -2304,7 +2305,7 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string,
     ? /^(?:trusted_hash|"trusted_hash"|'trusted_hash')\s*=/.test(line.trim())
     : line.trim().startsWith(field);
   const hashIndex = lines.findIndex(
-    (line, index) => index > headerIndex && index < nextSectionIndex && matchesField(line),
+    (line, index) => index > headerIndex && index < nextSectionIndex && topLevel[index] && matchesField(line),
   );
   if (hashIndex >= 0) {
     lines[hashIndex] = trustLine;

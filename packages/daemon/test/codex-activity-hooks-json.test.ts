@@ -279,6 +279,23 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
     expect(m.store[CONFIG]).toBe(after);
   });
 
+  it.each(['"""', "'''"])("provisions JSON hooks without rewriting quoted examples in a %s note", (quote) => {
+    const key = `${HOOKS}:stop:1:0`;
+    const note = `note = ${quote}\n"trusted_hash" = "double example"\n 'trusted_hash' = "literal example"\n${quote}\n`;
+    const config = `model = "gpt"\n\n[hooks.state."${key}"]\n${note}trusted_hash = "old"\nenabled = true\n`;
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config,
+      [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP] } }) });
+    const a = adapter(m.fs);
+    a.ensureCodexActivityHooks();
+    expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([USER_GROUP, ours()]);
+    expect(m.store[CONFIG]).toContain(note);
+    expect(state(m.store[CONFIG]!)[key]).toEqual({ trusted_hash: trustOf("Stop", 1).hash, enabled: true,
+      note: '"trusted_hash" = "double example"\n \'trusted_hash\' = "literal example"\n' });
+    const after = m.store[CONFIG];
+    a.ensureCodexActivityHooks();
+    expect(m.store[CONFIG]).toBe(after);
+  });
+
   it("a person's own relay with the same file name and label is theirs: kept, and OpenRig's is added (F4)", () => {
     const theirs = { hooks: [{ type: "command", command: 'node "/home/test/tools/activity-relay.cjs"', timeout: 19, statusMessage: "OpenRig activity" }] };
     const m = mockCodexFs({ [RELAY]: "// relay", [HOOKS]: JSON.stringify({ hooks: { Stop: [theirs] } }) });

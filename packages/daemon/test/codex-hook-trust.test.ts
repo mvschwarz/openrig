@@ -154,6 +154,39 @@ describe("OPR.0.4.3.33 — upsertCodexHookTrust (idempotent, non-clobbering, sec
     } } } });
   });
 
+  it.each(['"""', "'''"])("keeps quoted trust examples in a %s note unchanged", (quote) => {
+    const note = `note = ${quote}\n"trusted_hash" = "double example"\n 'trusted_hash' = "literal example"\n${quote}\n`;
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\n${note}trusted_hash = "sha256:old"\nenabled = false\n`;
+    const after = upsertCodexHookTrust(before, KEY, HASH);
+    expect(after).toBe(before.replace('trusted_hash = "sha256:old"', `trusted_hash = "${HASH}"`));
+    expect(parseToml(after)).toMatchObject({ hooks: { state: { [KEY]: { trusted_hash: HASH, enabled: false } } } });
+    expect(upsertCodexHookTrust(after, KEY, HASH)).toBe(after);
+  });
+
+  it("inserts real trust when a quoted assignment exists only in a note", () => {
+    const note = 'note = \'\'\'\n"trusted_hash" = "example"\n\'\'\'\n';
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\n${note}`;
+    const after = upsertCodexHookTrust(before, KEY, HASH);
+    expect(after).toContain(note);
+    expect(parseToml(after)).toEqual({ hooks: { state: { [KEY]: {
+      note: '"trusted_hash" = "example"\n', trusted_hash: HASH,
+    } } } });
+  });
+
+  it.each(['"""', "'''"])("ignores table-looking text in a %s note when locating real trust", (quote) => {
+    const note = `note = ${quote}\n[not-a-table]\n"trusted_hash" = "example"\n${quote}\n`;
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\n${note}trusted_hash = "sha256:old"\n`;
+    const after = upsertCodexHookTrust(before, KEY, HASH);
+    expect(after).toBe(before.replace('trusted_hash = "sha256:old"', `trusted_hash = "${HASH}"`));
+    expect(() => parseToml(after)).not.toThrow();
+  });
+
+  it("keeps a bare trust example in a multiline note unchanged", () => {
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\nnote = '''\ntrusted_hash = "example"\n'''\ntrusted_hash = "sha256:old"\n`;
+    expect(upsertCodexHookTrust(before, KEY, HASH)).toBe(
+      before.replace('trusted_hash = "sha256:old"', `trusted_hash = "${HASH}"`));
+  });
+
   it("does NOT clobber an unrelated [hooks.state], a [projects] trust entry, or other content", () => {
     const existing =
       '[projects."/some/project"]\ntrust_level = "trusted"\n\n' +
