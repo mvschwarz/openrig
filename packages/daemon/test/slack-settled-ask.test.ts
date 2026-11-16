@@ -82,11 +82,11 @@ describe("posted asks follow settlement outside Slack", () => {
   });
   afterEach(() => { wire.stop(); vi.useRealTimers(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
-  async function postAsk(detail?: string) {
+  async function postAsk(detail?: string, recommendedLabel?: string) {
     const before = postCount;
     const item = await repo.create({ sourceSession: "author@rig", destinationSession: human,
       summary: "Ship the change?", body: "Original **brief** with its evidence.", humanDetail: detail,
-      humanQuestions: [{ id: "ship", question: "Ship now?", options: [{ id: "yes", label: "Ship" }, { id: "hold", label: "Hold" }] }], nudge: false });
+      humanQuestions: [{ id: "ship", question: "Ship now?", options: [{ id: "yes", label: recommendedLabel ?? "Ship", ...(recommendedLabel ? { recommended: true } : {}) }, { id: "hold", label: "Hold" }] }], nudge: false });
     const [alert] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({});
     expect(alert?.qitemId).toBe(item.qitemId);
     expect(wire.dispatcher.dispatch("post_message", human, alert)).toMatchObject({ ok: true });
@@ -109,7 +109,7 @@ describe("posted asks follow settlement outside Slack", () => {
     const edited = updates[0]!;
     expect(edited).toMatchObject({ channel: original.channel, ts: original.ts });
     expect(edited.text).toContain(state === "done" ? "Done" : "Canceled");
-    expect(edited.text).toContain("superseded");
+    expect(edited.text).not.toContain("superseded");
     expect(edited.text).toContain(closed.ts);
     expect(edited.text).toContain("author@rig");
     expect(edited.text).toContain("Handled in the pane after the merge.");
@@ -163,8 +163,18 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
     await vi.waitFor(() => expect(updates).toHaveLength(1));
     expect(updates[0]!.text).toContain("Answered");
+    expect(String(updates[0]!.text).split("\n")[0]).not.toContain("no-follow-on");
     expect(updates[0]!.text).toContain(`by ${human}`);
     expect(postCount).toBe(1);
+  });
+
+  it.each(["Ship", "Ship (recommended)", "Ship (Recommended)"])("keeps the recommendation once when %s becomes settled history", async (label) => {
+    const item = await postAsk(undefined, label);
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const sections = (updates[0]!.blocks as Array<Record<string, unknown>>).filter((b) => b.type === "section");
+    expect(JSON.stringify(sections).match(/\(recommended\)/gi)).toHaveLength(1);
+    expect(repo.getById(item.qitemId)?.closureReason).toBe("no-follow-on");
   });
 
   it("retains a refused private-channel read without claiming the edit, then recovers on restart", async () => {
@@ -484,7 +494,7 @@ describe("posted asks follow settlement outside Slack", () => {
     await vi.waitFor(() => expect(updates).toHaveLength(1));
   });
 
-  it("shows a later close's new reason after the same direct ask was reopened", async () => {
+  it("shows a later close's explanation after the same direct ask was reopened", async () => {
     const item = await postAsk();
     wire.stop(); vi.useFakeTimers();
     repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "no-follow-on", transitionNote: "Initial completion." });
@@ -497,7 +507,9 @@ describe("posted asks follow settlement outside Slack", () => {
     repo.update({ qitemId: item.qitemId, actorSession: "author@rig", state: "done", closureReason: "superseded", transitionNote: "The later work replaced this ask." });
     await vi.advanceTimersByTimeAsync(0);
     expect(updates).toHaveLength(3);
-    expect(messages[0]!.text).toMatch(/^Done · superseded/);
+    expect(messages[0]!.text).toMatch(/^Done · \d{4}-/);
+    expect(String(messages[0]!.text).split("\n")[0]).not.toContain("superseded");
+    expect(repo.getById(item.qitemId)?.closureReason).toBe("superseded");
     expect(messages[0]!.text).toContain("The later work replaced this ask.");
     expect(postCount).toBe(1);
   });
