@@ -91,8 +91,9 @@ Other layouts and other herdr-app windows don't show Rig views. Each window (app
 - A local interactive cell sizes its seat like any terminal you use (tmux's `window-size latest`) while herdr-app shows
   it. While no pane shows it (another view or page, or **Your tabs**), herdr-core runs its terminal at the headless
   size, and the cell then leaves the seat's size to the seat's other clients. OpenRig recognises that state by the
-  headless size, 200 columns by 120 rows; a cell shown in a pane of exactly that size counts as not shown. This needs
-  tmux 3.2 or later. With an older tmux, a cell that no pane shows can still size the seat.
+  headless size, 200 columns by 120 rows; a cell shown in a pane of exactly that size counts as not shown. If
+  herdr-core's headless size was changed from that default, a cell that no pane shows isn't recognised and can still
+  size the seat. This needs tmux 3.2 or later. With an older tmux, a cell that no pane shows can still size the seat.
 
 ## What OpenRig keeps in the app home
 
