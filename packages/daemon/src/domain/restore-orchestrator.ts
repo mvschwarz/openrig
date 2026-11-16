@@ -62,7 +62,7 @@ import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { SEAT_STARTUP_BLOCKERS, resumingConversationSeats, validatePreRestore } from "./restore-preconditions.js";
-import { describePartners, holdsRecordedConversation } from "./shared-conversation.js";
+import { describePartners, holdsRecordedConversation, pairableConversation } from "./shared-conversation.js";
 import { getNodeInventoryForRigs } from "./node-inventory.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 
@@ -453,15 +453,22 @@ export class RestoreOrchestrator {
     this.activeRestores.add(rigId);
 
     try {
+      const currentRuntimes = Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime]));
+      // One observation of the seat records for the shared-conversation report, before any restore mutation: the
+      // validation and the partner check below name every agent from it, so a stale session this restore then marks
+      // detached is not "running" in one warning and "detached" in the other (the maintainer's 3rd review of #3250).
+      // The sessions the classification above already found stale are named detached, the status this restore gives them.
+      const observed = this.observeConversationRecords(rigId, snapshot.data, opts?.freshLogicalIds, currentRuntimes, classification.stale);
       const validation = validatePreRestore(snapshot.data, {
         fsOps: opts?.fsOps,
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
         freshLogicalIds: opts?.freshLogicalIds,
-        currentRuntimes: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime])),
+        currentRuntimes,
         currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
           .filter((current) => current.codexConfigProfile !== undefined)
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
-        ...this.currentSeatRecords(rigId),
+        currentStatuses: observed.currentStatuses,
+        attachedLogicalIds: observed.attachedLogicalIds,
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
       // A seat that is still a node of this rig but isn't in the snapshot's intended roster isn't started by this restore:
@@ -577,7 +584,8 @@ export class RestoreOrchestrator {
       // 5. Execute restore with compensating pattern per node
       const nodeResults: RestoreNodeResult[] = [];
       const restoreWarnings: string[] = [...validation.warnings];
-      restoreWarnings.push(...this.conversationPartners(rigId, snapshot.data, opts?.freshLogicalIds));
+      const heldLogicalIds = snapshot.data.nodes.filter((node) => heldForStartup.has(node.id)).map((node) => node.logicalId);
+      restoreWarnings.push(...this.conversationPartners(rigId, snapshot.data, observed, opts?.freshLogicalIds, currentRuntimes, heldLogicalIds));
       if (this.rigRepo.getRigNonInterruptive(rigId)) restoreWarnings.push(nonInterruptiveSummary(true));
       else if (opts?.nonInterruptive === false) restoreWarnings.push(nonInterruptiveSummary(false));
       for (const entry of plan) {
@@ -1081,29 +1089,26 @@ export class RestoreOrchestrator {
 
   /**
    * #3218 item 3 (B1 of its review; points 3 to 5 of the maintainer's): the agents this restore resumes, compared with
-   * the known agents outside it, with their recorded status (in this rig outside a replacement's selection, or in another
-   * rig), from the same rigs rig restore-check reads: the listed ones, archived rigs left out. Named in the restore's
-   * warnings; nothing is refused, stopped or picked, and an inventory that cannot be read says the comparison is
-   * unavailable.
+   * the known agents outside it, with their recorded status (in this rig outside a replacement's selection, kept
+   * attached to an external CLI or held for startup, or in another rig), from the same rigs rig restore-check reads: the
+   * listed ones, archived rigs left out. Named in the restore's warnings; nothing is refused, stopped or picked, and an
+   * inventory that cannot be read says the comparison is unavailable. Every status comes from the one observation taken
+   * before the restore changed anything (observeConversationRecords).
    */
-  private conversationPartners(rigId: string, data: SnapshotData, freshLogicalIds?: string[]): string[] {
-    const currentRuntimes = Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime]));
-    if (!resumingConversationSeats(data, { freshLogicalIds, currentRuntimes }).length) return [];
-    let inventory: NodeInventoryEntry[];
-    try {
-      // the listed rigs, as rig restore-check reads, and always this restore's own (an archived rig's restore too)
-      inventory = [...getNodeInventoryForRigs(this.db, new Set([...this.rigRepo.listRigs().map((rig) => rig.id), rigId])).values()].flat();
-    } catch (err) {
-      return [`Restore pre-validation: the shared-conversation comparison with agents outside this restore is unavailable (${err instanceof Error ? err.message : String(err)}).`];
+  private conversationPartners(rigId: string, data: SnapshotData, observed: ConversationRecords, freshLogicalIds: string[] | undefined,
+    currentRuntimes: Record<string, string | null | undefined>, heldLogicalIds: string[]): string[] {
+    const resuming = resumingConversationSeats(data, { freshLogicalIds, currentRuntimes, currentStatuses: observed.currentStatuses,
+      attachedLogicalIds: observed.attachedLogicalIds, heldLogicalIds });
+    if (!resuming.some(pairableConversation)) return [];
+    if (observed.inventory === null) {
+      return [`Restore pre-validation: the shared-conversation comparison with agents outside this restore is unavailable (${observed.unavailable}).`];
     }
-    const own = this.currentSeatRecords(rigId);
-    const resuming = resumingConversationSeats(data, { freshLogicalIds, currentRuntimes, ...own });
-    if (!resuming.length) return [];
     // Left out: only the seats restore launches. One kept attached to an external CLI (left_attached) stays running
-    // with its conversation, so it is compared as an agent outside the restore (the maintainer's review of #3250).
+    // with its conversation, and one held for startup keeps its current session: both are compared as agents outside
+    // the restore (the maintainer's reviews of #3250).
     const launched = new Set(resolveSnapshotRestoreTopology(data).intendedNodes.map((node) => node.logicalId)
-      .filter((logicalId) => !own.attachedLogicalIds.includes(logicalId)));
-    const others = inventory
+      .filter((logicalId) => !observed.attachedLogicalIds.includes(logicalId) && !heldLogicalIds.includes(logicalId)));
+    const others = observed.inventory
       .filter((entry) => !(entry.rigId === rigId && launched.has(entry.logicalId)) && holdsRecordedConversation(entry))
       .map((entry) => ({
         seat: entry.canonicalSessionName ?? `${entry.logicalId}@${entry.rigName}`,
@@ -1116,20 +1121,39 @@ export class RestoreOrchestrator {
       .map((warning) => `Restore pre-validation: ${warning}`);
   }
 
-  /** This rig's current seat records for the shared-conversation report, read for this rig alone (an archived rig's
-   *  restore inclusive): each seat's sessionStatus from the node inventory ("unknown" for all when it cannot be read),
-   *  and the seats kept attached to an external CLI from their bindings, the same record that makes restore leave
-   *  them running (left_attached) instead of launching them. */
-  private currentSeatRecords(rigId: string): { currentStatuses: Record<string, string | null>; attachedLogicalIds: string[] } {
-    let currentStatuses: Record<string, string | null> = {};
-    try {
-      currentStatuses = Object.fromEntries((getNodeInventoryForRigs(this.db, new Set([rigId])).get(rigId) ?? [])
-        .map((entry) => [entry.logicalId, entry.sessionStatus ?? null]));
-    } catch { /* every seat "unknown" */ }
+  /** The one observation of the seat records the shared-conversation report names (#3250, the maintainer's 3rd
+   *  review), taken before any restore mutation: the seats kept attached to an external CLI, from their bindings (the
+   *  record that makes restore leave them running, left_attached, instead of launching them), and, only when this
+   *  restore would resume a seat with a recorded conversation it can pair (pairableConversation), ONE read of the node inventory of the listed rigs and
+   *  this rig (an archived rig's restore inclusive): this rig's seats' sessionStatus and the partners' records. A session
+   *  of this rig recorded running that classifyRunningSessions found stale (no tmux session) is named detached, the
+   *  status this restore gives it before it launches anything, so the report never calls it running. An inventory that
+   *  cannot be read leaves the partner comparison unavailable; this rig's own statuses then come from a read of this rig
+   *  alone ("unknown" when that fails too). */
+  private observeConversationRecords(rigId: string, data: SnapshotData, freshLogicalIds: string[] | undefined,
+    currentRuntimes: Record<string, string | null | undefined>, staleSessionIds: readonly string[]): ConversationRecords {
     const attachedLogicalIds = (this.rigRepo.getRig(rigId)?.nodes ?? [])
       .filter((node) => seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external")
       .map((node) => node.logicalId);
-    return { currentStatuses, attachedLogicalIds };
+    if (!resumingConversationSeats(data, { freshLogicalIds, currentRuntimes, attachedLogicalIds }).some(pairableConversation)) {
+      return { currentStatuses: {}, attachedLogicalIds, inventory: [] };
+    }
+    const staleIds = new Set(staleSessionIds);
+    const staleNodeIds = new Set(this.sessionRegistry.getSessionsForRig(rigId).filter((session) => staleIds.has(session.id)).map((session) => session.nodeId));
+    const labelled = (entry: NodeInventoryEntry): NodeInventoryEntry =>
+      entry.rigId === rigId && entry.sessionStatus === "running" && staleNodeIds.has(entry.nodeId) ? { ...entry, sessionStatus: "detached" } : entry;
+    const statusesOf = (entries: readonly NodeInventoryEntry[]) => Object.fromEntries(entries.map((entry) => [entry.logicalId, entry.sessionStatus ?? null]));
+    try {
+      const byRig = getNodeInventoryForRigs(this.db, new Set([...this.rigRepo.listRigs().map((rig) => rig.id), rigId]));
+      const inventory = [...byRig.values()].flat().map(labelled);
+      return { currentStatuses: statusesOf(inventory.filter((entry) => entry.rigId === rigId)), attachedLogicalIds, inventory };
+    } catch (err) {
+      let currentStatuses: Record<string, string | null> = {};
+      try {
+        currentStatuses = statusesOf((getNodeInventoryForRigs(this.db, new Set([rigId])).get(rigId) ?? []).map(labelled));
+      } catch { /* every seat "unknown" */ }
+      return { currentStatuses, attachedLogicalIds, inventory: null, unavailable: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   private computeRestorePlan(data: SnapshotData): PlanEntry[] {
@@ -3098,6 +3122,15 @@ export class RestoreOrchestrator {
       return false;
     }
   }
+}
+
+/** The seat records the shared-conversation report names, observed once per restore (#3250). inventory null: it could
+ *  not be read (unavailable says why); [] when nothing this restore resumes holds a recorded conversation. */
+interface ConversationRecords {
+  currentStatuses: Record<string, string | null>;
+  attachedLogicalIds: string[];
+  inventory: NodeInventoryEntry[] | null;
+  unavailable?: string;
 }
 
 interface PlanEntry {

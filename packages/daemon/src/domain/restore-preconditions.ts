@@ -209,7 +209,9 @@ export function validatePreRestore(
 
   // #3218 item 3: two seats this restore would resume on the same recorded conversation are named, with the
   // conversation, so the person can decide. A reported gap, not a guard: nothing is refused or picked.
-  const shared = compareConversations(resumingConversationSeats(data, opts));
+  // A seat held for startup (a missing required startup file) is not launched, so it is not on the resumed side here
+  // (the maintainer's 3rd review of #3250); restore compares it as a current partner.
+  const shared = compareConversations(resumingConversationSeats(data, { ...opts, heldLogicalIds: heldForStartupLogicalIds(blockers, nodes) }));
   for (const group of shared.groups) {
     warnings.push(`Restore pre-validation: ${describeSharedConversation(group)}`);
   }
@@ -251,8 +253,16 @@ function pathLike(value: unknown): value is string {
   );
 }
 
-/** The occupants a restore of this snapshot would resume (the resume policy, not listed fresh, not a terminal), as
- *  ConversationSeat keyed by logical id (#3218 item 3). Shared by validatePreRestore and the restore's running check. */
+/** The logical ids of the seats a startup blocker holds (a missing required startup file or owner root): restore
+ *  doesn't launch them (#3250, the maintainer's 3rd review). */
+export function heldForStartupLogicalIds(blockers: readonly RestoreValidationBlocker[], nodes: readonly { id: string; logicalId: string }[] | null): string[] {
+  const held = new Set(blockers.filter((blocker) => SEAT_STARTUP_BLOCKERS.has(blocker.code) && blocker.nodeId).map((blocker) => blocker.nodeId));
+  return (nodes ?? []).filter((node) => held.has(node.id)).map((node) => node.logicalId);
+}
+
+/** The occupants a restore of this snapshot would resume (the resume policy, not listed fresh, not kept attached to an
+ *  external CLI, not held for startup, not a terminal), as ConversationSeat keyed by logical id (#3218 item 3). Shared
+ *  by validatePreRestore and the restore's partner check. */
 const UNREADABLE = Object.freeze({ unreadable: true });
 
 export function resumingConversationSeats(
@@ -262,6 +272,8 @@ export function resumingConversationSeats(
     currentRuntimes?: Record<string, string | null | undefined>;
     currentStatuses?: Record<string, string | null | undefined>;
     attachedLogicalIds?: string[];
+    /** Seats a startup blocker holds: restore doesn't launch them. */
+    heldLogicalIds?: string[];
   },
 ): ConversationSeat[] {
   if (!Array.isArray(data.nodes)) return [];
@@ -269,7 +281,8 @@ export function resumingConversationSeats(
   const resuming: ConversationSeat[] = [];
   for (const node of resolveSnapshotRestoreTopology(data).intendedNodes) {
     try {
-      if (opts.freshLogicalIds?.includes(node.logicalId) || opts.attachedLogicalIds?.includes(node.logicalId)) continue;
+      if (opts.freshLogicalIds?.includes(node.logicalId) || opts.attachedLogicalIds?.includes(node.logicalId)
+        || opts.heldLogicalIds?.includes(node.logicalId)) continue;
       const currentRuntime = opts.currentRuntimes?.[node.logicalId] ?? node.runtime;
       if (currentRuntime === "terminal") continue;
       const resolution = resolveActiveSnapshotSession({ ...data, sessions }, node.id);

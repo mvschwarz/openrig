@@ -44,6 +44,13 @@ export function holdsRecordedConversation(entry: { runtime?: string | null; sess
   return entry.sessionStatus === "running" || (entry.restorePolicy ?? "resume_if_possible") === "resume_if_possible";
 }
 
+/** Whether an agent's saved resume data names a conversation the comparison can pair: a resume type other than none
+ *  and a token, both text and not blank. Restore reads the agents outside it only when one of its own does (#3250). */
+export function pairableConversation(seat: ConversationSeat): boolean {
+  return typeof seat.resumeType === "string" && typeof seat.resumeToken === "string"
+    && !!seat.resumeType.trim() && seat.resumeType.trim() !== "none" && !!seat.resumeToken.trim();
+}
+
 export function compareConversations(seats: readonly ConversationSeat[]): ConversationComparison {
   const groups = new Map<string, SharedConversation>();
   const unavailable: string[] = [];

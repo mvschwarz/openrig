@@ -313,7 +313,8 @@ describe("RestoreOrchestrator", () => {
     if (shared) {
       expect(result.result.nodes.map((node) => node.logicalId).sort()).toEqual(["dev.a", "dev.b"]);
       expect(named).toHaveLength(1);
-      expect(named[0]).toContain("dev.a (running) and dev.b (running) have the same recorded claude_id conversation");
+      // no tmux session for either: the restore found them stale and names them detached (#3250, 3rd round)
+      expect(named[0]).toContain("dev.a (detached) and dev.b (detached) have the same recorded claude_id conversation");
       expect(result.result.warnings.join("\n")).not.toContain("conv-shared");
     } else {
       expect(named).toEqual([]);
@@ -338,9 +339,98 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.nodes[0]!.status).not.toBe("failed");
     const named = result.result.warnings.filter((line) => line.includes("outside this restore"));
     expect(named).toHaveLength(1);
+    // its session has no tmux session: the restore found it stale and names it detached, the status it gives it
     expect(named[0]).toContain(`dev.impl@r99 (detached) has the same recorded claude_id conversation as dev-parent@other-rig (${state}), outside this restore`);
     expect(result.result.warnings.join("\n")).not.toContain("conv-x");
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(held.id) as { status: string }).status).toBe(status);
+  });
+
+  // The maintainer's 3rd review of #3250: the validation and the partner check name the restore's agents from ONE
+  // observation taken before any mutation, so a stale session the restore marks detached in between is not "running" in
+  // one warning and "detached" in the other; the sessions it found stale are named detached in both.
+  it("names each resumed agent with the same status in the validation and in the partner warnings", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "dev.a", role: "worker", runtime: "claude-code" }, { logicalId: "dev.b", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "conv-x",
+    });
+    const other = rigRepo.createRig("other-rig");
+    const parent = rigRepo.addNode(other.id, "dev.parent", { runtime: "claude-code" });
+    const held = sessionRegistry.registerSession(parent.id, "dev-parent@other-rig");
+    sessionRegistry.updateStatus(held.id, "running");
+    sessionRegistry.updateResumeToken(held.id, "claude_id", "conv-x", "scrape");
+    sessionRegistry.updateBinding(parent.id, { tmuxSession: "dev-parent@other-rig", tmuxPane: "%9" });
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);   // no tmux session: both stale
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outside = result.result.warnings.filter((line) => line.includes("outside this restore"));
+    const own = result.result.warnings.filter((line) => line.includes("have the same recorded") && !outside.includes(line));
+    expect(own).toHaveLength(1);
+    expect(outside).toHaveLength(1);
+    expect(own[0]).toContain("dev.a (detached) and dev.b (detached) have the same recorded claude_id conversation");
+    expect(outside[0]).toContain("dev.a@r99 (detached) and dev.b@r99 (detached) have the same recorded claude_id conversation as dev-parent@other-rig (running)");
+    // before #3250's 3rd round the validation read them as running and the partner check, re-reading, as detached
+    expect(result.result.warnings.join("\n")).not.toContain("dev.a (running)");
+  });
+
+  // #3250, 3rd round (Sol's S1): the agents outside the restore are read only when a seat it resumes has a conversation
+  // the comparison can pair; a resume type "none" never pairs, so an unreadable inventory says nothing then.
+  it.each([["claude_id", true], ["none", false]])("reads the agents outside a restore only when a resumed seat has a pairable conversation (%s)", async (resumeType, reads) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "dev.impl", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType, resumeToken: "conv-y" });
+    vi.spyOn(rigRepo, "listRigs").mockImplementation(() => { throw new Error("inventory down"); });
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const unavailable = result.result.warnings.filter((line) => line.includes("comparison with agents outside this restore is unavailable (inventory down)"));
+    expect(unavailable).toHaveLength(reads ? 1 : 0);
+  });
+
+  // #3250, 3rd round (the adversarial review): an unreadable inventory of the other rigs leaves the partner comparison
+  // unavailable but not this rig's own statuses, which come from a read of this rig alone.
+  it("names its own seats by their record when only the other rigs' inventory cannot be read", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "dev.a", role: "worker", runtime: "claude-code" }, { logicalId: "dev.b", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "conv-z",
+    });
+    vi.spyOn(rigRepo, "listRigs").mockImplementation(() => { throw new Error("inventory down"); });
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.warnings.some((line) => line.includes("dev.a (detached) and dev.b (detached) have the same recorded claude_id conversation"))).toBe(true);
+    expect(result.result.warnings.some((line) => line.includes("is unavailable (inventory down)"))).toBe(true);
+    expect(result.result.warnings.join("\n")).not.toContain("(unknown)");
+  });
+
+  // The maintainer's 3rd review of #3250: a seat held for startup is not launched, so it is not on the resumed side, and
+  // its current session is compared as a partner of the seat the restore resumes. A seat is held only on the fresh path
+  // (its snapshot record has no usable resume type), so the pair is its CURRENT session's conversation.
+  it("compares a seat held for startup as a current partner, not as a seat it resumes", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }, { logicalId: "agent-b", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "conv-h",
+    });
+    const nodeA = snap.data.nodes.find((n) => n.logicalId === "agent-a")!;
+    const missingPath = "/tmp/openrig-missing-required-startup-3250-held.md";
+    const snapshot = updateSnapshotData(snap, (data) => {
+      // agent-a's snapshot record has no usable resume type (the fresh path, which replays its startup files); its
+      // current session still holds conv-h, the conversation agent-b resumes
+      data.sessions.find((sess: { nodeId: string }) => sess.nodeId === nodeA.id).resumeType = "none";
+      data.nodeStartupContext[nodeA.id] = {
+        projectionEntries: [],
+        resolvedStartupFiles: [{ path: "startup.md", absolutePath: missingPath, ownerRoot: "/tmp", deliveryHint: "guidance_merge", required: true, appliesOn: ["restore"] }],
+        startupActions: [],
+        runtime: "claude-code",
+      };
+    });
+    const result = await createOrchestrator({ tmux: mockTmux() }).restore(snapshot.id, { fsOps: { exists: (p) => p !== missingPath } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.find((n) => n.logicalId === "agent-a")?.error).toContain("Not launched");
+    expect(result.result.warnings.filter((line) => line.includes("have the same recorded"))).toEqual([]);
+    const outside = result.result.warnings.filter((line) => line.includes("outside this restore"));
+    expect(outside).toHaveLength(1);
+    expect(outside[0]).toMatch(/^Restore pre-validation: agent-b@r99 \(detached\) has the same recorded claude_id conversation as r99-agent-a \(detached\), outside this restore/);
+    expect(result.result.warnings.join("\n")).not.toContain("conv-h");
   });
 
   // The maintainer's 2nd review of #3250: the seats a restore resumes are named by their current record, as the agents
