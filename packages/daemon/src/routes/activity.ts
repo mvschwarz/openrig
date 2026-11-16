@@ -166,6 +166,12 @@ activityRoutes.post("/runner-channel", async c => {
     const channel = channelService(c), token = channelToken(c);
     channel.authenticate(token);
     const body = await c.req.json().catch(() => null);
+    if (body && typeof body === "object" && (body as Record<string, unknown>).type === "cancel-prepare") {
+      const ctx = permissionContext(c, false);
+      if ("refused" in ctx) return ctx.refused;
+      return c.json(channel.prepareCancellation(token, body as Record<string, unknown>, (grant, target) => ctx.permissions.withdrawTurn(
+        { nodeId: grant.nodeId, sessionName: ctx.store.resolveSession({ nodeId: grant.nodeId })?.sessionName ?? "", generation: grant.generation }, target)));
+    }
     return c.json(channel.post(token, body));
   } catch (error) { return channelFailure(c, error); }
 });
@@ -253,7 +259,8 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
  *  the same launch. `outcome` says what the refusal left undone. */
 function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string, revoked = false): Response | null {
   if (grant.runId) {
-    const standing = new ActivityGrantStore(store.db).standing(grant.grantId);
+    let standing: ReturnType<ActivityGrantStore["standing"]> = "unverified";
+    try { standing = new ActivityGrantStore(store.db).standing(grant.grantId); } catch { /* Unreadable authority is not a revoked run. */ }
     if (standing === "current") return null;
     if (standing === "unverified") {
       return c.json({ ok: false, code: "activity_grant_unverified", retryable: true,
@@ -1021,6 +1028,19 @@ async function submitPermission(c: Context, installTokenAccepted: boolean): Prom
   }
   const parsed = parseRunnerPermissionRequest(body);
   if (!parsed.ok) return c.json({ ok: false, code: "invalid_permission_request", error: parsed.message }, 400);
+  if (parsed.request.runId) {
+    let current: ReturnType<RunnerChannel["currentTurn"]> = null;
+    if (ctx.grant?.runId && ctx.grant.runId === parsed.request.runId) {
+      const refused = grantStandingRefusal(c, ctx.store, ctx.grant, "nothing was asked.");
+      if (refused) return refused;
+      try { current = (c.get("runnerChannel" as never) as RunnerChannel | undefined)?.currentTurn(seat.nodeId, true) ?? null; }
+      catch (error) { return channelFailure(c, error); }
+    }
+    if (!ctx.grant?.runId || ctx.grant.runId !== parsed.request.runId
+      || current?.runId !== parsed.request.runId || current.nativeTurnId !== parsed.request.nativeTurnId
+      || !current.acceptedTurnIds.includes(parsed.request.turnId))
+      return c.json({ ok: false, code: "runner_turn_unbound", error: "Permission metadata needs current bound native turn evidence." }, 409);
+  }
   const result = await ctx.permissions.submit(seat, parsed.request);
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, PERMISSION_REFUSAL_STATUS[result.code] ?? 409);
   // No one to ask: permitted at once with the agent's own allow. Nothing waits on a person, so nothing reads needs input.

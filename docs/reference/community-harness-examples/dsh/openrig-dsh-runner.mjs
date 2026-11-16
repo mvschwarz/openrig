@@ -28,7 +28,7 @@ const POST_TIMEOUT_MS = 2_000;
 const WAIT_SECONDS = 25;
 const READ_TRIES = 3; // reads in a row that get no answer before the runner permits
 // Refusals that say the request certainly isn't the seat's current occupant's live one: cancel it, and hold nothing.
-const NOT_LIVE = ["stale_generation", "activity_grant_wrong_seat", "activity_grant_stale"];
+const NOT_LIVE = ["stale_generation", "activity_grant_wrong_seat", "activity_grant_stale", "turn_withdrawn", "runner_turn_unbound"];
 // A read's states that end the request, answered cancelled (an `answered` that reaches there names an option dsh didn't
 // offer). Any other state, like an unlisted status, permits.
 const ENDED = ["refused", "withdrawn", "stale", "answered"];
@@ -97,12 +97,15 @@ function escapeLength(rest) {
 }
 
 /** JSON-RPC 2.0 with the agent, one message per line on its stdio. */
-class AgentPeer {
+export class AgentPeer {
   #child;
   #next = 1;
   #waiting = new Map();
   #requests = new Map();
   #notifications = new Map();
+  #prompt = null;
+  #promptEpoch = 0;
+  #cancellationFence = null;
 
   constructor(child, onNoise) {
     this.#child = child;
@@ -114,6 +117,7 @@ class AgentPeer {
         const waiter = this.#waiting.get(message.id);
         if (!waiter) return;
         this.#waiting.delete(message.id);
+        if (this.#prompt?.requestId === message.id) this.#prompt = null;
         if (message.error) waiter.reject(Object.assign(new Error(message.error.message ?? "error"), { code: message.error.code }));
         else waiter.resolve(message.result);
         return;
@@ -121,15 +125,46 @@ class AgentPeer {
       if (message.id === undefined) { this.#notifications.get(message.method)?.(message.params ?? {}); return; }
       const handler = this.#requests.get(message.method);
       if (!handler) { this.#write({ id: message.id, error: { code: -32601, message: `Method not found: ${message.method}` } }); return; }
+      const epoch = this.#prompt?.nativeTurnId;
       Promise.resolve().then(() => handler(message.params ?? {}, message.id)).then(
-        (result) => this.#write({ id: message.id, result }),
+        (result) => this.#write({ id: message.id, result: message.method === "session/request_permission"
+          && (!epoch || this.#prompt?.nativeTurnId !== epoch || this.#cancellationFence === epoch) ? CANCELLED : result }),
         (error) => this.#write({ id: message.id, error: { code: error.code ?? -32603, message: error.message } }));
     });
   }
 
-  request(method, params) {
+  request(method, params, onPrompt) {
+    if (method === "session/prompt" && (this.#prompt || this.#cancellationFence)) throw new Error("Native prompt ownership is fenced");
     const id = this.#next++;
-    return new Promise((resolve, reject) => { this.#waiting.set(id, { resolve, reject }); this.#write({ id, method, params }); });
+    if (method === "session/prompt") this.#prompt = { nativeTurnId: `dsh-prompt-${++this.#promptEpoch}`, requestId: id, sessionId: params.sessionId, submitted: false };
+    return new Promise((resolve, reject) => {
+      this.#waiting.set(id, { resolve, reject });
+      const write = () => {
+        if (this.#prompt?.requestId === id) this.#prompt.submitted = true;
+        this.#write({ id, method, params });
+      };
+      if (!onPrompt) { write(); return; }
+      Promise.resolve().then(() => onPrompt(this.promptScope())).then(write, error => {
+        this.#waiting.delete(id); if (this.#prompt?.requestId === id) this.#prompt = null; reject(error);
+      });
+    });
+  }
+
+  promptScope() { return this.#prompt ? { ...this.#prompt } : null; }
+  isCancellationFenced() { return this.#cancellationFence !== null; }
+  prepareCancellation(nativeTurnId) {
+    if (!this.#prompt?.submitted || this.#prompt.nativeTurnId !== nativeTurnId) return false;
+    this.#cancellationFence = nativeTurnId; return true;
+  }
+  // Release only once this exact prompt is no longer outstanding.
+  recheckCancellation(nativeTurnId) {
+    if (this.#cancellationFence !== nativeTurnId) return false;
+    if (this.#prompt?.nativeTurnId === nativeTurnId) return true;
+    this.#cancellationFence = null; return false;
+  }
+
+  abandonCancellationPreparation(nativeTurnId) {
+    if (this.#cancellationFence === nativeTurnId) this.#cancellationFence = null;
   }
 
   notify(method, params) { this.#write({ method, params }); }
@@ -139,6 +174,7 @@ class AgentPeer {
   failAll(reason) {
     for (const waiter of this.#waiting.values()) waiter.reject(new Error(reason));
     this.#waiting.clear();
+    this.#prompt = null;
   }
 
   #write(message) {
@@ -292,12 +328,29 @@ async function main() {
   const permanentRunRefusal = (status, code) => [401, 403, 404, 409, 410].includes(status)
     && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(code)
     && ([401, 403].includes(status) || ["runner_grant_required", "runner_grant_revoked", "runner_grant_stale"].includes(code));
+  let cancellation = null;
+  const quarantineManagedChannel = () => {
+    managedQuarantined = true;
+    if (cancellation && !cancellation.submitted) {
+      peer.abandonCancellationPreparation(cancellation.target.nativeTurnId);
+      finishCancel("not-supported", "runner_reporting_authority_lost");
+    }
+  };
+  let nativeTurnSequence = 0;
+  let nativeTurnPosts = Promise.resolve();
+  const reportTurn = (scope, status, acceptedTurnId) => {
+    if (!scope || !env.OPENRIG_RUN_ID || !env.OPENRIG_ACTIVITY_HOOK_TOKEN?.startsWith("oag_")) return Promise.resolve();
+    const body = { type: "turn", runId: env.OPENRIG_RUN_ID, sequence: ++nativeTurnSequence,
+      nativeTurnId: scope.nativeTurnId, state: status, acceptedTurnIds: [acceptedTurnId] };
+    nativeTurnPosts = nativeTurnPosts.then(() => channelPost(body));
+    return nativeTurnPosts;
+  };
   const channelPost = async (body) => {
     while (!channelStop.signal.aborted) {
       const result = await callOpenRig("POST", "/api/activity/runner-channel", body, POST_TIMEOUT_MS);
       if (result.status >= 200 && result.status < 300) return true;
       if ([401, 403, 404, 409, 410].includes(result.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(result.body?.code)) {
-        if (permanentRunRefusal(result.status, result.body?.code)) managedQuarantined = true;
+        if (permanentRunRefusal(result.status, result.body?.code)) quarantineManagedChannel();
         return false;
       }
       await sleep(250);
@@ -308,26 +361,73 @@ async function main() {
     const f = entry.frame;
     if (result) entry.result = result;
     entry.reports = entry.reports.then(() => channelPost({ type, runId: f.runId, requestId: f.requestId, sequence: f.sequence,
-      ...(entry.nativeTurnId ? { nativeTurnId: entry.nativeTurnId } : {}), ...(result ? { result } : {}) }));
+      ...(entry.nativeTurnId ? { nativeTurnId: entry.nativeTurnId, acceptedTurnId: entry.acceptedTurnId } : {}), ...(result ? { result } : {}) }));
   };
   const submitted = (entry) => {
     if (!entry || entry.submitted) return;
     entry.submitted = true; report(entry, "submitted");
   };
+  const finishCancel = (outcome, detail) => {
+    const operation = cancellation; if (!operation) return;
+    operation.entry.state = "terminal";
+    report(operation.entry, "result", { kind: "cancel", outcome, confirmed: outcome === "cancelled", ...(detail ? { detail } : {}) });
+    peer.recheckCancellation(operation.target.nativeTurnId);
+    cancellation = null;
+    pump();
+  };
+  const performCancel = async (operation) => {
+    const f = operation.entry.frame;
+    while (cancellation === operation && !agentExited) {
+      const response = await callOpenRig("POST", "/api/activity/runner-channel", { type: "cancel-prepare", runId: f.runId,
+        requestId: f.requestId, sequence: f.sequence }, POST_TIMEOUT_MS);
+      if (cancellation !== operation) return;
+      if (permanentRunRefusal(response.status, response.body?.code)) { quarantineManagedChannel(); return; }
+      if (peer.promptScope()?.nativeTurnId !== operation.target.nativeTurnId || response.body?.withdrawal?.notThisTurn) { finishCancel("not-this-turn"); return; }
+      if (response.status === 200 && response.body?.withdrawal?.confirmed === true) break;
+      await sleep(250);
+    }
+    if (agentExited || cancellation !== operation) return;
+    for (const ask of state.asks) ask.end("turn_cancelled");
+    // Every permission callback observes peer's fence; wait for in-flight submits and callback resolution.
+    while (state.asking > 0 && !agentExited) await sleep(25);
+    if (!peer.recheckCancellation(operation.target.nativeTurnId)) { finishCancel("not-this-turn"); return; }
+    if (agentExited) return;
+    operation.submitted = true;
+    state.cancelRequestedAt = new Date().toISOString();
+    peer.notify("session/cancel", { sessionId: state.sessionId });
+    report(operation.entry, "submitted", { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
+  };
   const acceptFrame = async (raw) => {
-    if (agentExited || stopping || raw.version !== 1 || raw.runId !== env.OPENRIG_RUN_ID || !["input", "wake"].includes(raw.kind)
+    if (agentExited || stopping || raw.version !== 1 || raw.runId !== env.OPENRIG_RUN_ID || !["input", "wake", "cancel"].includes(raw.kind)
       || !Number.isSafeInteger(raw.sequence) || raw.sequence < 1 || typeof raw.requestId !== "string"
-      || typeof (raw.kind === "wake" ? raw.payload?.question : raw.payload?.text) !== "string") return;
+      || (raw.kind === "cancel" ? !raw.payload?.target || raw.payload.target.runId !== raw.runId || typeof raw.payload.target.nativeTurnId !== "string"
+        : typeof (raw.kind === "wake" ? raw.payload?.question : raw.payload?.text) !== "string")) return;
     const frame = { version: 1, runId: raw.runId, requestId: raw.requestId, sequence: raw.sequence, kind: raw.kind,
-      payload: raw.kind === "wake" ? { question: raw.payload.question } : { text: raw.payload.text } };
+      payload: raw.kind === "cancel" ? { target: { ...raw.payload.target } } : raw.kind === "wake" ? { question: raw.payload.question } : { text: raw.payload.text } };
     if ([...managed.values()].some(entry => entry.frame.sequence === frame.sequence && entry.frame.requestId !== frame.requestId)) throw new Error("Conflicting native sequence");
     const old = managed.get(frame.requestId);
     if (old) { if (JSON.stringify(old.frame) !== JSON.stringify(frame)) throw new Error("Conflicting native request"); await old.acceptance; return; }
     const entry = { frame, state: "accepting", reports: Promise.resolve(), answer: [] };
     managed.set(frame.requestId, entry);
+    const target = frame.kind === "cancel" ? frame.payload.target : null;
+    const prepared = target && !cancellation && peer.prepareCancellation(target.nativeTurnId);
+    const operation = prepared ? { entry, target, submitted: false } : null;
+    if (operation) cancellation = operation;
     entry.acceptance = (async () => {
-      if (!await channelPost({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" })) { entry.state = "unavailable"; pump(); return; }
+      if (!await channelPost({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" })) {
+        entry.state = "unavailable";
+        if (operation && cancellation === operation && !operation.submitted) {
+          peer.abandonCancellationPreparation(operation.target.nativeTurnId); cancellation = null;
+        }
+        pump(); return;
+      }
+      if (operation && cancellation !== operation) return;
       entry.state = "queued";
+      if (target) {
+        if (!prepared) { entry.state = "terminal"; report(entry, "result", { kind: "cancel", outcome: peer.promptScope()?.nativeTurnId === target.nativeTurnId ? "not-supported" : "not-this-turn", confirmed: false }); }
+        else void performCancel(operation).catch(() => {});
+        return;
+      }
       const before = state.queue.findIndex(other => typeof other !== "string" && other.frame.sequence > frame.sequence);
       if (before < 0) state.queue.push(entry); else state.queue.splice(before, 0, entry);
       pump();
@@ -341,15 +441,15 @@ async function main() {
     while (!channelStop.signal.aborted) {
       try {
         const hello = await callOpenRig("POST", "/api/activity/runner-channel", { type: "hello", version: 1, runId: env.OPENRIG_RUN_ID, retained,
-          capabilities: { input: !managedQuarantined, wake: !managedQuarantined, cancel: false } }, POST_TIMEOUT_MS);
-        if (permanentRunRefusal(hello.status, hello.body?.code)) { managedQuarantined = true; return; }
+          capabilities: { input: !managedQuarantined, wake: !managedQuarantined, cancel: !managedQuarantined } }, POST_TIMEOUT_MS);
+        if (permanentRunRefusal(hello.status, hello.body?.code)) { quarantineManagedChannel(); return; }
         if (hello.status !== 200) throw new Error("Channel handshake unavailable");
         retained = true;
         const response = await fetch(`${endpoint.base}/api/activity/runner-channel`, { signal: channelStop.signal,
           headers: { authorization: `Bearer ${endpoint.token}`, "Last-Event-ID": String(cursor) } });
         if (!response.ok) {
           const failure = await response.json().catch(() => null);
-          if (permanentRunRefusal(response.status, failure?.code)) { managedQuarantined = true; return; }
+          if (permanentRunRefusal(response.status, failure?.code)) { quarantineManagedChannel(); return; }
           throw new Error("Channel unavailable");
         }
         if (!response.body) throw new Error("Channel unavailable");
@@ -459,10 +559,11 @@ async function main() {
   // request OpenRig says isn't the current occupant's, or that a person said no to with no reject option, is cancelled.
   const askOwner = async (requestId, toolCall, options) => {
     const turn = state.turn;
-    const live = () => state.running && state.turn === turn && !state.cancelRequestedAt && !agentExited;
+    const live = () => state.running && state.turn === turn && !state.cancelRequestedAt && !peer.isCancellationFenced() && !agentExited;
     const submitted = await callOpenRig("POST", "/api/activity/permission-requests", {
       sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION,
-      nativeRef: state.sessionId, turnId: String(turn), requestId: String(requestId), toolCall,
+      nativeRef: state.sessionId, turnId: String(turn),
+      ...(env.OPENRIG_ACTIVITY_HOOK_TOKEN?.startsWith("oag_") && env.OPENRIG_RUN_ID && peer.promptScope() ? { runId: env.OPENRIG_RUN_ID, nativeTurnId: peer.promptScope().nativeTurnId } : {}), requestId: String(requestId), toolCall,
       options: options.map((option) => ({ optionId: option.optionId, name: option.name ?? option.optionId, kind: option.kind })),
       occurredAt: new Date().toISOString(),
     }, 10_000);
@@ -563,7 +664,7 @@ async function main() {
     const toolCall = { title: String(params.toolCall?.title ?? "a tool call"), kind: String(params.toolCall?.kind ?? "other") };
     const options = Array.isArray(params.options) ? params.options : [];
     say(`\n[permission] dsh asks: ${toolCall.title} (${toolCall.kind}); options ${options.map((option) => option.optionId).join(", ")}`);
-    if (!state.running || state.cancelRequestedAt) return CANCELLED;
+    if (!state.running || state.cancelRequestedAt || peer.isCancellationFenced()) return CANCELLED;
     state.asking += 1; // no beat while a permission request is open: it may be waiting on a person
     return askOwner(requestId, toolCall, options).finally(() => { state.asking -= 1; setImmediate(settle); });
   });
@@ -600,25 +701,33 @@ async function main() {
     state.cancelRequestedAt = null;
     state.lastActive = 0;
     const turnId = String(state.turn);
-    if (entry) { entry.state = "writing"; entry.nativeTurnId = `dsh-prompt-${state.turn}`; }
+    if (entry) entry.state = "writing";
+    let nativeScope;
     say(`\nyou ▸ ${firstLine(text)}`);
     activity.post("UserPromptSubmit", "accepted", { turnId });
     let stopReason;
     try {
-      const result = await peer.request("session/prompt", { sessionId: state.sessionId, prompt: [{ type: "text", text }] });
+      const result = await peer.request("session/prompt", { sessionId: state.sessionId, prompt: [{ type: "text", text }] }, async scope => {
+        nativeScope = scope;
+        if (entry) { entry.nativeTurnId = scope.nativeTurnId; entry.acceptedTurnId = turnId; }
+        await reportTurn(scope, "opened", turnId);
+      });
       if (entry) submitted(entry);
       stopReason = String(result?.stopReason ?? "unreported");
     } catch (error) {
       if (entry && !entry.submitted && [-32600, -32601, -32602].includes(error.code)) {
         entry.rejected = true; report(entry, "rejected", { kind: entry.frame.kind, reason: "native_prompt_rejected" });
       }
-      if (agentExited && !entry) return;
+      if (agentExited && !entry && !cancellation) return;
       say(`\n[openrig-dsh] the turn failed: ${error.message}`);
       activity.post("Notification", "runtime_error", { turnId });
       stopReason = "error";
     }
+    await reportTurn(nativeScope, "closed", turnId);
+    if (cancellation?.target.nativeTurnId === nativeScope?.nativeTurnId && cancellation.submitted)
+      finishCancel(stopReason === "cancelled" ? "cancelled" : "requested", stopReason === "cancelled" ? undefined : "native_end_without_cancellation_proof");
     if (entry && !entry.rejected) {
-      const completion = !entry.submitted ? "unknown" : stopReason === "cancelled" || state.cancelRequestedAt ? "interrupted"
+      const completion = !entry.submitted ? "unknown" : stopReason === "cancelled" ? "interrupted"
         : stopReason === "end_turn" && (entry.frame.kind !== "wake" || entry.answer.some(text => text.length > 0)) ? "completed"
           : stopReason === "error" ? "failed" : "unknown";
       report(entry, "result", { kind: entry.frame.kind, nativeTurnId: entry.nativeTurnId, completion,
@@ -636,7 +745,7 @@ async function main() {
   };
 
   const pump = () => {
-    if (state.running || agentExited || state.queue.length === 0) return;
+    if (state.running || peer.isCancellationFenced() || agentExited || state.queue.length === 0) return;
     const index = managedQuarantined ? state.queue.findIndex(input => typeof input === "string") : 0;
     if (index < 0) return;
     const next = state.queue[index];

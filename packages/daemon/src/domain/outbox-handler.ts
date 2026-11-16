@@ -100,10 +100,11 @@ export interface OutboxRecordInput {
 /** Native protocol custody and effects share the existing delivery receipt. */
 export interface RunnerReceipt {
   version: 1; requestId: string; nodeId: string; runId: string; sequence: number;
-  kind: "input" | "wake"; memberIds?: string[]; inputRoute: "native"; payload: Record<string, unknown>;
+  kind: "input" | "wake" | "cancel"; memberIds?: string[]; inputRoute: "native"; payload: Record<string, unknown>;
   stage: "pending" | "offered" | "accepted" | "submitted" | "completed" | "rejected";
   bindingHash?: string; erasedAt?: string; acceptedAt?: string; submittedAt?: string; completedAt?: string;
   acceptedTurnId?: string; nativeTurnId?: string; result?: Record<string, unknown>;
+  withdrawal?: { stage: "pending" | "confirmed"; startedAt: string; confirmedAt?: string; pendingSubmissions: number; withdrawn: number };
   reconciliation?: "receiver_state_lost" | "native_ownership_unknown";
 }
 export type RunnerAdmission = OutboxRecordInput & { outboxId: string; nodeId: string; runId: string;
@@ -298,7 +299,9 @@ export class OutboxHandler {
       if (receipt.erasedAt) throw new OutboxHandlerError("runner_receipt_erased", "This native receipt was erased; no result recorded.");
       if (receipt.reconciliation) throw new OutboxHandlerError("runner_state_lost", "Native custody or execution ownership is uncertain; effect remains indeterminate.");
       for (const key of ["acceptedTurnId", "nativeTurnId", "result"] as const) {
-        if (receipt[key] !== undefined && evidence[key] !== undefined && stable(receipt[key]) !== stable(evidence[key]))
+        if (receipt[key] !== undefined && evidence[key] !== undefined && stable(receipt[key]) !== stable(evidence[key])
+          && !(key === "result" && receipt.kind === "cancel" && receipt.stage !== "completed" && receipt.result?.outcome === "requested"
+            && ["requested", "cancelled"].includes(String(evidence.result?.outcome))))
           throw new OutboxHandlerError("runner_result_conflict", "A different native result is already retained.");
       }
       const stages = ["pending", "offered", "accepted", "submitted", "completed"];
@@ -310,10 +313,13 @@ export class OutboxHandler {
       if (stage !== "rejected" && stages.indexOf(stage) <= stages.indexOf(receipt.stage)) return receipt;
       const unknownSubmission = stage === "completed" && receipt.stage === "accepted" && evidence.result?.submissionUnknown === true
         && evidence.result?.completion === "unknown";
-      if (stage !== "rejected" && !unknownSubmission && stages.indexOf(stage) !== stages.indexOf(receipt.stage) + 1)
+      const noCancelEffect = receipt.kind === "cancel" && receipt.stage === "accepted" && stage === "completed"
+        && ["not-this-turn", "not-supported"].includes(String(evidence.result?.outcome));
+      if (stage !== "rejected" && !unknownSubmission && !noCancelEffect && stages.indexOf(stage) !== stages.indexOf(receipt.stage) + 1)
         throw new OutboxHandlerError("runner_stage_conflict", "Native receipt skipped a required custody stage.");
       if (stage === "rejected" && ["submitted", "completed"].includes(receipt.stage))
         throw new OutboxHandlerError("runner_stage_conflict", "Submitted effects cannot become pre-effect rejection.");
+      const unknownCancellation = receipt.kind === "cancel" && evidence.result?.outcome === "requested" && evidence.result.operationAccepted !== true;
       const at = new Date().toISOString();
       const updated: RunnerReceipt = { ...receipt, ...evidence, stage,
         ...(evidence.result?.ownershipUnknown === true ? { reconciliation: "native_ownership_unknown" as const } : {}),
@@ -322,7 +328,7 @@ export class OutboxHandler {
       this.writeRunner(updated);
       if (stage === "submitted" || stage === "completed" || stage === "rejected") for (const memberId of receipt.memberIds ?? [id])
         this.db.prepare("UPDATE outbox_entries SET delivery_state=?,delivered_at=? WHERE outbox_id=?")
-          .run(unknownSubmission || updated.reconciliation ? "indeterminate" : stage === "rejected" ? "failed" : "delivered", unknownSubmission || updated.reconciliation || stage === "rejected" ? null : at, memberId);
+          .run(unknownSubmission || unknownCancellation || updated.reconciliation ? "indeterminate" : stage === "rejected" ? "failed" : "delivered", unknownSubmission || unknownCancellation || updated.reconciliation || stage === "rejected" ? null : at, memberId);
       return updated;
     })();
   }
@@ -348,6 +354,20 @@ export class OutboxHandler {
     })();
   }
 
+  recordRunnerWithdrawal(nodeId: string, runId: string, id: string, sequence: number,
+    evidence: { confirmed: boolean; pendingSubmissions: number; withdrawn: number }): RunnerReceipt {
+    const receipt = this.runnerReceipt(id);
+    if (!receipt || receipt.kind !== "cancel" || receipt.nodeId !== nodeId || receipt.runId !== runId || receipt.sequence !== sequence
+      || receipt.erasedAt || receipt.reconciliation || receipt.stage !== "accepted")
+      throw new OutboxHandlerError("runner_request_mismatch", "Cancellation preparation does not match retained accepted custody.");
+    const at = new Date().toISOString();
+    const withdrawal: NonNullable<RunnerReceipt["withdrawal"]> = { stage: evidence.confirmed ? "confirmed" : "pending",
+      startedAt: receipt.withdrawal?.startedAt ?? at, ...(evidence.confirmed ? { confirmedAt: receipt.withdrawal?.confirmedAt ?? at } : {}),
+      pendingSubmissions: evidence.pendingSubmissions, withdrawn: evidence.withdrawn };
+    if (receipt.withdrawal?.stage === "confirmed" && !evidence.confirmed) throw new OutboxHandlerError("runner_result_conflict", "Withdrawal confirmation cannot regress.");
+    const updated = { ...receipt, withdrawal }; this.writeRunner(updated); return updated;
+  }
+
   forgetRunnerMap(nodeId: string, runId: string): void {
     this.db.transaction(() => {
       for (const receipt of this.runnerReceipts(nodeId, runId)) {
@@ -369,8 +389,15 @@ export class OutboxHandler {
     const source = this.getById(id)!;
     const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null };
     const retained = row.guard_delivery ? JSON.parse(row.guard_delivery) : {};
+    const target = receipt?.kind === "cancel" ? receipt.payload.target as { runId?: unknown; nativeTurnId?: unknown } | undefined : undefined;
+    const cancellationTarget = target && typeof target.runId === "string" && typeof target.nativeTurnId === "string"
+      ? { runId: target.runId, nativeTurnId: target.nativeTurnId } : null;
     const tombstone: RunnerReceipt | null = receipt ? { version: 1, requestId: receipt.requestId, nodeId: receipt.nodeId, runId: receipt.runId,
-      sequence: receipt.sequence, kind: receipt.kind, inputRoute: "native", stage: receipt.stage, payload: {},
+      sequence: receipt.sequence, kind: receipt.kind, inputRoute: "native", stage: receipt.stage, payload: cancellationTarget ? { target: cancellationTarget } : {},
+      ...(cancellationTarget && receipt.withdrawal ? { withdrawal: { stage: receipt.withdrawal.stage, startedAt: receipt.withdrawal.startedAt,
+        ...(receipt.withdrawal.confirmedAt ? { confirmedAt: receipt.withdrawal.confirmedAt } : {}), pendingSubmissions: receipt.withdrawal.pendingSubmissions, withdrawn: receipt.withdrawal.withdrawn } } : {}),
+      ...(cancellationTarget && receipt.result ? { result: { kind: "cancel", outcome: receipt.result.outcome, confirmed: receipt.result.confirmed,
+        ...(typeof receipt.result.operationAccepted === "boolean" ? { operationAccepted: receipt.result.operationAccepted } : {}) } } : {}),
       ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}), ...(receipt.reconciliation ? { reconciliation: receipt.reconciliation } : {}),
       bindingHash: receipt.bindingHash, erasedAt: receipt.erasedAt ?? at } : null;
     this.db.transaction(() => {

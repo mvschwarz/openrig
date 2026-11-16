@@ -63,12 +63,33 @@ seatRoutes.post("/set-input-route/:seatRef", async c => {
     });
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
     return c.json({ nodeId: target.nodeId, inputRoute: body.route, nativeInput: { input: channel?.capable(target.nodeId, "input") ?? false,
-      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
+      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: channel?.capable(target.nodeId, "cancel") ?? false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
   } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
 });
 
 seatRoutes.post("/command/:seatRef", async c => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (body?.type === "cancel") {
+    const named = body.target as { runId?: unknown; nativeTurnId?: unknown } | undefined;
+    if (typeof body.requestId !== "string" || !body.requestId.trim() || body.requestId.length > 512
+      || !named || typeof named.runId !== "string" || !named.runId || named.runId.length > 1024
+      || typeof named.nativeTurnId !== "string" || !named.nativeTurnId || named.nativeTurnId.length > 1024)
+      return c.json({ error: "Supply requestId and exact target {runId,nativeTurnId}." }, 400);
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+    if (!channel || !guard) return c.json({ error: "Native cancellation unavailable." }, 503);
+    try {
+      const target = guard.target(c.req.param("seatRef"));
+      const receipt = await guard.custody([target.nodeId], async () => {
+        if (c.req.raw.signal.aborted && !channel.outbox.runnerReceipt(body.requestId as string))
+          throw Object.assign(new Error("Caller cancelled before native admission."), { code: "caller_cancelled" });
+        return channel.cancel(target.nodeId, { requestId: body.requestId as string,
+          sender: transportSenderSession(c) ?? "unknown", destination: target.session, target: { runId: named.runId as string, nativeTurnId: named.nativeTurnId as string } });
+      });
+      return c.json({ receipt }, receipt.stage === "completed" ? 200 : 202);
+    } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code,
+      ...((error as { code?: string }).code === "runner_grant_unverified" ? { retryable: true } : {}) }, 409); }
+  }
   if (!body || body.type !== "wake" || typeof body.requestId !== "string" || !body.requestId.trim()
     || body.requestId.length > 512 || typeof body.question !== "string" || !body.question.trim() || body.question.length > 1024 * 1024)
     return c.json({ error: "Supply wake type, opaque requestId and question." }, 400);
@@ -167,7 +188,8 @@ seatRoutes.get("/status/:seatRef", (c) => {
     const nodeId = rigRepo.getRig(result.status.rig_id)?.nodes.find((node) => node.logicalId === result.status.logical_id)?.id;
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
-    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: false } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
+    const nativeTurn = channel && nodeId ? channel.currentTurn(nodeId) : null;
+    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: channel.capable(nodeId, "cancel"), target: nativeTurn ? { runId: nativeTurn.runId, nativeTurnId: nativeTurn.nativeTurnId } : null } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }

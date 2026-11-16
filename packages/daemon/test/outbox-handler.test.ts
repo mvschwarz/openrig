@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 
 describe("OutboxHandler", () => {
@@ -198,6 +199,18 @@ describe("native runner receipts", () => {
     expect(outbox.getById("native-1")?.deliveryState).toBe("delivered");
     expect(outbox.updateRunner("node-1", "run-1", "native-1", 1, "accepted").stage).toBe("submitted");
   });
+  it("never changes a completed input's epoch, accepted ordinal, result, node or run on a late report", () => {
+    outbox.admitRunner(input());
+    for (const stage of ["offered", "accepted", "submitted"] as const) outbox.updateRunner("node-1", "run-1", "native-1", 1, stage);
+    const evidence = { nativeTurnId: "epoch-E", acceptedTurnId: "1", result: { kind: "input", accepted: true } };
+    const saved = outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", evidence);
+    for (const changed of [{ ...evidence, nativeTurnId: "epoch-F" }, { ...evidence, acceptedTurnId: "2" }, { ...evidence, result: { kind: "input", accepted: false } }])
+      expect(() => outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", changed)).toThrow();
+    expect(() => outbox.updateRunner("node-1", "other-run", "native-1", 1, "completed", evidence)).toThrow();
+    expect(() => outbox.updateRunner("other-node", "run-1", "native-1", 1, "completed", evidence)).toThrow();
+    expect(outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", evidence)).toEqual(saved);
+    expect(outbox.runnerReceipt("native-1")).toEqual(saved);
+  });
   it("resolves any grouped member after store restart and rejects changed membership or member collisions atomically", () => {
     for (const id of ["first", "second", "third"]) outbox.record({ ...input(id), body: id });
     const operation = { ...input("first"), body: "first", memberIds: ["first", "second"], payload: { text: "combined" } };
@@ -224,6 +237,38 @@ describe("native runner receipts", () => {
     const result = { kind: "input", completion: "unknown", submissionUnknown: true };
     expect(outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", { result }).result).toEqual(result);
     expect(outbox.getById("native-1")?.deliveryState).toBe("indeterminate");
+  });
+  it.each(["pending", "offered", "accepted", "submitted", "requested", "cancelled"] as const)("committed run replacement preserves cancellation truth and custody (%s)", phase => {
+    const request = { ...input(), kind: "cancel" as const, payload: { target: { runId: "run-1", nativeTurnId: "E" } } };
+    outbox.admitRunner(request);
+    if (phase !== "pending") outbox.updateRunner("node-1", "run-1", "native-1", 1, "offered");
+    if (!["pending", "offered"].includes(phase)) outbox.updateRunner("node-1", "run-1", "native-1", 1, "accepted");
+    if (["submitted", "requested", "cancelled"].includes(phase)) outbox.updateRunner("node-1", "run-1", "native-1", 1, "submitted", { result: { kind: "cancel", outcome: "requested", confirmed: false } });
+    if (["requested", "cancelled"].includes(phase)) outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", { result: { kind: "cancel", outcome: phase, confirmed: phase === "cancelled" } });
+    const saved = outbox.runnerReceipt("native-1")!; outbox.replaceRunnerRun("node-1", "run-2");
+    const receipt = outbox.runnerReceipt("native-1")!;
+    if (phase === "pending") expect(receipt).toMatchObject({ stage: "rejected", result: { kind: "cancel", accepted: false } });
+    else if (["requested", "cancelled"].includes(phase)) expect(receipt).toEqual(saved);
+    else {
+      expect(receipt).toEqual({ ...saved, reconciliation: "receiver_state_lost" });
+      expect(() => outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", { result: { kind: "cancel", outcome: "cancelled", confirmed: true } })).toThrow();
+    }
+    expect(outbox.claimForDelivery("native-1")).toBe(false);
+  });
+  it("erased cancellation retains only opaque target/withdrawal proof and refuses replay or late writes", () => {
+    migrate(db, [seatDeliveryGuardSchema]);
+    const request = { ...input(), kind: "cancel" as const, payload: { target: { runId: "run-1", nativeTurnId: "E" } } };
+    outbox.admitRunner(request);
+    for (const stage of ["offered", "accepted"] as const) outbox.updateRunner("node-1", "run-1", "native-1", 1, stage);
+    outbox.recordRunnerWithdrawal("node-1", "run-1", "native-1", 1, { confirmed: true, pendingSubmissions: 0, withdrawn: 2 });
+    outbox.updateRunner("node-1", "run-1", "native-1", 1, "submitted", { result: { kind: "cancel", outcome: "requested", confirmed: false, detail: "PRIVATE DETAIL", extra: "PRIVATE RESULT" } });
+    const hash = outbox.runnerReceipt("native-1")!.bindingHash;
+    outbox.eraseRunner("native-1", "2026-11-12T00:00:00Z");
+    const erased = outbox.runnerReceipt("native-1")!;
+    expect(erased).toMatchObject({ payload: request.payload, bindingHash: hash, withdrawal: { stage: "confirmed", withdrawn: 2 }, result: { kind: "cancel", outcome: "requested", confirmed: false } });
+    expect(JSON.stringify(erased)).not.toContain("PRIVATE");
+    expect(() => outbox.admitRunner(request)).toThrow(/erased/);
+    expect(() => outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", { result: { kind: "cancel", outcome: "cancelled", confirmed: true } })).toThrow(/erased/);
   });
   it("reconciles lost receiver memory as uncertainty without reoffering", () => {
     outbox.admitRunner(input());

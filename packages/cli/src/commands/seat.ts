@@ -22,6 +22,7 @@ async function defaultReadStdin(): Promise<string> {
 }
 
 interface SeatStatusResponse {
+  nativeInput?: { input: boolean; wake: boolean; cancel: boolean; target: { runId: string; nativeTurnId: string } | null };
   /** What OpenRig's own refocus hook has recorded for this seat (Claude and Codex seats). */
   refocus?: { lastRecordedAt: string | null; currentConversation: boolean | "unknown"; noIdentity?: true; detail: string };
   permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" }
@@ -263,6 +264,7 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Rig: ${status.rig_name}`);
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
+  if (status.nativeInput?.target) console.log(`Native turn: ${terminalJson(status.nativeInput.target)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
   // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
   if (status.permissions_to || status.runner) {
@@ -565,6 +567,15 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
         if (!body.history && !body.histories?.length) console.log("No eligible captured histories.");
       }
       if (response.status >= 400) process.exitCode = response.status >= 500 ? 2 : 1;
+    });
+  cmd.command("cancel").argument("<seat>")
+    .requiredOption("--run-id <id>", "Actual run ID from current seat status")
+    .requiredOption("--native-turn-id <id>", "Exact native invocation ID from current seat status")
+    .requiredOption("--request-id <id>", "Opaque cancellation ID; repeat this ID to reconcile the saved result")
+    .option("--json").description("Cancel one named native invocation after withdrawing its pending permissions")
+    .action(async (seat: string, opts: { runId: string; nativeTurnId: string; requestId: string; json?: boolean }) => {
+      await guardRequest("POST", `/api/seat/command/${encodeURIComponent(seat)}`, { type: "cancel", requestId: opts.requestId,
+        target: { runId: opts.runId, nativeTurnId: opts.nativeTurnId } }, opts.json);
     });
   cmd.command("set-input-route").argument("<seat>")
     .requiredOption("--route <route>", "typed or native")

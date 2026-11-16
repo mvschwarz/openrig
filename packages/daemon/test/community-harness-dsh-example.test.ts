@@ -1,3 +1,4 @@
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -116,7 +117,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
+type Permissions = "turn_withdrawn" | "runner_turn_unbound" | "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
 interface Hook { auth: string | undefined; body: Record<string, unknown>; at: number }
 
 const cleanups: Array<() => void> = [];
@@ -139,6 +140,7 @@ async function fakeOpenRig(permissions: Permissions) {
       if (permissions === "absent") return json(404, { error: "not found" });
       if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
         submits.push({ auth: req.headers.authorization, body, at: Date.now() });
+        if (["turn_withdrawn", "runner_turn_unbound"].includes(permissions)) return json(409, { ok: false, code: permissions });
         if (permissions === "deny") return json(409, { ok: false, code: "denied_by_seat", error: "This seat's operator chose to refuse its runner's permission requests." });
         if (permissions === "stale") return json(409, { ok: false, code: "stale_generation", error: "This request isn't from the seat's current occupant." });
         if (permissions === "broken") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
@@ -407,6 +409,8 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
 
   it.each([
     ["the submit says the request isn't the current occupant's", "stale"],
+    ["the native turn was withdrawn", "turn_withdrawn"],
+    ["the native turn is unbound", "runner_turn_unbound"],
     ["the person said no and the agent has no reject option", "saidno"],
   ] as const)("answers cancelled and holds no attention when %s", async (_case, permissions) => {
     const openrig = await fakeOpenRig(permissions);
@@ -900,5 +904,36 @@ describe("the actual dsh runner native channel", () => {
     await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "WAKE:AFTER"), "barrier released");
     expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: `WAKE:${suffix}`, result: expect.objectContaining({ answer: null, completion }) }));
     expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
+  });
+});
+
+
+describe("dsh outstanding prompt ownership", () => {
+  it("fences the exact outstanding prompt and suppresses an in-flight permission callback at the native write", async () => {
+    const { AgentPeer } = await import(/* @vite-ignore */ pathToFileURL(RUNNER).href);
+    const child = { stdout: new PassThrough(), stdin: new PassThrough() };
+    const writes: string[] = []; child.stdin.on("data", data => writes.push(String(data)));
+    const peer = new AgentPeer(child, () => {});
+    let answer!: (value: unknown) => void;
+    peer.onRequest("session/request_permission", () => new Promise(resolve => { answer = resolve; }));
+    const active = peer.request("session/prompt", { sessionId: "conversation", prompt: [] });
+    const scope = peer.promptScope();
+    expect(scope).toMatchObject({ nativeTurnId: "dsh-prompt-1", requestId: 1, sessionId: "conversation" });
+    child.stdout.write(JSON.stringify({ id: 77, method: "session/request_permission", params: {} }) + "\n");
+    await Promise.resolve();
+    expect(peer.prepareCancellation("conversation")).toBe(false);
+    expect(peer.prepareCancellation(scope.nativeTurnId)).toBe(true);
+    answer({ outcome: { outcome: "selected", optionId: "allow" } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(writes.map(line => JSON.parse(line)).find(frame => frame.id === 77)).toMatchObject({ result: { outcome: { outcome: "cancelled" } } });
+    child.stdout.write(JSON.stringify({ id: 1, result: { stopReason: "end_turn" } }) + "\n"); await active;
+    expect(peer.promptScope()).toBeNull();
+    expect(() => peer.request("session/prompt", { sessionId: "conversation", prompt: [] })).toThrow(/fenced/);
+    expect(peer.recheckCancellation(scope.nativeTurnId)).toBe(false);
+    const next = peer.request("session/prompt", { sessionId: "conversation", prompt: [] });
+    expect(peer.promptScope()).toMatchObject({ nativeTurnId: "dsh-prompt-2", requestId: 2 });
+    expect(peer.prepareCancellation(scope.nativeTurnId)).toBe(false);
+    child.stdout.write(JSON.stringify({ id: 2, result: { stopReason: "end_turn" } }) + "\n"); await next;
+    child.stdout.end(); child.stdin.end();
   });
 });

@@ -241,6 +241,10 @@ export type RigEvent =
   | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null; input?: { classification: string; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false } }
   // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
   // from the pi-runner's RPC get_state / typed events, never pane scraping.
+  | { type: "agent.runner_turn"; nodeId: string; runId: string; sequence: number; nativeTurnId: string;
+      state: "opened" | "closed"; acceptedTurnIds: string[] }
+  | { type: "agent.runner_turn_fenced"; nodeId: string; generation: string; runId: string; nativeTurnId: string }
+  | { type: "agent.runner_map_lost"; nodeId: string; runId: string }
   | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" | "launcher" }
   // OPR.0.4.0.22 — append-only audit of a managed resume-token write. Emitted
   // on an operator set (`operator_set`) and on reconcile capture-on-adopt
