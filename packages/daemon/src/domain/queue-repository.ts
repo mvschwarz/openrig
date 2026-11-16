@@ -1,5 +1,5 @@
 import { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
-import { PROMPT_ALERT_TAG, readWakeLadderBackstop } from "./queue-wake-ladder.js";
+import { PROMPT_ALERT_TAG, WAKE_ESCALATION_TAG, readWakeLadderBackstop } from "./queue-wake-ladder.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { quietCustodyBackstop, quietHoldCustody } from "./quiet-hold-custody.js";
 import type Database from "better-sqlite3";
@@ -5057,15 +5057,22 @@ export class QueueRepository {
   }
 
   /** The parked query's obligation face: open rows to one destination, newest first, without the per-row
-   *  projections list() derives (pickup, waiting view, delivery ledger), which this read never uses. */
+   *  projections list() derives (pickup, waiting view, delivery ledger), which this read never uses. A wake escalation
+   *  about this seat's own prompt is left out: with no operator seat to carry it, the alert falls back to the seat
+   *  itself, and the escalation is the wake, not the content, so it is never that seat's work. */
   listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }> {
     const addresses = this.resolveSessionAddresses(destinationSession);
     const slots = addresses.map(() => "?").join(",");
+    const ownPrompt = addresses.flatMap((address) => [`prompt-destination:${address}`, `consumed-prompt-destination:${address}`]);
     const rows = this.db.prepare(
       `SELECT qitem_id, state${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
         WHERE destination_session IN (${slots}) AND state IN ('pending', 'in-progress', 'blocked')
+          AND NOT CASE WHEN json_valid(tags) THEN
+            EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
+            AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value IN (${ownPrompt.map(() => "?").join(",")}))
+          ELSE 0 END
         ORDER BY ts_created DESC LIMIT ?`,
-    ).all(...addresses, limit) as Array<{ qitem_id: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null }>;
+    ).all(...addresses, WAKE_ESCALATION_TAG, ...ownPrompt, limit) as Array<{ qitem_id: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null }>;
     return rows.map((r) => ({ qitemId: r.qitem_id, state: r.state, summary: r.summary ?? null }));
   }
 

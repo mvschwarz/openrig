@@ -1891,12 +1891,21 @@ async function ensureEscalationRow(
     await refreshEscalationRowIfExists(deps, dest, members, dedupTag);
     return { qitemId: existing.qitem_id };
   }
+  // The summary counts what the alert is about, routed goals waiting on the seat included; a count of none is left out
+  // (a routed goal alone used to read "0 baton(s) stuck").
+  const stuck = [
+    ...(members.length ? [`${members.length} baton(s)`] : []),
+    ...(jobs.size ? [`${jobs.size} watchdog reminder(s)`] : []),
+  ].join(" and ");
+  const counted = [
+    ...(stuck ? [`${stuck} stuck at ${dest}`] : []),
+    ...(waiting.length ? [`${waiting.length} routed goal(s) waiting on ${stuck ? "it" : dest}`] : []),
+  ].join(" and ");
   const body =
     `WAKE ESCALATION (aggregated per destination)\n` +
     `destination: ${dest}\n` +
-    `reason: ${reason}\n` +
-    `stuck batons (${members.length}):\n` +
-    members.map((m) => `- ${m.row.qitemId}: ${m.row.summary ?? "outstanding work"} (${m.reason})`).join("\n") +
+    `reason: ${reason}` +
+    (members.length ? `\nstuck batons (${members.length}):\n${members.map((m) => `- ${m.row.qitemId}: ${m.row.summary ?? "outstanding work"} (${m.reason})`).join("\n")}` : "") +
     (jobs.size ? `\nwatchdog reminders refused at its prompt (${jobs.size}):\n${[...jobs.keys()].map(id => `- ${id}`).join("\n")}` : "") +
     (waiting.length ? `\nwork handed over with a return route, stuck at its prompt (${waiting.length}):\n${waiting.map(w => `- ${w.qitemId}: ${w.summary ?? "routed work"}`).join("\n")}` : "") +
     `\nThe rows above still carry their obligations exactly-once; this escalation is the wake, not the content.`;
@@ -1907,7 +1916,7 @@ async function ensureEscalationRow(
     sourceSession: OPENRIG_SENDER,
     destinationSession: orch,
     body,
-    summary: `Wake escalation: ${members.length} baton(s)${jobs.size ? ` and ${jobs.size} watchdog reminder(s)` : ""} stuck at ${dest} — ${reason}`,
+    summary: `Wake escalation: ${counted || dest} — ${reason}`,
     tags: [WAKE_ESCALATION_TAG, dedupTag,
       ...(oneHop ? [ESCALATION_HOP_TAG] : []), ...extraTags, ...members.map(m => recoveryTag(m.row.qitemId))],
     nudge: false, // delivery is the ladder's own rung attempt, recorded with its outcome

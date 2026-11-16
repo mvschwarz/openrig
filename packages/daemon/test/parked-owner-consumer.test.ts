@@ -896,3 +896,72 @@ describe("leading untyped parked-owner marker text", () => {
     expect((await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob())).action).toBe("send");
   });
 });
+
+// 0.7.18 rehearsal (#3318): with no operator seat, an alert about a seat's own prompt falls back to that seat. It is the
+// wake, not the content, so after the prompt cleared the parked check must not count it and wake the seat for nothing.
+describe("a wake escalation about the seat's own prompt is not that seat's work", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+  const NOW = Date.parse("2026-11-16T23:30:00.000Z");
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true } as never);
+  });
+  afterEach(() => db.close());
+
+  const alert = async (destination: string, tags: string[]) =>
+    (await repo.create({ sourceSession: "sender@r", destinationSession: destination, body: "WAKE ESCALATION", tags, nudge: false })).qitemId;
+
+  // As startup wires the shipped diagnosis: the real repository's obligation face behind diagnoseRigParked.
+  const evaluate = async () => {
+    const { diagnoseRigParked } = await import("../src/domain/parked-query.js");
+    const diagnosis = diagnoseRigParked({
+      getSeatState: () => ({
+        seatNodeId: "node-1", activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null }, needsInputEvidence: null,
+        decidedBy: "lifecycle-hooks" as const, seq: 3, changedAt: new Date(NOW - 60 * 60_000).toISOString(), rungs: [], lastSwap: null,
+      }),
+      listOpenObligations: (dest, limit) => ({ rows: repo.listOpenObligations(dest, limit), limit }),
+    } as never, [{ seatNodeId: "node-1", sessionName: SEAT }]);
+    const rows: ParkedOwnerConsumerDeps["rows"] = {
+      listTransitions: (q) => repo.listTransitions(q).map((t) => ({ ts: t.ts, transitionNote: t.transitionNote ?? null, actorSession: t.actorSession, state: t.state, transitionId: t.transitionId })),
+      appendNote: (q, note) => { repo.update({ qitemId: q, actorSession: "watchdog@system", transitionNote: note }); return { ok: true }; },
+      recordNudgeResult: (q, result) => repo.recordNudgeAttempt(q, result),
+      listOpenIds: (dest) => repo.listOpenObligations(dest, 500).map((r) => r.qitemId),
+    };
+    const policy = makeParkedOwnerConsumerPolicy({ diagnoseRig: () => diagnosis as never, history: { listForJob: () => [], countForJob: () => 0 },
+      rows, occupantGeneration: () => "gen-1", now: () => NOW });
+    return { diagnosis, evaluation: await policy.evaluate(makeJob()) };
+  };
+
+  it("leaves the seat's own prompt alert out of its obligations, by either prompt tag, and keeps everything else", async () => {
+    const own = await alert(SEAT, ["wake-escalation", "wake-prompt-refusal", `prompt-destination:${SEAT}`]);
+    const ownChoice = await alert(SEAT, ["wake-escalation", "wake-prompt-refusal", `consumed-prompt-destination:${SEAT}`]);
+    // An alert about another seat's prompt, carried here, is this seat's to act on.
+    const other = await alert(SEAT, ["wake-escalation", "wake-prompt-refusal", `prompt-destination:${SEAT2}`]);
+    // Only a wake escalation is excluded: an ordinary row with the tag is still work.
+    const plain = await alert(SEAT, [`prompt-destination:${SEAT}`]);
+    // A row whose tags aren't JSON is read as before, not dropped and not a failed read.
+    const unreadable = await alert(SEAT, ["work"]);
+    db.prepare("UPDATE queue_items SET tags = 'not json' WHERE qitem_id = ?").run(unreadable);
+
+    const ids = repo.listOpenObligations(SEAT, 500).map((r) => r.qitemId).sort();
+    expect(ids).toEqual([other, plain, unreadable].sort());
+    expect(ids).not.toContain(own);
+    expect(ids).not.toContain(ownChoice);
+  });
+
+  it("a seat holding only its own prompt alert reads not parked and gets no reminder; real work beside it still does", async () => {
+    await alert(SEAT, ["wake-escalation", "wake-prompt-refusal", `prompt-destination:${SEAT}`]);
+    const first = await evaluate();
+    expect(first.diagnosis.seats[0]!.parked).toBe(false);
+    expect(first.diagnosis.seats[0]!.obligations.scope).toContain("excluding=own-prompt-alerts");
+    expect(first.evaluation.action).toBe("skip");
+
+    const work = (await repo.create({ sourceSession: "sender@r", destinationSession: SEAT, body: "obligation", nudge: false })).qitemId;
+    const second = await evaluate();
+    expect(second.evaluation.action).toBe("send");
+    expect((second.evaluation as { notes?: { obligations?: string[] } }).notes?.obligations).toEqual([work]);
+  });
+});
