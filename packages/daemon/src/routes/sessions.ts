@@ -335,7 +335,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     const instantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
     if (!instantiator) return c.json({ ok: false, code: "internal_error", message: "Pod instantiator unavailable" }, 500);
     const result = await instantiator.retryFirstStart(rigId, node.id, retry.member, retry.rigRoot);
-    return c.json(result, result.ok ? 201 : result.code === "failed" ? 500 : 409);
+    return c.json(result, result.ok ? 201 : processLimitsStatus(result.code) ?? (result.code === "failed" ? 500 : 409));
   }
 
   if (node.podId || body.snapshotId !== undefined) {
@@ -344,7 +344,8 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
       const firstStart = await instantiator?.launchFirstMaterializedNode(rigId, node.id);
       if (firstStart) {
         if (firstStart.ok) (c.get("snapshotCapture" as never) as SnapshotCapture | undefined)?.captureSnapshot(rigId, "auto-rehydrate");
-        return c.json(firstStart, firstStart.ok ? 201 : firstStart.code === "target_liveness_unknown" ? 503 : 409);
+        return c.json(firstStart, firstStart.ok ? 201
+          : processLimitsStatus(firstStart.code) ?? (firstStart.code === "target_liveness_unknown" ? 503 : 409));
       }
     }
     const { restoreOrchestrator } = getDeps(c);
@@ -396,6 +397,13 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
 
   return c.json(result, 201);
 });
+
+/** #3253: the HTTP status of a launch refused for the seat's process limit, as the legacy launch maps it (only an
+ *  unverified check may pass on retry: 409; the rest are 422); undefined for any other code. */
+function processLimitsStatus(code: string | undefined): 409 | 422 | undefined {
+  if (code === "process_limits_unverified") return 409;
+  return code !== undefined && /^process_limits_/.test(code) ? 422 : undefined;
+}
 
 // POST /api/rigs/:rigId/nodes/launch-subset — multi-target managed subset launch
 nodesRoutes.post("/launch-subset", async (c) => {

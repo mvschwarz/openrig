@@ -38,7 +38,9 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid">; inheri
   /** What a capped new-session prints instead of its identity (default "%1 $3 4242 1700000000"). */
   printed?: string;
   /** The error a kill-session (and its detach) of the refused launch's session throws. */
-  killError?: string } = {}) {
+  killError?: string;
+  /** The guarded detach finds another session under that id on a replaced server (tmux prints the marker). */
+  targetChanged?: boolean } = {}) {
   const shellCalls: string[] = [];
   const argvCalls: string[][] = [];
   const get = (k: keyof Probe, fallback: string): Answer => (opts.probe && k in opts.probe ? opts.probe[k]! : fallback);
@@ -59,6 +61,7 @@ function makeAdapter(opts: { limits?: Record<string, number | "invalid">; inheri
     if (args.some(arg => arg.includes("default-shell"))) return "/bin/bash";
     if (args.includes("#{pane_pid}")) return "4321";
     if (opts.killError && args.some(arg => arg.includes("kill-session") || arg.includes("detach-client"))) throw new Error(opts.killError);
+    if (opts.targetChanged && args.some(arg => arg.includes("detach-client"))) return "openrig-stop-target-changed\n";
     // A capped new-session prints its pane, its session and its server, from the same command.
     const capped = args.includes("source-file") ? writes.at(-1)?.includes("#{session_id} #{pid} #{start_time}") : args.some(arg => arg.includes("#{session_id} #{pid}"));
     if (capped) return opts.printed ?? "%1 $3 4242 1700000000";
@@ -316,6 +319,18 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     expect(h.tmuxCalls("detach-client").join("\n")).toContain("#{==:#{pid},4242}");
     expect((result as { message: string }).message).not.toContain("may still be running");
     expect((result as { processLimits: object }).processLimits).not.toHaveProperty("possiblyRunning");
+  });
+
+  it("a refused fresh launch whose session id now names another terminal (a replaced server) reads as gone, not possibly running", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 }, targetChanged: true });
+    seen(h, true, "pending\n");
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    // the server that held this launch's session is gone with it: a plain refusal, retryable, nothing killed
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true });
+    expect((result as { processLimits: object }).processLimits).not.toHaveProperty("possiblyRunning");
+    expect((result as { message: string }).message).not.toContain("may still be running");
+    expect(h.tmuxCalls("detach-client").join("\n")).toContain("detach-client -s '$3'");
+    expect(h.tmuxCalls("kill-session")).toEqual([]);
   });
 
   it("a refused fresh launch whose session can't be removed says it may still be running, and how to stop it", async () => {

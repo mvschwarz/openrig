@@ -339,7 +339,9 @@ import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, SkillResource
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
 import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
-import type { ProcessLimitsMode, SeatProcessLimitsNotice, TmuxAdapter } from "../adapters/tmux.js";
+import type { ProcessLimitsMode, SeatProcessLimitsNotice, SeatProcessLimitsProblem, TmuxAdapter } from "../adapters/tmux.js";
+/** #3253: a launch's limit outcome: the notice of a recovery that went on, or the problem a refused launch reports. */
+type LaunchLimits = SeatProcessLimitsNotice | SeatProcessLimitsProblem;
 import { installTopologyDefaults } from "./topology-defaults-installer.js";
 import type {
   CompactionStrategy,
@@ -442,6 +444,10 @@ export interface LaunchMaterializedNodeResult {
   status: "launched" | "failed" | "attention_required";
   error?: string;
   sessionName?: string;
+  /** #3253: a launch refused for the seat's process limit keeps its own code, whether a retry may pass, and why. */
+  code?: string;
+  retryable?: boolean;
+  processLimits?: LaunchLimits;
 }
 
 export type LaunchMaterializedOutcome =
@@ -918,7 +924,7 @@ export class PodRigInstantiator {
    * Reuse the original declaration and launch effect; history always stays on restore. */
   async launchFirstMaterializedNode(rigId: string, nodeId: string): Promise<{
     ok: boolean; rigId: string; nodeId: string; logicalId: string; code?: string;
-    error?: string; sessionName?: string; warnings?: string[];
+    error?: string; sessionName?: string; warnings?: string[]; retryable?: boolean; processLimits?: LaunchLimits;
   } | null> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(nodeId)) {
@@ -989,7 +995,10 @@ export class PodRigInstantiator {
     const result = launched.result.nodes[0]!;
     if (changes.length) preflight.warnings.push(`First start uses the seat's current saved ${changes.join(", ")} instead of the materialized declaration.`);
     return { ok: result.status === "launched", rigId, nodeId, logicalId: node.logicalId,
-      ...(result.status !== "launched" ? { code: result.status, error: result.error } : {}),
+      // #3253: a refusal for the seat's limit keeps its own code (the route maps it), not the generic status
+      ...(result.status !== "launched" ? { code: result.code ?? result.status, error: result.error } : {}),
+      ...(result.retryable !== undefined ? { retryable: result.retryable } : {}),
+      ...(result.processLimits ? { processLimits: result.processLimits } : {}),
       sessionName: result.sessionName, warnings: [...preflight.warnings, ...(launched.result.warnings ?? [])] };
   }
 
@@ -1085,6 +1094,9 @@ export class PodRigInstantiator {
         status: launched.status,
         error: launched.error,
         sessionName: launched.sessionName,
+        ...("code" in launched && launched.code ? { code: launched.code } : {}),
+        ...("retryable" in launched && launched.retryable !== undefined ? { retryable: launched.retryable } : {}),
+        ...(launched.processLimits ? { processLimits: launched.processLimits } : {}),
       });
     }
 
@@ -1318,7 +1330,7 @@ export class PodRigInstantiator {
    * the failed shell. Existing validation, projection and startup delivery own all
    * effects; no node, history, token or startup-context row is fabricated here. */
   async retryFirstStart(rigId: string, nodeId: string, memberFragment: Record<string, unknown>, rigRoot: string): Promise<
-    { ok: false; code: string; message: string } |
+    { ok: false; code: string; message: string; retryable?: boolean; processLimits?: LaunchLimits } |
     { ok: true; rigId: string; nodeId: string; logicalId: string; status: "launched"; sessionName?: string; warnings?: string[] }
   > {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
@@ -1411,7 +1423,11 @@ export class PodRigInstantiator {
     const launchMember = limitsReadable ? member : { ...member, processLimits: undefined };
     const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member: launchMember,
       resolveResult: resolved, configResult: launchConfig, keepRecordedAdditions: true });
-    if (result.status !== "launched") return { ok: false, code: result.status, message: result.error ?? "First-start retry did not reach readiness." };
+    if (result.status !== "launched") {
+      return { ok: false, code: result.code ?? result.status, message: result.error ?? "First-start retry did not reach readiness.",
+        ...(result.retryable !== undefined ? { retryable: result.retryable } : {}),
+        ...(result.processLimits ? { processLimits: result.processLimits } : {}) };
+    }
     // The preflight above covers the whole rig and isn't returned; this member's agent spec advisories are.
     const warnings = [...agentSpecAdvisoryWarnings(node.logicalId, resolved), ...(result.warnings ?? [])];
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: warnings.length ? warnings : result.warnings };
@@ -2187,8 +2203,8 @@ export class PodRigInstantiator {
     resolveResult?: ReturnType<typeof resolveAgentRef>;
     /** #3253: how the launch treats a process limit it can't apply (default fresh: refused). A restore passes "recovery". */
     processLimitsMode?: ProcessLimitsMode;
-  }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
-    processLimits?: SeatProcessLimitsNotice }> {
+  }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string;
+    warnings?: string[]; retryable?: boolean; processLimits?: LaunchLimits }> {
     return input.member.agentRef === "builtin:terminal"
       ? this.launchExistingTerminalMember(input)
       : this.launchExistingAgentMember(input);
@@ -2249,7 +2265,10 @@ export class PodRigInstantiator {
       ...(opts?.processLimitsMode ? { processLimitsMode: opts.processLimitsMode } : {}),
     });
     const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
-    return advisories.length ? { ...launched, warnings: [...advisories, ...(launched.warnings ?? [])] } : launched;
+    // #3253: the recovery notice is what a restore reports; a fresh refusal's problem stays in the code and message.
+    const { processLimits, ...rest } = launched;
+    const notice = processLimits && "state" in processLimits ? { processLimits } : {};
+    return advisories.length ? { ...rest, ...notice, warnings: [...advisories, ...(launched.warnings ?? [])] } : { ...rest, ...notice };
   }
 
   /** The recipe supplies the authored source, while the retained node row is the
@@ -2469,7 +2488,7 @@ export class PodRigInstantiator {
     keepRecordedAdditions?: boolean;
     processLimitsMode?: ProcessLimitsMode;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
-    processLimits?: SeatProcessLimitsNotice }> {
+    retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingAgentMember(input));
@@ -2628,7 +2647,10 @@ export class PodRigInstantiator {
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}),
     });
     if (!launchResult.ok) {
-      return { status: "failed", code: launchResult.code, error: launchResult.message };
+      // #3253: a refusal for the seat's limit says whether a retry may pass and why, also past this launcher.
+      return { status: "failed", code: launchResult.code, error: launchResult.message,
+        ...(launchResult.retryable !== undefined ? { retryable: launchResult.retryable } : {}),
+        ...(launchResult.processLimits ? { processLimits: launchResult.processLimits } : {}) };
     }
     // #3253: a recovery that went on without the limit says so in the result, whatever happens after the terminal.
     const limitsNotice = launchResult.processLimits ? { processLimits: launchResult.processLimits } : {};
@@ -2955,7 +2977,7 @@ export class PodRigInstantiator {
     envOverride?: SeatEnv;
     processLimitsMode?: ProcessLimitsMode;
   }): Promise<{ status: "launched" | "failed"; code?: string; error?: string; sessionName?: string; warnings?: string[];
-    processLimits?: SeatProcessLimitsNotice }> {
+    retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingTerminalMember(input));
@@ -2981,7 +3003,10 @@ export class PodRigInstantiator {
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, env: input.envOverride,
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });
     if (!launchResult.ok) {
-      return { status: "failed", code: launchResult.code, error: launchResult.message };
+      // #3253: a refusal for the seat's limit says whether a retry may pass and why, also past this launcher.
+      return { status: "failed", code: launchResult.code, error: launchResult.message,
+        ...(launchResult.retryable !== undefined ? { retryable: launchResult.retryable } : {}),
+        ...(launchResult.processLimits ? { processLimits: launchResult.processLimits } : {}) };
     }
     const limitsNotice = launchResult.processLimits ? { processLimits: launchResult.processLimits } : {};
 
