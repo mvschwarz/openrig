@@ -177,8 +177,8 @@ commands; if the two ever differ, this step is right.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Hand it over by where the person will answer the team, from what they've already told you:
   - **They stay here** (they said so, or they can't use the operator's pane): hand the goal over as a task from your
-    own address ("If the person stays with you" below), so the team's questions, its seats' prompts and the result
-    come back to you. Don't tell the operator they'll answer in its pane.
+    own address ("If the person stays with you" below), giving the operator your return address for the team's questions and
+    result. A seat's prompt may still not reach this conversation. Don't tell the operator they'll answer in its pane.
   - **They'll talk to the operator in its pane:** find the `operator.agent` row in `rig ps --nodes --rig kernel --json`,
     take its `canonicalSessionName` (never the logical ID or a guessed name) and send:
     `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
@@ -276,8 +276,8 @@ commands; if the two ever differ, this step is right.
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
   read it with `rig capture <seat>@<rig>`.
-- **Seat permission prompts come to the person here, as questions, for as long as the team works,** whether you or
-  the operator started it, and whether or not they joined. This is the default, not a fallback. A permission prompt
+- **Bring seat permission prompts to the person here, as questions, for as long as the team works,** whether you or
+  the operator started it, and whether or not they joined. This is your default responsibility, not a fallback. A permission prompt
   is the person's to answer: they decide, which doesn't mean they type it into the seat's pane, so don't decline to
   relay it. After each step you hand off, and before you report progress, check `rig ps --nodes --rig <rig>` for a
   seat stopped at a prompt, and repeat that check while you wait for a seat's result, so a prompt that appears after
