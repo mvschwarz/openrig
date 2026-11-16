@@ -189,7 +189,7 @@ describe("#3081 POST /api/terminal/open-all, /close-all, and /rig-viewers", () =
     expect((await post(downApp, "/api/terminal/open-all", {})).status).toBe(503);
   });
 
-  it("delegates /close-all and /rig-viewers", async () => {
+  it("delegates /close-all and leaves removed /rig-viewers routes unavailable", async () => {
     const closeAll = vi.fn(async () => ({ ok: true, viewers: [{ view: "rig:a", provider: "herdr", target: "w1", outcome: "closed" }] }));
     const registerRigViewer = vi.fn(async () => ({ ok: true }));
     const retireRigViewer = vi.fn(async () => ({ ok: true }));
@@ -200,30 +200,30 @@ describe("#3081 POST /api/terminal/open-all, /close-all, and /rig-viewers", () =
     expect(closeAll).toHaveBeenCalledExactlyOnceWith({ provider: "herdr" });
 
     const badViewer = await post(app, "/api/terminal/rig-viewers", { kind: "tmux" });
-    expect(badViewer.status).toBe(400);
+    expect(badViewer.status).toBe(404);
 
     const viewerPayload = {
       kind: "tmux", view: "rig:a", sessionName: "openrig-view-1", sessionId: "$1",
       nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], phase: "created",
     };
     const regRes = await post(app, "/api/terminal/rig-viewers", viewerPayload);
-    expect(regRes.status).toBe(200);
-    expect(registerRigViewer).toHaveBeenCalledExactlyOnceWith(viewerPayload);
+    expect(regRes.status).toBe(404);
+    expect(registerRigViewer).not.toHaveBeenCalled();
 
     const delRes = await app.request("/api/terminal/rig-viewers", {
       method: "DELETE",
       body: JSON.stringify({ kind: "tmux", sessionId: "$1", nonce: "n1" }),
       headers: { "content-type": "application/json" },
     });
-    expect(delRes.status).toBe(200);
-    expect(retireRigViewer).toHaveBeenCalledExactlyOnceWith({ kind: "tmux", sessionId: "$1", nonce: "n1" });
+    expect(delRes.status).toBe(404);
+    expect(retireRigViewer).not.toHaveBeenCalled();
 
     // T3: DELETE /api/terminal/rig-viewers also accepts query parameters without body:
     const delQuery = await app.request("/api/terminal/rig-viewers?kind=tmux&sessionId=%241&nonce=n1", {
       method: "DELETE",
     });
-    expect(delQuery.status).toBe(200);
-    expect(retireRigViewer).toHaveBeenCalledTimes(2);
+    expect(delQuery.status).toBe(404);
+    expect(retireRigViewer).not.toHaveBeenCalled();
   });
 
   it("J11: maps corrupt_ledger on POST /api/terminal/close-all to HTTP 500", async () => {
@@ -269,7 +269,7 @@ describe("#3081 bf06 child B01/BT01 — HTTP /close-all and /close with real Ter
     };
     const def = makeEndpoint("/tmp/rt/herdr.sock", "ws-def", "rig:alpha");
     const work = makeEndpoint("/tmp/rt/sessions/work/herdr.sock", "ws-work", "rig:beta");
-    const tmuxExec = vi.fn(async () => "");
+    const tmuxExec = vi.fn(async () => "$1|openrig-view-1|fixture-session-options");
     const closeViewCalls: Array<{ viewId: string; appHome: string }> = [];
     const ledger = new RigViewerLedger(dir);
     const service = new TerminalService({
@@ -325,7 +325,6 @@ describe("#3081 bf06 child B01/BT01 — HTTP /close-all and /close with real Ter
     const { app, ledger, def, work, closedWorkspaces, tmuxExec } = makeLiveServiceApp();
     await ledger.upsert({ kind: "herdr", endpoint: def.endpointKey(), view: "rig:alpha", workspaceId: "ws-def", tabIds: ["t-ws-def"], tabLabels: ["openrig:rig:alpha#p1#k1/1"], paneIds: ["p-ws-def"], planId: "p1", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
     await ledger.upsert({ kind: "herdr", endpoint: work.endpointKey(), view: "rig:beta", workspaceId: "ws-work", tabIds: ["t-ws-work"], tabLabels: ["openrig:rig:beta#p1#k1/1"], paneIds: ["p-ws-work"], planId: "p1", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
-    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "rt-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
 
     const res = await post(app, "/api/terminal/close-all", { session: " work " });
     expect(res.status).toBe(200);

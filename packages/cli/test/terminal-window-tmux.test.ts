@@ -6,18 +6,33 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DaemonClient } from "../src/client.js";
 import { openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
+import { parseTmuxViewerProof, TMUX_VIEWER_PROOF_OPTION } from "../../daemon/src/domain/terminal/tmux-viewer-guard.js";
+import { TerminalService } from "../../daemon/src/domain/terminal/terminal-service.js";
 import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 
 // Real isolated tmux servers; the desktop launcher alone is inert.
 const sockets: string[] = [];
 const dirs: string[] = [];
+const proofObservers = new Map<string, { proofs: unknown[]; closedViewers: string[]; events: string[] }>();
 const env = { ...process.env }; delete env["TMUX"];
 function tmux(socket: string, args: string[]): string {
-  return execFileSync("tmux", ["-L", socket, "-f", "/dev/null", ...args], { encoding: "utf8", env, timeout: 5000 });
+  const out = execFileSync("tmux", ["-L", socket, "-f", "/dev/null", ...args], { encoding: "utf8", env, timeout: 5000 });
+  const observer = proofObservers.get(socket);
+  if (observer && args.includes("set-option") && args.includes(TMUX_VIEWER_PROOF_OPTION)) {
+    const proof = parseTmuxViewerProof(args.at(-1)!);
+    if (proof) { observer.proofs.push(proof); observer.events.push(`proof:${proof.view}`); }
+  }
+  if (observer && args.includes("if-shell") && !out.includes("openrig-viewer-kept")) {
+    const id = args[args.indexOf("if-shell") + 3]!;
+    const ids = execFileSync("tmux", ["-L", socket, "-f", "/dev/null", "list-sessions", "-F", "#{session_id}"], { encoding: "utf8", env, timeout: 5000 }).trim().split("\n");
+    if (!ids.includes(id)) observer.closedViewers.push(id);
+  }
+  return out;
 }
 const isViewerClose = (args: string[]) => args.includes("kill-session")
   || (args.includes("if-shell") && args.some(arg => arg.startsWith("kill-session -t ")));
 afterEach(() => {
+  proofObservers.clear();
   for (const socket of sockets.splice(0)) {
     try { tmux(socket, ["kill-server"]); } catch { /* Already exited after a failing setup. */ }
   }
@@ -161,7 +176,7 @@ it.each([80, 119, 120, 174])("opens the measured %i-column welcome in an owned v
 });
 
 describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cleanup", () => {
-  it.each(["window", "pane", "nonce", "gone"])("keeps the record when a viewer %s changes after cleanup snapshot", async change => {
+  it.each(["window", "pane", "nonce", "proof", "gone"])("keeps the record when a viewer %s changes after cleanup snapshot", async change => {
     const fixture = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
     let changed = false;
     const result = await openAllTerminalWindows(fixture.client, "tmux", {
@@ -178,6 +193,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
           if (change === "window") tmux(fixture.server, ["new-window", "-d", "-t", sessionId, "-n", "person", "sleep 60"]);
           if (change === "pane") tmux(fixture.server, ["split-window", "-d", "-t", sessionId, "sleep 60"]);
           if (change === "nonce") tmux(fixture.server, ["set-option", "-t", sessionId, "@openrig_rig_viewer", "person-nonce"]);
+          if (change === "proof") tmux(fixture.server, ["set-option", "-t", sessionId, TMUX_VIEWER_PROOF_OPTION, "changed"]);
           if (change === "gone") tmux(fixture.server, ["kill-session", "-t", sessionId]);
         }
         return tmux(fixture.server, args);
@@ -186,13 +202,13 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     });
     expect(changed).toBe(true);
     expect(result.rigs[0]).toMatchObject({ outcome: "failed", cleanup: "unknown" });
-    expect(fixture.registered).toHaveLength(1);
-    expect(fixture.retired).toHaveLength(0);
+    expect(fixture.proofs).toHaveLength(1);
+    expect(fixture.closedViewers).toHaveLength(0);
     expect(tmux(fixture.server, ["has-session", "-t", "=op@alpha"])).toBe("");
     if (change !== "gone") expect(tmux(fixture.server, ["has-session", "-t", "=openrig-view-guarded-cleanup"])).toBe("");
   });
 
-  function setupBulkTmux(rigs: Array<{ rig: string; seats: string[] }>) {
+  function setupBulkTmux(rigs: Array<{ rig: string; id?: string; seats: string[] }>) {
     const id = randomUUID().slice(0, 10);
     const server = `bulk-${id}`;
     sockets.push(server);
@@ -200,8 +216,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       for (const s of r.seats) tmux(server, ["new-session", "-d", "-s", `${s}@${r.rig}`, "sleep 60"]);
     }
     const events: string[] = [];
-    const registered: unknown[] = [];
-    const retired: unknown[] = [];
+    const proofs: unknown[] = [];
+    const closedViewers: unknown[] = [];
     const makeComposed = (rig: string, seats: string[]) => ({
       id: `rig:${rig}`,
       localTmuxServer: ["-L", server],
@@ -217,35 +233,104 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       isLocalInstance: vi.fn(async () => true),
       get: vi.fn(async (url: string) => {
         if (url === "/api/terminal/status") return { status: 200, data: { tmux: { mode: "isolated", serverArgs: ["-L", server] }, providers: [] } };
-        if (url === "/api/terminal/views") return { status: 200, data: { rigs: rigs.map(r => r.rig) } };
+        if (url === "/api/terminal/views") return { status: 200, data: { rigs: rigs.map(r => r.rig), rigIdentities: rigs.map(r => ({ id: r.id ?? r.rig, name: r.rig })) } };
         if (url.startsWith("/api/terminal/preview?")) {
           const view = new URL(url, "http://localhost").searchParams.get("view") ?? "";
           const rigName = view.replace(/^rig:/, "");
-          const spec = rigs.find(r => r.rig === rigName)!;
-          return { status: 200, data: { planId: `plan-${rigName}`, tmux: { mode: "isolated" }, status: {}, composed: makeComposed(rigName, spec.seats) } };
+          const spec = rigs.find(r => (r.id ?? r.rig) === rigName)!;
+          return { status: 200, data: { planId: `plan-${rigName}`, tmux: { mode: "isolated" }, status: {}, composed: { ...makeComposed(spec.rig, spec.seats), id: `rig:${rigName}` } } };
         }
         return { status: 404, data: {} };
       }),
-      post: vi.fn(async (url: string, body: unknown) => {
-        if (url === "/api/terminal/rig-viewers") {
-          events.push(`register:${(body as { view: string }).view}`);
-          registered.push(body);
-        }
-        return { status: 200, data: { ok: true } };
-      }),
-      delete: vi.fn(async (url: string) => {
-        if (url.startsWith("/api/terminal/rig-viewers")) {
-          events.push("retire");
-          retired.push(url);
-        }
-        return { status: 200, data: { ok: true } };
-      }),
+      post: vi.fn(async () => { throw new Error("Removed registration route must not be called"); }),
+      delete: vi.fn(async () => { throw new Error("Removed retirement route must not be called"); }),
     } as unknown as DaemonClient;
-    return { server, client, events, registered, retired };
+    proofObservers.set(server, { proofs, closedViewers, events });
+    return { server, client, events, proofs, closedViewers };
   }
 
-  it("opens one tagged session per non-empty rig, posts daemon record before launchWindow, and skips empty rigs", async () => {
-    const { server, client, events, registered } = setupBulkTmux([
+  it("keeps stopped and live rigs with the same display name separate by ID", async () => {
+    const f = setupBulkTmux([{ rig: "alpha", id: "stopped-id", seats: [] }, { rig: "alpha", id: "live-id", seats: ["op"] }]);
+    const result = await openAllTerminalWindows(f.client, "tmux", {
+      platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, exists: () => false, herdrConfig: () => "",
+      exec: async (file, args) => file === "/bin/sh" ? "tmux" : file === "tmux" ? tmux(f.server, args) : "window",
+      launch: async () => {}, sleep: async () => {}, id: () => "same-name",
+    });
+    expect(result.rigs).toHaveLength(2);
+    expect(result.rigs.find(r => r.view === "rig:live-id")).toMatchObject({ rig: "alpha", rigId: "live-id", outcome: "opened" });
+    expect(result.rigs.find(r => r.view === "rig:stopped-id")).toMatchObject({ rig: "alpha", rigId: "stopped-id", outcome: "absent" });
+    expect(f.proofs).toHaveLength(1);
+    expect(f.proofs[0]).toMatchObject({ view: "rig:live-id" });
+  });
+
+  it.each([["single", TMUX_VIEWER_PROOF_OPTION], ["bulk", TMUX_VIEWER_PROOF_OPTION], ["single", "@openrig_rig_viewer"], ["bulk", "@openrig_rig_viewer"]])("opens %s viewers when ownership option %s fails", async (mode, option) => {
+    const f = setupBulkTmux([{ rig: "alpha", seats: ["op"] }, { rig: "beta", seats: ["op"] }]);
+    let seq = 0;
+    const deps: WindowDeps = {
+      platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, exists: () => false, herdrConfig: () => "",
+      exec: async (file, args) => {
+        if (file === "/bin/sh") return "tmux";
+        if (file !== "tmux") return "window";
+        if (args.includes(option!) && args.includes("set-option") && seq === 1) throw new Error("fixture option write failed");
+        return tmux(f.server, args);
+      },
+      launch: async () => {}, sleep: async () => {}, id: () => `write-failure-${++seq}`,
+    };
+    const result = mode === "single" ? await openTerminalWindow(f.client, "rig:alpha", "tmux", deps) : await openAllTerminalWindows(f.client, "tmux", deps);
+    expect(result.ok).toBe(true);
+    const notes = "rigs" in result ? result.rigs[0]?.notes : result.notes;
+    expect(notes?.join(" ")).toContain("close --all cannot close an unqualified viewer");
+    if ("rigs" in result) expect(result.rigs.map(r => r.outcome)).toEqual(["opened", "opened"]);
+    const svc = new TerminalService({ resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null, resolveHost: () => null, hasSession: () => true,
+      tmuxServerArgs: () => ["-L", f.server], tmuxExec: async args => tmux(f.server, args) });
+    const closed = await svc.closeAll({ provider: "tmux" });
+    expect(closed.viewers.some(v => v.target === "openrig-view-write-failure-1" && v.outcome === "closed")).toBe(false);
+    expect(tmux(f.server, ["has-session", "-t", "=openrig-view-write-failure-1"])).toBe("");
+    expect(tmux(f.server, ["has-session", "-t", "=op@alpha"])).toBe("");
+  });
+
+  it("rejects a changed preview endpoint before creating a viewer and continues the next rig", async () => {
+    const f = setupBulkTmux([{ rig: "alpha", seats: ["op"] }, { rig: "beta", seats: ["op"] }]);
+    const original = f.client.get.bind(f.client);
+    f.client.get = (async (url: string) => {
+      const response = await original(url);
+      if (url.includes("view=rig%3Aalpha")) (response.data as { composed: { localTmuxServer: string[] } }).composed.localTmuxServer = ["-L", "other-server"];
+      return response;
+    }) as typeof f.client.get;
+    let seq = 0;
+    const result = await openAllTerminalWindows(f.client, "tmux", {
+      platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, exists: () => false, herdrConfig: () => "",
+      exec: async (file, args) => file === "/bin/sh" ? "tmux" : file === "tmux" ? tmux(f.server, args) : "window",
+      launch: async () => {}, sleep: async () => {}, id: () => `endpoint-${++seq}`,
+    });
+    expect(result.rigs.map(r => r.outcome)).toEqual(["failed", "opened"]);
+    expect(result.rigs[0]?.error).toContain("preview tmux endpoint changed");
+    expect(f.proofs).toHaveLength(1);
+    expect(f.proofs[0]).toMatchObject({ view: "rig:beta" });
+    expect(tmux(f.server, ["list-sessions", "-F", "#{session_name}"])).not.toContain("openrig-view-endpoint-2");
+  });
+
+  it("contains a malformed composition in its rig result and opens the next rig", async () => {
+    const f = setupBulkTmux([{ rig: "alpha", seats: ["op"] }, { rig: "beta", seats: ["op"] }]);
+    const original = f.client.get.bind(f.client);
+    f.client.get = (async (url: string) => {
+      const response = await original(url);
+      if (url.includes("view=rig%3Aalpha")) (response.data as { composed: { opened: unknown } }).composed.opened = null;
+      return response;
+    }) as typeof f.client.get;
+    const result = await openAllTerminalWindows(f.client, "tmux", {
+      platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, exists: () => false, herdrConfig: () => "",
+      exec: async (file, args) => file === "/bin/sh" ? "tmux" : file === "tmux" ? tmux(f.server, args) : "window",
+      launch: async () => {}, sleep: async () => {}, id: () => "after-broken-composition",
+    });
+    expect(result.rigs.map(r => r.outcome)).toEqual(["failed", "opened"]);
+    expect(f.proofs).toHaveLength(1);
+    expect(f.proofs[0]).toMatchObject({ view: "rig:beta" });
+  });
+
+  it("opens one tagged session per non-empty rig, writes session options before launchWindow, and skips empty rigs", async () => {
+    const { server, client, events, proofs } = setupBulkTmux([
       { rig: "empty", seats: [] },
       { rig: "beta", seats: ["op"] },
       { rig: "alpha", seats: ["op"] },
@@ -275,8 +360,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(result.provider).toBe("tmux");
     expect(result.rigs.map(r => r.rig)).toEqual(["alpha", "beta", "empty"]);
     expect(result.rigs.find(r => r.rig === "empty")?.outcome).toBe("absent");
-    expect(events).toEqual(["register:rig:alpha", "launch", "register:rig:beta", "launch"]);
-    expect(registered).toHaveLength(2);
+    expect(events).toEqual(["proof:rig:alpha", "launch", "proof:rig:beta", "launch"]);
+    expect(proofs).toHaveLength(2);
     const sessTags = new Map(
       tmux(server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"]).trim().split("\n").map(line => {
         const sep = line.indexOf("|");
@@ -289,7 +374,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
   });
 
   it("fails cleanly before creating any session when desktop launcher preflight returns a string", async () => {
-    const { server, client, registered } = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const { server, client, proofs } = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
     const deps: WindowDeps = {
       herdrConfig: () => "",
       platform: "linux",
@@ -302,7 +387,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     };
     const res = await openAllTerminalWindows(client, "tmux", deps);
     expect(res.ok).toBe(false);
-    expect(registered).toEqual([]);
+    expect(proofs).toEqual([]);
     expect(tmux(server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toEqual(["op@alpha"]);
   });
 
@@ -328,7 +413,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(res1.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed" });
     expect(res1.rigs[0]?.cleanup).toBe("closed");
     expect(tmux(c1.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toEqual(["op@alpha"]);
-    expect(c1.retired).toHaveLength(1);
+    expect(c1.closedViewers).toHaveLength(1);
 
     // 2. Extra window created before launch throws -> retains session + cleanup: "unknown" + keeps record:
     const c2 = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
@@ -352,7 +437,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     });
     expect(res2.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
     expect(tmux(c2.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-dirtyfail");
-    expect(c2.retired).toHaveLength(0);
+    expect(c2.closedViewers).toHaveLength(0);
 
     // 3. -1743 on rig 2 keeps rig 1 open and skips creating rig 3 session with code automation_denied:
     const c3 = setupBulkTmux([
@@ -384,12 +469,12 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(res3.rigs.find(r => r.rig === "alpha")?.outcome).toBe("opened");
     expect(res3.rigs.find(r => r.rig === "beta")?.outcome).toBe("failed");
     expect(res3.rigs.find(r => r.rig === "gamma")).toMatchObject({ outcome: "failed", code: "automation_denied" });
-    expect(c3.registered).toHaveLength(2);
+    expect(c3.proofs).toHaveLength(2);
     expect(tmux(c3.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-seq-1");
   });
 
   it("reports cleanup: unknown with an inspection note when createTmuxViewerLayout fails after new-session", async () => {
-    const { server, client, registered, retired } = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
+    const { server, client, proofs, closedViewers } = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
     let launchCalls = 0;
     const res = await openAllTerminalWindows(client, "tmux", {
       herdrConfig: () => "",
@@ -421,8 +506,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     const sessions = tmux(server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n");
     expect(sessions).toContain("openrig-view-partialfail");
     expect(sessions).toContain("op@alpha");
-    expect(registered).toHaveLength(0);
-    expect(retired).toHaveLength(0);
+    expect(proofs).toHaveLength(0);
+    expect(closedViewers).toHaveLength(0);
     expect(launchCalls).toBe(0);
   });
 
@@ -438,7 +523,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
         if (file === "/bin/sh") return "tmux";
         if (file === "/usr/bin/osascript") throw new Error("Not authorized to send Apple events (-1743)");
         if (file === "tmux") {
-          if (args.includes("list-sessions") && perm.registered.length > 0) {
+          if (args.includes("list-sessions") && perm.proofs.length > 0) {
             throw new Error("error connecting to /tmp/tmux-1000/default (Permission denied)");
           }
           return tmux(perm.server, args);
@@ -450,7 +535,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       id: () => "perm",
     });
     expect(permRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
-    expect(perm.retired).toHaveLength(0);
+    expect(perm.closedViewers).toHaveLength(0);
 
     // 2. Attached client on failing viewer MUST check list-clients, NOT kill-session, and MUST return cleanup: "unknown":
     const attached = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
@@ -485,7 +570,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(attachedKillCalls).toEqual([]);
     expect(attRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
     expect(tmux(attached.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-att");
-    expect(attached.retired).toHaveLength(0);
+    expect(attached.closedViewers).toHaveLength(0);
 
     // 3. Already-gone viewer BEFORE cleanup returns cleanup: "already_gone" and retires record:
     const gone = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
@@ -508,7 +593,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       id: () => "gone",
     });
     expect(goneRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "already_gone" });
-    expect(gone.retired).toHaveLength(1);
+    expect(gone.closedViewers).toHaveLength(0);
+    expect(tmux(gone.server, ["list-sessions", "-F", "#{session_name}"])).not.toContain("openrig-view-gone");
 
     // 4. Permission denied on post-kill readback MUST return cleanup: "unknown" and retain record:
     const postPerm = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
@@ -542,7 +628,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(postPermKillCalls).toHaveLength(1);
     expect(postPermPostListCalls).toBe(1);
     expect(postPermRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
-    expect(postPerm.retired).toHaveLength(0);
+    expect(postPerm.closedViewers).toHaveLength(1);
+    expect(postPermPostListCalls).toBeGreaterThan(0);
 
     // 5. Post-kill still-listed viewer MUST return cleanup: "unknown" and retain record:
     const stillListed = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
@@ -577,7 +664,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(stillPostListCalls).toBe(1);
     expect(stillRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
     expect(tmux(stillListed.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).toContain("openrig-view-still");
-    expect(stillListed.retired).toHaveLength(0);
+    expect(stillListed.closedViewers).toHaveLength(0);
   });
 
   it("J05: reads top-level rigViewer and skips @openrig_rig_viewer/registration for saved:rig:example and rigViewer:false spoofed rig:* payloads, while rig:alpha registers", async () => {
@@ -644,16 +731,19 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(spoofRows.find(row => row[0] === "openrig-view-spoof1")?.[1]).toBe("");
     expect(posts).toHaveLength(0);
 
-    await openTerminalWindow(previewClient(true), "rig:alpha", "tmux", depsFor("rig1"));
+    const rigOpened = await openTerminalWindow(previewClient(true), "rig:alpha", "tmux", depsFor("rig1"));
     const rigRows = tmux(server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"])
       .trim()
       .split("\n")
       .map(line => line.split("|"));
     expect(rigRows.find(row => row[0] === "openrig-view-rig1")?.[1]).toMatch(/^[0-9a-f-]{8,}$/);
-    expect(posts).toHaveLength(1);
+    expect(posts).toHaveLength(0);
+    const rawProof = tmux(server, ["list-sessions", "-F", `#{session_name}|#{${TMUX_VIEWER_PROOF_OPTION}}`])
+      .trim().split("\n").map(line => line.split("|")).find(row => row[0] === "openrig-view-rig1")?.[1] ?? "";
+    expect(parseTmuxViewerProof(rawProof), JSON.stringify({ rawProof, rigOpened })).toMatchObject({ view: "rig:alpha" });
   });
 
-  it("J14: fails openAllTerminalWindows when /api/terminal/views fails and omits close --all advice when unregistered", async () => {
+  it("J14: fails openAllTerminalWindows when /api/terminal/views fails and omits close --all advice when ownership options are unconfirmed", async () => {
     const server = `j14-${randomUUID().slice(0, 10)}`;
     sockets.push(server);
     tmux(server, ["new-session", "-d", "-s", "op@alpha", "sleep 60"]);
@@ -678,7 +768,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     });
     expect(viewsRes.ok).toBe(false);
 
-    // Registration fails BEFORE launch -> cleanup: unknown, and notes must NOT tell user close --all works!
+    // An option write fails, then launch fails. The unqualified viewer must remain for inspection.
     const base = setupBulkTmux([{ rig: "alpha", seats: ["op"] }]);
     const regFailClient = {
       ...base.client,
@@ -692,6 +782,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       exec: async (file, args) => {
         if (file === "/bin/sh") return "tmux";
         if (file === "tmux") {
+          if (args.includes("set-option") && args.includes(TMUX_VIEWER_PROOF_OPTION)) throw new Error("fixture option write failed");
           if (isViewerClose(args)) throw new Error("kill denied");
           return tmux(base.server, args);
         }
@@ -726,8 +817,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       tmux(server, ["new-session", "-d", "-s", `${seat}@${rig}`, "sleep 60"]);
     }
     const events: string[] = [];
-    const registered: Array<{ sessionName: string; sessionId: string; nonce: string; windowIds: string[]; paneIds: string[] }> = [];
-    const retired: string[] = [];
+    const proofs: Array<{ sessionName: string; sessionId: string; nonce: string; windowIds: string[]; paneIds: string[] }> = [];
+    const closedViewers: string[] = [];
     const pages = pagesSpec.map(page =>
       page.map(seat => ({
         seat: `${seat}@${rig}`,
@@ -750,32 +841,21 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       isLocalInstance: vi.fn(async () => true),
       get: vi.fn(async (url: string) => {
         if (url === "/api/terminal/status") return { status: 200, data: { tmux: { mode: "isolated", serverArgs: ["-L", server] }, providers: [] } };
-        if (url === "/api/terminal/views") return { status: 200, data: { rigs: [rig] } };
+        if (url === "/api/terminal/views") return { status: 200, data: { rigs: [rig], rigIdentities: [{ id: rig, name: rig }] } };
         if (url.startsWith("/api/terminal/preview?")) {
           return { status: 200, data: { planId: `plan-${rig}`, rigViewer: true, tmux: { mode: "isolated" }, status: {}, composed } };
         }
         return { status: 404, data: {} };
       }),
-      post: vi.fn(async (url: string, body: unknown) => {
-        if (url === "/api/terminal/rig-viewers") {
-          events.push(`register:${(body as { view: string }).view}`);
-          registered.push(body as { sessionName: string; sessionId: string; nonce: string; windowIds: string[]; paneIds: string[] });
-        }
-        return { status: 200, data: { ok: true } };
-      }),
-      delete: vi.fn(async (url: string) => {
-        if (url.startsWith("/api/terminal/rig-viewers")) {
-          events.push("retire");
-          retired.push(url);
-        }
-        return { status: 200, data: { ok: true } };
-      }),
+      post: vi.fn(async () => { throw new Error("Removed registration route must not be called"); }),
+      delete: vi.fn(async () => { throw new Error("Removed retirement route must not be called"); }),
     } as unknown as DaemonClient;
-    return { server, client, events, registered, retired, composed };
+    proofObservers.set(server, { proofs, closedViewers, events });
+    return { server, client, events, proofs, closedViewers, composed };
   }
 
   it("refuses pre-inventory foreign pane on succeeding bulk openAllTerminalWindows without false registration or nonce", async () => {
-    const { server, client, registered, retired } = setupBulkTmux([{ rig: "alpha", seats: ["op", "lead"] }]);
+    const { server, client, proofs, closedViewers } = setupBulkTmux([{ rig: "alpha", seats: ["op", "lead"] }]);
     const killCalls: string[][] = [];
     let foreignPaneId = "";
     const res = await openAllTerminalWindows(client, "tmux", {
@@ -806,8 +886,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
 
     expect(foreignPaneId).toMatch(/^%\d+$/);
     expect(killCalls).toEqual([]);
-    expect(registered).toEqual([]);
-    expect(retired).toEqual([]);
+    expect(proofs).toEqual([]);
+    expect(closedViewers).toEqual([]);
     expect(res.ok).toBe(false);
     expect(res.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
     expect((res.rigs[0]?.notes ?? []).join(" ")).not.toContain("rig terminal close --all");
@@ -818,7 +898,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
   });
 
   it("refuses pre-inventory foreign window across multi-page failed bulk launch and preserves foreign window", async () => {
-    const { server, client, registered, retired } = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
+    const { server, client, proofs, closedViewers } = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
     const killCalls: string[][] = [];
     let foreignWinId = "";
     const res = await openAllTerminalWindows(client, "tmux", {
@@ -849,8 +929,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
 
     expect(foreignWinId).toMatch(/^@\d+$/);
     expect(killCalls).toHaveLength(0);
-    expect(registered).toEqual([]);
-    expect(retired).toEqual([]);
+    expect(proofs).toEqual([]);
+    expect(closedViewers).toEqual([]);
     expect(res.ok).toBe(false);
     expect(res.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
     expect((res.rigs[0]?.notes ?? []).join(" ")).not.toContain("rig terminal close --all");
@@ -886,7 +966,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     });
 
     expect(stdForeignPane).toMatch(/^%\d+$/);
-    expect(std.registered).toEqual([]);
+    expect(std.proofs).toEqual([]);
     expect(stdRes.ok).toBe(false);
     const stdRows = tmux(std.server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"]).trim().split("\n").map(line => line.split("|"));
     expect(stdRows.find(row => row[0] === "openrig-view-s01std")?.[1]).toBe("");
@@ -930,7 +1010,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     });
 
     expect(kForeignWin).toMatch(/^@\d+$/);
-    expect(kbase.registered).toEqual([]);
+    expect(kbase.proofs).toEqual([]);
     expect(kres.ok).toBe(false);
     const kRows = tmux(kbase.server, ["list-sessions", "-F", "#{session_name}|#{@openrig_rig_viewer}"]).trim().split("\n").map(line => line.split("|"));
     expect(kRows.find(row => row[0] === "openrig-view-s01k")?.[1]).toBe("");
@@ -971,8 +1051,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     });
 
     expect(cleanRes.ok).toBe(true);
-    expect(clean.registered).toHaveLength(1);
-    const rec = clean.registered[0]!;
+    expect(clean.proofs).toHaveLength(1);
+    const rec = clean.proofs[0]!;
     expect(expectedSessionIds.size).toBe(1);
     expect([...expectedSessionIds][0]).toBe(rec.sessionId);
     expect(expectedWindowIds.size).toBe(2);
@@ -1005,7 +1085,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     });
     expect(failCleanKills).toHaveLength(1);
     expect(failCleanRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "closed" });
-    expect(failClean.retired).toHaveLength(1);
+    expect(failClean.closedViewers).toHaveLength(1);
     expect(tmux(failClean.server, ["list-sessions", "-F", "#{session_name}"]).trim().split("\n")).not.toContain("openrig-view-s01failok");
 
     const late = setupMultiPageRigTmux("alpha", [["op", "lead"], ["builder"]]);
@@ -1036,8 +1116,8 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       id: () => "s01late",
     });
     expect(lateWinId).toMatch(/^@\d+$/);
-    expect(late.registered).toHaveLength(1);
-    expect(late.retired).toHaveLength(0);
+    expect(late.proofs).toHaveLength(1);
+    expect(late.closedViewers).toHaveLength(0);
     expect(lateKills).toHaveLength(0);
     expect(lateRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
     expect(tmux(late.server, ["list-windows", "-t", "=openrig-view-s01late", "-F", "#{window_id}|#{window_name}"]).trim().split("\n"))
@@ -1074,7 +1154,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(aRes.ok).toBe(false);
     expect(aRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
     expect(aRes.rigs[0]?.error).toMatch(/creation response/i);
-    expect(a.registered).toEqual([]);
+    expect(a.proofs).toEqual([]);
     expect(aKills).toEqual([]);
     expect(aLaunches).toBe(0);
 
@@ -1107,7 +1187,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
     expect(bRes.ok).toBe(false);
     expect(bRes.rigs[0]).toMatchObject({ rig: "alpha", outcome: "failed", cleanup: "unknown" });
     expect(bRes.rigs[0]?.error).toMatch(/unexpected session/i);
-    expect(b.registered).toEqual([]);
+    expect(b.proofs).toEqual([]);
     expect(bKills).toEqual([]);
     expect(bLaunches).toBe(0);
 
@@ -1145,7 +1225,7 @@ describe("#3081 openAllTerminalWindows plain-tmux fallback and launch-failure cl
       id: () => "badph",
     });
     expect(cRes.ok).toBe(false);
-    expect(c.registered).toEqual([]);
+    expect(c.proofs).toEqual([]);
     expect(cLaunches).toBe(0);
   });
 });

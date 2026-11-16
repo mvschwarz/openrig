@@ -439,12 +439,12 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     expect(cmuxOpen).not.toHaveBeenCalled();
   });
 
-  it.each([
+  it.each(([
     ["missing page tab id", { omitLayoutTabIdOnCall: 2 }, 17],
     ["missing layout root echo", { omitLayoutRoot: true }, 1],
     ["unclosed default tab", { failDefaultTabClose: true }, 1],
     ["pane.list readback fails", { failPaneListCount: 2 }, 17],
-  ] as const)("does not write a close record and notes incomplete identity when %s", async (_label, mode, seatCount) => {
+  ] as const).flatMap(([label, mode, seatCount]) => (["single", "bulk"] as const).map(open => [label, mode, seatCount, open] as const)))("does not write a close record and notes incomplete identity when %s (%s seats, %s, %s)", async (_label, mode, seatCount, open) => {
     const rigViewersDir = tempDir("rig-viewers-");
     const h = makeInMemoryHerdr(mode);
     const svc = new TerminalService({
@@ -458,9 +458,10 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
       rigViewersDir,
     } satisfies TerminalServiceDeps);
 
-    const res = await svc.openAll({});
+    const res = open === "bulk" ? await svc.openAll({}) : await svc.openView({ view: "rig:alpha", provider: "herdr" });
     expect(res.ok).toBe(true);
-    expect(res.rigs[0]?.notes?.join("\n")).toMatch(/not recorded for close/i);
+    const notes = "rigs" in res ? res.rigs[0]?.notes : res.notes;
+    expect(notes?.join("\n")).toMatch(/not recorded for close/i);
     expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(0);
   });
 
@@ -639,4 +640,24 @@ describe("#3081 TerminalService.openAll + rig viewer ownership recording", () =>
     expect(res.ok).toBe(false);
     expect(res.rigs.map(r => r.outcome)).toEqual(["failed", "failed"]);
   });
+});
+
+it("opens the live rig by stable ID when a stopped rig has the same display name", async () => {
+  const h = makeInMemoryHerdr();
+  const listRigSeats = vi.fn((id: string) => id === "live-id" ? [makeRigSeat("alpha", "op")] : []);
+  const svc = new TerminalService({
+    resolveProvider: () => h.adapter, viewsStore: { get: () => null, list: () => [] },
+    listRigNames: () => ["alpha", "alpha"],
+    listRigs: () => [{ id: "stopped-id", name: "alpha" }, { id: "live-id", name: "alpha" }],
+    listRigSeats, listPodSeats: () => null, hasSession: () => true, resolveHost: () => null,
+  });
+  const result = await svc.openAll({ provider: "herdr" });
+  expect(result.rigs).toHaveLength(2);
+  expect(result.rigs.find(r => r.rigId === "live-id")).toMatchObject({ rig: "alpha", view: "rig:live-id", outcome: "opened" });
+  expect(result.rigs.find(r => r.rigId === "stopped-id")).toMatchObject({ rig: "alpha", view: "rig:stopped-id", outcome: "absent" });
+  expect(listRigSeats.mock.calls.map(([id]) => id).sort()).toEqual(["live-id", "stopped-id"]);
+  const views = await svc.listViews(true);
+  expect(views.rigs).toEqual(["alpha", "alpha"]);
+  expect(views.rigIdentities).toHaveLength(2);
+  expect(views.catalog?.filter(entry => entry.kind === "derived").map(entry => entry.view).sort()).toEqual(["rig:live-id", "rig:stopped-id"]);
 });

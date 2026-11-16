@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
+import { encodeTmuxViewerProof, TMUX_VIEWER_PROOF_OPTION, type TmuxViewerProof } from "../src/domain/terminal/tmux-viewer-guard.js";
 import { RigViewerLedger, tmuxEndpointKey } from "../src/domain/terminal/rig-viewer-records.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
@@ -167,6 +168,16 @@ function readRecords(dir: string) {
   return entries;
 }
 
+function seedTmux(socket: string, serverArgs: string[], record: Omit<TmuxViewerProof, "endpoint"> & { kind?: string; phase?: string }): void {
+  const proof = encodeTmuxViewerProof({ ...record, endpoint: tmuxEndpointKey(serverArgs) });
+  runTmux(socket, ["set-option", "-t", record.sessionId, TMUX_VIEWER_PROOF_OPTION, proof]);
+}
+
+function seedLegacyTmux(dir: string, record: Record<string, unknown>): void {
+  const hash = createHash("sha256").update(String(record.endpoint)).digest("hex");
+  writeFileSync(path.join(dir, `${hash}.json`), JSON.stringify({ version: 1, entries: { legacy: record } }), { mode: 0o600 });
+}
+
 describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
   it("pins selected tmux endpoint throughout the conditional close", async () => {
     const a = `pin-a-${randomUUID().slice(0, 10)}`, b = `pin-b-${randomUUID().slice(0, 10)}`;
@@ -182,7 +193,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       resolveHost: () => null, hasSession: () => true, rigViewersDir: tempDir("pinned-viewer-"),
       tmuxServerArgs, resolveLocalTmux: async () => "tmux",
     });
-    await svc.registerRigViewer({ kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-pinned", sessionId,
+    seedTmux(a, ["-L", a], { kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-pinned", sessionId,
       nonce: "pinned", windowIds: [windowId], paneIds: [paneId], phase: "created" });
     selected = a; tmuxServerArgs.mockClear();
     const result = await svc.closeAll({ provider: "tmux" });
@@ -192,7 +203,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     expect(runTmux(b, ["list-sessions", "-F", "#{session_name}"])).toBe("control\n");
   });
 
-  it.each(["window", "pane", "nonce", "gone", "malformed"])("retains authority when a tmux %s change occurs before conditional close", async change => {
+  it.each(["window", "pane", "nonce", "proof", "gone", "malformed"])("retains authority when a tmux %s change occurs before conditional close", async change => {
     const socket = `guarded-close-${randomUUID().slice(0, 10)}`;
     sockets.push(socket);
     runTmux(socket, ["new-session", "-d", "-s", "control", "sleep 60"]);
@@ -206,6 +217,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
         if (change === "window") runTmux(socket, ["new-window", "-d", "-t", sessionId, "-n", "person", "sleep 60"]);
         if (change === "pane") runTmux(socket, ["split-window", "-d", "-t", sessionId, "sleep 60"]);
         if (change === "nonce") runTmux(socket, ["set-option", "-t", sessionId, "@openrig_rig_viewer", "person-nonce"]);
+        if (change === "proof") runTmux(socket, ["set-option", "-t", sessionId, TMUX_VIEWER_PROOF_OPTION, "changed"]);
         if (change === "gone") runTmux(socket, ["kill-session", "-t", sessionId]);
       }
       return runTmux(socket, args);
@@ -217,7 +229,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       resolveHost: () => null, hasSession: () => true, rigViewersDir: dir,
       tmuxServerArgs: () => ["-L", socket], tmuxExec,
     });
-    await svc.registerRigViewer({ kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-race", sessionId,
+    seedTmux(socket, ["-L", socket], { kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-race", sessionId,
       nonce: change === "malformed" ? "nonce},#{pane_id};kill-server" : "fixture-nonce",
       windowIds: [windowId], paneIds: [paneId], phase: "created" });
     const before = readRecords(dir);
@@ -225,10 +237,10 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     expect(result.viewers[0]).toMatchObject({ outcome: "kept", code: "ownership_unconfirmed" });
     expect(readRecords(dir)).toEqual(before);
     expect(runTmux(socket, ["has-session", "-t", "=control"])).toBe("");
-    if (change === "malformed") expect(tmuxExec).not.toHaveBeenCalled();
+    if (change === "malformed") expect(tmuxExec.mock.calls.some(([args]) => args[0] === "if-shell")).toBe(false);
     if (change === "gone") {
       const again = await svc.closeAll({ provider: "tmux" });
-      expect(again.viewers[0]?.outcome).toBe("already_gone");
+      expect(again.viewers).toEqual([]); // Session options disappear with the session.
       expect(Object.keys(readRecords(dir))).toHaveLength(0);
     } else {
       expect(runTmux(socket, ["has-session", "-t", sessionId])).toBe("");
@@ -442,15 +454,15 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       tmuxExec: async (args) => execFileSync("tmux", [...serverArgs, ...args], { encoding: "utf8", env: tmuxEnv, timeout: 5000 }),
     });
 
-    await svc.registerRigViewer({
+    seedTmux(socket, serverArgs, {
       kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-v1", sessionId: s1Id!,
       nonce: "nonce-1", windowIds: [w1Id!], paneIds: [p1Id!], phase: "created",
     });
-    await svc.registerRigViewer({
+    seedTmux(socket, serverArgs, {
       kind: "tmux", view: "rig:beta", sessionName: "openrig-view-v2", sessionId: s2Id!,
       nonce: "nonce-2", windowIds: [w2Id!], paneIds: [p2Id!], phase: "created",
     });
-    await svc.registerRigViewer({
+    seedTmux(socket, serverArgs, {
       kind: "tmux", view: "rig:gamma", sessionName: "openrig-view-v3", sessionId: s3Id!,
       nonce: "nonce-3", windowIds: [w3Id!], paneIds: [p3Id!], phase: "created",
     });
@@ -534,11 +546,11 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
         return out;
       },
     });
-    await tmuxSvc.registerRigViewer({
+    seedTmux(socket, serverArgs, {
       kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-r1", sessionId: s1Id!,
       nonce: "nonce-r1", windowIds: [w1Id!], paneIds: [p1Id!], phase: "created",
     });
-    await tmuxSvc.registerRigViewer({
+    seedTmux(socket, serverArgs, {
       kind: "tmux", view: "rig:beta", sessionName: "openrig-view-r2", sessionId: s2Id!,
       nonce: "nonce-r2", windowIds: [w2Id!], paneIds: [p2Id!], phase: "created",
     });
@@ -554,6 +566,8 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const serverArgs = ["-L", "perm-test", "-f", "/dev/null"];
     let mode: "perm-pre" | "perm-post" | "still-listed" = "perm-pre";
     let killed = false;
+    const proof = encodeTmuxViewerProof({ view: "rig:alpha", endpoint: tmuxEndpointKey(serverArgs), sessionId: "$1", sessionName: "openrig-view-1", nonce: "nonce-1", windowIds: ["@1"], paneIds: ["%1"] });
+    const commands: string[][] = [];
     const svc = new TerminalService({
       resolveProvider: () => null,
       viewsStore: { get: () => null, list: () => [] },
@@ -565,6 +579,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       rigViewersDir,
       tmuxServerArgs: () => serverArgs,
       tmuxExec: async (args) => {
+        commands.push([...args]);
         if (mode === "perm-pre") {
           throw new Error("error connecting to /tmp/tmux-1000/perm-test (Permission denied)");
         }
@@ -575,24 +590,22 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
           killed = true;
           return "";
         }
-        if (args[0] === "list-sessions") return "$1|openrig-view-1\n";
+        if (args[0] === "list-sessions") return `$1|openrig-view-1|${proof}\n`;
         if (args[0] === "list-windows") return "$1|@1\n";
         if (args[0] === "list-panes") return "$1|%1\n";
         if (args[0] === "show-options") return "nonce-1\n";
-        if (args[0] === "display-message") return "$1|openrig-view-1|nonce-1|@1;|%1;|0";
+        if (args[0] === "display-message") return `$1|openrig-view-1|nonce-1|@1;|%1;|0|${proof}`;
         return "";
       },
     });
-    await svc.registerRigViewer({
-      kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-1", sessionId: "$1",
-      nonce: "nonce-1", windowIds: ["@1"], paneIds: ["%1"], phase: "created",
-    });
+
 
     // 1. Pre-close permission error -> failed / provider_unreachable + keeps record
     const pre = await svc.closeAll({ provider: "tmux" });
     expect(pre.ok).toBe(false);
     expect(pre.viewers[0]).toMatchObject({ outcome: "failed", code: "provider_unreachable" });
-    expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(1);
+    expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(0);
+    expect(commands.some(args => args[0] === "set-option")).toBe(false);
 
     // 2. Post-kill permission error -> failed / close_pending + keeps record
     mode = "perm-post";
@@ -600,7 +613,8 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     const postPerm = await svc.closeAll({ provider: "tmux" });
     expect(postPerm.ok).toBe(false);
     expect(postPerm.viewers[0]).toMatchObject({ outcome: "failed", code: "close_pending" });
-    expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(1);
+    expect(Object.keys(readRecords(rigViewersDir))).toHaveLength(0);
+    expect(commands.some(args => args[0] === "set-option")).toBe(false);
 
     // 3. kill-session exits cleanly, yet list-sessions still lists $1 -> failed / close_pending + phase closing
     mode = "still-listed";
@@ -609,8 +623,8 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
     expect(stillListed.ok).toBe(false);
     expect(stillListed.viewers[0]).toMatchObject({ outcome: "failed", code: "close_pending" });
     const recs = Object.values(readRecords(rigViewersDir));
-    expect(recs).toHaveLength(1);
-    expect(recs[0]?.["phase"]).toBe("closing");
+    expect(recs).toHaveLength(0);
+    expect(commands.some(args => args[0] === "set-option")).toBe(false);
   });
 
   it("J08: keeps a Herdr workspace whose w1/t1/p1 IDs were reused after restart with different tab labels (person content survives)", async () => {
@@ -694,10 +708,7 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       tmuxServerArgs: () => ["-L", "j12-default-fixture"],
       tmuxExec: defaultTmux,
     });
-    await defaultSvc.registerRigViewer({
-      kind: "tmux", view: "rig:beta", sessionName: "openrig-view-other", sessionId: "$9",
-      nonce: "nonce-9", windowIds: ["@9"], paneIds: ["%9"], phase: "created",
-    });
+
 
     const closeDefault = await defaultSvc.closeAll({});
     const herdrRes = closeDefault.viewers.find(v => v.provider === "herdr");
@@ -716,7 +727,8 @@ describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
       hasSession: () => true,
       rigViewersDir,
       tmuxServerArgs: () => ["-L", "other-tmux-server"],
-      tmuxExec: async () => "",
+      tmuxExec: async () => `$9|openrig-view-other|${encodeTmuxViewerProof({ view: "rig:beta", endpoint: tmuxEndpointKey(["-L", "j12-default-fixture"]), sessionId: "$9", sessionName: "openrig-view-other", nonce: "nonce-9", windowIds: ["@9"], paneIds: ["%9"] })}`,
+
     }).closeAll({ provider: "tmux" });
     expect(closeOtherTmux.viewers[0]).toMatchObject({ outcome: "kept", code: "different_endpoint" });
   });
@@ -854,7 +866,7 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     const work = makeHerdrEndpoint("/tmp/h/sessions/work/herdr.sock", [{ wid: "ws-work", label: "beta", tabId: "t-work", tabLabel: "openrig:rig:beta#p2#k2/1", paneId: "p-work" }]);
     await ledger.upsert({ kind: "herdr", endpoint: def.adapter.endpointKey(), view: "rig:alpha", workspaceId: "ws-def", tabIds: ["t-def"], tabLabels: ["openrig:rig:alpha#p1#k1/1"], paneIds: ["p-def"], planId: "p1", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
     await ledger.upsert({ kind: "herdr", endpoint: work.adapter.endpointKey(), view: "rig:beta", workspaceId: "ws-work", tabIds: ["t-work"], tabLabels: ["openrig:rig:beta#p2#k2/1"], paneIds: ["p-work"], planId: "p2", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
-    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    seedLegacyTmux(dir, { kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
     const tmuxExec = vi.fn(async () => "");
     const resolveSessionProvider = vi.fn((_name: string, sess: string) => (sess === "default" ? def.adapter : sess === "work" ? work.adapter : null));
     const svc = new TerminalService(makeBaseDeps({
@@ -873,7 +885,7 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     expect(res.viewers.find(v => v.provider === "tmux")).toBeUndefined();
     expect(res.viewers.find(v => v.target === "ws-def")).toMatchObject({ outcome: "kept", code: "conditional_close_unavailable", reason: expect.stringContaining("HERDR_SOCKET_PATH='/tmp/h/herdr.sock'") });
     expect(res.viewers.find(v => v.target === "ws-work")).toMatchObject({ outcome: "kept", code: "different_endpoint" });
-    expect((await ledger.listAll()).map(e => e.record.kind).sort()).toEqual(["herdr", "herdr", "tmux"]);
+    expect(Object.values(readRecords(dir)).map(e => e["kind"]).sort()).toEqual(["herdr", "herdr", "tmux"]);
   });
 
   it("closeAll({ session: \" work \" }) omits provider -> selects ONLY matching Herdr session, excluding tmux and keeping other Herdr endpoints", async () => {
@@ -884,7 +896,7 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     const work = makeHerdrEndpoint("/tmp/h2/sessions/work/herdr.sock", [{ wid: "ws-work", label: "beta", tabId: "t-work", tabLabel: "openrig:rig:beta#p2#k2/1", paneId: "p-work" }]);
     await ledger.upsert({ kind: "herdr", endpoint: def.adapter.endpointKey(), view: "rig:alpha", workspaceId: "ws-def", tabIds: ["t-def"], tabLabels: ["openrig:rig:alpha#p1#k1/1"], paneIds: ["p-def"], planId: "p1", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
     await ledger.upsert({ kind: "herdr", endpoint: work.adapter.endpointKey(), view: "rig:beta", workspaceId: "ws-work", tabIds: ["t-work"], tabLabels: ["openrig:rig:beta#p2#k2/1"], paneIds: ["p-work"], planId: "p2", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
-    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    seedLegacyTmux(dir, { kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
     const tmuxExec = vi.fn(async () => "");
     const resolveSessionProvider = vi.fn((_name: string, sess: string) => (sess === "work" ? work.adapter : def.adapter));
     const svc = new TerminalService(makeBaseDeps({
@@ -912,7 +924,7 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     const dir = mkdtempSync(path.join(tmpdir(), "o3081-b01-only-tmux-"));
     createdDirs.push(dir);
     const ledger = new RigViewerLedger(dir);
-    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    seedLegacyTmux(dir, { kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
     const tmuxExec = vi.fn(async () => "");
     const svc = new TerminalService(makeBaseDeps({
       rigViewersDir: dir,
@@ -923,7 +935,7 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     expect(res.ok).toBe(true);
     expect(res.viewers).toEqual([]);
     expect(tmuxExec).not.toHaveBeenCalled();
-    expect(await ledger.listAll()).toHaveLength(1);
+    expect(Object.keys(readRecords(dir))).toHaveLength(1);
   });
 
   it("normalizes whitespace provider and preserves unscoped closeAll across Herdr default + tmux", async () => {
@@ -932,15 +944,16 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     const ledger = new RigViewerLedger(dir);
     const def = makeHerdrEndpoint("/tmp/h3/herdr.sock", [{ wid: "ws-def", label: "alpha", tabId: "t-def", tabLabel: "openrig:rig:alpha#p1#k1/1", paneId: "p-def" }]);
     await ledger.upsert({ kind: "herdr", endpoint: def.adapter.endpointKey(), view: "rig:alpha", workspaceId: "ws-def", tabIds: ["t-def"], tabLabels: ["openrig:rig:alpha#p1#k1/1"], paneIds: ["p-def"], planId: "p1", createdAt: "2026-11-13T00:00:00Z", phase: "created" });
-    await ledger.upsert({ kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
+    seedLegacyTmux(dir, { kind: "tmux", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), view: "rig:gamma", sessionName: "openrig-view-1", sessionId: "$1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"], createdAt: "2026-11-13T00:00:00Z", phase: "created" });
     let killed = false;
+    const proof = encodeTmuxViewerProof({ view: "rig:gamma", endpoint: tmuxEndpointKey(["-L", "isolated-sock"]), sessionId: "$1", sessionName: "openrig-view-1", nonce: "n1", windowIds: ["@1"], paneIds: ["%1"] });
     const tmuxExec = vi.fn(async (args: string[]) => {
-      if (args[0] === "list-sessions") return killed ? "" : "$1|openrig-view-1\n";
+      if (args[0] === "list-sessions") return killed ? "" : `$1|openrig-view-1|${proof}\n`;
       if (args[0] === "list-windows") return killed ? "" : "$1|@1\n";
       if (args[0] === "list-panes") return killed ? "" : "$1|%1\n";
       if (args[0] === "show-options") return "n1\n";
       if (args[0] === "list-clients") return "";
-      if (args[0] === "display-message") return "$1|openrig-view-1|n1|@1;|%1;|0";
+      if (args[0] === "display-message") return `$1|openrig-view-1|n1|@1;|%1;|0|${proof}`;
       if (args[0] === "if-shell") { killed = true; return ""; }
       return "";
     });
@@ -989,4 +1002,19 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     expect(okRes.ok).toBe(true);
     expect(closed).toEqual([{ viewId: "rv-1", appHome: "/custom/app" }]);
   });
+});
+
+it.each([
+  ["error connecting to /tmp/fixture.sock (No such file or directory)", true],
+  ["error connecting to /tmp/fixture.sock (Permission denied)", false],
+])("classifies selected tmux socket absence without treating permission errors as absence: %s", async (message, absent) => {
+  const run = vi.fn(async () => { throw new Error(message); });
+  const svc = new TerminalService({ resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
+    listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null, resolveHost: () => null, hasSession: () => true,
+    tmuxExec: run, tmuxServerArgs: () => ["-L", "missing-fixture"] });
+  const result = await svc.closeAll({ provider: "tmux" });
+  expect(result.ok).toBe(absent);
+  if (absent) expect(result.viewers).toEqual([]);
+  else expect(result.viewers[0]).toMatchObject({ outcome: "failed", code: "provider_unreachable" });
+  expect(run).toHaveBeenCalledTimes(1);
 });

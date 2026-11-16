@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { qualifiesTmuxViewer, tmuxViewerCloseArgs } from "../src/domain/terminal/tmux-viewer-guard.js";
+import { encodeTmuxViewerProof, parseTmuxViewerProof, qualifiesTmuxViewer, tmuxViewerCloseArgs } from "../src/domain/terminal/tmux-viewer-guard.js";
 
 const viewer = { sessionId: "$1", sessionName: "openrig-view-fixture", nonce: "fixture:old-nonce.1", windowIds: ["@1", "@2"], paneIds: ["%1", "%2", "%3"] };
 const snapshot = "$1|openrig-view-fixture|fixture:old-nonce.1|@1;@2;|%1;%2;%3;|0";
@@ -39,4 +39,22 @@ describe("tmux viewer conditional close grammar", () => {
     expect(tmuxViewerCloseArgs(viewer, attached, true)).toBeNull();
     expect(tmuxViewerCloseArgs(viewer, attached)).not.toBeNull();
   });
+});
+
+it("binds the full session-option proof to the conditional command", () => {
+  const value = { ...viewer, view: "rig:stable-id", endpoint: 'tmux:["-L","fixture"]' };
+  const encoded = encodeTmuxViewerProof(value);
+  expect(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))).toEqual({ version: 1, ...value });
+  const parsed = parseTmuxViewerProof(encoded)!;
+  expect(parsed).toEqual({ ...value, proof: encoded });
+  const args = tmuxViewerCloseArgs(parsed, snapshot + "|" + encoded)!;
+  expect(args[4]).toContain(`#{==:#{@openrig_rig_viewer_proof},${encoded}}`);
+  expect(tmuxViewerCloseArgs(parsed, snapshot + "|changed")).toBeNull();
+  expect(tmuxViewerCloseArgs(parsed, snapshot)).toBeNull();
+});
+
+it.each(["", "not valid", Buffer.from('{"version":2}').toString("base64url"),
+  Buffer.from(JSON.stringify({ version: 1, ...viewer, paneIds: ["%1;kill-server"], view: "rig:a", endpoint: "tmux:[]" })).toString("base64url")
+])("rejects incomplete or unsafe session option proof %j", value => {
+  expect(parseTmuxViewerProof(value)).toBeNull();
 });

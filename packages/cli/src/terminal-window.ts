@@ -5,7 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { reportTmuxServerLimit, tmuxServerStartCommand } from "@openrig/daemon/tmux-server-start";
-import { qualifiesTmuxViewer, tmuxViewerCloseArgs, TMUX_VIEWER_SNAPSHOT, TMUX_VIEWER_KEPT } from "@openrig/daemon/terminal-viewer-guard";
+import { encodeTmuxViewerProof, parseTmuxViewerProof, TMUX_VIEWER_PROOF_OPTION, qualifiesTmuxViewer, tmuxViewerCloseArgs, TMUX_VIEWER_OPTION_SNAPSHOT, TMUX_VIEWER_KEPT } from "@openrig/daemon/terminal-viewer-guard";
 import { terminalAuthHeaders, type DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
@@ -227,6 +227,8 @@ interface CreatedTmuxViewer {
   nonce: string;
   windowIds: string[];
   paneIds: string[];
+  proof?: string;
+  ownershipNote?: string;
 }
 
 interface CreatedPlaceholder {
@@ -269,7 +271,7 @@ function splitLines(raw: string): string[] {
 function isTmuxNoServerError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   if (/permission denied|operation not permitted|eacces|eperm/i.test(msg)) return false;
-  return /\bno server running\b|\bno current target\b|failed to connect to server: (?:no such file|connection refused)/i.test(msg);
+  return /\bno server running\b|\bno current target\b|failed to connect to server: (?:no such file|connection refused)|error connecting to [^\r\n]+ \(No such file or directory\)/i.test(msg);
 }
 
 function isOwnedRigViewer(composed: Preview["composed"], view: string, viewDescriptor?: { kind?: string }, rigViewer?: boolean): boolean {
@@ -297,6 +299,7 @@ async function createTmuxViewerLayout(
   composed: Preview["composed"],
   placeholder?: CreatedPlaceholder,
   rigViewer = false,
+  serverArgs: readonly string[] = [],
 ): Promise<CreatedTmuxViewer> {
   let expectedSessionId = placeholder?.sessionId;
   const expectedWindowIds: string[] = [];
@@ -376,6 +379,8 @@ async function createTmuxViewerLayout(
   await runTmux(["select-window", "-t", `${viewer}:view-1`]);
   const nonce = randomUUID();
   const sessionId = expectedSessionId;
+  let proof: string | undefined;
+  let ownershipNote: string | undefined;
   if (rigViewer) {
     const matchingSessions = splitLines(await runTmux(["list-sessions", "-F", "#{session_id}|#{session_name}"]))
       .map(line => {
@@ -398,7 +403,19 @@ async function createTmuxViewerLayout(
     ) {
       throw new Error(`Tmux rig viewer session "${viewer}" contains unexplained windows or panes; refusing ownership registration.`);
     }
-    await runTmux(["set-option", "-t", sessionId, "@openrig_rig_viewer", nonce]);
+    try {
+      const encoded = encodeTmuxViewerProof({ sessionId, sessionName: viewer, nonce,
+        windowIds: expectedWindowIds, paneIds: expectedPaneIds, view: composed.id,
+        endpoint: `tmux:${JSON.stringify([...serverArgs])}` });
+      if (!parseTmuxViewerProof(encoded)) throw new Error("Ownership proof cannot be qualified.");
+      await runTmux(["set-option", "-t", sessionId, TMUX_VIEWER_PROOF_OPTION, encoded]);
+      // Publish the nonce last. Missing either option leaves the viewer unqualified.
+      await runTmux(["set-option", "-t", sessionId, "@openrig_rig_viewer", nonce]);
+      proof = encoded;
+    } catch (err) {
+      await runTmux(["set-option", "-u", "-t", sessionId, "@openrig_rig_viewer"]).catch(() => {});
+      ownershipNote = `Viewer opened, but its ownership options could not be confirmed. rig terminal close --all cannot close an unqualified viewer. Inspect it manually (${err instanceof Error ? err.message : String(err)}).`;
+    }
   }
   return {
     sessionName: viewer,
@@ -406,16 +423,16 @@ async function createTmuxViewerLayout(
     nonce,
     windowIds: [...expectedWindowIds],
     paneIds: [...expectedPaneIds],
+    ...(proof ? { proof } : {}),
+    ...(ownershipNote ? { ownershipNote } : {}),
   };
 }
 
 async function verifyAndCleanupFailedTmuxViewer(
   runTmux: (args: string[]) => Promise<string>,
-  client: DaemonClient,
   viewer: CreatedTmuxViewer,
-  retireRecord = true,
 ): Promise<"closed" | "already_gone" | "unknown"> {
-  if (!qualifiesTmuxViewer(viewer)) return "unknown";
+  if (!viewer.proof || !qualifiesTmuxViewer(viewer)) return "unknown";
   try {
     let sessIds: string[] = [];
     try {
@@ -424,9 +441,7 @@ async function verifyAndCleanupFailedTmuxViewer(
       if (isTmuxNoServerError(err)) sessIds = [];
       else return "unknown";
     }
-    const retirePath = `/api/terminal/rig-viewers?kind=tmux&sessionId=${encodeURIComponent(viewer.sessionId)}&nonce=${encodeURIComponent(viewer.nonce)}`;
     if (!sessIds.includes(viewer.sessionId)) {
-      if (retireRecord) await client.delete?.(retirePath, { headers: terminalAuthHeaders() }).catch(() => {});
       return "already_gone";
     }
     const liveNonce = (await runTmux(["show-options", "-qv", "-t", viewer.sessionId, "@openrig_rig_viewer"])).trim();
@@ -437,7 +452,7 @@ async function verifyAndCleanupFailedTmuxViewer(
     const clients = splitLines(await runTmux(["list-clients", "-t", viewer.sessionId, "-F", "#{client_name}"]));
     if (clients.length > 0) return "unknown";
 
-    const snapshot = await runTmux(["display-message", "-p", "-t", viewer.sessionId, TMUX_VIEWER_SNAPSHOT]);
+    const snapshot = await runTmux(["display-message", "-p", "-t", viewer.sessionId, TMUX_VIEWER_OPTION_SNAPSHOT]);
     const closeArgs = tmuxViewerCloseArgs(viewer, snapshot, true);
     if (!closeArgs) return "unknown";
     if ((await runTmux(closeArgs)).trim() === TMUX_VIEWER_KEPT) return "unknown";
@@ -449,7 +464,6 @@ async function verifyAndCleanupFailedTmuxViewer(
       else return "unknown";
     }
     if (afterLines.includes(viewer.sessionId)) return "unknown";
-    if (retireRecord) await client.delete?.(retirePath, { headers: terminalAuthHeaders() }).catch(() => {});
     return "closed";
   } catch {
     return "unknown";
@@ -679,15 +693,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       await measureWindow();
     }
     const rigViewer = isOwnedRigViewer(composed, view, preview.data.viewDescriptor, preview.data.rigViewer);
-    const createdViewer = await createTmuxViewerLayout(runTmux, viewer, composed, placeholder, rigViewer);
-    if (rigViewer && typeof client.post === "function") {
-      const reg = await client.post("/api/terminal/rig-viewers", {
-        kind: "tmux", view: composed.id, sessionName: createdViewer.sessionName,
-        sessionId: createdViewer.sessionId, nonce: createdViewer.nonce,
-        windowIds: createdViewer.windowIds, paneIds: createdViewer.paneIds, phase: "created",
-      }, { headers: terminalAuthHeaders() });
-      if (reg.status >= 400) throw new Error(`Failed to record rig viewer (HTTP ${reg.status}).`);
-    }
+    const createdViewer = await createTmuxViewerLayout(runTmux, viewer, composed, placeholder, rigViewer, tmuxServer);
+    if (createdViewer.ownershipNote) windowNotes.push(createdViewer.ownershipNote);
     if (!window) {
       windowAttempted = true;
       window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
@@ -903,7 +910,7 @@ async function openAllTmuxWindows(
   let tmuxServer: string[] = [];
   let runTmux: (args: string[]) => Promise<string>;
   let tmuxCommand = "";
-  let rigNames: string[] = [];
+  let rigIdentities: Array<{ id: string; name: string }> = [];
   try {
     tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"]).catch(() => "")).trim();
     if (!tmux) {
@@ -919,15 +926,16 @@ async function openAllTmuxWindows(
     const serverWords = tmuxServer.map((arg, index) => index % 2 ? shellQuote(arg) : arg).join(" ");
     tmuxCommand = `${shellQuote(tmux)}${serverWords ? ` ${serverWords}` : ""}`;
 
-    const viewsRes = await client.get<{ rigs?: string[]; error?: string }>("/api/terminal/views");
-    if (viewsRes.status >= 400 || !Array.isArray(viewsRes.data?.rigs)) {
+    const viewsRes = await client.get<{ rigIdentities?: Array<{ id: string; name: string }>; error?: string }>("/api/terminal/views");
+    if (viewsRes.status >= 400 || !Array.isArray(viewsRes.data?.rigIdentities)) {
       return {
         ok: false, provider: "tmux", rigs: [], windowAttempted: false, code: "views_unavailable",
         error: viewsRes.data?.error ?? `Cannot list rig views (HTTP ${viewsRes.status}).`,
         ...(windowNotes.length ? { notes: windowNotes } : {}),
       };
     }
-    rigNames = [...new Set(viewsRes.data.rigs)].sort();
+    const byId = new Map(viewsRes.data.rigIdentities.map(rig => [rig.id, rig]));
+    rigIdentities = [...byId.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   } catch (err) {
     return {
       ok: false,
@@ -944,10 +952,12 @@ async function openAllTmuxWindows(
   let anyWindowAttempted = false;
   let anyViewerEffect = false;
 
-  for (const rig of rigNames) {
-    const view = `rig:${rig}`;
+  for (const identity of rigIdentities) {
+    const rig = identity.name;
+    const view = `rig:${identity.id}`;
+    try {
     if (automationDeniedError !== null) {
-      rigs.push({ rig, view, outcome: "failed", code: "automation_denied", error: automationDeniedError, opened: [], absent: [], degraded: [], skipped: [] });
+      rigs.push({ rig, rigId: identity.id, view, outcome: "failed", code: "automation_denied", error: automationDeniedError, opened: [], absent: [], degraded: [], skipped: [] });
       continue;
     }
     let previewData: Preview | OpenViewResult | undefined;
@@ -958,7 +968,7 @@ async function openAllTmuxWindows(
       previewData = previewRes.data;
     } catch (err) {
       rigs.push({
-        rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [],
+        rig, rigId: identity.id, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [],
         code: "terminal_window_failed",
         error: err instanceof Error ? err.message : String(err),
       });
@@ -966,34 +976,38 @@ async function openAllTmuxWindows(
     }
     if (previewStatus >= 400 || !previewData || !("composed" in previewData)) {
       const errData = (previewData ?? {}) as OpenViewResult;
-      rigs.push({ rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [], ...(errData.code ? { code: errData.code } : {}), error: errData.error ?? "Could not compose rig view." });
+      rigs.push({ rig, rigId: identity.id, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [], ...(errData.code ? { code: errData.code } : {}), error: errData.error ?? "Could not compose rig view." });
       continue;
     }
     const { composed, skipped = [] } = previewData;
     if (composed.opened.length === 0) {
       const outcome = skipped.length > 0 && composed.absent.length === 0 ? "skipped" : "absent";
-      rigs.push({ rig, view, outcome, opened: [], absent: composed.absent, degraded: composed.degraded, skipped });
+      rigs.push({ rig, rigId: identity.id, view, outcome, opened: [], absent: composed.absent, degraded: composed.degraded, skipped });
       continue;
     }
 
+    try {
+      if (JSON.stringify(readTmuxServerArgs(composed.localTmuxServer)) !== JSON.stringify(tmuxServer)) {
+        throw new Error("The preview tmux endpoint changed. Refresh the preview; no viewer was created.");
+      }
+    } catch (err) {
+      rigs.push({ rig, rigId: identity.id, view, outcome: "failed", code: "tmux_endpoint_changed",
+        opened: [], absent: composed.absent, degraded: composed.degraded, skipped,
+        error: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
     const viewer = `openrig-view-${deps.id()}`;
     let created: CreatedTmuxViewer | undefined;
-    let registered = false;
+
     try {
       anyViewerEffect = true;
-      created = await createTmuxViewerLayout(runTmux, viewer, composed, undefined, true);
-      const reg = await client.post("/api/terminal/rig-viewers", {
-        kind: "tmux", view, sessionName: created.sessionName, sessionId: created.sessionId,
-        nonce: created.nonce, windowIds: created.windowIds, paneIds: created.paneIds, phase: "created",
-      }, { headers: terminalAuthHeaders() });
-      if (reg.status >= 400) throw new Error(`Failed to record rig viewer (HTTP ${reg.status}).`);
-      registered = true;
+      created = await createTmuxViewerLayout(runTmux, viewer, composed, undefined, true, tmuxServer);
       anyWindowAttempted = true;
       const window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
       rigs.push({
-        rig, view, outcome: "opened", opened: composed.opened.map(p => p.seat),
+        rig, rigId: identity.id, view, outcome: "opened", opened: composed.opened.map(p => p.seat),
         absent: composed.absent, degraded: composed.degraded, skipped,
-        notes: [`Viewing session: ${viewer} (${window.app}). Existing conversations were preserved.`],
+        notes: [`Viewing session: ${viewer} (${window.app}). Existing conversations were preserved.`, ...(created.ownershipNote ? [created.ownershipNote] : [])],
       });
     } catch (err) {
       const message = (err as Error).message;
@@ -1002,20 +1016,24 @@ async function openAllTmuxWindows(
         automationDeniedError = "macOS denied Automation access for remaining rig viewers.";
         windowNotes.push("macOS denied Automation access. In System Settings > Privacy & Security > Automation, allow the calling app to control the terminal app before trying again.");
       }
-      const cleanup = created ? await verifyAndCleanupFailedTmuxViewer(runTmux, client, created, registered) : "unknown";
+      const cleanup = created ? await verifyAndCleanupFailedTmuxViewer(runTmux, created) : "unknown";
       const retentionNote = cleanup !== "unknown"
         ? undefined
         : created
-          ? (registered
+          ? (created.proof
             ? `Viewing session ${created.sessionName} could not be verified clean and was retained; inspect it or run rig terminal close --all.`
-            : `Viewing session ${created.sessionName} could not be verified clean and was retained without an ownership record; inspect it before retrying.`)
+            : `Viewing session ${created.sessionName} could not be verified clean and was retained without confirmed ownership options; inspect it before retrying.`)
           : `Attempted viewing session ${viewer} could not be verified absent or cleaned up (partially created viewer may still exist without an ownership record); inspect it before retrying.`;
       rigs.push({
-        rig, view, outcome: "failed", opened: [], absent: composed.absent, degraded: composed.degraded, skipped,
+        rig, rigId: identity.id, view, outcome: "failed", opened: [], absent: composed.absent, degraded: composed.degraded, skipped,
         ...(isAutomationDenied ? { code: "automation_denied" } : {}),
         cleanup, error: message,
         ...(retentionNote ? { notes: [retentionNote] } : {}),
       });
+    }
+    } catch (err) {
+      rigs.push({ rig, rigId: identity.id, view, outcome: "failed", code: "terminal_window_failed",
+        opened: [], absent: [], degraded: [], skipped: [], error: err instanceof Error ? err.message : String(err) });
     }
   }
   const anyOpened = rigs.some(r => r.outcome === "opened");

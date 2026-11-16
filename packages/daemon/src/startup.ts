@@ -2312,9 +2312,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       viewsStore: new TerminalViewsStore(),
       listRigSeatsBatch: (names) => {
         const rigs = rigRepo.listRigs();
-        // Match listRigSeats' first-name resolution, including duplicate names.
+        // Prefer stable IDs. Names remain a compatibility lookup for individual views.
         const selected = new Map(names.flatMap(name => {
-          const rig = rigs.find(rig => rig.name === name);
+          const rig = rigs.find(rig => rig.id === name) ?? rigs.find(rig => rig.name === name);
           return rig ? [[name, rig] as const] : [];
         }));
         const inventory = getNodeInventoryForRigs(db, new Set([...selected.values()].map(rig => rig.id)));
@@ -2322,13 +2322,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
       listRigSeats: (rigArg) => {
         const rigs = rigRepo.listRigs();
-        const rig = rigs.find((r) => r.name === rigArg) ?? rigs.find((r) => r.id === rigArg);
+        const rig = rigs.find((r) => r.id === rigArg) ?? rigs.find((r) => r.name === rigArg);
         if (!rig) return null;
         return getNodeInventory(db, rig.id).map(toLiveSeatRow);
       },
       listPodSeats: (rigArg, pod) => {
         const rigs = rigRepo.listRigs();
-        const rig = rigs.find((r) => r.name === rigArg) ?? rigs.find((r) => r.id === rigArg);
+        const rig = rigs.find((r) => r.id === rigArg) ?? rigs.find((r) => r.name === rigArg);
         if (!rig) return null;
         const rows = getNodeInventory(db, rig.id)
           .filter((e) => e.podNamespace === pod)
@@ -2342,6 +2342,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         ?? { code: "scope_unavailable", error: "The configured scope index is unavailable." },
       invalidateScopeView: () => scopeTasks?.invalidate(),
       listRigNames: () => rigRepo.listRigs().map((r) => r.name),
+      listRigs: () => rigRepo.listRigs().map(({ id, name }) => ({ id, name })),
       resolveHost: (id) => {
         const res = loadHostRegistry();
         if (!res.ok) return null;

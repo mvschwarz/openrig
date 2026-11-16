@@ -91,6 +91,7 @@ export interface OpenViewResult {
 
 export interface OpenAllRigResult {
   rig: string;
+  rigId?: string;
   view: string;
   outcome: "opened" | "reused" | "absent" | "skipped" | "failed";
   opened: string[];

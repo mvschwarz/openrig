@@ -17,37 +17,7 @@ export interface HerdrRigViewerRecord {
   phase: RigViewerPhase;
 }
 
-export interface TmuxRigViewerRecord {
-  kind: "tmux";
-  endpoint: string;
-  view: string;
-  sessionName: string;
-  sessionId: string;
-  nonce: string;
-  windowIds: string[];
-  paneIds: string[];
-  createdAt: string;
-  phase: RigViewerPhase;
-}
-
-export type RigViewerRecord = HerdrRigViewerRecord | TmuxRigViewerRecord;
-
-export interface TmuxRigViewerRegistration {
-  kind: "tmux";
-  view: string;
-  sessionName: string;
-  sessionId: string;
-  nonce: string;
-  windowIds: string[];
-  paneIds: string[];
-  phase?: RigViewerPhase;
-}
-
-export interface TmuxRigViewerRetirement {
-  kind: "tmux";
-  sessionId: string;
-  nonce: string;
-}
+export type RigViewerRecord = HerdrRigViewerRecord;
 
 interface JournalFile {
   version: 1;
@@ -73,17 +43,12 @@ export function sameIdSet(actual: readonly string[], expected: readonly string[]
   return true;
 }
 
-export function rigViewerRecordKey(
-  record: { kind: "herdr"; workspaceId: string; tabLabels?: readonly string[] } | { kind: "tmux"; sessionId: string; nonce: string },
-): string {
-  if (record.kind === "herdr") {
-    if (record.tabLabels && record.tabLabels.length > 0) {
-      const labelDigest = createHash("sha256").update(JSON.stringify(record.tabLabels)).digest("hex").slice(0, 12);
-      return `herdr:${record.workspaceId}:${labelDigest}`;
-    }
-    return `herdr:${record.workspaceId}`;
+export function rigViewerRecordKey(record: { kind: "herdr"; workspaceId: string; tabLabels?: readonly string[] }): string {
+  if (record.tabLabels && record.tabLabels.length > 0) {
+    const labelDigest = createHash("sha256").update(JSON.stringify(record.tabLabels)).digest("hex").slice(0, 12);
+    return `herdr:${record.workspaceId}:${labelDigest}`;
   }
-  return `tmux:${record.sessionId}:${record.nonce}`;
+  return `herdr:${record.workspaceId}`;
 }
 
 export function tmuxEndpointKey(serverArgs: readonly string[]): string {
@@ -92,38 +57,6 @@ export function tmuxEndpointKey(serverArgs: readonly string[]): string {
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every(item => typeof item === "string" && item.length > 0);
-}
-
-export function parseTmuxRigViewerInput(raw: unknown): TmuxRigViewerRegistration | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const r = raw as Record<string, unknown>;
-  if (r["kind"] !== "tmux") return null;
-  if (typeof r["view"] !== "string" || !r["view"].startsWith("rig:") || r["view"].length <= 4) return null;
-  if (typeof r["sessionName"] !== "string" || !r["sessionName"].trim()) return null;
-  if (typeof r["sessionId"] !== "string" || !r["sessionId"].trim()) return null;
-  if (typeof r["nonce"] !== "string" || !r["nonce"].trim()) return null;
-  if (!isStringArray(r["windowIds"]) || r["windowIds"].length === 0) return null;
-  if (!isStringArray(r["paneIds"]) || r["paneIds"].length === 0) return null;
-  if (r["phase"] !== undefined && r["phase"] !== "created" && r["phase"] !== "closing") return null;
-  return {
-    kind: "tmux",
-    view: r["view"],
-    sessionName: r["sessionName"],
-    sessionId: r["sessionId"],
-    nonce: r["nonce"],
-    windowIds: [...r["windowIds"]],
-    paneIds: [...r["paneIds"]],
-    phase: (r["phase"] as RigViewerPhase | undefined) ?? "created",
-  };
-}
-
-export function parseRetireTmuxViewerInput(raw: unknown): TmuxRigViewerRetirement | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const r = raw as Record<string, unknown>;
-  if (r["kind"] !== "tmux") return null;
-  if (typeof r["sessionId"] !== "string" || !r["sessionId"].trim()) return null;
-  if (typeof r["nonce"] !== "string" || !r["nonce"].trim()) return null;
-  return { kind: "tmux", sessionId: r["sessionId"], nonce: r["nonce"] };
 }
 
 export interface RigViewerEndpointTx {
@@ -146,14 +79,6 @@ function isValidRigViewerRecord(raw: unknown): raw is RigViewerRecord {
     if (r["tabLabels"] !== undefined && (!Array.isArray(r["tabLabels"]) || !r["tabLabels"].every(item => typeof item === "string"))) return false;
     return true;
   }
-  if (r["kind"] === "tmux") {
-    if (typeof r["sessionName"] !== "string" || !r["sessionName"]) return false;
-    if (typeof r["sessionId"] !== "string" || !r["sessionId"]) return false;
-    if (typeof r["nonce"] !== "string" || !r["nonce"]) return false;
-    if (!isStringArray(r["windowIds"]) || r["windowIds"].length === 0) return false;
-    if (!isStringArray(r["paneIds"]) || r["paneIds"].length === 0) return false;
-    return true;
-  }
   return false;
 }
 
@@ -167,12 +92,16 @@ function parseJournalFile(rawText: string, file: string): JournalFile {
   if (!parsed || typeof parsed !== "object" || parsed.version !== 1 || !parsed.entries || typeof parsed.entries !== "object" || Array.isArray(parsed.entries)) {
     throw new CorruptRigViewerLedgerError(file, "expected version 1 object with entries map");
   }
+  const entries: Record<string, RigViewerRecord> = {};
   for (const [key, entry] of Object.entries(parsed.entries)) {
+    // Historical tmux files remain on disk but grant no new close authority.
+    if ((entry as { kind?: string } | null)?.kind === "tmux") continue;
     if (!isValidRigViewerRecord(entry)) {
       throw new CorruptRigViewerLedgerError(file, `invalid record for key '${key}'`);
     }
+    entries[key] = entry;
   }
-  return { version: 1, entries: { ...parsed.entries } };
+  return { version: 1, entries };
 }
 
 /**
@@ -246,6 +175,7 @@ export class RigViewerLedger {
   }
 
   upsert(record: RigViewerRecord): Promise<void> {
+    if (record.kind !== "herdr") return Promise.reject(new Error("Tmux ownership belongs in session options."));
     if (!record.view.startsWith("rig:")) return Promise.resolve();
     return this.runExclusive(record.endpoint, () => {
       const journal = this.readJournal(record.endpoint);

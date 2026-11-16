@@ -246,23 +246,39 @@ stopped/unbound/external seats become `absent`.
 Repeated bulk opens through the tmux fallback create another recorded viewer per
 non-empty rig. That path does not confirm or reuse an earlier viewer's current plan.
 
-When a `rig:<name>` (or bare `<name>`) viewer is created cleanly in Herdr with
-complete workspace, tab, tab-label, and pane identity verified post-close — or
-registered before window launch in the plain-tmux `--window` bulk/rig flow —
-OpenRig records an ownership entry per endpoint under
-`private/terminal-rig-viewers`. Saved (including `saved:rig:...`), pod, seat,
-task, reused, incomplete-identity, and pre-existing viewers opened before or
-outside this ownership ledger have no record (and `saved:` tmux `--window`
-viewers omit `@openrig_rig_viewer`) and are left untouched. If a CLI `tmux
+Bulk open uses each rig's ID. Names are display text. The views response keeps
+its existing name list and adds `rigIdentities` for clients that need stable IDs.
+The bulk tmux window client requires that identity list. Individual named views
+remain supported; an exact ID takes precedence in lookup.
+
+For Herdr, a new rig viewer with complete workspace, tab, tab-label and pane
+identity has an ownership entry per endpoint under `private/terminal-rig-viewers`.
+Reused or incomplete Herdr workspaces get no new entry. Both single and bulk rig
+opens report incomplete ownership or a failed record write.
+
+For tmux, the proof lives in session options. `@openrig_rig_viewer_proof` contains
+the original session ID/name, window/pane IDs, view, endpoint and nonce in a
+versioned base64url JSON value. `@openrig_rig_viewer` publishes the nonce last.
+Close requires both values. A failed option write leaves the viewer open with
+an ownership warning. It does not grant close authority from a partial proof.
+There is no separate tmux ledger or registration/retirement HTTP route. Old tmux
+ledger entries remain on disk but grant no close authority. Old or unqualified
+viewers need manual inspection. No external closing-phase record is needed:
+the proof disappears with the session, and a failed close can inspect the same
+remaining session options again.
+
+Saved (including `saved:rig:...`), pod, seat and task viewers get no tmux ownership
+options. Pre-existing viewers without complete options are left untouched.
+If a CLI `tmux
 --window` launch fails after creating a rig viewer, OpenRig verifies matching
-nonce, window/pane inventory, and zero attached clients before killing and
-retiring the session (`cleanup: "closed"`, or `"already_gone"` if the viewer
+nonce, window/pane inventory, and zero attached clients before killing the
+session (`cleanup: "closed"`, or `"already_gone"` if the viewer
 session had already disappeared); modified, attached, permission-denied, or
-unconfirmed viewers are retained with their record preserved and reported as
+unconfirmed viewers are retained with their session options preserved and reported as
 `cleanup: "unknown"`.
 
 `rig terminal close --all [--provider herdr|tmux] [--session <name>]` reads the
-recorded ownership ledger per endpoint and refreshes live inventory before
+Herdr ownership ledger and the selected tmux server's session options. It refreshes live inventory before
 inspecting each target. Existing Herdr viewers are kept. Herdr has no qualified
 compare-and-close operation, so bulk close never sends `workspace.close`, including
 for a record left in the `closing` phase. An intact viewer returns
@@ -274,7 +290,7 @@ absence. This does not change the separate single-view `herdr-app` close path.
 
 Unmodified tmux `rig:` viewers are closed (`closed`) while their underlying agent
 sessions continue running. A server-side `if-shell -F` compares session identity,
-nonce and complete window/pane inventory before it selects the close action. Failed
+nonce, complete proof option and original window/pane inventory before it selects the close action. Failed
 desktop-launch cleanup also requires zero attached clients in that same condition.
 Viewer IDs must have tmux's numeric `$`, `@` and `%` forms. Session names and nonces
 must contain only ASCII letters, digits, underscore, period, colon or hyphen for
@@ -284,10 +300,13 @@ shape is required for a nonce. Viewers
 with foreign, modified, or mismatched tabs/labels/panes/nonce (including reused
 short Herdr IDs after restart) are kept whole (`kept`: `not_separable` or
 `ownership_unconfirmed` for Herdr, `ownership_unconfirmed` for tmux). Records
-belonging to a different Herdr or tmux endpoint return `outcome: "kept"` with
-`code: "different_endpoint"`. Missing or already-removed targets report
-`already_gone` and clear their stale records; unreachable or permission-denied
-providers leave records intact (`provider_unreachable` or `close_pending`). A
+belonging to a different Herdr endpoint, or tmux proof that names a different
+endpoint, return `outcome: "kept"` with `code: "different_endpoint"`. Other tmux
+servers are not searched. Missing Herdr targets clear their stale records.
+Tmux targets that disappear during a close check report `already_gone`; a later
+call has no option record to enumerate for an absent session. A missing socket
+is an absent server. Permission errors remain unsafe. Unreachable providers or
+unconfirmed close results report `provider_unreachable` or `close_pending`. A
 corrupt ledger file under `private/terminal-rig-viewers` fails closed
 (`corrupt_ledger`, HTTP 500) without overwriting the file.
 

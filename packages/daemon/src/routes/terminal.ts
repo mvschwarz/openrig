@@ -16,12 +16,11 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 //
 // `POST /open`, `GET /views`, `GET /status`, `GET /preview`, `POST /close`, and
 // `/api/rigs/:rigId/terminal/open` keep the shipped no-bearer-token posture
-// ("no new auth surface v1"). `/open-all`, `/close-all`, `/follow`, and
-// `/rig-viewers` require the `terminalAuth` bearer token.
+// ("no new auth surface v1"). `/open-all`, `/close-all` and `/follow`
+// require the `terminalAuth` bearer token.
 
 import { Hono } from "hono";
 import type { HerdrAppTarget, TerminalService } from "../domain/terminal/terminal-service.js";
-import { parseRetireTmuxViewerInput, parseTmuxRigViewerInput } from "../domain/terminal/rig-viewer-records.js";
 import { isAbsolute } from "node:path";
 import type { FollowControls } from "../domain/terminal/terminal-follow-policy.js";
 
@@ -180,29 +179,6 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
       ...(parsed.session !== undefined ? { session: parsed.session } : {}),
     });
     return c.json(result, statusForOpen(result.ok, result.code));
-  });
-
-  app.post("/rig-viewers", terminalAuth, async (c) => {
-    const svc = getService(c);
-    if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable" }, 503);
-    const raw = await c.req.json().catch(() => null);
-    const parsed = parseTmuxRigViewerInput(raw);
-    if (!parsed) return c.json({ ok: false, error: "body_invalid" }, 400);
-    return c.json(await svc.registerRigViewer(parsed), 200);
-  });
-
-  app.delete("/rig-viewers", terminalAuth, async (c) => {
-    const svc = getService(c);
-    if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable" }, 503);
-    const qKind = c.req.query("kind");
-    const qSessionId = c.req.query("sessionId");
-    const qNonce = c.req.query("nonce");
-    const raw = qKind !== undefined || qSessionId !== undefined || qNonce !== undefined
-      ? { kind: qKind, sessionId: qSessionId, nonce: qNonce }
-      : await c.req.json().catch(() => null);
-    const parsed = parseRetireTmuxViewerInput(raw);
-    if (!parsed) return c.json({ ok: false, error: "body_invalid" }, 400);
-    return c.json(await svc.retireRigViewer(parsed), 200);
   });
 
   app.get("/views", async (c) => {

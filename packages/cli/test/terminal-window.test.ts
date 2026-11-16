@@ -11,7 +11,7 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
   const get = vi.fn(async (url: string): Promise<{ status: number; data: unknown }> => ({ status: 200, data: url.includes("preview") ? preview : { providers: [{ liveness: { alive: options.alive !== false } }] } }));
   const post = vi.fn(async (): Promise<{ status: number; data: unknown }> => options.refusal ? { status: options.refusal, data: { error: "view changed" } } : { status: 200, data: { provider: "herdr", ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } });
   const client = { baseUrl: "http://localhost:7433", isLocalInstance: vi.fn(async () => true), get, post } as unknown as DaemonClient;
-  let pane = 0;
+  let pane = 0, window = 0;
   const exec = vi.fn(async (file: string, args: string[]) => {
     if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { workspaces: [] } });
     if (args.includes("--version")) {
@@ -23,6 +23,10 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
     if (file === "/bin/sh") return args[1] === "command -v herdr" ? "/fixture/bin/herdr" : "/fixture/bin/tmux";
     if (args.at(-1) === "default-size") return "120x40";
     if (args.includes("show-options") && args.at(-1) === "window-size") return "latest";
+    if (args.includes("#{session_id}|#{window_id}|#{pane_id}")) {
+      if (args.includes("new-session") || args.includes("new-window")) window++;
+      return `$1|@${window}|%${++pane}`;
+    }
     if (args.includes("#{pane_id}")) return `%${++pane}`;
     return "";
   });

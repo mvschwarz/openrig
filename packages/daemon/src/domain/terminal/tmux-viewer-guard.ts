@@ -5,6 +5,31 @@ export interface TmuxViewerIdentity {
   nonce: string;
   windowIds: readonly string[];
   paneIds: readonly string[];
+  /** Encoded original proof, when session-option ownership is used. */
+  proof?: string;
+}
+
+export const TMUX_VIEWER_PROOF_OPTION = "@openrig_rig_viewer_proof";
+export interface TmuxViewerProof extends TmuxViewerIdentity { view: string; endpoint: string }
+
+/** One complete option plus the nonce marker. Partial writes grant no close authority. */
+export function encodeTmuxViewerProof(viewer: TmuxViewerProof): string {
+  return Buffer.from(JSON.stringify({ version: 1, sessionId: viewer.sessionId, sessionName: viewer.sessionName,
+    nonce: viewer.nonce, windowIds: viewer.windowIds, paneIds: viewer.paneIds, view: viewer.view, endpoint: viewer.endpoint })).toString("base64url");
+}
+
+export function parseTmuxViewerProof(proof: string): TmuxViewerProof | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(proof) || proof.length > 32768) return null;
+  try {
+    const value = JSON.parse(Buffer.from(proof, "base64url").toString("utf8"));
+    if (!value || value.version !== 1 || typeof value.sessionId !== "string" || typeof value.sessionName !== "string"
+      || typeof value.nonce !== "string" || !Array.isArray(value.windowIds) || !Array.isArray(value.paneIds)
+      || !value.windowIds.every((id: unknown) => typeof id === "string") || !value.paneIds.every((id: unknown) => typeof id === "string")
+      || typeof value.view !== "string" || !/^rig:.+/.test(value.view) || /[\x00-\x1f\x7f]/.test(value.view)
+      || typeof value.endpoint !== "string" || !value.endpoint.startsWith("tmux:") || !qualifiesTmuxViewer(value)) return null;
+    return { sessionId: value.sessionId, sessionName: value.sessionName, nonce: value.nonce,
+      windowIds: value.windowIds, paneIds: value.paneIds, view: value.view, endpoint: value.endpoint, proof };
+  } catch { return null; }
 }
 
 const safeText = (value: string) => value.length > 0 && !/[^A-Za-z0-9_.:-]/.test(value);
@@ -19,13 +44,15 @@ export function qualifiesTmuxViewer(viewer: TmuxViewerIdentity): boolean {
 const windows = "#{W:#{window_id};}";
 const panes = "#{W:#{P:#{pane_id};}}";
 export const TMUX_VIEWER_SNAPSHOT = `#{session_id}|#{session_name}|#{@openrig_rig_viewer}|${windows}|${panes}|#{session_attached}`;
+export const TMUX_VIEWER_OPTION_SNAPSHOT = `${TMUX_VIEWER_SNAPSHOT}|#{${TMUX_VIEWER_PROOF_OPTION}}`;
 export const TMUX_VIEWER_KEPT = "openrig-viewer-kept";
 
 /** A snapshot is useful only if it still describes exactly the recorded viewer. */
 export function tmuxViewerCloseArgs(viewer: TmuxViewerIdentity, snapshot: string, requireDetached = false): string[] | null {
   if (!qualifiesTmuxViewer(viewer)) return null;
   const fields = snapshot.trim().split("|");
-  if (fields.length !== 6) return null;
+  if (fields.length !== (viewer.proof === undefined ? 6 : 7)) return null;
+  if (viewer.proof !== undefined && (!/^[A-Za-z0-9_-]+$/.test(viewer.proof) || fields[6] !== viewer.proof)) return null;
   const [sessionId, sessionName, nonce, windowList, paneList, attached] = fields as [string, string, string, string, string, string];
   if (sessionId !== viewer.sessionId || sessionName !== viewer.sessionName || nonce !== viewer.nonce
     || !/^(?:@[0-9]+;)+$/.test(windowList) || !/^(?:%[0-9]+;)+$/.test(paneList)
@@ -41,6 +68,7 @@ export function tmuxViewerCloseArgs(viewer: TmuxViewerIdentity, snapshot: string
     `#{==:#{@openrig_rig_viewer},${nonce}}`,
     `#{==:${windows},${windowList}}`,
     `#{==:${panes},${paneList}}`,
+    ...(viewer.proof === undefined ? [] : [`#{==:#{${TMUX_VIEWER_PROOF_OPTION}},${viewer.proof}}`]),
     ...(requireDetached ? ["#{==:#{session_attached},0}"] : []),
   ];
   const condition = checks.reduce((left, right) => `#{&&:${left},${right}}`);

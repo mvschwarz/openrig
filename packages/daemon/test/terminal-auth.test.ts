@@ -112,13 +112,6 @@ describe("terminal and transport bearer diagnostics", () => {
       member: { hostId: "host", nodeId: "node" } } },
     { path: "/api/terminal/open-all", method: "POST" as const, body: { provider: "herdr" } },
     { path: "/api/terminal/close-all", method: "POST" as const, body: { provider: "herdr" } },
-    { path: "/api/terminal/rig-viewers", method: "POST" as const, body: {
-      kind: "tmux", view: "rig:synthetic", sessionName: "openrig-view-1", sessionId: "$1",
-      nonce: "nonce-1", windowIds: ["@1"], paneIds: ["%1"], phase: "created",
-    } },
-    { path: "/api/terminal/rig-viewers", method: "DELETE" as const, body: {
-      kind: "tmux", sessionId: "$1", nonce: "nonce-1",
-    } },
     { path: "/api/transport/capture", method: "POST" as const, body: { session: "test" } },
   ];
 
@@ -131,8 +124,6 @@ describe("terminal and transport bearer diagnostics", () => {
         ensureViewer: effect,
         openAll: effect,
         closeAll: effect,
-        registerRigViewer: effect,
-        retireRigViewer: effect,
       } as never);
       c.set("sessionTransport" as never, {
         resolveSessions: async () => ({ ok: true, sessions: [{ sessionName: "test", tmuxSession: "test" }] }),

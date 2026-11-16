@@ -1,7 +1,7 @@
 import type { ScopeViewError } from "./scope-task-terminal-view.js";
 import { tileAttachArgv } from "./tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
-import { qualifiesTmuxViewer, tmuxViewerCloseArgs, TMUX_VIEWER_SNAPSHOT, TMUX_VIEWER_KEPT } from "./tmux-viewer-guard.js";
+import { parseTmuxViewerProof, TMUX_VIEWER_PROOF_OPTION, tmuxViewerCloseArgs, TMUX_VIEWER_OPTION_SNAPSHOT, TMUX_VIEWER_KEPT } from "./tmux-viewer-guard.js";
 import type { ViewerKey, ViewerResult } from "./herdr-viewer.js";
 import { TerminalFollowing, type FollowingSelector } from "./terminal-following.js";
 import type { FollowControls } from "./terminal-follow-policy.js";
@@ -56,9 +56,6 @@ import {
   type RigViewerRecord,
   CorruptRigViewerLedgerError,
   sameIdSet,
-  type TmuxRigViewerRecord,
-  type TmuxRigViewerRegistration,
-  type TmuxRigViewerRetirement,
 } from "./rig-viewer-records.js";
 import type { TmuxServerSelection } from "../tmux-server-selection.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
@@ -135,6 +132,8 @@ export interface ListViewsResult {
   saved: SavedView[];
   /** Rig names openable as per-rig derived views (live from the inventory). */
   rigs: string[];
+  /** Stable local identities. Names remain above for existing clients. */
+  rigIdentities: Array<{ id: string; name: string }>;
   catalog?: Array<{ view: string; name: string; kind: "saved" | "derived"; members: string[]; ready: number; absent: number; degraded: number; pages: number }>;
 }
 
@@ -169,6 +168,7 @@ export interface SkippedSeat {
 
 export interface OpenAllRigResult {
   rig: string;
+  rigId?: string;
   view: string;
   outcome: "opened" | "reused" | "absent" | "skipped" | "failed";
   opened: string[];
@@ -229,8 +229,8 @@ export interface TerminalServiceDeps {
   resolveHerdrAppProvider?(target: HerdrAppTarget): (TerminalProvider & { closeView(viewId: string): Promise<OpenViewResult>; appHome: string }) | null;
   /** The saved-views store (read paths only from this service). */
   viewsStore: Pick<TerminalViewsStore, "get" | "list">;
-  /** Live seats of a rig BY NAME; null when no such rig is known (vs [] = a known-but-empty rig). */
-  listRigSeats(rigName: string): Promise<BulkSeatRow[] | null> | BulkSeatRow[] | null;
+  /** Resolve an exact rig ID first, then a legacy name; null means unknown. */
+  listRigSeats(rigIdOrName: string): Promise<BulkSeatRow[] | null> | BulkSeatRow[] | null;
   /** One request-local inventory fold for the derived catalog entries. */
   listRigSeatsBatch?(rigNames: string[]): Promise<Map<string, BulkSeatRow[]>> | Map<string, BulkSeatRow[]>;
   /** Live seats of a pod within a rig (by rig name-or-id + pod namespace); null when the rig/pod is unknown. */
@@ -243,6 +243,7 @@ export interface TerminalServiceDeps {
   invalidateScopeView?(): void;
   /** Known rig names (for the `views` listing). */
   listRigNames(): Promise<string[]> | string[];
+  listRigs?(): Promise<Array<{ id: string; name: string }>> | Array<{ id: string; name: string }>;
   /** Read-only host resolution for the composer (registry unavailable → null for every id). */
   resolveHost(id: string): HostEntry | null;
   /** Local liveness refine — has-session for a local tmux session; remote members are not probed here. */
@@ -343,7 +344,7 @@ function partitionRigRowsForBulk(rows: BulkSeatRow[]): {
 function isTmuxNoServerError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   if (/permission denied|operation not permitted|eacces|eperm/i.test(msg)) return false;
-  return /\bno server running\b|\bno current target\b|failed to connect to server: (?:no such file|connection refused)/i.test(msg);
+  return /\bno server running\b|\bno current target\b|failed to connect to server: (?:no such file|connection refused)|error connecting to [^\r\n]+ \(No such file or directory\)/i.test(msg);
 }
 
 interface TmuxInventorySession { sessionId: string; sessionName: string; windowIds: string[]; paneIds: string[] }
@@ -538,7 +539,7 @@ export class TerminalService {
         absent: composedView.absent, degraded: composedView.degraded, notes,
       };
     }
-    const tracked = await this.openTrackedHerdr(provider, composedView, planId, req.reuseLive, rigViewer, false);
+    const tracked = await this.openTrackedHerdr(provider, composedView, planId, req.reuseLive, rigViewer, true);
     const result = tracked.result;
     notes.push(...tracked.extraNotes);
     // herdr-app opens in the client the request came from: its failure says why, never "attach by hand elsewhere".
@@ -695,27 +696,9 @@ export class TerminalService {
     return execArgvCommand([bin, ...serverArgs, ...args]);
   }
 
-  async registerRigViewer(reg: TmuxRigViewerRegistration): Promise<{ ok: true }> {
-    const endpoint = tmuxEndpointKey(this.getTmuxServerArgs());
-    await this.rigViewers.upsert({
-      kind: "tmux",
-      endpoint,
-      view: reg.view,
-      sessionName: reg.sessionName,
-      sessionId: reg.sessionId,
-      nonce: reg.nonce,
-      windowIds: reg.windowIds,
-      paneIds: reg.paneIds,
-      createdAt: new Date().toISOString(),
-      phase: reg.phase ?? "created",
-    });
-    return { ok: true };
-  }
-
-  async retireRigViewer(ret: TmuxRigViewerRetirement): Promise<{ ok: true }> {
-    const endpoint = tmuxEndpointKey(this.getTmuxServerArgs());
-    await this.rigViewers.remove(endpoint, rigViewerRecordKey({ kind: "tmux", sessionId: ret.sessionId, nonce: ret.nonce }));
-    return { ok: true };
+  private async rigIdentities(): Promise<Array<{ id: string; name: string }>> {
+    const rows = this.deps.listRigs ? await this.deps.listRigs() : (await this.deps.listRigNames()).map(name => ({ id: name, name }));
+    return [...new Map(rows.map(row => [row.id, row])).values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   }
 
   async openAll(req: OpenAllRequest): Promise<OpenAllResult> {
@@ -747,10 +730,15 @@ export class TerminalService {
       };
     }
 
-    const rigNames = [...new Set(await this.deps.listRigNames())].sort();
+    const identities = await this.rigIdentities();
     const rigs: OpenAllRigResult[] = [];
-    for (const rig of rigNames) {
-      rigs.push(await this.openSingleRigBulk(rig, provider, session, req.viewportColumns, req.reuseLive));
+    for (const rig of identities) {
+      try {
+        rigs.push(await this.openSingleRigBulk(rig.id, provider, session, req.viewportColumns, req.reuseLive, rig.name));
+      } catch (err) {
+        rigs.push({ rig: rig.name, rigId: rig.id, view: `rig:${rig.id}`, outcome: "failed",
+          opened: [], absent: [], degraded: [], skipped: [], error: err instanceof Error ? err.message : String(err) });
+      }
     }
     return {
       ok: rigs.some(r => r.outcome === "opened" || r.outcome === "reused"),
@@ -766,6 +754,7 @@ export class TerminalService {
     session?: string,
     viewportColumns?: number,
     reuseLive?: boolean,
+    displayName = rig,
   ): Promise<OpenAllRigResult> {
     const view = `rig:${rig}`;
     let bulk: Awaited<ReturnType<TerminalService["composeRigBulk"]>>;
@@ -774,18 +763,18 @@ export class TerminalService {
     } catch (err) {
       // No composed view exists yet, so absent/degraded/skipped details are unknown.
       return {
-        rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [],
+        rig: displayName, rigId: rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [],
         error: err instanceof Error ? err.message : String(err),
       };
     }
     if (!bulk) {
-      return { rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [], code: "view_not_found", error: `unknown rig '${rig}'` };
+      return { rig: displayName, rigId: rig, view, outcome: "failed", opened: [], absent: [], degraded: [], skipped: [], code: "view_not_found", error: `unknown rig '${rig}'` };
     }
     const { composed, bulkAbsent, skipped } = bulk;
     if (composed.opened.length === 0) {
       const mergedAbsent = [...bulkAbsent, ...composed.absent];
       const outcome = skipped.length > 0 && mergedAbsent.length === 0 ? "skipped" : "absent";
-      return { rig, view, outcome, opened: [], absent: mergedAbsent, degraded: composed.degraded, skipped };
+      return { rig: displayName, rigId: rig, view, outcome, opened: [], absent: mergedAbsent, degraded: composed.degraded, skipped };
     }
     const planId = this.planId("herdr", composed, session);
     try {
@@ -794,24 +783,24 @@ export class TerminalService {
       const notes = [...(result.notes ?? []), ...extraNotes];
       if (result.reusedWorkspace) {
         return {
-          rig, view, outcome: "reused", opened: [], absent: mergedAbsent, degraded: result.degraded, skipped,
+          rig: displayName, rigId: rig, view, outcome: "reused", opened: [], absent: mergedAbsent, degraded: result.degraded, skipped,
           workspaceId: result.reusedWorkspace.id, ...(notes.length ? { notes } : {}),
         };
       }
       if (result.opened.length > 0) {
         return {
-          rig, view, outcome: "opened", opened: result.opened, absent: mergedAbsent, degraded: result.degraded, skipped,
+          rig: displayName, rigId: rig, view, outcome: "opened", opened: result.opened, absent: mergedAbsent, degraded: result.degraded, skipped,
           ...(workspaceId ? { workspaceId } : {}), ...(notes.length ? { notes } : {}),
         };
       }
       return {
-        rig, view, outcome: "failed", opened: [], absent: mergedAbsent, degraded: result.degraded, skipped,
+        rig: displayName, rigId: rig, view, outcome: "failed", opened: [], absent: mergedAbsent, degraded: result.degraded, skipped,
         ...(result.code ? { code: result.code } : {}), error: result.error ?? "no seats opened",
         ...(notes.length ? { notes } : {}),
       };
     } catch (err) {
       return {
-        rig, view, outcome: "failed", opened: [], absent: [...bulkAbsent, ...composed.absent], degraded: composed.degraded, skipped,
+        rig: displayName, rigId: rig, view, outcome: "failed", opened: [], absent: [...bulkAbsent, ...composed.absent], degraded: composed.degraded, skipped,
         error: err instanceof Error ? err.message : String(err),
       };
     }
@@ -843,7 +832,7 @@ export class TerminalService {
     }
     let allEntries: Array<{ endpoint: string; key: string; record: RigViewerRecord }>;
     try {
-      allEntries = await this.rigViewers.listAll();
+      allEntries = named === "tmux" ? [] : await this.rigViewers.listAll();
     } catch (err) {
       if (err instanceof CorruptRigViewerLedgerError || (err as { code?: string })?.code === "corrupt_ledger") {
         return { ok: false, viewers: [], code: "corrupt_ledger", error: err instanceof Error ? err.message : String(err) };
@@ -852,10 +841,6 @@ export class TerminalService {
     }
     const effectiveProvider = named || (session !== undefined ? "herdr" : undefined);
     const filtered = allEntries.filter(({ record }) => !effectiveProvider || record.kind === effectiveProvider);
-    if (filtered.length === 0) {
-      return { ok: true, viewers: [], notes: ["no OpenRig rig viewers recorded"] };
-    }
-
     const viewers: CloseAllViewerResult[] = [];
     const byEndpoint = new Map<string, Array<{ key: string; record: RigViewerRecord }>>();
     for (const item of filtered) {
@@ -869,12 +854,11 @@ export class TerminalService {
         const firstKind = entries[0]!.record.kind;
         if (firstKind === "herdr") {
           await this.closeHerdrEndpoint(endpoint, entries as Array<{ key: string; record: HerdrRigViewerRecord }>, session, tx, viewers);
-        } else {
-          await this.closeTmuxEndpoint(endpoint, entries as Array<{ key: string; record: TmuxRigViewerRecord }>, tx, viewers);
         }
       });
     }
-    return { ok: viewers.every(v => v.outcome !== "failed"), viewers };
+    if (!effectiveProvider || effectiveProvider === "tmux") await this.closeTmuxEndpoint(viewers);
+    return { ok: viewers.every(v => v.outcome !== "failed"), viewers, ...(!viewers.length ? { notes: ["no OpenRig rig viewers recorded"] } : {}) };
   }
 
   private resolveHerdrAdapterStatus(
@@ -964,87 +948,55 @@ export class TerminalService {
     }
   }
 
-  private async closeTmuxEndpoint(
-    endpoint: string,
-    entries: Array<{ key: string; record: TmuxRigViewerRecord }>,
-    tx: RigViewerEndpointTx,
-    viewers: CloseAllViewerResult[],
-  ): Promise<void> {
+  private async closeTmuxEndpoint(viewers: CloseAllViewerResult[]): Promise<void> {
     const serverArgs = [...this.getTmuxServerArgs()];
-    const runTmux = (args: string[]) => this.runDaemonTmux(args, serverArgs);
-    const currentEndpoint = tmuxEndpointKey(serverArgs);
-    if (endpoint !== currentEndpoint) {
-      for (const { record } of entries) {
-        viewers.push({
-          view: record.view, provider: "tmux", target: record.sessionName,
-          outcome: "kept", code: "different_endpoint",
-          reason: `Viewer belongs to a different tmux server endpoint (${endpoint}) than active endpoint (${currentEndpoint}).`,
-        });
-      }
+    const endpoint = tmuxEndpointKey(serverArgs);
+    const run = (args: string[]) => this.runDaemonTmux(args, serverArgs);
+    let candidates: string;
+    try {
+      candidates = await run(["list-sessions", "-F", `#{session_id}|#{session_name}|#{${TMUX_VIEWER_PROOF_OPTION}}`]);
+    } catch (err) {
+      if (!isTmuxNoServerError(err)) viewers.push({ view: "rig:*", provider: "tmux", target: endpoint,
+        outcome: "failed", code: "provider_unreachable", reason: err instanceof Error ? err.message : String(err) });
       return;
     }
-
-    for (const { key, record } of entries) {
-      let inv: Map<string, TmuxInventorySession>;
-      if (!qualifiesTmuxViewer(record)) {
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "kept", code: "ownership_unconfirmed", reason: "Recorded viewer fields cannot be qualified for tmux format and command syntax." });
+    for (const line of candidates.trim().split("\n")) {
+      const [sessionId, sessionName, encoded] = line.split("|");
+      if (!encoded) continue; // Unqualified and legacy viewers need manual inspection.
+      const proof = parseTmuxViewerProof(encoded);
+      const result = { view: proof?.view ?? "rig:*", provider: "tmux" as const, target: sessionName ?? endpoint };
+      if (!proof || proof.sessionId !== sessionId || proof.sessionName !== sessionName) {
+        viewers.push({ ...result, outcome: "kept", code: "ownership_unconfirmed", reason: "Tmux session ownership options are incomplete or invalid." });
         continue;
       }
+      if (proof.endpoint !== endpoint) {
+        viewers.push({ ...result, outcome: "kept", code: "different_endpoint", reason: "Tmux ownership options belong to a different endpoint." });
+        continue;
+      }
+      let attemptedClose = false;
       try {
-        inv = await readTmuxInventory(runTmux);
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "provider_unreachable", reason });
-        continue;
-      }
-
-      const live = inv.get(record.sessionId);
-      if (!live) {
-        tx.remove(key);
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "already_gone" });
-        continue;
-      }
-      const anyWin = live.windowIds.some(w => record.windowIds.includes(w));
-      const anyPane = live.paneIds.some(p => record.paneIds.includes(p));
-      if (!anyWin && !anyPane) {
-        tx.remove(key);
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "already_gone" });
-        continue;
-      }
-      let liveNonce: string;
-      try {
-        liveNonce = (await runTmux(["show-options", "-qv", "-t", record.sessionId, "@openrig_rig_viewer"])).trim();
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "provider_unreachable", reason });
-        continue;
-      }
-      const intact = liveNonce === record.nonce
-        && sameIdSet(live.windowIds, record.windowIds)
-        && sameIdSet(live.paneIds, record.paneIds);
-      if (!intact) {
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "kept", code: "ownership_unconfirmed", reason: "Tmux session ownership nonce or window/pane inventory no longer matches." });
-        continue;
-      }
-
-      tx.setPhase(key, "closing");
-      try {
-        const snapshot = await runTmux(["display-message", "-p", "-t", record.sessionId, TMUX_VIEWER_SNAPSHOT]);
-        const closeArgs = tmuxViewerCloseArgs(record, snapshot);
-        if (!closeArgs || (await runTmux(closeArgs)).trim() === TMUX_VIEWER_KEPT) {
-          tx.setPhase(key, record.phase);
-          viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "kept", code: "ownership_unconfirmed", reason: "Tmux viewer identity or contents changed before conditional close." });
+        const inventory = await readTmuxInventory(run);
+        if (!inventory.has(proof.sessionId)) {
+          viewers.push({ ...result, outcome: "already_gone" });
           continue;
         }
-        const after = await readTmuxInventory(runTmux);
-        if (after.has(record.sessionId)) {
-          viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "close_pending", reason: "Tmux session still present after kill-session." });
-        } else {
-          tx.remove(key);
-          viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "closed" });
+        const snapshot = await run(["display-message", "-p", "-t", proof.sessionId, TMUX_VIEWER_OPTION_SNAPSHOT]);
+        const args = tmuxViewerCloseArgs(proof, snapshot);
+        if (!args) {
+          viewers.push({ ...result, outcome: "kept", code: "ownership_unconfirmed", reason: "Tmux session nonce, identity or original inventory no longer matches." });
+          continue;
         }
+        attemptedClose = true;
+        if ((await run(args)).trim() === TMUX_VIEWER_KEPT) {
+          viewers.push({ ...result, outcome: "kept", code: "ownership_unconfirmed", reason: "Tmux viewer identity or contents changed before conditional close." });
+          continue;
+        }
+        if ((await readTmuxInventory(run)).has(proof.sessionId)) {
+          viewers.push({ ...result, outcome: "failed", code: "close_pending", reason: "Tmux session still present after conditional close." });
+        } else viewers.push({ ...result, outcome: "closed" });
       } catch (err) {
-        viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "close_pending", reason: err instanceof Error ? err.message : String(err) });
+        viewers.push({ ...result, outcome: "failed", code: attemptedClose ? "close_pending" : "provider_unreachable",
+          reason: err instanceof Error ? err.message : String(err) });
       }
     }
   }
@@ -1106,6 +1058,7 @@ export class TerminalService {
       following: this.following?.list() ?? [],
       saved: this.deps.viewsStore.list(),
       rigs: await this.deps.listRigNames(),
+      rigIdentities: await this.rigIdentities(),
     };
     if (!result.saved.some(view => view.id === "kernel") && result.rigs.includes("kernel")) {
       const kernel = await this.defaultKernelView();
@@ -1118,11 +1071,11 @@ export class TerminalService {
       result.catalog = [];
       const entries = [
         ...result.saved.map((s) => ({ view: `saved:${s.id}`, name: s.name, kind: "saved" as const })),
-        ...result.rigs.map((name) => ({ view: `rig:${name}`, name, kind: "derived" as const })),
+        ...result.rigIdentities.map(({ id, name }) => ({ view: `rig:${id}`, name, kind: "derived" as const })),
       ];
-      const inventory = await this.deps.listRigSeatsBatch?.(result.rigs);
+      const inventory = await this.deps.listRigSeatsBatch?.(result.rigIdentities.map(rig => rig.id));
       for (const entry of entries) {
-        const rows = entry.kind === "derived" ? inventory?.get(entry.name) : undefined;
+        const rows = entry.kind === "derived" ? inventory?.get(entry.view.slice(4)) : undefined;
         const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs(), localTmuxServerMode: daemonTmuxServerInfo()?.mode })
           : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
         if ("code" in plan) continue;
