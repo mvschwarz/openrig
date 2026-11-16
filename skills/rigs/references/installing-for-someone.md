@@ -34,12 +34,12 @@ Ask the person's goal, project folder and branch unless they've said, then hand 
 Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
 `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`,
 or have the person type the goal and folder in the operator's pane. (If the person stays with you, the skill's step 2 hands the goal over
-as a queue task from your own address instead.) Show where the operator answers and let it
+as a queue task with a return route instead.) Show where the operator answers and let it
 help them choose a team before any starter launch.
 If the person gives you a goal later, forward it, the folder and constraints the same way, by the route they chose;
 leave implementation with the operator's team instead of taking over the work yourself.
 Installation is complete when the operator is ready and the person is talking to it or, when they stay with you, once
-the goal has reached it as a task from your address, not merely when the daemon is healthy. If they choose to talk later, leave the exact connection step and say that the handoff is still pending.
+the goal has reached it as a task with your return route, not merely when the daemon is healthy. If they choose to talk later, leave the exact connection step and say that the handoff is still pending.
 
 Read `rig context get reference/getting-started.md#open-the-kernel-conversations` for the commands and manual
 path. Without a working daemon, the same guide is `daemon/docs/reference/getting-started.md` in the installed

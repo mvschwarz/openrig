@@ -1,4 +1,5 @@
 import { captureClaudeContinuation, type ClaudeContinuationLaunch } from "./claude-continuation-launch.js";
+import type { HarnessNotStartedReport } from "./harness-not-started-notice.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
@@ -54,12 +55,15 @@ import type {
   RestoreSnapshotSelection,
   NodeStartupSnapshot,
   RestoreExcludedNode,
+  NodeInventoryEntry,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { SEAT_STARTUP_BLOCKERS, validatePreRestore } from "./restore-preconditions.js";
+import { SEAT_STARTUP_BLOCKERS, resumingConversationSeats, validatePreRestore } from "./restore-preconditions.js";
+import { describePartners, holdsRecordedConversation, pairableConversation } from "./shared-conversation.js";
+import { getNodeInventoryForRigs } from "./node-inventory.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 
 // L3: result shape for runtime-truth reconciliation. A reconciliation that
@@ -221,6 +225,8 @@ export interface NarrowLaunchResult {
   launched?: RestoreNodeResult[];
   held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
+  /** The notice for targets this launch left as bare shells: who was told, and the seats with no single destination. */
+  harnessNotStarted?: HarnessNotStartedReport;
   failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
   /** In a plan, each target's `permission`: what this launch will start it with (absent for a seat it leaves attached). */
   targetNodes?: Array<{ nodeId: string; logicalId: string; permission?: RestorePermissionPreview }>;
@@ -272,6 +278,8 @@ export interface RestoreOrchestratorDeps {
    *  Absent in older wiring/tests: the current selection is unknown, so a
    *  missing saved marker is reported, never guessed. */
   getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
+  /** Tells the resolved escalation owners which seats an attempt left as bare shells (noticeHarnessNotStarted). */
+  harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
 }
 
 export class RestoreOrchestrator {
@@ -300,6 +308,7 @@ export class RestoreOrchestrator {
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
   private getDesiredClaudeActivityHooks: RestoreOrchestratorDeps["getDesiredClaudeActivityHooks"];
   private appliedLaunchStore: AppliedLaunchObservationStore;
+  private harnessNotStartedNotice: RestoreOrchestratorDeps["harnessNotStartedNotice"];
 
   constructor(deps: RestoreOrchestratorDeps) {
     if (deps.db !== deps.rigRepo.db) {
@@ -343,6 +352,7 @@ export class RestoreOrchestrator {
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
     this.seatSkillSelection = deps.seatSkillSelection;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
+    this.harnessNotStartedNotice = deps.harnessNotStartedNotice;
     this.routerLineSettings = deps.routerLineSettings;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
@@ -443,14 +453,22 @@ export class RestoreOrchestrator {
     this.activeRestores.add(rigId);
 
     try {
+      const currentRuntimes = Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime]));
+      // One observation of the seat records for the shared-conversation report, before any restore mutation: the
+      // validation and the partner check below name every agent from it, so a stale session this restore then marks
+      // detached is not "running" in one warning and "detached" in the other (the maintainer's 3rd review of #3250).
+      // The sessions the classification above already found stale are named detached, the status this restore gives them.
+      const observed = this.observeConversationRecords(rigId, snapshot.data, opts?.freshLogicalIds, currentRuntimes, classification.stale);
       const validation = validatePreRestore(snapshot.data, {
         fsOps: opts?.fsOps,
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
         freshLogicalIds: opts?.freshLogicalIds,
-        currentRuntimes: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime])),
+        currentRuntimes,
         currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
           .filter((current) => current.codexConfigProfile !== undefined)
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
+        currentStatuses: observed.currentStatuses,
+        attachedLogicalIds: observed.attachedLogicalIds,
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
       // A seat that is still a node of this rig but isn't in the snapshot's intended roster isn't started by this restore:
@@ -566,6 +584,8 @@ export class RestoreOrchestrator {
       // 5. Execute restore with compensating pattern per node
       const nodeResults: RestoreNodeResult[] = [];
       const restoreWarnings: string[] = [...validation.warnings];
+      const heldLogicalIds = snapshot.data.nodes.filter((node) => heldForStartup.has(node.id)).map((node) => node.logicalId);
+      restoreWarnings.push(...this.conversationPartners(rigId, snapshot.data, observed, opts?.freshLogicalIds, currentRuntimes, heldLogicalIds));
       if (this.rigRepo.getRigNonInterruptive(rigId)) restoreWarnings.push(nonInterruptiveSummary(true));
       else if (opts?.nonInterruptive === false) restoreWarnings.push(nonInterruptiveSummary(false));
       for (const entry of plan) {
@@ -596,6 +616,8 @@ export class RestoreOrchestrator {
         intendedRoster: topology.intendedRoster,
         excludedNodes,
       };
+      const notice = await this.noticeBareShells(rigId, `restore attempt ${attemptId}`, nodeResults, restoreWarnings);
+      if (notice) restoreResult.harnessNotStarted = notice;
 
       // 7. Emit restore.completed
       this.eventBus.emit({ type: "restore.completed", rigId, snapshotId, result: restoreResult });
@@ -872,16 +894,19 @@ export class RestoreOrchestrator {
     }
 
     // Emit restore.subset_completed for launched targets only
+    let harnessNotStarted: HarnessNotStartedReport | undefined;
     if (launched.length > 0) {
       const subsetResult: RestoreResult = {
         snapshotId: snapshot.id,
         preRestoreSnapshotId: null as unknown as string,
         rigResult: rollupRestoreRigResult(launched),
         nodes: launched,
-        warnings: subsetWarnings,
+        // A copy: the notice below adds its warnings to the launch's result, not to the event already emitted.
+        warnings: [...subsetWarnings],
         snapshotSelection,
       };
-      this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
+      const completed = this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
+      harnessNotStarted = await this.noticeBareShells(rigId, `launch attempt ${completed.seq}`, launched, subsetWarnings);
     }
 
     // Emit node.held for non-running held non-targets (tri-state: running/unknown/held)
@@ -930,6 +955,7 @@ export class RestoreOrchestrator {
       unmatchedIds: unmatchedIds.length > 0 ? unmatchedIds : undefined,
       warnings: subsetWarnings.length > 0 ? subsetWarnings : undefined,
       snapshotSelection,
+      ...(harnessNotStarted ? { harnessNotStarted } : {}),
       nonTargetEffects: {
         mode: opts.nonTargetMode,
         reason: opts.nonTargetMode === "detach_and_hold" ? holdReasonText : null,
@@ -1059,6 +1085,75 @@ export class RestoreOrchestrator {
     // Restore prior session statuses
     for (const sess of priorState.sessions) {
       this.sessionRegistry.updateStatus(sess.id, sess.status);
+    }
+  }
+
+  /**
+   * #3218 item 3 (B1 of its review; points 3 to 5 of the maintainer's): the agents this restore resumes, compared with
+   * the known agents outside it, with their recorded status (in this rig outside a replacement's selection, kept
+   * attached to an external CLI or held for startup, or in another rig), from the same rigs rig restore-check reads: the
+   * listed ones, archived rigs left out. Named in the restore's warnings; nothing is refused, stopped or picked, and an
+   * inventory that cannot be read says the comparison is unavailable. Every status comes from the one observation taken
+   * before the restore changed anything (observeConversationRecords).
+   */
+  private conversationPartners(rigId: string, data: SnapshotData, observed: ConversationRecords, freshLogicalIds: string[] | undefined,
+    currentRuntimes: Record<string, string | null | undefined>, heldLogicalIds: string[]): string[] {
+    const resuming = resumingConversationSeats(data, { freshLogicalIds, currentRuntimes, currentStatuses: observed.currentStatuses,
+      attachedLogicalIds: observed.attachedLogicalIds, heldLogicalIds });
+    if (!resuming.some(pairableConversation)) return [];
+    if (observed.inventory === null) {
+      return [`Restore pre-validation: the shared-conversation comparison with agents outside this restore is unavailable (${observed.unavailable}).`];
+    }
+    // Left out: only the seats restore launches. One kept attached to an external CLI (left_attached) stays running
+    // with its conversation, and one held for startup keeps its current session: both are compared as agents outside
+    // the restore (the maintainer's reviews of #3250).
+    const launched = new Set(resolveSnapshotRestoreTopology(data).intendedNodes.map((node) => node.logicalId)
+      .filter((logicalId) => !observed.attachedLogicalIds.includes(logicalId) && !heldLogicalIds.includes(logicalId)));
+    const others = observed.inventory
+      .filter((entry) => !(entry.rigId === rigId && launched.has(entry.logicalId)) && holdsRecordedConversation(entry))
+      .map((entry) => ({
+        seat: entry.canonicalSessionName ?? `${entry.logicalId}@${entry.rigName}`,
+        state: entry.sessionStatus ?? "unknown",
+        resumeType: entry.resumeType,
+        resumeToken: entry.resumeToken,
+      }));
+    const rigName = data.rig?.name ?? rigId;
+    return describePartners(resuming.map((entry) => ({ ...entry, seat: `${entry.seat}@${rigName}` })), others)
+      .map((warning) => `Restore pre-validation: ${warning}`);
+  }
+
+  /** The one observation of the seat records the shared-conversation report names (#3250, the maintainer's 3rd
+   *  review), taken before any restore mutation: the seats kept attached to an external CLI, from their bindings (the
+   *  record that makes restore leave them running, left_attached, instead of launching them), and, only when this
+   *  restore would resume a seat with a recorded conversation it can pair (pairableConversation), ONE read of the node inventory of the listed rigs and
+   *  this rig (an archived rig's restore inclusive): this rig's seats' sessionStatus and the partners' records. A session
+   *  of this rig recorded running that classifyRunningSessions found stale (no tmux session) is named detached, the
+   *  status this restore gives it before it launches anything, so the report never calls it running. An inventory that
+   *  cannot be read leaves the partner comparison unavailable; this rig's own statuses then come from a read of this rig
+   *  alone ("unknown" when that fails too). */
+  private observeConversationRecords(rigId: string, data: SnapshotData, freshLogicalIds: string[] | undefined,
+    currentRuntimes: Record<string, string | null | undefined>, staleSessionIds: readonly string[]): ConversationRecords {
+    const attachedLogicalIds = (this.rigRepo.getRig(rigId)?.nodes ?? [])
+      .filter((node) => seatProcessOwner(resolveSeatKind(this.sessionRegistry.getBindingForNode(node.id)?.attachmentType)) === "external")
+      .map((node) => node.logicalId);
+    if (!resumingConversationSeats(data, { freshLogicalIds, currentRuntimes, attachedLogicalIds }).some(pairableConversation)) {
+      return { currentStatuses: {}, attachedLogicalIds, inventory: [] };
+    }
+    const staleIds = new Set(staleSessionIds);
+    const staleNodeIds = new Set(this.sessionRegistry.getSessionsForRig(rigId).filter((session) => staleIds.has(session.id)).map((session) => session.nodeId));
+    const labelled = (entry: NodeInventoryEntry): NodeInventoryEntry =>
+      entry.rigId === rigId && entry.sessionStatus === "running" && staleNodeIds.has(entry.nodeId) ? { ...entry, sessionStatus: "detached" } : entry;
+    const statusesOf = (entries: readonly NodeInventoryEntry[]) => Object.fromEntries(entries.map((entry) => [entry.logicalId, entry.sessionStatus ?? null]));
+    try {
+      const byRig = getNodeInventoryForRigs(this.db, new Set([...this.rigRepo.listRigs().map((rig) => rig.id), rigId]));
+      const inventory = [...byRig.values()].flat().map(labelled);
+      return { currentStatuses: statusesOf(inventory.filter((entry) => entry.rigId === rigId)), attachedLogicalIds, inventory };
+    } catch (err) {
+      let currentStatuses: Record<string, string | null> = {};
+      try {
+        currentStatuses = statusesOf((getNodeInventoryForRigs(this.db, new Set([rigId])).get(rigId) ?? []).map(labelled));
+      } catch { /* every seat "unknown" */ }
+      return { currentStatuses, attachedLogicalIds, inventory: null, unavailable: err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -1739,6 +1834,23 @@ export class RestoreOrchestrator {
     return { rolledBack: true, terminalStopped };
   }
 
+  /** The notice for the seats an attempt positively left as bare shells, each with its own cause. Its warnings join the
+   *  attempt's, and a failure to send it is a warning too: it never changes or blocks the attempt's own result. Seats not
+   *  positively left as shells stay in the roll call. */
+  private async noticeBareShells(rigId: string, attempt: string, results: RestoreNodeResult[], warnings: string[]): Promise<HarnessNotStartedReport | undefined> {
+    const seats = results.filter((n) => n.stage === "harness_not_started")
+      .map(({ nodeId, logicalId, error }) => ({ nodeId, logicalId, ...(error ? { cause: error } : {}) }));
+    if (seats.length === 0 || !this.harnessNotStartedNotice) return undefined;
+    try {
+      const report = await this.harnessNotStartedNotice({ rigId, attempt, seats });
+      for (const warning of report.warnings ?? []) warnings.push(`Restore: ${warning}`);
+      return report;
+    } catch (err) {
+      warnings.push(`Restore: the notice for the seats left as a bare shell wasn't recorded (${err instanceof Error ? err.message : String(err)}).`);
+      return undefined;
+    }
+  }
+
   /** Restore left this pane as a bare shell, which the launcher registered as a running session. Mark that session, with
    *  the stage that says no harness started, so nothing counts the shell as a running seat. Nothing is stopped. */
   private markHarnessNotStarted(rigId: string, nodeId: string, sessionId: string, error: string): void {
@@ -2184,7 +2296,7 @@ export class RestoreOrchestrator {
           const error = `Harness not started: no usable persisted launch recipe for ${node.logicalId}.`;
           warnings?.push(`Restore: ${error}`);
           this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
-          return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
+          return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
         }
         const retired = await this.retireProvisionalSession(node.id, sessionName, launchResult.session.id);
         if (!retired.ok) {
@@ -2217,7 +2329,7 @@ export class RestoreOrchestrator {
       const error = `Harness not started: ${cause} for ${node.logicalId}.`;
       warnings?.push(`Restore: ${error}`);
       this.markHarnessNotStarted(rigId, node.id, launchResult.session.id, error);
-      return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
+      return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error, stage: "harness_not_started" };
     }
 
     // Attempt restore-safe startup replay if context available
@@ -2644,6 +2756,7 @@ export class RestoreOrchestrator {
     let kernelAuthority = false;
     let teamPermissionDefault = false;
     let claudePermissions: import("./claude-permission-rules.js").ClaudePermissionRules | undefined;
+    let claudeAutoMode: import("./claude-auto-mode.js").ClaudeAutoModeChoice | undefined;
     let claudeMcp: ClaudeMcp | undefined;
     let launchWrapper: string[] | undefined;
     let codexPermissions: import("./codex-member-permissions.js").CodexMemberPermissions | undefined;
@@ -2655,6 +2768,7 @@ export class RestoreOrchestrator {
       kernelAuthority = override.kernelAuthority === true;
       teamPermissionDefault = override.teamPermissionDefault === true;
       claudePermissions = override.claudePermissions;
+      claudeAutoMode = override.claudeAutoMode;
       claudeMcp = runtime === "claude-code" ? readSeatClaudeMcp(this.db, nodeId) : undefined;
       launchWrapper = isLaunchWrapperRuntime(runtime) ? readSeatLaunchWrapper(this.db, nodeId) : undefined;
       codexPermissions = override.codexPermissions;
@@ -2679,10 +2793,11 @@ export class RestoreOrchestrator {
         ...(claudeExecutable ? [claudeExecutable] : [])] : tail;
       const mcpTail = claudeMcp === undefined ? guardedTail : [...guardedTail, ...Array(Math.max(0, 9 - guardedTail.length)).fill(undefined), claudeMcp];
       const wrapperTail = launchWrapper?.length ? [...mcpTail, ...Array(Math.max(0, 10 - mcpTail.length)).fill(undefined), launchWrapper] : mcpTail;
-      const wrappedTail = claudeLaunch ? [...wrapperTail, ...Array(Math.max(0, 11 - wrapperTail.length)).fill(undefined), claudeLaunch] : wrapperTail;
+      const continuationTail = claudeLaunch ? [...wrapperTail, ...Array(Math.max(0, 11 - wrapperTail.length)).fill(undefined), claudeLaunch] : wrapperTail;
+      const wrappedTail = claudeAutoMode !== undefined ? [...continuationTail, ...Array(Math.max(0, 12 - continuationTail.length)).fill(undefined), claudeAutoMode] : continuationTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[], continuation?: ClaudeContinuationLaunch]));
+        ...(wrappedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp, launchWrapper?: readonly string[], continuation?: ClaudeContinuationLaunch, claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoModeChoice]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;
@@ -3011,6 +3126,15 @@ export class RestoreOrchestrator {
       return false;
     }
   }
+}
+
+/** The seat records the shared-conversation report names, observed once per restore (#3250). inventory null: it could
+ *  not be read (unavailable says why); [] when nothing this restore resumes holds a recorded conversation. */
+interface ConversationRecords {
+  currentStatuses: Record<string, string | null>;
+  attachedLogicalIds: string[];
+  inventory: NodeInventoryEntry[] | null;
+  unavailable?: string;
 }
 
 interface PlanEntry {

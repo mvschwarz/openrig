@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -32,6 +32,20 @@ describe("SeatStatusService", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it("reads only the selected node input route and observes route changes", () => {
+    const rig = rigRepo.createRig("routes");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi" });
+    const other = rigRepo.addNode(rig.id, "other", { runtime: "pi" });
+    const session = sessionRegistry.registerSession(node.id, "worker@routes");
+    rigRepo.setNodeInputRoute(other.id, "native");
+    const graph = vi.spyOn(rigRepo, "getRig");
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: { inputRoute: "typed" } });
+    rigRepo.setNodeInputRoute(node.id, "native");
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: { inputRoute: "native" } });
+    expect(graph).not.toHaveBeenCalled();
+    graph.mockRestore();
   });
 
   it("does not attach a last tool, another actor's prompt or completed activity to a permission diagnostic", () => {

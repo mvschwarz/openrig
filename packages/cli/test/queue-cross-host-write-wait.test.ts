@@ -19,7 +19,8 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 });
 
 type Reply = { status: number; data: unknown } | Error;
-type Request = { path: string; options?: { timeoutMs?: number } };
+type RequestOptions = { timeoutMs?: number; headers?: Record<string, string> };
+type Request = { path: string; options?: RequestOptions };
 const CREATED: Reply = { status: 201, data: { qitemId: "qitem-20261024070000-aaaa", destinationSession: "dev@rig-b", state: "pending" } };
 const HANDED_OFF: Reply = { status: 200, data: { closed: { qitemId: "qitem-src-1", state: "handed-off" }, created: { qitemId: "qitem-20261024070000-bbbb", state: "pending" } } };
 
@@ -31,7 +32,7 @@ function makeDeps(replies: Reply[]): { deps: QueueDeps; requests: Request[] } {
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
       clientFactory: () => ({
         get: vi.fn(async () => ({ status: 200, data: {} })),
-        post: vi.fn(async (p: string, _body: unknown, options?: { timeoutMs?: number }) => {
+        post: vi.fn(async (p: string, _body: unknown, options?: RequestOptions) => {
           requests.push({ path: p, options });
           const reply = replies.shift() ?? { status: 500, data: { error: "unrouted" } };
           if (reply instanceof Error) throw reply;
@@ -84,15 +85,56 @@ describe("cross-host queue writes wait for the daemon's answer", () => {
     it(`${c.verb} to another host waits longer than the daemon's 10 s forward deadline`, async () => {
       const requests = await run(c.argv("dev@rig-b@vps-b"), [c.reply]);
       expect(requests).toHaveLength(1);
-      expect(requests[0]!.options?.timeoutMs).toBe(15_000);
+      const options = requests[0]!.options;
+      expect(options?.timeoutMs).toBe(15_000);
+      if (c.verb === "create") {
+        expect(options).toEqual({ timeoutMs: 15_000 });
+      } else {
+        expect(options).toEqual({
+          timeoutMs: 15_000,
+          headers: { "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" },
+        });
+      }
     });
 
     it(`${c.verb} on this daemon keeps the client's default wait`, async () => {
       const requests = await run(c.argv("dev@rig-b"), [c.reply]);
       expect(requests).toHaveLength(1);
-      expect(requests[0]!.options).toBeUndefined();
+      const options = requests[0]!.options;
+      expect(options?.timeoutMs).toBeUndefined();
+      if (c.verb === "create") {
+        expect(options).toBeUndefined();
+      } else {
+        expect(options).toEqual({
+          headers: { "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" },
+        });
+      }
     });
   }
+
+  const oldDaemonHandoffCases = CALLERS.filter(c => c.verb !== "create").flatMap(c => [
+    { verb: c.verb, label: "without advisories", reply: c.reply },
+    { verb: c.verb, label: "with destination-only advice", reply: {
+      status: 200,
+      data: { ...(c.reply as { status: number; data: Record<string, unknown> }).data,
+        advisories: [{ code: "unmatched_destination_seat", message: "destination advice is not a scope-check acknowledgement" }] },
+    } },
+  ]);
+
+  it.each(oldDaemonHandoffCases)("$verb reports a missing scope-check acknowledgement for an old-daemon response $label", async row => {
+    const requests = await run([row.verb, "qitem-src-1", "--to", "dev@rig-b", "--summary", "s"], [row.reply]);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.options).toEqual({ headers: { "X-OpenRig-CLI-Handoff-Scope-Advisory": "1" } });
+    expect(stderr.filter(line => /this daemon didn't report a scope check/i.test(line))).toEqual([
+      "Warning: this daemon didn't report a scope check; it may be older than this CLI",
+    ]);
+    expect(stderr.join("\n")).not.toContain("scope_check_unavailable");
+    const expected = (row.reply as { data: Record<string, unknown> }).data;
+    expect(stdout).toEqual([JSON.stringify(expected)]);
+    expect(JSON.parse(stdout[0]!)).not.toHaveProperty("handoffScopeCheckAcknowledged");
+    expect(process.exitCode ?? 0).toBe(0);
+  });
 
   it("a create that gets no answer in time reads as unknown, never as a failure, with the ID to reconcile by", async () => {
     let thrown: unknown;

@@ -81,6 +81,7 @@ import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
+import { isEpisodeRelay, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG } from "./return-route.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
 import { parseReplyToChoice, parseArrivalThread, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
@@ -312,6 +313,10 @@ export interface QueueItem {
   /** Set only on a row whose content queue erasure removed (queue-erasure.ts): its body and other content are empty
    *  because they were erased, not because the row was written that way. */
   contentErasedAt?: string;
+  /** Present only on a row with a return route (return-route.ts): the conversation a person chose to answer this goal from,
+   *  which its handoffs carry and its new escalations deliver to, and how it was established. */
+  returnRoute?: string;
+  returnRouteBasis?: string | null;
   /** Present only on compact list rows, which omit these fields entirely so omitted content
    *  can't be mistaken for an empty value. Full reads never carry this marker. */
   fieldsElided?: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
@@ -377,6 +382,8 @@ interface QueueItemRow {
   last_heartbeat: string | null;
   resolution: string | null;
   target_repo: string | null;
+  return_route?: string | null;
+  return_route_basis?: string | null;
 }
 
 /**
@@ -481,6 +488,10 @@ export interface QueueCreateInput {
   identityProvenance?: string | null;
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
+  /** The conversation a person chose to answer this goal from, already resolved by the create route (return-route.ts),
+   *  and how it was established. A cancel-and-replace successor (handedOffFrom) without one keeps the original's. */
+  returnRoute?: string | null;
+  returnRouteBasis?: string | null;
 }
 
 /** Tags to add to an existing row (`addTags`). */
@@ -1131,6 +1142,7 @@ export class QueueRepository {
   private readonly hasSummaryColumn: boolean;
   private readonly hasHumanIntentColumn: boolean;
   private readonly hasReplyToColumn: boolean;
+  private readonly hasReturnRouteColumn: boolean;
   private readonly hasHumanQuestionsColumn: boolean;
   private readonly hasDelegatedDecisionColumn: boolean;
   private readonly hasEvidenceRefColumn: boolean;
@@ -1215,7 +1227,7 @@ export class QueueRepository {
     this.deliveryDrains = new RigDeliveryDrainStore(db);
     this.eventBus = eventBus;
     this.transitionLog = new QueueTransitionLog(db);
-    this.wakeRepo = new QueueWakeRepository(db);
+    this.wakeRepo = new QueueWakeRepository(db, (value) => this.isPersonAddress(value));
     this.validateRig = opts?.validateRig ?? (() => true);
     this.canRecordDestination = opts?.canRecordDestination ?? this.validateRig;
     this.destinationAdvisory = opts?.destinationAdvisory ?? (() => null);
@@ -1236,6 +1248,7 @@ export class QueueRepository {
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
     this.hasReplyToColumn = detectQueueColumn(db, "reply_to");
+    this.hasReturnRouteColumn = detectQueueColumn(db, "return_route");
     this.hasHumanQuestionsColumn = detectQueueColumn(db, "human_questions");
     this.hasDelegatedDecisionColumn = detectQueueColumn(db, "delegated_decision");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
@@ -1930,7 +1943,8 @@ export class QueueRepository {
         JOIN queue_items q ON q.qitem_id = o.audit_pointer AND (q.state = 'pending' OR substr(o.outbox_id, 1, ?) = ?)
           AND q.destination_session = o.destination_session
         WHERE o.rowid > ? AND o.rowid <= ? AND substr(o.outbox_id, 1, ?) = ?
-          AND o.delivery_state IN ('pending','failed','indeterminate') ORDER BY o.rowid LIMIT ?`)
+          AND o.delivery_state IN ('pending','failed','indeterminate')
+          AND json_extract(o.guard_delivery,'$.runner') IS NULL AND json_extract(o.guard_delivery,'$.nativeRequestId') IS NULL ORDER BY o.rowid LIMIT ?`)
         .all(CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX, cursor, horizon, WAKE_INTENT_PREFIX.length,
           WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;
@@ -2597,6 +2611,9 @@ export class QueueRepository {
     if (humanQuestions) {
       this.db.prepare("UPDATE queue_items SET human_questions = ? WHERE qitem_id = ?").run(JSON.stringify(humanQuestions), id);
     }
+    const replaced = input.returnRoute == null && handedOffFrom ? this.getById(handedOffFrom) : null;
+    this.persistReturnRoute(id, input.returnRoute ?? replaced?.returnRoute ?? null,
+      input.returnRoute ? input.returnRouteBasis ?? null : replaced?.returnRouteBasis ?? null);
     this.persistMintingGeneration(id, input.sourceSession);
     const notification = this.classifyOwnerNotification({
       action: "create",
@@ -2665,6 +2682,7 @@ export class QueueRepository {
   }
 
   isPersonAddress(destination: string): boolean {
+    if (!destination.includes("@")) return false;
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
@@ -2830,6 +2848,8 @@ export class QueueRepository {
 
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
+      // The goal's return route goes with the work, as its body does.
+      this.persistReturnRoute(newId, source.returnRoute ?? null, source.returnRouteBasis ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
       const carried = this.carryPermissionQuestion(source, newId, input.toSession);
 
@@ -3013,6 +3033,8 @@ export class QueueRepository {
 
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
+      // The goal's return route goes with the work, as its body does.
+      this.persistReturnRoute(newId, source.returnRoute ?? null, source.returnRouteBasis ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
       const carried = this.carryPermissionQuestion(source, newId, input.toSession);
 
@@ -3377,6 +3399,8 @@ export class QueueRepository {
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
         identityPrincipal: input.identityPrincipal ?? null,
       });
+
+      this.recordRelayPickup(qitem, input.destinationSession);
 
       // OPR.0.5.8.1 S1b — CLAIM-RESUME. A blocked row is claimable ("only
       // pending/blocked are claimable"), so claiming is a real exit from a park
@@ -3959,7 +3983,8 @@ export class QueueRepository {
       // start explicitly; it also gives the row's wake a real "last check" time.
       jobsRepo.recordEvaluation(job.jobId, job.registeredAt, false);
       parkWake = { kind: "timer", ref: job.jobId };
-    } else if (input.state === "blocked" && effectiveBlockedOn?.startsWith("qitem-")) {
+    } else if (input.state === "blocked" && effectiveBlockedOn && effectiveBlockedOn !== input.qitemId && !isHumanPark && !isTypedGateBlocker(effectiveBlockedOn)
+      && (effectiveBlockedOn.startsWith("qitem-") || isBlockerLive(this.getById(effectiveBlockedOn)?.state ?? ""))) {
       parkWake = { kind: "blocker", ref: effectiveBlockedOn };
     }
 
@@ -4155,6 +4180,8 @@ export class QueueRepository {
     const blockedRows = this.db
       .prepare("SELECT qitem_id, destination_session FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
       .all(input.qitemId) as Array<{ qitem_id: string; destination_session: string }>;
+    // Typed gates and people own their own resolution even when a custom row ID collides.
+    if (blockedRows.length === 0 || isTypedGateBlocker(input.qitemId) || this.isPersonAddress(input.qitemId)) return dependentEvents;
     for (const r of blockedRows) {
       const closed = this.getById(input.qitemId);
       const successors = input.terminalState === "handed-off" ? this.db.prepare(
@@ -5248,9 +5275,11 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r));
   }
 
-  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for. */
+  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for, and a
+   *  routed row's return route, which isn't elided, so a routed row never lists as unrouted. */
   private compactColumns(): string {
-    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "");
+    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
+      + (this.hasReturnRouteColumn ? ", return_route, return_route_basis" : "");
   }
 
   /**
@@ -6018,6 +6047,30 @@ export class QueueRepository {
     }
   }
 
+  /** A relay task's claim is pickup at its return route. It's recorded on the escalation the task carries, keyed by that
+   *  delivery episode, so the episode resolves. Pickup only: not the person's answer or approval, and nothing about the
+   *  seat's prompt. */
+  private recordRelayPickup(relay: QueueItem, actor: string): void {
+    if (!relay.tags?.includes(RELAY_TAG)) return;
+    const escalationId = relay.tags.find(t => t.startsWith(RELAY_FOR_PREFIX))?.slice(RELAY_FOR_PREFIX.length);
+    const key = relay.tags.find(t => t.startsWith(RELAY_KEY_PREFIX))?.slice(RELAY_KEY_PREFIX.length);
+    // Only the episode's own relay (its id, OpenRig as source, its tags) records pickup; a row that only carries the tags doesn't.
+    if (!escalationId || !key || !isEpisodeRelay(relay, escalationId, key, OPENRIG_SENDER)) return;
+    const escalation = this.getById(escalationId);
+    if (!escalation) return;
+    this.transitionLog.append({
+      qitemId: escalation.qitemId, state: escalation.state, actorSession: "wake-ladder@system",
+      transitionNote: `${RELAY_CLAIMED_PREFIX} notification_key=${key} relay=${relay.qitemId} by=${actor}: picked up at the return route; not the person's answer or approval`,
+      closureTarget: escalation.state === "in-progress" ? this.retainedClaimBlocker(escalation.qitemId) : undefined,
+    });
+  }
+
+  /** A row's return route (return-route.ts), when it has one; a schema without the column keeps the row without it. */
+  private persistReturnRoute(qitemId: string, route: string | null, basis: string | null): void {
+    if (!this.hasReturnRouteColumn || !route) return;
+    this.db.prepare("UPDATE queue_items SET return_route = ?, return_route_basis = ? WHERE qitem_id = ?").run(route, basis, qitemId);
+  }
+
   /** GHOST-STAGE (e/Class-B) — persist the MINTING occupant-generation additively (same degrade
    *  contract as persistSummary; NULL when unresolved/pre-063). Forensic provenance of the creator;
    *  the RELEASE discriminator is claimed_by_generation_uuid (stamped at claim), not this. */
@@ -6286,6 +6339,7 @@ export class QueueRepository {
       // older test fixtures supply legacy rows where target_repo is undefined.
       targetRepo: row.target_repo ?? null,
       ...(row.content_erased_at ? { contentErasedAt: row.content_erased_at } : {}),
+      ...(row.return_route ? { returnRoute: row.return_route, returnRouteBasis: row.return_route_basis ?? null } : {}),
     };
   }
 }

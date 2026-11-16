@@ -689,10 +689,10 @@ export class TerminalService {
     return this.deps.tmuxServerArgs ? this.deps.tmuxServerArgs() : daemonTmuxServerArgs();
   }
 
-  private async runDaemonTmux(args: string[]): Promise<string> {
+  private async runDaemonTmux(args: string[], serverArgs: readonly string[] = this.getTmuxServerArgs()): Promise<string> {
     if (this.deps.tmuxExec) return this.deps.tmuxExec(args);
     const bin = (await this.resolveLocalTmux()) ?? "tmux";
-    return execArgvCommand([bin, ...this.getTmuxServerArgs(), ...args]);
+    return execArgvCommand([bin, ...serverArgs, ...args]);
   }
 
   async registerRigViewer(reg: TmuxRigViewerRegistration): Promise<{ ok: true }> {
@@ -970,7 +970,9 @@ export class TerminalService {
     tx: RigViewerEndpointTx,
     viewers: CloseAllViewerResult[],
   ): Promise<void> {
-    const currentEndpoint = tmuxEndpointKey(this.getTmuxServerArgs());
+    const serverArgs = [...this.getTmuxServerArgs()];
+    const runTmux = (args: string[]) => this.runDaemonTmux(args, serverArgs);
+    const currentEndpoint = tmuxEndpointKey(serverArgs);
     if (endpoint !== currentEndpoint) {
       for (const { record } of entries) {
         viewers.push({
@@ -989,7 +991,7 @@ export class TerminalService {
         continue;
       }
       try {
-        inv = await readTmuxInventory(args => this.runDaemonTmux(args));
+        inv = await readTmuxInventory(runTmux);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "provider_unreachable", reason });
@@ -1011,7 +1013,7 @@ export class TerminalService {
       }
       let liveNonce: string;
       try {
-        liveNonce = (await this.runDaemonTmux(["show-options", "-qv", "-t", record.sessionId, "@openrig_rig_viewer"])).trim();
+        liveNonce = (await runTmux(["show-options", "-qv", "-t", record.sessionId, "@openrig_rig_viewer"])).trim();
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "provider_unreachable", reason });
@@ -1027,14 +1029,14 @@ export class TerminalService {
 
       tx.setPhase(key, "closing");
       try {
-        const snapshot = await this.runDaemonTmux(["display-message", "-p", "-t", record.sessionId, TMUX_VIEWER_SNAPSHOT]);
+        const snapshot = await runTmux(["display-message", "-p", "-t", record.sessionId, TMUX_VIEWER_SNAPSHOT]);
         const closeArgs = tmuxViewerCloseArgs(record, snapshot);
-        if (!closeArgs || (await this.runDaemonTmux(closeArgs)).trim() === TMUX_VIEWER_KEPT) {
+        if (!closeArgs || (await runTmux(closeArgs)).trim() === TMUX_VIEWER_KEPT) {
           tx.setPhase(key, record.phase);
           viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "kept", code: "ownership_unconfirmed", reason: "Tmux viewer identity or contents changed before conditional close." });
           continue;
         }
-        const after = await readTmuxInventory(args => this.runDaemonTmux(args));
+        const after = await readTmuxInventory(runTmux);
         if (after.has(record.sessionId)) {
           viewers.push({ view: record.view, provider: "tmux", target: record.sessionName, outcome: "failed", code: "close_pending", reason: "Tmux session still present after kill-session." });
         } else {

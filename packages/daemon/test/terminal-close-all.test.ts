@@ -168,6 +168,30 @@ function readRecords(dir: string) {
 }
 
 describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
+  it("pins selected tmux endpoint throughout the conditional close", async () => {
+    const a = `pin-a-${randomUUID().slice(0, 10)}`, b = `pin-b-${randomUUID().slice(0, 10)}`;
+    sockets.push(a, b);
+    for (const socket of [a, b]) runTmux(socket, ["new-session", "-d", "-s", "control", "sleep 60"]);
+    const [sessionId, windowId, paneId] = runTmux(a, ["new-session", "-d", "-s", "openrig-view-pinned", "-P", "-F", "#{session_id}|#{window_id}|#{pane_id}", "sleep 60"]).trim().split("|") as [string, string, string];
+    runTmux(a, ["set-option", "-t", sessionId, "@openrig_rig_viewer", "pinned"]);
+    let selected = a;
+    const tmuxServerArgs = vi.fn(() => { const socket = selected; selected = b; return ["-L", socket]; });
+    const svc = new TerminalService({
+      resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
+      listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null,
+      resolveHost: () => null, hasSession: () => true, rigViewersDir: tempDir("pinned-viewer-"),
+      tmuxServerArgs, resolveLocalTmux: async () => "tmux",
+    });
+    await svc.registerRigViewer({ kind: "tmux", view: "rig:alpha", sessionName: "openrig-view-pinned", sessionId,
+      nonce: "pinned", windowIds: [windowId], paneIds: [paneId], phase: "created" });
+    selected = a; tmuxServerArgs.mockClear();
+    const result = await svc.closeAll({ provider: "tmux" });
+    expect(result.viewers[0]?.outcome).toBe("closed");
+    expect(tmuxServerArgs).toHaveBeenCalledTimes(1);
+    expect(runTmux(a, ["list-sessions", "-F", "#{session_name}"])).toBe("control\n");
+    expect(runTmux(b, ["list-sessions", "-F", "#{session_name}"])).toBe("control\n");
+  });
+
   it.each(["window", "pane", "nonce", "gone", "malformed"])("retains authority when a tmux %s change occurs before conditional close", async change => {
     const socket = `guarded-close-${randomUUID().slice(0, 10)}`;
     sockets.push(socket);

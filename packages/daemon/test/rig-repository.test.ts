@@ -17,6 +17,17 @@ describe("RigRepository", () => {
     db.close();
   });
 
+  it("reads one node input route with a typed fallback for missing nodes and older schemas", () => {
+    const rig = repo.createRig("routes");
+    const node = repo.addNode(rig.id, "worker", { runtime: "pi" });
+    expect(repo.getNodeInputRoute(node.id)).toBe("typed");
+    repo.setNodeInputRoute(node.id, "native");
+    expect(repo.getNodeInputRoute(node.id)).toBe("native");
+    expect(repo.getNodeInputRoute("missing")).toBe("typed");
+    db.exec("ALTER TABLE nodes DROP COLUMN input_route");
+    expect(new RigRepository(db).getNodeInputRoute(node.id)).toBe("typed");
+  });
+
   it("createRig persists and returns typed Rig with id", () => {
     const rig = repo.createRig("test-rig");
     expect(rig.id).toBeDefined();

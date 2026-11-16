@@ -465,6 +465,14 @@ function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptCo
   return !full && compactOutputEnabled() ? ctx : null;
 }
 
+/** A cross-host handoff whose return route couldn't go with the work says so, as a warning beside the result. */
+function warnRouteNotCarried(status: number, data: unknown): void {
+  const advisories = status < 400 ? (data as { advisories?: unknown } | null)?.advisories : undefined;
+  for (const advisory of Array.isArray(advisories) ? advisories as Array<{ code?: unknown; message?: unknown }> : []) {
+    if (advisory.code === "return_route_not_carried" && typeof advisory.message === "string") console.error(`Warning: ${advisory.message}`);
+  }
+}
+
 /** A handoff whose outcome is unknown may have committed. This names the source row to read before any retry, on the
  *  daemon the command used, and where a successor would be. It never says the handoff failed, names a successor id, or
  *  asks for the handoff to be repeated. */
@@ -503,9 +511,18 @@ function remoteHostOf(hostId: string | undefined): string | undefined {
  *  (`QUEUE_FORWARD_TIMEOUT_MS` in the daemon's routes/queue.ts), so waiting only the client's 5 s default
  *  turns a slow remote's answer into an unknown outcome. */
 const CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS = 15_000;
+const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 
 function crossHostWriteOptions(hostId: string | undefined): { timeoutMs: number } | undefined {
   return remoteHostOf(hostId) ? { timeoutMs: CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS } : undefined;
+}
+
+/** The daemon returns handoff scope advice only to this CLI diagnostic request; it is not in the write body. */
+function handoffScopeDiagnosticOptions(hostId: string | undefined) {
+  return {
+    ...(crossHostWriteOptions(hostId) ?? {}),
+    headers: { [CLI_HANDOFF_SCOPE_ADVISORY_HEADER]: "1" },
+  };
 }
 
 /** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
@@ -892,6 +909,52 @@ function emitQueueUpdateReadBackFailure(qitemId: string, detail: string, json: b
   process.exitCode = 1;
 }
 
+const HANDOFF_SCOPE_ADVISORY_CODES = new Set([
+  "unresolved_scope",
+  "ambiguous_scope",
+  "empty_scope",
+  "conflicting_scope",
+  "scope_check_unavailable",
+  "scope_check_skipped",
+]);
+
+/** Handoff diagnostics and the opt-in acknowledgement stay out of stdout projections. */
+function emitHandoffScopeAdvisories(status: number, body: unknown): unknown {
+  if (status >= 400) return body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    console.error("Warning: this daemon didn't report a scope check; it may be older than this CLI");
+    return body;
+  }
+  const record = body as Record<string, unknown>;
+  const acknowledged = record.handoffScopeCheckAcknowledged === true;
+  const projected = { ...record };
+  delete projected.handoffScopeCheckAcknowledged;
+  if (!acknowledged) console.error("Warning: this daemon didn't report a scope check; it may be older than this CLI");
+  if (!Array.isArray(record.advisories)) return projected;
+
+  const retained: unknown[] = [];
+  let emitted = false;
+  for (const value of record.advisories) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      retained.push(value);
+      continue;
+    }
+    const advisory = value as { code?: unknown; message?: unknown };
+    if (!HANDOFF_SCOPE_ADVISORY_CODES.has(String(advisory.code)) || typeof advisory.message !== "string") {
+      retained.push(value);
+      continue;
+    }
+    emitted = true;
+    if (advisory.code === "scope_check_skipped") console.error(`Note: ${advisory.message}`);
+    else console.error(`Warning: ${advisory.message}`);
+  }
+  if (!emitted) return projected;
+
+  if (retained.length > 0) projected.advisories = retained;
+  else delete projected.advisories;
+  return projected;
+}
+
 // OPR.0.4.3.03 — `rig queue show` body preview.
 //
 // Default `show` renders a BOUNDED body preview instead of dumping the whole
@@ -1265,6 +1328,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--human-questions-file <path>", "#193: JSON array of 1-4 questions for a decision, each {id, question, options: [{id, label, recommended?}]} with 2-4 options; Slack shows them as buttons")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
+    .option("--return-route <route>", "For work a person answers from their own conversation: auto (OpenRig issues this conversation an address and prints it; use it from then on), self (this session's own address, for a session that joined), or an address you were given. The work carries it through handoffs, and its seats' prompts and stuck steps come to that address as tasks, ahead of the person's Slack connection, for this work only. Without it, nothing changes")
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
     .option("--verify", "Boundedly wait after persistence for the existing receipts: the gateway receipt for a person, or the wake result and any claim already present for a seat, plus the gateway receipt when the gateway may also post to that seat (a registered person with a pane; eligible to post, not guaranteed). Never retries the create or the wake, and never claims the message was read")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
@@ -1292,6 +1356,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       summary?: string;
       evidenceRef?: string;
       host?: string;
+      returnRoute?: string;
       nudge?: boolean;
       verify?: boolean;
       json?: boolean;
@@ -1365,8 +1430,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // A managed seat keeps transport-derived identity; an external caller can
       // name the existing claimed:v1 body actor without forging a transport header.
       const managedSource = resolveSenderSession();
-      const source = resolveCurrentSession(managedSource ?? opts.source, "source");
-      if (!source) return;
+      // With --return-route auto, a session with no address of its own needs none: OpenRig issues one, and it's this task's source.
+      const issuedActor = opts.returnRoute?.trim() === "auto" && managedSource === undefined && opts.source === undefined;
+      const source = issuedActor ? undefined : resolveCurrentSession(managedSource ?? opts.source, "source");
+      if (!source && !issuedActor) return;
       const deps = getDeps();
       // OPR.0.3.2.21.FR-4(b) — first-class --mission / --slice flags
       // translate to canonical mission:<id> / slice:<id> tags. Composes
@@ -1437,6 +1504,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           expiresAt: opts.expiresAt,
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
+          ...(opts.returnRoute !== undefined ? { returnRoute: opts.returnRoute } : {}),
           // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (omitted for
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
@@ -1462,6 +1530,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               case "empty_scope":
               case "conflicting_scope":
               case "scope_check_unavailable":
+              case "return_route_not_carried":
                 console.error(`Warning: ${advisory.message}`);
                 break;
             }
@@ -1495,6 +1564,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
+          }
+          // The address this work's questions come to, and the line to read them by.
+          if (status < 400 && typeof created?.returnRoute === "string") {
+            const route = created.returnRoute;
+            console.error(`Return route: ${route}. This work's questions and its seats' prompts come there as tasks; read them with ` +
+              `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
+              (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
           }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
           const advisories = Array.isArray(created?.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
@@ -1931,10 +2007,12 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
+        }, handoffScopeDiagnosticOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
+        warnRouteNotCarried(res.status, res.data);
+        const output = emitHandoffScopeAdvisories(res.status, res.data);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, output, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
         if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
@@ -2034,10 +2112,12 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
+        }, handoffScopeDiagnosticOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
+        warnRouteNotCarried(res.status, res.data);
+        const output = emitHandoffScopeAdvisories(res.status, res.data);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, output, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
         if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));

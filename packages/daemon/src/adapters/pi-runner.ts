@@ -1,3 +1,4 @@
+import type { PiManagedRequest } from "./pi-runner-protocol.js";
 // OPR.0.4.6.PI1 — the pane-hosted pi-runner (compiled entry in the daemon dist).
 //
 // The runner is what makes a Pi seat behave like a normal OpenRig tmux seat
@@ -807,6 +808,8 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
 // ── The runner core (injected effects; owns protocol state) ─────────────────
 
 export interface RunnerIo {
+  /** Retries transport failures; false means permanent authority/receipt refusal. */
+  postRunner?(payload: Record<string, unknown>): Promise<boolean>;
   /** Write one JSONL command to pi stdin. */
   sendRpc(cmd: Record<string, unknown>): void;
   /** Print a full line to the pane. */
@@ -921,6 +924,12 @@ export async function readPiSessionEntryIds(
   }
 }
 
+interface PiManagedEntry {
+  frame: PiManagedRequest; acceptance?: Promise<void>; state: "accepting" | "queued" | "writing" | "submitted" | "terminal" | "unavailable";
+  reports: Promise<unknown>; nativeAccepted?: boolean; terminalResult?: Record<string, unknown>; wakeOpened?: boolean; contaminated?: boolean; answer?: string[]; stopReason?: string;
+  disposition?: string; preDispositionEvents?: boolean; nativeTerminal?: boolean;
+}
+
 export class RunnerCore {
   private compaction: PiRunnerState["compaction"];
   /** The last attempt-stamped record, kept beside `compaction` so a later
@@ -931,6 +940,17 @@ export class RunnerCore {
   /** Durable copy of that pending attempt: written before the compact RPC, so a
    *  restarted daemon reads the newest request as uncertain, not as an older run. */
   private pendingCompaction: PiRunnerState["pendingCompaction"];
+  private readonly managed = new Map<string, PiManagedEntry>();
+  private readonly managedQueue: PiManagedEntry[] = [];
+  private readonly managedRpc = new Map<string, PiManagedEntry>();
+  private managedWake: PiManagedEntry | null = null;
+  private managedQuarantined = false;
+  private pendingManagedStart = false;
+  private readonly personPreflights = new Set<string>();
+  private promptRevision = 0;
+  private idleRevision = -1;
+  private idleQuery: { id: string; revision: number } | null = null;
+  private nativeQueueStateAvailable = false;
   private streaming = false;
   /** The child is gone; the status row says exited, never idle. */
   private paneExited = false;
@@ -1004,6 +1024,10 @@ export class RunnerCore {
   }
   /** Runner readiness is the sidecar's acknowledged get_state, not RPC transport ready. */
   isReady(): boolean { return this.ready; }
+  /** A permanent reporting-authority refusal fences new managed dispatch, not person input or native work already in flight. */
+  quarantineManagedChannel(): void { this.managedQuarantined = true; }
+
+  nativeChannelCapabilities() { return { input: this.ready && !this.managedQuarantined && this.runtime === "pi", wake: this.ready && !this.managedQuarantined && this.nativeQueueStateAvailable && this.runtime === "pi", cancel: false }; }
 
   /** Kick off identity capture. Called once pi's RPC stream is up; for OMP, with its `ready` frame. */
   start(ready?: Record<string, unknown>): void {
@@ -1088,6 +1112,84 @@ export class RunnerCore {
 
   private get runtime(): string { return this.opts.runtime ?? "pi"; }
 
+  async acceptRunnerRequest(frame: PiManagedRequest): Promise<void> {
+    if (!this.ready || this.runtime !== "pi" || !this.io.postRunner || frame.version !== 1 || frame.runId !== this.identity.runId
+      || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1 || typeof frame.requestId !== "string"
+      || !["input", "wake"].includes(frame.kind) || typeof (frame.kind === "wake" ? frame.payload?.question : frame.payload?.text) !== "string") return;
+    frame = { version: 1, runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, kind: frame.kind,
+      payload: frame.kind === "wake" ? { question: frame.payload.question! } : { text: frame.payload.text! } };
+    if ([...this.managed.values()].some(entry => entry.frame.sequence === frame.sequence && entry.frame.requestId !== frame.requestId)) throw new Error("Conflicting native sequence");
+    const old = this.managed.get(frame.requestId);
+    if (old) {
+      if (JSON.stringify(old.frame) !== JSON.stringify(frame)) throw new Error("Conflicting native request identity");
+      await old.acceptance; return;
+    }
+    const entry: PiManagedEntry = { frame, state: "accepting", reports: Promise.resolve() };
+    this.managed.set(frame.requestId, entry);
+    entry.acceptance = (async () => {
+      const accepted = await this.io.postRunner!({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" });
+      if (!accepted) { entry.state = "unavailable"; this.pumpManaged(); return; }
+      entry.state = "queued"; this.managedQueue.push(entry); this.managedQueue.sort((a, b) => a.frame.sequence - b.frame.sequence); this.pumpManaged();
+    })();
+    await entry.acceptance;
+  }
+
+  private reportManaged(entry: PiManagedEntry, type: "submitted" | "result" | "rejected", result?: Record<string, unknown>): void {
+    const f = entry.frame;
+    if (type !== "submitted" && result) entry.terminalResult = result;
+    entry.reports = entry.reports.then(() => this.io.postRunner?.({ type, runId: f.runId, requestId: f.requestId, sequence: f.sequence,
+      ...(f.kind === "wake" ? { nativeTurnId: `pi-wake-${f.requestId}` } : {}), ...(result ? { result } : {}) })).catch(() => {});
+  }
+
+  private pumpManaged(): void {
+    if (!this.ready || this.managedQuarantined || this.managedWake || this.pendingManagedStart && !this.streaming) return;
+    const entry = this.managedQueue[0];
+    if (!entry || this.personPreflights.size || [...this.managed.values()].some(prior => prior.state === "accepting" && prior.frame.sequence < entry.frame.sequence)
+      || entry.frame.kind === "wake" && (this.streaming || this.pendingManagedStart)) return;
+    if (entry.frame.kind === "wake" && this.idleRevision !== this.promptRevision) {
+      if (!this.idleQuery) {
+        this.idleQuery = { id: `openrig-native-idle-${this.promptRevision}`, revision: this.promptRevision };
+        this.io.sendRpc({ type: "get_state", id: this.idleQuery.id });
+      }
+      return;
+    }
+    this.promptRevision += 1;
+    this.managedQueue.shift(); entry.state = "writing";
+    if (entry.frame.kind === "wake") { this.managedWake = entry; entry.answer = []; }
+    if (!this.streaming) this.pendingManagedStart = true;
+    const id = `openrig-native-${entry.frame.requestId}`;
+    this.managedRpc.set(id, entry);
+    this.io.sendRpc({ id, type: "prompt", message: entry.frame.kind === "wake" ? entry.frame.payload.question! : entry.frame.payload.text!, streamingBehavior: "steer" });
+    this.acceptIntoOpenRun();
+    // Ordinary busy messages may steer; the next queued wake waits for agent_end, not this RPC response.
+    this.pumpManaged();
+  }
+
+  private finishManagedWake(entry: PiManagedEntry, forced?: "unknown" | "failed"): void {
+    // Pi reports started before agent.prompt, but awaits extension handlers before handled.
+    // Events before that authoritative disposition cannot establish this invocation's ownership.
+    if (!forced && entry.disposition === undefined) return;
+    const ownershipUnknown = !["started", "handled"].includes(entry.disposition ?? "") || entry.preDispositionEvents === true;
+    if (ownershipUnknown) this.managedQuarantined = true;
+    const completion = ownershipUnknown || forced && !entry.nativeAccepted ? "unknown" : forced ?? (entry.contaminated || !entry.wakeOpened ? "unknown"
+      : entry.stopReason === "stop" && entry.answer?.some(text => text.length > 0) ? "completed" : entry.stopReason === "aborted" ? "interrupted" : entry.stopReason === "error" ? "failed" : "unknown");
+    entry.state = "terminal";
+    entry.terminalResult = { kind: "wake", nativeTurnId: `pi-wake-${entry.frame.requestId}`,
+      completion, answer: completion === "completed" ? entry.answer?.join("\n") ?? "" : null,
+      ...(ownershipUnknown ? { ownershipUnknown: true } : {}),
+      ...(forced && !entry.nativeAccepted ? { submissionUnknown: true } : {}) };
+    if (entry.nativeAccepted || forced) this.reportManaged(entry, "result", entry.terminalResult);
+    if (this.managedWake === entry) this.managedWake = null;
+  }
+
+  private personPrompt(command: Record<string, unknown>): void {
+    if (this.runtime !== "pi" || !this.io.postRunner) { this.io.sendRpc(command); return; }
+    const id = `openrig-person-${++this.promptRevision}`;
+    this.personPreflights.add(id);
+    if (!this.streaming) this.pendingManagedStart = true;
+    this.io.sendRpc({ ...command, id });
+  }
+
   /** One aggregated paste block from pane stdin. */
   handleUserBlock(block: string): void {
     const compact = /^\/openrig-compact ([\w-]+)$/.exec(block);
@@ -1105,6 +1207,7 @@ export class RunnerCore {
       this.io.sendRpc({ type: "compact", id: COMPACT_ID + attemptId });
       return;
     }
+    if (this.managedWake) this.managedWake.contaminated = true;
     if (block === "/abort") {
       this.io.sendRpc({ type: "abort" });
       this.diag("[pi-runner] abort sent");
@@ -1112,7 +1215,7 @@ export class RunnerCore {
     }
     if (block.startsWith("/followup ")) {
       const message = block.slice("/followup ".length);
-      this.io.sendRpc({ type: "follow_up", message });
+      this.personPrompt({ type: "follow_up", message });
       this.io.mirrorLine(`${this.style.commit("you (follow-up) ▸")} ${message}`);
       this.acceptIntoOpenRun();
       return;
@@ -1121,7 +1224,7 @@ export class RunnerCore {
     // while busy, queue it as a steer, delivered after the current turn's tool calls and before the next model call.
     // The runner's `streaming` starts only at agent_start, so it can't tell when a turn is about to start (#1932) or
     // when a prompt was consumed locally and started none. It labels the mirror line only.
-    this.io.sendRpc({ type: "prompt", message: block, streamingBehavior: "steer" });
+    this.personPrompt({ type: "prompt", message: block, streamingBehavior: "steer" });
     this.io.mirrorLine(this.streaming ? `${this.style.commit("you (steer) ▸")} ${block}` : `${this.style.commit("you ▸")} ${block}`);
     this.acceptIntoOpenRun();
   }
@@ -1140,6 +1243,7 @@ export class RunnerCore {
   handlePiExit(code: number | null): void {
     this.ready = false;
     this.paneExited = true;
+    if (this.managedWake) this.finishManagedWake(this.managedWake, "failed");
     this.reportDroppedFrame(this.frameDecoder?.incomplete());
     this.io.mirrorLine(`[${this.runtime}-runner] EXITED ${this.runtime} exited (code ${code ?? "unknown"})`);
     this.writeSidecar({ exited: { code, at: this.io.now() } });
@@ -1148,6 +1252,51 @@ export class RunnerCore {
   }
 
   private handleResponse(record: Record<string, unknown>): void {
+    if (this.idleQuery && record.id === this.idleQuery.id) {
+      const query = this.idleQuery; this.idleQuery = null;
+      const data = record.data as { isStreaming?: boolean; pendingMessageCount?: number } | undefined;
+      if (record.success === true && data?.isStreaming === false && data.pendingMessageCount === 0 && query.revision === this.promptRevision) {
+        this.idleRevision = query.revision; this.pumpManaged();
+      } else if (record.success === true && typeof data?.isStreaming === "boolean" && Number.isSafeInteger(data.pendingMessageCount) && Number(data.pendingMessageCount) >= 0) {
+        setTimeout(() => this.pumpManaged(), 250).unref();
+      } else {
+        const next = this.managedQueue.shift();
+        if (next) { next.state = "terminal"; this.reportManaged(next, "rejected", { kind: next.frame.kind, reason: "native_idle_state_unavailable" }); }
+        this.pumpManaged();
+      }
+      return;
+    }
+    if (typeof record.id === "string" && this.personPreflights.delete(record.id)) {
+      if (record.success !== true || (record.data as { disposition?: string } | undefined)?.disposition === "handled") this.pendingManagedStart = false;
+      this.pumpManaged();
+      if (record.success !== false && record.error == null) return;
+    }
+    const managed = typeof record.id === "string" ? this.managedRpc.get(record.id) : undefined;
+    if (managed) {
+      this.managedRpc.delete(String(record.id));
+      if (record.success === true) {
+        managed.nativeAccepted = true; managed.state = "submitted"; this.reportManaged(managed, "submitted");
+        if (managed.frame.kind === "wake") {
+          const disposition = (record.data as { disposition?: unknown } | undefined)?.disposition;
+          managed.disposition = typeof disposition === "string" ? disposition : "unknown";
+          if (!["started", "handled"].includes(managed.disposition) || managed.preDispositionEvents) this.managedQuarantined = true;
+          if (managed.nativeTerminal || managed.disposition !== "started" && !this.streaming) this.finishManagedWake(managed);
+          else if (managed.terminalResult) this.reportManaged(managed, "result", managed.terminalResult);
+          if (this.managedWake !== managed && !this.streaming) { this.pendingManagedStart = false; this.pumpManaged(); }
+        } else {
+          managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true });
+          if ((record.data as { disposition?: string } | undefined)?.disposition === "handled") {
+            this.pendingManagedStart = false; this.pumpManaged();
+          }
+        }
+      } else {
+        managed.state = "terminal"; this.pendingManagedStart = false;
+        this.reportManaged(managed, "rejected", { kind: managed.frame.kind, reason: "native_prompt_rejected" });
+        if (this.managedWake === managed) this.managedWake = null;
+        this.pumpManaged();
+      }
+      return;
+    }
     if (record.id === NEGOTIATE_ID && this.v2Limit !== null) {
       if (record.success === true) {
         this.frameDecoder = new OmpFrameDecoder(this.v2Limit);
@@ -1222,7 +1371,9 @@ export class RunnerCore {
       this.sessionFile = sessionFile ?? this.sessionFile;
       this.sessionId = sessionId ?? this.sessionId;
       const wasReady = this.ready;
+      this.nativeQueueStateAvailable = typeof data.isStreaming === "boolean" && Number.isSafeInteger(data.pendingMessageCount) && Number(data.pendingMessageCount) >= 0;
       this.ready = this.runtime === "pi" || !!this.sessionFile;
+      if (this.ready) this.pumpManaged();
       if (!this.ready) {
         if (this.runtime === "omp") {
           this.diag("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
@@ -1562,6 +1713,19 @@ export class RunnerCore {
       // Some paths omit agent_start; turn_start still opens a new turn.
       if (event.type === "turn_start") this.assistantErrorShown = false;
     }
+    const wake = this.managedWake;
+    if (wake && wake.disposition === undefined && ["agent_start", "message_end", "agent_end"].includes(String(event.type))) wake.preDispositionEvents = true;
+    if (event.type === "agent_start" && wake) {
+      if (wake.wakeOpened) wake.contaminated = true;
+      wake.wakeOpened = true;
+    }
+    if (event.type === "message_end" && wake && wake.disposition === "started" && !wake.preDispositionEvents && wake.wakeOpened) {
+      const assistant = event.message as { role?: string; content?: Array<{ type: string; text?: string }>; stopReason?: string } | undefined;
+      if (assistant?.role === "assistant") {
+        wake.answer!.push(...(Array.isArray(assistant.content) ? assistant.content : []).filter(part => part.type === "text" && typeof part.text === "string").map(part => part.text!));
+        wake.stopReason = assistant.stopReason;
+      }
+    }
     const mapped = mapPiEvent(event, this.runtime, this.style);
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
     // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
@@ -1573,6 +1737,7 @@ export class RunnerCore {
       if (changed) this.refreshPaneStatus();
     }
     if (opening) {
+      setImmediate(() => this.pumpManaged());
       this.turn += 1;
       this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
     }
@@ -1585,6 +1750,10 @@ export class RunnerCore {
         this.paneRetrying = false;
         this.refreshPaneStatus();
       }
+      this.idleRevision = -1;
+      this.pendingManagedStart = false;
+      if (wake) { wake.nativeTerminal = true; this.finishManagedWake(wake); }
+      setImmediate(() => this.pumpManaged());
       // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every
@@ -1996,6 +2165,90 @@ export function piLaunchCapabilityError(
   return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
 }
 
+function isPermanentPiRunRefusal(status: number, code?: string): boolean {
+  if (![401, 403, 404, 409, 410].includes(status) || ["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(code ?? "")) return false;
+  return status === 401 || status === 403 || ["runner_grant_required", "runner_grant_revoked", "runner_grant_stale"].includes(code ?? "");
+}
+
+function runnerFrameBound(buffer: string): { limit: number; chars?: number } {
+  const overhead = 64 * 1024;
+  const fallback = { limit: 6 * 1024 * 1024 + overhead };
+  if (!buffer.startsWith(": runner-frame-chars=") || !buffer.includes("\n")) return fallback;
+  const header = /^: runner-frame-chars=([0-9]+)\n/.exec(buffer);
+  const chars = header ? Number(header[1]) : NaN;
+  if (!Number.isSafeInteger(chars) || chars < 1 || chars > Number.MAX_SAFE_INTEGER - overhead)
+    throw new Error("Invalid channel frame size");
+  return { limit: chars + overhead, chars };
+}
+
+/** Pi's HTTP/SSE wire loop; it owns no native executor or durable receiver journal. */
+export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseUrl: string; token: string }, runId: string, signal: AbortSignal): Promise<void> {
+  let retained = false, cursor = 0;
+  while (!signal.aborted) {
+    try {
+      if (!core.isReady()) { await new Promise(resolve => setTimeout(resolve, 100)); continue; }
+      const hello = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { method: "POST", signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]),
+        headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ type: "hello", version: 1, runId, retained, capabilities: core.nativeChannelCapabilities() }) });
+      if (!hello.ok) {
+        const failure = await hello.json().catch(() => null) as { code?: string } | null;
+        if (isPermanentPiRunRefusal(hello.status, failure?.code)) { core.quarantineManagedChannel(); return; }
+        throw new Error("Channel handshake unavailable");
+      }
+      retained = true;
+      const response = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { signal,
+        headers: { authorization: `Bearer ${endpoint.token}`, "Last-Event-ID": String(cursor) } });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null) as { code?: string } | null;
+        if (isPermanentPiRunRefusal(response.status, failure?.code)) { core.quarantineManagedChannel(); return; }
+        throw new Error("Channel subscription unavailable");
+      }
+      if (!response.body) throw new Error("Channel subscription unavailable");
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      try {
+        for (;;) {
+          const chunk = await reader.read(); if (chunk.done) break;
+          buffer += chunk.value.replace(/\r/g, "");
+          let end: number;
+          while ((end = buffer.indexOf("\n\n")) >= 0) {
+            const bound = runnerFrameBound(buffer);
+            if (end > bound.limit) throw new Error("Channel frame too large");
+            const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+            const data = block.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
+            if (bound.chars !== undefined && data.length !== bound.chars) throw new Error("Channel frame size mismatch");
+            if (!data) continue;
+            const frame = JSON.parse(data) as PiManagedRequest;
+            if (frame.runId !== runId || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1) throw new Error("Invalid channel frame");
+            cursor = Math.max(cursor, frame.sequence);
+            // Do not block reconnection on an ack whose response was lost; the core retains its acceptance promise.
+            void core.acceptRunnerRequest(frame).catch(() => {});
+          }
+          if (buffer.length > runnerFrameBound(buffer).limit) throw new Error("Channel frame too large");
+        }
+      } finally { await reader.cancel().catch(() => {}); }
+    } catch { /* Same live process/map reconnects; native writes never replay here. */ }
+    if (!signal.aborted) await new Promise(resolve => setTimeout(resolve, 250));
+  }
+}
+
+async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string }, body: Record<string, unknown>, signal: AbortSignal, onPermanentRunRefusal: () => void): Promise<boolean> {
+  while (!signal.aborted) {
+    try {
+      const response = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { method: "POST",
+        signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]), headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+      if (response.ok) return true;
+      const failure = await response.json().catch(() => null) as { code?: string } | null;
+      if ([401, 403, 404, 409, 410].includes(response.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(failure?.code ?? "")) {
+        if (isPermanentPiRunRefusal(response.status, failure?.code)) onPermanentRunRefusal();
+        return false;
+      }
+    } catch { /* A lost response retries the saved receipt, never the native operation. */ }
+    if (!signal.aborted) await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   let args: RunnerArgs;
   try {
@@ -2177,7 +2430,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       .finally(() => clearTimeout(timeout));
   });
 
+  const nativePosts = new AbortController(), nativeStream = new AbortController();
+  child.once("exit", () => { nativeStream.abort(); setTimeout(() => nativePosts.abort(), 2000).unref(); });
+  child.once("error", () => { nativeStream.abort(); nativePosts.abort(); });
   const io: RunnerIo = {
+    ...(runtime === "pi" && endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal, () => core.quarantineManagedChannel()) } : {}),
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
     },
@@ -2244,6 +2501,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     runId: runId,
   }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence,
     requestedSessionFile: args.sessionFile, model: args.model, thinking: args.thinking });
+
+  if (runtime === "pi" && endpoint && runId)
+    void connectPiRunnerChannel(core, endpoint, runId, nativeStream.signal);
 
   let transportUp = runtime !== "omp";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
