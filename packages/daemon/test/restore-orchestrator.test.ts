@@ -1,6 +1,7 @@
 import { seatSkillPaths, recordSeatSkillWrite, recordSeatSkillFollowing, cleanSeatSkills } from "../src/domain/seat-skill-storage.js";
 import type { RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { isEffectivelyRunning } from "../src/domain/ps-projection.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -3339,6 +3340,64 @@ describe("RestoreOrchestrator", () => {
       seats: [{ nodeId: result.result.nodes[0]!.nodeId, logicalId: "dev.moved", cause: "Harness not started: no startup context for dev.moved." }],
     }));
     expect(result.result.harnessNotStarted).toEqual(report);
+  });
+
+  // #3216's follow-up (CodeRabbit's Major): a full restore launches a seat by its logical id, so a seat recreated since the
+  // snapshot is launched under its live node. The notice reads that node, where the bare shell's session is; the result
+  // keeps the snapshot's node id, the identity its roll call and receipt use.
+  it("hands the notice a recreated seat's live node, where its bare shell was registered", async () => {
+    const { node, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(node.id);
+    const live = rigRepo.addNode(node.rigId, "dev.moved", { runtime: "claude-code", podId: "pod-test-rig" });
+    const notice = vi.fn(async () => ({ notices: [], unrouted: [], warnings: [] }));
+    const result = await createOrchestrator({ harnessNotStartedNotice: notice })
+      .restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "attention_required", stage: "harness_not_started" });
+    const shell = db.prepare("SELECT node_id FROM sessions WHERE startup_status = 'attention_required'").all() as Array<{ node_id: string }>;
+    expect(shell).toEqual([{ node_id: live.id }]);
+    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+      seats: [{ nodeId: live.id, logicalId: "dev.moved", cause: "Harness not started: no startup context for dev.moved." }],
+    }));
+  });
+
+  // The bare shell's startup failure names the node the launch registered it on, so node inventory gives the live seat
+  // that stage and rig ps doesn't count the shell as a running seat.
+  it("records a recreated seat's bare-shell failure on its live node, so ps doesn't count the shell as running", async () => {
+    const { node, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(node.id);
+    const live = rigRepo.addNode(node.rigId, "dev.moved", { runtime: "claude-code", podId: "pod-test-rig" });
+    const result = await createOrchestrator().restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    const failed = db.prepare("SELECT node_id FROM events WHERE type = 'node.startup_failed'").all() as Array<{ node_id: string }>;
+    expect(failed).toEqual([{ node_id: live.id }]);
+    const seat = getNodeInventory(db, node.rigId).find((entry) => entry.nodeId === live.id)!;
+    expect(seat).toMatchObject({ sessionStatus: "running", startupStatus: "attention_required", latestErrorStage: "harness_not_started" });
+    expect(isEffectivelyRunning(seat)).toBe(false);
+  });
+
+  // The notice's live read runs after the launches: a failure to read it is the notice's own warning, and the restore's
+  // completed result stands.
+  it("keeps a completed restore's result when the notice can't read the live rig, with a warning and no notice", async () => {
+    const { snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    const notice = vi.fn(async () => ({ notices: [], unrouted: [], warnings: [] }));
+    const getRig = rigRepo.getRig.bind(rigRepo);
+    vi.spyOn(rigRepo, "getRig").mockImplementation((id: string) => {
+      if (new Error().stack?.includes("noticeBareShells")) throw new Error("database is locked");
+      return getRig(id);
+    });
+    const result = await createOrchestrator({ harnessNotStartedNotice: notice })
+      .restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", stage: "harness_not_started" });
+    expect(result.result.warnings).toContain("Restore: the notice for the seats left as a bare shell wasn't recorded (database is locked).");
+    expect(notice).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'restore.completed'").get()).toEqual({ n: 1 });
   });
 
   it("carries a partial notice report, and its warnings join the restore's", async () => {
