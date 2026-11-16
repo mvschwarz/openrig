@@ -101,6 +101,21 @@ def read(path):
         return None
 
 
+def may_have_parent(node, spec_text):
+    # The CLI performs the authoritative YAML parse. This inexpensive precheck
+    # avoids starting it for the common parentless case, including legacy SPECs
+    # in a configured missions root. Recognize block and flow mapping keys.
+    manifest = read(node / "mission.yaml")
+    text = manifest if manifest is not None else spec_text.partition("---")[2].partition("---")[0]
+    key = r"(?:parent|'parent'|\"parent\")"
+    value = r"[ \t]*(?:\r?\n[ \t]+)?(?!null(?:\s|[,}\]#]|$)|~(?:\s|[,}\]#]|$))[^\s,}\]#]"
+    if re.search(r"(?:^|[,{])[ \t]*" + key + r"[ \t]*:" + value, text, re.MULTILINE | re.IGNORECASE):
+        return True
+    # Escaped or explicit YAML keys, aliases and merge keys need the shared
+    # parser to decide: treating them as absent could silently lose a link.
+    return bool(re.search(r"(?:^|[,{])[ \t]*(?:\?[ \t]+|<<[ \t]*:|metadata[ \t]*:[ \t]*\*|\"[^\"\n]*\\[^\"\n]*\"[ \t]*:)", text, re.MULTILINE))
+
+
 # Contract twin of CLI scope-fs.ts and daemon scope/node-file.ts; parity is tested.
 NOTES_FILE_PRECEDENCE = ("NOTES.md", "MISSION_NOTES.md")
 
@@ -303,7 +318,7 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
 
             # Parent links are logical edges, not filesystem ancestors. Ask the
             # scope reader to resolve IDs so tracing uses the same rules as CLI.
-            if node.parent.name == "missions" or (node / "mission.yaml").is_file():
+            if may_have_parent(node, text):
                 remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
                 workspace = next((ancestor for ancestor in node.parents if under_root(ancestor, root) and (ancestor / "project.yaml").is_file()), node.parent)
                 raw = rig_output("scope", "mission", "show", str(node), "--workspace", str(workspace), "--json", timeout=remaining) if remaining > 0 else None

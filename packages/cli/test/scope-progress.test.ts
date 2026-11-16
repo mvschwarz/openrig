@@ -195,10 +195,6 @@ describe("mission parent links", () => {
     const slice = await createSlice(env, "parent");
     const sliceInfo = await run(["slice", "show", slice, "--json"], env.missionsRoot);
     const sliceId = JSON.parse(sliceInfo.stdout).slice.id as string;
-    const duplicate = await run(["mission", "create", "different-name", "--id", "OPR.0.4.0", "--parent", sliceId, "--json"], env.missionsRoot);
-    expect(duplicate.exitCode).toBe(1);
-    expect(duplicate.stdout).toContain("already in use");
-    expect(fs.existsSync(path.join(env.missionsRoot, "different-name"))).toBe(false);
     const created = await run(["mission", "create", "child", "--parent", sliceId, "--json"], env.missionsRoot);
     expect(created.exitCode).toBe(0);
     const childId = JSON.parse(created.stdout).mission.id as string;
@@ -252,6 +248,11 @@ describe("mission parent links", () => {
     writeFile(path.join(env.missionsRoot, "broken", "SPEC.md"), "---\nid: [bad\n---\n# Invalid\n");
     const validRead = await run(["mission", "show", "child", "--json"], env.missionsRoot);
     expect(JSON.parse(validRead.stdout).mission.id).toBe(childId);
+    writeFile(path.join(env.missionsRoot, "bad-directory", "SPEC.md"), "---\nid: OPR.99.0.42\n---\n");
+    writeFile(path.join(env.missionsRoot, "bad-directory", "slices"), "not a directory");
+    const withDirectoryGap = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
+    expect(withDirectoryGap.id).toBe(childId);
+    expect(withDirectoryGap.parentWarnings.join(" ")).toContain("bad-directory");
     const tolerantWrite = await run(["mission", "parent", "child", sliceId, "--json"], env.missionsRoot);
     expect(tolerantWrite.exitCode).toBe(0);
     expect(JSON.parse(tolerantWrite.stdout).warnings.join(" ")).toContain("broken");
@@ -262,6 +263,18 @@ describe("mission parent links", () => {
     const idlessClear = await run(["mission", "parent", "idless", "--clear", "--json"], env.missionsRoot);
     expect(idlessClear.exitCode).toBe(0);
     expect(fs.readFileSync(path.join(idless, "SPEC.md"), "utf8")).not.toContain("parent:");
+    const idlessSet = await run(["mission", "parent", "idless", sliceId, "--json"], env.missionsRoot);
+    expect(idlessSet.exitCode).toBe(0);
+    const idlessShow = JSON.parse((await run(["mission", "show", "idless", "--json"], env.missionsRoot)).stdout).mission;
+    expect(idlessShow.parentId).toBe(sliceId);
+    const children = JSON.parse((await run(["slice", "show", slice, "--json"], env.missionsRoot)).stdout).slice.childMissions;
+    expect(children).toEqual(expect.arrayContaining([expect.objectContaining({ name: "idless", id: null })]));
+    const duplicate = await run(["mission", "create", "different-name", "--id", "OPR.0.4.0", "--parent", sliceId, "--json"], env.missionsRoot);
+    expect(duplicate.exitCode).toBe(0);
+    expect(duplicate.stdout).toContain("release-0.4.0");
+    expect(fs.existsSync(path.join(env.missionsRoot, "different-name"))).toBe(true);
+    const ambiguous = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
+    expect(ambiguous.parentGap).toContain("does not resolve uniquely");
   });
 });
 

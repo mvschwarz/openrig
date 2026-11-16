@@ -5,11 +5,11 @@ import { resolveNodeFile } from "./node-file.js";
 
 /** One authored node in a single project's missions tree. IDs are read, never invented. */
 export interface ParentScopeNode {
-  id: string;
+  id: string | null;
   name: string;
   kind: "mission" | "slice";
   path: string;
-  missionId: string;
+  missionId: string | null;
   parent: string | null;
   intent: string | null;
   status: string | null;
@@ -33,7 +33,12 @@ function stringValue(value: unknown): string | null {
 
 /** Discover declared missions and slices, including closed slices, under one root. */
 export function readParentScope(root: string, options: { strict?: boolean; onInvalid?: (message: string) => void } = {}): ParentScopeNode[] {
-  if (!fs.existsSync(root)) return [];
+  let rootEntries: fs.Dirent[];
+  try { rootEntries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
   const nodes: ParentScopeNode[] = [];
   function readDocument<T>(file: string, read: () => T): T | null {
     try { return read(); }
@@ -44,14 +49,13 @@ export function readParentScope(root: string, options: { strict?: boolean; onInv
       return null;
     }
   }
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+  for (const entry of rootEntries) {
     if (!entry.isDirectory()) continue;
     const missionPath = path.join(root, entry.name), file = resolveNodeFile(missionPath);
     if (!file) continue;
     const fm = readDocument(file, () => frontmatter(file));
     if (!fm) continue;
     const id = stringValue(fm.id ?? fm.dotId);
-    if (!id) continue;
     const manifest = path.join(missionPath, "mission.yaml");
     const hasManifest = fs.existsSync(manifest);
     const data: unknown = hasManifest ? readDocument(manifest, () => {
@@ -67,7 +71,9 @@ export function readParentScope(root: string, options: { strict?: boolean; onInv
     for (const dir of ["slices", "closed"]) {
       const sliceRoot = path.join(missionPath, dir);
       if (!fs.existsSync(sliceRoot)) continue;
-      for (const slice of fs.readdirSync(sliceRoot, { withFileTypes: true })) {
+      const entries = readDocument(sliceRoot, () => fs.readdirSync(sliceRoot, { withFileTypes: true }));
+      if (!entries) continue;
+      for (const slice of entries) {
         if (!slice.isDirectory()) continue;
         const slicePath = path.join(sliceRoot, slice.name), nodeFile = resolveNodeFile(slicePath);
         if (!nodeFile) continue;
@@ -94,8 +100,9 @@ export function validateMissionParent(nodes: ParentScopeNode[], missionId: strin
   let current: ParentScopeNode | null = parent;
   while (current) {
     let owner: ParentScopeNode;
-    try { owner = current.kind === "slice" ? unique(current.missionId) : current; }
+    try { owner = current.kind === "slice" ? unique(current.missionId ?? "") : current; }
     catch (error) { onWarning?.((error as Error).message); break; }
+    if (!owner.id) { onWarning?.(`Mission at '${owner.path}' has no ID.`); break; }
     if (owner.id === missionId || seen.has(owner.id)) { onWarning?.(`Parent '${parentId}' would form or enter a cycle.`); break; }
     seen.add(owner.id);
     try { current = owner.parent ? unique(owner.parent) : null; }

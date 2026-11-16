@@ -24,6 +24,26 @@ with tempfile.TemporaryDirectory() as tmp:
         return json.dumps({'mission': {'parentChain': [{'id': 'M.1', 'path': '/parent', 'intent': 'parent goal'}], 'parentGap': None}})
     trace.rig_output = rig
     failures = []
+    (mission / 'mission.yaml').write_text('metadata: { status: active }\n')
+    trace.render_work(mission, root, 'light', failures)
+    assert not calls
+    (mission / 'mission.yaml').write_text('metadata: { parent: null }\n')
+    trace.render_work(mission, root, 'light', failures)
+    assert not calls
+    (mission / 'mission.yaml').write_text('metadata: { "par\\u0065nt": M.1 }\n')
+    trace.render_work(mission, root, 'light', failures)
+    assert len(calls) == 1
+    calls.clear()
+    (mission / 'mission.yaml').unlink()
+    legacy = root / 'custom-root' / 'legacy'
+    legacy.mkdir(parents=True)
+    (root / 'project.yaml').write_text('missions:\n  root: custom-root\n')
+    (legacy / 'SPEC.md').write_text('---\nid: M.3\nparent: M.1\n---\n')
+    trace.render_work(legacy, root, 'light', [])
+    assert len(calls) == 1
+    assert calls[0][0][4:6] == ('--workspace', str(root))
+    calls.clear()
+    (mission / 'mission.yaml').write_text('metadata: { "parent": M.1 }\n')
     result = trace.render_work(mission, root, 'light', failures)
     assert len(calls) == 1 and 0 < calls[0][1]['timeout'] <= 1.8
     assert 'PARENT · M.1 · /parent' in result and 'NOTES · NOTES.md' in result

@@ -232,7 +232,10 @@ A mission can link to the mission or slice whose work it breaks down. Use
 `rig scope mission parent <mission> <dot-id>` to set the link later. Use
 `rig scope mission parent <mission> --clear` to remove it. The target must
 resolve uniquely within the project's missions root. Cycles and unresolved
-ancestors are warnings and are reported by scope audit.
+ancestors are warnings and are reported by scope audit. A mission without an
+authored ID can still have a parent; reverse views show its ID as unknown. When
+creating a mission with a duplicate ID and a parent, the command warns with the
+existing path because references to that ID are ambiguous.
 The link is `metadata.parent` in `mission.yaml`, or `parent` in the node
 frontmatter for a legacy mission without a manifest. It does not change
 folder layout, slice membership, or the meaning of `depends-on`.

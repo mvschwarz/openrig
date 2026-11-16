@@ -92,7 +92,7 @@ export function missionsRoutes(): Hono {
       status,
       parentId: missionNode?.parent ?? null,
       parent: parentMatches.length === 1 ? parentMatches[0] : null,
-      childMissions: missionNode && parentNodes.filter((node) => node.id === missionNode.id).length === 1 ? parentNodes.filter((node) => node.kind === "mission" && node.parent === missionNode.id) : [],
+      childMissions: missionNode?.id && parentNodes.filter((node) => node.id === missionNode.id).length === 1 ? parentNodes.filter((node) => node.kind === "mission" && node.parent === missionNode.id) : [],
     });
   });
 

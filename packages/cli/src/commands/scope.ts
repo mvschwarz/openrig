@@ -764,7 +764,8 @@ function buildMissionShowCommand(): Command {
         }));
         // FR-5: derive read-time trust from (stage x verified) — NEVER stored.
         const trust = deriveScopeTrust(mission.frontmatter);
-        const scopeNodes = readParentScope(missionsRoot);
+        const parentWarnings: string[] = [];
+        const scopeNodes = readParentScope(missionsRoot, { onInvalid: (message) => parentWarnings.push(message) });
         const own = scopeNodes.find((node) => node.kind === "mission" && node.path === mission.absPath);
         const parentMatches = own?.parent ? scopeNodes.filter((node) => node.id === own.parent) : [];
         const parent = parentMatches.length === 1 ? parentMatches[0] : null;
@@ -776,10 +777,14 @@ function buildMissionShowCommand(): Command {
           const matches = scopeNodes.filter((node) => node.id === currentParent!.parent);
           if (matches.length !== 1) { parentGap = `${currentParent.parent} does not resolve uniquely`; break; }
           const next = matches[0]!;
-          if (seenParents.has(next.id) || next.id === own?.id) { parentGap = `cycle at ${next.id}`; break; }
-          seenParents.add(next.id);
+          if (seenParents.has(next.id!) || next.id === own?.id) { parentGap = `cycle at ${next.id}`; break; }
+          seenParents.add(next.id!);
           parentChain.push(next);
-          currentParent = next.kind === "slice" ? scopeNodes.find((node) => node.kind === "mission" && node.id === next.missionId) : next;
+          if (next.kind === "slice") {
+            const owners = scopeNodes.filter((node) => node.kind === "mission" && node.id === next.missionId);
+            if (owners.length !== 1) { parentGap = `${next.missionId} does not resolve uniquely`; break; }
+            currentParent = owners[0];
+          } else currentParent = next;
         }
         const childMissions = mission.id && scopeNodes.filter((node) => node.id === mission.id).length === 1 ? scopeNodes.filter((node) => node.kind === "mission" && node.parent === mission.id) : [];
         const payload = {
@@ -799,6 +804,7 @@ function buildMissionShowCommand(): Command {
             parentId: own?.parent ?? null,
             parentChain,
             parentGap,
+            parentWarnings,
             childMissions,
           },
         };
@@ -808,6 +814,7 @@ function buildMissionShowCommand(): Command {
           out.write(`Mission: ${mission.name}\n`);
           out.write(`  id: ${mission.id ?? "—"}\n`);
           if (own?.parent) out.write(`  parent: ${parent?.name ?? own.parent} (${own.parent})\n`);
+          for (const warning of parentWarnings) out.write(`  warning: ${warning}\n`);
           if (childMissions.length) out.write(`  child missions: ${childMissions.map((node) => node.name).join(", ")}\n`);
           out.write(formatTrustLine(trust));
           out.write(`  active slices: ${mission.activeSliceCount}\n`);
@@ -944,7 +951,7 @@ function buildMissionCreateCommand(): Command {
         const parentWarnings: string[] = [];
         if (opts.parent !== undefined) {
           const nodes = readParentScope(missionsRoot, { onInvalid: (message) => parentWarnings.push(message) });
-          if (nodes.some((node) => node.id === id)) throw new ScopeCliError({ fact: `Mission ID ${id} is already in use.`, consequence: "Mission not created.", action: "Choose an unused mission ID." });
+          for (const node of nodes.filter((node) => node.id === id)) parentWarnings.push(`Mission ID ${id} is already in use at ${node.path}.`);
           validateMissionParent(nodes, id, opts.parent, (message) => parentWarnings.push(message));
         }
         const project = id.split(".")[0];
@@ -1090,8 +1097,17 @@ function buildMissionParentCommand(): Command {
           if (parent) doc.setIn(["metadata", "parent"], parent);
           else doc.deleteIn(["metadata", "parent"]);
           fs.writeFileSync(manifestPath, doc.toString(), "utf8");
+        } else if (parent) {
+          updateFrontmatter(mission.readmePath!, { parent });
         } else {
-          updateFrontmatter(mission.readmePath!, { parent: parent ?? null });
+          const original = fs.readFileSync(mission.readmePath!, "utf8");
+          const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
+          if (match) {
+            const doc = YAML.parseDocument(match[1]!);
+            if (doc.errors.length) throw doc.errors[0];
+            doc.delete("parent");
+            fs.writeFileSync(mission.readmePath!, `---\n${doc.toString()}---${original.slice(match[0].length)}`, "utf8");
+          }
         }
         emit(out, { ok: true, mission: mission.name, parent: parent ?? null, warnings }, json, [`Mission ${mission.name} parent: ${parent ?? "(none)"}`, ...warnings.map((message) => `Warning: ${message}`)]);
       } catch (err) { fail(err, json, out); }
@@ -1331,7 +1347,7 @@ function buildAuditCommand(): Command {
         const parentNodes = readParentScope(missionsRoot, { onInvalid: (message) => parentFindings.push(message) });
         const audited = parentNodes.find((node) => node.kind === "mission" && node.path === missionDir);
         if (audited?.parent) {
-          try { validateMissionParent(parentNodes, audited.id, audited.parent, (message) => parentFindings.push(message)); }
+          try { validateMissionParent(parentNodes, audited.id ?? "", audited.parent, (message) => parentFindings.push(message)); }
           catch (error) { parentFindings.push((error as Error).message); }
         }
         if (audited) {
