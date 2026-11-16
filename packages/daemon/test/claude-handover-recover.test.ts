@@ -340,10 +340,18 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(state()).toEqual(before);
   });
 
-  // CodeRabbit on the merge head (:1003): a pane in another window of the seat's session is a second pane too.
-  it("refuses when the seat's session has a second window, its pane the only one of the active window", async () => {
+  // #3218 item 5: the launch and its readiness check read the session's active window, so another window of the seat's
+  // session isn't a second pane of this seat. The recorded pane is found anywhere in the session, alone in its window.
+  it("adopts when the seat's session has a second window, the recorded pane alone in its own window", async () => {
+    await failedHandover();
+    otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+    expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
+  });
+
+  it("refuses when the recorded pane isn't in the seat's session any more, even with a pane alone in another window", async () => {
     await failedHandover();
     const before = state();
+    panes = () => [{ id: "%12", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "successor_identity_unproven" });
     expect(state()).toEqual(before);
@@ -369,8 +377,11 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
 
   it("refuses when the pane changes while the successor is being proven", async () => {
     await failedHandover();
-    let listed = 0;
-    panes = () => ++listed === 1 ? [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }]
+    // A second pane appears once the proof has read the pane's processes: the check before it sees one, the recheck two.
+    let proven = false;
+    const processes = paneProcesses;
+    paneProcesses = () => { proven = true; return processes(); };
+    panes = () => !proven ? [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }]
       : [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }, { id: "%10", index: 1, cwd: "/project", width: 80, height: 24, active: false }];
     const before = state();
     const result = await service().recover({ seatRef: SEAT, reason: "adopt" });

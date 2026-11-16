@@ -1056,9 +1056,12 @@ export class SeatHandoverService {
     const token = attempt.resumeToken?.trim();
     if (!token) return { ok: false, message: "The failed handover did not capture its successor's session id, so the pane's process can't be proven to be that successor." };
     const onlyPane = async () => {
-      // Every window of the session (tmux list-panes -s): a pane in another window is a second pane too.
-      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession, true);
-      return panes.length === 1 && panes[0]?.id === attempt.pane;
+      // The recorded pane, found in any window of the session (tmux list-panes -s), alone in its own window. The launch
+      // and its readiness check read one window, so a pane in another window of the session isn't a second pane here.
+      const sessionPanes = await this.tmuxAdapter.listPanes(attempt.canonicalSession, true);
+      if (!sessionPanes.some((pane) => pane.id === attempt.pane)) return false;
+      const windowPanes = await this.tmuxAdapter.listPanes(attempt.pane);
+      return windowPanes.length === 1 && windowPanes[0]?.id === attempt.pane;
     };
     // #3044 review S1: proven as the adapter's readiness proves the launch (claude-code-adapter assessManagedProbe): with
     // its frozen executable and, for a #! wrapper that starts Claude without exec (#2341), as the script's child.
@@ -1069,7 +1072,7 @@ export class SeatHandoverService {
     const proofInput = { target: attempt.pane, tmux: this.tmuxAdapter, listProcesses: list, expectedToken: token, selectedExecutable, scriptLaunch };
     try {
       if (!await onlyPane()) {
-        return { ok: false, message: `Pane "${attempt.pane}" is no longer the only pane of ${attempt.canonicalSession}, where the failed handover launched its successor.` };
+        return { ok: false, message: `Pane "${attempt.pane}" is no longer in ${attempt.canonicalSession} alone in its window, where the failed handover launched its successor.` };
       }
       const native = await verifyClaudePaneProcess(proofInput);
       if (!native) {
