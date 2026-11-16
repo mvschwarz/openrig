@@ -11,6 +11,9 @@ import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
+import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RETURN_ROUTE_NOTE_PREFIX, isEpisodeRelay,
+  promptKindFromReason, resolveEscalationReturnRoute, routeOnThisHost, type PromptKind } from "./return-route.js";
+import { isTypedGateBlocker } from "./queue-blocker.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
 import { readWakeOutcome } from "./connection-contract.js";
 import { runSyncSite } from "./sync-site-wrap.js";
@@ -212,6 +215,8 @@ export interface WakeLadderDeps {
   usageLimitJitterSeconds?: number;
   /** Cached arbitrated activity only: no new probe or native input. */
   readPromptState?: (destination: string, refusedAt: string) => "blocked" | "clear" | "unknown";
+  /** The kind of prompt a seat's cached activity reports (its needs-input reason); "unknown" when it doesn't say. */
+  readPromptKind?: (destination: string) => PromptKind;
   /** Fresh bound kernel Codex screens only; no native input or new scheduler. */
   readHookReviews?: () => Promise<HookReviewObservation[]>;
   now?: Date;
@@ -321,7 +326,9 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
     if (
       note.startsWith("slack-owner-notification-posted ") ||
       note.startsWith(`${RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX} `) ||
-      note.startsWith("delivery-termination:")
+      note.startsWith("delivery-termination:") ||
+      // A relay task's pickup at the goal's return route (return-route.ts).
+      note.startsWith(`${RELAY_CLAIMED_PREFIX} `)
     ) {
       if (view.opEngineKey === null || note.split(/\s+/).includes(`notification_key=${view.opEngineKey}`)) {
         view.opOutcomeResolved = true;
@@ -372,7 +379,9 @@ function hasPickupEvidence(db: Database.Database, row: Pick<QueueItem, "qitemId"
       note.startsWith("delivery-deferral-") ||
       // Quiet hours: holding an ask and releasing it are delivery machinery too, never someone picking it up.
       note.startsWith("delivery-decision: quiet-hold ") ||
-      note.startsWith("quiet-release-")
+      note.startsWith("quiet-release-") ||
+      // The return route's records: a relay's pickup, a conflict or another host's route (return-route.ts).
+      note.startsWith(RETURN_ROUTE_NOTE_PREFIX)
     )
       continue;
     return true;
@@ -1059,6 +1068,18 @@ export function classifyPromptAfterRefusal(
   return Date.parse(evidence.observedAt) > Date.parse(refusedAt) ? "clear" : "unknown";
 }
 
+/** The production prompt-kind read: the seat's cached needs-input reason (selection or permission), and "unknown" otherwise. */
+export function makePromptKindReader(deps: {
+  db: Database.Database;
+  getSeatState?: (nodeId: string) => Pick<ArbitratedSeatState, "needsInput"> | null | undefined;
+}): (destination: string) => PromptKind {
+  return destination => {
+    const nodeId = resolveSessionNodeId(deps.db, destination);
+    const state = nodeId ? deps.getSeatState?.(nodeId) : null;
+    return state && state.needsInput.count > 0 ? promptKindFromReason(state.needsInput.reason) : "unknown";
+  };
+}
+
 /** The production prompt read for a refused destination. The activity oracle answers first; when it has no
  *  evidence, the ladder reads the same retained runtime hook the send gate refused on, so a held wake still
  *  escalates after the activity service is rebuilt, or when the oracle does not yet trust the hook source
@@ -1241,7 +1262,9 @@ async function advancePromptRefusals(
   attemptWake: (qitemId: string, target: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
-  const groups = new Map<string, { keys: string[]; rowKeys: Map<string, Set<string>>; jobKeys: Set<string>; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean; hookReview?: string }>();
+  const groups = new Map<string, { keys: string[]; rowKeys: Map<string, Set<string>>; jobKeys: Set<string>; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean; hookReview?: string;
+    /** Routed work stuck at this seat's prompt (return-route.ts), by id, and its episode keys. */
+    waiters?: Map<string, QueueItem>; waiterKeys?: Set<string> }>();
   const readAt = (dest: string, refusedAt: string): "blocked" | "clear" | "unknown" => {
     try { return deps.readPromptState?.(dest, refusedAt) ?? "unknown"; } catch { return "unknown"; }
   };
@@ -1370,6 +1393,32 @@ async function advancePromptRefusals(
     } catch { /* No new evidence; existing hook episodes remain unresolved below. */ }
   }
 
+  // Work handed over with a return route that's stuck at a seat's prompt: held by that seat, or waiting on it (blocked on the
+  // seat, or on a row the seat holds). The person who chose that route is the one to answer, so this raises the seat's prompt
+  // alert even though no wake was refused. Work without a route is unchanged. Only a positive needs-input reading starts an
+  // episode; it ends when the seat's prompt reads clear, and a prompt after that is a new one.
+  for (const work of routedPromptWork(deps.db)) {
+    const dest = work.subject;
+    if (deps.queueRepo.deliveryDrains.holds(dest) || readAt(dest, now.toISOString()) !== "blocked") continue;
+    const key = `${PROMPT_EPISODE_TAG}${dest}|routed-work:${work.qitemId}|after:${clearedAlert(dest)?.qitemId ?? "start"}`;
+    if (closedEpisode(key)) continue;
+    const row = readCandidate(work.qitemId, dest);
+    if (!row || !["pending", "in-progress", "blocked"].includes(row.state) || deliveryHeld(deps.queueRepo, row)) continue;
+    let group = groups.get(dest);
+    if (!group) { group = { keys: [], rowKeys: new Map(), jobKeys: new Set(), rows: new Map(), jobs: new Map(), refusedAt: now.toISOString() }; groups.set(dest, group); }
+    if (!group.keys.includes(key)) group.keys.push(key);
+    (group.waiterKeys ??= new Set()).add(key);
+    (group.waiters ??= new Map()).set(row.qitemId, row);
+    // The kind the seat's activity reports. A choice prompt keeps the choice route and its setting, and a permission prompt
+    // the permission route; a kind it doesn't report marks neither, so it's never taken for a positively identified one.
+    let kind: PromptKind = "unknown";
+    try { kind = deps.readPromptKind?.(dest) ?? "unknown"; } catch { /* unknown */ }
+    if (kind === "choice") {
+      group.choice = true;
+      if (group.refusedAt === now.toISOString()) group.latestChoice = true;
+    } else if (kind === "permission") group.other = true;
+  }
+
   // A recovery returned to the blocked seat inherits only its source row's episodes.
   // Reconstruct this membership before retirement, even when the recovery has no refusal of its own.
   for (const [dest, group] of groups) {
@@ -1429,6 +1478,7 @@ async function advancePromptRefusals(
       && t.transitionNote === PROMPT_CLEARED_NOTE && Date.parse(t.ts) >= Date.parse(group?.refusedAt ?? aggregate.tsCreated))) {
       appendMarker(deps.queueRepo, aggregate, PROMPT_CLEARED_NOTE);
     }
+    if (cleared) await supersedeRelays(deps, aggregate.qitemId, `${dest}'s prompt read clear`);
     // Missing work/episode membership says nothing about the seat's prompt. Keep an explicit owner's hold
     // (including its wake) even on a positive clear; only its owner can dispose of that custody.
     const retained = cleared && aggregate.state === "blocked"
@@ -1522,9 +1572,16 @@ async function advancePromptRefusals(
       }
       members.splice(i, 1);
     }
-    if (!members.length && !group.jobs.size && !group.hookReview) continue;
+    if (!members.length && !group.jobs.size && !group.hookReview && !group.waiters?.size) continue;
     const orch = openEscalationOwner(deps, `prompt-destination:${dest}`) ?? resolveOrch(dest);
-    const toOperator = orch === null || orch === dest;
+    const waiterTags = [...(group.waiters?.keys() ?? [])].map(id => `${PROMPT_ROUTED_WORK_PREFIX}${id}`);
+    // A seat's prompt in work handed over with a return route goes to that conversation through the operator rung, not to the
+    // seat's orchestrator: only the person can answer it, and they chose to answer there. A choice prompt keeps its route, and
+    // so does a route on another host, which this daemon doesn't deliver to: the seat's lead is woken as usual.
+    const resolution = resolveEscalationReturnRoute(deps.db,
+      { qitemId: "", tags: [...members.map(m => recoveryTag(m.row.qitemId)), ...waiterTags] });
+    const routed = !(group.choice && !group.other) && resolution.kind === "route" && routeOnThisHost(resolution.route) !== null;
+    const toOperator = orch === null || orch === dest || routed;
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
     const reason = (group.hookReview
@@ -1535,17 +1592,25 @@ async function advancePromptRefusals(
     // prompt keeps the permission-prompt route.
     const choiceOnly = Boolean(group.choice && !group.other);
     const kindTags = choiceOnly ? [PROMPT_CHOICE_TAG] : [];
-    const keys = group.keys.filter(key => key === group.hookReview || group.jobKeys.has(key) || members.some(m => group.rowKeys.get(m.row.qitemId)?.has(key)));
+    const keys = group.keys.filter(key => key === group.hookReview || group.jobKeys.has(key) || group.waiterKeys?.has(key)
+      || members.some(m => group.rowKeys.get(m.row.qitemId)?.has(key)));
+    const waiting = [...(group.waiters?.values() ?? [])];
     const aggregate = await ensureEscalationRow(deps, dest,
-      toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0]) : orch!, members, reason,
-      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys], group.jobs);
+      toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0] ?? waiting[0]?.sourceSession) : orch!, members, reason,
+      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys, ...waiterTags], group.jobs, waiting);
     if (!aggregate || deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
-    const addedKeys = keys.filter(key => !row.tags?.includes(key));
+    const addedKeys = [...keys, ...waiterTags].filter(key => !row.tags?.includes(key));
     // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
     const kindChanged = choiceOnly !== Boolean(row.tags?.includes(PROMPT_CHOICE_TAG));
-    if (addedKeys.length || kindChanged) {
+    // Routed work that left the group (finished, handed on, no longer waiting) leaves the alert too, or the engine's route
+    // lookup still reads its route. Only while no operator delivery has gone out: an episode already dispatched, or one the
+    // engine already holds, keeps its record and its custody.
+    const departedWaiters = (row.tags ?? []).filter(t => t.startsWith(PROMPT_ROUTED_WORK_PREFIX) && !waiterTags.includes(t));
+    const pruneDeparted = departedWaiters.length > 0 && !readLadder(deps.db, row.qitemId, 0).opEngineDispatched
+      && !(deps.deliveryEngine?.hasAcceptedEscalation?.(row) ?? false);
+    if (addedKeys.length || kindChanged || pruneDeparted) {
       const events = deps.db.transaction(() => {
         // The original body and its delivery receipt stay immutable. Publish newly
         // observed hook guidance on this same readable record before any exhausted
@@ -1554,8 +1619,11 @@ async function advancePromptRefusals(
           ? deps.queueRepo.updateWithinTransaction({ qitemId: row.qitemId, actorSession: LADDER_ACTOR,
               summary: reason, transitionNote: `hook-review observed: ${reason}` }).persistedEvents
           : [];
-        deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
-          .run(JSON.stringify([...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys]), row.qitemId);
+        const nextTags = [...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG && !(pruneDeparted && departedWaiters.includes(t))),
+          ...kindTags, ...addedKeys];
+        deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(nextTags), row.qitemId);
+        // The rungs below read this row: routed work that just joined must reach the engine's route lookup.
+        row.tags = nextTags;
         return events;
       })();
       deps.queueRepo.notifyCommitted(events);
@@ -1577,7 +1645,11 @@ async function advancePromptRefusals(
     // joined it), the permission leg still runs; accepted or deferred delivery stays exactly-once.
     const floorOnly = view.exhausted && !view.opEngineDispatched
       && view.exhaustedNote === `${LADDER_EXHAUSTED_PREFIX} ${PROMPT_FLOOR_EXHAUSTED}`;
-    if (view.exhausted && !(floorOnly && !choiceOnly)) continue;
+    // The seat's lead was woken before routed work joined this alert, and no operator delivery has gone out: that work's
+    // conversation still gets its relay. Once one has, the exactly-once rule below keeps it.
+    const routedAfterOrchestrator = routed && view.exhausted && !view.opEngineDispatched
+      && (view.exhaustedNote?.startsWith(`${LADDER_EXHAUSTED_PREFIX} escalated to orchestrator`) ?? false);
+    if (view.exhausted && !(floorOnly && !choiceOnly) && !routedAfterOrchestrator) continue;
     if (view.opEngineDispatched) {
       if (view.opOutcomeResolved) appendExhausted(deps.queueRepo, row, "engine outcome resolved");
       continue; // accepted/deferred delivery retains gateway custody
@@ -1592,7 +1664,7 @@ async function advancePromptRefusals(
     if (deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     if (promptState(dest) !== "blocked") continue;
     const freshMembers = members.map(m => readCandidate(m.row.qitemId, dest));
-    if (unreadableDestinations.has(dest) || (!group.jobs.size && !group.hookReview && !freshMembers.some(fresh =>
+    if (unreadableDestinations.has(dest) || (!group.jobs.size && !group.hookReview && !group.waiters?.size && !freshMembers.some(fresh =>
       fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state)))) continue;
     if (!view.orchRung) {
       if (!toOperator) {
@@ -1614,6 +1686,48 @@ async function advancePromptRefusals(
       () => deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row)))) {
       const floor = deps.queueRepo.listTransitions(row.qitemId).at(-1)?.transitionNote?.includes("human rung explicit-only");
       appendExhausted(deps.queueRepo, row, floor ? PROMPT_FLOOR_EXHAUSTED : "operator rung resolved");
+    }
+  }
+}
+
+/** Open rows with a return route and the seat each is stuck on: its own holder, or for a blocked row the seat it's blocked on,
+ *  directly or through a row that seat holds. */
+function routedPromptWork(db: Database.Database): Array<{ qitemId: string; subject: string }> {
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('queue_items') WHERE name = 'return_route'").get()) return [];
+  const rows = db.prepare(`SELECT w.qitem_id, w.state, w.destination_session, w.blocked_on, b.destination_session AS blocker_owner, b.state AS blocker_state
+      FROM queue_items w LEFT JOIN queue_items b ON b.qitem_id = w.blocked_on
+     WHERE w.state IN ('pending','in-progress','blocked') AND w.return_route IS NOT NULL`)
+    .all() as Array<{ qitem_id: string; state: string; destination_session: string; blocked_on: string | null; blocker_owner: string | null; blocker_state: string | null }>;
+  return rows.flatMap(row => {
+    if (row.state !== "blocked") return [{ qitemId: row.qitem_id, subject: row.destination_session }];
+    if (!row.blocked_on) return [];
+    const subject = row.blocker_owner !== null
+      ? (["pending", "in-progress", "blocked"].includes(row.blocker_state ?? "") ? row.blocker_owner : null)
+      : !isTypedGateBlocker(row.blocked_on) && parseSessionName(row.blocked_on).kind === "canonical" ? row.blocked_on : null;
+    return subject ? [{ qitemId: row.qitem_id, subject }] : [];
+  });
+}
+
+/** Relay tasks still open for a prompt alert whose prompt read clear: an answer for that prompt must not be sent. One no agent
+ *  has picked up is closed as canceled, so it leaves the conversation's list; one an agent holds keeps its custody and gets the
+ *  note. A relay that can't be updated is logged and left as it is; it never stops the prompt pass. */
+async function supersedeRelays(deps: WakeLadderDeps, alertId: string, why: string): Promise<void> {
+  const open = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+      AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`).all(`${RELAY_FOR_PREFIX}${alertId}`) as Array<{ qitem_id: string }>;
+  for (const { qitem_id } of open) {
+    try {
+      const relay = deps.queueRepo.getById(qitem_id);
+      // Only the episode's own relay (its id, OpenRig as source, its tags); another row that carries the tag is left as it is.
+      const key = relay?.tags?.find(t => t.startsWith(RELAY_KEY_PREFIX))?.slice(RELAY_KEY_PREFIX.length);
+      if (!relay || !key || !isEpisodeRelay(relay, alertId, key, OPENRIG_SENDER)) continue;
+      const note = `${RETURN_ROUTE_NOTE_PREFIX}superseded: ${why}, so don't send an answer for that prompt. A new prompt gets a new task.`;
+      if (deps.queueRepo.listTransitions(qitem_id).some(t => t.transitionNote === note)) continue;
+      if (relay.state === "pending") {
+        await deps.queueRepo.update({ qitemId: qitem_id, actorSession: relay.sourceSession, state: "done", closureReason: "canceled",
+          closureTarget: "prompt-cleared", transitionNote: note });
+      } else appendMarker(deps.queueRepo, relay, note);
+    } catch (err) {
+      (deps.log ?? console.error)(`[wake-ladder] relay ${qitem_id} not superseded: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
@@ -1756,6 +1870,8 @@ async function ensureEscalationRow(
   extraTags: string[] = [],
   /** Watchdog reminders refused at this seat's prompt: job id to the session that registered it. */
   jobs: ReadonlyMap<string, string> = new Map(),
+  /** Routed work stuck at this seat's prompt (return-route.ts). Named, never taken over: their owners keep them. */
+  waiting: readonly QueueItem[] = [],
 ): Promise<{ qitemId: string } | null> {
   if (deps.queueRepo.deliveryDrains.holds(dest) || deps.queueRepo.deliveryDrains.holds(orch)
     || members.some(m => deliveryHeld(deps.queueRepo, m.row))) return null;
@@ -1782,6 +1898,7 @@ async function ensureEscalationRow(
     `stuck batons (${members.length}):\n` +
     members.map((m) => `- ${m.row.qitemId}: ${m.row.summary ?? "outstanding work"} (${m.reason})`).join("\n") +
     (jobs.size ? `\nwatchdog reminders refused at its prompt (${jobs.size}):\n${[...jobs.keys()].map(id => `- ${id}`).join("\n")}` : "") +
+    (waiting.length ? `\nwork handed over with a return route, stuck at its prompt (${waiting.length}):\n${waiting.map(w => `- ${w.qitemId}: ${w.summary ?? "routed work"}`).join("\n")}` : "") +
     `\nThe rows above still carry their obligations exactly-once; this escalation is the wake, not the content.`;
   const route = !deps.resolveOrchestrator
     ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;

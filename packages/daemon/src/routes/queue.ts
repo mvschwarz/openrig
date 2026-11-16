@@ -14,7 +14,9 @@ import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelf
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
+import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+  routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -80,6 +82,26 @@ const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
 // shipped registry has no canonical own-alias reader, and D-4 frames this name
 // as free-text best-effort by design.
 export const CROSS_HOST_TAG = "cross-host";
+/** A route this daemon sends to another host, naming this host (`member@rig@<self>`); one carried from another host keeps
+ *  its own. Null when this daemon doesn't know its host id, so the route can't say where it is. */
+export function hostQualifiedRoute(route: string): string | null {
+  if (splitRoute(route).host) return route;
+  const stamped = stampSelfHostSuffix(route);
+  return stamped === route ? null : stamped;
+}
+
+/** A forwarded row's tags, with the mark that its return route wasn't carried when that's so. */
+function withRouteNotCarriedTag(tags: string[] | undefined, notCarried: string | null): string[] | undefined {
+  if (!notCarried) return tags;
+  return [...(tags ?? []).filter(t => t !== RETURN_ROUTE_NOT_CARRIED_TAG), RETURN_ROUTE_NOT_CARRIED_TAG];
+}
+
+/** How a named route was established: a route carried from another host keeps the basis it was sent with there. */
+function carriedRouteBasis(route: string, basis: unknown): ReturnRouteBasis {
+  return splitRoute(canonicalSenderSession(route)).host && RETURN_ROUTE_BASES.includes(basis as ReturnRouteBasis)
+    ? basis as ReturnRouteBasis : "named";
+}
+
 export function crossHostProvenanceTags(existing: string[] | undefined): string[] {
   const base = existing ?? [];
   const fromHost = `from-host:${osHostname()}`;
@@ -562,8 +584,12 @@ export function queueRoutes(): Hono {
       );
     }
 
-    // (2) The deterministic successor identity + forwarded body.
-    const effectiveTags = body.tags ?? source.tags ?? undefined;
+    // (2) The deterministic successor identity + forwarded body. The goal's return route goes with the work, naming the host
+    // it's on. Without this host's id it can't say where the conversation is, so the work goes without it, and the response,
+    // the source row and the successor say so; the route is never sent as a bare address the other host would read as its own.
+    const carriedRoute = source.returnRoute ? hostQualifiedRoute(source.returnRoute) : null;
+    const routeNotCarried = source.returnRoute && !carriedRoute ? routeNotCarriedMessage(source.returnRoute) : null;
+    const effectiveTags = withRouteNotCarriedTag(body.tags ?? source.tags ?? undefined, routeNotCarried);
     const forwardBody: Record<string, unknown> = {
       qitemId: successorId,
       // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon IS the origin,
@@ -585,6 +611,7 @@ export function queueRoutes(): Hono {
       ...(body.evidenceRef !== undefined ? { evidenceRef: body.evidenceRef } : {}),
       ...(body.nudge !== undefined ? { nudge: body.nudge } : {}),
       ...(body.humanAlert !== undefined ? { humanAlert: body.humanAlert } : {}),
+      ...(carriedRoute ? { returnRoute: carriedRoute, returnRouteBasis: source.returnRouteBasis ?? "named" } : {}),
     };
 
     // (3) Successor-create FIRST — origin-owns-the-record; failure leaves the
@@ -608,6 +635,10 @@ export function queueRoutes(): Hono {
       });
     } catch (err) {
       return errorResponse(c, err);
+    }
+    const notCarriedNote = routeNotCarried ? `${RETURN_ROUTE_NOTE_PREFIX}not-carried: ${routeNotCarried}` : null;
+    if (notCarriedNote && !repo.listTransitions(source.qitemId).some(t => t.transitionNote === notCarriedNote)) {
+      repo.transitionLog.append({ qitemId: source.qitemId, state: closed.item.state, actorSession: body.fromSession, transitionNote: notCarriedNote });
     }
 
     // `created` is the origin daemon's row, verbatim. The origin can also report
@@ -634,8 +665,10 @@ export function queueRoutes(): Hono {
       tagSource: hasAcceptedTags && acceptedTagsMatchRequest ? (body.tags == null ? "inherited" : "explicit") : "unknown",
       delivery,
     }) : null;
+    const advisories = [...(scopeAdvisory ? [scopeAdvisory] : []),
+      ...(routeNotCarried ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
     return c.json({ closed: closed.item, created: fwd.payload,
-      ...(scopeAdvisory ? { advisories: [scopeAdvisory] } : {}),
+      ...(advisories.length ? { advisories } : {}),
       ...(scopeCheckRequested ? { [HANDOFF_SCOPE_CHECK_ACKNOWLEDGED]: true } : {}) }, 201);
   }
 
@@ -660,7 +693,9 @@ export function queueRoutes(): Hono {
       if (refusal) return { ok: false, response: refusal };
       try {
         // Recorded as the receiving /create records a forwarded write: no transport header, so claimed:v1.
-        const item = await getRepo(c).create({ ...input, identityProvenance: "claimed:v1" });
+        // A route naming this host is one of this host's own addresses.
+        const route = typeof input.returnRoute === "string" ? canonicalSenderSession(input.returnRoute) : input.returnRoute;
+        const item = await getRepo(c).create({ ...input, ...(route ? { returnRoute: route } : {}), identityProvenance: "claimed:v1" });
         const advisory = destinationAdvisory(c, item.destinationSession);
         return { ok: true, payload: { ...item, ...(advisory ? { advisories: [advisory] } : {}) } };
       } catch (err) {
@@ -695,15 +730,51 @@ export function queueRoutes(): Hono {
       // session string stays member@rig; the host is NEVER in-string).
       // Absent / "" / "local" = today's local path, byte-identical.
       hostId?: string;
+      /** The first-user return route (return-route.ts): auto, self, or an agent conversation's queue address. */
+      returnRoute?: string;
+      /** How a route carried from another host was established there. */
+      returnRouteBasis?: string;
     }>().catch(() => ({} as never));
+
+    // The return route, when the caller asks for one: `auto` issues a conversation address for this create (from its id, so
+    // an exact retry issues the same one), `self` takes the caller's own identity, and anything else is an address the
+    // caller named. Absent, the create is exactly as before.
+    const requestedRoute = typeof body.returnRoute === "string" ? body.returnRoute.trim() : undefined;
+    if (body.returnRoute !== undefined && (!requestedRoute
+      || (requestedRoute !== "auto" && requestedRoute !== "self" && !isRouteAddress(canonicalSenderSession(requestedRoute))))) {
+      return c.json({ error: "invalid_return_route", message: "A return route is auto, self, or an agent conversation's queue address (member@rig). A person is reached through the gateway, not a return route." }, 400);
+    }
+    const createId = body.qitemId ?? (requestedRoute ? newQitemId() : undefined);
+    const issued = requestedRoute === "auto" ? issuedReturnAddress(createId!) : null;
 
     // P21 I3 — the source is the transport-derived sender (X-OpenRig-Session), NEVER the body claim.
     // P18 deliver-and-label: absent header + a body sourceSession → recorded as the claimed-era stamp
     // claimed:v1; absent header + no body → 400 actor_required; a body sourceSession that DIFFERS from the
     // header → the wire SUPERSEDES it (transport:v1), not a 409. `sourceSession` below is authoritative.
-    const identity = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
+    // A caller with neither that asks for an issued route is declared by it: the issued address is the row's actor,
+    // recorded as claimed:v1 (declared here, not verified), never as a transport identity. A known caller keeps its own.
+    const derived = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
+    const identity: typeof derived = !derived.ok && issued ? { ok: true, session: issued, provenance: "claimed:v1" } : derived;
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
+    let route = requestedRoute === undefined ? null
+      : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
+        : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
+          : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
+    if (route && !isRouteAddress(route.address)) {
+      return c.json({ error: "invalid_return_route", message: `--return-route self takes the caller's own address, and this caller is ${sourceSession}, which isn't an agent conversation's queue address. Use auto, or name the address.` }, 400);
+    }
+    // A registered person's alias on this host is a person, reached through the gateway: the work goes on without that route,
+    // and the response and the row say so. An unreadable registry decides nothing.
+    let routeNotKept: string | null = null;
+    if (route && route.basis !== "issued" && route.basis !== "issued-actor" && !splitRoute(route.address).host) {
+      let person = false;
+      try { person = getRepo(c).isHumanDestination(route.address); } catch { /* unreadable registry: the route is kept as given */ }
+      if (person) {
+        routeNotKept = routeIsPersonMessage(route.address);
+        route = null;
+      }
+    }
     { const held = switchCustody(c, sourceSession); if (held) return held; }
     // Required destination and body, then PL-007: validate target_repo against
     // source rig's workspace.repos[].
@@ -726,39 +797,49 @@ export function queueRoutes(): Hono {
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       if (body.classificationBinding !== undefined)
         return c.json({ error: "invalid_classification_binding", message: "Classifier-bound effects belong to this daemon's local queue." }, 400);
-      const mintedId = body.qitemId ?? newQitemId();
-      const { hostId: _dropped, ...rest } = body;
+      const mintedId = createId ?? newQitemId();
+      // The route names this host, so the receiving daemon never reads it as one of its own addresses. Without this host's id
+      // the work goes without the route, and the response and the row say so.
+      const carried = route ? hostQualifiedRoute(route.address) : null;
+      const routeNotCarried = routeNotKept ?? (route && !carried ? routeNotCarriedMessage(route.address) : null);
+      const { hostId: _dropped, returnRoute: _route, returnRouteBasis: _basis, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
         ...rest,
+        ...(route && carried ? { returnRoute: carried, returnRouteBasis: route.basis } : {}),
         qitemId: mintedId,
         // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon is the origin,
         // so it stamps its OWN self-id (overriding the bare spread) before the
         // remote create() runs — else the remote would forge member@rig@RECEIVER.
         sourceSession: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? sourceSession : stampSelfHostSuffix(sourceSession),
-        tags: crossHostProvenanceTags(body.tags),
+        tags: crossHostProvenanceTags(withRouteNotCarriedTag(body.tags, routeNotCarried)),
       };
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
       const payload = fwd.payload;
-      if (!skippedScope || payload === null || typeof payload !== "object" || Array.isArray(payload))
+      // A same-id retry returns the row the receiver already stored: say the route wasn't carried only when it has none.
+      const returnedRoute = payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        && typeof (payload as { returnRoute?: unknown }).returnRoute === "string";
+      const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
+        ...(routeNotCarried && !returnedRoute ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
+      if (!added.length || payload === null || typeof payload !== "object" || Array.isArray(payload))
         return c.json(payload, fwd.status as 200);
       const objectPayload = payload as Record<string, unknown>;
       const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
-      return c.json({ ...objectPayload, advisories: [...existingAdvisories, toCreateScopeAdvisory(skippedScope)] }, fwd.status as 200);
+      return c.json({ ...objectPayload, advisories: [...existingAdvisories, ...added] }, fwd.status as 200);
     }
 
     try {
       const fence = classificationRefusal(c, sourceSession, body.classificationBinding);
       if (fence) return fence;
       const item = await getRepo(c).create({
-        qitemId: body.qitemId,
+        qitemId: createId,
         sourceSession,
         destinationSession: body.destinationSession!, // required by createInputRefusal
         body: body.body!,
         priority: body.priority,
         tier: body.tier,
-        tags: body.tags,
+        tags: withRouteNotCarriedTag(body.tags, routeNotKept),
         expiresAt: body.expiresAt,
         chainOfRecord: body.chainOfRecord,
         targetRepo: body.targetRepo,
@@ -771,9 +852,12 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
+        ...(route ? { returnRoute: route.address, returnRouteBasis: route.basis } : {}),
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
-      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory].filter(Boolean);
+      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory,
+        // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
+        routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
