@@ -14,9 +14,10 @@ OpenRig 0.7.17 teaches a team to bring its questions to the Claude Code
 conversation you started it from: the installer, the kernel operator and the
 `rigs` skill are instructed to bring a seat's prompt back there, pass on only
 what you answered, and read the newest review before saying the work is done.
-Restore and `rig down` report more of what they actually did, and there are
-fixes across delivery, workflows and connected assistants, including
-contributions from people using OpenRig.
+In this release's first trial, that guidance didn't complete the journey (see
+Known limits). Restore and `rig down` report more of what they actually did,
+and there are fixes across delivery, workflows and connected assistants,
+including contributions from people using OpenRig.
 
 ### Before you upgrade
 
@@ -112,8 +113,13 @@ contributions from people using OpenRig.
 
 - **Questions in your own conversation wait for you:** nothing wakes an idle
   conversation, and a prompt that changes between OpenRig reading it and sending
-  your key can take the key. This guidance isn't yet confirmed with a person
-  using it end to end.
+  your key can take the key. In this release's first trial, with Claude Code
+  and a simulated person, a reviewer's permission question never reached the
+  person, the person's agent twice offered a bare terminal attachment as a way
+  to answer a seat's prompt, and the work didn't reach a reviewed commit. No
+  return address for the person's conversation had been established, and no
+  escalation for the reviewer's question was recorded. This guidance doesn't
+  reliably complete that journey, and a second trial wasn't run.
 - **Restore:** `restore-check`'s recovery plan still counts seats restore leaves
   alone, and a seat left as a bare shell after "Harness not started" still
   counts as running in `rig ps`.

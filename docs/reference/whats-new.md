@@ -4,7 +4,9 @@ This note is for an agent on an install that was just upgraded to 0.7.17.
 OpenRig 0.7.17 teaches the installer, the kernel operator and the `rigs` skill
 to bring a team's questions to the conversation your person started it from:
 when they stay in their own Claude Code conversation, a seat's prompt is to go
-there as a task, and only their recorded words back to the seat. Restore and
+there as a task, and only their recorded words back to the seat. In this
+release's first trial, that guidance didn't complete the journey (see "Limits
+to keep in view"). Restore and
 `rig down` report more of what they did, a rig's automatic delivery can be held
 during maintenance, and three daemon read paths changed. It adds two database
 migrations. If you upgraded from 0.7.15 or
@@ -136,8 +138,13 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 
 - **Your person's conversation isn't woken.** A seat's question waits until
   they return to it, and a prompt that changes between the capture and the key
-  can take the key. This route isn't yet confirmed with a person using it end
-  to end.
+  can take the key. In this release's first trial, with Claude Code and a
+  simulated person, a reviewer's permission question never reached the person,
+  the person's agent twice offered a bare terminal attachment as a way to
+  answer a seat's prompt, and the work didn't reach a reviewed commit. No
+  return address for the person's conversation had been established, and no
+  escalation for the reviewer's question was recorded. This route doesn't
+  reliably complete that journey, and a second trial wasn't run.
 - **Restore's overall result:** `restore-check`'s recovery plan still counts
   seats restore leaves alone, and says restore tries the conversation for an
   in-roster external CLI seat. A seat left as a bare shell after "Harness not
