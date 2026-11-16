@@ -452,7 +452,7 @@ export class SeatRuntimeSwitchService {
         advisor: materials.settings.advisor.value, codexConfigProfile: materials.settings.codexConfigProfile.value,
         claudeMcp,
         ...(launchWrapper?.length ? { launchWrapper } : {}),
-        claudePermissions: override.claudePermissions, kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
+        claudePermissions: override.claudePermissions, claudeAutoMode: override.claudeAutoMode, kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
         ...(override.codexPermissions ? { codexPermissions: override.codexPermissions } : {}),
         nonInterruptive: rigRepo.getRigNonInterruptive(node.rigId), launchPosture, ...(permissionMode ? { permissionMode } : {}),
         seatEnv: withPluginDirs({ ...rigRepo.getEffectiveSeatEnv(node.id, changesPiRuntime || ctx.input.accountHome === undefined),

@@ -1,5 +1,6 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
 import { parseStoredProcessLimits, serializeProcessLimits, validateProcessLimits, type ProcessLimits } from "./process-limits.js";
@@ -331,6 +332,7 @@ interface NodeOptions {
   /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`). */
   claudeTokenRef?: ClaudeSeatTokenRef;
   claudeMcp?: ClaudeMcp;
@@ -671,6 +673,11 @@ export class RigRepository {
       // Required rule persistence is atomic with creation, including direct repository callers.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    if (opts?.claudeAutoMode !== undefined) {
+      if (opts.runtime !== "claude-code") throw new Error("claude_auto_mode requires a claude-code seat");
+      validateClaudeAutoMode(opts.claudeAutoMode);
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     if (opts?.codexPermissions !== undefined) {
       if (opts.runtime !== "codex") throw new Error("codex_permissions requires a codex seat");
       validateCodexMemberPermissions(opts.codexPermissions);
@@ -789,6 +796,11 @@ export class RigRepository {
       this.db.prepare("UPDATE nodes SET claude_permissions_json = ? WHERE id = ?")
         .run(JSON.stringify(validateClaudePermissionRules(opts.claudePermissions)), id);
     }
+    if (opts?.claudeAutoMode !== undefined) {
+      if (opts.runtime !== "claude-code") throw new Error("claude_auto_mode requires a claude-code seat");
+      this.db.prepare("UPDATE nodes SET claude_auto_mode_json = ? WHERE id = ?")
+        .run(JSON.stringify(validateClaudeAutoMode(opts.claudeAutoMode)), id);
+    }
 
     if (opts?.codexPermissions !== undefined) {
       if (opts.runtime !== "codex") throw new Error("codex_permissions requires a codex seat");
@@ -841,6 +853,17 @@ export class RigRepository {
     } catch {
       return null;
     }
+  }
+
+  getNodeInputRoute(nodeId: string): "typed" | "native" {
+    if (!this.hasNodeColumn("input_route")) return "typed";
+    const row = this.db.prepare("SELECT input_route FROM nodes WHERE id=?").get(nodeId) as { input_route: string | null } | undefined;
+    return row?.input_route === "native" ? "native" : "typed";
+  }
+
+  setNodeInputRoute(nodeId: string, route: "typed" | "native"): boolean {
+    if (!["typed", "native"].includes(route)) throw new Error("Invalid input route.");
+    return this.db.prepare("UPDATE nodes SET input_route=? WHERE id=?").run(route, nodeId).changes > 0;
   }
 
   /** S5 (OPR.0.5.4.7) — the first supported nodes.model write (the inventory was insert-only;
@@ -1224,6 +1247,7 @@ export class RigRepository {
       role: row.role,
       runtime: row.runtime,
       model: row.model,
+      inputRoute: row.input_route ?? "typed",
       effort: row.effort ?? null,
       advisor: row.advisor ?? null,
       claudeMcp: row.claude_mcp ?? null,
@@ -1317,6 +1341,7 @@ interface RigRow {
 }
 
 interface NodeRow {
+  input_route?: "typed" | "native";
   id: string;
   rig_id: string;
   logical_id: string;

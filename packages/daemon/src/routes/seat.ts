@@ -1,3 +1,4 @@
+import { RunnerChannel } from "../domain/runner-channel.js";
 import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
 import { OutboxHandler } from "../domain/outbox-handler.js";
 import { Hono, type Context } from "hono";
@@ -38,6 +39,59 @@ seatRoutes.use("*", async (c, next) => {
   const refusal = rigRepo ? runtimeSwitchCustodyRefusal(rigRepo.db, transportSenderSession(c), c.req.header(OCCUPANT_GENERATION_HEADER)) : null;
   if (refusal) return c.json(refusal.body, refusal.status);
   return next();
+});
+
+seatRoutes.post("/set-input-route/:seatRef", async c => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || !["typed", "native"].includes(String(body.route)) || typeof body.reason !== "string" || !body.reason.trim())
+    return c.json({ error: "Supply typed or native route and a reason." }, 400);
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+  const repo = c.get("rigRepo" as never) as RigRepository;
+  if (!guard) return c.json({ error: "Delivery guard unavailable." }, 503);
+  try {
+    const target = guard.target(c.req.param("seatRef"));
+    await guard.custody([target.nodeId], async () => {
+      const node = repo.db.prepare("SELECT rig_id,input_route FROM nodes WHERE id=?").get(target.nodeId) as { rig_id: string; input_route: "typed" | "native" };
+      if (node.input_route === body.route) return;
+      const events = c.get("eventBus" as never) as EventBus | undefined;
+      const event = repo.db.transaction(() => {
+        repo.setNodeInputRoute(target.nodeId, body.route as "typed" | "native");
+        return events?.persistWithinTransaction({ type: "node.input_route_changed", rigId: node.rig_id, nodeId: target.nodeId,
+          from: node.input_route, to: body.route as "typed" | "native", reason: (body.reason as string).trim(), actor: transportSenderSession(c) ?? null });
+      })();
+      if (event) events!.notifySubscribers(event);
+    });
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    return c.json({ nodeId: target.nodeId, inputRoute: body.route, nativeInput: { input: channel?.capable(target.nodeId, "input") ?? false,
+      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
+  } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
+});
+
+seatRoutes.post("/command/:seatRef", async c => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || body.type !== "wake" || typeof body.requestId !== "string" || !body.requestId.trim()
+    || body.requestId.length > 512 || typeof body.question !== "string" || !body.question.trim() || body.question.length > 1024 * 1024)
+    return c.json({ error: "Supply wake type, opaque requestId and question." }, 400);
+  const transport = c.get("sessionTransport" as never) as SessionTransport | undefined;
+  if (!transport?.deliveryGuard) return c.json({ error: "Native transport unavailable." }, 503);
+  try {
+    const target = transport.deliveryGuard.target(c.req.param("seatRef"));
+    const result = await transport.sendNativeWake(target.session, body.question, body.requestId, transportSenderSession(c) ?? "unknown");
+    return c.json(result, result.ok ? result.runnerReceipt?.stage === "completed" ? 200 : 202 : 409);
+  } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
+});
+
+seatRoutes.get("/command/:seatRef", c => {
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+  if (!guard) return c.json({ error: "Delivery guard unavailable." }, 503);
+  try {
+    const target = guard.target(c.req.param("seatRef"));
+    const id = c.req.query("requestId");
+    if (!id) return c.json({ error: "requestId required." }, 400);
+    const receipt = new OutboxHandler(guard.db).runnerReceipt(id);
+    if (!receipt || receipt.nodeId !== target.nodeId) return c.json({ error: "Request unavailable." }, 404);
+    return c.json({ receipt });
+  } catch (error) { return c.json({ error: (error as Error).message }, 409); }
 });
 
 // S09 is an independent delivery preference, never a lifecycle or permission change.
@@ -137,7 +191,8 @@ seatRoutes.get("/status/:seatRef", async (c) => {
           : { state: "not_applied", requested: { tasksMax: limits.tasksMax }, reason: "the seat is not running; the limit applies at its next fresh launch" }
         // No limit stored: nothing is read, so a seat without process_limits is unchanged.
         : null;
-    return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: false } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }
@@ -453,13 +508,15 @@ const setPermissionsHandler = async (c: Context) => {
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
   if (!body || Array.isArray(body)) return c.json({ error: "mode is required" }, 400);
-  const given = [body.mode, body.rules, body.codexPermissions, body.codexProfile].filter(value => value !== undefined).length;
+  // autoMode: null clears the seat's block.
+  const given = [body.mode, body.rules, body.autoMode, body.codexPermissions, body.codexProfile].filter(value => value !== undefined).length;
   if (given === 0) return c.json({ error: "mode is required" }, 400);
-  if (given > 1) return c.json({ error: "Choose exactly one of mode, rules, codexPermissions or codexProfile" }, 400);
+  if (given > 1) return c.json({ error: "Choose exactly one of mode, rules, autoMode, codexPermissions or codexProfile" }, 400);
   if (body.mode !== undefined && typeof body.mode !== "string") return c.json({ error: "mode must be a string" }, 400);
   if (body.codexProfile !== undefined && typeof body.codexProfile !== "string") return c.json({ error: "codexProfile must be a string" }, 400);
   if (typeof body.reason !== "string") return c.json({ error: "reason is required" }, 400);
   const choice = typeof body.mode === "string" ? { mode: body.mode } : body.rules !== undefined ? { rules: body.rules }
+    : body.autoMode !== undefined ? { autoMode: body.autoMode }
     : body.codexPermissions !== undefined ? { codexPermissions: body.codexPermissions } : { codexProfile: body.codexProfile as string };
   const result = await seatLifecycleService(c).setPermissions({
     ...settingTarget(c), ...choice, reason: body.reason, actor,

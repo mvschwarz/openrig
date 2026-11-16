@@ -143,3 +143,94 @@ describe("OutboxHandler", () => {
     expect(list[0]!.body).toBe("2");
   });
 });
+
+
+describe("native runner receipts", () => {
+  let db: Database.Database;
+  let outbox: OutboxHandler;
+  const input = (id = "native-1", runId = "run-1") => ({ outboxId: id, senderSession: "alice@rig", destinationSession: "bob@rig", body: "hello",
+    nodeId: "node-1", runId, kind: "input" as const, payload: { text: "hello" }, inputRoute: "native" as const });
+  beforeEach(() => {
+    db = createDb(); migrate(db, [outboxEntriesSchema]);
+    db.exec("ALTER TABLE outbox_entries ADD COLUMN guard_delivery TEXT");
+    outbox = new OutboxHandler(db);
+  });
+  afterEach(() => db.close());
+  it("binds immutable IDs and allocates order once per run while preserving receipt keys", () => {
+    outbox.record(input());
+    db.prepare("UPDATE outbox_entries SET guard_delivery=?").run(JSON.stringify({ ids: ["native-1"], watchdog: { nextAction: "inspect" } }));
+    expect(outbox.admitRunner(input())).toMatchObject({ sequence: 1, stage: "pending" });
+    expect(outbox.admitRunner(input()).sequence).toBe(1);
+    expect(outbox.admitRunner(input("native-2")).sequence).toBe(2);
+    expect(outbox.admitRunner(input("native-3", "run-2")).sequence).toBe(1);
+    expect(JSON.parse((db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id='native-1'").get() as { guard_delivery: string }).guard_delivery).watchdog).toEqual({ nextAction: "inspect" });
+    for (const change of [{ body: "other" }, { senderSession: "eve@rig" }, { runId: "other" }, { nodeId: "other" }, { payload: { text: "other" } }])
+      expect(() => outbox.admitRunner({ ...input(), ...change })).toThrow(/different/);
+  });
+  it("a held wake cannot become an ordinary input through grouped secondary membership", () => {
+    const held = input("held-wake");
+    outbox.bindInputRoute(held, "native", "wake");
+    outbox.record(input("first"));
+    expect(() => outbox.admitRunner({ ...input("first"), memberIds: ["first", "held-wake"] })).toThrow(/different/);
+    expect(outbox.runnerReceipt("first")).toBeNull();
+    expect(outbox.inputKind("held-wake")).toBe("wake");
+  });
+  it("a missing primary cannot be recreated by direct native admission of its surviving member", () => {
+    for (const id of ["owner", "member"]) outbox.record({ ...input(id), body: id });
+    outbox.admitRunner({ ...input("owner"), body: "owner", memberIds: ["owner", "member"] });
+    db.prepare("DELETE FROM outbox_entries WHERE outbox_id='owner'").run();
+    expect(() => outbox.admitRunner({ ...input("member"), body: "member" })).toThrow(/different|unavailable/);
+    expect(() => outbox.admitRunner({ ...input("owner"), body: "owner" })).toThrow(/unavailable/);
+    expect(outbox.runnerReceipt("member")).toBeNull();
+  });
+  it("an admitted native ID cannot gain a different original-conversation constraint on retry", () => {
+    outbox.admitRunner(input());
+    expect(() => outbox.bindExpectedIdentity(input(), { nodeId: "node-1", sessionName: "bob@rig", runtime: "pi", nativeId: "other" })).toThrow(/different/);
+  });
+  it("acceptance is durable, monotonic, and never reclaims a native effect through typed recovery", () => {
+    outbox.admitRunner(input());
+    expect(() => outbox.updateRunner("node-1", "run-1", "native-1", 2, "offered")).toThrow();
+    outbox.updateRunner("node-1", "run-1", "native-1", 1, "offered");
+    outbox.updateRunner("node-1", "run-1", "native-1", 1, "accepted");
+    expect(outbox.claimForDelivery("native-1")).toBe(false);
+    expect(() => outbox.updateRunner("node-1", "run-2", "native-1", 1, "submitted")).toThrow();
+    outbox.updateRunner("node-1", "run-1", "native-1", 1, "submitted", { acceptedTurnId: "1" });
+    expect(outbox.getById("native-1")?.deliveryState).toBe("delivered");
+    expect(outbox.updateRunner("node-1", "run-1", "native-1", 1, "accepted").stage).toBe("submitted");
+  });
+  it("resolves any grouped member after store restart and rejects changed membership or member collisions atomically", () => {
+    for (const id of ["first", "second", "third"]) outbox.record({ ...input(id), body: id });
+    const operation = { ...input("first"), body: "first", memberIds: ["first", "second"], payload: { text: "combined" } };
+    outbox.admitRunner(operation);
+    outbox = new OutboxHandler(db);
+    expect(outbox.runnerReceipt("second")).toMatchObject({ requestId: "first", sequence: 1 });
+    expect(() => outbox.admitRunner({ ...operation, memberIds: ["first", "third"] })).toThrow(/different/);
+    expect(() => outbox.admitRunner({ ...input("third"), body: "third", memberIds: ["third", "second"] })).toThrow(/different/);
+    expect(outbox.runnerReceipt("third")).toBeNull();
+    expect(outbox.runnerReceipts("node-1", "run-1")).toHaveLength(1);
+    outbox.updateRunner("node-1", "run-1", "first", 1, "offered");
+    outbox.updateRunner("node-1", "run-1", "first", 1, "accepted");
+    outbox.updateRunner("node-1", "run-1", "first", 1, "submitted");
+    expect(outbox.getById("second")?.deliveryState).toBe("delivered");
+    expect(outbox.claimForDelivery("second")).toBe(false);
+    db.prepare("DELETE FROM outbox_entries WHERE outbox_id='first'").run();
+    expect(outbox.runnerPrimary("second")).toBe("first");
+    expect(outbox.runnerReceipt("second")).toBeNull();
+    expect(outbox.claimForDelivery("second")).toBe(false);
+  });
+  it("retains terminal native submission uncertainty without claiming delivery", () => {
+    outbox.admitRunner(input()); outbox.updateRunner("node-1", "run-1", "native-1", 1, "offered");
+    outbox.updateRunner("node-1", "run-1", "native-1", 1, "accepted");
+    const result = { kind: "input", completion: "unknown", submissionUnknown: true };
+    expect(outbox.updateRunner("node-1", "run-1", "native-1", 1, "completed", { result }).result).toEqual(result);
+    expect(outbox.getById("native-1")?.deliveryState).toBe("indeterminate");
+  });
+  it("reconciles lost receiver memory as uncertainty without reoffering", () => {
+    outbox.admitRunner(input());
+    outbox.updateRunner("node-1", "run-1", "native-1", 1, "offered");
+    outbox.forgetRunnerMap("node-1", "run-1");
+    expect(outbox.getById("native-1")?.deliveryState).toBe("indeterminate");
+    expect(outbox.runnerReceipts("node-1", "run-1")[0]).toMatchObject({ stage: "offered", reconciliation: "receiver_state_lost" });
+    expect(outbox.claimForDelivery("native-1")).toBe(false);
+  });
+});

@@ -2035,6 +2035,8 @@ describe("SeatHandoverService", () => {
     const rules = { allow: [], deny: ["Read(./private/**)"] };
     const writer = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
     expect(await writer.setPermissions({ seatRef: "dev-impl@seat-rig", rules, actor: "operator@seat-rig", reason: "Set successor rules" })).toMatchObject({ ok: true });
+    const claudeAutoMode = { environment: ["$defaults", "Source control: github.com/acme"] };
+    expect(await writer.setPermissions({ seatRef: "dev-impl@seat-rig", autoMode: claudeAutoMode, actor: "operator@seat-rig", reason: "Set successor auto mode" })).toMatchObject({ ok: true });
     launchHarness.mockResolvedValue({ ok: true, resumeToken: "claude-successor", resumeType: "claude_id" });
     const claudeService = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
       tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
@@ -2044,7 +2046,7 @@ describe("SeatHandoverService", () => {
     });
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
     expect(launchHarness).toHaveBeenCalledTimes(1);
-    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules, claudeMcp });
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules, claudeAutoMode, claudeMcp });
   });
 
   it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {

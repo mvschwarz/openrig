@@ -29,6 +29,7 @@ export interface ContinuityState {
 }
 
 export interface Node {
+  inputRoute?: "typed" | "native";
   id: string;
   rigId: string;
   logicalId: string;
@@ -174,6 +175,7 @@ export type RigEvent =
       channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
     }
   | { type: "rig.deleted"; rigId: string }
+  | { type: "node.input_route_changed"; rigId: string; nodeId: string; from: "typed" | "native"; to: "typed" | "native"; reason: string; actor: string | null }
   | { type: "node.added"; rigId: string; nodeId: string; logicalId: string }
   | { type: "node.removed"; rigId: string; nodeId: string }
   | { type: "binding.updated"; rigId: string; nodeId: string }
@@ -190,6 +192,7 @@ export type RigEvent =
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
+  | { type: "node.claude_auto_mode_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only"; replaced?: unknown }
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -1234,6 +1237,7 @@ export interface LegacyRigSpecNode {
   effort?: string;
   advisor?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
@@ -1362,6 +1366,7 @@ export interface RigSpecPodMember {
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
@@ -1663,6 +1668,7 @@ export interface ExpansionPodFragment {
     effort?: unknown;
     codexConfigProfile?: string;
     claudePermissions?: unknown;
+    claudeAutoMode?: unknown;
     claudeToken?: unknown;
     claudeMcp?: unknown;
     codexPermissions?: unknown;

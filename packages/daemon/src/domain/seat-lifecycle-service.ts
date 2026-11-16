@@ -1,5 +1,6 @@
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import type { NativeProcessLister } from "./native-process-lineage.js";
@@ -925,8 +926,8 @@ export class SeatLifecycleService {
     return probe.state === "present" ? { state: "yes" } : { state: "no", detail: "tmux session absent" };
   }
 
-  async setPermissions(input: SeatSettingTarget & { mode?: string; rules?: unknown; codexPermissions?: unknown; codexProfile?: string; reason: string; actor: string }): Promise<
-    | { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown; observation?: unknown }
+  async setPermissions(input: SeatSettingTarget & { mode?: string; rules?: unknown; autoMode?: unknown; codexPermissions?: unknown; codexProfile?: string; reason: string; actor: string }): Promise<
+    | { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown; observation?: unknown; advisories?: string[] }
     | SeatRefusal
   > {
     input = { ...input };
@@ -937,8 +938,9 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    const choices = [input.mode, input.rules, input.codexPermissions, input.codexProfile].filter(value => value !== undefined).length;
-    if (choices !== 1) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode, rules, codex permissions or codex profile." };
+    const choices = [input.mode, input.rules, input.autoMode, input.codexPermissions, input.codexProfile].filter(value => value !== undefined).length;
+    if (choices !== 1) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode, rules, auto mode, codex permissions or codex profile." };
+    if (input.autoMode !== undefined) return this.setClaudeAutoMode(seat, runtime, input.autoMode, input.actor.trim(), input.reason.trim());
     if (input.codexPermissions !== undefined) return this.setCodexPermissions(seat, runtime, input.codexPermissions, input.actor.trim(), input.reason.trim());
     if (input.codexProfile !== undefined) return this.setCodexProfile(seat, runtime, input.codexProfile, resolved.entry.cwd ?? undefined,
       input.actor.trim(), input.reason.trim(), input.nodeId !== undefined);
@@ -1008,6 +1010,34 @@ export class SeatLifecycleService {
     } catch (error) {
       return { ok: false, code: "permission_selection_refused", message: (error as Error).message };
     }
+  }
+
+  /** Replaces the seat's Claude autoMode block, or clears it when `value` is null. */
+  private setClaudeAutoMode(seat: SeatDescriptor, runtime: string, value: unknown, actor: string, reason: string):
+    { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; advisories: string[] } | SeatRefusal {
+    if (runtime !== "claude-code") return { ok: false, code: "permission_selection_refused", message: "claude_auto_mode is only supported for claude-code seats." };
+    try {
+      const to = value === null ? null : validateClaudeAutoMode(value);
+      let persisted: PersistedEvent | null = null;
+      const result = this.db.transaction(() => {
+        // Read the current record for the audit; malformed old bytes stay visible as such and are replaced.
+        const row = this.db.prepare("SELECT claude_auto_mode_json FROM nodes WHERE id = ? AND runtime = 'claude-code'").get(seat.nodeId) as { claude_auto_mode_json: string | null } | undefined;
+        if (!row) throw new Error("Seat runtime changed; the auto mode block was not changed.");
+        let from: unknown = null;
+        try { from = readClaudeAutoMode(this.db, seat.nodeId) ?? null; }
+        catch { from = { state: "invalid", stored: row.claude_auto_mode_json }; }
+        const changed = JSON.stringify(from) !== JSON.stringify(to);
+        if (changed) {
+          this.db.prepare("UPDATE nodes SET claude_auto_mode_json = ? WHERE id = ?").run(to === null ? null : JSON.stringify(to), seat.nodeId);
+          persisted = this.eventBus.persistWithinTransaction({ type: "node.claude_auto_mode_changed", rigId: seat.rigId,
+            nodeId: seat.nodeId, from, to, actor, reason, effect: "future_launches_only" });
+        }
+        return { ok: true as const, seat, from, to, changed, advisories: to === null ? [] : claudeAutoModeAdvisories(to),
+          effect: `${to === null ? "Clearing this seat's block stops OpenRig passing one; your user and managed auto mode settings are unaffected and still apply." : "The block is added to the seat's launch settings beside your user and managed auto mode settings."} It applies at the next separately authorized managed launch or resume. The current process, permission mode and history are unchanged. Older readers may ignore it.` };
+      })();
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      return result;
+    } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
   }
 
   /** A Codex seat's envelope: its explicit permission choice, which replaces a recorded mode in the same write. */

@@ -693,3 +693,15 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     }
   });
 });
+
+
+it("set-input-route posts the explicit seat choice and validates unsupported routes locally", async () => {
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const deps = makeDeps({ status: 200, data: { inputRoute: "typed" } }, calls);
+  await captureLogs(() => makeCommand(deps).parseAsync(["seat", "set-input-route", "dev@rig", "--route", "typed", "--reason", "use pane", "--json"], { from: "user" }));
+  expect(calls).toEqual([{ path: "/api/seat/set-input-route/dev%40rig", body: { route: "typed", reason: "use pane" } }]);
+  calls.length = 0;
+  const result = await captureLogs(() => makeCommand(deps).parseAsync(["seat", "set-input-route", "dev@rig", "--route", "automatic", "--reason", "no"], { from: "user" }));
+  expect(result.exitCode).toBe(1);
+  expect(calls).toEqual([]);
+});

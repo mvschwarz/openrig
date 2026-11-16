@@ -7,6 +7,7 @@
 
 import type Database from "better-sqlite3";
 import { createHash, randomBytes } from "node:crypto";
+import { OutboxHandler } from "./outbox-handler.js";
 import { SessionRegistry } from "./session-registry.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { monotonicFactory } from "ulid";
@@ -125,6 +126,7 @@ export class ActivityGrantStore {
         .run(at, grant.nodeId, grantId);
       this.db.prepare("UPDATE activity_grants SET activated_at = ?, session_id = ? WHERE grant_id = ? AND revoked_at IS NULL")
         .run(at, session.id, grantId);
+      new OutboxHandler(this.db).replaceRunnerRun(grant.nodeId, grant.runId);
       return true;
     })();
   }
