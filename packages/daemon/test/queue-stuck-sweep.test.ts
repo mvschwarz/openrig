@@ -2828,7 +2828,7 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
         destinationSession: current.destinationSession, body: current.body, summary: current.summary });
       current = next;
       expect.soft(current.body, `delivery pass ${pass}: current condition is visible`).toMatch(/^STUCK SWEEP FINDING \(undelivered-human-notice\)/);
-      expect.soft(current.summary, `delivery pass ${pass}: its title says so`).toMatch(new RegExp(`^Checked on ${row.qitemId}: the person it's for wasn't notified \\(\\d+ minutes?\\)$`));
+      expect.soft(current.summary, `delivery pass ${pass}: its title says so`).toMatch(new RegExp(`^Checked on ${row.qitemId}: notification to its person is unconfirmed \\(\\d+ minutes?\\)$`));
       expect.soft(current.body, `delivery pass ${pass}: current recipient and failure are visible`)
         .toContain(`human notice ${outcome} to ${destination}`);
       expect(repo.getById(row.qitemId)!.waiting!.nextBackstop).toMatchObject({ owner: current.destinationSession,

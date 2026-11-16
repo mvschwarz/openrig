@@ -120,7 +120,7 @@ export function findingDedupTag(kind: StuckFindingKind, qitemId: string): string
 
 /** A finding's title, written for the person whose work list shows it; an agent reads it too, so it names the item. Code
  *  reads the kind from the dedup tag and the body's first line (`STUCK SWEEP FINDING (<kind>)`), never from this. */
-export function findingTitle(kind: StuckFindingKind, rowId: string, ageMinutes: number, possiblyPosted = false): string {
+export function findingTitle(kind: StuckFindingKind, rowId: string, ageMinutes: number): string {
   const minutes = `${ageMinutes} ${ageMinutes === 1 ? "minute" : "minutes"}`;
   switch (kind) {
     case "unclaimed-obligation": return `Checked on ${rowId}: nobody has picked it up in ${minutes}`;
@@ -129,9 +129,8 @@ export function findingTitle(kind: StuckFindingKind, rowId: string, ageMinutes: 
     case "parked-owner-no-input": return `Checked on ${rowId}: its parked owner couldn't be reminded (${minutes})`;
     case "unconsumed-wait": return `Checked on ${rowId}: its owner hasn't answered the wait notice (${minutes})`;
     case "undelivered-wake": return `Checked on ${rowId}: its owner couldn't be woken (${minutes})`;
-    case "undelivered-human-notice": return possiblyPosted
-      ? `Checked on ${rowId}: notification to its person is unconfirmed (${minutes})`
-      : `Checked on ${rowId}: the person it's for wasn't notified (${minutes})`;
+    // One title for every delivery outcome, which can change while the finding stays open; the body names the failure.
+    case "undelivered-human-notice": return `Checked on ${rowId}: notification to its person is unconfirmed (${minutes})`;
     case "dangling-closure": return `Checked on ${rowId}: it was closed onto a successor that isn't here (${minutes})`;
     case "unclaimed-backlog": return `Checked on ${rowId}: nobody has picked it up in ${minutes}`;
   }
@@ -497,8 +496,6 @@ interface Candidate {
   jobId?: string;
   /** Set when its own route was the destination and that destination can't hear its finding (routeAroundNoWake). */
   noWake?: boolean;
-  /** undelivered-human-notice only: Slack answered but its reply couldn't be read, so the notice may have posted. */
-  possiblyPosted?: boolean;
 }
 
 function isFindingRow(item: QueueItem): boolean {
@@ -1021,7 +1018,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       return {
         kind: humanNotice ? "undelivered-human-notice" : "undelivered-wake",
         row,
-        possiblyPosted,
         route: humanNotice ? noticeOwner : resolveOrch(row.destinationSession, row) ?? row.destinationSession,
         ageMinutes: minutesSince(row.tsCreated, now),
         evidenceAt: latestIso(row.tsUpdated, row.lastNudgeAttempt),
@@ -1568,7 +1564,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
             const marker = "\n\n--- Original finding (historical) ---\n";
             const original = sharedRow.body.includes(marker) ? sharedRow.body.split(marker, 2)[1]! : sharedRow.body;
             const body = evidenceBody(deps.db, c) + marker + original;
-            const summary = findingTitle(c.kind, c.row.qitemId, c.ageMinutes, c.possiblyPosted);
+            const summary = findingTitle(c.kind, c.row.qitemId, c.ageMinutes);
             deps.db.prepare("UPDATE queue_items SET body = ?, summary = ? WHERE qitem_id = ? AND body = ? AND summary = ? AND state IN ('pending', 'in-progress', 'blocked')")
               .run(body, summary, shared.qitemId, sharedRow.body, sharedRow.summary);
           }
@@ -1613,7 +1609,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           body: evidenceBody(deps.db, now_) + (routeNotes.has(c.row.qitemId) ? `\nescalation route: ${routeNotes.get(c.row.qitemId)}` : ""),
           summary: now_.verificationTargets
             ? custodyHeadline(c.row.qitemId, now_.verificationTargets, now_.ageMinutes)
-            : findingTitle(c.kind, c.row.qitemId, now_.ageMinutes, now_.possiblyPosted),
+            : findingTitle(c.kind, c.row.qitemId, now_.ageMinutes),
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId),
             ...(routed.has(c.row.qitemId) || now_.row.tags?.includes(ESCALATION_HOP_TAG) ? [ESCALATION_HOP_TAG] : []),
