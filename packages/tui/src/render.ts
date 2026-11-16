@@ -1,3 +1,4 @@
+import stringWidth from "string-width";
 import { helpScreen } from "./commands/help.js";
 import { commandFocusVisible } from "./motion.js";
 import { attentionLines } from "./attention/attention-model.js";
@@ -37,7 +38,7 @@ import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js"
 import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
 import { terminalLines } from "./terminals/terminal-model.js";
-import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, sliceWhole, wrapDetailLines } from "./detail.js";
+import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, wrapDetailLines } from "./detail.js";
 import { healthAgentLines, healthDetailLines, healthListLines, healthSummaryLine } from "./health/health-model.js";
 import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, SeatEffortRead, ViewState } from "./types.js";
 
@@ -54,17 +55,42 @@ interface ContentLine {
   sticky?: { group: string; text?: string };
 }
 
-function pad(text: string | number | null | undefined, width: number): string {
+// Cell widths are terminal columns, not string length: a CJK character takes two columns and a combining mark none,
+// so a cell sized by `.length` overflows its column and moves every column, and click target, after it.
+const graphemes = new Intl.Segmenter();
+
+function columns(text: string): number {
+  return /^[\x20-\x7e]*$/.test(text) ? text.length : stringWidth(text);
+}
+
+/** The longest prefix of `text` that fits in `width` columns, cut between graphemes. */
+function sliceColumns(text: string, width: number): string {
+  let prefix = "";
+  let used = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    const w = stringWidth(segment);
+    if (used + w > width) break;
+    prefix += segment;
+    used += w;
+  }
+  return prefix;
+}
+
+/** `text` in exactly `width` columns; a wide character that doesn't fit before the ellipsis leaves a space. */
+function fit(text: string | number | null | undefined, width: number, align: Align): string {
   const t = String(text ?? "");
-  if (t.length <= width) return t + " ".repeat(width - t.length);
   // never hard-clip mid-word: any truncation reads as an ellipsis (glance honesty)
-  return (sliceWhole(t, Math.max(width - 1, 0)) + "…").padEnd(width);
+  const shown = columns(t) <= width ? t : sliceColumns(t, Math.max(width - 1, 0)) + "…";
+  const fill = " ".repeat(Math.max(width - columns(shown), 0));
+  return align === "right" ? fill + shown : shown + fill;
+}
+
+function pad(text: string | number | null | undefined, width: number): string {
+  return fit(text, width, "left");
 }
 
 function padLeft(text: string | number | null | undefined, width: number): string {
-  const t = String(text ?? "");
-  if (t.length <= width) return " ".repeat(width - t.length) + t;
-  return (sliceWhole(t, Math.max(width - 1, 0)) + "…").padStart(width);
+  return fit(text, width, "right");
 }
 
 type Align = "left" | "right";
