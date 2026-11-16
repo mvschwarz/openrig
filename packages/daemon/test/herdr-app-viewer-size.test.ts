@@ -88,12 +88,13 @@ describe.skipIf(!tmuxBin || !flagsAtRuntime)("the generated herdr-app viewer (re
     await viewer(200, 120, "h3");
     await settle();
     // The seat is replaced (same name and node id): the tile attaches a NEW tmux client on the same terminal, which the
-    // terminal's size never changed for. The person attaches first, so the viewer's new client is the latest one.
+    // terminal's size never changed for. The person attaches first, so the viewer's new client is the latest one: the
+    // tile reattaches only once the new session carries the node id, so it is published after the person's baseline.
     await tmux(seat, "kill-session", "-t", "=seat1");
     await tmux(view, "kill-session", "-t", "p1").catch(() => {});
     await tmux(seat, "-f", "/dev/null", "new-session", "-d", "-s", "seat1", "-x", "80", "-y", "20", "cat");
-    await tmux(seat, "set-environment", "-t", "seat1", "OPENRIG_NODE_ID", "node-1");
     const before = await person();
+    await tmux(seat, "set-environment", "-t", "seat1", "OPENRIG_NODE_ID", "node-1");
     expect(await until(async () => (await clients()).length === 2)).toBe(true); // the viewer's tile attached again
     expect(await until(async () => (await windowSize()) === before)).toBe(true);
     await settle();
