@@ -503,9 +503,18 @@ function remoteHostOf(hostId: string | undefined): string | undefined {
  *  (`QUEUE_FORWARD_TIMEOUT_MS` in the daemon's routes/queue.ts), so waiting only the client's 5 s default
  *  turns a slow remote's answer into an unknown outcome. */
 const CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS = 15_000;
+const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 
 function crossHostWriteOptions(hostId: string | undefined): { timeoutMs: number } | undefined {
   return remoteHostOf(hostId) ? { timeoutMs: CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS } : undefined;
+}
+
+/** The daemon returns handoff scope advice only to this CLI diagnostic request; it is not in the write body. */
+function handoffScopeDiagnosticOptions(hostId: string | undefined) {
+  return {
+    ...(crossHostWriteOptions(hostId) ?? {}),
+    headers: { [CLI_HANDOFF_SCOPE_ADVISORY_HEADER]: "1" },
+  };
 }
 
 /** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
@@ -890,6 +899,52 @@ function emitQueueUpdateReadBackFailure(qitemId: string, detail: string, json: b
   if (json) console.error(JSON.stringify({ error: "queue_update_readback_failed", message, action }));
   else console.error(`${message}\n${action}`);
   process.exitCode = 1;
+}
+
+const HANDOFF_SCOPE_ADVISORY_CODES = new Set([
+  "unresolved_scope",
+  "ambiguous_scope",
+  "empty_scope",
+  "conflicting_scope",
+  "scope_check_unavailable",
+  "scope_check_skipped",
+]);
+
+/** Handoff diagnostics and the opt-in acknowledgement stay out of stdout projections. */
+function emitHandoffScopeAdvisories(status: number, body: unknown): unknown {
+  if (status >= 400) return body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    console.error("Warning: this daemon didn't report a scope check; it may be older than this CLI");
+    return body;
+  }
+  const record = body as Record<string, unknown>;
+  const acknowledged = record.handoffScopeCheckAcknowledged === true;
+  const projected = { ...record };
+  delete projected.handoffScopeCheckAcknowledged;
+  if (!acknowledged) console.error("Warning: this daemon didn't report a scope check; it may be older than this CLI");
+  if (!Array.isArray(record.advisories)) return projected;
+
+  const retained: unknown[] = [];
+  let emitted = false;
+  for (const value of record.advisories) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      retained.push(value);
+      continue;
+    }
+    const advisory = value as { code?: unknown; message?: unknown };
+    if (!HANDOFF_SCOPE_ADVISORY_CODES.has(String(advisory.code)) || typeof advisory.message !== "string") {
+      retained.push(value);
+      continue;
+    }
+    emitted = true;
+    if (advisory.code === "scope_check_skipped") console.error(`Note: ${advisory.message}`);
+    else console.error(`Warning: ${advisory.message}`);
+  }
+  if (!emitted) return projected;
+
+  if (retained.length > 0) projected.advisories = retained;
+  else delete projected.advisories;
+  return projected;
 }
 
 // OPR.0.4.3.03 — `rig queue show` body preview.
@@ -1931,10 +1986,11 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
+        }, handoffScopeDiagnosticOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
+        const output = emitHandoffScopeAdvisories(res.status, res.data);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, output, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
         if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
@@ -2034,10 +2090,11 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
+        }, handoffScopeDiagnosticOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
+        const output = emitHandoffScopeAdvisories(res.status, res.data);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, output, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
         if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
