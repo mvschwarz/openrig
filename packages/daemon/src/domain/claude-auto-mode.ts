@@ -79,6 +79,11 @@ export interface ClaudeAutoModeStatus {
   inspect?: string;
 }
 
+/** Key order doesn't matter; list order does. */
+function canonicalJson(block: ClaudeAutoMode): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(block).sort(([a], [b]) => a.localeCompare(b))));
+}
+
 /** Saved against applied, for seat status. `applied` is the observation's field: absent when not recorded. `plannedAuto` is undefined when the plan can't be read. */
 export function claudeAutoModeStatus(db: Database.Database, nodeId: string, applied: AppliedClaudeAutoMode | undefined, plannedAuto: boolean | undefined): ClaudeAutoModeStatus | undefined {
   let saved: ClaudeAutoModeStatus["saved"];
@@ -90,8 +95,8 @@ export function claudeAutoModeStatus(db: Database.Database, nodeId: string, appl
     : applied === null ? { state: "none" } : "unknown" in applied ? { state: "unknown", reason: applied.unknown } : { state: "sent", block: applied };
   // Shown with nothing saved when the last launch sent a block, or when a launch recorded that it couldn't tell.
   if (saved.state === "none" && lastLaunch.state !== "sent" && !(lastLaunch.state === "unknown" && lastLaunch.reason)) return undefined;
-  const savedJson = saved.state === "recorded" ? JSON.stringify(saved.block) : saved.state === "none" ? "null" : undefined;
-  const appliedJson = lastLaunch.state === "sent" ? JSON.stringify(lastLaunch.block) : lastLaunch.state === "none" ? "null" : undefined;
+  const savedJson = saved.state === "recorded" ? canonicalJson(saved.block) : saved.state === "none" ? "null" : undefined;
+  const appliedJson = lastLaunch.state === "sent" ? canonicalJson(lastLaunch.block) : lastLaunch.state === "none" ? "null" : undefined;
   const matchesLastLaunch = savedJson === undefined || appliedJson === undefined ? null : savedJson === appliedJson;
   const notes = ["Claude adds these entries to your user and managed auto mode settings; OpenRig doesn't read or change those."];
   if (matchesLastLaunch === false) notes.push("The saved block differs from the last launch's; it applies at the next managed launch or resume.");

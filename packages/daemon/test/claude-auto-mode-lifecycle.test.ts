@@ -153,6 +153,13 @@ describe("a seat's Claude autoMode block", () => {
     expect(differs["inspect"]).toMatch(/^claude --settings '.*' auto-mode config$/);
     launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: block });
     expect(status().status.permissions.claudeAutoMode).toMatchObject({ lastLaunch: { state: "sent", block }, matchesLastLaunch: true });
+    const reordered = Object.fromEntries(Object.entries(block).reverse());
+    expect(Object.keys(reordered)).not.toEqual(Object.keys(block));
+    launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: reordered });
+    expect(status().status.permissions.claudeAutoMode).toMatchObject({ matchesLastLaunch: true });
+    const listReordered = { ...block, environment: [...block.environment!].reverse() };
+    launches.recordGeneration(generation, { ...observeClaudePermission("--permission-mode auto"), claudeAutoMode: listReordered });
+    expect(status().status.permissions.claudeAutoMode).toMatchObject({ matchesLastLaunch: false });
     await f.service.setPermissions({ ...update, autoMode: null });
     expect(status().status.permissions.claudeAutoMode).toMatchObject({ saved: { state: "none" }, matchesLastLaunch: false });
   });
