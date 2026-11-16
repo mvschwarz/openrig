@@ -42,7 +42,7 @@ import { listProjects, projectCatalogPaths } from "../domain/workspace/project-r
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
-import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope } from "../domain/queue-erasure.js";
+import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope, type HostClass } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
@@ -100,7 +100,7 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
  *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
 export const HANDOFF_SUCCESSOR_LIMIT = 20;
-export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
   try {
     // Newest first, one past the bound so a cut list is known.
     const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
@@ -771,8 +771,11 @@ export function queueRoutes(): Hono {
       return refuse("erase_rig_invalid", "rig is the account rig's id, given with members.");
     }
     if (body.members !== undefined) {
-      const members = exactList(body.members);
-      if (!members) return refuse("erase_members_invalid", "members must be a non-empty list of exact session names.");
+      // An empty list, given with rig, is an account rig that never had a member; the erasure checks the rig's history.
+      const members = Array.isArray(body.members) && body.members.length === 0 && typeof body.rig === "string" ? [] : exactList(body.members);
+      if (!members) {
+        return refuse("erase_members_invalid", "members must be a non-empty list of exact session names, or [] with rig for an account rig that never had a member.");
+      }
       scope = { kind: "members", members, ...(typeof body.rig === "string" ? { rig: body.rig } : {}) };
     } else if (body.ids !== undefined) {
       // Plain ids take the request's action (delete by default); a report's qitems entries keep their own.
@@ -810,10 +813,34 @@ export function queueRoutes(): Hono {
       }
       scope = { kind: "routine", contentDays, metadataDays };
     }
+    // Whose host a host-qualified address at the rig names, for a never-member erase. Another host is proved only by a
+    // registered entry whose identity is established (declared, or a learned binding still eligible) and differs from this
+    // daemon's known id. This daemon's id, or an entry established as it, is this host. Anything else (an entry known only
+    // by its label, or no known id for this daemon) is unknown, which refuses. Routing is unchanged.
+    const registryLoader = (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ?? loadHostRegistry;
+    const bindingsLoader =
+      (c.get("hostBindingsLoader" as never) as (() => ReturnType<typeof loadLearnedHostBindings>) | undefined) ?? loadLearnedHostBindings;
+    let hosts: { registry: Parameters<typeof eligibleQueueBindings>[0]; learned: ReturnType<typeof eligibleQueueBindings> } | null | undefined;
+    const classifyHost = (host: string): HostClass => {
+      const self = getSelfHostId();
+      if (resolvesToLocalHost(host, self)) return "self";
+      if (self === null) return "unknown";
+      if (hosts === undefined) {
+        const reg = registryLoader();
+        hosts = reg.ok ? { registry: reg.registry, learned: eligibleQueueBindings(reg.registry, bindingsLoader()) } : null;
+      }
+      const known = hosts;
+      if (!known) return "unknown";
+      const match = resolveHost(known.registry, host, known.learned);
+      if (!match.ok) return "unknown";
+      const identity = match.host.hostId ?? known.learned[match.host.id]?.hostId;
+      if (identity === undefined) return "unknown";
+      return identity === self ? "self" : "other";
+    };
     try {
       const ledger = settings?.resolveOne("retention.erasure_ledger").value;
       const report = await eraseQueue(c.get("db" as never) as Database.Database, {
-        scope, apply: body.apply === true, nowIso: new Date().toISOString(),
+        scope, apply: body.apply === true, nowIso: new Date().toISOString(), classifyHost,
         ...(typeof ledger === "string" && ledger.length > 0 ? { ledgerPath: ledger } : {}),
       });
       console.log(`[queue-erase] ${identity.session} ${scope.kind} ${report.applied ? "applied" : "dry run"}: `
@@ -940,6 +967,28 @@ export function queueRoutes(): Hono {
       const advisories = [body.state === "blocked" ? parkWithoutWakeAdvisory(item) : null, ...unstoredAdvisories(body, item)]
         .filter((advisory) => advisory !== null);
       return c.json({ ...item, ...(advisories.length > 0 ? { advisories } : {}) });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // POST /:qitemId/tags — add tags to a row, in any state ({ add: [...] }). Add-only: existing tags stay, a tag the
+  // row already has adds nothing, and nothing else about the row changes. The actor is the transport-derived sender,
+  // as for update, and the tags added are recorded on a transition naming it.
+  app.post("/:qitemId/tags", async (c) => {
+    const qitemId = c.req.param("qitemId");
+    const body = await c.req.json<{ add?: unknown; actorSession?: string }>().catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "queue tag", bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
+    const actorSession = identity.session;
+    { const held = switchCustody(c, actorSession); if (held) return held; }
+    const add = body.add;
+    if (!Array.isArray(add) || add.length === 0 || !add.every((tag) => typeof tag === "string" && tag.trim().length > 0)) {
+      return c.json({ error: "tags_required", message: "add takes one or more non-blank tags; nothing was written" }, 400);
+    }
+    try {
+      const { item, added } = getRepo(c).addTags({ qitemId, actorSession, tags: add as string[], ...resolveRecordedIdentity(c, identity) });
+      return c.json({ ...item, added });
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -1409,7 +1458,8 @@ export function queueRoutes(): Hono {
       if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
         repo.recordInboxCheckIn(sender);
       }
-      return c.json(items);
+      return c.json(items.map((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
+        ? { ...item, ...handoffSuccessors(repo, item) } : item));
     }
 
     // OPR.0.3.2.20 — attention path goes through
@@ -1574,8 +1624,10 @@ export function queueRoutes(): Hono {
       ...item,
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
-      // The answer rows returned to this row, read by their link rather than their text; empty when none came back.
+      // The answer rows returned to this row, read by their link rather than their text; empty when none came back here.
+      // Only this daemon's rows are read: an answer another host holds isn't in them, so empty isn't proof of none.
       answers: repo.answersForAsk(qitemId),
+      answersFrom: "this-daemon",
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,

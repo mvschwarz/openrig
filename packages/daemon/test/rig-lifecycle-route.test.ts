@@ -5,6 +5,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 
 describe("Rig lifecycle routes", () => {
   let db: Database.Database;
@@ -546,6 +547,33 @@ describe("Rig lifecycle routes", () => {
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual(expect.objectContaining({ ok: false, code: "fallback_in_target" }));
     expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId)).toEqual(["infra.server"]);
+  });
+
+  it("removes a running external_cli seat without a tmux server or stopping the caller's program", async () => {
+    migrate(db, ALL_MIGRATIONS);
+    const exec = vi.fn(async () => { throw new Error("no server running on /tmp/tmux-1000/fixture"); });
+    const tmux = new TmuxAdapter(exec);
+    tmux.deliveryGuard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
+    setup = createTestApp(db, { tmux });
+    const rig = setup.rigRepo.createRig("remove-external");
+    const node = setup.rigRepo.addNode(rig.id, "external.helper", { runtime: "terminal" });
+    const attached = await setup.selfAttachService.attachToNode({
+      rigId: rig.id, logicalId: node.logicalId, displayName: "raw@remove-external", cwd: "/tmp",
+    });
+    expect(attached.ok).toBe(true);
+    if (!attached.ok) return;
+    expect(setup.sessionRegistry.getBindingForNode(node.id)).toMatchObject({ attachmentType: "external_cli", tmuxSession: null });
+    expect(setup.sessionRegistry.getSessionsForRig(rig.id).find(session => session.nodeId === node.id))
+      .toMatchObject({ origin: "claimed", status: "running" });
+    exec.mockClear();
+    const kill = vi.spyOn(tmux, "killSession");
+    const response = await setup.app.request(`/api/rigs/${rig.id}/nodes/${node.id}`, { method: "DELETE" });
+    const body = await response.json();
+    expect(response.status, JSON.stringify(body)).toBe(200);
+    expect(body).toMatchObject({ ok: true, sessionsKilled: 0 });
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.some(candidate => candidate.id === node.id)).toBe(false);
+    expect(kill).not.toHaveBeenCalled();
+    expect(exec).not.toHaveBeenCalled();
   });
 
   it("DELETE /api/rigs/:rigId/nodes/:nodeRef preserves a previously detached claimed session while removing the node", async () => {

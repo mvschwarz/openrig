@@ -4,6 +4,9 @@ import { resolveActiveSnapshotSession } from "./active-occupant.js";
 import { effectiveRestorePolicy } from "./restore-policy.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 
+/** Pre-restore blockers that concern one seat's own startup content: they hold only that seat, and only if restore launches it. */
+export const SEAT_STARTUP_BLOCKERS = new Set(["required_startup_file_missing", "startup_owner_root_missing"]);
+
 // Shared read-only validation. Keep restore's refusal order and replay eligibility here.
 export function validatePreRestore(
   data: SnapshotData,

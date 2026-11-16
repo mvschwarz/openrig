@@ -54,6 +54,7 @@ function fixture(runtime: "claude-code" | "codex" = "claude-code", guarded = fal
     command: runtime === "codex" ? `codex resume ${current}` : `claude --session-id ${current}`, startedAt: "Thu Oct 29 00:00:00 2026" }];
   vi.spyOn(ProcessCensus.prototype, "list").mockImplementation(async () => rows());
   vi.spyOn(CodexThreadIdResolver.prototype, "resolve").mockImplementation(async () => current);
+  vi.spyOn(CodexThreadIdResolver.prototype, "resolveWithHome").mockImplementation(async () => ({ thread: current, codexHome: root }));
   const store = new ContextUsageStore(db, { stateDir: root, codexHomeDir: root });
   const records = new Map([[A, join(root, "a.jsonl")], [B, join(root, "b.jsonl")]]);
   for (const [id, file] of records) writeFileSync(file, runtime === "codex"

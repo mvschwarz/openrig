@@ -103,13 +103,16 @@ status reads unknown, with the reason. See [Check-in status](hosted-members.md#c
 
 Any member can declare a `label`: how the person knows it, which an assistant can say back, such as
 `"claude (Sam's assistant, invited)"`. It's plain text of at most 200 characters, with no control characters, line or
-paragraph separators, bidirectional embeddings, overrides or isolates, or angle brackets. Joiners and direction marks
-are allowed, as names need them. A label that breaks those rules doesn't stop the roster loading: it's ignored with
-`label_problem`, and the member is named by its seat as before. An external caller's entry carries that
-`label_problem`, so an unusable label doesn't read as absent.
+paragraph separators, bidirectional embeddings, overrides or isolates, word joiner or invisible operators (U+2060 to
+U+2064), byte-order mark (U+FEFF), or angle brackets. The zero-width space, the zero-width joiner and non-joiner, and
+the direction marks are allowed, as names need them. A label that breaks those rules doesn't stop the roster
+loading: it's ignored with `label_problem`, and the member is named by its seat as before. An external caller's entry
+carries that `label_problem`, so an unusable label doesn't read as absent.
 
-The roster at `rosters/network-<rig>.json` names that rig's team: for an external caller, `rig_team` reports its `name`
-as `rig.displayName`, beside the rig's own name. The name follows the label rule; one that breaks it isn't shown, and
+The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
+rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
+external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. The name follows the
+label rule; one that breaks it isn't shown, and
 `rig.displayNameProblem` says why. When an external caller's default list of its own open items is empty,
 `rig_queue_list` adds a line its assistant can repeat, such as
 `No open requests are addressed to you on the team "Sam's team".` (a list of every state says `No requests …`).

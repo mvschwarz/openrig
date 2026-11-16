@@ -330,13 +330,13 @@ exec "$@"
     await sleep(4_000);
     await check();
     // A relaunch doesn't start the same-named app in its place. The self-attached session is the person's own terminal,
-    // which OpenRig didn't create, so rig down leaves it running and says so (exit 2) instead of stopping a terminal it can't
-    // show is the seat's.
+    // which OpenRig didn't start, so rig down releases its seat, as rig unclaim does, names it, and leaves the terminal
+    // running. The one session it stops is the rig's own launched worker.
     const down = await rig(["down", "free-rig", "--json", "--force"]);
-    expect(down.code, JSON.stringify(down)).toBe(2);
-    expect(JSON.parse(down.stdout).errors).toEqual([expect.stringMatching(
-      /^Kill failed for session '[^']+': '[^']+' was left running: its tmux session \$\d+ doesn't carry this seat's OpenRig marker/)]);
-    // The manual path it names: the person stops their own terminal on the daemon's server, then runs rig down again.
+    expect(down.code, JSON.stringify(down)).toBe(0);
+    expect(JSON.parse(down.stdout)).toMatchObject({ errors: [], released: ["free-seat"], sessionsKilled: 1 });
+    execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "has-session", "-t", "=free-seat"], { env: scaffold.env as NodeJS.ProcessEnv });
+    // The person stops their own terminal when they choose; a later rig down then has nothing left to stop or release.
     execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "kill-session", "-t", "=free-seat"], { env: scaffold.env as NodeJS.ProcessEnv });
     const again = await rig(["down", "free-rig", "--json", "--force"]);
     expect(JSON.parse(again.stdout).errors, JSON.stringify(again)).toEqual([]);

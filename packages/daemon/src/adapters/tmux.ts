@@ -29,6 +29,9 @@ interface TmuxShellCommandOptions {
   execInScript?: boolean;
   /** Preserve rc aliases/functions in POSIX or fish panes; other shells use /bin/sh. */
   sourceInPane?: boolean;
+  /** The staged script is POSIX shell only (a Claude seat's token step): with sourceInPane, a POSIX pane still sources it,
+   *  but a fish pane runs it with /bin/sh instead of sourcing it. */
+  posix?: boolean;
 }
 
 /**
@@ -852,6 +855,19 @@ export class TmuxAdapter {
     }
   }
 
+  /** When the tmux server holding a session started (`#{start_time}`, seconds since the epoch), or null when it can't
+   *  be read. Pane ids are unique for the life of a server and repeat only after it restarts. */
+  async serverStartTime(session: string): Promise<number | null> {
+    const target = exactTarget(session, "session");
+    try {
+      const out = (await this.run(["tmux", "display-message", "-p", "-t", target, "#{start_time}"],
+        `tmux display-message -p -t ${shellQuote(target)} '#{start_time}'`)).trim();
+      return /^\d+$/.test(out) ? Number(out) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Classified session probe (OPR.0.5.4.2): the three error classes tmux
    * produces are distinct answers, and the adapter must not decide for its
@@ -1181,7 +1197,7 @@ export class TmuxAdapter {
     const sourceInPane = ["bash", "zsh", "sh", "dash", "ksh"].includes(paneShell);
     let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
     let invocation = path ? sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}` : command;
-    if (path && paneShell === "fish") {
+    if (path && paneShell === "fish" && !options.posix) {
       const quotedPath = shellQuote(path);
       invocation = `/bin/sh ${quotedPath}`;
       // Fish single quotes reinterpret POSIX backslashes. Keep those payloads

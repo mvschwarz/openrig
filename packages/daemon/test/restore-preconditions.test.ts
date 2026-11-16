@@ -157,6 +157,22 @@ describe("restore-check consumes the shared snapshot validation", () => {
     expect(result.recovery.blocked[0]?.reason).toContain(message);
   });
 
+  // A seat's own missing startup file holds only a seat restore launches; restore keeps an external CLI attachment instead,
+  // so for that seat it's a named caveat, and a service input that's missing still blocks the rig.
+  it("names a missing startup file of a seat restore leaves attached as a caveat, not a rig blocker", () => {
+    const external = () => [{ ...node(), attachmentType: "external_cli" } as NodeInventoryEntry];
+    const result = new RestoreCheckService(deps({ getNodeInventory: external, exists: (path) => path !== "/files/notes.md" }))
+      .check({ compact: true, noQueue: true, noHooks: true });
+    expect(result.checks.find((c) => c.check === "rig.test-rig.restore-preconditions")).toMatchObject({
+      status: "yellow",
+      evidence: "Snapshot chosen-snapshot: required_startup_file_missing: Required startup file is missing for seat: /files/notes.md (restore doesn't launch this seat, so this doesn't block a restore)",
+    });
+    expect(result.verdict).toBe("restorable_with_caveats");
+    const services = new RestoreCheckService(deps({ getNodeInventory: external, exists: (path) => path !== "/services" }))
+      .check({ compact: true, noQueue: true, noHooks: true });
+    expect(services.checks.find((c) => c.check === "rig.test-rig.restore-preconditions")?.status).toBe("red");
+  });
+
   it("uses yellow for warnings only and green for a completed empty result", () => {
     const snapshot = data();
     snapshot.nodeStartupContext!["node-1"]!.resolvedStartupFiles[0]!.required = false;
@@ -180,7 +196,9 @@ describe("restore-check consumes the shared snapshot validation", () => {
       getNodeInventory: (id) => [node(id)], getRestoreInputs,
     })).check({ noQueue: true, noHooks: true });
     expect(getRestoreInputs).toHaveBeenCalledTimes(2);
-    expect(result.verdict).toBe("not_restorable");
+    // No stopped seat blocks (restore brings each back from its saved startup context), so the unavailable inputs make
+    // the verdict unknown; the rigs stay isolated below.
+    expect(result.verdict).toBe("unknown");
     expect(result.rigs.find((r) => r.rigId === "rig-1")?.status).toBe("unknown");
     expect(result.rigs.find((r) => r.rigId === "rig-2")?.status).not.toBe("unknown");
     expect(result.recovery.unknown[0]?.reason).toContain(reason);

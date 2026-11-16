@@ -17,6 +17,7 @@ import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
 import { codeResultOf, planItemArtifact, type FileRead, type SharedRoot } from "../queue-artifact.js";
+import { resolveSenderSession } from "../sender-identity.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -67,7 +68,7 @@ export interface GatewayDeliveryResult extends DeliveryResultBase {
 export interface TerminalDeliveryResult extends DeliveryResultBase {
   receiptSource: "terminal";
   /** The class of wakeResult: verified; delivered-ack-pending; claimed (a claimed row whose wake wasn't confirmed);
-   *  retained:*; failed:* or unroutable:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
+   *  retained:*; failed:*, unroutable:* or awaiting-pickup:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
    *  (still-pending); or no wake requested by --no-nudge (not-requested). */
   outcome: "verified" | "delivered-ack-pending" | "claimed" | "retained" | "failed" | "indeterminate" | "still-pending" | "not-requested";
   /** The row's lastNudgeResult as recorded; null before any wake result. */
@@ -140,7 +141,7 @@ function gatewayReceiptOf(row: QueueRow): GatewayReceipt {
 function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
   if (wakeResult === null) return "still-pending";
   if (wakeResult === "verified" || wakeResult === "delivered-ack-pending" || wakeResult === "claimed") return wakeResult;
-  if (wakeResult.startsWith("failed:") || wakeResult.startsWith("unroutable:")) return "failed";
+  if (wakeResult.startsWith("failed:") || wakeResult.startsWith("unroutable:") || wakeResult.startsWith("awaiting-pickup:")) return "failed";
   if (wakeResult.startsWith("retained:")) return "retained";
   return "indeterminate";
 }
@@ -168,7 +169,10 @@ function terminalDeliveryResult(
     "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
     "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
     "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
-    "failed": `The wake failed (${wakeResult}).`,
+    // A hosted member with no wake trigger: no wake exists to fail, and the work waits to be read.
+    "failed": wakeResult?.startsWith("awaiting-pickup:")
+      ? `No wake is sent (${wakeResult}): the work waits in the member's queue until it reads it.`
+      : `The wake failed (${wakeResult}).`,
     "indeterminate": wakeResult?.startsWith("wake-accepted:")
       ? `The member's trigger accepted the ring (${wakeResult}). That isn't pickup: its claim is.`
       : `Terminal receipt unconfirmed (${wakeResult}).`,
@@ -347,9 +351,7 @@ async function withClient<T>(
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
-  if (status >= 400 && body && typeof body === "object"
-    && (body as { error?: unknown }).error === "remote_queue_write_failed"
-    && (body as { outcome?: unknown }).outcome === "indeterminate") {
+  if (isIndeterminateRemoteWrite(status, body)) {
     console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
   }
   if (json) {
@@ -461,6 +463,34 @@ export function printCurrentWorkChoice(data: unknown): void {
  *  output). Error responses always print whole, whatever this returns. */
 function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptContext | null {
   return !full && compactOutputEnabled() ? ctx : null;
+}
+
+/** A handoff whose outcome is unknown may have committed. This names the source row to read before any retry, on the
+ *  daemon the command used, and where a successor would be. It never says the handoff failed, names a successor id, or
+ *  asks for the handoff to be repeated. */
+function handoffRecoveryHint(qitemId: string, hostId: string | undefined): string {
+  const remote = remoteHostOf(hostId);
+  return `Before any retry, read source row ${qitemId} at the same endpoint and OPENRIG_HOME: `
+    + `rig queue show ${shellQuote(qitemId)} --full --json. Read its recorded outcome: a handed-off row names its successor`
+    + (remote ? ` on host ${shellQuote(remote)}` : "")
+    + ", or says why it can't. A row that still reads open doesn't show the handoff failed: it may still commit.";
+}
+
+/** A handoff whose answer was lost (no answer in time, a lost connection, or an unreadable response) carries the hint in
+ *  its error. A pre-header disconnect can follow a committed handoff, as it can a create, so the shared renderer must not
+ *  call it undelivered. */
+function withHandoffRecovery(error: unknown, qitemId: string, hostId: string | undefined): unknown {
+  if (!(error instanceof DaemonConnectionError || error instanceof DaemonResponseError)) return error;
+  if (error instanceof DaemonConnectionError) error.writeOutcome = "unknown";
+  error.message += ` ${handoffRecoveryHint(qitemId, hostId)}`;
+  return error;
+}
+
+/** The selected daemon's forward to another host lost the remote's answer: the write was sent and may still commit. */
+function isIndeterminateRemoteWrite(status: number, body: unknown): boolean {
+  return status >= 400 && !!body && typeof body === "object"
+    && (body as { error?: unknown }).error === "remote_queue_write_failed"
+    && (body as { outcome?: unknown }).outcome === "indeterminate";
 }
 
 /** A `--host` id that may name another daemon. Empty and `local` never do; one that
@@ -694,6 +724,174 @@ async function printQueueItemResult(
   await printWriteResult(client, json, body, status, receipt && remoteHost ? { ...receipt, remoteHost } : receipt, remoteHost !== undefined);
 }
 
+const UPDATE_READ_BACK_FIELDS = [
+  "state", "closureReason", "closureTarget", "closureRequiredAt", "resolution", "blockedOn", "summary", "evidenceRef",
+] as const;
+
+interface QueueTransitionReadBack {
+  transitionId: number;
+  transitionNote: string | null;
+  actorSession: string;
+}
+
+function queueUpdateFieldMatches(field: (typeof UPDATE_READ_BACK_FIELDS)[number], requested: unknown, actual: unknown): boolean {
+  if (field === "closureRequiredAt" && typeof requested === "string" && typeof actual === "string") {
+    const requestedTime = Date.parse(requested);
+    const actualTime = Date.parse(actual);
+    return Number.isFinite(requestedTime) && Number.isFinite(actualTime) && requestedTime === actualTime;
+  }
+  if (field === "resolution" && typeof requested === "string" && typeof actual === "string") {
+    return actual === requested || actual.endsWith(`\n${requested}`);
+  }
+  return Object.is(actual, requested);
+}
+
+/** Whether a recorded note is this update's note as the daemon records it (QueueRepository.update): as written, or with
+ *  only what the daemon adds for this request, the reopen prefix, the summary suffix, or a revised deadline's receipt
+ *  naming the new time and the accepting actor. Another writer's note that merely starts the same way isn't. */
+function noteRecordedAs(actual: string, note: string, requested: Record<string, unknown>, actor: string, deadline: unknown): boolean {
+  const bases = [note];
+  if (requested.reopen === true) bases.push(`reopen acknowledged: ${note}`);
+  if (typeof requested.summary === "string" && requested.summary.trim() && !note.includes("(summary updated)")) {
+    bases.push(`${note} (summary updated)`);
+  }
+  if (requested.closureRequiredAt === undefined) return bases.includes(actual);
+  // The receipt's earlier time isn't known here: it's one line between the fixed parts.
+  const tail = ` -> ${String(deadline)}; accepted by ${actor}`;
+  return bases.some((base) => {
+    const head = `${base}\nclosure deadline re-estimated: `;
+    if (!actual.startsWith(head) || !actual.endsWith(tail) || actual.length <= head.length + tail.length) return false;
+    return !actual.slice(head.length, actual.length - tail.length).includes("\n");
+  });
+}
+
+/** Who the daemon records as this write's actor: the sender header as sent, else the actor the body declares. Empty when
+ *  neither is known. A daemon drops a sender's host suffix only when it's that daemon's own id, so the bare form is
+ *  this write's only where the selected daemon answers with that id; nothing else (an absent --host included) shows it. */
+async function updateActors(client: Pick<DaemonClient, "senderIdentity" | "get">, bodyActor: unknown): Promise<string[]> {
+  const { session } = await client.senderIdentity();
+  if (session) {
+    const parts = session.split("@");
+    if (parts.length !== 3) return [session];
+    let daemonId: unknown;
+    try {
+      daemonId = (await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 })).data?.selfHostId;
+    } catch { /* Unanswered: the suffix stays unproven, so only the full actor counts. */ }
+    return daemonId === parts[2] ? [session, `${parts[0]}@${parts[1]}`] : [session];
+  }
+  return typeof bodyActor === "string" && bodyActor.trim() ? [bodyActor.trim()] : [];
+}
+
+async function readQueueTransitionCursor(
+  client: Pick<DaemonClient, "get">,
+  qitemId: string,
+  options: { headers?: Record<string, string>; timeoutMs?: number },
+): Promise<{ ok: true; latestTransitionId: number } | { ok: false; detail: string }> {
+  let response: DaemonResponse<unknown>;
+  try {
+    response = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`, options);
+  } catch (error) {
+    return { ok: false, detail: `canonical transition preflight did not answer: ${(error as Error).message}` };
+  }
+  if (response.status !== 200 || !Array.isArray(response.data)) {
+    return { ok: false, detail: `canonical transition preflight returned HTTP ${response.status} without a transition list` };
+  }
+  const transitionIds = response.data.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const transitionId = (entry as { transitionId?: unknown }).transitionId;
+    return typeof transitionId === "number" && Number.isSafeInteger(transitionId) ? [transitionId] : [];
+  });
+  if (transitionIds.length !== response.data.length) {
+    return { ok: false, detail: "canonical transition preflight returned a malformed transition list" };
+  }
+  return { ok: true, latestTransitionId: Math.max(0, ...transitionIds) };
+}
+
+async function readBackQueueUpdate(
+  client: Pick<DaemonClient, "get">,
+  qitemId: string,
+  requested: Record<string, unknown>,
+  options: { headers?: Record<string, string>; timeoutMs?: number },
+  transitionFloor?: number,
+  /** Why the transition cursor wasn't taken before the write, when it wasn't. */
+  floorUnknown?: string,
+  /** Who the daemon records as this write's actor (updateActors). */
+  actors: string[] = [],
+): Promise<{ ok: true; row: Record<string, unknown> } | { ok: false; detail: string; noteUnproven?: true }> {
+  let response: DaemonResponse<Record<string, unknown>>;
+  try {
+    response = await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, options);
+  } catch (error) {
+    return { ok: false, detail: `canonical read-back did not answer: ${(error as Error).message}` };
+  }
+  if (response.status !== 200 || !response.data || response.data.qitemId !== qitemId) {
+    return { ok: false, detail: `canonical read-back returned HTTP ${response.status} without row ${qitemId}` };
+  }
+  const mismatches = UPDATE_READ_BACK_FIELDS.flatMap((field) => {
+    if (requested[field] === undefined) return [];
+    // A blank summary or evidence ref isn't stored (the daemon says so, summary_not_stored or evidence_ref_not_stored,
+    // and keeps the row's own), so there's nothing of it to read back.
+    if ((field === "summary" || field === "evidenceRef") && typeof requested[field] === "string" && !(requested[field] as string).trim()) return [];
+    return queueUpdateFieldMatches(field, requested[field], response.data[field])
+      ? []
+      : [`${field}: requested ${JSON.stringify(requested[field])}, read ${JSON.stringify(response.data[field])}`];
+  });
+  if (mismatches.length > 0) {
+    return { ok: false, detail: `canonical read-back mismatch (${mismatches.join("; ")})` };
+  }
+
+  const requestedNote = typeof requested.transitionNote === "string" && requested.transitionNote.trim().length > 0
+    ? requested.transitionNote
+    : null;
+  if (requestedNote !== null) {
+    // Without the cursor, a transition carrying the note can't be shown to be this write's: never accept an older one.
+    if (transitionFloor === undefined) {
+      return { ok: false, noteUnproven: true, detail: `the requested note can't be shown to be new, because the transition read before the write failed (${floorUnknown ?? "no cursor"})` };
+    }
+    if (actors.length === 0) {
+      return { ok: false, noteUnproven: true, detail: "the requested note can't be tied to this write, because the actor it was sent as isn't known" };
+    }
+    let transitions: DaemonResponse<unknown>;
+    try {
+      transitions = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`, options);
+    } catch (error) {
+      return { ok: false, noteUnproven: true, detail: `canonical transition read-back did not answer: ${(error as Error).message}` };
+    }
+    if (transitions.status !== 200 || !Array.isArray(transitions.data)) {
+      return { ok: false, noteUnproven: true, detail: `canonical transition read-back returned HTTP ${transitions.status} without a transition list` };
+    }
+    const matching = transitions.data.some((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const transition = entry as Partial<QueueTransitionReadBack>;
+      return typeof transition.transitionId === "number"
+        && transition.transitionId > transitionFloor
+        && typeof transition.transitionNote === "string"
+        && typeof transition.actorSession === "string"
+        && actors.includes(transition.actorSession)
+        && noteRecordedAs(transition.transitionNote, requestedNote, requested, transition.actorSession, response.data.closureRequiredAt);
+    });
+    if (!matching) {
+      return {
+        ok: false,
+        noteUnproven: true,
+        detail: `no newer canonical transition carried requested note ${JSON.stringify(requestedNote)} from ${actors.map((actor) => JSON.stringify(actor)).join(" or ")}`,
+      };
+    }
+  }
+  return { ok: true, row: response.data };
+}
+
+/** `noteUnproven`: the requested note wasn't shown to be recorded. A note is in the row's transition log, which `queue show`
+ *  doesn't print, so the action names that too. */
+function emitQueueUpdateReadBackFailure(qitemId: string, detail: string, json: boolean, noteUnproven = false): void {
+  const message = `Queue update response was not accepted as success: ${detail}. The write may have committed, but its requested state was not verified.`;
+  const action = `Run rig queue show ${shellQuote(qitemId)} --full --json against the same daemon before retrying`
+    + (noteUnproven ? `, and rig queue transitions ${shellQuote(qitemId)} --full --json to see whether the note was recorded.` : ".");
+  if (json) console.error(JSON.stringify({ error: "queue_update_readback_failed", message, action }));
+  else console.error(`${message}\n${action}`);
+  process.exitCode = 1;
+}
+
 // OPR.0.4.3.03 — `rig queue show` body preview.
 //
 // Default `show` renders a BOUNDED body preview instead of dumping the whole
@@ -874,21 +1072,21 @@ function emitBodyResolveError(err: Error & { fact?: string; consequence?: string
 }
 
 function resolveCurrentSession(explicit: string | undefined, optionName: string): string | undefined {
-  const session = explicit ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+  const session = explicit ?? resolveSenderSession();
   if (session) return session;
 
-  console.error(`--${optionName} is required when OPENRIG_SESSION_NAME is not set`);
+  console.error(`--${optionName} is required when OPENRIG_SESSION_NAME is not set and reconciled tmux pane metadata does not resolve a session`);
   process.exitCode = 1;
   return undefined;
 }
 
-/** For a verb whose actor is the seat's own identity (the X-OpenRig-Session header the CLI sets from OPENRIG_SESSION_NAME),
+/** For a verb whose actor is the seat's own identity (the X-OpenRig-Session header the CLI sets from managed identity),
  *  where the named flag is deprecated and ignored: the error names what actually sets the actor, never the flag. */
 function requireSeatSession(ignoredFlag: string): string | undefined {
-  const session = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+  const session = resolveSenderSession();
   if (session) return session;
 
-  console.error(`OPENRIG_SESSION_NAME is not set, so there's no seat to act as. Run this from a managed seat, or set ` +
+  console.error(`OPENRIG_SESSION_NAME is not set, so there's no seat to act as, and reconciled tmux pane metadata does not resolve one. Run this from a managed seat, or set ` +
     `OPENRIG_SESSION_NAME to the seat's session name (for example dev-impl@my-rig). --${ignoredFlag} is ignored: the ` +
     "actor is the seat's own identity.");
   process.exitCode = 1;
@@ -912,8 +1110,8 @@ const UPDATE_STATE_WRITE_FLAGS = [
  */
 function resolveUpdateActor(source: string | undefined, opts: Record<string, unknown>): { actorSession?: string } | false {
   const refuse = (message: string): false => { console.error(message); process.exitCode = 1; return false; };
-  // Trimmed like the DaemonClient's header (senderIdentityHeaders): a blank env is no seat, so the two never disagree.
-  const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim() || undefined;
+  // The same resolver the DaemonClient header uses, so the preflight and transport can never disagree.
+  const seat = resolveSenderSession();
   if (source !== undefined) {
     const trimmed = source.trim();
     if (parseSessionName(trimmed).kind !== "external") {
@@ -933,10 +1131,10 @@ function resolveUpdateActor(source: string | undefined, opts: Record<string, unk
   if (seat) return {};
   const noteOnly = opts.note !== undefined && UPDATE_STATE_WRITE_FLAGS.every(([key]) => opts[key] === undefined);
   return refuse(noteOnly
-    ? "notes need a seat; an external routine can pass --source <name>@external. OPENRIG_SESSION_NAME is not set, so " +
-      "there's no seat to act as: run this from a managed seat, or add --source <name>@external to record the note as " +
+    ? "notes need a seat; an external routine can pass --source <name>@external. OPENRIG_SESSION_NAME is not set and reconciled " +
+      "tmux pane metadata does not resolve a seat: run this from a managed seat, or add --source <name>@external to record the note as " +
       "that external routine (claimed, never a seat). --actor is ignored: the actor is the seat's own identity."
-    : "OPENRIG_SESSION_NAME is not set, so there's no seat to act as. Run this from a managed seat, or set " +
+    : "OPENRIG_SESSION_NAME is not set, so there's no seat to act as, and reconciled tmux pane metadata does not resolve one. Run this from a managed seat, or set " +
       "OPENRIG_SESSION_NAME to the seat's session name (for example dev-impl@my-rig). --actor is ignored: the actor is " +
       "the seat's own identity. Changing a row needs a seat, and notes need a seat; an external routine can pass " +
       "--source <name>@external for a note only. A person answering an ask addressed to them (a host pairing approval, " +
@@ -1166,7 +1364,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       }
       // A managed seat keeps transport-derived identity; an external caller can
       // name the existing claimed:v1 body actor without forging a transport header.
-      const managedSource = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      const managedSource = resolveSenderSession();
       const source = resolveCurrentSession(managedSource ?? opts.source, "source");
       if (!source) return;
       const deps = getDeps();
@@ -1472,7 +1670,7 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
           process.exitCode = 1;
           return;
         }
-        const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+        const requested = {
           state: opts.state,
           reopen: opts.reopen,
           closureReason: opts.closureReason,
@@ -1486,9 +1684,51 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
           ...actor,
-        }, target.options);
+        };
+        let transitionFloor: number | undefined;
+        let floorUnknown: string | undefined;
+        if (typeof requested.transitionNote === "string" && requested.transitionNote.trim().length > 0) {
+          // The cursor proves the note is new afterwards. Without it the write still goes; the receipt says what's unproven.
+          const cursor = await readQueueTransitionCursor(target.client, qitemId, target.options);
+          if (cursor.ok) transitionFloor = cursor.latestTransitionId;
+          else floorUnknown = cursor.detail;
+        }
+        const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, requested, target.options);
+        if (res.status < 400) {
+          const actors = await updateActors(target.client, requested.actorSession);
+          const verified = await readBackQueueUpdate(target.client, qitemId, requested, target.options, transitionFloor, floorUnknown, actors);
+          if (!verified.ok) {
+            emitQueueUpdateReadBackFailure(qitemId, verified.detail, opts.json ?? false, verified.noteUnproven);
+            return;
+          }
+          // The canonical row's fields win; the write's own advisories (a park with no wake) come only with its response.
+          const advisories = (res.data as { advisories?: unknown } | null)?.advisories;
+          const row = Array.isArray(advisories) ? { ...verified.row, advisories } : verified.row;
+          await printQueueItemResult(target.client, qitemId, opts.json ?? false, row, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
+          return;
+        }
         await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }), target.remote);
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));
+    });
+
+  cmd
+    .command("tag <qitemId>")
+    .description("Add tags to a qitem in any state, changing nothing else: its existing tags stay, a tag it already has adds nothing, and a closed row stays closed. The tags added are recorded on the row's history with who added them. Tags are never removed or rewritten.")
+    .requiredOption("--add <tag>", "A tag to add, exact and case-sensitive; repeat for several (commas are literal)", (value: string, previous: string[] = []) => [...previous, value], [] as string[])
+    .option("--json", "JSON output for agents")
+    .action(async (qitemId: string, opts: { add: string[]; json?: boolean }) => {
+      // The actor is the seat itself (X-OpenRig-Session, stamped by DaemonClient), as for update.
+      if (!requireSeatSession("actor")) return;
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{ added?: unknown }>(`/api/queue/${encodeURIComponent(qitemId)}/tags`, { add: opts.add });
+        const added = res.status < 400 && Array.isArray(res.data?.added) ? res.data.added as string[] : undefined;
+        if (!added) return printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        if (opts.json) console.log(JSON.stringify(res.data));
+        else console.log(added.length > 0
+          ? `Added to ${qitemId}: ${added.join(", ")}`
+          : `Nothing added: ${qitemId} already has ${[...new Set(opts.add)].join(", ")}`);
+      });
     });
 
   // OPR.0.4.4.19 FR-6 — the first-class park affordance (C5 leg 1). One verb,
@@ -1691,12 +1931,13 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId));
+        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
+        if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
       });
     });
 
@@ -1793,12 +2034,13 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
-        }, crossHostWriteOptions(hostResolved.hostId));
+        }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => { throw withHandoffRecovery(error, qitemId, hostResolved.hostId); });
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
+        if (isIndeterminateRemoteWrite(res.status, res.data)) console.error(handoffRecoveryHint(qitemId, hostResolved.hostId));
       });
     });
 
@@ -2180,7 +2422,7 @@ Examples:
   cmd
     .command("erase")
     .description("Erase queue rows in one exact scope: an account's rows, a list of ids, or the closed-work retention windows; a dry run unless --apply")
-    .option("--members <file>", "Account deletion: the account's recorded session names (exact, departed seats included), one per line or a JSON array")
+    .option("--members <file>", "Account deletion: the account's recorded session names (exact, departed seats included), one per line or a JSON array. Empty, with --rig, for an account rig that never had a session")
     .option("--rig <id>", "With --members: the account rig's id. Also erases the rig's own records that outlive it (events, snapshots, node and seat records); refused unless every member is a session of it")
     .option("--ids <file>", "These qitem ids, one per line or a JSON array; a report's qitems entries, or an erasure ledger's JSON lines, keep each one's action")
     .option("--action <action>", "With --ids: delete (default) removes each row and keeps only its id; scrub removes its content and keeps the row", enumArg(["delete", "scrub"]))
@@ -2203,8 +2445,9 @@ Examples:
       "A deleted row keeps only its id, and a create that reuses that id is refused (qitem_erased). A row a workflow still",
       "references is reported under gaps and left. Output is JSON: clean (true only when nothing was left), complete,",
       "qitems, mixed, gaps, alreadyAbsent, linked, unlinked and rig. Refusals: erase_scope_required, erase_scope_conflict,",
-      "erase_members_invalid, erase_rig_invalid, erase_rig_mismatch, erase_ids_invalid, erase_action_invalid,",
-      "erase_routine_off. A run that stops on an error returns what it committed, with error.stage, and exits 2.",
+      "erase_members_invalid, erase_rig_invalid, erase_rig_mismatch, erase_rig_had_sessions, erase_rig_history_unknown,",
+      "erase_ids_invalid, erase_action_invalid, erase_routine_off. A run that stops on an error returns what it",
+      "committed, with error.stage, and exits 2.",
       "Reference: docs/reference/queue-erasure.md",
     ].join("\n"))
     .action(async (opts: { members?: string; rig?: string; ids?: string; action?: string; routine?: boolean; apply?: boolean; actor?: string; json?: boolean }) => {
