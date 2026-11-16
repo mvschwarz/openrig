@@ -13,23 +13,28 @@ import { connectPiRunnerChannel, RunnerCore } from "../src/adapters/pi-runner.js
 describe.skipIf(process.platform === "win32")("Pi startup RPC handshake", () => {
   it.each([
     { character: "\n", members: 0, hint: undefined }, { character: "\0", members: 0, hint: undefined },
+    { character: "\0", members: 1, hint: undefined },
     { character: "\0", members: 2, hint: undefined }, { character: "\n", members: 9, hint: undefined },
     ...["omit", "invalid", "9007199254740991", "1"].map(hint => ({ character: "\0", members: 2, hint })),
-  ])("the production SSE reader bounds escaped retained input ($members members, $character, $hint)", async ({ character, members, hint }) => {
+  ])("the production SSE reader bounds ordinary/grouped native input ($members sources, $character, $hint)", async ({ character, members, hint }) => {
     const posts: Record<string, unknown>[] = [], rpc: Record<string, unknown>[] = [];
     const core = new RunnerCore({ sendRpc: command => { rpc.push(command); }, mirrorLine: () => {}, mirrorAppend: () => {},
       postActivity: () => {}, writeSidecar: () => {}, now: () => new Date().toISOString(), postRunner: async body => { posts.push(body); return true; } },
       { sessionName: "fixture", runId: "run" });
     core.start(); core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionId: "offline", isStreaming: false, pendingMessageCount: 0 } }));
-    const question = "q" + character.repeat(hint && hint !== "omit" ? 1 : 1024 * 1024 - 1);
+    const question = "q" + character.repeat(hint && hint !== "omit" ? 1 : (members === 1 ? 2 : 1) * 1024 * 1024 - 1);
     const frames = [1, 2].map(sequence => {
       const memberIds = Array.from({ length: members }, (_, index) => index === 0 ? `large-${sequence}` : `large-${sequence}-source-🧭-${index}`);
       const grouped = members > 0 && sequence === 1;
       const frame = grouped ? { version: 1, requestId: `large-${sequence}`, nodeId: "node-🧭", runId: "run", sequence,
-        kind: "input", inputRoute: "native", stage: "offered", bindingHash: "b".repeat(64), memberIds,
+        kind: "input", inputRoute: "native", stage: "offered", bindingHash: "b".repeat(64), ...(members > 1 ? { memberIds } : {}),
         payload: { text: Array.from({ length: members }, () => question).join("\n") } }
-        : { version: 1, runId: "run", requestId: `large-${sequence}`, sequence, kind: "wake", payload: { question } };
+        : { version: 1, runId: "run", requestId: `large-${sequence}`, sequence, kind: "wake", payload: { question: members === 1 ? "normal successor" : question } };
       const data = JSON.stringify(frame);
+      if (members === 1 && sequence === 1) {
+        expect(frame).not.toHaveProperty("memberIds");
+        expect(data.length).toBeGreaterThan(6 * 1024 * 1024 + 64 * 1024);
+      }
       return `${grouped && hint !== "omit" ? `: runner-frame-chars=${hint ?? data.length}\n` : ""}event: request\ndata: ${data}\n\n`;
     }).join("");
     const controller = new AbortController();
