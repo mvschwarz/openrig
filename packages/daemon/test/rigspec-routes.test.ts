@@ -256,18 +256,36 @@ describe("Rigspec export routes", () => {
     expect(res.status).toBe(500);
   });
 
-  it("#3253: an export refused for a seat's unreadable process_limits is a 409 naming the seat, on YAML and JSON", async () => {
-    const rig = rigRepo.createRig("limits-rig");
-    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: pod.id, agentRef: "local:agents/impl", profile: "default",
+  it("#3253: a seat's unreadable process_limits exports the rest of the rig and names the seat, on YAML and JSON, flat and pod-aware", async () => {
+    const flat = rigRepo.createRig("limits-flat");
+    const flatBad = rigRepo.addNode(flat.id, "worker", { runtime: "codex", cwd: ".", processLimits: { tasksMax: 512 } });
+    rigRepo.addNode(flat.id, "capped", { runtime: "codex", cwd: ".", processLimits: { tasksMax: 64 } });
+    const podded = rigRepo.createRig("limits-pod");
+    const pod = new PodRepository(db).createPod(podded.id, "dev", "Dev");
+    const podBad = rigRepo.addNode(podded.id, "dev.impl", { runtime: "codex", podId: pod.id, agentRef: "local:agents/impl", profile: "default",
       cwd: ".", processLimits: { tasksMax: 512 } });
-    db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", node.id);
-    for (const path of [`/api/rigs/${rig.id}/spec`, `/api/rigs/${rig.id}/spec.json`]) {
-      const res = await app.request(path);
-      expect(res.status, path).toBe(409);
-      const body = await res.json() as { error: string; code: string };
-      expect(body.code).toBe("export_refused");
-      expect(body.error).toMatch(/^Cannot export seat 'dev\.impl': .*clear it with process_limits: \{\}/);
+    rigRepo.addNode(podded.id, "dev.qa", { runtime: "codex", podId: pod.id, agentRef: "local:agents/qa", profile: "default",
+      cwd: ".", processLimits: { tasksMax: 64 } });
+    for (const [rig, bad, seat] of [[flat, flatBad, "worker"], [podded, podBad, "dev.impl"]] as const) {
+      db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", bad.id);
+      const warning = [{ logicalId: seat, reason: "process_limits can't be read; not carried" }];
+      // these fixture seats have no recorded source, so the pod-aware rig also names their member startup
+      const limitWarnings = (res: Response) => (JSON.parse(decodeURIComponent(res.headers.get("X-OpenRig-Export-Warnings")!)) as
+        Array<{ logicalId: string; reason: string }>).filter((w) => w.reason.startsWith("process_limits"));
+      const yamlRes = await app.request(`/api/rigs/${rig.id}/spec`);
+      expect(yamlRes.status, seat).toBe(200);
+      expect(limitWarnings(yamlRes)).toEqual(warning);
+      const yaml = await yamlRes.text();
+      expect(yaml).toContain(`# Not carried: ${seat}'s process_limits, because the saved value can't be read; it stays stored as it is. ` +
+        "Fix it by re-applying the spec with process_limits: { tasks_max: <N> }, or clear it with process_limits: {}");
+      // the other seat's valid limit still exports; the unreadable one isn't invented or emptied
+      expect(yaml.split("\n").filter((line) => !line.startsWith("#") && line.includes("tasks_max:")).map((line) => line.trim()))
+        .toEqual(["tasks_max: 64"]);
+      const jsonRes = await app.request(`/api/rigs/${rig.id}/spec.json`);
+      expect(jsonRes.status, seat).toBe(200);
+      expect(limitWarnings(jsonRes)).toEqual(warning);
+      expect((await jsonRes.text()).match(/"tasksMax":\d+/g)).toEqual(['"tasksMax":64']);
+      expect(db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(bad.id)).toEqual({ process_limits: "{not json" });
     }
   });
 });
