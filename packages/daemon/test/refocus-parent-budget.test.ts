@@ -27,13 +27,24 @@ with tempfile.TemporaryDirectory() as tmp:
     (mission / 'mission.yaml').write_text('metadata: { status: active }\n')
     trace.render_work(mission, root, 'light', failures)
     assert not calls
+    trace.TRACE_STARTED = trace.time.monotonic()
     (mission / 'mission.yaml').write_text('metadata: { parent: null }\n')
     trace.render_work(mission, root, 'light', failures)
     assert not calls
+    trace.TRACE_STARTED = trace.time.monotonic()
+    (mission / 'mission.yaml').write_text('metadata:\n  ? parent\n  : null\n')
+    trace.render_work(mission, root, 'light', failures)
+    assert not calls and not failures
+    trace.TRACE_STARTED = trace.time.monotonic()
+    (mission / 'mission.yaml').write_text('defaults: &defaults { status: active }\nmetadata: *defaults\n')
+    trace.render_work(mission, root, 'light', failures)
+    assert not calls and not failures
+    trace.TRACE_STARTED = trace.time.monotonic()
     (mission / 'mission.yaml').write_text('metadata: { "par\\u0065nt": M.1 }\n')
     trace.render_work(mission, root, 'light', failures)
     assert len(calls) == 1
     calls.clear()
+    trace.TRACE_STARTED = trace.time.monotonic()
     (mission / 'mission.yaml').unlink()
     legacy = root / 'custom-root' / 'legacy'
     legacy.mkdir(parents=True)
@@ -43,6 +54,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert len(calls) == 1
     assert calls[0][0][4:6] == ('--workspace', str(root))
     calls.clear()
+    trace.TRACE_STARTED = trace.time.monotonic()
     (mission / 'mission.yaml').write_text('metadata: { "parent": M.1 }\n')
     result = trace.render_work(mission, root, 'light', failures)
     assert len(calls) == 1 and 0 < calls[0][1]['timeout'] <= 1.8

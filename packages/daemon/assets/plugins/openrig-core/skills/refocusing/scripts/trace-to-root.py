@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -101,19 +102,41 @@ def read(path):
         return None
 
 
-def may_have_parent(node, spec_text):
-    # The CLI performs the authoritative YAML parse. This inexpensive precheck
-    # avoids starting it for the common parentless case, including legacy SPECs
-    # in a configured missions root. Recognize block and flow mapping keys.
+def may_have_parent(node, spec_text, timeout):
+    # Avoid a parser process for ordinary documents without any possible key.
+    # For possible links, use the same YAML parser as the CLI before querying.
     manifest = read(node / "mission.yaml")
+    if manifest is None and (node / "mission.yaml").exists():
+        return None
     text = manifest if manifest is not None else spec_text.partition("---")[2].partition("---")[0]
-    key = r"(?:parent|'parent'|\"parent\")"
-    value = r"[ \t]*(?:\r?\n[ \t]+)?(?!null(?:\s|[,}\]#]|$)|~(?:\s|[,}\]#]|$))[^\s,}\]#]"
-    if re.search(r"(?:^|[,{])[ \t]*" + key + r"[ \t]*:" + value, text, re.MULTILINE | re.IGNORECASE):
-        return True
-    # Escaped or explicit YAML keys, aliases and merge keys need the shared
-    # parser to decide: treating them as absent could silently lose a link.
-    return bool(re.search(r"(?:^|[,{])[ \t]*(?:\?[ \t]+|<<[ \t]*:|metadata[ \t]*:[ \t]*\*|\"[^\"\n]*\\[^\"\n]*\"[ \t]*:)", text, re.MULTILINE))
+    if not re.search(r"parent|\\|\*|<<|\?", text, re.IGNORECASE):
+        return False
+    if timeout <= 0:
+        return None
+    rig = shutil.which("rig")
+    paths = [str(Path(__file__).resolve().parent), str(node), str(Path.cwd())]
+    if rig:
+        paths.append(str(Path(rig).resolve().parent))
+    script = """
+const fs = require('node:fs');
+const path = require('node:path');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+let yamlPath;
+try { yamlPath = require.resolve('yaml', { paths: input.paths }); }
+catch {
+  const cli = require.resolve('@openrig/cli', { paths: input.paths });
+  yamlPath = require.resolve('yaml', { paths: [path.dirname(cli)] });
+}
+const YAML = require(yamlPath);
+const doc = YAML.parse(input.text);
+const value = input.manifest ? doc?.metadata?.parent : doc?.parent;
+process.stdout.write(typeof value === 'string' && value.trim() ? 'yes' : 'no');
+"""
+    try:
+        result = subprocess.run(["node", "-e", script], input=json.dumps({"text": text, "manifest": manifest is not None, "paths": paths}), capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {"yes": True, "no": False}.get(result.stdout) if result.returncode == 0 else None
 
 
 # Contract twin of CLI scope-fs.ts and daemon scope/node-file.ts; parity is tested.
@@ -318,7 +341,12 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
 
             # Parent links are logical edges, not filesystem ancestors. Ask the
             # scope reader to resolve IDs so tracing uses the same rules as CLI.
-            if may_have_parent(node, text):
+            remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
+            has_parent = may_have_parent(node, text, remaining)
+            if has_parent is None:
+                failures.append(f"parent link unavailable or timed out: {node}")
+                output.append(f"PARENT TRACE GAP — unable to read parent link within budget at {node}")
+            elif has_parent:
                 remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
                 workspace = next((ancestor for ancestor in node.parents if under_root(ancestor, root) and (ancestor / "project.yaml").is_file()), node.parent)
                 raw = rig_output("scope", "mission", "show", str(node), "--workspace", str(workspace), "--json", timeout=remaining) if remaining > 0 else None
