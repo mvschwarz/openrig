@@ -2932,6 +2932,9 @@ export class SessionTransport {
     // Preferences select new requests. Retained IDs keep their recorded route; a legacy unmarked held row is typed.
     const checkRetainedRoutes = (selected: "typed" | "native", selectedIds: readonly string[]) => {
       for (const id of selectedIds) {
+        const kind = history.inputKind(id);
+        if (kind && kind !== (opts?.nativeWake ? "wake" : "input"))
+          throw new DeliveryGuardError("delivery_identity_conflict", "This delivery ID selects a different native kind; use a new request ID.");
         const recorded = history.inputRoute(id);
         const entry = recorded === null && selected === "native" ? history.getById(id) : null;
         const saved = recorded ?? (entry && ["retained", "retired"].includes(entry.deliveryState) ? "typed" : null);
@@ -3056,7 +3059,7 @@ export class SessionTransport {
               identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, ...(opts?.urgent ? { urgency: "urgent" } : {}),
             }, target, !!opts?.committedOutboxIds, { sameSend: ids });
             outbox.bindInputRoute({ outboxId: id, senderSession: prior?.senderSession ?? opts?.actorSession ?? "unknown",
-              destinationSession: sessionName, body: prior?.body ?? text }, inputRoute(target.nodeId));
+              destinationSession: sessionName, body: prior?.body ?? text }, inputRoute(target.nodeId), opts?.nativeWake ? "wake" : "input");
           }
         })();
         // P2: observed only after the retention above committed; a submit-only

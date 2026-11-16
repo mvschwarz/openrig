@@ -640,6 +640,61 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
     expect(f.outbox.runnerReceipt("unverified")?.stage).toBe("accepted");
   });
 
+  it("committed run replacement settles old native custody without replay", async () => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    f.admit("accepted"); f.channel.frames(f.grant.token, 0);
+    f.channel.post(f.grant.token, { type: "ack", runId: "run-one", requestId: "accepted", sequence: 1, state: "accepted" });
+    f.admit("pending");
+    const wake = f.channel.admit(f.node.id, { outboxId: "unanswered", senderSession: "sender", destinationSession: "dev@channel", body: "why", kind: "wake", inputRoute: "native", payload: { question: "why" } });
+    f.outbox.updateRunner(f.node.id, "run-one", wake.requestId, wake.sequence, "offered");
+    f.outbox.updateRunner(f.node.id, "run-one", wake.requestId, wake.sequence, "accepted");
+    f.outbox.updateRunner(f.node.id, "run-one", wake.requestId, wake.sequence, "submitted");
+    for (const id of ["offered", "submitted-input", "completed", "rejected", "erased"]) {
+      const r = f.admit(id);
+      f.outbox.updateRunner(f.node.id, "run-one", id, r.sequence, "offered");
+      if (id !== "offered") {
+        f.outbox.updateRunner(f.node.id, "run-one", id, r.sequence, "accepted");
+        if (id !== "rejected") f.outbox.updateRunner(f.node.id, "run-one", id, r.sequence, "submitted");
+        if (id === "completed" || id === "rejected") f.outbox.updateRunner(f.node.id, "run-one", id, r.sequence, id, { result: { kind: "input", accepted: id === "completed" } });
+        if (id === "erased") f.outbox.eraseRunner(id, "2026-11-16T00:00:00.000Z");
+      }
+    }
+    const preserved = ["submitted-input", "completed", "rejected", "erased"].map(id => ({ id, row: f.outbox.getById(id), receipt: f.outbox.runnerReceipt(id) }));
+    // A same-run credential refresh and a runner death do not by themselves lose custody.
+    const refresh = f.grants.issue({ nodeId: f.node.id, generation: f.grant.generation, issuedBy: "refresh", run: { runId: "run-one", binding: f.grant.binding! } });
+    expect(f.grants.activate(refresh.grantId)).toBe(true);
+    expect(f.outbox.runnerReceipt("accepted")?.reconciliation).toBeUndefined();
+    f.grants.revoke({ grantId: refresh.grantId }, "runner died");
+    const next = f.grants.issue({ nodeId: f.node.id, generation: f.grant.generation, issuedBy: "replacement", run: { runId: "run-two", binding: f.grant.binding! } });
+    expect(f.outbox.getById("pending")?.deliveryState).toBe("sending");
+    expect(f.grants.activate(next.grantId)).toBe(true);
+    expect(f.channel.post(next.token, { ...f.hello, runId: "run-two" })).toMatchObject({ receipts: [] });
+    for (const id of ["accepted", "unanswered", "offered"]) {
+      expect(f.outbox.runnerReceipt(id)?.reconciliation).toBe("receiver_state_lost");
+      expect(f.outbox.getById(id)?.deliveryState).toBe("indeterminate");
+    }
+    expect(f.outbox.getById("pending")?.deliveryState).toBe("failed");
+    expect(f.outbox.runnerReceipt("pending")).toMatchObject({ stage: "rejected", result: { error: "not offered: its run ended" } });
+    for (const item of preserved) {
+      expect(f.outbox.runnerReceipt(item.id)).toEqual(item.receipt);
+      expect(f.outbox.getById(item.id)).toEqual(item.row);
+    }
+    expect(f.channel.frames(next.token, 0)).toEqual([]);
+    cleanups.push(f.channel.connect(next.token));
+    expect(f.channel.admit(f.node.id, { outboxId: "fresh", senderSession: "sender", destinationSession: "dev@channel", body: "new", kind: "input", inputRoute: "native", payload: { text: "new" } })).toMatchObject({ runId: "run-two", sequence: 1 });
+  });
+  it.each([false, true])("held native wake identity cannot become ordinary input (held=%s)", async held => {
+    const f = await fixture(); f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
+    f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    await f.guard.set(f.node.id, { mode: "hold" }, "person", "hold");
+    expect(await f.transport.sendNativeWake("dev@channel", "why", "held-wake", "sender")).toMatchObject({ outcome: "retained" });
+    if (!held) await f.guard.set(f.node.id, { mode: "off" }, "person", "release");
+    expect(await f.transport.send("dev@channel", "why", { deliveryId: "held-wake", actorSession: "sender" })).toMatchObject({ ok: false, reason: "delivery_identity_conflict" });
+    expect(f.outbox.runnerReceipt("held-wake")).toBeNull();
+    expect(f.outbox.getById("held-wake")?.deliveryState).toBe("retained");
+    await f.guard.set(f.node.id, { mode: "off" }, "person", "release");
+    expect(await f.transport.sendNativeWake("dev@channel", "why", "held-wake", "sender")).toMatchObject({ runnerReceipt: { kind: "wake" } });
+  });
   it("pending and replacement grants cannot subscribe to or settle the retiring run's receipts", async () => {
     const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token)); f.admit("old");
     f.channel.frames(f.grant.token, 0);
@@ -742,10 +797,15 @@ setTimeout(()=>reply({stopReason:text==='INTERRUPT'?'cancelled':'end_turn'}),tex
     expect(effects).toBe(0);
     expect(f.outbox.getById(id)?.deliveryState).toBe("indeterminate");
   });
-  it("seat route choice requires a live capability, and wake submission/lookup use that exact request", async () => {
+  it("seat route choice persists without a live capability, and wake submission/lookup use that exact request", async () => {
     const f = await fixture();
     const post = (path: string, body: unknown) => f.app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    expect((await post("/api/seat/set-input-route/dev%40channel", { route: "native", reason: "native" })).status).toBe(409);
+    expect((await post("/api/seat/set-input-route/dev%40channel", { route: "native", reason: "native" })).status).toBe(200);
+    expect(f.channel.capable(f.node.id, "input")).toBe(false);
+    expect(await (await post("/api/seat/set-input-route/dev%40channel", { route: "native", reason: "native" })).json()).toMatchObject({ inputRoute: "native", nativeInput: { input: false, wake: false } });
+    expect((await post("/api/seat/command/dev%40channel", { type: "wake", requestId: "unavailable", question: "why" })).status).toBe(409);
+    expect(f.outbox.runnerReceipt("unavailable")).toBeNull();
+    f.db.prepare("UPDATE nodes SET input_route='typed' WHERE id=?").run(f.node.id);
     f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
     expect((await post("/api/seat/command/dev%40channel", { type: "wake", requestId: "question", question: "why" })).status).toBe(409);
     expect((await post("/api/seat/set-input-route/dev%40channel", { route: "native", reason: "native" })).status).toBe(200);

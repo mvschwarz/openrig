@@ -192,19 +192,26 @@ export class OutboxHandler {
     return receipt.runner?.inputRoute ?? receipt.inputRoute ?? null;
   }
 
-  bindInputRoute(input: OutboxRecordInput & { outboxId: string }, route: "typed" | "native"): void {
+  inputKind(id: string): RunnerReceipt["kind"] | null {
+    if (!this.hasGuardDeliveryColumn) return null;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(id) as { guard_delivery: string | null } | undefined;
+    const saved = row?.guard_delivery ? JSON.parse(row.guard_delivery) : null;
+    return saved?.runner?.kind ?? saved?.kind ?? null;
+  }
+
+  bindInputRoute(input: OutboxRecordInput & { outboxId: string }, route: "typed" | "native", kind: RunnerReceipt["kind"] = "input"): void {
     if (!this.hasGuardDeliveryColumn) {
       if (route === "typed") return; // Legacy curated schemas retain their existing typed behavior.
       throw new OutboxHandlerError("runner_receipt_unavailable", "Route receipt schema unavailable.");
     }
     this.db.transaction(() => {
-      const entry = this.getById(input.outboxId), prior = this.inputRoute(input.outboxId);
+      const entry = this.getById(input.outboxId), prior = this.inputRoute(input.outboxId), priorKind = this.inputKind(input.outboxId);
       if (entry && (entry.senderSession !== input.senderSession || entry.destinationSession !== input.destinationSession || entry.body !== input.body)
-        || prior && prior !== route) throw new OutboxHandlerError("delivery_identity_conflict", "This ID names different input or route.");
+        || prior && prior !== route || priorKind && priorKind !== kind) throw new OutboxHandlerError("delivery_identity_conflict", "This ID names different input or route.");
       if (!entry) this.record(input);
       const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(input.outboxId) as { guard_delivery: string | null };
       const receipt = row.guard_delivery ? JSON.parse(row.guard_delivery) : { ids: [input.outboxId] };
-      this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, inputRoute: route }), input.outboxId);
+      this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(JSON.stringify({ ...receipt, inputRoute: route, ...(route === "native" ? { kind } : {}) }), input.outboxId);
     })();
   }
 
@@ -249,9 +256,9 @@ export class OutboxHandler {
       if (!memberIds.length || memberIds[0] !== input.outboxId || new Set(memberIds).size !== memberIds.length)
         throw new OutboxHandlerError("delivery_identity_conflict", "Invalid ordered native membership.");
       for (const id of memberIds) {
-        const member = this.getById(id), owner = this.runnerPrimary(id);
+        const member = this.getById(id), owner = this.runnerPrimary(id), kind = this.inputKind(id);
         if (owner && owner !== input.outboxId || memberIds.length > 1 && (!member || member.destinationSession !== input.destinationSession)
-          || this.inputRoute(id) === "typed") throw new OutboxHandlerError("delivery_identity_conflict", "Native membership names different target, route or operation.");
+          || this.inputRoute(id) === "typed" || kind && kind !== input.kind) throw new OutboxHandlerError("delivery_identity_conflict", "Native membership names different target, route or operation.");
       }
       if (this.inputRoute(input.outboxId) === "typed") throw new OutboxHandlerError("delivery_identity_conflict", "This ID names a different input route.");
       if (entry && (entry.senderSession !== input.senderSession || entry.destinationSession !== input.destinationSession || entry.body !== input.body)
@@ -320,6 +327,27 @@ export class OutboxHandler {
     })();
   }
 
+  /** Called only at a committed Core run cutover, never from an uncertain liveness read. */
+  replaceRunnerRun(nodeId: string, currentRunId: string): void {
+    if (!this.hasGuardDeliveryColumn) return;
+    this.db.transaction(() => {
+      const runs = this.db.prepare(`SELECT DISTINCT json_extract(guard_delivery,'$.runner.runId') AS runId
+        FROM outbox_entries WHERE json_extract(guard_delivery,'$.runner.nodeId')=?
+        AND json_extract(guard_delivery,'$.runner.runId')<>?`).all(nodeId, currentRunId) as { runId: string }[];
+      for (const { runId } of runs) for (const receipt of this.runnerReceipts(nodeId, runId)) {
+        if (receipt.erasedAt || ["completed", "rejected"].includes(receipt.stage)
+          || receipt.stage === "submitted" && receipt.kind === "input") continue;
+        const pending = receipt.stage === "pending";
+        this.writeRunner(pending ? { ...receipt, stage: "rejected", completedAt: new Date().toISOString(),
+          result: { kind: receipt.kind, accepted: false, error: "not offered: its run ended" } }
+          : { ...receipt, reconciliation: "receiver_state_lost" });
+        for (const id of receipt.memberIds ?? [receipt.requestId])
+          this.db.prepare("UPDATE outbox_entries SET delivery_state=?,delivered_at=NULL WHERE outbox_id=?")
+            .run(pending ? "failed" : "indeterminate", id);
+      }
+    })();
+  }
+
   forgetRunnerMap(nodeId: string, runId: string): void {
     this.db.transaction(() => {
       for (const receipt of this.runnerReceipts(nodeId, runId)) {
@@ -348,7 +376,7 @@ export class OutboxHandler {
     this.db.transaction(() => {
       // Every erasure entry point removes this selected source's content/endpoints. Other group source histories
       // stay governed by their own scope; the composed native payload/result is always sanitized for the whole group.
-      this.db.prepare("UPDATE outbox_entries SET body='',tags=NULL,sender_session='',destination_session='',guard_binding=NULL,audit_pointer=NULL,retirement_reason=NULL WHERE outbox_id=?").run(id);
+      this.db.prepare("UPDATE outbox_entries SET body='',tags=NULL,sender_session='',destination_session='',guard_binding=NULL,audit_pointer=NULL,retirement_reason=NULL,retired_by=NULL WHERE outbox_id=?").run(id);
       if (!receipt || !tombstone) {
         // A native request held before run admission has no run or sequence to invent. Keep its opaque erased-route
         // identity; the same unavailable shape also fences a surviving pointer whose primary evidence is missing.

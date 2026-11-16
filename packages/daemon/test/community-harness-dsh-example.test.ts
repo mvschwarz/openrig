@@ -739,14 +739,22 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
 });
 
 
-async function nativeChannelFixture(lostResultId = "WAKE:A") {
+async function nativeChannelFixture(lostResultId = "WAKE:A", refusal?: { status: number; code: string }) {
   const frames: Array<Record<string, unknown>> = [], stages = new Map<string, string>(), posts: Array<Record<string, unknown>> = [];
   const streams = new Set<import("node:http").ServerResponse>();
-  let lostAck = false, lostResult = false;
+  let lostAck = refusal !== undefined, lostResult = false, refusalSent = false;
+  let refusedAck: import("node:http").ServerResponse | undefined;
   const offer = () => {
     const frame = frames.find(f => stages.get(String(f.requestId)) === "offered") ?? frames.find(f => !stages.has(String(f.requestId)));
     if (!frame) return; stages.set(String(frame.requestId), "offered");
-    for (const stream of streams) stream.write(`event: request\nid: ${frame.sequence}\ndata: ${JSON.stringify(frame)}\n\n`);
+    const wire = `event: request\nid: ${frame.sequence}\ndata: ${JSON.stringify(frame)}\n\n`;
+    for (const stream of streams) {
+      if (wire.length > 2 * 1024 * 1024) {
+        // A JSON escape can cross HTTP chunks; send its backslash before the remainder.
+        const split = wire.indexOf("\\") + 1;
+        stream.write(wire.slice(0, split)); setTimeout(() => { if (!stream.destroyed) stream.write(wire.slice(split)); }, 10);
+      } else stream.write(wire);
+    }
   };
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/api/activity/runner-channel") {
@@ -759,7 +767,15 @@ async function nativeChannelFixture(lostResultId = "WAKE:A") {
       posts.push(body);
       if (body.type === "hello") return reply({ capabilities: { input: true, wake: true, cancel: false }, receipts: [] });
       stages.set(String(body.requestId), String(body.type));
-      if (body.type === "ack") { offer(); if (!lostAck) { lostAck = true; res.destroy(); return; } }
+      if (body.type === "ack") {
+        offer();
+        if (refusal && body.requestId === "FIRST" && !refusalSent) { refusedAck = res; return; }
+        if (refusal && body.requestId === "LATER") {
+          reply({ receipt: { stage: body.type } });
+          setTimeout(() => { refusalSent = true; refusedAck!.writeHead(refusal.status, { "content-type": "application/json" }); refusedAck!.end(JSON.stringify({ code: refusal.code })); }, 25); return;
+        }
+        if (!lostAck) { lostAck = true; res.destroy(); return; }
+      }
       if (body.type === "result" && body.requestId === lostResultId && !lostResult) { lostResult = true; res.destroy(); return; }
       reply({ receipt: { stage: body.type } });
     });
@@ -773,6 +789,39 @@ async function nativeChannelFixture(lostResultId = "WAKE:A") {
 }
 
 describe("the actual dsh runner native channel", () => {
+  it.each([
+    { status: 409, code: "runner_receipt_erased", later: true },
+    { status: 401, code: "runner_grant_revoked", later: false },
+    { status: 409, code: "runner_grant_stale", later: false },
+    { status: 409, code: "runner_grant_pending", later: true },
+    { status: 409, code: "runner_grant_unverified", later: true },
+  ])("ACK refusal $code preserves custody, progress and person controls", async ({ status, code, later }) => {
+    const channel = await nativeChannelFixture("none", { status, code }), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["BUSY", "FIRST", "LATER"]);
+    await waitFor(() => channel.posts.filter(post => post.type === "ack").length >= 3, "all acknowledgements");
+    await new Promise(resolve => setTimeout(resolve, 350));
+    if (later) await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "LATER"), "later progress without a person pump", 1000);
+    runner.type("person after refusal");
+    await waitFor(() => requests(runner.log(), "session/prompt").some(command => JSON.stringify(command).includes("person after refusal")), "person input");
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    const prompts = requests(runner.log(), "session/prompt").map(command => (command.params as { prompt: Array<{ text: string }> }).prompt[0]!.text);
+    expect(prompts.filter(text => text === "FIRST")).toHaveLength(code === "runner_grant_pending" || code === "runner_grant_unverified" ? 1 : 0);
+    expect(prompts.filter(text => text === "LATER")).toHaveLength(later ? 1 : 0);
+    expect(prompts.filter(text => text === "BUSY")).toHaveLength(1);
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "BUSY" }));
+    expect(requests(runner.log(), "session/cancel")).toEqual([]);
+  });
+  it.each(["\n", "\0"])("accepts a full escaped question through the production dsh SSE reader (%j)", async character => {
+    const channel = await nativeChannelFixture("none"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    const question = "q" + character.repeat(1024 * 1024 - 1);
+    channel.push(["WAKE:LARGE"], question);
+    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "WAKE:LARGE"), "large question acknowledgement", 3000);
+    expect(channel.posts.filter(post => post.type === "ack" && post.requestId === "WAKE:LARGE")).toHaveLength(1);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  });
+
   it("flushes an active managed turn's terminal receipt after child exit and a lost result reply", async () => {
     const channel = await nativeChannelFixture("WAKE:EXIT"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
     await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);

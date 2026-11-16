@@ -539,7 +539,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
   cmd.command("set-input-route").argument("<seat>")
     .requiredOption("--route <route>", "typed or native")
     .requiredOption("--reason <text>").option("--json")
-    .description("Choose this seat's managed input route; native requires a current capable runner")
+    .description("Choose this seat's managed input route; native delivery needs a capable live runner")
     .action(async (seat: string, opts: { route: string; reason: string; json?: boolean }) => {
       if (!["typed", "native"].includes(opts.route) || !opts.reason.trim()) {
         console.error("Supply --route typed|native and a reason."); process.exitCode = 1; return;

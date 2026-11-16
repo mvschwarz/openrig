@@ -7,12 +7,17 @@ import type { StatusDeps } from "./status.js";
 import { resolveIdentitySource } from "./whoami.js";
 import { runWake, DEFAULT_WAKE_TIMEOUT_MS, defaultWakeRunner, defaultWakeFileLocator, type WakeRunner } from "../ask-wake.js";
 
-interface NativeWakeReceipt { requestId: string; stage: string; erasedAt?: string; result?: { kind?: string; completion?: string; answer?: string | null } }
+interface NativeWakeReceipt { requestId: string; stage: string; erasedAt?: string; reconciliation?: string; result?: { kind?: string; completion?: string; answer?: string | null } }
 async function askLiveRunner(client: DaemonClient, seat: string, question: string, timeoutMs: number, json: boolean): Promise<boolean> {
   try {
-    const view = await client.get<{ inputRoute?: string; nativeInput?: { wake?: boolean } }>(`/api/seat/status/${encodeURIComponent(seat)}`);
-    if (view.status < 400 && view.data.inputRoute === "typed") return false;
-    if (view.status >= 400 || view.data.inputRoute !== "native") throw new Error("Seat input route is unavailable; no wake submitted.");
+    const view = await client.get<{ inputRoute?: string; nativeInput?: { wake?: boolean }; seat_ref?: string; rig_id?: string; rig_name?: string;
+      logical_id?: string; runtime?: string | null; session_status?: string | null; runner?: boolean; error?: unknown }>(`/api/seat/status/${encodeURIComponent(seat)}`);
+    const legacyStatus = !("inputRoute" in view.data) && !("error" in view.data)
+      && [view.data.seat_ref, view.data.rig_id, view.data.rig_name, view.data.logical_id].every(value => typeof value === "string" && value.length > 0)
+      && (typeof view.data.runtime === "string" || view.data.runtime === null)
+      && (typeof view.data.session_status === "string" || view.data.session_status === null) && typeof view.data.runner === "boolean";
+    if (view.status >= 200 && view.status < 300 && (view.data.inputRoute === "typed" || legacyStatus)) return false;
+    if (view.status < 200 || view.status >= 300 || view.data.inputRoute !== "native") throw new Error("Seat input route is unavailable; no wake submitted.");
   } catch (error) {
     if (json) console.log(JSON.stringify({ unavailable: true, error: (error as Error).message }));
     else console.error(`Wake unavailable: ${(error as Error).message}`);
@@ -33,6 +38,7 @@ async function askLiveRunner(client: DaemonClient, seat: string, question: strin
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       if (receipt && receipt.requestId !== requestId) throw new Error("Native wake receipt names another request");
+      if (receipt?.reconciliation === "receiver_state_lost") { show({ unavailable: true, error: "native receiver state was lost; outcome remains uncertain" }); process.exitCode = 2; return true; }
       if (receipt?.erasedAt) { show({ unavailable: true, error: "native request content was erased" }); process.exitCode = 2; return true; }
       if (receipt && ["completed", "rejected"].includes(receipt.stage)) {
         show(); if (receipt.result?.kind !== "wake" || receipt.result.completion !== "completed" || typeof receipt.result.answer !== "string") process.exitCode = 2;

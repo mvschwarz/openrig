@@ -2199,9 +2199,10 @@ export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseU
         for (;;) {
           const chunk = await reader.read(); if (chunk.done) break;
           buffer += chunk.value.replace(/\r/g, "");
-          if (buffer.length > 2 * 1024 * 1024) throw new Error("Channel frame too large");
           let end: number;
           while ((end = buffer.indexOf("\n\n")) >= 0) {
+            // A 1 MiB question can occupy six JSON characters per source character, plus envelope metadata.
+            if (end > 6 * 1024 * 1024 + 64 * 1024) throw new Error("Channel frame too large");
             const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
             const data = block.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
             if (!data) continue;
@@ -2211,6 +2212,7 @@ export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseU
             // Do not block reconnection on an ack whose response was lost; the core retains its acceptance promise.
             void core.acceptRunnerRequest(frame).catch(() => {});
           }
+          if (buffer.length > 6 * 1024 * 1024 + 64 * 1024) throw new Error("Channel frame too large");
         }
       } finally { await reader.cancel().catch(() => {}); }
     } catch { /* Same live process/map reconnects; native writes never replay here. */ }

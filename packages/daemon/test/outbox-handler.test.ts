@@ -167,6 +167,14 @@ describe("native runner receipts", () => {
     for (const change of [{ body: "other" }, { senderSession: "eve@rig" }, { runId: "other" }, { nodeId: "other" }, { payload: { text: "other" } }])
       expect(() => outbox.admitRunner({ ...input(), ...change })).toThrow(/different/);
   });
+  it("a held wake cannot become an ordinary input through grouped secondary membership", () => {
+    const held = input("held-wake");
+    outbox.bindInputRoute(held, "native", "wake");
+    outbox.record(input("first"));
+    expect(() => outbox.admitRunner({ ...input("first"), memberIds: ["first", "held-wake"] })).toThrow(/different/);
+    expect(outbox.runnerReceipt("first")).toBeNull();
+    expect(outbox.inputKind("held-wake")).toBe("wake");
+  });
   it("a missing primary cannot be recreated by direct native admission of its surviving member", () => {
     for (const id of ["owner", "member"]) outbox.record({ ...input(id), body: id });
     outbox.admitRunner({ ...input("owner"), body: "owner", memberIds: ["owner", "member"] });

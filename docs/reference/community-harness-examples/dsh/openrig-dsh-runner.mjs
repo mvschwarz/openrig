@@ -277,11 +277,18 @@ async function main() {
   const managed = new Map();
   const channelStop = new AbortController();
   let activeManaged = null;
+  let managedQuarantined = false;
+  const permanentRunRefusal = (status, code) => [401, 403, 404, 409, 410].includes(status)
+    && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(code)
+    && ([401, 403].includes(status) || ["runner_grant_required", "runner_grant_revoked", "runner_grant_stale"].includes(code));
   const channelPost = async (body) => {
     while (!channelStop.signal.aborted) {
       const result = await callOpenRig("POST", "/api/activity/runner-channel", body, POST_TIMEOUT_MS);
       if (result.status >= 200 && result.status < 300) return true;
-      if ([401, 403, 404, 409, 410].includes(result.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(result.body?.code)) return false;
+      if ([401, 403, 404, 409, 410].includes(result.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(result.body?.code)) {
+        if (permanentRunRefusal(result.status, result.body?.code)) managedQuarantined = true;
+        return false;
+      }
       await sleep(250);
     }
     return false;
@@ -308,7 +315,7 @@ async function main() {
     const entry = { frame, state: "accepting", reports: Promise.resolve(), answer: [] };
     managed.set(frame.requestId, entry);
     entry.acceptance = (async () => {
-      if (!await channelPost({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" })) { entry.state = "unavailable"; return; }
+      if (!await channelPost({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" })) { entry.state = "unavailable"; pump(); return; }
       entry.state = "queued";
       const before = state.queue.findIndex(other => typeof other !== "string" && other.frame.sequence > frame.sequence);
       if (before < 0) state.queue.push(entry); else state.queue.splice(before, 0, entry);
@@ -323,27 +330,34 @@ async function main() {
     while (!channelStop.signal.aborted) {
       try {
         const hello = await callOpenRig("POST", "/api/activity/runner-channel", { type: "hello", version: 1, runId: env.OPENRIG_RUN_ID, retained,
-          capabilities: { input: true, wake: true, cancel: false } }, POST_TIMEOUT_MS);
-        if ([401, 403].includes(hello.status)) return;
+          capabilities: { input: !managedQuarantined, wake: !managedQuarantined, cancel: false } }, POST_TIMEOUT_MS);
+        if (permanentRunRefusal(hello.status, hello.body?.code)) { managedQuarantined = true; return; }
         if (hello.status !== 200) throw new Error("Channel handshake unavailable");
         retained = true;
         const response = await fetch(`${endpoint.base}/api/activity/runner-channel`, { signal: channelStop.signal,
           headers: { authorization: `Bearer ${endpoint.token}`, "Last-Event-ID": String(cursor) } });
-        if (!response.ok || !response.body) throw new Error("Channel unavailable");
+        if (!response.ok) {
+          const failure = await response.json().catch(() => null);
+          if (permanentRunRefusal(response.status, failure?.code)) { managedQuarantined = true; return; }
+          throw new Error("Channel unavailable");
+        }
+        if (!response.body) throw new Error("Channel unavailable");
         const reader = response.body.pipeThrough(new TextDecoderStream()).getReader(); let buffer = "";
         try {
           for (;;) {
             const part = await reader.read(); if (part.done) break;
             buffer += part.value.replace(/\r/g, "");
-            if (buffer.length > 2 * 1024 * 1024) throw new Error("Channel frame too large");
             let end;
             while ((end = buffer.indexOf("\n\n")) >= 0) {
+              // A 1 MiB question can occupy six JSON characters per source character, plus envelope metadata.
+              if (end > 6 * 1024 * 1024 + 64 * 1024) throw new Error("Channel frame too large");
               const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);
               const data = block.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
               if (!data) continue;
               const frame = JSON.parse(data); if (frame.runId !== env.OPENRIG_RUN_ID || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1) throw new Error("Invalid channel frame");
               cursor = Math.max(cursor, frame.sequence); void acceptFrame(frame).catch(() => {});
             }
+            if (buffer.length > 6 * 1024 * 1024 + 64 * 1024) throw new Error("Channel frame too large");
           }
         } finally { await reader.cancel().catch(() => {}); }
       } catch { /* Reconnect with this process's retained map; never replay native operations. */ }
@@ -611,9 +625,11 @@ async function main() {
 
   const pump = () => {
     if (state.running || agentExited || state.queue.length === 0) return;
-    const next = state.queue[0];
+    const index = managedQuarantined ? state.queue.findIndex(input => typeof input === "string") : 0;
+    if (index < 0) return;
+    const next = state.queue[index];
     if (typeof next !== "string" && [...managed.values()].some(prior => prior.state === "accepting" && prior.frame.sequence < next.frame.sequence)) return;
-    activeTurn = runTurn(state.queue.shift());
+    activeTurn = runTurn(state.queue.splice(index, 1)[0]);
   };
 
   const submit = (text) => {

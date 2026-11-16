@@ -1,4 +1,4 @@
-import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
+import { RunnerChannel } from "../domain/runner-channel.js";
 import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
 import { OutboxHandler } from "../domain/outbox-handler.js";
 import { Hono, type Context } from "hono";
@@ -47,13 +47,10 @@ seatRoutes.post("/set-input-route/:seatRef", async c => {
     return c.json({ error: "Supply typed or native route and a reason." }, 400);
   const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
   const repo = c.get("rigRepo" as never) as RigRepository;
-  const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
   if (!guard) return c.json({ error: "Delivery guard unavailable." }, 503);
   try {
     const target = guard.target(c.req.param("seatRef"));
     await guard.custody([target.nodeId], async () => {
-      if (body.route === "native" && !channel?.capable(target.nodeId, "input"))
-        throw new RunnerChannelError("runner_unavailable", "No current capable native runner; route unchanged.");
       const node = repo.db.prepare("SELECT rig_id,input_route FROM nodes WHERE id=?").get(target.nodeId) as { rig_id: string; input_route: "typed" | "native" };
       if (node.input_route === body.route) return;
       const events = c.get("eventBus" as never) as EventBus | undefined;
@@ -64,7 +61,9 @@ seatRoutes.post("/set-input-route/:seatRef", async c => {
       })();
       if (event) events!.notifySubscribers(event);
     });
-    return c.json({ nodeId: target.nodeId, inputRoute: body.route, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    return c.json({ nodeId: target.nodeId, inputRoute: body.route, nativeInput: { input: channel?.capable(target.nodeId, "input") ?? false,
+      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
   } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
 });
 

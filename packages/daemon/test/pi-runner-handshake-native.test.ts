@@ -4,11 +4,43 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { piSeatPaths, PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER } from "../src/adapters/pi-runner-protocol.js";
+
+import { connectPiRunnerChannel, RunnerCore } from "../src/adapters/pi-runner.js";
 
 // Real runner + real offline JSONL child, never a provider API or installed Pi.
 describe.skipIf(process.platform === "win32")("Pi startup RPC handshake", () => {
+  it.each(["\n", "\0"])("the production SSE reader accepts the full escaped question quota (%j)", async character => {
+    const posts: Record<string, unknown>[] = [], rpc: Record<string, unknown>[] = [];
+    const core = new RunnerCore({ sendRpc: command => { rpc.push(command); }, mirrorLine: () => {}, mirrorAppend: () => {},
+      postActivity: () => {}, writeSidecar: () => {}, now: () => new Date().toISOString(), postRunner: async body => { posts.push(body); return true; } },
+      { sessionName: "fixture", runId: "run" });
+    core.start(); core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionId: "offline", isStreaming: false, pendingMessageCount: 0 } }));
+    const question = "q" + character.repeat(1024 * 1024 - 1);
+    const frames = [1, 2].map(sequence => `event: request\ndata: ${JSON.stringify({ version: 1, runId: "run", requestId: `large-${sequence}`, sequence, kind: "wake", payload: { question } })}\n\n`).join("");
+    const controller = new AbortController();
+    let reads = 0;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (init?.method === "POST") return new Response(JSON.stringify({ receipts: [] }));
+      reads++;
+      return new Response(new ReadableStream({ start(stream) {
+        // Deliberately split the first JSON escape and then coalesce two valid large frames.
+        const split = frames.indexOf(character === "\n" ? "\\n" : "\\u0000") + 1;
+        stream.enqueue(new TextEncoder().encode(frames.slice(0, split)));
+        stream.enqueue(new TextEncoder().encode(frames.slice(split))); stream.close();
+      } }));
+    });
+    try {
+      const connected = connectPiRunnerChannel(core, { baseUrl: "http://fixture", token: "fixture" }, "run", controller.signal);
+      const until = Date.now() + 1000;
+      while (posts.filter(post => post.type === "ack").length < 2 && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+      controller.abort(); await connected;
+      expect(posts.filter(post => post.type === "ack").map(post => post.requestId)).toEqual(["large-1", "large-2"]);
+      expect(reads).toBe(1);
+    } finally { controller.abort(); fetch.mockRestore(); }
+  });
+
   it.each([
     { boundary: "ack", code: "runner_receipt_erased", status: 409, later: true },
     { boundary: "ack", code: "runner_grant_revoked", status: 401, later: false },
