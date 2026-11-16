@@ -135,7 +135,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   before any resend, and don't let a script resend on that exit code alone. Since 0.7.14 an ordinary
   send is refused as needing input while an open Claude Code or Codex `/model` picker is
   positively identified; nothing is typed. That's shown by the change's own tests, not yet checked
-  with the real Claude Code and Codex programs on 0.7.14. A
+  with the real Claude Code and Codex programs on 0.7.14. Since 0.7.17 that refusal says to close the
+  picker (Esc) in that pane and send again, and doesn't offer `--dangerously-interact`, because text
+  typed there picks a model. A
   producer-link advisory reading `no_activity_signal` means activity could not be determined;
   confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
   question waiting for a person is refused with `target_needs_input`, even when its screen
