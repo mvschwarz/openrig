@@ -260,6 +260,12 @@ export class SuccessorSessionLauncher {
       };
     }
 
+    const guardedTarget = this.tmuxAdapter.deliveryGuard?.maybeTarget(input.node.id);
+    if (this.tmuxAdapter.deliveryGuard && (guardedTarget?.session !== departingSession || guardedTarget.pane !== pane.id)) {
+      return { ok: false, code: "pane_unresolved", step: "resolve_pane", replacementStarted: false,
+        message: `The managed binding does not match pane "${pane.id}" of "${departingSession}"; no cutover was started.` };
+    }
+
     const binding = successorBinding(input.node, departingSession, pane.id, cwd, input.occupantGeneration);
     const adapter = input.node.runtime ? this.runtimeAdapters[input.node.runtime] : undefined;
     let preflightWarnings: string[] = [];
@@ -280,7 +286,8 @@ export class SuccessorSessionLauncher {
     //    money-proof). The swap: set remain-on-exit so the pane survives the exit → graceful SIGTERM
     //    ("exits in place"; also protects the provider session state the successor's resume depends on) →
     //    bounded-timeout SIGKILL fallback (pinned degraded path) → respawn-pane (no -k) on the dead pane.
-    const terminated = await this.terminateRetiree(pane.id);
+    const inputTarget = this.tmuxAdapter.deliveryGuard ? input.node.id : pane.id;
+    const terminated = await this.terminateRetiree(pane.id, inputTarget);
     if (!terminated.ok) {
       return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
     }
@@ -291,7 +298,7 @@ export class SuccessorSessionLauncher {
     // <old-token>`), which is exactly how the 2026-08-22 wave's "fresh" successors booted 14-day-old
     // contexts. An explicit shell also resets the pane's respawn default, self-healing the pane.
     const blankShell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
-    const respawned = await this.tmuxAdapter.respawnPane(pane.id, blankShell, { cwd, env });
+    const respawned = await this.tmuxAdapter.respawnPane(inputTarget, blankShell, { cwd, env });
     if (!respawned.ok) {
       return {
         ok: false,
@@ -554,8 +561,8 @@ export class SuccessorSessionLauncher {
    * (Graceful signal = SIGTERM as the desk-provisional default under build-ahead; dev-planner ratifies
    * the exact graceful mechanism — SIGTERM vs a runtime-specific quit — at their resume.)
    */
-  private async terminateRetiree(paneId: string): Promise<PaneTerminationResult> {
-    return terminatePaneInPlace(this.tmuxAdapter, paneId, { pollMs: this.exitPollMs, timeoutMs: this.exitTimeoutMs, sleep: this.sleep });
+  private async terminateRetiree(paneId: string, inputTarget: string): Promise<PaneTerminationResult> {
+    return terminatePaneInPlace(this.tmuxAdapter, paneId, { pollMs: this.exitPollMs, timeoutMs: this.exitTimeoutMs, sleep: this.sleep }, "Retiree", inputTarget);
   }
 
   /** KI-14: is the respawned pane's foreground a bare shell? A non-shell here means the pane booted
