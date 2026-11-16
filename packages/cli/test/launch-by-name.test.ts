@@ -281,3 +281,28 @@ describe("remote rig lookup keeps rig down --host's results", () => {
     expect(await resolveRemoteRigId("h1", "alpha", remote("fail"))).toEqual({ ok: false, error: "cannot resolve rig on host h1: HTTP 503" });
   });
 });
+
+// Launch keeps a seat whose session is live and isn't proven to be a bare shell. That shows a live session, not a
+// running agent, and the output says only that.
+describe("rig launch over a live session", () => {
+  const client = (answer: Answer) => ({
+    get: vi.fn(async (path: string): Promise<Answer> => path.startsWith("/api/rigs/summary")
+      ? { status: 200, data: RIGS } : path === "/healthz" ? { status: 200, data: { status: "ok", semver: "0.7.0" } } : { status: 200, data: { version: "0.7.0" } }),
+    post: vi.fn(async (): Promise<Answer> => answer),
+  });
+
+  it("names the seats kept for a live session without calling them running", async () => {
+    await launchCommand(deps(client({ status: 201, data: { ok: true, launched: [], held: [], alreadyRunning: [{ nodeId: "n1", logicalId: "worker" }] } })))
+      .parseAsync(["node", "rig", "alpha", "--seats", "worker"]);
+    expect(out.join("\n")).toContain("Not relaunched, live session (its agent isn't proven running): worker");
+    expect(out.join("\n")).not.toMatch(/Already running/);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("says a single seat has a live session, not that it's running", async () => {
+    await launchCommand(deps(client({ status: 200, data: { ok: true, alreadyRunning: [{ nodeId: "n1", logicalId: "worker" }] } })))
+      .parseAsync(["node", "rig", "alpha", "worker"]);
+    expect(out.join("\n")).toContain(`Node worker has a live session in rig alpha (${ALPHA}), so it wasn't relaunched. Its agent isn't proven running.`);
+    expect(out.join("\n")).not.toMatch(/is already running/);
+  });
+});
