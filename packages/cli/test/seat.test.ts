@@ -767,6 +767,26 @@ describe("rig seat status", () => {
     expect(errors.join("\n")).toContain("List seats with: rig ps --nodes");
   });
 
+  it("#3253: a plain handover successor_create_failed names the process-limit notice once", async () => {
+    const deps = makeDeps({
+      status: 500,
+      data: {
+        ok: false,
+        code: "successor_create_failed",
+        message: "Handover failed at step \"create-successor\": harness not interactive",
+        guidance: "The seat's registry binding is unchanged.",
+        processLimits: { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true,
+          requested: { tasksMax: 256 } },
+      },
+    }, []);
+    const { errors } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "impl@seat-rig", "--reason", "context-wall"]);
+    });
+    const out = errors.join("\n");
+    expect(out.match(/the user manager timed out/g)).toHaveLength(1);
+    expect(out).toContain("Process limits: tasks_max 256: requested, not applied");
+  });
+
   it("#3253: a plain handover failure after a recovery launch without the limit names the process-limit notice", async () => {
     const deps = makeDeps({
       status: 500,

@@ -1642,7 +1642,8 @@ describe("SeatHandoverService", () => {
       const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
       expect(result).toMatchObject({ ok: false, code: "successor_create_failed", processLimits: notice });
-      expect((result as { guidance: string }).guidance).toMatch(/process_limits requested, not applied: .*the user manager timed out.*went on without the limit/);
+      // one source: the structured notice (the CLI renders its line); the guidance doesn't repeat it
+      expect((result as { guidance: string }).guidance).not.toMatch(/process_limits requested/);
     });
 
   it("maps a listPanes THROW resolving the departing pane to a loud successor_create_failed (no rejection, seat untouched)", async () => {
