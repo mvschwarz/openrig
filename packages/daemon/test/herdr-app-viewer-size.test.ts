@@ -14,7 +14,26 @@ const run = promisify(execFile);
 const tmuxBin = (() => { try { return execFileSync("sh", ["-c", "command -v tmux"], { encoding: "utf8" }).trim(); } catch { return ""; } })();
 // refresh-client -f (client flags at runtime) needs tmux 3.2 or later.
 const tmuxVersion = (() => { try { return execFileSync(tmuxBin, ["-V"], { encoding: "utf8" }).trim(); } catch { return ""; } })();
-const flagsAtRuntime = !/^tmux ([12]\.|3\.[01]\b)/.test(tmuxVersion);
+// 3.0 and 3.1 with or without a patch letter (3.1c) lack it; 3.10 and later have it.
+const flagsAtRuntime = !/^tmux ([12]\.|3\.[01](?:\D|$))/.test(tmuxVersion);
+
+// The watcher's own version gate, taken from the generated viewer and run by sh: which tmux versions it leaves alone.
+describe("the viewer's tmux version gate", () => {
+  const script = () => {
+    const argv = viewerArgv({ attachArgv: tileAttachArgv("tmux", ["-S", "/nonexistent/s"], "seat1", false), paneCommand: "", readOnly: false }, "g1", { path: "/nonexistent/g1.shown", until: 0, expired: "x" });
+    const text = argv.find((a) => a.includes('-V 2>/dev/null)" in')) ?? "";
+    const gate = /case "\$\("\$x" -V 2>\/dev\/null\)" in (.*?)\) exit 0;; esac;/.exec(text)?.[1];
+    expect(gate, "the gate is in the generated viewer").toBeTruthy();
+    return gate as string;
+  };
+  const leftAlone = (version: string) => execFileSync("sh", ["-c", `case "$1" in ${script()}) echo old;; *) echo new;; esac`, "gate", version], { encoding: "utf8" }).trim() === "old";
+  it("leaves tmux 1.x, 2.x, 3.0 and 3.1 alone, with or without a patch letter", () => {
+    for (const v of ["tmux 1.8", "tmux 2.9a", "tmux 3.0", "tmux 3.0a", "tmux 3.1", "tmux 3.1b", "tmux 3.1c"]) expect(leftAlone(v), v).toBe(true);
+  });
+  it("sets flags from tmux 3.2 on, including 3.10 and later", () => {
+    for (const v of ["tmux 3.2", "tmux 3.2a", "tmux 3.3a", "tmux 3.5a", "tmux 3.10", "tmux 3.11a", "tmux next-3.6"]) expect(leftAlone(v), v).toBe(false);
+  });
+});
 
 describe.skipIf(!tmuxBin || !flagsAtRuntime)("the generated herdr-app viewer (real tmux): a cell no screen shows never sizes the seat", () => {
   let dir: string;

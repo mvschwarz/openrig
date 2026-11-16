@@ -56,7 +56,8 @@ export const HEADLESS_SIZE = { cols: 200, rows: 120 };
 const HEADLESS_WATCH = [
   'w=; t=$(tty 2>/dev/null) || t=;',
   'case "$t" in /dev/*) (p=$$; x=$3; shift 3;',
-  'case "$("$x" -V 2>/dev/null)" in "tmux "[12].*|"tmux 3.0"*|"tmux 3.1"*) exit 0;; esac;',
+  // tmux 3.0 and 3.1 (with or without a patch letter, such as 3.1c) have no client flags at runtime; 3.10 and later do.
+  'case "$("$x" -V 2>/dev/null)" in "tmux "[12].*|"tmux 3.0"|"tmux 3.0"[!0-9]*|"tmux 3.1"|"tmux 3.1"[!0-9]*) exit 0;; esac;',
   // tmux keeps flags per client, and the tile attaches a new client on the same terminal when the seat is replaced: while the
   // cell is at the headless size the flag is set again about once a second, so a new client never sizes the seat for long. At any
   // other size a new client already sizes it, as a client a person types in should.
