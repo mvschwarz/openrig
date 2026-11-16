@@ -445,6 +445,48 @@ describe("rig seat status", () => {
     expect(output).not.toContain("Permission mode for future launches");
   });
 
+  it("prints the saved auto mode block against the last launch's, with its notes and warnings", async () => {
+    const account = { summary: "Next launch: --permission-mode auto.", overrides: [], unknown: [], openRigAdds: { claudeAllow: [], claudeAsk: [], notes: [] }, controls: [] };
+    const claudeAutoMode = {
+      saved: { state: "recorded", block: { environment: ["$defaults", "x"], soft_deny: ["only"], classifyAllShell: true } },
+      lastLaunch: { state: "unknown" }, matchesLastLaunch: null,
+      notes: ["Claude adds these entries to your user and managed auto mode settings; OpenRig doesn't read or change those."],
+      advisories: ['claude_auto_mode.soft_deny: without "$defaults", this list replaces Claude\'s built-in soft_deny entries'],
+      inspect: "claude --settings '{}' auto-mode config",
+    };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", account, claudeAutoMode } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("  Claude auto mode block (saved): environment 2 (with $defaults), soft_deny 1, classifyAllShell true");
+    expect(output).toContain("  Claude auto mode block (last launch, observed): unknown; unknown whether it matches saved");
+    expect(output).toContain(`  ${claudeAutoMode.notes[0]}`);
+    expect(output).toContain(`  Warning: ${claudeAutoMode.advisories[0]}`);
+    expect(output).toContain("  Effective lists where you run it: claude --settings '{}' auto-mode config");
+  });
+
+  it("prints a saved auto mode block that can't be read as unavailable, with an unknown comparison", async () => {
+    const claudeAutoMode = { saved: { state: "unavailable", error: "Seat n1: the saved claude_auto_mode can't be read" },
+      lastLaunch: { state: "none" }, matchesLastLaunch: null, notes: [], advisories: [] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", claudeAutoMode } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("  Claude auto mode block (saved): unavailable: Seat n1: the saved claude_auto_mode can't be read");
+    expect(output).toContain("  Claude auto mode block (last launch, observed): none; unknown whether it matches saved");
+  });
+
+  it("prints a launch that read --settings from a file as unknown, with nothing saved", async () => {
+    const claudeAutoMode = { saved: { state: "none" }, lastLaunch: { state: "unknown", reason: "settings_file" }, matchesLastLaunch: null, notes: [], advisories: [] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", claudeAutoMode } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    expect(logs.join("\n")).toContain("  Claude auto mode block (last launch, observed): unknown (that launch read --settings from a file OpenRig can't check); unknown whether it matches saved");
+  });
+
   it("prints each advisory the account carries, after the summary", async () => {
     const advisory = 'Claude Code answers plan-mode turns with Sonnet when the model is the alias "haiku". To keep Haiku, set a full Haiku model id: '
       + 'rig seat set-model dev-impl@seat-rig --model <full Haiku id> --reason "<why>".';

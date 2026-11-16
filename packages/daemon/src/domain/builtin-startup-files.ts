@@ -10,9 +10,16 @@
 // A packaged install (@openrig/cli/daemon/...) is re-anchored even while it still exists, so
 // seats never keep an old version's shipped content. A dev checkout (packages/daemon/...) is
 // re-anchored only when the stored file is missing: its files may be newer than, or absent
-// from, the running install. Custom, user, plugin and other external paths are never rewritten.
+// from, the running install. Any other daemon/{assets,specs} location (an install under a home
+// that moved, such as a workspace restored onto another machine) is re-anchored only when the
+// stored file is missing and the running install has the same file, so a folder that merely
+// looks like one is left alone while it exists. A plugin selected under the OpenRig home
+// (`openrig-home:`) follows the running home. Custom, user and other external paths are never
+// rewritten.
 import { existsSync } from "node:fs";
 import nodePath from "node:path";
+import { getOpenRigHome } from "../openrig-compat.js";
+import { resolvePluginPath } from "./projection-planner.js";
 
 /** Logical name -> path relative to the daemon assets root, as rigspec-instantiator produces them. */
 const BUILTIN_STARTUP_FILES: ReadonlyMap<string, string> = new Map([
@@ -46,21 +53,25 @@ function layoutAt(parts: string[], i: number): InstallLayout | null {
   return null;
 }
 
-/** The recognized OpenRig install's daemon/specs root containing `p`, with its layout. */
-function shippedSpecsRootOf(p: string): { root: string; layout: InstallLayout } | null {
+/** The daemon/specs root containing `p`: a recognized install's, else the innermost other one (layout null). */
+function shippedSpecsRootOf(p: string): { root: string; layout: InstallLayout | null } | null {
   const parts = nodePath.resolve(p).split(nodePath.sep);
+  let other: { root: string; layout: null } | null = null;
   for (let i = parts.length - 2; i >= 1; i--) {
     if (parts[i] !== "daemon" || parts[i + 1] !== "specs") continue;
+    const root = parts.slice(0, i + 2).join(nodePath.sep);
     const layout = layoutAt(parts, i);
-    if (layout) return { root: parts.slice(0, i + 2).join(nodePath.sep), layout };
+    if (layout) return { root, layout };
+    other ??= { root, layout: null };
   }
-  return null;
+  return other;
 }
 
-/** The install layout of a stored built-in startup file: its logical name is a built-in, its ownerRoot is a recognized
- *  install's daemon/assets, and its absolutePath is exactly <ownerRoot>/<that built-in's relative path>. Null for
- *  anything else, including a custom file with the same name or path suffix. */
-function builtinLayout(file: { path: string; absolutePath: string; ownerRoot: string }): InstallLayout | null {
+/** Whether a stored startup file is a built-in, and the layout of the install it came from (null when no known layout
+ *  names it): its logical name is a built-in, its ownerRoot is a daemon/assets directory, and its absolutePath is
+ *  exactly <ownerRoot>/<that built-in's relative path>. Null for anything else, including a custom file with the same
+ *  name or path suffix. */
+function builtinOrigin(file: { path: string; absolutePath: string; ownerRoot: string }): { layout: InstallLayout | null } | null {
   // Persisted contexts from older versions may lack ownerRoot or path: their identity is unknown, so not a built-in.
   if (typeof file.ownerRoot !== "string" || typeof file.absolutePath !== "string") return null;
   const relative = typeof file.path === "string" ? BUILTIN_STARTUP_FILES.get(file.path) : undefined;
@@ -68,39 +79,48 @@ function builtinLayout(file: { path: string; absolutePath: string; ownerRoot: st
   const storedRoot = nodePath.resolve(file.ownerRoot);
   const parts = storedRoot.split(nodePath.sep);
   const i = parts.length - 2;
-  const layout = parts[i] === "daemon" && parts[i + 1] === "assets" ? layoutAt(parts, i) : null;
-  return layout && nodePath.resolve(file.absolutePath) === nodePath.join(storedRoot, relative) ? layout : null;
+  if (parts[i] !== "daemon" || parts[i + 1] !== "assets") return null;
+  return nodePath.resolve(file.absolutePath) === nodePath.join(storedRoot, relative) ? { layout: layoutAt(parts, i) } : null;
 }
 
-/** A stored file from a dev checkout is followed only when it is gone; a packaged one always. */
-function shouldReanchor(layout: InstallLayout, storedFile: string, exists: Exists): boolean {
-  return layout === "packaged" || !exists(storedFile);
+/** The layout of a stored built-in startup file from a recognized install, or null. */
+function builtinLayout(file: { path: string; absolutePath: string; ownerRoot: string }): InstallLayout | null {
+  return builtinOrigin(file)?.layout ?? null;
+}
+
+/** A packaged install's stored file is always followed; a dev checkout's only when it is gone; any other install's
+ *  only when it is gone and the running install has the same file. */
+function shouldReanchor(layout: InstallLayout | null, storedFile: string, runningFile: string, exists: Exists): boolean {
+  if (layout === "packaged") return true;
+  if (exists(storedFile)) return false;
+  return layout === "dev-checkout" || exists(runningFile);
 }
 
 /** Map a (root, file) pair stored under one install's daemon/specs onto the running specs root,
- *  preserving both relative paths. Null when the root is not in a recognized install's specs,
- *  the file lies outside that same specs root, or a dev-checkout file is still present. */
+ *  preserving both relative paths. Null when the root is not in a daemon/specs root, the file
+ *  lies outside that same specs root, or shouldReanchor keeps the stored file. */
 function mapUnderShippedSpecs(root: string, file: string, specsRoot: string, exists: Exists): { root: string; file: string } | null {
   const stored = shippedSpecsRootOf(root);
   if (!stored) return null;
   const resolvedFile = nodePath.resolve(file);
   if (!resolvedFile.startsWith(stored.root + nodePath.sep)) return null;
-  if (!shouldReanchor(stored.layout, file, exists)) return null;
-  return {
+  const mapped = {
     root: nodePath.join(specsRoot, nodePath.relative(stored.root, nodePath.resolve(root))),
     file: nodePath.join(specsRoot, nodePath.relative(stored.root, resolvedFile)),
   };
+  return shouldReanchor(stored.layout, file, mapped.file, exists) ? mapped : null;
 }
 
 /**
  * Re-anchor one stored startup file to the running install when it ships with OpenRig:
  * - a built-in: its logical name is one of the four built-ins, its stored absolutePath is
- *   exactly <ownerRoot>/<known relative path>, and ownerRoot is a recognized install's
- *   daemon/assets directory; or
- * - a shipped-spec file: its ownerRoot and absolutePath both lie under the same recognized
- *   install's daemon/specs (for example the kernel rig culture and agent role/startup files).
- * Dev-checkout files are re-anchored only when missing. Anything else (custom rig/agent files,
- * user content with a matching basename) is returned unchanged. Required, applicability,
+ *   exactly <ownerRoot>/<known relative path>, and ownerRoot is an install's daemon/assets
+ *   directory; or
+ * - a shipped-spec file: its ownerRoot and absolutePath both lie under the same install's
+ *   daemon/specs (for example the kernel rig culture and agent role/startup files).
+ * Dev-checkout files are re-anchored only when missing, and files of an install no known layout
+ * names only when missing and present in the running install. Anything else (custom rig/agent
+ * files, user content with a matching basename) is returned unchanged. Required, applicability,
  * delivery and every other field are preserved.
  */
 export function reanchorBuiltinStartupFile<T extends { path: string; absolutePath: string; ownerRoot: string }>(
@@ -111,10 +131,11 @@ export function reanchorBuiltinStartupFile<T extends { path: string; absolutePat
 ): T {
   // Persisted contexts from older versions may lack ownerRoot/path; leave them exactly as stored.
   if (typeof file.ownerRoot !== "string" || typeof file.absolutePath !== "string") return file;
-  const layout = builtinLayout(file);
-  if (layout) {
-    return shouldReanchor(layout, file.absolutePath, exists)
-      ? { ...file, absolutePath: nodePath.join(assetsRoot, BUILTIN_STARTUP_FILES.get(file.path)!), ownerRoot: assetsRoot }
+  const origin = builtinOrigin(file);
+  if (origin) {
+    const running = nodePath.join(assetsRoot, BUILTIN_STARTUP_FILES.get(file.path)!);
+    return shouldReanchor(origin.layout, file.absolutePath, running, exists)
+      ? { ...file, absolutePath: running, ownerRoot: assetsRoot }
       : file;
   }
   const mapped = mapUnderShippedSpecs(file.ownerRoot, file.absolutePath, specsRoot, exists);
@@ -137,21 +158,43 @@ export function withContextEntryFloor<T extends { path: string; absolutePath: st
   return [...files.slice(0, start + 1), entry, ...files.slice(start + 1)];
 }
 
+type StoredPluginEntry = { category?: string | null; resourcePath?: string | null; sourcePath?: string | null; absolutePath: string };
+
+/** A plugin entry the profile selected under the OpenRig home (`openrig-home:<path>`). */
+function selectedUnderHome(entry: StoredPluginEntry): entry is StoredPluginEntry & { resourcePath: string } {
+  return entry.category === "plugin" && typeof entry.resourcePath === "string" && entry.resourcePath.startsWith("openrig-home:");
+}
+
+/** Where a stored plugin entry is now: a plugin selected under the OpenRig home is that path in the running home, by
+ *  the planner's own rule (resolvePluginPath); any other entry keeps its stored absolutePath. */
+export function homePluginPath(entry: StoredPluginEntry, openrigHome: string = getOpenRigHome()): string {
+  return selectedUnderHome(entry) ? resolvePluginPath(entry.resourcePath, entry.sourcePath ?? "", openrigHome) : entry.absolutePath;
+}
+
 /**
  * Re-anchor one stored projection entry to the running install when it is a shipped-spec
- * resource: both its sourcePath and its resource absolutePath lie under the same recognized
- * OpenRig install's daemon/specs root (dev-checkout resources only when missing). A resource
- * stored elsewhere (a plugin under ~/.openrig/plugins, user specs, custom paths) is returned
- * unchanged even when its sourcePath is a shipped spec. Identifiers, category, target and
- * merge behavior are preserved.
+ * resource: both its sourcePath and its resource absolutePath lie under the same install's
+ * daemon/specs root (dev-checkout resources only when missing; an install no known layout names
+ * only when missing and present in the running install). A plugin selected under the OpenRig
+ * home follows the running home, and its sourcePath (the spec that selected it) follows the
+ * running install by the same rules. Any other resource stored elsewhere (a plugin at a path
+ * of its own, user specs, custom paths) is returned unchanged even when its sourcePath is a
+ * shipped spec. Identifiers, category, target and merge behavior are preserved.
  */
-export function reanchorShippedProjectionEntry<T extends { sourcePath: string; absolutePath: string }>(
+export function reanchorShippedProjectionEntry<T extends { sourcePath: string; absolutePath: string; category?: string | null; resourcePath?: string | null }>(
   entry: T,
   specsRoot: string = runningShippedSpecsRoot(),
   exists: Exists = existsSync,
+  openrigHome: string = getOpenRigHome(),
 ): T {
   // Persisted entries from older versions may lack sourcePath; leave them exactly as stored.
   if (typeof entry.sourcePath !== "string" || typeof entry.absolutePath !== "string") return entry;
+  if (selectedUnderHome(entry)) {
+    const absolutePath = homePluginPath(entry, openrigHome);
+    // The spec that selected it is a folder, mapped by the same rules as a file under the specs root.
+    const sourcePath = mapUnderShippedSpecs(entry.sourcePath, entry.sourcePath, specsRoot, exists)?.root ?? entry.sourcePath;
+    return absolutePath === entry.absolutePath && sourcePath === entry.sourcePath ? entry : { ...entry, sourcePath, absolutePath };
+  }
   const mapped = mapUnderShippedSpecs(entry.sourcePath, entry.absolutePath, specsRoot, exists);
   return mapped ? { ...entry, sourcePath: mapped.root, absolutePath: mapped.file } : entry;
 }

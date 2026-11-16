@@ -949,6 +949,25 @@ describe("MCP Server", () => {
     await server.close();
   });
 
+  it("names rig_queue_show in rig_queue_create's description only for a grant that offers it", async () => {
+    const createDescription = async (objects: Record<string, string[]>) => {
+      const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+        access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects } } });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "create-only", version: "1.0.0" });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const description = (await client.listTools()).tools.find((tool) => tool.name === "rig_queue_create")?.description ?? "";
+      await client.close();
+      await server.close();
+      return description;
+    };
+    const createOnly = await createDescription({ queue: ["create"] });
+    expect(createOnly).not.toContain("rig_queue_show");
+    expect(createOnly).toContain("Pass a qitemId you choose, and retry an uncertain create (a timeout, or an error after sending) only with that same id, never a new one");
+    expect(await createDescription({ queue: ["create", "show"] })).toContain("check rig_queue_show with that qitemId first, and retry only with the same id, never a new one.");
+  });
+
   it("a network grant's tool descriptions carry the request rules on their own, for a client that drops instructions", async () => {
     const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
       access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false,
