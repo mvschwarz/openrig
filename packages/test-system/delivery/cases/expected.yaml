@@ -89,7 +89,7 @@ cases:
     variants:
       - "footer: none"
       - "footer: Claude context hint ('~Nk uncached · /clear to start fresh')"
-      - "footer: Claude auto-update failure, full wording and the width-clipped form ('… npm i -g @anthropic-ai/claude-c…'), at 80x24"
+      - "footer: Claude auto-update failure, the full wording at a size where it fits on one line (e.g. 200x50), and the width-clipped form ('… npm i -g @anthropic-ai/claude-c…') at 80x24"
     contract: "#2933, #2942, #3016/#2948 (0.7.13); 0.7.9 #2437/#2442 nothing replayed; 0.7.12 #2515 finding: clearing a draft is not automatic delivery"
     note: "0.7.12 S02/D3 NOT MET this exact cell with the clipped footer (retained idle-pane evidence from that run); 0.7.12 = baseline, 0.7.13 = expected fixed"
 

@@ -8,9 +8,10 @@ import { parseCommand } from "../src/grammar.js";
 import { pageReadKey } from "../src/page-read.js";
 import { createLiveRefresh } from "../src/live.js";
 
-it("groups the existing views under six entries and preserves direct aliases and Back", () => {
+it("groups the existing views under seven entries and preserves direct aliases and Back", () => {
   const view = createViewState({ instanceId: "s03" });
-  expect(computeExplorerRows(view.get(), emptySnapshot()).filter(r => !r.label.startsWith(" ")).map(r => r.label)).toEqual(["TOPOLOGY", "SPECS", "PROJECTS", "TERMINALS", "FEED", "SYSTEM"]);
+  // FLEET · PROJECTS is #3093's explicit fleet view; the local PROJECTS pane is unchanged.
+  expect(computeExplorerRows(view.get(), emptySnapshot()).filter(r => !r.label.startsWith(" ")).map(r => r.label)).toEqual(["TOPOLOGY", "SPECS", "PROJECTS", "FLEET · PROJECTS", "TERMINALS", "FEED", "SYSTEM"]);
   view.dispatch(parseCommand("system"));
   expect(view.get().section).toBe("system");
   const healthKey = pageReadKey(view.get());

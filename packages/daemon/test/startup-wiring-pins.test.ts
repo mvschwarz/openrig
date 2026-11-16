@@ -108,15 +108,16 @@ describe("P16 — domain-internal safety injections (the recurred class, pinned 
     expect(fromSeat).toBe(fs.realpathSync(db.name));
   });
 
-  it("QueueRepository.validateRig is the topology gate, not the permissive default (recurrence #1)", async () => {
-    // behavioral probe through the composed object: an unknown-rig destination must refuse.
-    await expect(
-      deps.queueRepo!.create({
-        sourceSession: "a@known-nowhere",
-        destinationSession: "b@definitely-unregistered-rig",
-        body: "wiring probe",
-      } as never),
-    ).rejects.toThrow(/unknown rig/);
+  it("QueueRepository keeps recording separate from topology-backed receiver selection", async () => {
+    const destination = "b@definitely-unregistered-rig";
+    expect(deps.queueRepo!.acceptsDestination(destination)).toBe(false);
+    const item = await deps.queueRepo!.create({
+      sourceSession: "a@known-nowhere", destinationSession: destination,
+      body: "wiring probe", nudge: false,
+    });
+    expect(deps.queueRepo!.getById(item.qitemId)?.destinationSession).toBe(destination);
+    expect(deps.queueRepo!.acceptsDestination(destination)).toBe(false);
+    expect(deps.queueRepo!.destinationAdvisory(destination)?.status).toBe("missing");
   });
 
   it("QueueRepository.workflowFrontierPredicate is injected (the close-path guard)", () => {
