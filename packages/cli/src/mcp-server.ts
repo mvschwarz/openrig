@@ -246,12 +246,17 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
 
 const TAKES_REQUESTS_UNKNOWN = "Some rosters couldn't be read, or this daemon's host id isn't known yet, so whether this seat takes requests isn't known.";
 
+/** The node an address names, by both names rig_team matches a roster entry with: its session and its logical address
+ *  (pod-member@rig). Null when no node of that rig has the name (a hosted member, or no such seat); "unknown" when the
+ *  rig or its nodes couldn't be read. */
+type NodeNames = { session: string | null; address: string } | null | "unknown";
+
 /** What a sender is told when the seat a new item went to takes no requests, by the same roster read as rig_team: the item
  *  is written as asked, and this says so with the owner's note, so the sender's assistant can send the work elsewhere.
- *  A roster that can't be read, or a host id not known yet, never stops the write: it says that isn't known. Null for a
- *  seat that takes requests, or is on no roster. */
-async function requestsAdvisoryFor(folder: string, seat: string, selfHostId: () => Promise<string | null>, canList: boolean):
-  Promise<Record<string, unknown> | null> {
+ *  A roster that can't be read, a host id not known yet, or a node that can't be read never stops the write: it says that
+ *  isn't known. Null for a seat that takes requests, or is on no roster. */
+async function requestsAdvisoryFor(folder: string, seat: string, selfHostId: () => Promise<string | null>,
+  nodeOf: () => Promise<NodeNames>, list: { offered: boolean; nodeEntries: boolean }): Promise<Record<string, unknown> | null> {
   const unknown = { seat, takesRequests: "unknown", message: TAKES_REQUESTS_UNKNOWN };
   try {
     statSync(folder);
@@ -259,16 +264,26 @@ async function requestsAdvisoryFor(folder: string, seat: string, selfHostId: () 
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : unknown;
   }
   const { rosters, warnings } = readRosters(folder);
-  const listed = rosters.flatMap((roster) => roster.members).filter((member) => member.seat === seat);
-  if (listed.length === 0) return warnings.length > 0 ? unknown : null;
+  // A node's entry can be authored under its other name, so every entry in the seat's rig is a candidate.
+  const rig = seat.slice(seat.lastIndexOf("@") + 1);
+  const inRig = rosters.flatMap((roster) => roster.members).filter((member) => member.seat === seat || member.seat.endsWith(`@${rig}`));
+  if (inRig.length === 0) return warnings.length > 0 ? unknown : null;
   const host = await selfHostId();
   if (!host) return unknown;
-  // The first roster by file name supplies a seat's entry, as rig_team reads it.
-  const member = listed.find((entry) => entry.host === host);
+  const here = inRig.filter((member) => member.host === host);
+  if (here.length === 0) return warnings.length > 0 ? unknown : null;
+  const node = await nodeOf();
+  if (node === "unknown") return unknown;
+  // As rig_team applies an entry to a seat: its session's entry, else its logical address's, the first roster by file name
+  // supplying each. An address no node has is matched as written.
+  const names = node ? [node.session, node.address].filter((name): name is string => !!name) : [seat];
+  const member = names.map((name) => here.find((entry) => entry.seat === name)).find((entry) => entry !== undefined);
   if (!member) return warnings.length > 0 ? unknown : null;
   if (member.takes_requests !== false) return null;
+  // rig_team shows a hosted member's flag to every caller, and a node seat's only to an external one.
+  const shown = list.offered && (list.nodeEntries || node === null);
   return { seat, takesRequests: false, ...(member.takes_requests_note ? { takesRequestsNote: member.takes_requests_note } : {}),
-    message: `${seat}'s roster entry says it takes no requests, so it isn't expected to pick this up. The item was written as asked. To get the work done, send it to another seat${canList ? "; rig_team shows which take requests" : ""}.` };
+    message: `${seat}'s roster entry says it takes no requests, so it isn't expected to pick this up. The item was written as asked. To get the work done, send it to another seat${shown ? "; rig_team shows which take requests" : ""}.` };
 }
 
 type SliceEntry = { name?: string; missionId?: string | null; displayName?: string; status?: string; description?: string | null; qitemCount?: number; lastActivityAt?: string | null };
@@ -1022,11 +1037,27 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   const selfHostId = (): Promise<string | null> => client.get("/healthz")
     .then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null);
+  /** The node a seat address names in its rig, by session or logical address, as rig_team names its seats. */
+  const nodeOf = async (seat: string): Promise<NodeNames> => {
+    const rigName = seat.slice(seat.lastIndexOf("@") + 1);
+    const rig = await rigIdFor(client, rigName);
+    if ("content" in rig) return "unknown";
+    if (!rig.resolved) return rig.known ? "unknown" : null;
+    const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
+    if (nodes.status >= 400 || !Array.isArray(nodes.data)) return "unknown";
+    for (const node of nodes.data as Array<{ logicalId?: unknown; canonicalSessionName?: unknown }>) {
+      const address = typeof node.logicalId === "string" ? `${node.logicalId.replace(".", "-")}@${rigName}` : null;
+      const session = typeof node.canonicalSessionName === "string" ? node.canonicalSessionName : null;
+      if (address && (session === seat || address === seat)) return { session, address };
+    }
+    return null;
+  };
   /** A write's answer, with what its seat's roster entry says about taking requests when that applies. */
   const withRequestsAdvisory = async (res: DaemonResponse, seat: unknown, remote: boolean): Promise<DaemonResponse> => {
     if (res.status >= 400 || remote || typeof seat !== "string" || !res.data || typeof res.data !== "object") return res;
-    // The write has landed: reading the roster never turns it into an unknown outcome.
-    const advisory = await requestsAdvisoryFor(rostersFolder(), seat, selfHostId, offered("rig_team"))
+    // The write has landed: finding or reading the roster never turns it into an unknown outcome.
+    const advisory = await Promise.resolve()
+      .then(() => requestsAdvisoryFor(rostersFolder(), seat, selfHostId, () => nodeOf(seat), { offered: offered("rig_team"), nodeEntries: !!access?.external }))
       .catch(() => ({ seat, takesRequests: "unknown", message: TAKES_REQUESTS_UNKNOWN }));
     return advisory ? { ...res, data: { ...res.data, requestsAdvisory: advisory } } : res;
   };
@@ -1622,7 +1653,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_create")) server.registerTool(
     "rig_queue_create",
     {
-      ...worded("rig_queue_create", "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show, on this same item. Pass a qitemId you choose, so an uncertain create can be checked: if the call times out or errors after sending, check rig_queue_show with that qitemId first, and retry only with the same id, never a new one. When the seat's roster entry says it takes no requests, the item is still written and requestsAdvisory says so, with the owner's note. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", ADDITIVE),
+      ...worded("rig_queue_create", "Hand a task to another seat as a durable queue item. Returns its qitemId: follow the request and its answer with rig_queue_show. Pass a qitemId you choose, so an uncertain create can be checked: if the call times out or errors after sending, check rig_queue_show with that qitemId first, and retry only with the same id, never a new one. When the seat's roster entry says it takes no requests, the item is still written and requestsAdvisory says so, with the owner's note. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", ADDITIVE),
       inputSchema: z.object({
         destination: access?.external
           ? z.string().optional().describe("Destination seat: member@rig, or its name alone as the team shows it (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver")

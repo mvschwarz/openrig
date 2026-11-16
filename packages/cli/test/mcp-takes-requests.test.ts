@@ -29,22 +29,26 @@ function rosters(members: unknown[]) {
   fs.writeFileSync(path.join(folder, "network-team.json"), JSON.stringify(roster(members)));
   return folder;
 }
+// dev.lead's session isn't named after its logical address: its entry is authored under dev-lead@team, the name rig_team
+// also matches it by.
 const studio = () => rosters([
   member("dev-review@team", { takes_requests: false, takes_requests_note: NOTE }),
   member("grok@team", { hosted: true, takes_requests: false }),
   member("dev-impl@team"),
+  member("dev-lead@team", { takes_requests: false, takes_requests_note: NOTE }),
 ]);
 
-async function connect(folder: string, external: boolean) {
+async function connect(folder: string | (() => string), external: boolean) {
   const stored = new Map<string, Record<string, unknown>>();
   const get = vi.fn(async (p: string): Promise<DaemonResponse> => {
     if (p === "/healthz") return { status: 200, data: { selfHostId: "host-a" } };
     if (p.startsWith("/api/rigs/summary")) return { status: 200, data: [{ id: "rig-1", name: "team" }] };
     if (p === "/api/rigs/rig-1") return { status: 200, data: { rig: { id: "rig-1", name: "team" }, nodes: [{ id: "n1", logicalId: "dev.review" },
-      { id: "n2", logicalId: "dev.impl" }], edges: [], representative: null } };
+      { id: "n2", logicalId: "dev.impl" }, { id: "n3", logicalId: "dev.lead" }], edges: [], representative: null } };
     if (p === "/api/rigs/rig-1/nodes") return { status: 200, data: [
       { logicalId: "dev.review", canonicalSessionName: "dev-review@team", hostSelfId: "host-a", agentActivity: { state: "idle" } },
       { logicalId: "dev.impl", canonicalSessionName: "dev-impl@team", hostSelfId: "host-a", agentActivity: { state: "idle" } },
+      { logicalId: "dev.lead", canonicalSessionName: "dev-lead-2@team", hostSelfId: "host-a", agentActivity: { state: "idle" } },
     ] };
     if (p === "/api/queue/hosted-members") return { status: 200, data: { members: [] } };
     if (p.startsWith("/api/queue/list?")) return { status: 200, data: [] };
@@ -66,7 +70,7 @@ async function connect(folder: string, external: boolean) {
   const client = new DaemonClient("http://127.0.0.1:9999");
   client.get = get;
   client.post = post as typeof client.post;
-  const server = createMcpServer(client, { rostersFolder: () => folder, presenceFile: () => path.join(folder, "presence.json"),
+  const server = createMcpServer(client, { rostersFolder: typeof folder === "string" ? () => folder : folder, presenceFile: () => path.join(os.tmpdir(), "mcp-takes-presence.json"),
     ...(external ? { seat: CALLER, access: EXTERNAL } : { seat: "lead@team" }) });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: "takes", version: "1.0.0" });
@@ -156,5 +160,41 @@ describe("a roster entry that takes no requests", () => {
       const ordinary = await s.call("rig_queue_handoff", { qitemId: "qitem-held", to: "dev-impl@team" });
       expect(ordinary.structuredContent).not.toHaveProperty("requestsAdvisory");
     } finally { await s.close(); }
+  });
+
+  it("keeps a landed create and handoff when finding the roster folder throws, with the unknown advisory", async () => {
+    // The default folder reads the config file; one that becomes malformed under a running server throws there.
+    const s = await connect(() => { throw new Error("config.json: Unexpected token"); }, false);
+    try {
+      const sent = await s.call("rig_queue_create", { destination: "dev-review@team", body: "Review the diff", qitemId: "qitem-chosen-4" });
+      expect(sent.isError).toBeFalsy();
+      expect(sent.structuredContent).toMatchObject({ qitemId: "qitem-chosen-4", state: "pending",
+        requestsAdvisory: { seat: "dev-review@team", takesRequests: "unknown" } });
+      const handed = await s.call("rig_queue_handoff", { qitemId: "qitem-held", to: "dev-review@team" });
+      expect(handed.isError).toBeFalsy();
+      expect(handed.structuredContent).toMatchObject({ successor: { qitemId: "qitem-next" },
+        requestsAdvisory: { seat: "dev-review@team", takesRequests: "unknown" } });
+    } finally { await s.close(); }
+  });
+
+  it("finds an entry authored under a node's other name, as rig_team does, for a create, its retry and a handoff", async () => {
+    const s = await connect(studio(), true);
+    try {
+      const team = (await s.call("rig_team", {})).structuredContent;
+      expect(team.seats.find((entry: { session: string }) => entry.session === "dev-lead-2@team")).toMatchObject({ takesRequests: false });
+      const args = { destination: "dev-lead-2@team", body: "Plan it", qitemId: "qitem-chosen-5" };
+      const first = await s.call("rig_queue_create", args);
+      expect(first.structuredContent.requestsAdvisory).toMatchObject({ seat: "dev-lead-2@team", takesRequests: false, takesRequestsNote: NOTE });
+      expect((await s.call("rig_queue_create", args)).structuredContent).toEqual(first.structuredContent);
+    } finally { await s.close(); }
+    const internal = await connect(studio(), false);
+    try {
+      const handed = await internal.call("rig_queue_handoff", { qitemId: "qitem-held", to: "dev-lead-2@team" });
+      expect(handed.structuredContent.requestsAdvisory).toMatchObject({ seat: "dev-lead-2@team", takesRequests: false, takesRequestsNote: NOTE });
+      // An internal caller's rig_team doesn't show a node seat's roster entry, so the advisory doesn't send it there.
+      expect(handed.structuredContent.requestsAdvisory.message).not.toContain("rig_team");
+      const hosted = await internal.call("rig_queue_handoff", { qitemId: "qitem-held", to: "grok@team" });
+      expect(hosted.structuredContent.requestsAdvisory.message).toContain("rig_team shows which take requests");
+    } finally { await internal.close(); }
   });
 });
