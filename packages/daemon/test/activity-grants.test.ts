@@ -347,9 +347,12 @@ describe("actual run grants", () => {
     const binding = { nodeId: f.node.id, tmuxSession: "dev-guest@guest-rig", tmuxPane: "%1" } as never;
     const first = await begin(binding, "synth", "first", 1);
     const token = [...env.values()][0]!;
-    expect(first.wrap("node runner.js")).not.toContain(token);
-    expect(first.wrap("node runner.js")).toContain("set +x");
-    expect(first.wrap("node runner.js")).toContain("set-environment");
+    const wrapped = first.wrap("node runner.js");
+    const grantKey = [...env.keys()][0]!;
+    expect(wrapped).not.toContain(token);
+    expect(wrapped).toContain("set +x");
+    expect(wrapped).toContain(`-r ${grantKey}`);
+    expect(wrapped).not.toContain(`-u ${grantKey}`);
     first.dispatched();
     const second = await begin(binding, "synth", "second", 1);
     second.dispatched();

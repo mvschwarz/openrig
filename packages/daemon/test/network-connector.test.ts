@@ -126,6 +126,14 @@ describe("network connector", () => {
     // Where it came from is read before the requester's own words.
     expect(local!.body!.split("\n")[0]).toBe("From assistant@team through the network hub https://hub.example/mcp, as alex@team (hub item hub-1).");
     expect(local!.body).toContain("Summarize the release notes");
+    // After the requester's words: what goes back to them, that sharing instructions apply, and how to answer, in that order.
+    const after = local!.body!.split("\n---\n")[1]!.split("\n");
+    expect(after).toEqual([
+      "The requester gets back only this item's progress (queued, picked up, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. Nothing else from here goes to the hub: no other notes, items or files.",
+      "Put in your answer only what this seat's sharing instructions allow.",
+      `Answer by closing this item with your result: rig queue update ${local!.qitemId} --state done --closure-reason no-follow-on --resolution "<your answer>".`,
+      "OpenRig returns the resolution to the hub item.",
+    ]);
     // The hub claim is custody, not pickup: the item says it's queued and not picked up.
     expect(hub.items.get("hub-1")).toMatchObject({ state: "in-progress" });
     expect(hub.items.get("hub-1")!.notes).toEqual(["Queued for the connected local seat. Not picked up yet."]);

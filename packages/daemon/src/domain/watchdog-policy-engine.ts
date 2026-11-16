@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import type { EventBus } from "./event-bus.js";
+import type { readSendOutcome } from "./connection-contract.js";
 import type { Policy, PolicyEvaluation, PolicyJob } from "./policies/types.js";
 import { artifactPoolReadyPolicy } from "./policies/artifact-pool-ready.js";
 import { edgeArtifactRequiredPolicy } from "./policies/edge-artifact-required.js";
@@ -78,6 +79,10 @@ export interface DeliveryOutcome {
   nextAction?: string;
   terminalReason?: string;
   memberOutcomes?: Record<string, DeliveryOutcome>;
+  /** What the attempt's own send result says happened, in the shared words (member-connection.v1); `ok` beside it is
+   *  the status, not the fact, so `ok` with `unknown` is unknown. Absent where no send result was read (an exception, or a
+   *  reconciled receipt): that's no claim of delivery or verification. */
+  fact?: ReturnType<typeof readSendOutcome>;
 }
 
 export interface WatchdogDeliverySource {
@@ -380,13 +385,19 @@ export class WatchdogPolicyEngine {
     // Issue #1180 — token/percent jobs measure the seat's sampled context use,
     // so only byte-gated jobs need a transcript-file binding.
     const byteGated = job.thresholdBytes != null;
+    // A file the person named (`--watched-file`, the spec's `context.watched_file`) stays the watched file when the
+    // target's occupant changes, and a binding an earlier rebind moved off it goes back to it. Only a binding resolved
+    // from the target's own transcript follows its new occupant.
+    const namedWatchedFile = typeof parsed.context.watched_file === "string" && parsed.context.watched_file !== ""
+      ? parsed.context.watched_file
+      : null;
     if (
       isContextUsageThreshold &&
       byteGated &&
       occupantGeneration &&
-      job.watchedFileGeneration !== occupantGeneration
+      (namedWatchedFile ? watchedFilePath !== namedWatchedFile : job.watchedFileGeneration !== occupantGeneration)
     ) {
-      watchedFilePath = this.jobsRepo.findTranscriptPath(job.targetSession, occupantGeneration);
+      watchedFilePath = namedWatchedFile ?? this.jobsRepo.findTranscriptPath(job.targetSession, occupantGeneration);
       if (watchedFilePath) {
         this.jobsRepo.recordWatchedFileBinding(job.jobId, watchedFilePath, occupantGeneration);
         this.historyLog.record({
@@ -809,9 +820,13 @@ export class WatchdogPolicyEngine {
     const notes = digest
       ? { ...(outcome.notes ?? {}), digestDeliveryId: digest.deliveryId, digestSize: digest.size }
       : outcome.notes;
-    const deliveryNotes = delivery.inputPhase === undefined && delivery.code === undefined ? notes
+    // Where a send returned, the history says what its result showed in the shared words, beside the status, with
+    // render-verified only when the screen showed it; no fact or flag claims no delivery or verification. Banking a
+    // receipt still follows `status` alone.
+    const deliveryNotes = delivery.inputPhase === undefined && delivery.code === undefined && delivery.fact === undefined ? notes
       : { ...(notes ?? {}), ...(delivery.inputPhase === undefined ? {} : { deliveryInputPhase: delivery.inputPhase }),
-        ...(delivery.code === undefined ? {} : { deliveryCode: delivery.code }) };
+        ...(delivery.code === undefined ? {} : { deliveryCode: delivery.code }),
+        ...(delivery.fact === undefined ? {} : { deliveryFact: delivery.fact.fact, ...(delivery.fact.renderVerified ? { deliveryRenderVerified: true } : {}) }) };
     const receiptNotes = delivery.retryAt || delivery.nextAction || delivery.occurrenceTracked
       ? { ...(deliveryNotes ?? {}), ...(delivery.retryAt ? { retryAt: delivery.retryAt } : {}),
         ...(delivery.nextAction ? { nextAction: delivery.nextAction } : {}),

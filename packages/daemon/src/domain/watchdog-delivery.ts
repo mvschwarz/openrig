@@ -2,7 +2,8 @@ import { OutboxHandlerError, type OutboxHandler } from "./outbox-handler.js";
 import { withWatchdogReceipts } from "./watchdog-delivery-receipts.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { PARKED_OWNER_COMPACTION_PENDING, PARKED_OWNER_POLICY_NAME } from "./policies/parked-owner-consumer.js";
-import type { SessionTransport } from "./session-transport.js";
+import { writtenFact, type SessionTransport } from "./session-transport.js";
+import { readSendOutcome } from "./connection-contract.js";
 import {
   formatWatchdogDeliveryMessage,
   type DeliveryFn,
@@ -42,10 +43,11 @@ export function makeWatchdogDeliver(deps: {
       } : undefined;
       const result = await deps.sessionTransport.send(targetSession, payload,
         { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, ...(beforeWrite ? { beforeWrite } : {}) });
-      if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
+      const fact = readSendOutcome(result, writtenFact(result));
+      if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted, fact };
       return result.ok
-        ? { status: "ok", continuityActionCompleted }
-        : { status: "failed", error: result.error, sent: result.sent, ...(result.reason ? { transportReason: result.reason } : {}),
+        ? { status: "ok", continuityActionCompleted, fact }
+        : { status: "failed", fact, error: result.error, sent: result.sent, ...(result.reason ? { transportReason: result.reason } : {}),
           ...(result.inputPhase ? { inputPhase: result.inputPhase } : {}),
           ...(result.sent === false && result.inputPhase === "not_reached" && result.noInputCode ? { code: result.noInputCode } : {}), continuityActionCompleted };
     } catch (err) {

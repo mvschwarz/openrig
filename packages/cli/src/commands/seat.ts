@@ -52,6 +52,11 @@ interface SeatStatusResponse {
     desired: { mode: string } | null;
     lastLaunchArguments: { value: string | null; approvalPolicy?: string } | null;
     nativeEffect: "unverified";
+    claudeAutoMode?: {
+      saved: { state: "recorded"; block: Record<string, unknown> } | { state: "none" } | { state: "unavailable"; error: string };
+      lastLaunch: { state: "sent" | "none" | "unknown"; block?: Record<string, unknown>; reason?: "settings_file" };
+      matchesLastLaunch: boolean | null; advisories: string[]; notes: string[]; inspect?: string;
+    };
     error?: string;
     effective?: {
       effectiveMode: string;
@@ -178,7 +183,7 @@ interface SeatHandoverMutationResult {
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: { state: string; detail: string };
         model?: { requested: string | null; predecessorCompared: false } };
   /** The restore or rebuild priming packet was pasted and Enter pressed, but its submission couldn't be confirmed. */
-  restorePacket?: { status: "unconfirmed"; reason: string };
+  restorePacket?: { status: "unconfirmed" | "accepted"; reason: string };
   /** #2456: the required startup files the successor started without, where a start would have failed. */
   startedWithoutRequired?: string[];
   /** #2985: this handover adopted the running successor of an earlier failed one (`--recover`). */
@@ -227,6 +232,29 @@ const LEVEL_WORDS: Record<string, string> = {
 function terminalJson(value: unknown, space?: number): string {
   return JSON.stringify(value, null, space).replace(/[\u007f-\u009f\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu,
     character => character.split("").map(unit => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
+}
+
+type SeatAutoModeStatus = NonNullable<NonNullable<SeatStatusResponse["permissions"]>["claudeAutoMode"]>;
+
+function autoModeCounts(block: Record<string, unknown>): string {
+  const parts = ["environment", "allow", "soft_deny", "hard_deny"].filter(key => Array.isArray(block[key]))
+    .map(key => `${key} ${(block[key] as unknown[]).length}${(block[key] as unknown[]).includes("$defaults") ? " (with $defaults)" : ""}`);
+  if (typeof block["classifyAllShell"] === "boolean") parts.push(`classifyAllShell ${block["classifyAllShell"]}`);
+  return parts.length ? parts.join(", ") : "empty block";
+}
+
+function printClaudeAutoMode(m: SeatAutoModeStatus): void {
+  const saved = m.saved.state === "recorded" ? autoModeCounts(m.saved.block) : m.saved.state === "none" ? "none" : `unavailable: ${m.saved.error}`;
+  const last = m.lastLaunch.state === "sent" && m.lastLaunch.block ? autoModeCounts(m.lastLaunch.block)
+    : m.lastLaunch.state === "none" ? "none"
+    : m.lastLaunch.reason === "settings_file" ? "unknown (that launch read --settings from a file OpenRig can't check)" : "unknown";
+  const match = m.matchesLastLaunch === true ? "same as saved" : m.matchesLastLaunch === false ? "differs from saved" : "unknown whether it matches saved";
+  console.log(`  Claude auto mode block (saved): ${saved}`);
+  console.log(`  Claude auto mode block (last launch, observed): ${last}; ${match}`);
+  for (const note of m.notes) console.log(`  ${note}`);
+  for (const advisory of m.advisories) console.log(`  Warning: ${advisory}`);
+  if (m.inspect) console.log(`  Effective lists where you run it: ${m.inspect}`);
+  console.log("  The exact lists are in --json, under permissions.claudeAutoMode.");
 }
 
 /** Show configured seat state, including selected account references, without claiming the running login is verified. */
@@ -297,6 +325,7 @@ function printHuman(status: SeatStatusResponse): void {
     for (const note of a.openRigAdds.notes) console.log(`  ${note}`);
     if (a.openRigAdds.claudeDeny) console.log(`  Claude member rules (planned): ${a.openRigAdds.claudeDeny.length} denies; exact lists are in --json.`);
     if (a.openRigAdds.claudeAllow.length) console.log("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
+    if (p.claudeAutoMode) printClaudeAutoMode(p.claudeAutoMode);
     console.log(`  Last launch arguments (observed): ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
     for (const item of a.unknown) console.log(`  Unknown: ${item}`);
     if (a.controls.length) {
@@ -321,6 +350,7 @@ function printHuman(status: SeatStatusResponse): void {
     console.log(`Last launch arguments: ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
     console.log("Native permission effect: unverified by this status read");
     if (p.error) console.log(`Permission selection unavailable: ${p.error}`);
+    if (p.claudeAutoMode) printClaudeAutoMode(p.claudeAutoMode);
   }
   if (status.terminalPolicy) {
     const p = status.terminalPolicy;
@@ -410,7 +440,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       console.log(`Codex rebuild model: ${outcome.model.requested ? `requested ${outcome.model.requested}` : "runtime configuration/default"}. The predecessor's in-pane model was not compared or carried.`);
     }
     if (outcome.primedArtifacts.length > 0) {
-      const heading = result.restorePacket?.status === "unconfirmed" ? "Rebuild packet includes" : "Rebuild primed from";
+      const heading = result.restorePacket ? "Rebuild packet includes" : "Rebuild primed from";
       console.log(`${heading} ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
       for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);
     }
@@ -428,7 +458,11 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       return;
     }
   }
-  if (result.sideEffects.startupContextDelivered) {
+  if (result.sideEffects.startupContextDelivered && result.restorePacket?.status === "accepted") {
+    // Typed and submitted on a runtime whose input box isn't read: delivered as far as OpenRig can tell, no further.
+    console.log(`The ${result.source.mode === "rebuild" ? "rebuild priming packet" : "captured startup context (restore packet)"} was typed and submitted to the successor; ${result.restorePacket.reason}.`);
+    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
+  } else if (result.sideEffects.startupContextDelivered) {
     if (result.source.mode === "rebuild") {
       console.log("The rebuild priming packet was delivered to the successor.");
     } else {
@@ -531,6 +565,16 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
         if (!body.history && !body.histories?.length) console.log("No eligible captured histories.");
       }
       if (response.status >= 400) process.exitCode = response.status >= 500 ? 2 : 1;
+    });
+  cmd.command("set-input-route").argument("<seat>")
+    .requiredOption("--route <route>", "typed or native")
+    .requiredOption("--reason <text>").option("--json")
+    .description("Choose this seat's managed input route; native delivery needs a capable live runner")
+    .action(async (seat: string, opts: { route: string; reason: string; json?: boolean }) => {
+      if (!["typed", "native"].includes(opts.route) || !opts.reason.trim()) {
+        console.error("Supply --route typed|native and a reason."); process.exitCode = 1; return;
+      }
+      await guardRequest("POST", `/api/seat/set-input-route/${encodeURIComponent(seat)}`, { route: opts.route, reason: opts.reason }, opts.json);
     });
   cmd.command("set-typing-guard").argument("<seat>")
     .option("--enabled <boolean>", "Compatibility: true selects hold; false selects off")
@@ -895,16 +939,23 @@ identity remains unverified; a version number alone cannot clear it.
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
     .option("--rules <file>", "JSON allow/deny lists for this Claude seat; replaces its recorded rules without changing its mode")
+    .option("--auto-mode <file>", "JSON Claude autoMode block for this seat; replaces its recorded block without changing its mode")
+    .option("--clear-auto-mode", "Clear this Claude seat's recorded autoMode block")
     .option("--codex-permissions <file>", "JSON sandbox/approval envelope, or filesystem policy, for this Codex seat; replaces its recorded mode")
     .option("--codex-profile <name>", "Codex config profile for this seat, or inherit to clear it; approval stays with the envelope or session")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")
-    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. Or, in place of sandbox and those fields, filesystem: a nonempty mapping of absolute paths, ~/paths or native special paths such as :minimal and :workspace_roots to read, write or deny, with approval never or on-request and an optional network_access. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
-    .action(async (seat: string, opts: { mode?: string; rules?: string; codexPermissions?: string; codexProfile?: string; reason: string; operator?: string; json?: boolean }) => {
-      if ([opts.mode, opts.rules, opts.codexPermissions, opts.codexProfile].filter(value => value !== undefined).length !== 1) {
-        console.error("Choose exactly one of --mode, --rules <file>, --codex-permissions <file> or --codex-profile <name>."); process.exitCode = 1; return;
+    .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.\n--rules takes a JSON object with allow and deny lists only. Use empty lists to clear the seat rules. It does not remove inherited grants or change the running process.\n--auto-mode takes a JSON object with Claude's environment, allow, soft_deny and hard_deny lists of prose entries, and optionally classifyAllShell. Claude adds them to your user and managed auto mode settings. Without \"$defaults\", a list may replace Claude's built-in entries for that section, unless another scope (user or managed settings) keeps \"$defaults\" there; OpenRig warns but doesn't add it. claude auto-mode config shows the effective lists. --clear-auto-mode stops OpenRig passing a block; user and managed settings are unaffected.\n--codex-permissions takes a JSON object: sandbox (workspace-write or read-only), approval (never, on-request or untrusted), and for workspace-write network_access, writable_roots (absolute paths), exclude_tmpdir_env_var and exclude_slash_tmp. Or, in place of sandbox and those fields, filesystem: a nonempty mapping of absolute paths, ~/paths or native special paths such as :minimal and :workspace_roots to read, write or deny, with approval never or on-request and an optional network_access. It replaces a recorded mode; --mode replaces the envelope. Full access stays --mode full_bypass.\n--codex-profile reports an absent, changed or unchecked profile file without refusing; a profile that fails to load is refused.")
+    .action(async (seat: string, opts: { mode?: string; rules?: string; autoMode?: string; clearAutoMode?: boolean; codexPermissions?: string; codexProfile?: string; reason: string; operator?: string; json?: boolean }) => {
+      if ([opts.mode, opts.rules, opts.autoMode, opts.clearAutoMode, opts.codexPermissions, opts.codexProfile].filter(value => value !== undefined).length !== 1) {
+        console.error("Choose exactly one of --mode, --rules <file>, --auto-mode <file>, --clear-auto-mode, --codex-permissions <file> or --codex-profile <name>."); process.exitCode = 1; return;
+      }
+      let autoMode: unknown;
+      if (opts.autoMode !== undefined) {
+        try { autoMode = JSON.parse(readFileSync(opts.autoMode, "utf8")); }
+        catch { console.error(`Cannot read JSON from ${opts.autoMode}; provide an autoMode mapping.`); process.exitCode = 1; return; }
       }
       let rules: unknown;
       if (opts.rules !== undefined) {
@@ -916,11 +967,17 @@ identity remains unverified; a version number alone cannot clear it.
         try { codexPermissions = JSON.parse(readFileSync(opts.codexPermissions, "utf8")); }
         catch { console.error(`Cannot read JSON from ${opts.codexPermissions}; provide a sandbox/approval or filesystem mapping.`); process.exitCode = 1; return; }
       }
-      const choice = opts.rules !== undefined ? { rules } : codexPermissions !== undefined ? { codexPermissions }
+      const choice = opts.rules !== undefined ? { rules } : opts.autoMode !== undefined ? { autoMode } : opts.clearAutoMode ? { autoMode: null }
+        : codexPermissions !== undefined ? { codexPermissions }
         : opts.codexProfile !== undefined ? { codexProfile: opts.codexProfile } : { mode: opts.mode };
       await runLifecycleVerb("set-permissions", seat, { ...choice, reason: opts.reason, operator: opts.operator }, opts, data => {
         if (opts.rules !== undefined) {
           console.log(`Claude tool rules ${data["changed"] === false ? "unchanged" : "recorded and audited"}.`);
+          console.log(String(data["effect"])); return;
+        }
+        if (opts.autoMode !== undefined || opts.clearAutoMode) {
+          console.log(`Claude auto mode block ${data["changed"] === false ? "unchanged" : opts.clearAutoMode || autoMode === null ? "cleared and audited" : "recorded and audited"}.`);
+          for (const advisory of (data["advisories"] as string[] | undefined) ?? []) console.log(`Warning: ${advisory}`);
           console.log(String(data["effect"])); return;
         }
         if (codexPermissions !== undefined) {

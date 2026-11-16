@@ -42,6 +42,8 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
+import { typingGuardModesSchema } from "../src/db/migrations/100_typing_guard_modes.js";
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
@@ -114,6 +116,8 @@ function makeHarness(): Harness {
     queueItemsSchema,
     queueTransitionsSchema,
     outboxEntriesSchema,
+    seatDeliveryGuardSchema,
+    typingGuardModesSchema,
     workflowSpecsSchema,
     workflowInstancesSchema,
     workflowStepTrailsSchema,

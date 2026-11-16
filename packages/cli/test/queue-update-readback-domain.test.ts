@@ -191,6 +191,9 @@ describe("queue update canonical read-back against daemon domain semantics", () 
     expect(result.row.state).toBe("done");
     expect(result.row.resolution).toBeNull();
     expect(result.errors.join("\n")).toContain("resolution");
+    // No note was asked for, so the action stays the row read alone.
+    expect(result.errors.join("\n")).toContain(`rig queue show '${qitemId}' --full --json against the same daemon before retrying.`);
+    expect(result.errors.join("\n")).not.toContain("rig queue transitions");
   });
 
   it("requires a newer canonical transition carrying the requested note", async () => {
@@ -226,6 +229,8 @@ describe("queue update canonical read-back against daemon domain semantics", () 
     expect(said).toContain("queue_update_readback_failed");
     expect(said).toContain("can't be shown to be new");
     expect(said).not.toContain("queue_update_preflight_failed");
+    // The note is in the transition log, which `queue show` doesn't print, so the reconciliation names that too.
+    expect(said).toContain(`rig queue transitions '${qitemId}' --full --json to see whether the note was recorded`);
   });
 
   it("gives each run its own exit status: a failed update, then a successful one in the same process", async () => {

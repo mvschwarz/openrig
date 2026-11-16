@@ -1,3 +1,4 @@
+import type { RunnerChannel } from "./domain/runner-channel.js";
 import { EnvironmentLifecycle } from "./domain/environment-lifecycle.js";
 import { EnvironmentPlatform, type EnvironmentDriver } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
@@ -40,6 +41,8 @@ import { rigsRoutes } from "./routes/rigs.js";
 import { rigDeliveryDrainRoutes } from "./routes/rig-delivery-drain.js";
 import { OPERATION_CONTRACT, OPERATION_KINDS } from "./domain/operation-correlation.js";
 import { teamOperationsCapabilities } from "./domain/team-operations.js";
+import { MEMBER_CONNECTION_CONTRACT, ROUTE_DECLARATIONS } from "./domain/connection-contract.js";
+import { resolveMemberConnection } from "./domain/member-connection.js";
 import { sessionsRoutes, nodesRoutes, sessionAdminRoutes } from "./routes/sessions.js";
 import { adaptersRoutes } from "./routes/adapters.js";
 import { eventsRoute } from "./routes/events.js";
@@ -153,6 +156,7 @@ import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
 export interface AppDeps {
+  runnerChannel?: RunnerChannel;
   environmentDriver?: EnvironmentDriver;
   environmentArtifactRoot?: string;
   environmentStateRoot?: string;
@@ -367,6 +371,7 @@ export interface AppDeps {
    * auto share one back-half state machine — no second restore path).
    */
   compactionEnforcer?: ClaudeCompactionEnforcer;
+  piCompactionService?: import("./domain/pi-compaction-service.js").PiCompactionService;
   /**
    * GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator, constructed once in startup and
    * injected so SeatHandoverService.commit()'s re-key call actually FIRES (dev-driver's fold added
@@ -622,6 +627,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("podBundleSourceResolver" as never, deps.podBundleSourceResolver);
     c.set("runtimeAdapters" as never, deps.runtimeAdapters ?? {});
     c.set("transcriptStore" as never, deps.transcriptStore);
+    c.set("runnerChannel" as never, deps.runnerChannel);
     c.set("sessionTransport" as never, deps.sessionTransport);
     c.set("askService" as never, deps.askService);
     c.set("wakeResolveService" as never, deps.wakeResolveService);
@@ -680,6 +686,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("healthCheckpoints" as never, deps.healthCheckpoints);
     c.set("contextMonitor" as never, deps.contextMonitor);
     c.set("compactionEnforcer" as never, deps.compactionEnforcer);
+    c.set("piCompactionService" as never, deps.piCompactionService);
     c.set("occupantInvalidator" as never, deps.occupantInvalidator);
     c.set("nodeCmuxService" as never, deps.nodeCmuxService);
     c.set("agentActivityStore" as never, deps.agentActivityStore);
@@ -800,6 +807,13 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/rigs/:rigId/delivery-drain", rigDeliveryDrainRoutes);
   app.get("/api/operations/capabilities", (c) => c.json({ contract: OPERATION_CONTRACT, kinds: OPERATION_KINDS }));
   app.get("/api/team-operations/capabilities", (c) => c.json(teamOperationsCapabilities()));
+  // What each delivery route declares it supports, and with ?session=, the route and declaration of the member that
+  // address names.
+  app.get("/api/member-connection/capabilities", (c) => {
+    const member = c.req.query("session")?.trim();
+    return c.json({ contract: MEMBER_CONNECTION_CONTRACT, routes: ROUTE_DECLARATIONS,
+      ...(member ? { member: resolveMemberConnection(deps.rigRepo.db, deps.queueRepo, member) } : {}) });
+  });
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);

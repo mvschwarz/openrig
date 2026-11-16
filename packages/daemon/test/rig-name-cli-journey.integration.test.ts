@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-env.js";
@@ -58,8 +58,10 @@ describe("rig up --name: two named rigs from one spec, and a restore by name", (
     const restore = await runRig(["up", "alpha", "--existing", "--fresh", "work.worker", "--json", "--yes"], daemon!.readEnv, rigBin, 120_000);
     expect(JSON.parse(restore.stdout), JSON.stringify(restore)).toMatchObject({
       status: "restored", rigName: "alpha", rigResult: "partially_restored",
-      nodes: [{ logicalId: "work.worker", status: "fresh-primed" }], attachCommand: "tmux attach -t work-worker@alpha",
+      nodes: [{ logicalId: "work.worker", status: "fresh-primed" }],
+      attachCommand: expect.stringContaining(join(realpathSync(scaffold!.tmuxTmpDir), `tmux-${process.getuid!()}`, "default")),
     });
+    expect(JSON.parse(restore.stdout).attachCommand).toMatch(/^tmux -S .+ attach -t work-worker@alpha$/);
     const rows = await rigs();
     expect(rows.map((r) => r.name).sort()).toEqual(["alpha", "beta"]);
     expect(rows.find((r) => r.name === "alpha")).toMatchObject({ status: "running", nodeCount: 1, runningCount: 1 });

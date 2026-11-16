@@ -1,4 +1,6 @@
 import { beginStartupPhase, recordStartupPhase } from "./domain/startup-phase-timing.js";
+import { RunnerChannel } from "./domain/runner-channel.js";
+import { ActivityGrantStore } from "./domain/activity-grants.js";
 import { runnerGrantIssuer } from "./domain/runner-grant-launch.js";
 import { piAccountStateRoot } from "./domain/pi-account-state.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
@@ -213,6 +215,7 @@ import { recoverSeatSkillAttempts } from "./domain/seat-skill-apply.js";
 import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import { lstatLinkInfo } from "./domain/restore-guidance.js";
 import { managedBlockRecords } from "./domain/managed-block-records.js";
+import { noticeHarnessNotStarted } from "./domain/harness-not-started-notice.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -551,6 +554,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // staging. Same `db`, so a stageWakeIntent() call inside a terminal
   // db.transaction commits atomically with the close + successor create.
   const outboxHandlerInstance = new OutboxHandler(db);
+  const runnerChannel = new RunnerChannel(new ActivityGrantStore(db), outboxHandlerInstance);
   queueRepoInstance.attachOutbox(outboxHandlerInstance);
   outboxHandlerInstance.reconcileAbandonedSending("watchdog-occurrence-");
   // Reconcile only the prior process's claims, before transport/producers/timers can start new sends.
@@ -929,6 +933,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     seatSkillSelection: async (rigId, nodeId) => persistedSeatSkillSelection
       ? persistedSeatSkillSelection(rigId, nodeId)
       : { ok: false, reason: "the pod instantiator is not ready" },
+    harnessNotStartedNotice: (input) => noticeHarnessNotStarted(db, queueRepoInstance, input),
   });
 
   // Connect to cmux at startup — degrades gracefully if absent
@@ -1409,6 +1414,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     scanner: tmuxScanner, fingerprinter: sessionFingerprinter, enricher: sessionEnricher,
     discoveryRepo, sessionRegistry, eventBus,
   });
+  // W2a-1 — producer wiring: the live occupant generation resolves synchronously from the shipped
+  // occupant-tenure ledger. generation_uuid CHANGES for a new occupant and persists only within one
+  // tenure (a same-session relaunch is a continuation with no new generation); node_id is the stable-
+  // across-handover key, not this. null = UNKNOWN, honored by the store as abstain (never a stale claim
+  // rendered live). No tmux exec — a better-sqlite3 read on the hot path.
+  const agentActivityStore = new AgentActivityStore({
+    db,
+    eventBus,
+    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    isRegisteredOccupantGeneration: (nodeId, generation) =>
+      sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
+  });
   // Context usage store — constructed ahead of the refresher + ClaimService so the
   // Claude status-line sidecar reader can be injected into BOTH: FR-3
   // adoption-boundary capture (ClaimService) and FR-4 snapshot null-fill (refresher).
@@ -1416,6 +1433,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { ContextUsageStore } = await import("./domain/context-usage-store.js");
   const contextUsageStore = new ContextUsageStore(db, {
     stateDir: OPENRIG_HOME,
+    runnerObservations: agentActivityStore,
     codexHome: configuredCodexHome,
     // GHOST-STAGE (c-id): reject context readings from before the live occupant booted (prior
     // generation) so a frozen pre-handover sample can't drive the threshold. null = UNKNOWN (inert).
@@ -1437,7 +1455,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     return resolver;
   };
   const currentModelReader = new CurrentModelReader({
-    sessions: sessionRegistry, identities: new SeatIdentityStore(db), context: contextUsageStore,
+    sessions: sessionRegistry, identities: new SeatIdentityStore(db), context: contextUsageStore, runnerObservations: agentActivityStore,
     census: modelCensus,
     readAllPaneProcesses: () => tmuxAdapter.readAllPaneProcesses(),
     native: {
@@ -1518,18 +1536,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // (ContextUsageStore is constructed above, ahead of ClaimService, for FR-3.)
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
   const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmuxAdapter, tmuxAdapter);
-  // W2a-1 — producer wiring: the live occupant generation resolves synchronously from the shipped
-  // occupant-tenure ledger. generation_uuid CHANGES for a new occupant and persists only within one
-  // tenure (a same-session relaunch is a continuation with no new generation); node_id is the stable-
-  // across-handover key, not this. null = UNKNOWN, honored by the store as abstain (never a stale claim
-  // rendered live). No tmux exec — a better-sqlite3 read on the hot path.
-  const agentActivityStore = new AgentActivityStore({
-    db,
-    eventBus,
-    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
-    isRegisteredOccupantGeneration: (nodeId, generation) =>
-      sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
-  });
   // #763 — Codex usage-limit banner detector. The reactive tap only accepts a
   // typed at_limit hook row and no hook producer emits one for Codex, so the
   // structural sweep reports what the seat itself shows. Attached late (rather
@@ -1563,7 +1569,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   };
   eventBus.subscribe(event => {
-    if (event.type !== "restore.completed") return;
+    if (event.type !== "restore.completed" && event.type !== "restore.subset_completed") return;
     void seatAttentionReconciler.onRestoreCompleted(event.rigId)
       .catch(error => console.warn(`Restored-seat reconcile: ${error instanceof Error ? error.name : typeof error}`));
   });
@@ -1669,8 +1675,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     podBundleSourceResolver,
     runtimeAdapters: runtimeAdaptersMap,
     transcriptStore,
+    runnerChannel,
     sessionTransport: (() => {
       const t = new SessionTransport({
+        runnerChannel,
         contextUsageStore,
         db,
         rigRepo,
@@ -2849,6 +2857,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
   // the manual back-half drain through the auto poll loop (no second path).
   deps.compactionEnforcer = compactionEnforcer;
+  const { PiCompactionService } = await import("./domain/pi-compaction-service.js");
+  const { PiCompactionRequestStore } = await import("./domain/pi-compaction-request-store.js");
+  if (sessionTransport) deps.piCompactionService = new PiCompactionService({
+    requestStore: new PiCompactionRequestStore(nodePath.join(OPENRIG_HOME, "state", "pi-compaction-requests")),
+    readSidecar: session => piAdapter.readRunnerSidecar(session).state,
+    // The agent's ordinary guarded send path (session transport + delivery guard),
+    // not a raw tmux write: drafts, holds, prompts and the occupant are respected.
+    send: (session, text, opts) => sessionTransport.send(session, text, opts),
+    terminalPolicies: new TerminalPolicyStore(db),
+  });
 
   // GHOST-STAGE (e/Class-B) — construct the canonical OccupantInvalidator now that both Class-A deps
   // exist (the enforcer's in-mem maps 1a-1f + the context sidecar 2a). Injected into SeatHandoverService
