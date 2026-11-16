@@ -252,8 +252,8 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
 
   it("a config the trust write would make invalid leaves both files untouched (F3)", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    // Valid TOML: a quoted field name the line writer doesn't recognise, on the key OpenRig would write.
-    const config = `model = "gpt"\n\n[hooks.state."${HOOKS}:stop:0:0"]\n"trusted_hash" = "person-choice"\n`;
+    // Valid TOML: an inline state table the line writer doesn't extend, on the key OpenRig would write.
+    const config = `model = "gpt"\n\n[hooks.state]\n"${HOOKS}:stop:0:0" = { trusted_hash = "person-choice" }\n`;
     expect(() => parseToml(config)).not.toThrow();
     const json = JSON.stringify({ hooks: {} });
     const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config, [HOOKS]: json });
@@ -262,6 +262,21 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
     expect(m.store[HOOKS]).toBe(json);
     expect(spy).toHaveBeenCalledWith(expect.stringContaining("left untouched"));
     spy.mockRestore();
+  });
+
+  it.each(['"trusted_hash"', "'trusted_hash'"])("updates a quoted JSON hook trust field %s and keeps the person's choice", (field) => {
+    const key = `${HOOKS}:stop:1:0`;
+    const config = `model = "gpt"\n\n[hooks.state."${key}"]\n${field} = "old"\nenabled = true\n`;
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config,
+      [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP] } }) });
+    const a = adapter(m.fs);
+    a.ensureCodexActivityHooks();
+    expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([USER_GROUP, ours()]);
+    expect(state(m.store[CONFIG]!)[key]).toEqual({ trusted_hash: trustOf("Stop", 1).hash, enabled: true });
+    expect(parseToml(m.store[CONFIG]!).model).toBe("gpt");
+    const after = m.store[CONFIG];
+    a.ensureCodexActivityHooks();
+    expect(m.store[CONFIG]).toBe(after);
   });
 
   it("a person's own relay with the same file name and label is theirs: kept, and OpenRig's is added (F4)", () => {

@@ -2299,8 +2299,12 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string,
     }
   }
 
+  // Declaration keys may be quoted. Keep owned-plugin content-approval handling unchanged.
+  const matchesField = (line: string) => field === "trusted_hash"
+    ? /^(?:trusted_hash|"trusted_hash"|'trusted_hash')\s*=/.test(line.trim())
+    : line.trim().startsWith(field);
   const hashIndex = lines.findIndex(
-    (line, index) => index > headerIndex && index < nextSectionIndex && line.trim().startsWith(field),
+    (line, index) => index > headerIndex && index < nextSectionIndex && matchesField(line),
   );
   if (hashIndex >= 0) {
     lines[hashIndex] = trustLine;
