@@ -176,8 +176,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   Empty the box first and check the seat compacted.
 - **No memory claim** is made for this release.
 - **0.7.16's limits** below still apply unless this release changes them (the
-  wide-footer case, where a seat's question goes when the person stays in their
-  own conversation, and restore's overall result).
+  wide-footer case and restore's overall result).
 
 ## What changed in OpenRig 0.7.16
 

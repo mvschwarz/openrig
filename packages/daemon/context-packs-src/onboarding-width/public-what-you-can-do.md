@@ -608,7 +608,7 @@ decide a kind of prompt only under the person's explicit instruction, and never 
 decision as the person's. When 0.7.16 was tested, in one Claude setup an agent still recorded
 approvals it made itself as "Person approved", so those entries alone don't establish the person's
 approval. Its setup path teaches an installing assistant the person stays with to keep its own
-return address, so the team's questions come back to it. In 0.7.16, OpenRig's own question about a
+return address for the team's questions. In 0.7.16, OpenRig's own question about a
 seat's prompt doesn't reach a person who isn't registered; it waits with the kernel operator, and
 registering wasn't tested as a fix for this. Since 0.7.17, when the person stays in their own
 conversation, the installer is instructed to hand their goal over as a task from that conversation's

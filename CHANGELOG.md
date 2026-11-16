@@ -140,7 +140,7 @@ including contributions from people using OpenRig.
   approvals it made itself as "Person approved"; check the conversation to see
   who decided.
 - **From 0.7.16:** [its known limits](https://github.com/mvschwarz/openrig/releases/tag/v0.7.16)
-  still apply unless this release changes them ([#3231](https://github.com/mvschwarz/openrig/pull/3231), [#3288](https://github.com/mvschwarz/openrig/pull/3288), [#3306](https://github.com/mvschwarz/openrig/pull/3306), [#3260](https://github.com/mvschwarz/openrig/pull/3260)).
+  still apply unless this release changes them ([#3231](https://github.com/mvschwarz/openrig/pull/3231), [#3260](https://github.com/mvschwarz/openrig/pull/3260)).
 
 ### Credits
 
