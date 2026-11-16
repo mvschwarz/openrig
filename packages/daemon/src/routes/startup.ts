@@ -338,7 +338,11 @@ async function reviewSelectedHistory(c: Context, retained = false) {
   const state = facts && selectedState(c, rigId, nodeId, refs, facts.snapshot);
   if (state && "permissionUnavailable" in state) return c.json({ ok: false, code: "permission_unavailable",
     message: "The selected seat's saved permission choice needs repair before launch." }, 409);
-  if (!facts || !state) return c.json({ ok: false, code: "selection_changed", message: "The selected source changed. Refresh the history list." }, 409);
+  if (!facts) return c.json({ ok: false, code: "selection_changed", message: "The selected source changed. Refresh the history list." }, 409);
+  // The saved snapshot still stands, but the seat's own record no longer matches it: after a /clear, /resume or a new
+  // conversation the seat records a different conversation, so refreshing would show the same saved one again.
+  if (!state) return c.json({ ok: false, code: "selection_changed",
+    message: `This seat's conversation changed since it was saved (a /clear, /resume or new conversation records a new one), so the saved conversation can't be resumed from here. To save the current one, run rig snapshot ${facts.rig.rig.name}; to start the seat blank, run rig seat launch <seat> --fresh --reason <why>.` }, 409);
   const forecast = buildRestorePlanPreview({ ...facts.rig, nodes: [facts.node] }, facts.snapshot,
     collectPreviewSessionRows(repo(c).db, { ...facts.rig, nodes: [facts.node] }, facts.snapshot), undefined, Date.now(), {},
     { nodeId, historySessionId: refs.historySessionId }).nodes[0]!;
