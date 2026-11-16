@@ -44,11 +44,18 @@ function sha256File(path) {
   return hash.digest("hex");
 }
 
-/** Whether a file starts with the ELF magic, reading only its first 4 bytes. */
+/** Whether a file starts with the ELF magic, reading only its first 4 bytes. A read may return fewer bytes than asked
+ *  for before the end of the file, so the head is filled until it has 4 bytes or a read returns none. */
 const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 function isElf(path) {
   let fd;
-  try { fd = openSync(path, "r"); const head = Buffer.alloc(4); return readSync(fd, head, 0, 4, 0) === 4 && head.equals(ELF_MAGIC); }
+  try {
+    fd = openSync(path, "r");
+    const head = Buffer.alloc(4);
+    let filled = 0;
+    for (let n; filled < 4 && (n = readSync(fd, head, filled, 4 - filled, filled)) > 0;) filled += n;
+    return filled === 4 && head.equals(ELF_MAGIC);
+  }
   catch { return false; }
   finally { if (fd !== undefined) closeSync(fd); }
 }
