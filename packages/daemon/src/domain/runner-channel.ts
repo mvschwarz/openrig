@@ -11,7 +11,7 @@ export function runnerChannelKind(binding: RunGrantBinding | null): "managed-pi"
 }
 
 export class RunnerChannelError extends Error {
-  constructor(readonly code: string, message: string, readonly status: 400 | 401 | 409 | 503 = 409) { super(message); }
+  constructor(readonly code: string, message: string, readonly status: 400 | 401 | 409 | 503 = 409, readonly retryable = false) { super(message); }
 }
 interface Capabilities { input: boolean; wake: boolean; cancel: boolean }
 
@@ -41,7 +41,7 @@ export class RunnerChannel {
   capable(nodeId: string, kind: "input" | "wake" | "cancel"): boolean {
     const grant = this.grants.activeForNode(nodeId);
     return !!grant?.runId && this.standing(grant.grantId) === "current" && (this.connections.get(grant.grantId) ?? 0) > 0 && this.live.get(grant.grantId)?.[kind] === true
-      && !this.outbox.runnerReceipts(nodeId, grant.runId).some(receipt => receipt.reconciliation);
+      && !this.outbox.runnerReceipts(nodeId, grant.runId).some(receipt => receipt.kind !== "cancel" && receipt.reconciliation);
   }
 
   admit(nodeId: string, input: Omit<RunnerAdmission, "nodeId" | "runId">): RunnerReceipt {
@@ -61,8 +61,18 @@ export class RunnerChannel {
     if (prior) return this.outbox.admitRunner(admitted);
     const current = this.currentTurn(nodeId, true);
     const matching = current?.runId === target.runId && current.nativeTurnId === target.nativeTurnId;
+    let unsupported = false;
+    if (matching) {
+      const grant = this.grants.activeForNode(nodeId), standing = grant ? this.standing(grant.grantId) : null;
+      if (!grant?.runId || grant.runId !== target.runId || standing !== "current")
+        throw new RunnerChannelError("runner_unavailable", "Current runner authority could not be verified; retry this ID after recovery.", 409, true);
+      const kind = runnerChannelKind(grant.binding);
+      unsupported = kind === null || !this.implementedKinds.has(kind) || this.live.get(grant.grantId)?.cancel === false;
+      if (!unsupported && !this.capable(nodeId, "cancel"))
+        throw new RunnerChannelError("runner_unavailable", "No live verified cancellation connection; retry this ID after recovery.", 409, true);
+    }
     let receipt = this.outbox.admitRunner(admitted);
-    if (!matching || !this.capable(nodeId, "cancel")) {
+    if (!matching || unsupported) {
       receipt = this.outbox.updateRunner(nodeId, target.runId, input.requestId, receipt.sequence, "offered");
       receipt = this.outbox.updateRunner(nodeId, target.runId, input.requestId, receipt.sequence, "accepted");
       receipt = this.outbox.updateRunner(nodeId, target.runId, input.requestId, receipt.sequence, "completed",
@@ -142,7 +152,10 @@ export class RunnerChannel {
       if (!body.result || typeof body.result !== "object" || Array.isArray(body.result)) throw new RunnerChannelError("invalid_runner_result", "Supply a native result.", 400);
       const receipt = this.outbox.runnerReceipt(body.requestId);
       const result = body.result as Record<string, unknown>;
-      if (receipt?.kind === "cancel" && (result.kind !== "cancel" || !["requested", "cancelled", "not-this-turn", "not-supported"].includes(String(result.outcome))
+      const retiredBeforeWrite = receipt?.kind === "cancel" && stage === "rejected" && result.kind === "cancel"
+        && result.applied === false && typeof result.reason === "string" && result.reason.trim().length > 0
+        && result.outcome === undefined && (result.confirmed === undefined || result.confirmed === false) && (result.operationAccepted === undefined || result.operationAccepted === false);
+      if (receipt?.kind === "cancel" && !retiredBeforeWrite && (result.kind !== "cancel" || !["requested", "cancelled", "not-this-turn", "not-supported"].includes(String(result.outcome))
         || typeof result.confirmed !== "boolean" || stage === "submitted" && result.outcome !== "requested"
         || result.confirmed !== (result.outcome === "cancelled") || result.operationAccepted !== undefined && typeof result.operationAccepted !== "boolean")) throw new RunnerChannelError("invalid_runner_result", "Invalid cancellation outcome.", 400);
       if (receipt?.kind !== "cancel" && result.kind === "cancel") throw new RunnerChannelError("invalid_runner_result", "Cancellation result belongs to another operation.", 400);
@@ -167,6 +180,23 @@ export class RunnerChannel {
     }
   }
 
+  /** Receipt evidence across runs; history is not a claim that all later input is blocked. */
+  unresolved(nodeId: string): Record<string, unknown>[] {
+    const runId = this.grants.activeForNode(nodeId)?.runId;
+    return this.outbox.runnerReceipts(nodeId).filter(receipt => (receipt.reconciliation
+      || !["completed", "rejected"].includes(receipt.stage)
+      || receipt.kind === "cancel" && receipt.result?.outcome === "requested" && receipt.result.confirmed !== true)).map(receipt => {
+      const entry = this.outbox.getById(receipt.requestId);
+      return { requestId: receipt.requestId, runId: receipt.runId, inCurrentRun: receipt.runId === runId,
+        kind: receipt.kind, stage: receipt.stage, ...(receipt.erasedAt ? { erasedAt: receipt.erasedAt } : {}), sender: entry?.senderSession, destination: entry?.destinationSession,
+        ...(receipt.memberIds ? { memberIds: receipt.memberIds } : {}),
+        ...(receipt.kind === "cancel" ? { target: receipt.payload.target } : {}),
+        ...(receipt.withdrawal ? { withdrawal: { stage: receipt.withdrawal.stage, startedAt: receipt.withdrawal.startedAt, ...(receipt.withdrawal.confirmedAt ? { confirmedAt: receipt.withdrawal.confirmedAt } : {}), pendingSubmissions: receipt.withdrawal.pendingSubmissions } } : {}),
+        ...(receipt.reconciliation ? { reconciliation: receipt.reconciliation } : {}),
+        ...(receipt.result?.outcome ? { outcome: receipt.result.outcome, confirmed: receipt.result.confirmed } : {}) };
+    });
+  }
+
   /** Current authenticated invocation evidence, never a claim that absence means idle. */
   currentTurn(nodeId: string, requireKnown = false): { runId: string; nativeTurnId: string; acceptedTurnIds: string[] } | null {
     const grant = this.grants.activeForNode(nodeId);
@@ -176,15 +206,18 @@ export class RunnerChannel {
     }
     const standing = this.standing(grant.grantId);
     if (standing === "unverified" || standing === "pending") {
-      if (requireKnown) throw new RunnerChannelError(`runner_grant_${standing}`, `Runner grant is ${standing}.`);
+      if (requireKnown) throw new RunnerChannelError(`runner_grant_${standing}`, `Runner grant is ${standing}.`, 409, true);
       return null;
     }
     if (standing !== "current") {
       if (requireKnown) throw new RunnerChannelError("runner_unavailable", "Native turn ownership is unknown; no cancellation outcome was inferred.");
       return null;
     }
-    if (this.runnerMapLost(nodeId, grant.runId)
-      || this.outbox.runnerReceipts(nodeId, grant.runId).some(receipt => receipt.reconciliation)) {
+    if (this.runnerMapLost(nodeId, grant.runId)) {
+      if (requireKnown) throw new RunnerChannelError("runner_unavailable", `Native turn ownership is unknown for the rest of run ${grant.runId}; only a new run clears this cancellation-target refusal.`);
+      return null;
+    }
+    if (this.outbox.runnerReceipts(nodeId, grant.runId).some(receipt => receipt.kind !== "cancel" && receipt.reconciliation)) {
       if (requireKnown) throw new RunnerChannelError("runner_unavailable", "Native turn ownership is unknown; no cancellation outcome was inferred.");
       return null;
     }
@@ -239,8 +272,8 @@ export class RunnerChannel {
     if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > (receipts.at(-1)?.sequence ?? 0))
       throw new RunnerChannelError("invalid_runner_cursor", "Invalid run-local cursor.", 400);
     // Once custody is unknown, never automatically feed later saved prompts into that execution.
-    if (receipts.some(receipt => receipt.reconciliation)) return [];
-    const control = receipts.find(r => r.kind === "cancel" && ["pending", "offered"].includes(r.stage) && !r.erasedAt);
+    if (receipts.some(receipt => receipt.kind !== "cancel" && receipt.reconciliation)) return [];
+    const control = receipts.find(r => r.kind === "cancel" && ["pending", "offered"].includes(r.stage) && !r.erasedAt && !r.reconciliation);
     if (control) return [control.stage === "offered" ? control : this.outbox.updateRunner(grant.nodeId, grant.runId, control.requestId, control.sequence, "offered")];
     const offered = receipts.find(r => r.stage === "offered" && !r.reconciliation && !r.erasedAt);
     if (offered) return [offered];

@@ -236,11 +236,11 @@ export class OutboxHandler {
     return receipt && receipt.requestId === saved.nativeRequestId && receipt.memberIds?.includes(id) ? receipt : null;
   }
 
-  runnerReceipts(nodeId: string, runId: string): RunnerReceipt[] {
+  runnerReceipts(nodeId: string, runId?: string): RunnerReceipt[] {
     if (!this.hasGuardDeliveryColumn) return [];
     return (this.db.prepare(`SELECT guard_delivery FROM outbox_entries
-      WHERE json_extract(guard_delivery,'$.runner.nodeId')=? AND json_extract(guard_delivery,'$.runner.runId')=?
-      ORDER BY CAST(json_extract(guard_delivery,'$.runner.sequence') AS INTEGER)`).all(nodeId, runId) as { guard_delivery: string }[])
+      WHERE json_extract(guard_delivery,'$.runner.nodeId')=? ${runId === undefined ? '' : "AND json_extract(guard_delivery,'$.runner.runId')=?"}
+      ORDER BY CAST(json_extract(guard_delivery,'$.runner.sequence') AS INTEGER)`).all(...(runId === undefined ? [nodeId] : [nodeId, runId])) as { guard_delivery: string }[])
       .map(row => JSON.parse(row.guard_delivery).runner as RunnerReceipt);
   }
 

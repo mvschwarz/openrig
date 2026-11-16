@@ -22,7 +22,7 @@ async function defaultReadStdin(): Promise<string> {
 }
 
 interface SeatStatusResponse {
-  nativeInput?: { input: boolean; wake: boolean; cancel: boolean; target: { runId: string; nativeTurnId: string } | null };
+  nativeInput?: { input: boolean; wake: boolean; cancel: boolean; unresolved?: Record<string, unknown>[]; recovery?: string; target: { runId: string; nativeTurnId: string } | null };
   /** What OpenRig's own refocus hook has recorded for this seat (Claude and Codex seats). */
   refocus?: { lastRecordedAt: string | null; currentConversation: boolean | "unknown"; noIdentity?: true; detail: string };
   permission_stop?: { state: "unavailable"; command: "unavailable"; origin: "unknown" }
@@ -264,6 +264,10 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Rig: ${status.rig_name}`);
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
+  if (status.nativeInput?.unresolved?.length) {
+    console.log(`Native request evidence: ${terminalJson(status.nativeInput.unresolved)}`);
+    if (status.nativeInput.recovery) console.log(status.nativeInput.recovery);
+  }
   if (status.nativeInput?.target) console.log(`Native turn: ${terminalJson(status.nativeInput.target)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
   // Only a runner submits permission requests; a plain seat's own prompts are its harness's.

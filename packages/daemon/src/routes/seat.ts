@@ -86,9 +86,9 @@ seatRoutes.post("/command/:seatRef", async c => {
         return channel.cancel(target.nodeId, { requestId: body.requestId as string,
           sender: transportSenderSession(c) ?? "unknown", destination: target.session, target: { runId: named.runId as string, nativeTurnId: named.nativeTurnId as string } });
       });
-      return c.json({ receipt }, receipt.stage === "completed" ? 200 : 202);
+      return c.json({ receipt }, ["completed", "rejected"].includes(receipt.stage) ? 200 : 202);
     } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code,
-      ...((error as { code?: string }).code === "runner_grant_unverified" ? { retryable: true } : {}) }, 409); }
+      ...((error as { code?: string; retryable?: boolean }).retryable || (error as { code?: string }).code === "runner_grant_unverified" ? { retryable: true } : {}) }, 409); }
   }
   if (!body || body.type !== "wake" || typeof body.requestId !== "string" || !body.requestId.trim()
     || body.requestId.length > 512 || typeof body.question !== "string" || !body.question.trim() || body.question.length > 1024 * 1024)
@@ -189,7 +189,7 @@ seatRoutes.get("/status/:seatRef", (c) => {
     const runtimeSwitch = nodeId ? runtimeSwitchSummary(rigRepo.db, { nodeId }) : null;
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
     const nativeTurn = channel && nodeId ? channel.currentTurn(nodeId) : null;
-    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: channel.capable(nodeId, "cancel"), target: nativeTurn ? { runId: nativeTurn.runId, nativeTurnId: nativeTurn.nativeTurnId } : null } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
+    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: channel.capable(nodeId, "cancel"), unresolved: channel.unresolved(nodeId), recovery: "The person operating this seat or its responsible agent can inspect these request IDs and destinations. Evidence from earlier runs does not mean current input is held. An uncertain cancellation releases when its named invocation ends; person native controls remain available. Explicit manual choice: rig seat stop <seat> --reason <text>. No automatic restart or replay.", target: nativeTurn ? { runId: nativeTurn.runId, nativeTurnId: nativeTurn.nativeTurnId } : null } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }

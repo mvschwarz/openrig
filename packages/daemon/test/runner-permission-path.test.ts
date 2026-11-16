@@ -1142,6 +1142,25 @@ describe("native epoch permission withdrawal", () => {
   }
   const request = (id: string, turnId = "1") => ({ nativeRef: "native", turnId, requestId: id, options: OPTIONS,
     runId: "run-E", nativeTurnId: "epoch-E", toolCall: { title: "write" } });
+  it("an authenticated uncorrelated pending ask keeps deny-only epoch tags and E withdrawal cannot deny F", async () => {
+    const f = fixture({ decider: DECIDER });
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('uncorrelated',?,?,'%1')").run(f.runner.id, SEAT);
+    const session = f.db.prepare("SELECT id FROM sessions WHERE node_id=? ORDER BY id DESC LIMIT 1").get(f.runner.id) as { id: string };
+    const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "launch", run: {
+      runId: "run-E", sessionId: session.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    const pending = await f.submit(request("uncorrelated-E"), grant.token);
+    expect(pending).toMatchObject({ status: 200, body: { ok: true, correlation: "unverified" } });
+    const id = String(pending.body.askId); expect(f.queueRepo.getById(id)?.state).toBe("pending");
+    const p = permissions(f), seat = { nodeId: f.runner.id, sessionName: SEAT, generation: f.generation() };
+    expect(p.withdrawTurn(seat, { runId: "run-E", nativeTurnId: "epoch-E" })).toMatchObject({ confirmed: true, withdrawn: 1 });
+    expect(await f.read(id, 0, grant.token)).toMatchObject({ body: { state: "withdrawn" } });
+    expect(await f.decide(id, "allow")).toMatchObject({ body: { state: "withdrawn" } });
+    expect(await f.submit(request("late-E"), grant.token)).toMatchObject({ status: 409, body: { code: "turn_withdrawn" } });
+    const other = await f.submit({ ...request("different-F"), nativeTurnId: "epoch-F" }, grant.token);
+    expect(other).toMatchObject({ status: 200, body: { correlation: "unverified" } });
+    expect(f.queueRepo.getById(String(other.body.askId))?.state).toBe("pending");
+  });
   it("withdraws every accepted steer ask and blocks late reads/decisions after service reconstruction", async () => {
     const f = fixture(); const p = permissions(f);
     const seat = { nodeId: f.runner.id, sessionName: SEAT, generation: f.generation() };
