@@ -262,10 +262,11 @@ export const ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
 ];
 
 /** The capabilities this build declares for a route and runtime: the runtime's own entry, else the route's `*` entry,
- *  else every capability unknown. */
+ *  else every capability unknown. Only an entry of its own counts, so a runtime named like an object property
+ *  (`constructor`) takes the `*` entry. */
 export function declaredCapabilities(route: ConnectionRoute, runtime: string | null | undefined): ConnectionCapabilities {
   const declared = ROUTE_DECLARATIONS.find((d) => d.route === route)?.capabilities;
-  return (runtime ? declared?.[runtime] : undefined) ?? declared?.["*"] ?? UNKNOWN_CAPABILITIES;
+  return (runtime && declared && Object.hasOwn(declared, runtime) ? declared[runtime] : undefined) ?? declared?.["*"] ?? UNKNOWN_CAPABILITIES;
 }
 
 const UNKNOWN_CAPABILITIES = caps("unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown", "unknown");
@@ -292,11 +293,15 @@ export function memberConnection(member: string, found: { kind: "person" } | { k
   if (found.kind === "none") return { member, route: null, runtime: null, capabilities: UNKNOWN_CAPABILITIES, reason: found.reason };
   const declared = declaredCapabilities("typed", found.runtime);
   if (found.live) return { member, route: "typed", runtime: found.runtime, capabilities: declared };
-  // A seat with no session recorded as current keeps its declaration; what needs its terminal can't be used until it has one.
+  // A seat with no session recorded as current keeps its declaration; what needs its terminal can't be used until it has
+  // one. That includes managed compaction and restore-packet confirmation, which read the seat's screen. Resume, which
+  // applies to a stopped seat, keeps its declaration.
   const live = (value: Declared): Declared => value === "supported" ? "unavailable" : value;
   return { member, route: "typed", runtime: found.runtime, reason: "it has no session recorded as current",
     capabilities: { ...declared, observe: { dialog: live(declared.observe.dialog), turnStart: declared.observe.turnStart },
-      control: { submit: live(declared.control.submit) } } };
+      control: { submit: live(declared.control.submit) },
+      continuity: { ...declared.continuity, managedCompaction: live(declared.continuity.managedCompaction),
+        restorePacketConfirmation: live(declared.continuity.restorePacketConfirmation) } } };
 }
 
 /** What a typed send's input reached, as the transport reads it from the send's result (`writtenFact`). */
