@@ -957,18 +957,17 @@ export class TmuxAdapter {
    *  emptied) and the pane's process is in a seat scope; `failed_before_command` when the pane died with the marker still
    *  pending (systemd-run could not make the scope, also late, after the check passed); `ran_and_ended` when it died
    *  after the command started inside the scope; `ran_unconfirmed` when the command started (the marker was emptied)
-   *  but its process wasn't seen in the scope in time; `unconfirmed` when the pane never reported (the marker stayed
-   *  pending) in time; `unknown` when the pane or the marker can't be read. The marker is removed at the end. */
+   *  but its process wasn't seen in the scope in time; `unknown` when the time ran out with the pane alive (its wrapper
+   *  can still enter the scope and start the command after the last look) or the pane or the marker can't be read.
+   *  The marker is removed at the end. */
   private async seatScopeStart(pane: string, marker: string | undefined):
-    Promise<"started" | "failed_before_command" | "ran_and_ended" | "ran_unconfirmed" | "unconfirmed" | "unknown"> {
+    Promise<"started" | "failed_before_command" | "ran_and_ended" | "ran_unconfirmed" | "unknown"> {
     let sawRan = false;
-    let lastMark: "ran" | "pending" | "unreadable" = "pending";
     try {
       for (let i = 0; i < SEAT_SCOPE_START_CHECKS; i++) {
         let dead: boolean;
         try { dead = await this.isPaneDead(pane); } catch { return sawRan ? "ran_unconfirmed" : "unknown"; }
         const mark = await this.scopeMarkerState(marker);
-        lastMark = mark;
         if (mark === "ran") sawRan = true;
         if (dead) return mark === "ran" ? "ran_and_ended" : mark === "pending" ? "failed_before_command" : sawRan ? "ran_unconfirmed" : "unknown";
         if (mark === "ran") {
@@ -980,7 +979,8 @@ export class TmuxAdapter {
         }
         await this.scopeStartSleep(SEAT_SCOPE_START_CHECK_MS);
       }
-      return sawRan ? "ran_unconfirmed" : lastMark === "pending" ? "unconfirmed" : "unknown";
+      // Out of time with the pane alive: the wrapper may enter its scope and start the command after the last look.
+      return sawRan ? "ran_unconfirmed" : "unknown";
     } finally {
       if (marker) await this.fileOps.unlink(marker).catch(() => {});
     }
@@ -1202,7 +1202,8 @@ export class TmuxAdapter {
    *  the start can't be told, it goes on with an `unknown` notice and runs nothing again. Null: the launch stands. */
   private async scopeStartOutcome(pane: string | null, mode: ProcessLimitsMode | undefined, notices: ScopeNotices,
     warnings: string[]): Promise<{ refuse: SeatProcessLimitsProblem } | { retryUncapped: SeatProcessLimitsProblem } | null> {
-    const start = pane ? await this.seatScopeStart(pane, notices.marker) : "unconfirmed";
+    // No pane to watch: whether its command started can't be told.
+    const start = pane ? await this.seatScopeStart(pane, notices.marker) : "unknown";
     if (!pane && notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
     if (start === "started") return null;
     const requested = notices.tasksMax !== undefined ? { requested: { tasksMax: notices.tasksMax } } : {};
@@ -1215,10 +1216,10 @@ export class TmuxAdapter {
       }
       if (start === "unknown") {
         return { refuse: { kind: "unverified", ...requested, commandStarted: "unknown",
-          reason: "whether the seat's command started in its scope couldn't be read" } };
+          reason: "the seat's scope start was not confirmed in time, so whether its command started is unknown" } };
       }
-      return { refuse: { kind: "unverified", ...requested,
-        reason: start === "failed_before_command" ? failedBefore : "the seat's scope start was not confirmed in time" } };
+      // Only a pane that died with the marker still pending failed before the command.
+      return { refuse: { kind: "unverified", ...requested, reason: failedBefore } };
     }
     if (start === "failed_before_command") return { retryUncapped: { kind: "unverified", reason: failedBefore } };
     const notice = unknownNotice({ kind: "unverified", ...requested,

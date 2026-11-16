@@ -291,12 +291,13 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     expect((result as { message: string }).message).not.toContain("may still be running");
   });
 
-  it("a fresh launch whose start is not confirmed in time is refused and its session removed", async () => {
+  it("a fresh launch whose start is not confirmed in time (pane alive) is refused, its session removed, as may have run", async () => {
     const h = makeAdapter({ limits: { "node-a": 256 } });
     const dead = seen(h, false, "pending\n", SERVER_CG);
     const result = await h.adapter.createSession("impl-a@demo", "/work", A);
-    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true,
-      processLimits: { reason: expect.stringContaining("not confirmed in time") } });
+    // the wrapper is alive and can still start the command after the last look: no retry
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false,
+      processLimits: { reason: expect.stringContaining("not confirmed in time"), commandStarted: "unknown" } });
     expect(dead).toHaveBeenCalledTimes(120);
     expect(h.newSessions()).toHaveLength(1);
     expect(h.tmuxCalls("kill-session")).toEqual([expect.stringContaining("kill-session -t '$3'")]);
@@ -335,6 +336,26 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     expect((result as { processLimits: object }).processLimits).not.toHaveProperty("possiblyRunning");
     const message = (result as { message: string }).message;
     expect(message).toContain("its command started");
+    expect(message).toContain("its terminal was removed");
+    expect(message).not.toContain("not started");
+    expect(message).not.toMatch(/retry/i);
+    expect(h.tmuxCalls("kill-session")).toEqual([expect.stringContaining("kill-session -t '$3'")]);
+  });
+
+  it("a fresh launch whose live wrapper times out (the command starting during the last sleep) says it may have run, no retry", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 } });
+    seen(h, false, "pending\n");   // the pane alive and the marker pending at every check
+    let marker = "pending\n";
+    const read = h.adapter.procRead;
+    h.adapter.procRead = async (path: string) => (SYNTHETIC.test(path) ? marker : read(path));
+    let sleeps = 0;
+    h.adapter.scopeStartSleep = async () => { if (++sleeps === 120) marker = ""; };   // it starts in the final sleep
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(sleeps).toBe(120);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false,
+      processLimits: { kind: "unverified", commandStarted: "unknown" } });
+    const message = (result as { message: string }).message;
+    expect(message).toContain("its command may have started");
     expect(message).toContain("its terminal was removed");
     expect(message).not.toContain("not started");
     expect(message).not.toMatch(/retry/i);

@@ -1087,9 +1087,10 @@ members:
     started again without the limit; when it can't be removed, the refusal says the session may still be running and
     how to stop it, without a retry, and its `processLimits` carries `possiblyRunning: true` and `retryable` false). What
     was seen of the command is said apart from what became of its terminal: only a start that failed before the command
-    (the pane died before entering the scope) or a pane that never reported reads "not started" and retryable. When the
-    command started in the scope but its process wasn't seen there in time, or its start marker couldn't be read, the
-    refusal says the command started (or may have), that its terminal was removed, and suggests no retry:
+    (the pane died with its start marker still pending) reads "not started" and retryable. When the command started in
+    the scope but its process wasn't seen there in time, when the time ran out with the pane still alive (its wrapper
+    can still start the command after the last look), or when its start marker couldn't be read, the refusal says the
+    command started (or may have), what became of its terminal, and suggests no retry:
     `processLimits.commandStarted` is `true` or `"unknown"`, and `retryable` is false. A capped launch whose `new-session`
     printed no pane and whose session can't be read back is refused the same possibly-running way (a session positively
     absent stays `session_not_created`). The first launch after that minute checks again, so a setup fixed meanwhile is
