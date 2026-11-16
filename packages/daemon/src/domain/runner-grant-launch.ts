@@ -51,10 +51,10 @@ export function runnerGrantIssuer(db: Database.Database, tmux: Pick<TmuxAdapter,
         const target = shellQuote(`=${session}`);
         // No eval: token text is treated only as data. Disable tracing before reading the private value.
         const script = `set +x; unset OPENRIG_RUN_ID; if _openrig_grant=$(tmux show-environment -t ${target} ${key} 2>/dev/null) && `
-          + `case "$_openrig_grant" in ${key}=oag_*) true;; *) false;; esac && tmux set-environment -t ${target} -u ${key} 2>/dev/null; then `
+          + `case "$_openrig_grant" in ${key}=oag_*) true;; *) false;; esac && tmux set-environment -t ${target} -r ${key} 2>/dev/null; then `
           + `OPENRIG_ACTIVITY_HOOK_TOKEN=\${_openrig_grant#*=}; OPENRIG_RUN_ID=${shellQuote(runId)}; OPENRIG_OCCUPANT_GENERATION=${shellQuote(grant.generation)}; `
           + `export OPENRIG_ACTIVITY_HOOK_TOKEN OPENRIG_RUN_ID OPENRIG_OCCUPANT_GENERATION; `
-          + `else tmux set-environment -t ${target} -u ${key} 2>/dev/null || :; printf '%s\\n' 'Run-bound reporting unavailable; using existing install-token reporting.' >&2; fi; `
+          + `else tmux set-environment -t ${target} -r ${key} 2>/dev/null || :; printf '%s\\n' 'Run-bound reporting unavailable; using existing install-token reporting.' >&2; fi; `
           + `unset _openrig_grant; exec ${command}`;
         return `/bin/sh -c ${shellQuote(script)}`;
       },

@@ -481,13 +481,15 @@ const setPermissionsHandler = async (c: Context) => {
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
   if (!body || Array.isArray(body)) return c.json({ error: "mode is required" }, 400);
-  const given = [body.mode, body.rules, body.codexPermissions, body.codexProfile].filter(value => value !== undefined).length;
+  // autoMode: null clears the seat's block.
+  const given = [body.mode, body.rules, body.autoMode, body.codexPermissions, body.codexProfile].filter(value => value !== undefined).length;
   if (given === 0) return c.json({ error: "mode is required" }, 400);
-  if (given > 1) return c.json({ error: "Choose exactly one of mode, rules, codexPermissions or codexProfile" }, 400);
+  if (given > 1) return c.json({ error: "Choose exactly one of mode, rules, autoMode, codexPermissions or codexProfile" }, 400);
   if (body.mode !== undefined && typeof body.mode !== "string") return c.json({ error: "mode must be a string" }, 400);
   if (body.codexProfile !== undefined && typeof body.codexProfile !== "string") return c.json({ error: "codexProfile must be a string" }, 400);
   if (typeof body.reason !== "string") return c.json({ error: "reason is required" }, 400);
   const choice = typeof body.mode === "string" ? { mode: body.mode } : body.rules !== undefined ? { rules: body.rules }
+    : body.autoMode !== undefined ? { autoMode: body.autoMode }
     : body.codexPermissions !== undefined ? { codexPermissions: body.codexPermissions } : { codexProfile: body.codexProfile as string };
   const result = await seatLifecycleService(c).setPermissions({
     ...settingTarget(c), ...choice, reason: body.reason, actor,
