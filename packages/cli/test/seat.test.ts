@@ -767,6 +767,30 @@ describe("rig seat status", () => {
     expect(errors.join("\n")).toContain("List seats with: rig ps --nodes");
   });
 
+  it("#3253: a plain handover failure after a recovery launch without the limit names the process-limit notice", async () => {
+    const deps = makeDeps({
+      status: 500,
+      data: {
+        ok: false,
+        code: "context_delivery_failed",
+        message: "Handover failed at step \"deliver-restore-packet\": the pane did not accept the packet",
+        guidance: "The successor candidate was unwound and the seat's binding is unchanged.",
+        processLimits: { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true,
+          requested: { tasksMax: 256 } },
+      },
+    }, []);
+
+    const { errors, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "impl@seat-rig", "--reason", "context-wall"]);
+    });
+
+    expect(exitCode).toBeGreaterThan(0);
+    const out = errors.join("\n");
+    expect(out).toContain("Handover failed at step");
+    expect(out).toContain("Process limits: tasks_max 256: requested, not applied");
+    expect(out).toContain("unverified: the user manager timed out");
+  });
+
   it("handover non-dry-run JSON prints mutation result for discovered source", async () => {
     const paths: string[] = [];
     const deps = makeDeps({ status: 200, data: HANDOVER_RESULT }, paths);

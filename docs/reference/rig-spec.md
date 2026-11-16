@@ -1085,8 +1085,15 @@ members:
     that couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
     didn't see in time (its new session is removed, by the identity tmux printed when it made it, and the seat is never
     started again without the limit; when it can't be removed, the refusal says the session may still be running and
-    how to stop it, without a retry, and its `processLimits` carries `possiblyRunning: true` and `retryable` false). The first
-    launch after that minute checks again, so a setup fixed meanwhile is seen;
+    how to stop it, without a retry, and its `processLimits` carries `possiblyRunning: true` and `retryable` false). What
+    was seen of the command is said apart from what became of its terminal: only a start that failed before the command
+    (the pane died before entering the scope) or a pane that never reported reads "not started" and retryable. When the
+    command started in the scope but its process wasn't seen there in time, or its start marker couldn't be read, the
+    refusal says the command started (or may have), that its terminal was removed, and suggests no retry:
+    `processLimits.commandStarted` is `true` or `"unknown"`, and `retryable` is false. A capped launch whose `new-session`
+    printed no pane and whose session can't be read back is refused the same possibly-running way (a session positively
+    absent stays `session_not_created`). The first launch after that minute checks again, so a setup fixed meanwhile is
+    seen;
   - `process_limits_invalid` when the seat's stored value can't be read: only this seat is affected, and the value is
     kept until a re-applied spec replaces or clears it.
   Over HTTP, `process_limits_unverified` answers 409 and the other three 422, with `retryable` and `processLimits` (the

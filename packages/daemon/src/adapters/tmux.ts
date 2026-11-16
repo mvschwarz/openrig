@@ -494,6 +494,10 @@ export interface SeatProcessLimitsProblem {
   /** A refused fresh launch whose terminal couldn't be removed (or wasn't identified): it may be running, so the
    *  outcome is unknown and a retry isn't suggested until it is stopped. */
   possiblyRunning?: true;
+  /** A refused fresh launch whose command started inside the seat's scope before the refusal (its marker was emptied:
+   *  `true`) or may have (the marker couldn't be read: "unknown"). It may have done work, so it is not a failure before
+   *  the command, and a retry isn't suggested; whether its terminal was removed is said apart. */
+  commandStarted?: true | "unknown";
 }
 
 /** The structured warning of a recovery (handover, provider switch, restart in place) that went ahead without the
@@ -600,16 +604,22 @@ export interface SeatLaunchPolicy { inheritTmuxEnvironment: boolean; env: Readon
 
 /** The launch result of a fresh seat launch whose limit can't be applied. */
 function processLimitsNotAppliedResult(error: SeatProcessLimitsNotApplied, left?: string | null): TmuxResult {
-  // A refusal whose terminal may still be running is not "not started": its outcome is unknown, and a blind retry
-  // could start a second one beside it.
+  // What was observed about the command and what became of its terminal are said apart: a refusal whose command
+  // started (or may have) is not "not started", and one whose terminal may still be running has an unknown outcome.
+  // Either way a blind retry could repeat the command or start a second one beside it, so none is suggested.
+  const started = error.problem.commandStarted;
   const problem: SeatProcessLimitsProblem = left ? { ...error.problem, possiblyRunning: true } : error.problem;
-  const message = left
-    ? `process_limits is set for this seat, but ${problemText(error.problem)}; the launch was refused, and whether its ` +
-      `terminal is running is unknown. ${left} Stop it before launching this seat again.`
-    : error.message;
+  let message = error.message;
+  if (started || left) {
+    message = `process_limits is set for this seat, but ${problemText(error.problem)}; the launch was refused`;
+    if (started) message += `, after its command ${started === true ? "started" : "may have started"} in the seat's scope`;
+    message += left
+      ? `, and whether its terminal is running is unknown. ${left} Stop it before launching this seat again.`
+      : "; its terminal was removed. Check what the command did before launching this seat again.";
+  }
   console.warn(`[seat launch] ${message}`);
   return { ok: false, code: `process_limits_${error.problem.kind}`, message,
-    retryable: !left && error.problem.kind === "unverified", processLimits: problem };
+    retryable: !left && !started && error.problem.kind === "unverified", processLimits: problem };
 }
 
 /** What a capped launch's new-session prints: its pane, its session's immutable id and its server (pid, start time). */
@@ -946,16 +956,21 @@ export class TmuxAdapter {
   /** Whether a capped launch's seat scope started: `started` once its command started inside the scope (the marker is
    *  emptied) and the pane's process is in a seat scope; `failed_before_command` when the pane died with the marker still
    *  pending (systemd-run could not make the scope, also late, after the check passed); `ran_and_ended` when it died
-   *  after the command started inside the scope; `unconfirmed` when none was seen in time, or the pane or the marker
-   *  can't be read. The marker is removed at the end. */
+   *  after the command started inside the scope; `ran_unconfirmed` when the command started (the marker was emptied)
+   *  but its process wasn't seen in the scope in time; `unconfirmed` when the pane never reported (the marker stayed
+   *  pending) in time; `unknown` when the pane or the marker can't be read. The marker is removed at the end. */
   private async seatScopeStart(pane: string, marker: string | undefined):
-    Promise<"started" | "failed_before_command" | "ran_and_ended" | "unconfirmed"> {
+    Promise<"started" | "failed_before_command" | "ran_and_ended" | "ran_unconfirmed" | "unconfirmed" | "unknown"> {
+    let sawRan = false;
+    let lastMark: "ran" | "pending" | "unreadable" = "pending";
     try {
       for (let i = 0; i < SEAT_SCOPE_START_CHECKS; i++) {
         let dead: boolean;
-        try { dead = await this.isPaneDead(pane); } catch { return "unconfirmed"; }
+        try { dead = await this.isPaneDead(pane); } catch { return sawRan ? "ran_unconfirmed" : "unknown"; }
         const mark = await this.scopeMarkerState(marker);
-        if (dead) return mark === "ran" ? "ran_and_ended" : mark === "pending" ? "failed_before_command" : "unconfirmed";
+        lastMark = mark;
+        if (mark === "ran") sawRan = true;
+        if (dead) return mark === "ran" ? "ran_and_ended" : mark === "pending" ? "failed_before_command" : sawRan ? "ran_unconfirmed" : "unknown";
         if (mark === "ran") {
           try {
             const pid = await this.getPanePid(pane);
@@ -965,7 +980,7 @@ export class TmuxAdapter {
         }
         await this.scopeStartSleep(SEAT_SCOPE_START_CHECK_MS);
       }
-      return "unconfirmed";
+      return sawRan ? "ran_unconfirmed" : lastMark === "pending" ? "unconfirmed" : "unknown";
     } finally {
       if (marker) await this.fileOps.unlink(marker).catch(() => {});
     }
@@ -1194,6 +1209,14 @@ export class TmuxAdapter {
     const failedBefore = "the seat's scope did not start: its pane's command exited before entering it";
     if (mode !== "recovery") {
       if (start === "ran_and_ended") return null;
+      if (start === "ran_unconfirmed") {
+        return { refuse: { kind: "unverified", ...requested, commandStarted: true,
+          reason: "the seat's command started, but its process was not seen in the seat's scope in time" } };
+      }
+      if (start === "unknown") {
+        return { refuse: { kind: "unverified", ...requested, commandStarted: "unknown",
+          reason: "whether the seat's command started in its scope couldn't be read" } };
+      }
       return { refuse: { kind: "unverified", ...requested,
         reason: start === "failed_before_command" ? failedBefore : "the seat's scope start was not confirmed in time" } };
     }
@@ -1201,7 +1224,9 @@ export class TmuxAdapter {
     const notice = unknownNotice({ kind: "unverified", ...requested,
       reason: start === "ran_and_ended"
         ? "the seat's command started in its scope and ended before it was seen running; it was not run again"
-        : "the seat's scope start was not confirmed in time; the seat was not started again" });
+        : start === "ran_unconfirmed"
+          ? "the seat's command started, but its process was not seen in the seat's scope in time; it was not run again"
+          : "the seat's scope start was not confirmed in time; the seat was not started again" });
     notices.processLimits = notice;
     warnings.push(noticeLine(notice));
     return null;
@@ -1771,6 +1796,15 @@ export class TmuxAdapter {
     // launch counts as created.
     if (!/^%\d+$/.test(created)) {
       const unconfirmed = await this.sessionUnconfirmedAfterCreate(name);
+      // #3253: a capped launch whose session can't be read back may be running uncapped: the possibly-running refusal
+      // (no retry, how to look and stop it). A session positively absent stays session_not_created.
+      if (unconfirmed?.code === "session_unconfirmed" && notices.capped) {
+        if (notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
+        return processLimitsNotAppliedResult(new SeatProcessLimitsNotApplied({ kind: "unverified",
+          ...(notices.tasksMax !== undefined ? { requested: { tasksMax: notices.tasksMax } } : {}),
+          reason: `tmux printed no pane for the launch and its session couldn't be read back (${unconfirmed.message})` }),
+          await this.removeRefusedSession(name, null));
+      }
       if (unconfirmed) return { ok: false, ...unconfirmed };
     }
     // #3253: a capped launch counts only once its scope is seen to start. A fresh one that isn't is refused and the

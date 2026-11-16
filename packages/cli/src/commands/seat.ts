@@ -104,6 +104,8 @@ interface SeatStatusError {
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
   clients?: Array<{ name: string; session: string }>;
+  /** #3253: the process-limit notice of a failure after a launch that went on without the limit (or the refusal's problem). */
+  processLimits?: Record<string, unknown>;
 }
 
 interface SeatHandoverPlan {
@@ -487,6 +489,10 @@ function printSeatError(error: SeatStatusError, fallback: string): void {
   if (error.guidance) {
     console.error(error.guidance);
   }
+  // #3253: the JSON carries the process-limit notice; the plain output names it too (a handover's packet or
+  // finalization failure after a successor that went on without its limit).
+  const limits = failureProcessLimitsLine(error.processLimits);
+  if (limits) console.error(limits);
   if (error.code === "seat_ambiguous" && error.matches?.length) {
     for (const match of error.matches) {
       console.error(`  ${match.logical_id}@${match.rig_name} (${display(match.current_occupant)})`);
@@ -1927,13 +1933,37 @@ function printEffortReport(data: Record<string, unknown>): void {
 }
 
 /** #3253: a restart in place that can't keep or re-apply the seat's process limit says so, by what the restart did. */
-function restartProcessLimitsLine(data: Record<string, unknown>): string | null {
-  const notice = data["processLimits"] as { state: "not_applied" | "unknown"; kind: string; reason: string;
-    requested?: { tasksMax: number }; ageSeconds?: number; retryable?: boolean } | undefined;
-  if (!notice) return null;
+type ProcessLimitsNoticeView = { state?: "not_applied" | "unknown"; kind: string; reason: string;
+  requested?: { tasksMax: number }; ageSeconds?: number; retryable?: boolean };
+
+/** The parts every process-limit line shares: what was asked, and why it wasn't applied. */
+function processLimitsAskedWhy(notice: ProcessLimitsNoticeView): { asked: string; why: string } {
   const asked = notice.requested ? `tasks_max ${notice.requested.tasksMax}` : "process_limits";
   const why = `${notice.kind}: ${notice.reason}${notice.ageSeconds !== undefined ? `, observed ${notice.ageSeconds}s ago` : ""}` +
     (notice.retryable ? "; this may be temporary" : "");
+  return { asked, why };
+}
+
+/** The process-limit line of a failed seat command: what the launch it made runs under, in the restart line's form. */
+function failureProcessLimitsLine(raw: Record<string, unknown> | undefined): string | null {
+  if (!raw || typeof raw["kind"] !== "string" || typeof raw["reason"] !== "string") return null;
+  const notice = raw as unknown as ProcessLimitsNoticeView;
+  const { asked, why } = processLimitsAskedWhy(notice);
+  if (notice.state === "unknown") {
+    return `Process limits: ${asked}: unknown (${why}); whether what it started runs under the limit can't be told, and ` +
+      "nothing was run a second time. The request stays stored, and a fresh launch applies it.";
+  }
+  if (notice.state === "not_applied") {
+    return `Process limits: ${asked}: requested, not applied; what it started runs without it (${why}). The request stays ` +
+      "stored, and a fresh launch applies it.";
+  }
+  return `Process limits: ${asked}: not applied (${why}).`;
+}
+
+function restartProcessLimitsLine(data: Record<string, unknown>): string | null {
+  const notice = data["processLimits"] as (ProcessLimitsNoticeView & { state: "not_applied" | "unknown" }) | undefined;
+  if (!notice) return null;
+  const { asked, why } = processLimitsAskedWhy(notice);
   const outcome = data["outcome"] as string | undefined;
   if (notice.state === "unknown") {
     return `Process limits: ${asked}: unknown (${why}); whether the restarted seat runs under the limit can't be told, and ` +

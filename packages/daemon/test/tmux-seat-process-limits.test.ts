@@ -321,6 +321,58 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     expect((result as { processLimits: object }).processLimits).not.toHaveProperty("possiblyRunning");
   });
 
+  it("a fresh launch whose command ran but whose scope can't be read says it started, removed, and suggests no retry", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 } });
+    seen(h, false, "");   // the marker says the command ran inside the scope
+    const read = h.adapter.procRead;
+    h.adapter.procRead = async (path: string) => {   // but the pane process's cgroup can't be read
+      if (path === "/proc/4321/cgroup") throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      return read(path);
+    };
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false,
+      processLimits: { kind: "unverified", commandStarted: true } });
+    expect((result as { processLimits: object }).processLimits).not.toHaveProperty("possiblyRunning");
+    const message = (result as { message: string }).message;
+    expect(message).toContain("its command started");
+    expect(message).toContain("its terminal was removed");
+    expect(message).not.toContain("not started");
+    expect(message).not.toMatch(/retry/i);
+    expect(h.tmuxCalls("kill-session")).toEqual([expect.stringContaining("kill-session -t '$3'")]);
+  });
+
+  it("a fresh launch whose marker can't be read says its command may have started, and suggests no retry", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 } });
+    seen(h, false, "something else\n", SERVER_CG);
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false,
+      processLimits: { commandStarted: "unknown" } });
+    expect((result as { message: string }).message).toContain("its command may have started");
+    expect((result as { message: string }).message).not.toMatch(/retry/i);
+  });
+
+  it("a fresh launch that failed before its command (pane dead, marker pending) still reads not started and retryable", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 } });
+    seen(h, true, "pending\n");
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: true });
+    expect((result as { processLimits: object }).processLimits).not.toHaveProperty("commandStarted");
+    expect((result as { message: string }).message).toContain("the seat was not started");
+  });
+
+  it("a capped new-session that printed nothing and can't be read back is refused as possibly running (no retry)", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 }, printed: "" });
+    h.adapter.probeSession = async () => { throw new Error("no server running on /tmp/tmux-1000/default"); };
+    const result = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false, processLimits: { possiblyRunning: true } });
+    expect((result as { message: string }).message).toContain("kill-session -t '=impl-a@demo'");
+    expect(h.tmuxCalls("kill-session")).toEqual([]);
+    // positively absent: still the plain session_not_created
+    const gone = makeAdapter({ limits: { "node-a": 256 }, printed: "" });
+    gone.adapter.probeSession = async () => ({ state: "absent" as const });
+    expect(await gone.adapter.createSession("impl-a@demo", "/work", A)).toMatchObject({ ok: false, code: "session_not_created" });
+  });
+
   it("a refused fresh launch whose session id now names another terminal (a replaced server) reads as gone, not possibly running", async () => {
     const h = makeAdapter({ limits: { "node-a": 256 }, targetChanged: true });
     seen(h, true, "pending\n");
