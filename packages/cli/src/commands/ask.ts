@@ -118,8 +118,8 @@ export function askCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .option("--seat <session-name>", "Scope the search to ONE seat's transcript across every generation that sat in it (cross-generation archaeology)")
     .option("--session <token>", "Search ONE specific session's JSONL by its session token (read-only)")
-    .option("--wake <target>", "EXECUTES: wake member@rig[@N], or pass a session ID or title to the runtime — ask one question, get a snapshot answer, back to cold (runtime cost; explicit, never an implicit escalation from a search)")
-    .option("--runtime <runtime>", "runtime for --wake: claude (default) or codex")
+    .option("--wake <target>", "EXECUTES: explicitly native seats use their live run channel; typed seats or runtime IDs/titles use a one-shot Claude/Codex wake (runtime cost; explicit, never an implicit escalation from search)")
+    .option("--runtime <runtime>", "one-shot runtime for typed --wake targets or raw tokens: claude (default) or codex")
     .option("--wake-timeout <seconds>", "bounded wake timeout in seconds (default 180)")
     .addHelpText("after", `
 rig ask is one verb for information about the PAST, three ways to reach it:
@@ -129,9 +129,10 @@ rig ask is one verb for information about the PAST, three ways to reach it:
   3. rig ask <rig> "<q>" --session <token>  search ONE session's JSONL by
                                             token — "I have the token, find it" (L2, read-only)
   4. rig ask <rig> "<q>" --wake <target>
-                                            WAKE that session (by member@rig[@N]
-                                            or runtime ID/title), ask, get a snapshot
-                                            answer, back to cold (L3, EXECUTES)
+                                            WAKE the selected native seat's live run
+                                            for its dedicated answer, or resume a typed
+                                            Claude/Codex target once, back to cold
+                                            (L3, EXECUTES)
 
 Wake seat targets must include the rig: member@rig or member@rig@N (1 = newest tenure).
 Values without @ go unchanged to the runtime as a session ID or title; a bare member
@@ -153,9 +154,9 @@ Exit codes:
   0  Success
   1  Daemon not running, the rig is unknown or ambiguous, or --runtime or
      --wake-timeout is invalid
-  2  Failed to fetch data from daemon; the --wake seat has no such tenure, or its
-     tenure isn't Claude or Codex or has no resume token; or the wake failed or
-     timed out`);
+  2  Failed to fetch data from daemon; the --wake seat has no such tenure or
+     no current native wake capability; a typed target isn't Claude/Codex or
+     has no resume token; or the wake failed or timed out`);
 
   const getDeps = (): AskCommandDeps => (depsOverride as AskCommandDeps | undefined) ?? {
     lifecycleDeps: realDeps(),
@@ -165,8 +166,8 @@ Exit codes:
   cmd.action(async (rig: string, question: string, opts: { json?: boolean; seat?: string; session?: string; wake?: string; runtime?: string; wakeTimeout?: string }) => {
     const deps = getDeps();
 
-    // L3 — WAKE: EXECUTES the runtime headless. A raw token wakes CLI-locally; a
-    // seat[@gen] target is resolved to a token via the daemon first. Explicit
+    // L3 — WAKE: EXECUTES. An explicitly native seat uses its live run channel;
+    // typed seats resolve through the daemon and raw tokens wake CLI-locally. Explicit
     // --wake only — never an implicit escalation from a failed L1/L2 search, and
     // an unresolvable seat REFUSES with teaching (never a guessed wake).
     if (opts.wake) {
