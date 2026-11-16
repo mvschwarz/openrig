@@ -25,10 +25,9 @@ import {
 } from "./delivery-rules-engine.js";
 import {
   RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG, RETURN_ROUTE_NOTE_PREFIX,
-  isEpisodeRelay, relayTaskId, resolveEscalationReturnRoute, splitRoute,
+  isEpisodeRelay, relayTaskId, resolveEscalationReturnRoute, routeOnThisHost,
 } from "../return-route.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
-import { getSelfHostId } from "../hosts/fanout-contract.js";
 import { OPENRIG_SENDER } from "../../lib/pane-envelope.js";
 
 export interface OperatorDeliveryEngine {
@@ -62,12 +61,6 @@ export function buildDeferralFirePayload(row: QueueItem, notificationKey: string
 
 function describeDecision(d: DeliveryDecision): string {
   return d.deferMinutes !== undefined ? `${d.outcome}-deferred-${d.deferMinutes}m` : d.outcome;
-}
-
-/** A route's address when the conversation is on this host; null when it names another host. */
-function routeOnThisHost(route: string): string | null {
-  const { address, host } = splitRoute(route);
-  return host === null || host === getSelfHostId() ? address : null;
 }
 
 /** The seat a prompt alert is about, or the escalated row's own seat. */

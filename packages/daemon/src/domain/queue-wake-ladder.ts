@@ -11,8 +11,8 @@ import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
-import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RETURN_ROUTE_NOTE_PREFIX, promptKindFromReason, resolveEscalationReturnRoute,
-  type PromptKind } from "./return-route.js";
+import { PROMPT_ROUTED_WORK_PREFIX, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RETURN_ROUTE_NOTE_PREFIX, isEpisodeRelay,
+  promptKindFromReason, resolveEscalationReturnRoute, routeOnThisHost, type PromptKind } from "./return-route.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
 import { readWakeOutcome } from "./connection-contract.js";
@@ -1576,9 +1576,11 @@ async function advancePromptRefusals(
     const orch = openEscalationOwner(deps, `prompt-destination:${dest}`) ?? resolveOrch(dest);
     const waiterTags = [...(group.waiters?.keys() ?? [])].map(id => `${PROMPT_ROUTED_WORK_PREFIX}${id}`);
     // A seat's prompt in work handed over with a return route goes to that conversation through the operator rung, not to the
-    // seat's orchestrator: only the person can answer it, and they chose to answer there. A choice prompt keeps its route.
-    const routed = !(group.choice && !group.other) && resolveEscalationReturnRoute(deps.db,
-      { qitemId: "", tags: [...members.map(m => recoveryTag(m.row.qitemId)), ...waiterTags] }).kind === "route";
+    // seat's orchestrator: only the person can answer it, and they chose to answer there. A choice prompt keeps its route, and
+    // so does a route on another host, which this daemon doesn't deliver to: the seat's lead is woken as usual.
+    const resolution = resolveEscalationReturnRoute(deps.db,
+      { qitemId: "", tags: [...members.map(m => recoveryTag(m.row.qitemId)), ...waiterTags] });
+    const routed = !(group.choice && !group.other) && resolution.kind === "route" && routeOnThisHost(resolution.route) !== null;
     const toOperator = orch === null || orch === dest || routed;
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
@@ -1611,8 +1613,10 @@ async function advancePromptRefusals(
           ? deps.queueRepo.updateWithinTransaction({ qitemId: row.qitemId, actorSession: LADDER_ACTOR,
               summary: reason, transitionNote: `hook-review observed: ${reason}` }).persistedEvents
           : [];
-        deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
-          .run(JSON.stringify([...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys]), row.qitemId);
+        const nextTags = [...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys];
+        deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(nextTags), row.qitemId);
+        // The rungs below read this row: routed work that just joined must reach the engine's route lookup.
+        row.tags = nextTags;
         return events;
       })();
       deps.queueRepo.notifyCommitted(events);
@@ -1634,7 +1638,11 @@ async function advancePromptRefusals(
     // joined it), the permission leg still runs; accepted or deferred delivery stays exactly-once.
     const floorOnly = view.exhausted && !view.opEngineDispatched
       && view.exhaustedNote === `${LADDER_EXHAUSTED_PREFIX} ${PROMPT_FLOOR_EXHAUSTED}`;
-    if (view.exhausted && !(floorOnly && !choiceOnly)) continue;
+    // The seat's lead was woken before routed work joined this alert, and no operator delivery has gone out: that work's
+    // conversation still gets its relay. Once one has, the exactly-once rule below keeps it.
+    const routedAfterOrchestrator = routed && view.exhausted && !view.opEngineDispatched
+      && (view.exhaustedNote?.startsWith(`${LADDER_EXHAUSTED_PREFIX} escalated to orchestrator`) ?? false);
+    if (view.exhausted && !(floorOnly && !choiceOnly) && !routedAfterOrchestrator) continue;
     if (view.opEngineDispatched) {
       if (view.opOutcomeResolved) appendExhausted(deps.queueRepo, row, "engine outcome resolved");
       continue; // accepted/deferred delivery retains gateway custody
@@ -1702,7 +1710,9 @@ async function supersedeRelays(deps: WakeLadderDeps, alertId: string, why: strin
   for (const { qitem_id } of open) {
     try {
       const relay = deps.queueRepo.getById(qitem_id);
-      if (!relay) continue;
+      // Only the episode's own relay (its id, OpenRig as source, its tags); another row that carries the tag is left as it is.
+      const key = relay?.tags?.find(t => t.startsWith(RELAY_KEY_PREFIX))?.slice(RELAY_KEY_PREFIX.length);
+      if (!relay || !key || !isEpisodeRelay(relay, alertId, key, OPENRIG_SENDER)) continue;
       const note = `${RETURN_ROUTE_NOTE_PREFIX}superseded: ${why}, so don't send an answer for that prompt. A new prompt gets a new task.`;
       if (deps.queueRepo.listTransitions(qitem_id).some(t => t.transitionNote === note)) continue;
       if (relay.state === "pending") {

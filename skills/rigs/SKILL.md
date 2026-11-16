@@ -239,7 +239,8 @@ commands; if the two ever differ, this step is right.
     `Return route: <address>`: that's your address from now on. The goal's handoffs carry it, and a seat that stops at a
     prompt in this work reaches you there as a task. Tell the person the task ID it prints, and keep the goal, your
     address and that ID: they're how you find this work again. If the outcome is unknown, repeat the same command with
-    the `--id` it printed: the same task keeps the same address.
+    `--id` and the ID from its `Queue create request ID:` line, which it prints before it sends: the same task keeps the
+    same address.
   - **The team's questions** come to your address as tasks:
     `OPENRIG_SESSION_NAME=<address> rig queue list --owned --state pending,in-progress`. Read each in full
     (`rig queue show <id> --full`) and show the person the whole question in the team's words. Record only what they
@@ -383,7 +384,9 @@ Follow these steps by default. Only when the person declined the Codex offer abo
 - **Give the team more work:** write the goal to a file: what to change, in which repository and branch, what done
   looks like, and that the result comes back to you (the branch or commit, the review, any PR text), ending with the
   reply paragraph above. Then
-  `OPENRIG_SESSION_NAME=<address> rig queue create --destination <seat>@<rig> --summary "<the goal in a sentence>" --body-file <file> --verify`.
+  `OPENRIG_SESSION_NAME=<address> rig queue create --destination <seat>@<rig> --return-route self --summary "<the goal in a sentence>" --body-file <file> --verify`.
+  Each goal carries its own route: without `--return-route self`, its seats' prompts don't come to you, and the
+  `returnRoute` the reply paragraph points the team to is empty.
   A message informs, and a queue task is the work someone owns. Read its wake outcome as above before you send
   anything else.
 - **Then ask what's next.** If no team can take the work, fix that or ask the person. Don't quietly do it yourself.

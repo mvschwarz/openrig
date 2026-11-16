@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
+import { getSelfHostId } from "./hosts/fanout-contract.js";
 
 /** How a row's return route was established:
  *  - `issued`: OpenRig issued it for this create, and the caller's own identity is still the row's source;
@@ -65,6 +66,13 @@ export function promptKindFromReason(reason: string | null | undefined): PromptK
 export function splitRoute(route: string): { address: string; host: string | null } {
   const parts = route.split("@");
   return parts.length === 3 ? { address: `${parts[0]}@${parts[1]}`, host: parts[2]! } : { address: route, host: null };
+}
+
+/** A route's address when the conversation is on this host; null when it names another host, which this daemon doesn't
+ *  deliver to. */
+export function routeOnThisHost(route: string): string | null {
+  const { address, host } = splitRoute(route);
+  return host === null || host === getSelfHostId() ? address : null;
 }
 
 /** An agent conversation's queue address (member@rig, or member@rig@host carried from another host). A person's address

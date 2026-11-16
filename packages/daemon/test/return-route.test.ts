@@ -39,12 +39,14 @@ describe("first-user return route", () => {
   let repo: QueueRepository;
   let app: Hono;
   let home: string;
+  let people: LoadResult;
   const selfBefore = getSelfHostId();
 
   beforeEach(() => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
-    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    people = nobody;
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: () => people });
     app = new Hono();
     app.use("*", async (c, next) => { c.set("queueRepo" as never, repo); c.set("eventBus" as never, new EventBus(db)); await next(); });
     app.route("/api/queue", queueRoutes());
@@ -103,7 +105,8 @@ describe("first-user return route", () => {
     it("a named address is kept as named; a person's address isn't a route", async () => {
       const named = await (await create({ returnRoute: "claude-app@kernel" }, "front@kernel")).json() as Record<string, unknown>;
       expect(named).toMatchObject({ returnRoute: "claude-app@kernel", returnRouteBasis: "named" });
-      for (const person of ["sam@external", "human@kernel"]) {
+      people = slackPerson; // sam is registered, so sam@kernel is that person's address
+      for (const person of ["sam@external", "human@kernel", "sam@kernel"]) {
         const res = await create({ returnRoute: person }, "front@kernel");
         expect(res.status).toBe(400);
         expect((await res.json() as { error: string }).error).toBe("invalid_return_route");
@@ -115,6 +118,15 @@ describe("first-user return route", () => {
       expect(row).not.toHaveProperty("returnRoute");
       expect(row).not.toHaveProperty("returnRouteBasis");
       expect((await create({})).status).toBe(400); // still actor_required with no identity at all
+    });
+
+    it("a compact listing shows a routed row's route, and an unrouted row still has none", async () => {
+      const routed = await repo.create({ sourceSession: "front@kernel", destinationSession: lead, body: "goal", nudge: false,
+        returnRoute: "front@kernel", returnRouteBasis: "named" });
+      const plain = await repo.create({ sourceSession: "front@kernel", destinationSession: lead, body: "other", nudge: false });
+      const listed = repo.list({ compact: true, limit: 100 });
+      expect(listed.find(r => r.qitemId === routed.qitemId)).toMatchObject({ returnRoute: "front@kernel", returnRouteBasis: "named" });
+      expect(listed.find(r => r.qitemId === plain.qitemId)).not.toHaveProperty("returnRoute");
     });
   });
 
@@ -268,7 +280,8 @@ describe("first-user return route", () => {
       expect(relay.body).toContain(`--reason 'task ${relayId}: <their words>'`);
       expect(relay.lastNudgeResult).toBeNull(); // nothing to wake: the conversation reads it on its next turn
       await port.dispatchEscalation(alert, "again");
-      expect(repo.list({ destination: "front@kernel", limit: 100 }).filter(r => r.tags?.includes("return-route-relay"))).toHaveLength(1);
+      expect(repo.list({ destinationSession: "front@kernel", limit: 100 }).filter(r => r.tags?.includes("return-route-relay"))).toHaveLength(1);
+      expect(repo.list({ destinationSession: "front-2@kernel", limit: 100 })).toEqual([]);
       // Without a route, the same escalation is undeliverable as before.
       expect((await port.dispatchEscalation(await promptAlert(null), "x")).decision).toBe("undeliverable:no-registered-human");
     });
@@ -377,7 +390,7 @@ describe("first-user return route", () => {
       db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify(["wake-prompt-refusal", `prompt-destination:${reviewer}`]), alert.qitemId);
       expect((await port.dispatchEscalation(repo.getById(alert.qitemId)!, "x")).decision).toBe("return-route:front@kernel");
       expect(dispatched).toEqual([]);
-      expect(repo.list({ destination: "front@kernel", limit: 100 }).filter(r => r.tags?.includes("return-route-relay"))).toHaveLength(1);
+      expect(repo.list({ destinationSession: "front@kernel", limit: 100 }).filter(r => r.tags?.includes("return-route-relay"))).toHaveLength(1);
     });
 
     it("the relay's commands quote every name, and its quoting rule keeps the person's words literal", async () => {
@@ -411,7 +424,7 @@ describe("first-user return route", () => {
       readPromptKind: dest => (dest === reviewer ? kind : "unknown"),
       retryIntervalSeconds: 60, now, deliveryEngine: port(), attemptWake, log: (line: string) => { throw new Error(`unexpected ladder log: ${line}`); } });
     const alerts = () => repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 }).filter(r => r.tags?.includes("wake-prompt-refusal"));
-    const relays = () => repo.list({ destination: "front@kernel", limit: 1000 }).filter(r => r.tags?.includes("return-route-relay"));
+    const relays = () => repo.list({ destinationSession: "front@kernel", limit: 1000 }).filter(r => r.tags?.includes("return-route-relay"));
     async function waitingGoal(route: string | null, on: "seat" | "row" | "held" = "seat") {
       const goal = await repo.create({ sourceSession: "front@kernel", destinationSession: lead, body: "goal", nudge: false,
         ...(route ? { returnRoute: route, returnRouteBasis: "issued-actor" } : {}) });
@@ -461,31 +474,63 @@ describe("first-user return route", () => {
 
     it("a choice already known from a refused wake isn't turned into a permission prompt by routed work at that seat", async () => {
       const routed = await waitingGoal("front@kernel", "held");
-      const history: WatchdogHistoryEntry[] = [];
-      const policy = makeParkedOwnerConsumerPolicy({
-        diagnoseRig: () => ({ seats: [{ sessionName: reviewer, parked: true,
-          activity: { value: "idle-at-prompt", needsInput: { count: 1, reason: "selection prompt" } },
-          obligations: { items: [{ qitemId: routed.qitemId, state: "in-progress", summary: "review" }], held: [] } }] }),
-        history: { listForJob: () => history, countForJob: () => history.length },
-        rows: {
-          listTransitions: id => repo.listTransitions(id),
-          appendNote: (id, note) => { void repo.update({ qitemId: id, actorSession: "watchdog@system", transitionNote: note }); return { ok: true }; },
-          recordNudgeResult: (id, result) => repo.recordNudgeAttempt(id, result),
-          listOpenIds: () => [routed.qitemId],
-          recoveryOwnsWake: id => queueRecoveryOwnsWake(db, repo.getById(id)),
-        },
-      });
-      const job = { jobId: "choice-job", policy: PARKED_OWNER_POLICY_NAME, target: { session: makeRigAnchor("starter") }, context: {} } as PolicyJob;
-      const wakeNotes = await policy.evaluate(job);
-      history.push({ historyId: "choice-history", jobId: job.jobId, evaluatedAt: new Date().toISOString(), outcome: "sent", skipReason: null,
-        deliveryTargetSession: reviewer, deliveryStatus: "failed", deliveryMessage: "wake", evaluationNotes: { ...wakeNotes.notes,
-          deliveryReason: `Refused: '${reviewer}' is at an interactive prompt (selection_prompt). No text was sent.` } });
-      await policy.evaluate(job);
+      await refuseWake([routed.qitemId], `Refused: '${reviewer}' is at an interactive prompt (selection_prompt). No text was sent.`);
       const wake = vi.fn(async () => "verified");
       await tick(undefined, wake);
       expect(alerts()[0]!.tags).toContain("prompt-kind:choice");
       expect(wake).toHaveBeenCalledWith(alerts()[0]!.qitemId, lead);
       expect(relays()).toEqual([]);
+    });
+
+    function refuseWake(rowIds: string[], deliveryReason: string) {
+      const history: WatchdogHistoryEntry[] = [];
+      const policy = makeParkedOwnerConsumerPolicy({
+        diagnoseRig: () => ({ seats: [{ sessionName: reviewer, parked: true,
+          activity: { value: "idle-at-prompt", needsInput: { count: 1, reason: "prompt" } },
+          obligations: { items: rowIds.map(qitemId => ({ qitemId, state: "in-progress", summary: "review" })), held: [] } }] }),
+        history: { listForJob: () => history, countForJob: () => history.length },
+        rows: {
+          listTransitions: id => repo.listTransitions(id),
+          appendNote: (id, note) => { void repo.update({ qitemId: id, actorSession: "watchdog@system", transitionNote: note }); return { ok: true }; },
+          recordNudgeResult: (id, result) => repo.recordNudgeAttempt(id, result),
+          listOpenIds: () => rowIds,
+          recoveryOwnsWake: id => queueRecoveryOwnsWake(db, repo.getById(id)),
+        },
+      });
+      const job = { jobId: "refuse-job", policy: PARKED_OWNER_POLICY_NAME, target: { session: makeRigAnchor("starter") }, context: {} } as PolicyJob;
+      return policy.evaluate(job).then(async wake => {
+        history.push({ historyId: "refuse-history", jobId: job.jobId, evaluatedAt: new Date().toISOString(), outcome: "sent", skipReason: null,
+          deliveryTargetSession: reviewer, deliveryStatus: "failed", deliveryMessage: "wake", evaluationNotes: { ...wake.notes, deliveryReason } });
+        await policy.evaluate(job);
+      });
+    }
+
+    it("routed work that joins an alert whose lead was already woken still gets its relay, once", async () => {
+      const unrouted = await repo.create({ sourceSession: lead, destinationSession: reviewer, body: "other review", nudge: false });
+      repo.claim({ qitemId: unrouted.qitemId, destinationSession: reviewer });
+      await refuseWake([unrouted.qitemId], `Refused: '${reviewer}' is at an interactive prompt (target_needs_input). No text was sent.`);
+      const wake = vi.fn(async () => "verified");
+      await tick(undefined, wake);
+      expect(wake).toHaveBeenCalledWith(alerts()[0]!.qitemId, lead);
+      expect(repo.listTransitions(alerts()[0]!.qitemId).some(t => t.transitionNote?.startsWith("ladder-exhausted: escalated to orchestrator"))).toBe(true);
+      expect(relays()).toEqual([]);
+      await waitingGoal("front@kernel");
+      await tick(new Date(Date.now() + 400_000), wake);
+      expect(alerts()).toHaveLength(1);
+      expect(relays()).toHaveLength(1);
+      await tick(new Date(Date.now() + 800_000), wake);
+      expect(relays()).toHaveLength(1);
+      expect(wake).toHaveBeenCalledTimes(1);
+    });
+
+    it("a route on another host keeps the seat's usual order: its lead is woken, and no relay is made", async () => {
+      setSelfHostId("host-b");
+      await waitingGoal("front@kernel@host-a");
+      const wake = vi.fn(async () => "verified");
+      await tick(undefined, wake);
+      expect(alerts()).toHaveLength(1);
+      expect(wake).toHaveBeenCalledWith(alerts()[0]!.qitemId, lead);
+      expect(repo.list({ limit: 1000 }).filter(r => r.tags?.includes("return-route-relay"))).toEqual([]);
     });
 
     it("closing the relay without a claim leaves the alert's delivery unresolved and the prompt's alert open until it clears", async () => {
@@ -539,6 +584,18 @@ describe("first-user return route", () => {
       const open = relays().filter(r => r.state === "pending");
       expect(open).toHaveLength(1);
       expect(open[0]!.qitemId).not.toBe(stale.qitemId);
+    });
+
+    it("a clear closes only the episode's own relay: another row that carries the alert's relay tag is left as it is", async () => {
+      await waitingGoal("front@kernel");
+      await tick();
+      const decoy = await repo.create({ sourceSession: lead, destinationSession: "front@kernel", body: "other work", nudge: false,
+        tags: [`relay-for:${alerts()[0]!.qitemId}`] });
+      prompt = "clear";
+      await tick(new Date(Date.now() + 400_000));
+      expect(relays()[0]).toMatchObject({ state: "done", closureReason: "canceled" });
+      expect(repo.getById(decoy.qitemId)).toMatchObject({ state: "pending" });
+      expect(repo.listTransitions(decoy.qitemId).some(t => t.transitionNote?.includes("superseded"))).toBe(false);
     });
 
     it("an unknown prompt state neither starts an episode nor clears one", async () => {

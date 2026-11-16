@@ -733,6 +733,14 @@ export function queueRoutes(): Hono {
     if (route && !isRouteAddress(route.address)) {
       return c.json({ error: "invalid_return_route", message: `--return-route self takes the caller's own address, and this caller is ${sourceSession}, which isn't an agent conversation's queue address. Use auto, or name the address.` }, 400);
     }
+    // A registered person's alias on this host is a person, reached through the gateway; an unreadable registry decides nothing.
+    if (route && route.basis !== "issued" && route.basis !== "issued-actor" && !splitRoute(route.address).host) {
+      let person = false;
+      try { person = getRepo(c).isHumanDestination(route.address); } catch { /* unreadable registry: the route is kept as given */ }
+      if (person) {
+        return c.json({ error: "invalid_return_route", message: `${route.address} is a registered person's address. A person is reached through the gateway, not a return route: use auto, or an agent conversation's address.` }, 400);
+      }
+    }
     { const held = switchCustody(c, sourceSession); if (held) return held; }
     // Required destination and body, then PL-007: validate target_repo against
     // source rig's workspace.repos[].

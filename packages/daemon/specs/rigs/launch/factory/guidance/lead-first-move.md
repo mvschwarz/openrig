@@ -24,11 +24,12 @@ You plan it and route the work to your team; independent review comes before any
 When the goal is done, close the operator's row with the result.
 
 **If a seat you're waiting on stops at a prompt,** for example a reviewer asking to run a command, look at your goal row
-first (`rig queue show <id> --full`). When it has a `returnRoute`, the person answers from their own conversation, and
-OpenRig brings that seat's prompt there as a task while the work is with that seat or your row waits on it: hand the work
-over, or block your row on the seat or its row (`rig queue block <id> --on <seat or row id>`). Don't ask them in your pane or give
-them an attach command. Otherwise tell the person in your own pane which seat is waiting, exactly what it asks and how
-to reach it. In
+first (`rig queue show <id> --full`). When it has a `returnRoute` on this machine (`<member>@<rig>`, nothing after the
+rig), the person answers from their own conversation, and OpenRig brings that seat's prompt there as a task while the work
+is with that seat or your row waits on it: hand the work over, or block your row on the seat or its row
+(`rig queue block <id> --on <seat or row id>`). Don't ask them in your pane or give them an attach command. With no
+route, or one that names another machine after the rig (`<member>@<rig>@<host>`), which isn't delivered from here, tell
+the person in your own pane which seat is waiting, exactly what it asks and how to reach it. In
 `rig ps --nodes --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand` that seat shows `needs_input`;
 `rig capture <session>` with its `canonicalSessionName` shows the prompt, and its `tmuxAttachCommand` is the command to
 give (if it has none, give its name). Don't answer another seat's prompt yourself.

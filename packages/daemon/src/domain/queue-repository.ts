@@ -5270,9 +5270,11 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r));
   }
 
-  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for. */
+  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for, and a
+   *  routed row's return route, which isn't elided, so a routed row never lists as unrouted. */
   private compactColumns(): string {
-    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "");
+    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
+      + (this.hasReturnRouteColumn ? ", return_route, return_route_basis" : "");
   }
 
   /**
