@@ -8,6 +8,8 @@ with one grant per participant. The network connector puts one selected local se
 The connector opens no port: your daemon makes every connection outward, and the hub never connects to your machine. Work the hub
 sends that participant runs on your seat, under your accounts, and the result goes back to the hub item.
 
+**The network connector is experimental and unsupported.** Use it only if you choose to, at your own risk.
+
 ## Enroll in an account, then connect by name
 
 When your hub is an account's network, enroll this daemon once with the one-time code its page shows, then connect
@@ -58,9 +60,13 @@ waits for any other change to this enrollment to finish, within the same 30 seco
 waiting says so and doesn't send the code. The account makes a new installation, with a new key, for the new code. Here,
 that key takes the old one's place and the bindings made through the old installation end, in one step:
 
-- If that step fails after the account accepted the code, nothing here changes, and the error says so. The old
-  enrollment keeps working only while the account keeps the old installation, and the account now has a new
-  installation whose key nothing here holds: remove it on the account page, then enroll again with a new code.
+- If that step fails after the account accepted the code, the enrollment's record here doesn't change, and the error
+  says so. The key is put back too, but moving key files happens outside that record's rollback. If putting it back also
+  fails (on a full or read-only disk, for example), the old key is left as `key.json.prev` beside `key.json` in the
+  installation's folder under `network-secrets/` in the OpenRig home: move it back to `key.json` before you go on. A
+  `key.json.next` there is a staged new key, and the next replace removes it. The old enrollment keeps working only
+  while the account keeps the old installation, and the account now has a new installation whose key nothing here
+  holds: remove it on the account page, then enroll again with a new code.
 - Once the step is done, `enroll` names the bindings it ended. The old installation may still list their names, and the
   new key can't drop them, so remove them on the account page. `rig network status` marks each of them as possibly still
   listed under the old installation, as it does a binding that ended earlier without the account confirming the drop:
@@ -77,7 +83,7 @@ rig network connect <seat> --hub <url> --as <participant> --token-file <path>
 - `<participant>` is the participant's address in the hub (`member@rig`), and the token file holds its bearer.
 - The binding follows the seat's node, so a relaunched or renamed seat keeps it.
 - The token is stored at `<OpenRig home>/network-secrets/<binding>/credential.json` (a 0700 folder and a 0600 file). It
-  is never returned by the API or shown in status. A token in the hub URL is refused.
+  is never returned by the API or shown in status. A user name or password in the hub URL is refused: put the token in its token file, not in the URL.
 - A plain-http hub URL needs `--allow-http` (see Limits).
 - One active binding per local seat, and one per hub participant.
 - On a daemon with an operator bearer configured, `connect` and `disconnect` send `OPENRIG_AUTH_BEARER_TOKEN`, as the
@@ -86,7 +92,7 @@ rig network connect <seat> --hub <url> --as <participant> --token-file <path>
 ## What the connector does
 
 The daemon runs the connector for every active binding. It normally polls every 30 seconds
-(`OPENRIG_NETWORK_POLL_SECONDS`, at least 5); a failing hub, backoff or a backlog can delay it. Each binding's pass has
+(`OPENRIG_NETWORK_POLL_SECONDS`; a value under 5 is ignored); a failing hub, backoff or a backlog can delay it. Each binding's pass has
 a deadline of 60 seconds, so one slow hub doesn't hold the others. With no active binding it makes no network call.
 
 1. It lists the participant's own items on the hub, claims each pending one, and creates a local queue item for the
@@ -138,7 +144,8 @@ a replaced installation. `--json` adds the connector's view: each binding's next
 - **The seat has no session:** its hub items stay pending and unclaimed, and the last error says why. They're taken
   once the seat has a session again. A stopped seat still has its session, so it still takes items; they wait for it.
 - **The hub can't be reached, or a pass runs past its deadline:** the binding stays active, the error is recorded, and
-  retries back off, doubling up to 5 minutes. A failure on this machine is recorded as local, not as the hub's.
+  retries back off, doubling to 5 minutes by default, or to the poll interval when that is longer, with up to 20%
+  jitter either way. A failure on this machine is recorded as local, not as the hub's.
 - **The hub refuses the credential** (HTTP 401): the binding is marked revoked and its credential removed. No new work
   comes in; local items and results stay.
 

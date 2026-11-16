@@ -266,43 +266,25 @@ function outcomeComplete(slice: SliceFacts): boolean {
   const r = slice.readiness;
   return !!r?.configured && r.state === "ready" && r.items.length > 0 && r.items.every(i => i.state === "accepted");
 }
-const NON_DELIVERY_DECLARED_WORDS = new Set([
-  "wontfix",
-  "deferred",
-  "superseded",
-  "stale",
-  "closed-wontfix",
-  "closed-deferred",
-  "closed-superseded",
-  "closed-stale",
-]);
-function nonDeliveryClosedWord(slice: SliceFacts): string | null {
-  const stage = stageText(slice);
-  const declared = declaredText(slice);
-  if (stage === "retired" || declared === "retired") return "retired";
-  if (declared === "deferred" || declared === "closed-deferred") return "deferred";
-  if (stage === "superseded" || declared === "superseded" || declared === "closed-superseded") return "superseded";
-  if (
-    declared === "wontfix"
-    || declared === "closed-wontfix"
-    || declared === "stale"
-    || declared === "closed-stale"
-    || record(slice.ladder["recorded_status"])["bucket"] === "closed"
-  ) {
-    return "closed";
-  }
-  return null;
+/** The `closed-<reason>` words `rig scope slice close --in-place` writes. An explicit close reads as "closed"; the reason stays
+ *  visible as the declared word on the strip. Bare statuses (`deferred`, `superseded`, …) keep their earlier reading. */
+const EXPLICIT_CLOSE_WORDS = new Set(["closed-deferred", "closed-superseded", "closed-wontfix", "closed-stale"]);
+function explicitCloseWord(slice: SliceFacts): string | null {
+  if (EXPLICIT_CLOSE_WORDS.has(declaredText(slice))) return "closed";
+  return record(slice.ladder["recorded_status"])["bucket"] === "closed" ? "closed" : null;
 }
 function stateWord(slice: SliceFacts): string {
   const problem = problemText(slice);
   if (problem) return problem.startsWith("needs input") ? "needs input" : problem.startsWith("waits on") ? "blocked" : "waiting";
   if (record(slice.lane?.["activity"])["activity"] === "working") return "working";
   if (slice.work.length) return slice.work.some(w => w["state"] === "blocked") ? "waiting" : "assigned";
+  const explicitClose = explicitCloseWord(slice);
+  if (explicitClose) return explicitClose;
   if (outcomeComplete(slice)) return "outcome complete";
   if (slice.readiness?.items.some(i => i.state === "withdrawn" || i.state === "rejected")) return "reopened";
-  const nonDelivery = nonDeliveryClosedWord(slice);
-  if (nonDelivery) return nonDelivery;
   if (slice.readiness?.configured) return "outcomes pending";
+  if (stageText(slice) === "retired" || declaredText(slice) === "retired") return "retired";
+  if (declaredText(slice) === "deferred") return "deferred";
   return declaredDone(slice.ladder, declaredText(slice)) ? "declared done" : "planned";
 }
 
@@ -885,7 +867,8 @@ export function executionSliceStripLines(
   const declaredWord = declared?.trim().toLowerCase() || "no declared status";
   const isTerminalDeclared =
     declaredWord === "retired"
-    || NON_DELIVERY_DECLARED_WORDS.has(declaredWord)
+    || declaredWord === "deferred"
+    || EXPLICIT_CLOSE_WORDS.has(declaredWord)
     || record(slice.ladder["recorded_status"])["bucket"] === "closed"
     || declaredDone(slice.ladder, declaredWord);
   const next = isTerminalDeclared && !slice.lane

@@ -1,0 +1,89 @@
+{
+  "about": "Read-only capture of one handoff family from a live OpenRig daemon (2026-11-11, follow-up to #2889, family compaction). Seat-authored note prose is replaced; daemon-generated notes are verbatim; every member carries a neutral mission tag; seat-written tags the detector does not read are neutral.",
+  "family": "compaction",
+  "lineageId": "qitem-compaction-restore-70def04e-8fa5-490a-895f-be0acb70d887",
+  "now": "2026-11-06T04:34:37.633Z",
+  "observationWindowSeconds": 86400,
+  "members": [
+    {
+      "qitemId": "qitem-20261106043400-7aa6cadd",
+      "handedOffFrom": "qitem-compaction-restore-70def04e-8fa5-490a-895f-be0acb70d887",
+      "sourceSession": "coordenacao-orquestrador-tech@fabrica",
+      "destinationSession": "plataforma-supervisor@comando",
+      "tags": [
+        "compaction",
+        "restore-delivery",
+        "attempt:70def04e-8fa5-490a-895f-be0acb70d887",
+        "mission:family-compaction"
+      ]
+    },
+    {
+      "qitemId": "qitem-compaction-restore-70def04e-8fa5-490a-895f-be0acb70d887",
+      "handedOffFrom": null,
+      "sourceSession": "build-dev-1@fabrica",
+      "destinationSession": "coordenacao-orquestrador-tech@fabrica",
+      "tags": [
+        "compaction",
+        "restore-delivery",
+        "attempt:70def04e-8fa5-490a-895f-be0acb70d887",
+        "mission:family-compaction"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": 54758,
+      "qitemId": "qitem-compaction-restore-70def04e-8fa5-490a-895f-be0acb70d887",
+      "ts": "2026-11-06T04:30:12.122Z",
+      "state": "pending",
+      "actorSession": "build-dev-1@fabrica",
+      "transitionNote": "created",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 54774,
+      "qitemId": "qitem-compaction-restore-70def04e-8fa5-490a-895f-be0acb70d887",
+      "ts": "2026-11-06T04:31:12.534Z",
+      "state": "pending",
+      "actorSession": "system:compaction",
+      "transitionNote": "Managed restore for build-dev-1@fabrica: restore_prompt undeliverable (draft_input_unknown; idle_prompt) (summary updated)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 54804,
+      "qitemId": "qitem-compaction-restore-70def04e-8fa5-490a-895f-be0acb70d887",
+      "ts": "2026-11-06T04:34:00.283Z",
+      "state": "handed-off",
+      "actorSession": "coordenacao-orquestrador-tech@fabrica",
+      "transitionNote": "handed off to plataforma-supervisor@comando",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 54805,
+      "qitemId": "qitem-20261106043400-7aa6cadd",
+      "ts": "2026-11-06T04:34:00.283Z",
+      "state": "pending",
+      "actorSession": "coordenacao-orquestrador-tech@fabrica",
+      "transitionNote": "handoff from qitem-compaction-restore-70def04e-8fa5-490a-895f-be0acb70d887",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 54813,
+      "qitemId": "qitem-20261106043400-7aa6cadd",
+      "ts": "2026-11-06T04:34:37.389Z",
+      "state": "in-progress",
+      "actorSession": "plataforma-supervisor@comando",
+      "transitionNote": "claimed",
+      "identityProvenance": "transport:v1"
+    },
+    {
+      "transitionId": 54814,
+      "qitemId": "qitem-20261106043400-7aa6cadd",
+      "ts": "2026-11-06T04:34:37.633Z",
+      "state": "done",
+      "actorSession": "plataforma-supervisor@comando",
+      "transitionNote": null,
+      "identityProvenance": "transport:v1"
+    }
+  ]
+}

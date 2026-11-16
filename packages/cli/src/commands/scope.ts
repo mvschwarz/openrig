@@ -41,10 +41,11 @@ import {
 } from "../lib/scope/dot-id.js";
 import {
   buildMissionDependencyGraph,
-  classifyProgressStatusFrontmatter,
   ensureMissionId,
   ensureMissionIdPersisted,
   findMission,
+  indexerReadsStatusIn,
+  readIndexerSliceStatus,
   resolveNodeFile,
   findSlice,
   listMissions,
@@ -550,15 +551,16 @@ function buildSliceShipCommand(): Command {
 // rig scope slice close
 // ---------------------------------------------------------------------
 
-function countRecordedSliceJudgments(sliceAbsPath: string): number {
+/** How many judgment files the slice records, or `null` when the judgments folder cannot be read (unknown, not zero).
+ *  A folder that does not exist records none. */
+function countRecordedSliceJudgments(sliceAbsPath: string): number | null {
   const judgmentsDir = path.join(sliceAbsPath, "proof", "judgments");
-  if (!fs.existsSync(judgmentsDir)) return 0;
   try {
     return fs.readdirSync(judgmentsDir, { withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
       .length;
-  } catch {
-    return 0;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? 0 : null;
   }
 }
 
@@ -623,17 +625,6 @@ function buildSliceCloseCommand(): Command {
           const edits = compositionEdit ? [compositionEdit] : [];
           const nodePath = slice.readmePath;
           const originalNode = fs.readFileSync(nodePath, "utf8");
-          const nodeStatusState = classifyProgressStatusFrontmatter(originalNode);
-          if (nodeStatusState.kind === "ambiguous") {
-            const nodeLabel = path.basename(nodePath);
-            throw new ScopeCliError({
-              fact: `Slice ${nodeLabel} (${nodePath}) contains an ambiguous ${nodeStatusState.detail}.`,
-              consequence:
-                "In-place closure aborted before any file was modified so CLI and line-based slice indexers cannot diverge on slice status.",
-              action:
-                `Use a single top-level scalar "status:" key without an inline "#" comment in ${nodeLabel} frontmatter (moving any inline comment onto its own "#" line and removing or renaming any duplicate or nested "status:" entry), or close without --in-place, then retry.`,
-            });
-          }
           const progressPath = path.join(slice.absPath, "PROGRESS.md");
           let originalProgress: string | null = null;
           try {
@@ -641,23 +632,12 @@ function buildSliceCloseCommand(): Command {
           } catch (err) {
             if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
           }
-          const progressStatusState =
-            originalProgress !== null
-              ? classifyProgressStatusFrontmatter(originalProgress)
-              : ({ kind: "absent" } as const);
-          if (progressStatusState.kind === "ambiguous") {
-            throw new ScopeCliError({
-              fact: `Slice PROGRESS.md (${progressPath}) contains an ambiguous ${progressStatusState.detail}.`,
-              consequence:
-                "In-place closure aborted before any file was modified so CLI and line-based slice indexers cannot diverge on slice status.",
-              action:
-                'Use a single top-level scalar "status:" key without an inline "#" comment in PROGRESS.md frontmatter (moving any inline comment onto its own "#" line and removing or renaming any duplicate or nested "status:" entry), or close without --in-place, then retry.',
-            });
-          }
-          const shouldReconcileProgressStatus = progressStatusState.kind === "reconcile";
+          // The slice indexer lets PROGRESS.md override the node file, so a status it reads there is reconciled too.
+          const shouldReconcileProgressStatus = originalProgress !== null && indexerReadsStatusIn(originalProgress);
 
           applyMissionCompositionEdits(edits);
           let attemptedProgressWrite = false;
+          let readBackMismatch: ScopeCliError | null = null;
           try {
             const updates: Record<string, unknown> = {
               status: targetStatus,
@@ -668,6 +648,17 @@ function buildSliceCloseCommand(): Command {
             if (shouldReconcileProgressStatus) {
               attemptedProgressWrite = true;
               updateFrontmatter(progressPath, { status: targetStatus });
+            }
+            // Read the status back the way the slice indexer does; a shape that reads differently rolls everything back.
+            const readBack = readIndexerSliceStatus(slice.absPath);
+            if (readBack.status !== targetStatus) {
+              const readFile = readBack.file ?? nodePath;
+              readBackMismatch = new ScopeCliError({
+                fact: `After writing status "${targetStatus}", the slice indexer reads ${readBack.status === null ? "no status" : `"${readBack.status}"`} from ${readFile}.`,
+                consequence: "In-place closure refused.",
+                action: `Give ${path.basename(readFile)} one top-level scalar "status:" line, with no inline "#" comment and no duplicate or nested "status:" entry, or close without --in-place, then retry.`,
+              });
+              throw readBackMismatch;
             }
           } catch (error) {
             const rollbackFailures: string[] = [];
@@ -698,10 +689,16 @@ function buildSliceCloseCommand(): Command {
             }
             if (rollbackFailures.length > 0) {
               if (error instanceof ScopeCliError) {
+                // Never promise restoration here: the slice may be left partly changed, and the failures below say where.
+                const stateKnown = error === readBackMismatch
+                  ? ` Rollback did NOT complete (${rollbackFailures.join("; ")}). The slice's files and ${path.join(mission.absPath, "mission.yaml")} may be partly changed and their current state is unknown.`
+                  : ` (rollback failure(s): ${rollbackFailures.join("; ")})`;
                 throw new ScopeCliError({
                   fact: error.fact,
-                  consequence: `${error.consequence} (rollback failure(s): ${rollbackFailures.join("; ")})`,
-                  action: error.action,
+                  consequence: `${error.consequence}${stateKnown}`,
+                  action: error === readBackMismatch
+                    ? `Inspect ${nodePath}, ${progressPath} and ${path.join(mission.absPath, "mission.yaml")} and repair any leftover change before closing this slice again. ${error.action}`
+                    : error.action,
                 });
               }
               const origMessage = error instanceof Error ? error.message : String(error);
@@ -709,6 +706,13 @@ function buildSliceCloseCommand(): Command {
                 `${origMessage} (rollback failure(s): ${rollbackFailures.join("; ")})`,
                 { cause: error },
               );
+            }
+            if (error instanceof ScopeCliError && error === readBackMismatch) {
+              throw new ScopeCliError({
+                fact: error.fact,
+                consequence: "In-place closure rolled back: every file it changed was restored, so readers cannot disagree about this slice's status.",
+                action: error.action,
+              });
             }
             throw error;
           }
@@ -737,9 +741,11 @@ function buildSliceCloseCommand(): Command {
             `  reason: ${reason}`,
             `  status: ${targetStatus}`,
             `  path: ${slice.absPath}`,
-            ...(judgmentCount > 0
-              ? [`  proof: ${judgmentCount} recorded judgment file(s) kept in place (applicability not evaluated; run rig proof show to check current readiness)`]
-              : []),
+            ...(judgmentCount === null
+              ? ["  proof: judgment folder could not be read (judgment count unknown; applicability not evaluated; run rig proof show to check current readiness)"]
+              : judgmentCount > 0
+                ? [`  proof: ${judgmentCount} recorded judgment file(s) kept in place (applicability not evaluated; run rig proof show to check current readiness)`]
+                : []),
           ]);
           return;
         }
@@ -792,7 +798,7 @@ function buildSliceCloseCommand(): Command {
             git: { usedGit, repoRoot },
             proofApplicability: {
               evaluated: false,
-              changed: judgmentCount > 0,
+              changed: judgmentCount === null ? null : judgmentCount > 0,
               pathPreserved: false,
               receiptFilesPreserved: true,
               judgmentCount,
@@ -802,9 +808,11 @@ function buildSliceCloseCommand(): Command {
           `Closed ${slice.missionName}/${slice.name} → ${slice.missionName}/closed/${destName}`,
           `  reason: ${reason}`,
           `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
-          ...(judgmentCount > 0
-            ? [`  proof: ${judgmentCount} recorded judgment(s) now read unknown after path move (use --in-place to keep slice path in place; accepted proof still requires unchanged item, policy, and cited evidence)`]
-            : []),
+          ...(judgmentCount === null
+            ? ["  proof: judgment folder could not be read, so recorded judgments (if any) now read unknown after path move (use --in-place to keep slice path in place; accepted proof still requires unchanged item, policy, and cited evidence)"]
+            : judgmentCount > 0
+              ? [`  proof: ${judgmentCount} recorded judgment(s) now read unknown after path move (use --in-place to keep slice path in place; accepted proof still requires unchanged item, policy, and cited evidence)`]
+              : []),
         ]);
       } catch (err) {
         fail(err, json, out);

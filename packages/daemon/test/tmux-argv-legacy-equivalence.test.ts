@@ -106,6 +106,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.listWindows(SESSION);
   await a.listPanes(SESSION);
   await a.listPanes("=seat:1");
+  await a.serverStartTime(SESSION);
   await a.probeSession(SESSION);
   await a.hasSession(SESSION);
   await a.createSession(SESSION, "/w x", { PATH: "/a b:$HOME", Q: "it's" });
@@ -158,6 +159,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.readPaneLastActivity(SESSION);
   await a.listClients();
   await a.listSessionClientTerminals(SESSION);
+  await a.lastClientActivity(SESSION);  // #3076: the client activity read right before an automatic paste
   await a.switchClient("/dev/ttys001", SESSION);
   // A runtime switch's exchange: two session-id reads, then the guarded if-shell swap (nested quoting); and its env writes.
   await a.swapRuntimeSwitchPanes({ nodeId: "n1", stagingSession: "staging'q a", canonicalSession: SESSION, canonicalPane: "%1", stagedPane: "%1" });

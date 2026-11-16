@@ -1,0 +1,66 @@
+{
+  "about": "Read-only capture of one handoff family from a live OpenRig daemon (2026-11-11, follow-up to #2889, family kernel). Seat-authored note prose is replaced; daemon-generated notes are verbatim; every member carries a neutral mission tag; seat-written tags the detector does not read are neutral.",
+  "family": "kernel",
+  "lineageId": "qitem-20261109141133-fdc0cb57",
+  "now": "2026-11-09T14:16:35.176Z",
+  "observationWindowSeconds": 86400,
+  "members": [
+    {
+      "qitemId": "qitem-20261109141133-fdc0cb57",
+      "handedOffFrom": null,
+      "sourceSession": "daemon@kernel",
+      "destinationSession": "coordenacao-orquestrador-tech@fabrica",
+      "tags": [
+        "wake-escalation",
+        "prompt-destination:qualidade-revisor@fabrica",
+        "wake-prompt-refusal",
+        "prompt-kind:choice",
+        "prompt-episode:qualidade-revisor@fabrica|03a70bcbe1cf2986#43b51f73-b8bd-4d9d-8bf7-72f587327797",
+        "recovery-for:ace-2990",
+        "recovery-for:ace-2991",
+        "recovery-for:ace-2992",
+        "recovery-for:qitem-20261109131606-cf420b20",
+        "recovery-for:qitem-20261109134848-94fa20c6",
+        "mission:family-kernel"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "transitionId": 129426,
+      "qitemId": "qitem-20261109141133-fdc0cb57",
+      "ts": "2026-11-09T14:11:33.557Z",
+      "state": "pending",
+      "actorSession": "daemon@kernel",
+      "transitionNote": "created",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 129427,
+      "qitemId": "qitem-20261109141133-fdc0cb57",
+      "ts": "2026-11-09T14:11:34.746Z",
+      "state": "pending",
+      "actorSession": "wake-ladder@system",
+      "transitionNote": "escalation-rung: orchestrator -> coordenacao-orquestrador-tech@fabrica outcome=delivered-ack-pending reason=interactive prompt blocks outstanding work; no input was sent",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 129428,
+      "qitemId": "qitem-20261109141133-fdc0cb57",
+      "ts": "2026-11-09T14:11:34.746Z",
+      "state": "pending",
+      "actorSession": "wake-ladder@system",
+      "transitionNote": "ladder-exhausted: escalated to orchestrator (delivered-ack-pending)",
+      "identityProvenance": null
+    },
+    {
+      "transitionId": 129501,
+      "qitemId": "qitem-20261109141133-fdc0cb57",
+      "ts": "2026-11-09T14:16:35.176Z",
+      "state": "done",
+      "actorSession": "daemon@kernel",
+      "transitionNote": "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt",
+      "identityProvenance": null
+    }
+  ]
+}

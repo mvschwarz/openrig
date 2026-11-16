@@ -361,6 +361,22 @@ export class WorkflowValidator {
       });
     }
 
+    // #3087: validate never resolves seats, so a harness pin is only
+    // reconciled when a run resolves the step's owner. Say so, so a
+    // clean result is not read as "every pin is satisfiable".
+    spec.steps.forEach((step, idx) => {
+      if (!step.harness) return;
+      const binding = spec.target?.rig
+        ? `rig "${spec.target.rig}"`
+        : "no rig is bound";
+      issues.push({
+        code: "harness_pin_unchecked",
+        message: `step "${step.id}" pins harness "${step.harness}", but validate does not check harness pins against any seats (${binding}). The pin is checked when a run resolves the step's owner, and the run fails with harness_pin_unsatisfied if no preferred_target of role "${step.actor_role}" runs ${step.harness}.`,
+        field: `workflow.steps[${idx}].harness`,
+        severity: "warning",
+      });
+    });
+
     // OPR.0.4.6.WF2 FR-5: gate target semantics — a HUMAN-seat target
     // requires summary + evidence_ref (the shipped human-route write
     // path enforces them at create; failing HERE is the fail-at-author-

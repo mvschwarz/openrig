@@ -42,7 +42,9 @@ export function freshRecoveryId(db: Database.Database, qitemId: string, overdueD
  * idx_queue_items_recovery_tags' WHERE clause (migration 099) byte for byte, which is what lets the
  * planner read that small index instead of scanning and parsing every row. */
 const RECOVERY_TAG_ROWS = `(tags LIKE '%"recovery-for:%' OR tags LIKE '%\\%')`;
-const RECOVERY_ORDER = "ORDER BY CASE WHEN state IN ('pending','in-progress','blocked') THEN 0 ELSE 1 END, ts_updated DESC, qitem_id DESC LIMIT 1";
+// Unary + preserves the numeric CASE order but prevents a prefix match on the full-history listing
+// index. Both standalone lookups and the batch need the small recovery-tag index instead.
+const RECOVERY_ORDER = "ORDER BY +CASE WHEN state IN ('pending','in-progress','blocked') THEN 0 ELSE 1 END, ts_updated DESC, qitem_id DESC LIMIT 1";
 /** A listing's recovery index, built by SQLite's own json_each (the same values, and the same truthy excludeTag
  * test, as the per-row query): for each string tag value, the rows that carry it in RECOVERY_ORDER, and each row's
  * string values. Built lazily, on the first lookup inside `withRecoveryIndex`, so a listing that never asks (a

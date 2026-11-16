@@ -116,7 +116,7 @@ jobs:
     # macOS, the platform OpenRig runs on: several daemon and cli tests read macOS ps columns,
     # file-inode behaviour and release tags.
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.package == 'daemon' && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:

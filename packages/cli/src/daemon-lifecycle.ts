@@ -5,7 +5,7 @@ import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemo
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
 export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
-import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
+import { DAEMON_START_READINESS_WAIT_MS as STARTUP_READINESS_DEADLINE_MS, DAEMON_START_PROBE_TIMEOUT_MS as STARTUP_PROBE_TIMEOUT_MS, DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 // Types only: the module itself (with the daemon's yaml-reading system world) is imported where an
@@ -297,7 +297,7 @@ const DEFAULT_DB = "openrig.sqlite";
 // bounded, but do not kill a healthy daemon during first-boot slack.
 // #1786: one elapsed deadline, started when the readiness loop begins (after the
 // child is spawned and its handlers are attached), covers every primary probe,
-// listener check and backoff (the 20s the old 80 x 250ms delays gave). Each probe
+// listener check and backoff in one 180-second owned-child wait. Each probe
 // may take up to STARTUP_PROBE_TIMEOUT_MS, so a busy child that answers correctly
 // in a second is accepted, but no probe timer outlives the deadline (a 2s startup
 // ceiling, not a universal header wait). The deadline only stops new probes and
@@ -305,8 +305,7 @@ const DEFAULT_DB = "openrig.sqlite";
 // answer already in hand when the clock passes it is still used, with the usual
 // liveness and publication rechecks. A failed start may add up to
 // DAEMON_STOP_WAIT_MS of owned-child cleanup.
-const STARTUP_READINESS_DEADLINE_MS = 20_000;
-const STARTUP_PROBE_TIMEOUT_MS = 2_000;
+const STARTUP_PROGRESS_INTERVAL_MS = 20_000;
 const HEALTHZ_DELAY_MS = 250;
 // OPR.0.4.7 slice-05 item-4: the WHOLE status health probe stays within ONE normal
 // CLI request window (~5s, matching DaemonClient's timeoutMs) — immediate connection
@@ -859,7 +858,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     let databaseWarnings: string[] = [];
     let lastProbe = "health endpoint not responding";
     let unverified: string[] | null = null;
-    deadline = Date.now() + STARTUP_READINESS_DEADLINE_MS;
+    const readinessStartedAt = Date.now();
+    deadline = readinessStartedAt + STARTUP_READINESS_DEADLINE_MS;
+    let nextProgressAt = readinessStartedAt + STARTUP_PROGRESS_INTERVAL_MS;
     while (remaining() > 0) {
       unverified = null;
       try {
@@ -890,6 +891,10 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
         assertChild();
         if (error instanceof StartupIdentityError) throw error;
         lastProbe = error instanceof Error ? error.message : String(error);
+      }
+      if (remaining() > 0 && Date.now() >= nextProgressAt) {
+        console.error(`Waiting for daemon child ${pid} readiness (${Math.floor((Date.now() - readinessStartedAt) / 1000)}s elapsed; ${STARTUP_READINESS_DEADLINE_MS / 1000}s limit). This start has not published readiness.`);
+        nextProgressAt = Date.now() + STARTUP_PROGRESS_INTERVAL_MS;
       }
       await Promise.race([new Promise((resolve) => setTimeout(resolve, Math.min(HEALTHZ_DELAY_MS, remaining()))), failed]);
     }

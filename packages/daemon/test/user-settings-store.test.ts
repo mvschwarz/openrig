@@ -138,6 +138,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines", "ui.timezone",
       "ui.enabled",
+      "ui.topology_remote_seats",
       // OPR.0.4.0.1 — global live-terminal cap.
       "ui.terminal.max_live_terminals",
       "recovery.auto_drive_provider_prompts",
@@ -620,6 +621,19 @@ describe("SettingsStore (User Settings v0)", () => {
       expect(store.resolveOne("daemon.port").source).toBe("default");
       const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
       expect(warns.some((w) => w.includes("file value for daemon.port rejected"))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a non-string provider.selected in config.json falls back to the default with a warning", () => {
+    writeFileSync(configPath, JSON.stringify({ provider: { selected: ["claude"] } }));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const store = new SettingsStore(configPath);
+      expect(store.resolveOne("provider.selected")).toMatchObject({ value: "", source: "default" });
+      const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes("file value for provider.selected rejected"))).toBe(true);
     } finally {
       stderrSpy.mockRestore();
     }

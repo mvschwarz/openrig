@@ -324,6 +324,89 @@ envelope. An OpenRig older than 0.7.3 doesn't read a recorded envelope, so after
 the seat launches without it. The field is also supported on legacy flat Codex nodes; other
 runtimes reject it.
 
+For an explicit filesystem policy, use `filesystem` **instead of** `sandbox` and its
+workspace-write fields. This is the same per-seat selection and audited setter:
+
+```yaml
+cwd: /workspace/shared
+env:
+  CODEX_HOME: /accounts/codex       # existing account home; never copied
+codex_permissions:
+  approval: never
+  filesystem:
+    ":minimal": read
+    ":workspace_roots": write
+    "/workspace/shared/private": deny
+  network_access: false
+```
+
+The mapping accepts native `read`, `write` and `deny` values at absolute paths,
+`~/path`, or `:root`, `:minimal`, `:workspace_roots` (alias `:project_roots`),
+`:tmpdir` and `:slash_tmp`.
+It must be nonempty; nested subpath maps and arbitrary Codex settings are not part
+of this option. Omitted network access becomes `false`. Include the read access
+your tools and installed Codex executable need; this custom profile adds no
+workspace, temporary, queue-state, seat-folder or Git-directory write grants of
+its own. Native Codex decides whether the host can enforce the supplied rules.
+Filesystem approval accepts `never` or `on-request`; the retired `untrusted`
+approval is rejected before the selection is saved.
+
+OpenRig emits the policy as invocation-local `permissions.openrig-seat` and
+`default_permissions` overrides, with the selected approval. It writes no policy
+file, so two seats can share both `CODEX_HOME` and `cwd` without overwriting each
+other. Clearing the selection changes only that seat's record. Existing
+account-scoped `codex_config_fragment` resources and their root-key rejection
+stay unchanged.
+
+Before dispatch, OpenRig compares Codex's native configuration with the seat's
+selection. Positive evidence of access widening, a conflicting profile or
+approval choice, an excluding managed allowlist, or a missing/empty selected
+profile refuses launch. Compatible managed defaults and allowlists, harmless
+descriptions and provably narrower flat rules are accepted. Legacy sandbox
+settings are inert under the invocation's explicit permission-profile selection.
+Null fields are treated as absent, including unfamiliar optional fields.
+Managed `defaultPermissions` is a fallback, not a forced selection; the
+effective profile and managed allowlist determine whether the agent's choice holds.
+
+A timeout, reader failure, unfamiliar representation or unsupported managed
+requirement continues with the authored flags and reports `policy not verified:
+<reason>` in the launch observation and status. The policy is never dropped or
+swapped, and account/project settings are never edited to make the check pass.
+Absent selection or approval fields, unfamiliar approval strings or profile formats,
+and unclear overlap between native selectors and authored path rules are also unverified.
+An authored selector that may cover an extra grant is considered before a literal
+ancestor would reject that grant, except that an explicit non-root deny ancestor
+always takes precedence over possible selector coverage. A full-root deny, written
+as `/` or `:root`, is a default narrower grants may refine: possible authored
+selector coverage stays unverified, while a proven outside grant still refuses.
+Codex 0.167.2's `:minimal` adds system read defaults, not `/home` or `/Users`
+user-data coverage; extra grants there under a root deny or with no root rule still refuse unless
+another authored rule may cover them. Other minimal-path coverage stays unexpanded.
+Duplicate aliases from a
+lower layer leave their own coverage unverified; they do not hide a known widening
+at another path.
+Inconclusive coverage warnings name the extra rule and access. An excluding managed
+allowlist is reported before an effective selection or approval mismatch.
+Concrete refusals name the conflicting rule and offer a remedy; handover preserves
+that remedy while leaving the predecessor running.
+Without an explicit `CODEX_HOME`, OpenRig resolves the normal account home and
+pins it for both the read and launch; an unresolvable home is reported as
+unverified. A named `codex_config_profile` is retained but unverified because the
+native reader cannot load that layer on this path. A `launch_wrapper` is also
+retained and unverified: it may change the effective home/configuration, so a
+read without that wrapper cannot certify the launch.
+
+The filesystem selection replaces permission-mode and team/kernel defaults,
+including ambient YOLO. Fresh launches, both resume paths and restore emit the
+same selection. A rebuild uses the saved filesystem policy ahead of an observed
+predecessor sandbox; clearing or replacing the policy after a snapshot takes
+effect on restore. Status reports the plan and its limits, not observed native
+enforcement. Handover checks the successor's filesystem selection before
+signaling the predecessor; a concrete conflict leaves that predecessor running.
+Configuration can change between the preflight and native startup;
+the read and launch are not atomic. Codex's sandbox governs local command
+execution, not every connector, account or external service.
+
 For an existing seat, put the envelope in a JSON file, or change its profile, with the existing
 audited permission command:
 
@@ -369,8 +452,12 @@ the Codex version and configuration being used.
 
 A non-kernel Claude or Codex seat with no authored permission policy, explicit
 seat permission selection, or named Codex profile receives the team launch
-default. An explicit policy, including `none` or `builtin:locked`, keeps its
-existing meaning. The default is derived again for fresh launch, resume, fork
+default. So does one whose policy is `builtin:standard` or `builtin:open`, with
+no seat permission selection, Claude rules of its own, or named Codex profile:
+those policies default to allow, and their rules aren't applied at launch, so
+recording one doesn't leave the seat stricter than recording none. The member's
+own policy decides over the rig's. Any other explicit policy, including `none`
+or `builtin:locked`, keeps its existing meaning. The default is derived again for fresh launch, resume, fork
 and handover; it is not saved as a user choice. Kernel, Pi and terminal behavior
 is unchanged.
 
@@ -472,7 +559,8 @@ launches with `-s danger-full-access -a never`, plus per-launch `-c` overrides t
 full-access and GPT-5.1 migration notices, whatever the rig's non-interruptive choice.
 
 **Config-surface policies are recorded, not applied at launch.** The seat still starts at
-the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the
+the floor: with the [team launch default](#team-launch-defaults) for `standard` and `open`,
+and without it for any other. The plan's line for that seat says which. The `allow`, `ask` and `deny` rules take effect once they are translated into the
 runtime's native settings. The `applying-a-permission-policy` skill in `openrig-core` does
 that translation, with per-runtime limits. For example, Claude's prefix rules can't
 reliably tell `git push --force` from `git push`. An `ask` waits for a person, so it pauses
@@ -798,7 +886,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `restore_policy` | string | no | the AgentSpec's | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. The default comes from the AgentSpec's `defaults.lifecycle` (else `resume_if_possible`) as narrowed by its profile; a member value may only narrow it further, in that order. |
 | `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing). |
 | `mechanic` | string | no | — | A canonical `seat@rig` session address, for `apprentice-handover`. |
-| `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. |
+| `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. Rebuild `artifact_set` paths are read as given, relative to the daemon's working directory, so an absolute path is the reliable form. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
 

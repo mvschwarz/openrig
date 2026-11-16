@@ -1599,21 +1599,15 @@ describe("#2727 in-place slice closure bucketing", () => {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  it("maps non-delivery closure words to closed while keeping done/shipped/promoted/bare-closed in done", () => {
-    for (const word of [
-      "closed-deferred",
-      "closed-superseded",
-      "closed-wontfix",
-      "closed-stale",
-      "deferred",
-      "superseded",
-      "wontfix",
-      "stale",
-    ]) {
+  it("maps only the closed-<reason> words to closed, keeps done/shipped/promoted/bare-closed in done, and leaves bare wontfix/deferred/superseded/stale reading active", () => {
+    for (const word of ["closed-deferred", "closed-superseded", "closed-wontfix", "closed-stale"]) {
       expect(sliceStatusBucket(word), word).toBe("closed");
     }
     for (const word of ["done", "shipped", "shipped-to-release-0.7", "promoted", "closed", "phase-a-closed-locally-promoted"]) {
       expect(sliceStatusBucket(word), word).toBe("done");
+    }
+    for (const word of ["deferred", "superseded", "wontfix", "stale"]) {
+      expect(sliceStatusBucket(word), word).toBe("active");
     }
   });
 

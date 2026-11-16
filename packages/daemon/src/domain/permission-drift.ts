@@ -2,6 +2,7 @@ import nodePath from "node:path";
 
 export type AppliedLaunchAxis = "permission" | "sandbox" | "resource_trust" | "not_applicable";
 export type AppliedLaunchState = "observed" | "unknown";
+export type CodexObservedApprovalPolicy = "untrusted" | "on-request" | "never";
 
 export interface AppliedLaunchObservation {
   runtime: string;
@@ -10,7 +11,7 @@ export interface AppliedLaunchObservation {
   value: string | null;
   reason?: string;
   /** Emitted Codex approval argument; null/absent does not infer a native default. */
-  approvalPolicy?: "never" | null;
+  approvalPolicy?: CodexObservedApprovalPolicy | null;
   /** Codex: true when the launch added --no-daemon, false when the probe found no such option; absent when not probed. */
   daemonOptOut?: boolean;
 }
@@ -267,7 +268,8 @@ export function diagnoseRuntimePosture(input: {
   const launchArguments = applied?.state === "observed" && applied.runtime === input.runtime
     && (input.runtime === "claude-code" || input.runtime === "codex");
   const enforcement = launchArguments
-    ? unknownEnforcement(applied.axis, applied.value, null, "native_permission_effect_unverified")
+    ? unknownEnforcement(applied.axis, applied.value, null,
+      applied.runtime === "codex" && applied.reason?.startsWith("policy not verified:") ? applied.reason : "native_permission_effect_unverified")
     : input.runtime === "claude-code"
     ? inspectClaude(input.cwd, input.applied, input.fs)
     : inspectLaunchBoundRuntime(input.runtime, input.applied);

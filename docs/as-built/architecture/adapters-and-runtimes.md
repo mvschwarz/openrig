@@ -82,9 +82,10 @@ optional `evidence` (last-N pane lines, flowed through to
 `RestoreNodeResult.attentionEvidence` for `attention_required` outcomes,
 `:99–102`). This is the honest-failure shape, not a smoothed optional `error`.
 
-Readiness has its own attention codes (`runtime-adapter.ts:74–87`):
+Readiness has its own attention codes (`ATTENTION_REQUIRED_READINESS_CODES` in `runtime-adapter.ts`):
 `trust_gate`, `hook_trust_gate`, `update_gate`, `login_required`, `mcp_gate`,
-`bypass_consent_gate`, `codex_auth_refusal` and `codex_client_incompatible`.
+`bypass_consent_gate`, `claude_resume_selection_prompt`, `claude_gated_grants_gate`,
+`codex_auth_refusal` and `codex_client_incompatible`.
 When `checkReady` reports one, the readiness wait returns at once and startup
 ends `attention_required`.
 
@@ -476,7 +477,8 @@ command + pane content and returns one of four honest statuses
   conversation"; it is *distinct* from `inconclusive` and `failed` (comment
   `:4–6`).
 
-Other codes include `bypass_consent_gate`, `mcp_gate`, `login_required` and
+Other codes include `bypass_consent_gate`, `claude_gated_grants_gate` (the
+"gated grants" trust check, which is never auto-driven), `mcp_gate`, `login_required` and
 `returned_to_shell` for Claude, and `codex_client_incompatible`,
 `no_saved_session`, `codex_auth_refusal` and `model_selection_gate` for Codex;
 an unknown runtime gets `unsupported_runtime`. For Claude, `assessManagedProbe`
