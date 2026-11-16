@@ -54,6 +54,12 @@ export function routeNotCarriedMessage(route: string): string {
   return `The return route ${route} wasn't carried: this daemon doesn't know its own host id, so the route couldn't say which ` +
     `host the conversation is on. The work went on without it, and its escalations there take that host's usual route.`;
 }
+/** Said on a create whose named or self return route is a registered person's address: the work goes, without the route. */
+export function routeIsPersonMessage(route: string): string {
+  return `The return route ${route} wasn't kept: it's a registered person's address, and a person is reached through the ` +
+    `gateway, not a return route. The work went on without it, and its escalations take this host's usual route. For a ` +
+    `return route, use auto or an agent conversation's address.`;
+}
 
 /** What kind of prompt a seat's activity reports: a choice (a selection menu, such as a usage-limit dialog), a permission
  *  prompt, or a kind it doesn't say. Read from the reason the activity already records; nothing new is probed. */

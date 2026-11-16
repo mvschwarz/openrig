@@ -105,12 +105,31 @@ describe("first-user return route", () => {
     it("a named address is kept as named; a person's address isn't a route", async () => {
       const named = await (await create({ returnRoute: "claude-app@kernel" }, "front@kernel")).json() as Record<string, unknown>;
       expect(named).toMatchObject({ returnRoute: "claude-app@kernel", returnRouteBasis: "named" });
-      people = slackPerson; // sam is registered, so sam@kernel is that person's address
-      for (const person of ["sam@external", "human@kernel", "sam@kernel"]) {
+      for (const person of ["sam@external", "human@kernel"]) {
         const res = await create({ returnRoute: person }, "front@kernel");
         expect(res.status).toBe(400);
         expect((await res.json() as { error: string }).error).toBe("invalid_return_route");
       }
+    });
+
+    it("a registered person's address, named or the caller's own, isn't kept: the work is created without it, and the response and the row say why", async () => {
+      people = slackPerson; // sam is registered, so sam@kernel is that person's address
+      for (const [returnRoute, sender] of [["sam@kernel", "front@kernel"], ["self", "sam@kernel"]] as const) {
+        const res = await create({ returnRoute }, sender);
+        expect(res.status).toBe(201);
+        const row = await res.json() as { qitemId: string; tags: string[]; advisories: Array<{ code: string; message: string }> };
+        expect(row).not.toHaveProperty("returnRoute");
+        expect(repo.getById(row.qitemId)).not.toHaveProperty("returnRoute");
+        expect(row.tags).toContain("return-route-not-carried");
+        const said = row.advisories.filter(a => a.code === "return_route_not_carried").map(a => a.message);
+        expect(said).toEqual([expect.stringContaining("The return route sam@kernel wasn't kept: it's a registered person's address")]);
+        expect(said[0]).not.toContain("host id");
+      }
+      // An unreadable registry decides nothing: the route is kept as given.
+      people = { ok: false, error: "unreadable" } as unknown as LoadResult;
+      const kept = await (await create({ returnRoute: "sam@kernel" }, "front@kernel")).json() as Record<string, unknown> & { tags?: string[] };
+      expect(kept).toMatchObject({ returnRoute: "sam@kernel", returnRouteBasis: "named" });
+      expect(kept.tags ?? []).not.toContain("return-route-not-carried");
     });
 
     it("without the flag the create is unchanged and the row carries no route", async () => {
@@ -145,7 +164,7 @@ describe("first-user return route", () => {
       expect((await repo.handoff({ qitemId: plain.qitemId, fromSession: "b@r", toSession: "c@r", nudge: false })).created).not.toHaveProperty("returnRoute");
     });
 
-    it("a create sent to another host names this host on the route; without a host id it goes without the route and says so", async () => {
+    it("a create sent to another host names this host on the route; without a host id, or for a person's address, it goes without the route and says so", async () => {
       const sent: Array<Record<string, unknown>> = [];
       const remote = new Hono();
       remote.use("*", async (c, next) => {
@@ -175,6 +194,17 @@ describe("first-user return route", () => {
       expect(sent).toHaveLength(1);
       expect(sent[0]).toMatchObject({ returnRoute: `${issuedReturnAddress("qitem-goal-x")}@host-a`, returnRouteBasis: "issued-actor",
         sourceSession: `${issuedReturnAddress("qitem-goal-x")}@host-a` });
+      // A registered person's address isn't sent as a route, even with this host's id known.
+      sent.length = 0;
+      people = slackPerson;
+      const person = await remote.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "front@kernel" },
+        body: JSON.stringify({ destinationSession: lead, body: "goal", nudge: false, returnRoute: "sam@kernel", hostId: "host-b" }) });
+      expect(person.status).toBe(201);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).not.toHaveProperty("returnRoute");
+      expect(sent[0]!.tags).toContain("return-route-not-carried");
+      expect((await person.json() as { advisories: Array<{ code: string; message: string }> }).advisories
+        .find(a => a.code === "return_route_not_carried")?.message).toContain("sam@kernel wasn't kept: it's a registered person's address");
     });
 
     it.each(["handoff", "handoff-and-complete"] as const)("a %s to another host carries the route naming this host; without a host id it goes without the route and says so", async verb => {

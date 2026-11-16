@@ -76,6 +76,25 @@ describe("queue create --return-route", () => {
     expect(stderr).toContain(`Warning: ${message}`);
   });
 
+  it("a local create whose named route is a registered person's prints the daemon's reason and no route line", async () => {
+    const message = "The return route sam@kernel wasn't kept: it's a registered person's address, and a person is reached through the gateway, not a return route.";
+    const d: QueueDeps = {
+      lifecycleDeps: { readFile: () => null, exists: () => false, fetch: async () => ({ ok: true }) } as QueueDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        post: async (_url: string, body: Record<string, unknown>) => {
+          posted.push(body);
+          return { status: 201, data: { qitemId: "qitem-x", sourceSession: "front@kernel", destinationSession: body.destinationSession, state: "pending",
+            body: body.body, tags: ["return-route-not-carried"], advisories: [{ code: "return_route_not_carried", message }] } };
+        },
+      }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
+    };
+    process.env.OPENRIG_SESSION_NAME = "front@kernel";
+    await create(d, ["--return-route", "sam@kernel"]);
+    expect(JSON.parse(JSON.stringify(posted[0]))).toMatchObject({ returnRoute: "sam@kernel" });
+    expect(stderr).toContain(`Warning: ${message}`);
+    expect(stderr.some(l => l.startsWith("Return route:"))).toBe(false);
+  });
+
   it("a plain create sends no route and prints no route line", async () => {
     await create(deps(null), ["--source", "front@kernel"]);
     expect(JSON.parse(JSON.stringify(posted[0]))).not.toHaveProperty("returnRoute");

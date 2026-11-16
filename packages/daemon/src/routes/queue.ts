@@ -16,7 +16,7 @@ import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
 import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
-  routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
+  routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -726,19 +726,22 @@ export function queueRoutes(): Hono {
     const identity: typeof derived = !derived.ok && issued ? { ok: true, session: issued, provenance: "claimed:v1" } : derived;
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
-    const route = requestedRoute === undefined ? null
+    let route = requestedRoute === undefined ? null
       : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
         : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
           : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
     if (route && !isRouteAddress(route.address)) {
       return c.json({ error: "invalid_return_route", message: `--return-route self takes the caller's own address, and this caller is ${sourceSession}, which isn't an agent conversation's queue address. Use auto, or name the address.` }, 400);
     }
-    // A registered person's alias on this host is a person, reached through the gateway; an unreadable registry decides nothing.
+    // A registered person's alias on this host is a person, reached through the gateway: the work goes on without that route,
+    // and the response and the row say so. An unreadable registry decides nothing.
+    let routeNotKept: string | null = null;
     if (route && route.basis !== "issued" && route.basis !== "issued-actor" && !splitRoute(route.address).host) {
       let person = false;
       try { person = getRepo(c).isHumanDestination(route.address); } catch { /* unreadable registry: the route is kept as given */ }
       if (person) {
-        return c.json({ error: "invalid_return_route", message: `${route.address} is a registered person's address. A person is reached through the gateway, not a return route: use auto, or an agent conversation's address.` }, 400);
+        routeNotKept = routeIsPersonMessage(route.address);
+        route = null;
       }
     }
     { const held = switchCustody(c, sourceSession); if (held) return held; }
@@ -767,7 +770,7 @@ export function queueRoutes(): Hono {
       // The route names this host, so the receiving daemon never reads it as one of its own addresses. Without this host's id
       // the work goes without the route, and the response and the row say so.
       const carried = route ? hostQualifiedRoute(route.address) : null;
-      const routeNotCarried = route && !carried ? routeNotCarriedMessage(route.address) : null;
+      const routeNotCarried = routeNotKept ?? (route && !carried ? routeNotCarriedMessage(route.address) : null);
       const { hostId: _dropped, returnRoute: _route, returnRouteBasis: _basis, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
         ...rest,
@@ -802,7 +805,7 @@ export function queueRoutes(): Hono {
         body: body.body!,
         priority: body.priority,
         tier: body.tier,
-        tags: body.tags,
+        tags: withRouteNotCarriedTag(body.tags, routeNotKept),
         expiresAt: body.expiresAt,
         chainOfRecord: body.chainOfRecord,
         targetRepo: body.targetRepo,
@@ -818,7 +821,8 @@ export function queueRoutes(): Hono {
         ...(route ? { returnRoute: route.address, returnRouteBasis: route.basis } : {}),
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
-      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory].filter(Boolean);
+      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory,
+        routeNotKept ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
