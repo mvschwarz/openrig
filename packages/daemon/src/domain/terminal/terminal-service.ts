@@ -311,7 +311,7 @@ function manualHerdrViewerClose(endpoint: string, workspaceId: string): string {
     || !workspaceId || workspaceId.startsWith("-") || /[\x00-\x1f\x7f]/.test(workspaceId)) {
     return "The exact endpoint or workspace identity cannot be qualified for a manual command. Inspect the workspace in its original endpoint.";
   }
-  return `After inspecting the workspace, close it manually: env -u HERDR_ENV -u HERDR_SOCKET_PATH -u OPENRIG_HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)} herdr workspace close ${shellQuote(workspaceId)}`;
+  return `After inspecting the workspace, close it manually: env -u HERDR_SESSION -u HERDR_ENV -u HERDR_SOCKET_PATH -u OPENRIG_HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)} herdr workspace close ${shellQuote(workspaceId)}`;
 }
 
 function partitionRigRowsForBulk(rows: BulkSeatRow[]): {

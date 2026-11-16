@@ -788,8 +788,7 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     expect(endpoint.closedWorkspaces).toEqual([]);
     expect(await ledger.listAll()).toEqual(before);
     if (workspaceId === "ws-'quoted") {
-      expect(result.viewers[0]?.reason).toContain(`HERDR_SOCKET_PATH='/tmp/h/sock'"'"'s file.sock'`);
-      expect(result.viewers[0]?.reason).toContain(`herdr workspace close 'ws-'"'"'quoted'`);
+      expect(result.viewers[0]?.reason).toContain(`env -u HERDR_SESSION -u HERDR_ENV -u HERDR_SOCKET_PATH -u OPENRIG_HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/tmp/h/sock'"'"'s file.sock' herdr workspace close 'ws-'"'"'quoted'`);
     } else {
       expect(result.viewers[0]?.reason).toContain("cannot be qualified");
       expect(result.viewers[0]?.reason).not.toContain("herdr workspace close");
@@ -905,7 +904,7 @@ describe("#3081 bf06 child B01/BT01 — closeAll session validation & provider e
     expect(def.closedWorkspaces).toEqual([]);
     expect(tmuxExec).not.toHaveBeenCalled();
     expect(res.viewers.some(v => v.provider === "tmux")).toBe(false);
-    expect(res.viewers.find(v => v.target === "ws-work")).toMatchObject({ outcome: "kept", code: "conditional_close_unavailable", reason: expect.stringContaining("HERDR_SOCKET_PATH='/tmp/h2/sessions/work/herdr.sock'") });
+    expect(res.viewers.find(v => v.target === "ws-work")).toMatchObject({ outcome: "kept", code: "conditional_close_unavailable", reason: expect.stringContaining("env -u HERDR_SESSION -u HERDR_ENV -u HERDR_SOCKET_PATH -u OPENRIG_HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/tmp/h2/sessions/work/herdr.sock' herdr workspace close 'ws-work'") });
     expect(res.viewers.find(v => v.target === "ws-def")).toMatchObject({ outcome: "kept", code: "different_endpoint" });
   });
 
