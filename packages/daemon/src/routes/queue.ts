@@ -1383,6 +1383,7 @@ export function queueRoutes(): Hono {
     // workspace.root, and the trace can only ascend to a root it knows (#2693).
     let workRoots: string[] = [];
     let catalogPath: string | null = null;
+    let catalogError: unknown;
     try {
       catalogPath = projectCatalogPaths(c).catalog;
     } catch {
@@ -1400,19 +1401,22 @@ export function queueRoutes(): Hono {
         }]));
         workRoots = projects.filter((project) => !project.error).map((project) => project.root);
       }
-    } catch {
+    } catch (error) {
       catalogStatus = "unavailable";
+      catalogError = error;
     }
     // The project this seat's broad refocus orientation belongs to when no typed baton names
     // one (#3320), chosen as work-install chooses: the only catalog entry, then the rig's
     // association, the seat's working folder, the only unclaimed entry. No unique answer is
     // reported with its reason, never guessed.
     let workProject: { id: string; root: string; selectedBy: string } | { error: string } | undefined;
+    const unselected = (error: unknown) => {
+      const candidates = error instanceof ProjectReadError && error.candidates?.length ? ` (candidates: ${error.candidates.join(", ")})` : "";
+      return { error: `${error instanceof Error ? error.message : String(error)}${candidates}` };
+    };
+    // An unreadable catalog selects nothing; say why, and the trace keeps the workspace root.
+    if (catalogStatus === "unavailable") workProject = unselected(catalogError);
     if (catalogPath && catalogStatus === "usable") {
-      const unselected = (error: unknown) => {
-        const candidates = error instanceof ProjectReadError && error.candidates?.length ? ` (candidates: ${error.candidates.join(", ")})` : "";
-        return { error: `${(error as Error).message}${candidates}` };
-      };
       try {
         const only = selectCatalogProject(catalogPath);
         if (only) workProject = { ...only, selectedBy: "single" };

@@ -404,7 +404,7 @@ def render_held_and_next(evidence):
     return "\n".join(output)
 
 
-def render_candidates(evidence, root, depth, failures, extra_roots=()):
+def render_candidates(evidence, root, depth, failures, extra_roots=(), project=None, project_unknown=None):
     """The work section from labelled queue evidence. One direct, resolved tag is shown as the
     work with its source; anything less certain lists every candidate and asks the agent."""
     candidates = evidence.get("candidates") or []
@@ -444,9 +444,18 @@ def render_candidates(evidence, root, depth, failures, extra_roots=()):
             output.append(f"Missions on this host: {listing}")
     output.append("Then read that mission's current intent as text:")
     output.append(f"  python3 {Path(__file__).resolve()} --trees work --packet --work-start {missions_root}/<mission>")
-    orientation = render_work(root, root, "light", failures, packet=True)
+    # Nothing in progress: orient from the seat's selected project, which may live outside
+    # workspace.root (#3320), or say why none was selected. Held and next work stay evidence only.
+    orient_root = root
+    if not candidates and not unknown and project:
+        orient_root = Path(project).expanduser().resolve()
+    elif not candidates and not unknown and project_unknown:
+        output.append(f"PROJECT UNSELECTED — {project_unknown}; showing the work root instead")
+    orientation = render_work(orient_root, orient_root, "light", failures, packet=True)
     _, _, rest = orientation.partition("\n")
-    output.append("\n## ORIENTATION — the project-level chain, not your work\n" + rest.lstrip("\n"))
+    heading = ("the selected project's chain, not your work" if orient_root is not root
+               else "the project-level chain, not your work")
+    output.append(f"\n## ORIENTATION — {heading}\n" + rest.lstrip("\n"))
     return "\n".join(output)
 
 
@@ -567,7 +576,8 @@ def main():
             if explicit:
                 sections.append(render_work(Path(explicit), work_root_for(explicit, root, extra_roots), args.depth, failures, packet=args.packet))
             elif evidence is not None:
-                sections.append(render_candidates(evidence, root, args.depth, failures, extra_roots))
+                sections.append(render_candidates(evidence, root, args.depth, failures, extra_roots,
+                                                  project=args.work_project, project_unknown=args.work_project_unknown))
             elif args.work_candidates:
                 pass  # the unreadable-evidence gap above is the answer; never fall back to the root
             elif args.work_basis == NO_CURRENT_BATON_BASIS and args.work_project:

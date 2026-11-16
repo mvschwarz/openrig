@@ -107,6 +107,48 @@ describe("refocus trace with no typed baton (#3320)", () => {
     expect(result.stdout).toContain(`root: ${w.workspace}`);
     expect(result.stdout).toContain("PROJECT UNSELECTED — multiple projects are declared (candidates: a, b)");
   });
+
+  /** Work-packet mode: the hook sends the daemon's candidate evidence instead of a basis. */
+  function candidates(evidence: object) {
+    const file = join(root!, "candidates.json");
+    writeFileSync(file, JSON.stringify(evidence));
+    return file;
+  }
+  const HELD = { qitemId: "q-held", summary: "waiting on review", blockedOn: "review" };
+  const NEXT = { qitemId: "q-next", summary: "pending follow-up" };
+
+  it("orients work-packet mode from the selected project when nothing is in progress", () => {
+    const w = world();
+    const result = w.trace(["--packet", "--work-candidates", candidates({ candidates: [], held: [HELD], next: [NEXT] }),
+      "--work-root", w.projectB, "--work-project", w.projectB]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("## ORIENTATION — the selected project's chain, not your work");
+    expect(result.stdout).toContain(`root: ${w.projectB}`);
+    expect(result.stdout).toContain("intent: ship project b");
+    expect(result.stdout).not.toContain("intent: run the workspace");
+    // Held and pending work stay evidence, never adopted as current work.
+    expect(result.stdout).toContain("No in-progress queue row names your work");
+    expect(result.stdout).toContain("HELD WORK (blocked; this is not next):");
+    expect(result.stdout).toContain("POSSIBLE NEXT WORK (pending; no order implied):");
+  });
+
+  it("names why no project was selected in work-packet mode and keeps the workspace orientation", () => {
+    const w = world();
+    const result = w.trace(["--packet", "--work-candidates", candidates({ candidates: [] }),
+      "--work-project-unknown", "workspace.yaml projects must each declare string id and root values"]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("PROJECT UNSELECTED — workspace.yaml projects must each declare string id and root values");
+    expect(result.stdout).toContain(`root: ${w.workspace}`);
+  });
+
+  it("keeps the workspace orientation in work-packet mode while candidates are in flight", () => {
+    const w = world();
+    const inFlight = [{ mission: "m1", kind: "mission", source: "row q1" }, { mission: "m2", kind: "mission", source: "row q2" }];
+    const result = w.trace(["--packet", "--work-candidates", candidates({ candidates: inFlight }), "--work-project", w.projectB]);
+    expect(result.stdout).toContain("2 candidates are in flight");
+    expect(result.stdout).toContain(`root: ${w.workspace}`);
+    expect(result.stdout).not.toContain("intent: ship project b");
+  });
 });
 
 describe("refocus hook forwards the daemon's catalogued work roots (#2693)", () => {
