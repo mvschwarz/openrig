@@ -20,8 +20,8 @@ import nodePath from "node:path";
 import { shellQuote } from "./shell-quote.js";
 /** Run-local managed channel input, shared wire only; native execution remains in each runner. */
 export interface PiManagedRequest {
-  version: 1; runId: string; requestId: string; sequence: number; kind: "input" | "wake";
-  payload: { text?: string; question?: string };
+  version: 1; runId: string; requestId: string; sequence: number; kind: "input" | "wake" | "cancel";
+  payload: { text?: string; question?: string; target?: { runId: string; nativeTurnId: string } };
 }
 
 export type RunnerRuntime = "pi" | "omp";

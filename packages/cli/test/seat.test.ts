@@ -94,6 +94,16 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it("shows body-free current and historical native recovery evidence in human and JSON seat status", async () => {
+    const nativeInput = { input: true, wake: true, cancel: false, target: null,
+      unresolved: [{ requestId: "uncertain", runId: "old", inCurrentRun: false, kind: "cancel", stage: "completed", outcome: "requested", destination: "dev@rig" }],
+      recovery: "Person native controls remain available. Explicit manual choice: rig seat stop dev@rig --reason <text>." };
+    const paths: string[] = []; const deps = makeDeps({ status: 200, data: { ...STATUS, nativeInput } }, paths);
+    const human = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(human.logs.join("\n")).toContain('"requestId":"uncertain"'); expect(human.logs).toContain(nativeInput.recovery);
+    const json = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig", "--json"]).then(() => undefined));
+    expect(JSON.parse(json.logs.join("\n")).nativeInput).toEqual(nativeInput);
+  });
   it.each(["request_observed", "completed"])("reports a %s harness observation with time and honest pending state", async state => {
     const permission_stop = { state, command: "Bash: git [arguments hidden]", origin: "harness",
       source: "PermissionRequest", observed_at: "2026-11-05T01:00:00.000Z", actor: "subagent",

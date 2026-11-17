@@ -63,12 +63,33 @@ seatRoutes.post("/set-input-route/:seatRef", async c => {
     });
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
     return c.json({ nodeId: target.nodeId, inputRoute: body.route, nativeInput: { input: channel?.capable(target.nodeId, "input") ?? false,
-      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
+      wake: channel?.capable(target.nodeId, "wake") ?? false, cancel: channel?.capable(target.nodeId, "cancel") ?? false }, reason: body.reason.trim(), actor: transportSenderSession(c) ?? null });
   } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code }, 409); }
 });
 
 seatRoutes.post("/command/:seatRef", async c => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (body?.type === "cancel") {
+    const named = body.target as { runId?: unknown; nativeTurnId?: unknown } | undefined;
+    if (typeof body.requestId !== "string" || !body.requestId.trim() || body.requestId.length > 512
+      || !named || typeof named.runId !== "string" || !named.runId || named.runId.length > 1024
+      || typeof named.nativeTurnId !== "string" || !named.nativeTurnId || named.nativeTurnId.length > 1024)
+      return c.json({ error: "Supply requestId and exact target {runId,nativeTurnId}." }, 400);
+    const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+    const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+    if (!channel || !guard) return c.json({ error: "Native cancellation unavailable." }, 503);
+    try {
+      const target = guard.target(c.req.param("seatRef"));
+      const receipt = await guard.custody([target.nodeId], async () => {
+        if (c.req.raw.signal.aborted && !channel.outbox.runnerReceipt(body.requestId as string))
+          throw Object.assign(new Error("Caller cancelled before native admission."), { code: "caller_cancelled" });
+        return channel.cancel(target.nodeId, { requestId: body.requestId as string,
+          sender: transportSenderSession(c) ?? "unknown", destination: target.session, target: { runId: named.runId as string, nativeTurnId: named.nativeTurnId as string } });
+      });
+      return c.json({ receipt }, ["completed", "rejected"].includes(receipt.stage) ? 200 : 202);
+    } catch (error) { return c.json({ error: (error as Error).message, code: (error as { code?: string }).code,
+      ...((error as { code?: string; retryable?: boolean }).retryable || (error as { code?: string }).code === "runner_grant_unverified" ? { retryable: true } : {}) }, 409); }
+  }
   if (!body || body.type !== "wake" || typeof body.requestId !== "string" || !body.requestId.trim()
     || body.requestId.length > 512 || typeof body.question !== "string" || !body.question.trim() || body.question.length > 1024 * 1024)
     return c.json({ error: "Supply wake type, opaque requestId and question." }, 400);
@@ -192,7 +213,8 @@ seatRoutes.get("/status/:seatRef", async (c) => {
         // No limit stored: nothing is read, so a seat without process_limits is unchanged.
         : null;
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
-    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: false } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
+    const nativeTurn = channel && nodeId ? channel.currentTurn(nodeId) : null;
+    return c.json({ ...result.status, ...(channel && nodeId ? { nativeInput: { input: channel.capable(nodeId, "input"), wake: channel.capable(nodeId, "wake"), cancel: channel.capable(nodeId, "cancel"), unresolved: channel.unresolved(nodeId), recovery: "The person operating this seat or its responsible agent can inspect these request IDs and destinations. Evidence from earlier runs does not mean current input is held. A submitted Pi cancellation holds person prompts until its named run emits agent_settled; normal input/wake readiness still applies. Continue retained native words with a new plain prompt in that pane, without resending them. This is distinct from /abort or stopping the seat, is not cancellation proof, and never restores withdrawn approvals. Responsible-agent work uses its ordinary queue route; if no independent agent can act, the person operating this seat can take that step. Explicit manual choice: rig seat stop <seat> --reason <text>. No automatic restart or replay.", target: nativeTurn ? { runId: nativeTurn.runId, nativeTurnId: nativeTurn.nativeTurnId } : null } } : {}), ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(processLimits ? { processLimits } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldCount(target.nodeId),
     } } : {}) });
   }

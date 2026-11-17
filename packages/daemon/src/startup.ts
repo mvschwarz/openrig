@@ -569,7 +569,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // staging. Same `db`, so a stageWakeIntent() call inside a terminal
   // db.transaction commits atomically with the close + successor create.
   const outboxHandlerInstance = new OutboxHandler(db);
-  const runnerChannel = new RunnerChannel(new ActivityGrantStore(db), outboxHandlerInstance);
+  const runnerChannel = new RunnerChannel(new ActivityGrantStore(db), outboxHandlerInstance, undefined, eventBus);
   queueRepoInstance.attachOutbox(outboxHandlerInstance);
   outboxHandlerInstance.reconcileAbandonedSending("watchdog-occurrence-");
   // Reconcile only the prior process's claims, before transport/producers/timers can start new sends.

@@ -705,3 +705,11 @@ it("set-input-route posts the explicit seat choice and validates unsupported rou
   expect(result.exitCode).toBe(1);
   expect(calls).toEqual([]);
 });
+
+
+it("seat cancel posts an immutable explicit native target and request ID without a status re-resolution", async () => {
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const deps = makeDeps({ status: 202, data: { receipt: { stage: "pending" } } }, calls);
+  await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "cancel", "dev@rig", "--run-id", "run-E", "--native-turn-id", "epoch-E", "--request-id", "cancel-one", "--json"]));
+  expect(calls).toEqual([{ path: "/api/seat/command/dev%40rig", body: { type: "cancel", requestId: "cancel-one", target: { runId: "run-E", nativeTurnId: "epoch-E" } } }]);
+});

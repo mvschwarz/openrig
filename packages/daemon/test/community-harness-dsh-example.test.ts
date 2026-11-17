@@ -1,3 +1,4 @@
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -116,13 +117,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
+type Permissions = "uncorrelated" | "turn_withdrawn" | "runner_turn_unbound" | "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two" | "twoslow";
 interface Hook { auth: string | undefined; body: Record<string, unknown>; at: number }
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-async function fakeOpenRig(permissions: Permissions) {
+async function fakeOpenRig(permissions: Permissions, turnReportingUnavailable = false) {
   const hooks: Hook[] = [];
   const channelRequests: string[] = [];
   const submits: Array<{ auth: string | undefined; body: Record<string, unknown>; at: number }> = [];
@@ -136,13 +137,19 @@ async function fakeOpenRig(permissions: Permissions) {
       const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
       if (url.pathname === "/api/activity/runner-channel") channelRequests.push(req.method ?? "unknown");
       if (req.method === "POST" && url.pathname === "/api/activity/hooks") { hooks.push({ auth: req.headers.authorization, body, at: Date.now() }); return json(200, { ok: true }); }
+      if (turnReportingUnavailable && url.pathname === "/api/activity/runner-channel") {
+        if (body.type === "turn") return json(503, { code: "temporarily_unavailable" });
+        return json(req.method === "POST" ? 200 : 404, { ok: true });
+      }
       if (permissions === "absent") return json(404, { error: "not found" });
       if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
         submits.push({ auth: req.headers.authorization, body, at: Date.now() });
+        if (["turn_withdrawn", "runner_turn_unbound"].includes(permissions)) return json(409, { ok: false, code: permissions });
         if (permissions === "deny") return json(409, { ok: false, code: "denied_by_seat", error: "This seat's operator chose to refuse its runner's permission requests." });
         if (permissions === "stale") return json(409, { ok: false, code: "stale_generation", error: "This request isn't from the seat's current occupant." });
         if (permissions === "broken") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
         if (permissions === "revoked") return json(401, { ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked; nothing was asked." });
+        if (permissions === "uncorrelated") return json(200, { ok: true, state: "permitted", optionId: "allow", correlation: "unverified" });
         if (permissions === "permitted") return json(200, { ok: true, state: "permitted", optionId: "allow", reason: "no one can be asked: no person is registered" });
         if (permissions === "two") return json(200, { ok: true, askId: `ask-${submits.length}`, created: true });
         // Two asks, and OpenRig takes 1.5 s to answer the second one's submit.
@@ -281,6 +288,22 @@ describe("the documented dsh example runner", () => {
     expect(String(record.producer)).toMatch(/dsh 0\.0\.1 \(as its ACP handshake reports it\); ACP 1/);
   }, 30_000);
 
+  it("shows the accepted permission correlation warning without treating it as a refusal", async () => {
+    const openrig = await fakeOpenRig("uncorrelated"), seat = start(openrig);
+    await waitFor(seat.launch, "launch"); seat.type("PERMIT");
+    await waitFor(() => seat.out().includes("accepted without verified native-turn correlation"), "visible uncorrelated diagnostic");
+    expect(seat.out()).not.toContain("[permission] refused");
+  });
+  it("ordinary person prompts and terminal progress do not wait for unavailable turn reporting", async () => {
+    const openrig = await fakeOpenRig("absent", true);
+    const seat = start(openrig, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_test", OPENRIG_RUN_ID: "run" });
+    await waitFor(seat.launch, "launch"); seat.type("first ordinary input"); seat.type("second ordinary input");
+    await waitFor(() => requests(seat.log(), "session/prompt").length === 2, "both ordinary native prompts", 5_000);
+    await waitFor(() => ["1", "2"].every(turnId => openrig.hooks.some(hook => hook.body.hookEvent === "Stop" && hook.body.subtype === "end_turn" && hook.body.turnId === turnId)), "both turn ends", 5_000);
+    expect(requests(seat.log(), "session/prompt").map(frame => (frame.params as { prompt: unknown }).prompt)).toEqual([
+      [{ type: "text", text: "first ordinary input" }], [{ type: "text", text: "second ordinary input" }],
+    ]);
+  });
   it("sends one submitted block as one prompt and reports working, then idle, in order", async () => {
     const openrig = await fakeOpenRig("absent");
     const seat = start(openrig);
@@ -407,6 +430,8 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
 
   it.each([
     ["the submit says the request isn't the current occupant's", "stale"],
+    ["the native turn was withdrawn", "turn_withdrawn"],
+    ["the native turn is unbound", "runner_turn_unbound"],
     ["the person said no and the agent has no reject option", "saidno"],
   ] as const)("answers cancelled and holds no attention when %s", async (_case, permissions) => {
     const openrig = await fakeOpenRig(permissions);
@@ -900,5 +925,59 @@ describe("the actual dsh runner native channel", () => {
     await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "WAKE:AFTER"), "barrier released");
     expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: `WAKE:${suffix}`, result: expect.objectContaining({ answer: null, completion }) }));
     expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
+  });
+});
+
+
+describe("dsh outstanding prompt ownership", () => {
+  it("person abort before the prompt write suppresses that prompt even after its preparation resolves", async () => {
+    const { AgentPeer } = await import(/* @vite-ignore */ pathToFileURL(RUNNER).href);
+    const child = { stdout: new PassThrough(), stdin: new PassThrough() };
+    const writes: string[] = []; child.stdin.on("data", data => writes.push(String(data)));
+    const peer = new AgentPeer(child, () => {}); let release!: () => void;
+    const active = peer.request("session/prompt", { sessionId: "conversation", prompt: [] }, () => new Promise<void>(resolve => { release = resolve; }));
+    await Promise.resolve(); expect(peer.cancelUnsubmittedPrompt()).toBe(true); release();
+    expect(await active).toEqual({ stopReason: "interrupted" });
+    await new Promise(resolve => setImmediate(resolve)); expect(writes).toEqual([]);
+    child.stdout.end(); child.stdin.end();
+  });
+  it("a cancelled prewrite callback cannot report the next prompt scope", async () => {
+    const { AgentPeer } = await import(/* @vite-ignore */ pathToFileURL(RUNNER).href);
+    const child = { stdout: new PassThrough(), stdin: new PassThrough() }; child.stdin.resume();
+    const peer = new AgentPeer(child, () => {}); const scopes: unknown[] = [];
+    const first = peer.request("session/prompt", { sessionId: "conversation", prompt: [] }, (scope: unknown) => { scopes.push(scope); });
+    expect(peer.cancelUnsubmittedPrompt()).toBe(true);
+    const second = peer.request("session/prompt", { sessionId: "conversation", prompt: [] }, (scope: unknown) => { scopes.push(scope); });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(scopes).toEqual([expect.objectContaining({ nativeTurnId: "dsh-prompt-2", requestId: 2 })]);
+    child.stdout.write(JSON.stringify({ id: 2, result: { stopReason: "end_turn" } }) + "\n"); await first; await second;
+    child.stdout.end(); child.stdin.end();
+  });
+  it("fences the exact outstanding prompt and suppresses an in-flight permission callback at the native write", async () => {
+    const { AgentPeer } = await import(/* @vite-ignore */ pathToFileURL(RUNNER).href);
+    const child = { stdout: new PassThrough(), stdin: new PassThrough() };
+    const writes: string[] = []; child.stdin.on("data", data => writes.push(String(data)));
+    const peer = new AgentPeer(child, () => {});
+    let answer!: (value: unknown) => void;
+    peer.onRequest("session/request_permission", () => new Promise(resolve => { answer = resolve; }));
+    const active = peer.request("session/prompt", { sessionId: "conversation", prompt: [] });
+    const scope = peer.promptScope();
+    expect(scope).toMatchObject({ nativeTurnId: "dsh-prompt-1", requestId: 1, sessionId: "conversation" });
+    child.stdout.write(JSON.stringify({ id: 77, method: "session/request_permission", params: {} }) + "\n");
+    await Promise.resolve();
+    expect(peer.prepareCancellation("conversation")).toBe(false);
+    expect(peer.prepareCancellation(scope.nativeTurnId)).toBe(true);
+    answer({ outcome: { outcome: "selected", optionId: "allow" } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(writes.map(line => JSON.parse(line)).find(frame => frame.id === 77)).toMatchObject({ result: { outcome: { outcome: "cancelled" } } });
+    child.stdout.write(JSON.stringify({ id: 1, result: { stopReason: "end_turn" } }) + "\n"); await active;
+    expect(peer.promptScope()).toBeNull();
+    expect(() => peer.request("session/prompt", { sessionId: "conversation", prompt: [] })).toThrow(/fenced/);
+    expect(peer.recheckCancellation(scope.nativeTurnId)).toBe(false);
+    const next = peer.request("session/prompt", { sessionId: "conversation", prompt: [] });
+    expect(peer.promptScope()).toMatchObject({ nativeTurnId: "dsh-prompt-2", requestId: 2 });
+    expect(peer.prepareCancellation(scope.nativeTurnId)).toBe(false);
+    child.stdout.write(JSON.stringify({ id: 2, result: { stopReason: "end_turn" } }) + "\n"); await next;
+    child.stdout.end(); child.stdin.end();
   });
 });
