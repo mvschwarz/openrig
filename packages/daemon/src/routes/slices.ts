@@ -18,6 +18,7 @@ import { inferCatalogProject, ProjectReadError } from "../domain/workspace/proje
 // avoid `/proof-asset` being parsed as a slice-name.
 
 import { Hono, type Context } from "hono";
+import { readParentScope, type ParentScopeNode } from "../domain/scope/mission-parent.js";
 import { createProofPolicyRead, readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -105,15 +106,30 @@ export function slicesRoutes(): Hono {
         complete: projectLookup.complete,
       });
       const authored = deps.indexer.missionAuthoredStatuses();
+      const parentRoots = new Map<string, ParentScopeNode[]>();
+      const parentWarnings: string[] = [];
+      for (const slice of filtered) {
+        if (!slice.missionId) continue;
+        const root = path.resolve(slice.slicePath, "..", "..", "..");
+        if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
+      }
+      const childMissions = (slicePath: string, missionId: string | null) => {
+        if (!missionId) return [];
+        const nodes = parentRoots.get(path.resolve(slicePath, "..", "..", "..")) ?? [];
+        const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === slicePath);
+        return node && nodes.filter((candidate) => candidate.id === node.id).length === 1 ? nodes.filter((candidate) => candidate.kind === "mission" && candidate.parent === node.id) : [];
+      };
       return {
         slices: filtered.map((s) => ({
           ...s,
+          childMissions: childMissions(s.slicePath, s.missionId),
           queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
           readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
         })),
         totalCount: filtered.length,
         filter,
         boundToWorkflow: boundDiagnostic,
+        parentWarnings,
         // VM-005 (release-0.4.7): additive authored mission-status sidecar so
         // chip surfaces can honor authored-wins precedence without a second
         // round-trip. The `slices` array itself is byte-untouched.
