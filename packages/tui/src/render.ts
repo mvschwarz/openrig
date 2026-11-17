@@ -1068,7 +1068,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     // Keep the explicit desktop action above the rig's grid: the whole rig, or on a pod's page that pod.
     lines.push(podFilter
       ? fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${podFilter}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${podFilter}` } })
-      : fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.name}` } }));
+      : fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.id ?? rig.name}` } }));
     const healthScope = { kind: "rig" as const, rigId: rig.id ?? rig.name, rigName: rig.name, local: host === snap.hosts[0] };
     if (state.viewTab === "health") return [...lines, { text: "" }, ...healthListLines(snap, healthScope, contentWidth)];
     if (state.viewTab === "recent") {
