@@ -29,6 +29,20 @@ function fixture(runtime: string, name = "workshop") {
     launchPosture: "floor" } as NodeBinding;
   return { db, rigRepo, rig, node, store, registry, session, binding };
 }
+it.each(["omp", "omp-tui"])("%s grants full bypass only to an unconfigured kernel seat by default", runtime => {
+  const kernel = fixture(runtime, "kernel");
+  const ordinary = fixture(runtime);
+  vi.stubEnv("OPENRIG_YOLO", "1");
+  expect(kernel.store.launchOverride(kernel.node.id, runtime)).toMatchObject({ kernelAuthority: true, launchPosture: "full_bypass" });
+  expect(ordinary.store.launchOverride(ordinary.node.id, runtime).launchPosture).toBeUndefined();
+  expect(kernel.store.resolve(kernel.node.id, runtime)).toMatchObject({ effectiveMode: "yolo", source: "kernel_default" });
+  expect(ordinary.store.resolve(ordinary.node.id, runtime)).toMatchObject({ effectiveMode: "always-ask", source: "system_default" });
+  ordinary.rigRepo.setRigPermissionPolicy(ordinary.rig.id, "builtin:yolo");
+  expect(ordinary.store.resolve(ordinary.node.id, runtime)).toMatchObject({ effectiveMode: "yolo", source: "rig_spec" });
+  kernel.rigRepo.setRigPermissionPolicy(kernel.rig.id, "builtin:locked");
+  expect(kernel.store.launchOverride(kernel.node.id, runtime).launchPosture).toBeUndefined();
+});
+
 function transport() {
   const send = vi.fn(async () => ({ ok: false as const, message: "inert boundary" }));
   const tmux = { sendShellCommand: send, sendText: send } as unknown as TmuxAdapter;

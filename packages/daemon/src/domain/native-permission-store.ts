@@ -65,9 +65,12 @@ function resolveLaunchDefaultFromMetadata(
   codexProfileOverride?: string | null,
   seatRules = false,
 ): "kernel" | "team" | undefined {
-  if (runtime !== "claude-code" && runtime !== "codex") return undefined;
+  if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "omp" && runtime !== "omp-tui") return undefined;
   if (!meta || (runtime === "codex" && (codexProfileOverride === undefined ? meta.codexProfile : codexProfileOverride)?.trim())) {
     return undefined;
+  }
+  if (runtime === "omp" || runtime === "omp-tui") {
+    return meta.rigName === "kernel" && meta.memberPolicy == null && meta.rigPolicy == null ? "kernel" : undefined;
   }
   // The member's own policy decides over the rig's, whatever it is.
   const policy = meta.memberPolicy ?? meta.rigPolicy;
@@ -116,7 +119,7 @@ export function resolveLaunchOverrideFromFacts(
     ? undefined
     : resolveLaunchDefaultFromMetadata(facts.runtime, facts.launchDefaultMetadata, facts.target?.codexProfile, facts.claudePermissions !== undefined);
   if (launchDefault === "kernel") {
-    return { ...ruleBinding, kernelAuthority: true, teamPermissionDefault: false, launchPosture: facts.runtime === "codex" ? "full_bypass" : "floor" };
+    return { ...ruleBinding, kernelAuthority: true, teamPermissionDefault: false, launchPosture: facts.runtime === "claude-code" ? "floor" : "full_bypass" };
   }
   return { ...ruleBinding, kernelAuthority: false, teamPermissionDefault: launchDefault === "team", ...permissionBindingOverride(selection) };
 }
@@ -134,7 +137,7 @@ export class NativePermissionStore {
   /** Kernel is the persisted class-of-one rig, never a pane-name or cwd heuristic.
    * Authored policies and named Codex profiles keep their existing meaning. */
   private readLaunchDefaultMetadata(nodeId: string, runtime: string): LaunchDefaultMetadata | undefined {
-    if (runtime !== "claude-code" && runtime !== "codex") return undefined;
+    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "omp" && runtime !== "omp-tui") return undefined;
     try {
       const row = this.db.prepare(`SELECT r.name, n.permission_policy AS member_policy,
         r.permission_policy AS rig_policy, n.codex_config_profile AS profile
@@ -229,6 +232,8 @@ export class NativePermissionStore {
   }
 
   resolve(nodeId: string, runtime: string): ResolvedSeatPermission {
+    const omp = runtime === "omp" || runtime === "omp-tui";
+    const floorMode = omp ? "always-ask" : runtime === "codex" ? "floor" : "acceptEdits";
     // Level 1: Explicit per-seat selection (records actor + reason, overrides member and rig)
     const explicit = this.read(nodeId);
     if (explicit) {
@@ -294,7 +299,7 @@ export class NativePermissionStore {
       if (effectivePosture === "auto") {
         if (runtime !== "claude-code") {
           return {
-            effectiveMode: "floor",
+            effectiveMode: omp ? "always-ask" : "floor",
             source: "member_spec",
             launchPosture: "floor",
             fallbackReason: noAutoModeFallback(runtime),
@@ -310,7 +315,7 @@ export class NativePermissionStore {
 
       if (effectivePosture === "full_bypass") {
         return {
-          effectiveMode: "full_bypass",
+          effectiveMode: omp ? "yolo" : "full_bypass",
           source: "member_spec",
           launchPosture: "full_bypass",
         };
@@ -318,7 +323,7 @@ export class NativePermissionStore {
 
       // effectivePosture === "floor" (e.g. builtin:locked, none, or custom floor policy)
       return {
-        effectiveMode: runtime === "codex" ? "floor" : "acceptEdits",
+        effectiveMode: floorMode,
         source: "member_spec",
         launchPosture: "floor",
       };
@@ -326,8 +331,8 @@ export class NativePermissionStore {
 
     // Kernel's operational default also replaces persisted no-policy floor provenance.
     if (this.launchDefault(nodeId, runtime) === "kernel") {
-      return { effectiveMode: runtime === "codex" ? "full_bypass" : "acceptEdits", source: "kernel_default",
-        launchPosture: runtime === "codex" ? "full_bypass" : "floor" };
+      return { effectiveMode: omp ? "yolo" : runtime === "codex" ? "full_bypass" : "acceptEdits", source: "kernel_default",
+        launchPosture: runtime === "claude-code" ? "floor" : "full_bypass" };
     }
 
     // Level 3: Rig-level declaration in rig.yaml
@@ -343,7 +348,7 @@ export class NativePermissionStore {
       if (posture === "auto") {
         if (runtime !== "claude-code") {
           return {
-            effectiveMode: "floor",
+            effectiveMode: omp ? "always-ask" : "floor",
             source: "rig_spec",
             launchPosture: "floor",
             fallbackReason: noAutoModeFallback(runtime),
@@ -359,7 +364,7 @@ export class NativePermissionStore {
 
       if (posture === "full_bypass") {
         return {
-          effectiveMode: "full_bypass",
+          effectiveMode: omp ? "yolo" : "full_bypass",
           source: "rig_spec",
           launchPosture: "full_bypass",
         };
@@ -367,7 +372,7 @@ export class NativePermissionStore {
 
       // posture === "floor" (e.g. builtin:locked, none)
       return {
-        effectiveMode: runtime === "codex" ? "floor" : "acceptEdits",
+        effectiveMode: floorMode,
         source: "rig_spec",
         launchPosture: "floor",
       };
@@ -375,7 +380,7 @@ export class NativePermissionStore {
 
     // Level 4: System default floor
     return {
-      effectiveMode: runtime === "codex" ? "floor" : "acceptEdits",
+      effectiveMode: floorMode,
       source: "system_default",
       launchPosture: "floor",
     };

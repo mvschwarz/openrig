@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
-import { piTrust, yoloEnabled } from "./yolo-mode.js";
+import { piTrust } from "./yolo-mode.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
@@ -122,7 +122,7 @@ export class PiResumeAdapter {
       );
 
       const trust = this.runtime === "omp"
-        ? (yoloEnabled(process.env, resolvedPosture) ? "approve" : "no-approve")
+        ? (resolvedPosture === "full_bypass" ? "approve" : "no-approve")
         : piTrust(this.options.trustPosture, process.env, resolvedPosture);
       const appliedLaunch = this.runtime === "omp"
         ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
