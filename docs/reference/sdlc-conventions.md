@@ -247,6 +247,25 @@ mini-requirements show "Not compliant · mini-requirements not authored";
 nothing is invented) —
 but it does not carry its weight in review.
 
+### A2.1. Missions that break down another scope
+
+A mission can link to the mission or slice whose work it breaks down. Use
+`rig scope mission create <name> --parent <dot-id>` when creating it, or
+`rig scope mission parent <mission> <dot-id>` to set the link later. Use
+`rig scope mission parent <mission> --clear` to remove it. The target must
+resolve uniquely within the project's missions root. Cycles and unresolved
+ancestors are warnings and are reported by scope audit. A mission without an
+authored ID can still have a parent; reverse views show its ID as unknown. When
+creating a mission with a duplicate ID and a parent, the command warns with the
+existing path because references to that ID are ambiguous.
+The link is `metadata.parent` in `mission.yaml`, or `parent` in the node
+frontmatter for a legacy mission without a manifest. It does not change
+folder layout, slice membership, or the meaning of `depends-on`.
+
+Mission and slice show surfaces expose the link in both directions; scope
+audit reports dangling links and active children of completed slices. The
+refocus trace follows the logical parent to show the outcome's intent.
+
 ## A3. Honesty rails (public surfaces + cited hashes)
 
 ### Public-repo surfaces read as product engineering
