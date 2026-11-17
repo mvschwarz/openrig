@@ -1,4 +1,13 @@
-# What changed in OpenRig 0.7.17
+# What changed in OpenRig 0.7.18
+
+This note is for an agent on an install that was just upgraded to 0.7.18.
+If you upgraded from 0.7.16 or earlier, also read "What changed in OpenRig
+0.7.17" below, and so on back. For the full capability map, read
+`rig context get onboarding-width/public-what-you-can-do.md`. After the upgraded
+daemon starts, `rig context get reference/whats-new.md` describes this version.
+Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`.
+
+## What changed in OpenRig 0.7.17
 
 This note is for an agent on an install that was just upgraded to 0.7.17.
 OpenRig 0.7.17 teaches the installer, the kernel operator and the `rigs` skill
@@ -16,7 +25,7 @@ the full capability map, read
 daemon starts, `rig context get reference/whats-new.md` describes this version.
 Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`.
 
-## After the upgrade
+### After the upgrade
 
 - **Restart the daemon** (`rig daemon stop`, then `rig daemon start`), with a
   database backup first. Your agents keep running through it; don't use
@@ -28,7 +37,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - **One new setting:** `ui.topology_remote_seats` (off by default) lets the TUI's
   topology TABLE read a remote rig's seats, read-only.
 
-## Your person's own conversation
+### Your person's own conversation
 
 - **If your person installed OpenRig from their own Claude Code conversation and
   stays there,** the installer is instructed to hand their goal to the team as a
@@ -54,7 +63,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   startup text; read it from the `rigs` skill's
   `references/installing-for-someone.md` when you need it.
 
-## Recovery
+### Recovery
 
 - **Restore** reads `partially_restored`, and names the seat, when it skipped a
   seat that isn't in the snapshot's roster or left one attached. Which seats
@@ -86,7 +95,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   leaves the token unknown; discovered handover resolves a relative
   `CLAUDE_CONFIG_DIR` against the seat's directory.
 
-## Delivery, workflows and tools
+### Delivery, workflows and tools
 
 - **Three daemon read paths changed:** the stuck sweep reads undelivered ids in
   windows and yields between them (a window and one row's derivation are still
@@ -136,7 +145,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   confirmation hide a hub URL's query string (`--json` keeps the full URL);
   `rig setup` prints the harness login line.
 
-## Limits to keep in view
+### Limits to keep in view
 
 - **Your person's conversation isn't woken.** A seat's question waits until
   they return to it, and a prompt that changes between the capture and the key
