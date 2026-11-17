@@ -136,14 +136,14 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
     }
   });
 
-  it("176_node_keep_alive adds an off-by-default keep_alive column and the per-seat budget, and guards pre-176 databases", () => {
-    expect(ALL_MIGRATIONS.some((m) => m.name === "176_node_keep_alive.sql")).toBe(true);
+  it("177_node_keep_alive adds an off-by-default keep_alive column and the per-seat budget, and guards pre-177 databases", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "177_node_keep_alive.sql")).toBe(true);
     const db = new Database(":memory:");
     try {
       db.pragma("foreign_keys = ON");
-      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "176_node_keep_alive.sql"));
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "177_node_keep_alive.sql"));
       const repo = new RigRepository(db);
-      const rig = repo.createRig("pre-176");
+      const rig = repo.createRig("pre-177");
       const legacyNode = repo.addNode(rig.id, "legacy", { runtime: "codex" });
       expect("keepAlive" in legacyNode).toBe(false);
       expect(repo.setNodeKeepAlive(legacyNode.id, false)).toBe(false);

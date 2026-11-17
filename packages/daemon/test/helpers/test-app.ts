@@ -1,5 +1,5 @@
-import { nodeKeepAliveSchema } from "../../src/db/migrations/176_node_keep_alive.js";
-import { sessionStopAttemptSchema } from "../../src/db/migrations/175_session_stop_attempt.js";
+import { nodeKeepAliveSchema } from "../../src/db/migrations/177_node_keep_alive.js";
+import { sessionStopAttemptSchema } from "../../src/db/migrations/176_session_stop_attempt.js";
 import { nodeProcessLimitsSchema } from "../../src/db/migrations/173_node_process_limits.js";
 import { sessionLaunchedCwdSchema } from "../../src/db/migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "../../src/db/migrations/170_rig_delivery_drains.js";
