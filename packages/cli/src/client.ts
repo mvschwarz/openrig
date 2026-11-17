@@ -6,6 +6,7 @@ import { ConfigStore } from "./config-store.js";
 import { getOpenRigHome, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
 import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "./long-request-fetch.js";
+import { resolveSenderSession, type BindingCheck, type TmuxIdentityReader } from "./sender-identity.js";
 
 export function terminalAuthHeaders(): Record<string, string> {
   const token = resolveTerminalToken();
@@ -35,8 +36,10 @@ export const OCCUPANT_GENERATION_HEADER = "X-OpenRig-Occupant-Generation";
  * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand. A client built for one
  * authenticated caller (`sessionName`) carries that caller's seat instead of the process env.
  */
-export function senderIdentityHeaders(originSelfHostId?: string, sessionName?: string): Record<string, string> {
-  const session = (sessionName ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME"))?.trim();
+export function senderIdentityHeaders(
+  originSelfHostId?: string, sessionName?: string, tmuxReader?: TmuxIdentityReader, isBound?: BindingCheck,
+): Record<string, string> {
+  const session = (sessionName ?? resolveSenderSession(tmuxReader, isBound))?.trim();
   if (!session) return {};
   // Preserve qualified senders; append only a locally derived instance id.
   const value =

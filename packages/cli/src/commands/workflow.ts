@@ -937,6 +937,10 @@ work should continue from the SAME step under a new owner. The old
 owner's stale close attempts are structurally rejected afterwards
 (packet_not_on_frontier).
 
+If the step's packet was already passed on with rig queue handoff to that
+same seat, route adopts the one successor there onto the frontier, with or
+without --packet, and writes no queue row; running it again writes nothing.
+
 Examples:
   $ rig workflow route WF01ABC --to dev2-driver@my-rig --reason "owner seat dead"
 `)
@@ -971,7 +975,7 @@ Examples:
           printOutcomeSummary(opts.json ?? false, res.status, {
             what: `Adopted the queue handoff of step ${body.stepId ?? "?"} to ${body.toSession ?? opts.to}: packet ${body.closedPacketId ?? "?"} was already handed off, and its successor ${body.newPacketId ?? "?"} (${state}) now holds the step`,
             state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step; no queue row closed or created; no step advanced`,
-            next: state === "done" || state === "handed-off"
+            next: !["pending", "in-progress", "blocked"].includes(state)
               ? `The successor is already ${state}; its outcome is on rig queue show ${body.newPacketId ?? "<packet>"}, and the step's exit is the workflow owner's to project`
               : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
           });

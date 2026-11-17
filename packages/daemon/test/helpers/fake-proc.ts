@@ -1,5 +1,7 @@
 // A scenario's processes served through the process table's Linux read (/proc), on any host platform.
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readProcCensus, type ProcessTableCensus } from "../../src/domain/process-table.js";
 import os from "node:os";
 import path from "node:path";
 import { setProcRootForTest } from "../../src/domain/process-table.js";
@@ -56,4 +58,22 @@ export function restoreProc(): void {
   setProcRootForTest();
   Object.defineProperty(process, "platform", platform);
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+}
+
+/** A permission-hidden stat through the real reader, including when the test itself runs as root. */
+export async function readPermissionHiddenProc(root: string, pid: number): Promise<ProcessTableCensus> {
+  if (process.getuid?.() !== 0) {
+    try { fs.readFileSync(path.join(root, String(pid), "stat")); throw new Error("stat was readable"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EACCES") throw error; }
+    return readProcCensus(root);
+  }
+  // Root bypasses mode bits; only this child drops privilege. The reader and its worker stay real.
+  fs.chmodSync(root, 0o755);
+  const source = new URL("../../src/domain/process-table.ts", import.meta.url).href;
+  const script = `import fs from "node:fs"; import { readProcCensus } from ${JSON.stringify(source)};
+    try { fs.readFileSync(${JSON.stringify(path.join(root, String(pid), "stat"))}); throw new Error("stat was readable"); }
+    catch (error) { if (error.code !== "EACCES") throw error; }
+    process.stdout.write(JSON.stringify(await readProcCensus(${JSON.stringify(root)})));`;
+  return JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
+    { uid: 65534, gid: 65534, encoding: "utf8", timeout: 10_000 }));
 }

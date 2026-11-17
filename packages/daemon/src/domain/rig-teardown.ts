@@ -43,7 +43,8 @@ export interface TeardownResult {
    *  processes (a gateway, say) may keep running, as its preset's limits say. Present only when there was one. */
   paneOnly?: string[];
   /** Sessions OpenRig didn't launch (joined with `rig attach --self`, adopted, bound or reconciled): down released each
-   *  seat, as `rig unclaim` does, and left the session running as its owner's. Present only when there was one. */
+   *  seat, as `rig unclaim` does, and left the session running as its owner's. A later down names a released session
+   *  here too while it keeps the seat's skills for it. Present only when there was one. */
   released?: string[];
 }
 
@@ -155,7 +156,7 @@ export class RigTeardownOrchestrator {
         }
       }
       // Read which seats are settled before a delete removes their session rows.
-      const settled = this.settledSkillSeats(skillSeats);
+      const skillState = this.settledSkillSeats(skillSeats);
       // Skip to delete if requested
       if (opts?.delete) {
         this.atomicDelete(rigId);
@@ -163,7 +164,7 @@ export class RigTeardownOrchestrator {
       } else {
         this.deps.eventBus.emit({ type: "rig.stopped", rigId });
       }
-      this.cleanupSeatSkills(rigId, skillSeats, settled, result);
+      this.cleanupSeatSkills(rigId, skillSeats, skillState, result);
       return result;
     }
 
@@ -284,7 +285,7 @@ export class RigTeardownOrchestrator {
     }
 
     // Read which seats are settled before a delete removes their session rows.
-    const settled = this.settledSkillSeats(skillSeats);
+    const skillState = this.settledSkillSeats(skillSeats);
     // 6. Delete if requested (blocked by kill failures)
     if (opts?.delete) {
       if (killFailures > 0) {
@@ -305,7 +306,7 @@ export class RigTeardownOrchestrator {
       this.deps.eventBus.emit({ type: "rig.stopped", rigId });
     }
 
-    this.cleanupSeatSkills(rigId, skillSeats, settled, result, external);
+    this.cleanupSeatSkills(rigId, skillSeats, skillState, result, external);
     return result;
   }
 
@@ -315,33 +316,49 @@ export class RigTeardownOrchestrator {
    * exited or detached row whose absence wasn't confirmed (a session still present, a probe unavailable or failing, no
    * probe at all) leaves the seat unsettled: a detached row doesn't prove the process is gone. So does any released
    * session (claimed, then detached) whose stop isn't recorded, latest or not: it may still run and hold the seat's
-   * skill catalog.
+   * skill catalog. A seat held only by such sessions (its latest is recorded stopped or is one of them) maps to their
+   * names in `heldByReleased`.
    */
-  private settledSkillSeats(seats: ReadonlyArray<{ id: string }>): Set<string> {
+  private settledSkillSeats(seats: ReadonlyArray<{ id: string }>): { settled: Set<string>; heldByReleased: Map<string, string[]> } {
     const settled = new Set<string>();
-    const latest = this.db.prepare(`SELECT intentionally_stopped AS stopped FROM sessions WHERE node_id = ?
+    const heldByReleased = new Map<string, string[]>();
+    const latest = this.db.prepare(`SELECT id, intentionally_stopped AS stopped FROM sessions WHERE node_id = ?
       ORDER BY created_at DESC, id DESC LIMIT 1`);
-    const released = this.db.prepare(`SELECT 1 FROM sessions WHERE node_id = ? AND origin = 'claimed'
-      AND status = 'detached' AND intentionally_stopped = 0 LIMIT 1`);
+    const released = this.db.prepare(`SELECT id, session_name AS name FROM sessions WHERE node_id = ? AND origin = 'claimed'
+      AND status = 'detached' AND intentionally_stopped = 0 ORDER BY created_at, id`);
     for (const seat of seats) {
       try {
-        const row = latest.get(seat.id) as { stopped: number } | undefined;
-        if ((!row || row.stopped === 1) && released.get(seat.id) === undefined) settled.add(seat.id);
+        const row = latest.get(seat.id) as { id: string; stopped: number } | undefined;
+        const held = released.all(seat.id) as Array<{ id: string; name: string }>;
+        const latestSettled = !row || row.stopped === 1;
+        if (held.length === 0) {
+          if (latestSettled) settled.add(seat.id);
+        } else if (latestSettled || held.some((session) => session.id === row?.id)) {
+          heldByReleased.set(seat.id, held.map((session) => session.name));
+        }
       } catch {}
     }
-    return settled;
+    return { settled, heldByReleased };
   }
 
   /** OPR.0.7.0.13: once a seat's consumer is confirmed gone, remove the unchanged skill files OpenRig wrote into its
    *  own storage and report what was kept. The records go only with the rig itself, so a restore can rebuild them. */
-  private cleanupSeatSkills(rigId: string, seats: ReadonlyArray<{ id: string; logicalId: string; runtime: string }>, settled: ReadonlySet<string>, result: TeardownResult, external: ReadonlySet<string> = new Set()): void {
+  private cleanupSeatSkills(rigId: string, seats: ReadonlyArray<{ id: string; logicalId: string; runtime: string }>, { settled, heldByReleased }: { settled: ReadonlySet<string>; heldByReleased: ReadonlyMap<string, string[]> }, result: TeardownResult, external: ReadonlySet<string> = new Set()): void {
     const kept: string[] = [];
     for (const seat of seats) {
       // An external seat left running keeps its skills; leftRunning already says so.
       if (external.has(seat.id)) continue;
       if (!settled.has(seat.id)) {
         const paths = seatSkillPaths({ rigId, logicalId: seat.logicalId, runtime: seat.runtime });
-        if (fs.existsSync(paths.root)) result.errors.push(`Seat skills for ${seat.logicalId} kept: its consumer isn't confirmed stopped`);
+        if (!fs.existsSync(paths.root)) continue;
+        const held = heldByReleased.get(seat.id);
+        if (!held) {
+          result.errors.push(`Seat skills for ${seat.logicalId} kept: its consumer isn't confirmed stopped`);
+          continue;
+        }
+        // Only released sessions hold it: each is its owner's, so its skills are kept and released names it, as the
+        // down that released it did.
+        for (const name of held) if (!result.released?.includes(name)) (result.released ??= []).push(name);
         continue;
       }
       try {

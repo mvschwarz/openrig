@@ -1,5 +1,8 @@
 import type Database from "better-sqlite3";
 import { isQueueWait } from "./queue-wait-backoff.js";
+import { isTypedGateBlocker } from "./queue-blocker.js";
+import { isHumanSeatSessionRef } from "./session-name.js";
+import { loadHumanRegistry, resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
 
 export type ParkWakeKind = "watchdog" | "timer" | "blocker";
 export type ParkWakePhase = "armed" | "fired";
@@ -60,7 +63,12 @@ export class QueueWakeRepository {
    *  compiling it each time dominated their cost. It holds no result; every call reads afresh. */
   private lookup: Database.Statement | undefined;
 
-  constructor(private readonly db: Database.Database) {
+  constructor(private readonly db: Database.Database, private readonly isPersonAddress: (value: string) => boolean = (value) => {
+    if (!value.includes("@")) return false;
+    if (isHumanSeatSessionRef(value)) return true;
+    const registry = loadHumanRegistry();
+    return registry.ok && resolveRegisteredHumanAddress(value, registry.entities) !== null;
+  }) {
     this.available = this.db.prepare(
       "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'queue_transition_wakes'",
     ).get() !== undefined;
@@ -91,12 +99,27 @@ export class QueueWakeRepository {
 
   getStatus(qitemId: string): ParkWakeStatus | null {
     if (!this.available) return null;
-    const armed = this.db.prepare(
+    let armed = this.db.prepare(
       `SELECT * FROM queue_transition_wakes
         WHERE qitem_id = ? AND phase = 'armed'
         ORDER BY transition_id DESC LIMIT 1`,
     ).get(qitemId) as WakeRow | undefined;
-    if (!armed) return null;
+    const current = this.db.prepare("SELECT state, blocked_on FROM queue_items WHERE qitem_id = ?")
+      .get(qitemId) as { state: string; blocked_on: string | null } | undefined;
+    if (armed && current?.state === "blocked" && this.db.prepare(
+      "SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_id > ? AND state <> 'blocked' LIMIT 1",
+    ).get(qitemId, armed.transition_id)) armed = undefined;
+    if (armed?.wake_kind === "blocker" && current?.state === "blocked"
+      && (armed.wake_ref !== current.blocked_on || isTypedGateBlocker(armed.wake_ref) || this.isPersonAddress(armed.wake_ref))) armed = undefined;
+    if (!armed) {
+      // Older parks on custom queue IDs have no wake receipt, although the
+      // blocker transition still unparks them. Only an existing live row is
+      // evidence of that continuation; typed gates and missing rows are not.
+      if (current?.state !== "blocked" || !current.blocked_on || current.blocked_on === qitemId
+        || isTypedGateBlocker(current.blocked_on) || this.isPersonAddress(current.blocked_on)
+        || !this.isLive("blocker", current.blocked_on)) return null;
+      return { kind: "blocker", ref: current.blocked_on, phase: "armed", live: true, deliveryStatus: null, unconsumed: false };
+    }
     const fired = this.db.prepare(
       `SELECT * FROM queue_transition_wakes
         WHERE qitem_id = ? AND phase = 'fired' AND wake_ref = ?

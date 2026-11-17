@@ -89,7 +89,8 @@ These facts stay separate on the row:
 - **Wake:** with a trigger, the row's wake result is `wake-accepted:webhook (<url_ref>) answered <status>` when the trigger took the
   ring, `indeterminate:webhook …` when it didn't answer in time, or `failed:webhook …`. Accepted means the tool's trigger
   answered, not that the member read the row.
-  - With no trigger, the result is `unroutable`. The member finds work by reading its own inbox and picks a row up by claiming
+  - With no trigger, the result is `awaiting-pickup: …`: no wake is sent, and the work waits until the member reads its queue (rows
+    recorded before this wording read `unroutable: …`, and both are read the same way). The member finds work by reading its own inbox and picks a row up by claiming
     it, so a row gets no finding of its own. Work it leaves unclaimed past the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default) is listed in one standing notice per member. The notice goes to
     the operator seat when it's a person, else the rows' creator when they all share one, else the operator agent, else the

@@ -1,5 +1,6 @@
-import { continuationChoiceNotes, resumedClaudeArguments, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
+import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode, type ClaudeContinuationLaunch } from "../domain/claude-continuation-launch.js";
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
+import { claudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "../domain/claude-auto-mode.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
@@ -87,6 +88,7 @@ export class ClaudeResumeAdapter {
     claudeMcp?: ClaudeMcp,
     launchWrapper?: readonly string[],
     continuation?: ClaudeContinuationLaunch,
+    claudeAutoMode?: ClaudeAutoModeChoice,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -120,11 +122,12 @@ export class ClaudeResumeAdapter {
     const requiresApiKey = seatToken?.ref.kind === "api-key";
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
     if (seatToken) tokenWarnings.push(...(await this.options.claudeManagedLaunch?.tokenPrecedenceWarnings?.(nodeId!, seatToken.ref) ?? []));
-    const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode,
+    const choice = { claudePermissions, claudeAutoMode, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode,
       // The version gate reads the Claude this resume runs, not PATH's.
       hookBridge: nodeId ? (await this.options.hookBridgeLaunch?.(nodeId, executable ?? undefined)) === true : false };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
-    const appliedLaunch = observeClaudePermission(posture);
+    const autoMode = claudeAutoModeForLaunch(claudeAutoMode);
+    if (autoMode.warning) tokenWarnings.push(autoMode.warning);
     const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
       ...(this.options.restoreReadPolicy?.() ?? {}),
@@ -136,7 +139,7 @@ export class ClaudeResumeAdapter {
       try { wrapperPrefix = this.options.seatLaunchEnvironment.resolveLaunchWrapper(launchWrapper).map(shellQuote).join(" ") + " "; }
       catch { return { ok: false, code: "resume_failed", message: "launch_wrapper unavailable; no agent started." }; }
     }
-    const nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture);
+    const nativeArgs = resumedClaudeArguments(continuation, ["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], resumeToken!, effort, posture, autoMode.block ?? null);
     const cmd = managed ? managed.command(nativeArgs, claudeResumeLaunchEnv(resumeToken!))
       : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}${executable ? `exec ${wrapperPrefix}${shellQuote(executable)}` : "claude"} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(resumeToken!)}`;
 
@@ -145,6 +148,10 @@ export class ClaudeResumeAdapter {
       ? `${claudeResumeLaunchPrefix(resumeToken!)}exec ${wrapperPrefix}${shellQuote(executable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
     if (!managed && continuation?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(continuation, posture, model));
+    // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
+    const sentAutoMode = managed || (continuation?.args && executable) ? sentClaudeAutoMode(nativeArgs) : autoMode.block ?? null;
+    if (sentAutoMode === undefined) tokenWarnings.push("The running Claude's --settings is a file, so this relaunch can't set or check its auto mode block; status shows the block as unknown.");
+    const appliedLaunch = { ...observeClaudePermission(posture), claudeAutoMode: sentAutoMode === undefined ? { unknown: "settings_file" as const } : sentAutoMode };
 
     const assertSelected = beforeNativeDispatch ? () => { if (!beforeNativeDispatch()) throw new Error("Selected history changed before Claude resume input"); } : undefined;
     const beforeManagedInput = beforeNativeDispatch ? () => { assertSelected?.(); managed?.assertCurrent?.(); } : managed?.assertCurrent;

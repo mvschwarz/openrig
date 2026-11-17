@@ -40,6 +40,14 @@ export interface RosterMember extends Reference {
   label?: string;
   /** Why an authored `label` isn't used. The roster still loads, and the member is named by its seat as before. */
   label_problem?: string;
+  /** Its owner says it takes no requests (only `false` is authored; a member takes them by default). Work sent to it is
+   *  still written, and the sender is told so, with `takes_requests_note`, so it can send the work elsewhere. */
+  takes_requests?: false;
+  /** Why it takes no requests, as a sender's assistant can repeat it: the label rule (plain text, at most 200 characters). */
+  takes_requests_note?: string;
+  /** Why an authored `takes_requests` or `takes_requests_note` can't be used. The roster still loads; a note that can't be
+   *  used leaves the flag in place. */
+  takes_requests_problem?: string;
 }
 export interface Roster {
   version: 1;
@@ -109,12 +117,21 @@ export function parseRoster(value: unknown): Roster {
               : null;
     // A label that can't be used never stops the roster loading either: the member is named by its seat instead.
     const badLabel = m.label === undefined ? null : shownTextProblem("label", m.label);
+    // So does a takes-requests flag or note that can't be used: a bad flag reads as taking requests, a bad note leaves the
+    // flag without it, and either says why.
+    const takes = m.takes_requests, takesNote = m.takes_requests_note;
+    const takesProblem = takes !== undefined && typeof takes !== "boolean" ? `takes_requests ${JSON.stringify(takes)} isn't true or false`
+      : takesNote !== undefined && takes !== false ? "takes_requests_note is for a member with takes_requests: false"
+        : takesNote !== undefined ? shownTextProblem("takes_requests_note", takesNote) : null;
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
       use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
       ...(m.hosted === true ? { hosted: true } : {}), ...(m.wake === undefined ? {} : { wake: parseWake(m.wake) }),
       ...(cadenceProblem ? { check_in_problem: cadenceProblem }
         : { ...(cadence === undefined ? {} : { check_in_minutes: cadence as number }), ...(onRequest === true ? { check_in_on_request: true as const } : {}) }),
-      ...(m.label === undefined ? {} : badLabel ? { label_problem: badLabel } : { label: (m.label as string).trim() }) };
+      ...(m.label === undefined ? {} : badLabel ? { label_problem: badLabel } : { label: (m.label as string).trim() }),
+      ...(takes === false ? { takes_requests: false as const } : {}),
+      ...(takes === false && takesNote !== undefined && !takesProblem ? { takes_requests_note: (takesNote as string).trim() } : {}),
+      ...(takesProblem ? { takes_requests_problem: takesProblem } : {}) };
   });
   return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
     curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
@@ -131,16 +148,18 @@ function readRosterFile(file: string): Roster {
   } finally { if (fd !== undefined) closeSync(fd); }
 }
 
-export function readRosters(folder: string): { rosters: Roster[]; warnings: string[] } {
-  const rosters: Roster[] = [], warnings: string[] = [];
+/** The rosters in file-name order, each with its file (`files[i]` is `rosters[i]`'s), and the files that couldn't be read,
+ *  so a caller that takes the first roster's entry can tell when an unread file came first. */
+export function readRosters(folder: string): { rosters: Roster[]; warnings: string[]; files: string[]; unreadable: string[] } {
+  const rosters: Roster[] = [], warnings: string[] = [], files: string[] = [], unreadable: string[] = [];
   let names: string[];
   try { names = readdirSync(folder).filter(n => n.endsWith(".json")).sort(); }
-  catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`] }; }
+  catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`], files, unreadable }; }
   for (const name of names) {
-    try { rosters.push(readRosterFile(join(folder, name))); }
-    catch (error) { warnings.push(`${name}: ${(error as Error).message}`); }
+    try { rosters.push(readRosterFile(join(folder, name))); files.push(name); }
+    catch (error) { warnings.push(`${name}: ${(error as Error).message}`); unreadable.push(name); }
   }
-  return { rosters, warnings };
+  return { rosters, warnings, files, unreadable };
 }
 
 /** The name a person knows a rig's team by: its network roster's (`network-<rig>.json`) authored `name`, or, when there's

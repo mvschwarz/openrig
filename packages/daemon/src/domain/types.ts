@@ -1,4 +1,5 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import type { readSendOutcome } from "./connection-contract.js";
 import type { RuntimeHomeRecordRef } from "./seat-runtime-home-record-types.js";
 
 export interface Rig {
@@ -28,6 +29,7 @@ export interface ContinuityState {
 }
 
 export interface Node {
+  inputRoute?: "typed" | "native";
   id: string;
   rigId: string;
   logicalId: string;
@@ -41,6 +43,10 @@ export interface Node {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; null/absent = none. */
   launchWrapper?: string[] | null;
+  /** The seat's own process limits (spec `process_limits`, #3253): applied to its new launches; null/absent = none. */
+  processLimits?: import("./process-limits.js").ProcessLimits | null;
+  /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
+  processLimitsError?: string;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -129,6 +135,25 @@ export type DeliveryEvidenceAdmitted = { outboxIds: string[] } | "none" | "unkno
 /** A send's own screen check as it reported it, or nulls when none ran. */
 export type DeliveryEvidenceObserved = { outcome: string | null; verified: boolean | null };
 
+/** Facts a runner reports about its own process; launch authentication is not independent native verification. */
+export interface RunnerObservations {
+  session?: { nativeRef: string };
+  model?: { id: string };
+  context?: { usedTokens?: number; windowTokens?: number; usedPercentage?: number; inputTokens?: number; outputTokens?: number };
+}
+export interface RunnerObservation {
+  nodeId: string;
+  sessionRowId: string;
+  generation: string;
+  runId: string;
+  grantId: string;
+  family: "observation";
+  sequence: number;
+  occurredAt: string;
+  receivedAt: string;
+  observations: RunnerObservations;
+}
+
 export type RigEvent =
   | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
@@ -150,6 +175,7 @@ export type RigEvent =
       channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
     }
   | { type: "rig.deleted"; rigId: string }
+  | { type: "node.input_route_changed"; rigId: string; nodeId: string; from: "typed" | "native"; to: "typed" | "native"; reason: string; actor: string | null }
   | { type: "node.added"; rigId: string; nodeId: string; logicalId: string }
   | { type: "node.removed"; rigId: string; nodeId: string }
   | { type: "binding.updated"; rigId: string; nodeId: string }
@@ -166,6 +192,7 @@ export type RigEvent =
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
+  | { type: "node.claude_auto_mode_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only"; replaced?: unknown }
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -190,6 +217,7 @@ export type RigEvent =
   // visible-runtime-evidence preconditions hold. The original failure event
   // is preserved in the log; this event records the audit trail of the upgrade.
   | { type: "restore.outcome_reconciled"; rigId: string; nodeId: string; attemptId: number; from: "failed" | "attention_required"; to: "operator_recovered"; evidence: { tmux: boolean; fgProcess: "claude" | "codex" | string; resumeTokenUsed: boolean; paneState: "usable" } | { source: string; reason?: string; kind?: string; state?: string; runtimeCwdVerified?: boolean } }
+  | ({ type: "agent.runner_observation"; rigId: string } & RunnerObservation)
   | { type: "agent.activity"; rigId: string; nodeId: string; sessionName: string; runtime: string | null; activity: AgentActivity }
   /** What one send's own result says was admitted, written and seen on screen, for the seat and
    *  occupant it was sent to. Additive: it sits beside the send's result and never rewrites it. `written` is what the
@@ -201,7 +229,9 @@ export type RigEvent =
       admitted: DeliveryEvidenceAdmitted;
       written: "submitted" | "submit_only" | "text_only" | "text_submit_unknown" | "uncertain" | "none" | "unknown";
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
-      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null }
+      wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
+      /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
+      outcome: ReturnType<typeof readSendOutcome> }
   /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
    *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
    *  queued messages were handed back to typed delivery because the bridge had no live arm. */
@@ -223,7 +253,7 @@ export type RigEvent =
   | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null; input?: { classification: string; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false } }
   // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
   // from the pi-runner's RPC get_state / typed events, never pane scraping.
-  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" }
+  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" | "launcher" }
   // OPR.0.4.0.22 — append-only audit of a managed resume-token write. Emitted
   // on an operator set (`operator_set`) and on reconcile capture-on-adopt
   // (`reconcile_capture`). NEVER carries the raw token (credential-class);
@@ -285,7 +315,10 @@ export type RigEvent =
        *  session. The seat list marks the seat while this session is its current one. */
       startedWithoutRequired?: string[]; successorSessionId?: string;
       /** #2985: the handover adopted the running successor of an earlier failed one (`rig seat handover --recover`). */
-      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string } }
+      recoveredFrom?: { attemptId: string; failedStep: string; failureCode: string; failedAt: string };
+      /** #3218 item 6: the recovery recorded the conversation its launch named because the successor's current one could
+       *  not be read (Claude's session file for its process); the warning the command printed, kept in the history. */
+      conversationUnconfirmed?: string }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -385,7 +418,7 @@ export type RigEvent =
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string }
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string; actorSession?: string; reason?: string; oldPacketId?: string; newPacketId?: string }
   // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
   // deletion path. Emitted once per workflow_specs cache row removed
   // because its source file disappeared from the scanned workflows folder.
@@ -546,6 +579,8 @@ export interface RestoreResult {
   snapshotSelection?: RestoreSnapshotSelection;
   intendedRoster?: Array<{ nodeId: string; logicalId: string }>;
   excludedNodes?: RestoreExcludedNode[];
+  /** The notice for seats this attempt left as bare shells: who was told, and the seats with no single destination. */
+  harnessNotStarted?: import("./harness-not-started-notice.js").HarnessNotStartedReport;
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
@@ -562,6 +597,8 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
+  stage?: "harness_not_started";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
   /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
@@ -614,6 +651,9 @@ export interface RestoreNodeResult {
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
+  /** #3253: the seat was launched without its requested process limit (the request stays stored; a fresh launch
+   *  applies it). */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
 }
 
 export type RestoreOutcome =
@@ -845,6 +885,8 @@ export interface NodeInventoryEntry {
   resumeCommandLabel?: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
+  /** The stage of this session's own startup failure, read only while startup needs attention (`harness_not_started`: no harness). */
+  latestErrorStage?: string | null;
   // Extended fields
   model: string | null;
   /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
@@ -1087,6 +1129,8 @@ export interface StartupBlock {
 }
 
 export type StartupFailureStage =
+  /** Restore didn't start the harness at all (no startup context or no adapter): the pane holds only a shell. */
+  | "harness_not_started"
   | "permission_selection"
   | "proof_selection"
   | "projection"
@@ -1201,12 +1245,15 @@ export interface LegacyRigSpecNode {
   effort?: string;
   advisor?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1327,6 +1374,7 @@ export interface RigSpecPodMember {
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
@@ -1334,6 +1382,8 @@ export interface RigSpecPodMember {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;
@@ -1626,6 +1676,7 @@ export interface ExpansionPodFragment {
     effort?: unknown;
     codexConfigProfile?: string;
     claudePermissions?: unknown;
+    claudeAutoMode?: unknown;
     claudeToken?: unknown;
     claudeMcp?: unknown;
     codexPermissions?: unknown;
@@ -1685,6 +1736,7 @@ export type ContextAvailability = "known" | "unknown";
 
 export type ContextUnknownReason =
   | "unsupported_runtime"
+  | "window_capacity_unknown"
   | "not_managed"
   | "missing_sidecar"
   | "parse_error"
@@ -1696,7 +1748,7 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | null;
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;

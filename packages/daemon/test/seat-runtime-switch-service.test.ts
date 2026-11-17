@@ -703,6 +703,8 @@ describe("live seat runtime switch", () => {
   it.each([undefined, "none"] as const)("carries retained Claude rules and MCP selection (%s) into the target successor", async claudeMcp => {
     const rules = { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] };
     db.prepare("UPDATE nodes SET claude_permissions_json=? WHERE id=?").run(JSON.stringify(rules), nodeId);
+    const claudeAutoMode = { soft_deny: ["$defaults", "Never push to main"] };
+    db.prepare("UPDATE nodes SET claude_auto_mode_json=? WHERE id=?").run(JSON.stringify(claudeAutoMode), nodeId);
     rigRepo.setNodeClaudeMcp(nodeId, claudeMcp ?? null);
     new NativePermissionStore(db).write(nodeId, { runtime: "codex", mode: "floor" }, "operator", "earlier Codex choice");
     const claude = adapter("claude-code");
@@ -711,7 +713,7 @@ describe("live seat runtime switch", () => {
     expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", permissionMode: "acceptEdits", reason: "switch with retained rules" }))
       .toMatchObject({ ok: true, to: "claude-code" });
     expect(claude.launchHarness).toHaveBeenCalledWith(expect.objectContaining({
-      claudePermissions: rules, permissionMode: "acceptEdits", claudeMcp,
+      claudePermissions: rules, claudeAutoMode, permissionMode: "acceptEdits", claudeMcp,
     }), expect.objectContaining({ name: SEAT }));
   });
 

@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { statSync } from "node:fs";
 import nodePath from "node:path";
 import type { ToolAnnotations } from "@modelcontextprotocol/server";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, remoteDaemonClient, terminalAuthHeaders, type DaemonResponse } from "./client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, operatorAuthHeaders, remoteDaemonClient, terminalAuthHeaders, type DaemonResponse } from "./client.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer, type HostRegistryLoadResult } from "./host-registry.js";
 import { loadHostBindings, type HostBindingsFile } from "./host-bindings.js";
 import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
@@ -154,12 +154,21 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
  *  under a grant. Its roster entry authors what it's good at and its limits; it has no node or pane, and OpenRig doesn't
  *  observe it between calls, so its activity is unknown, never idle. */
 type HostedMember = { session: string; label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string;
-  caveat: string | null; pane: null; activity?: "unknown"; presence?: HostedPresence };
+  caveat: string | null; pane: null; activity?: "unknown"; presence?: HostedPresence } & TakesRequests;
 
 /** A node seat's authored roster entry, merged into its own rig_team entry: how the person knows it, what it's good at,
  *  its limits, and what OpenRig last saw of it, so an assistant can tell a disconnected seat from its own history. */
 type SeatRosterEntry = { label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null;
-  presence?: HostedPresence };
+  presence?: HostedPresence } & TakesRequests;
+
+/** A roster entry whose owner says it takes no requests, with the owner's reason, or why an authored value isn't used. */
+type TakesRequests = { takesRequests?: false; takesRequestsNote?: string; takesRequestsProblem?: string };
+
+function takesRequestsOf(member: RosterMember): TakesRequests {
+  return { ...(member.takes_requests === false ? { takesRequests: false as const } : {}),
+    ...(member.takes_requests_note ? { takesRequestsNote: member.takes_requests_note } : {}),
+    ...(member.takes_requests_problem ? { takesRequestsProblem: member.takes_requests_problem } : {}) };
+}
 
 /** What OpenRig last saw of a hosted member: its last call to this host's MCP server, and the latest ring among its recent
  *  rows. Presence isn't pickup (a claim on a row), and null is unknown, never idle. */
@@ -226,12 +235,60 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
     if (member.host !== host || members.has(member.seat) || seats.has(member.seat)) continue;
     // A label that can't be used says why, so it doesn't read as absent.
     const named = !external ? {} : member.label ? { label: member.label } : member.label_problem ? { label_problem: member.label_problem } : {};
-    const entry = { ...named, roster, capabilities: member.capabilities, useWhen: member.use_when, caveat: member.caveat ?? null };
+    const entry = { ...named, roster, capabilities: member.capabilities, useWhen: member.use_when, caveat: member.caveat ?? null,
+      ...takesRequestsOf(member) };
     const presence = await presenceOf(member.seat);
     if (nodeSeats.has(member.seat)) seats.set(member.seat, { ...entry, ...(presence ? { presence } : {}) });
     else members.set(member.seat, { session: member.seat, ...entry, pane: null, activity: "unknown", ...(presence ? { presence } : {}) });
   }
   return { members: [...members.values()], seats, ...unread };
+}
+
+const TAKES_REQUESTS_UNKNOWN = "Some rosters couldn't be read, or this daemon's host id isn't known yet, so whether this seat takes requests isn't known.";
+
+/** The node an address names, by both names rig_team matches a roster entry with: its session and its logical address
+ *  (pod-member@rig). Null when no node of that rig has the name (a hosted member, or no such seat); "unknown" when the
+ *  rig or its nodes couldn't be read. */
+type NodeNames = { session: string | null; address: string } | null | "unknown";
+
+/** What a sender is told when the seat a new item went to takes no requests, by the same roster read as rig_team: the item
+ *  is written as asked, and this says so with the owner's note, so the sender's assistant can send the work elsewhere.
+ *  A roster that can't be read, a host id not known yet, or a node that can't be read never stops the write: it says that
+ *  isn't known. Null for a seat that takes requests, or is on no roster. */
+async function requestsAdvisoryFor(folder: string, seat: string, selfHostId: () => Promise<string | null>,
+  nodeOf: () => Promise<NodeNames>, list: { offered: boolean; nodeEntries: boolean }): Promise<Record<string, unknown> | null> {
+  const unknown = { seat, takesRequests: "unknown", message: TAKES_REQUESTS_UNKNOWN };
+  try {
+    statSync(folder);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : unknown;
+  }
+  const { rosters, warnings, files, unreadable } = readRosters(folder);
+  // A node's entry can be authored under its other name, so every entry in the seat's rig is a candidate.
+  const rig = seat.slice(seat.lastIndexOf("@") + 1);
+  const inRig = rosters.flatMap((roster, i) => roster.members.map((member) => ({ member, file: files[i]! })))
+    .filter(({ member }) => member.seat === seat || member.seat.endsWith(`@${rig}`));
+  if (inRig.length === 0) return warnings.length > 0 ? unknown : null;
+  const host = await selfHostId();
+  if (!host) return unknown;
+  const here = inRig.filter(({ member }) => member.host === host);
+  if (here.length === 0) return warnings.length > 0 ? unknown : null;
+  const node = await nodeOf();
+  if (node === "unknown") return unknown;
+  // As rig_team applies an entry to a seat: its session's entry, else its logical address's, the first roster by file name
+  // supplying each. An address no node has is matched as written.
+  const names = node ? [node.session, node.address].filter((name): name is string => !!name) : [seat];
+  const at = names.findIndex((name) => here.some(({ member }) => member.seat === name));
+  if (at < 0) return warnings.length > 0 ? unknown : null;
+  const { member, file } = here.find((entry) => entry.member.seat === names[at])!;
+  // A roster that couldn't be read may hold the entry that wins: any one, for a name ahead of this one, or one ahead of
+  // this entry's file, for the same name.
+  if ((at > 0 && unreadable.length > 0) || unreadable.some((name) => name < file)) return unknown;
+  if (member.takes_requests !== false) return null;
+  // rig_team shows a hosted member's flag to every caller, and a node seat's only to an external one.
+  const shown = list.offered && (list.nodeEntries || node === null);
+  return { seat, takesRequests: false, ...(member.takes_requests_note ? { takesRequestsNote: member.takes_requests_note } : {}),
+    message: `${seat}'s roster entry says it takes no requests, so it isn't expected to pick this up. The item was written as asked. To get the work done, send it to another seat${shown ? "; rig_team shows which take requests" : ""}.` };
 }
 
 type SliceEntry = { name?: string; missionId?: string | null; displayName?: string; status?: string; description?: string | null; qitemCount?: number; lastActivityAt?: string | null };
@@ -384,6 +441,7 @@ function withoutDaemonLinkedRows<T>(row: T): T {
   delete fields.successorsTruncated;
   delete fields.successorNote;
   delete fields.answers;
+  delete fields.answersFrom;
   return fields as T;
 }
 
@@ -570,7 +628,7 @@ export const PLAIN_WORDING: Readonly<Record<string, { title: string; replaces: s
   rig_queue_show: { title: "Show one request", replaces: "Read one queue item and its transitions.",
     with: "Shows one request, who picked it up, and its answer." },
   rig_queue_create: { title: "Send a request", replaces: "Hand a task to another seat as a durable queue item.",
-    with: "Sends a request to another assistant on your team." },
+    with: "Sends a request to another assistant on your team. When it's picked up depends on that assistant: rig_team shows how each one checks for requests, where that's known." },
   rig_queue_claim: { title: "Pick up a request", replaces: "Claim a queue item assigned to this seat before working on it.",
     with: "Marks a request addressed to this assistant as picked up, so others see it's being worked on. Do it before working on the request." },
   rig_queue_update: { title: "Answer a request", replaces: "Update a queue item: add a note, block it, close it, or reopen a closed one.",
@@ -579,7 +637,7 @@ export const PLAIN_WORDING: Readonly<Record<string, { title: string; replaces: s
     replaces: "Read a finished item's artifact (its evidenceRef), or a named file, through the daemon's shared roots (OPENRIG_FILES_ALLOWLIST), as text:",
     with: "Reads a file attached to a request. It returns text:" },
   rig_team: { title: "Show my team", replaces: "Show a rig's team.",
-    with: "Shows the assistants on your team, each one's address for sending it a request, and which one leads." },
+    with: "Shows the assistants on your team, each one's address for sending it a request, and which one leads. Send to an address exactly as shown." },
   rig_whoami: { title: "Show this connection", replaces: "Show which OpenRig seat this server acts as: ",
     with: "Shows which assistant this connection is and which team it belongs to. It answers with " },
 };
@@ -726,7 +784,7 @@ function askWhichAssistant(canList: boolean, frontDoor: boolean): string {
     "If the list shows the chosen one detached or stopped, or a connected assistant with no check-in yet or overdue, say so before sending and ask whether to send it anyway.",
     "If the list says the chosen one's person is no longer on the team, don't send; tell your person and ask whether to send it to someone else.",
     ...(frontDoor ? ["When you send to a running team seat, tell your person that seat will pick it up on its own."] : []),
-    "When you send to another connected assistant, tell your person it will be picked up the next time that assistant's person opens it, or on a schedule they've set up.",
+    "When you send to another connected assistant, tell your person how it picks requests up as the list says (when its person asks it, or on its check-in schedule); if the list doesn't say, say that's unknown, and don't promise a time.",
     ...(frontDoor ? ["If you sent it anyway, tell your person it waits until that one is back."] : []),
     "If your person names one clearly, or says to send it anyway to one that isn't connected, go ahead without asking again.",
     "If your person still asks to send to one whose person is no longer on the team, tell them it can't be delivered: requests to an assistant whose person is no longer on the team are closed unanswered.",
@@ -747,10 +805,12 @@ const FRONT_DOOR_INSTRUCTIONS = [...SHARED_INSTRUCTIONS, FRONT_DOOR_WORKFLOW].jo
 // An external caller's first paragraph says what the connection is for, on its own: a client may show the model only the
 // start (ChatGPT asks that the first 512 characters stand alone). The paragraphs after it say how.
 const EXTERNAL_PURPOSE = "This connection links you to the person's OpenRig team, AI agents who do work for them. Give the team a task with rig_queue_create and keep its qitemId; read its progress and answer with rig_queue_show; list your requests with rig_queue_list; read files it attached with rig_artifact_read. The work carries on after this chat ends.";
+/** How an external caller keeps one request one item, for a grant that can create and read back what it sent. */
+const RETRY_RULE = "Acceptance is not completed work. Choose a qitemId and pass it to rig_queue_create, so an uncertain create (a timeout, or an error after sending) can be checked: read that same qitemId with rig_queue_show first, and create again only with that same id, never a new one.";
 const EXTERNAL_HOW = [
   "This connection acts as the caller its grant names, and the team records your requests as that caller's. Use only the tools this connection offers.",
   "To ask the connected team to do work, use rig_queue_create with the task in body. You may omit destination to use the receiver configured by the server operator. If no receiver is available, ask the operator to configure it; don't guess an address. An explicit destination still must be within this connection's grant.",
-  "Acceptance is not completed work. If a create times out, check that same qitemId before retrying and reuse it; never retry with a new id. Use revises for a requested revision of earlier work, preserving its lineage. rig_queue_list shows your own work, including an empty list before your first request.",
+  `${RETRY_RULE} Use revises for a requested revision of earlier work, preserving its lineage. rig_queue_list shows your own work, including an empty list before your first request.`,
   "rig_artifact_read reads within the shared roots and items this connection may reach.",
 ];
 const EXTERNAL_INSTRUCTIONS = [
@@ -769,6 +829,7 @@ const EXTERNAL_PERSON_INSTRUCTIONS = [
  *  only the tools that grant offers. */
 function externalInboxInstructions(tools: ReadonlySet<string>): string {
   return [...sharedInstructions((tool) => tools.has(tool)),
+    ...(tools.has("rig_queue_create") && tools.has("rig_queue_show") ? [RETRY_RULE] : []),
     `Items addressed to your seat are yours${tools.has("rig_queue_list") ? ": rig_queue_list with owned set lists them" : ""}. For each, claim it (rig_queue_claim), do it, then close it done with closure reason no-follow-on and the answer in resolution (rig_queue_update); the sender reads that answer on the same item. A message is an item too: read it and close it done, with your reply in resolution when it needs one; its sender reads that reply on the same item. Nothing promises to wake you, so check your items again.`,
   ].join("\n");
 }
@@ -979,6 +1040,32 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     return options === undefined ? target.client.post<T>(path, body) : target.client.post<T>(path, body, options);
   };
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
+  const selfHostId = (): Promise<string | null> => client.get("/healthz")
+    .then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null);
+  /** The node a seat address names in its rig, by session or logical address, as rig_team names its seats. */
+  const nodeOf = async (seat: string): Promise<NodeNames> => {
+    const rigName = seat.slice(seat.lastIndexOf("@") + 1);
+    const rig = await rigIdFor(client, rigName);
+    if ("content" in rig) return "unknown";
+    if (!rig.resolved) return rig.known ? "unknown" : null;
+    const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
+    if (nodes.status >= 400 || !Array.isArray(nodes.data)) return "unknown";
+    for (const node of nodes.data as Array<{ logicalId?: unknown; canonicalSessionName?: unknown }>) {
+      const address = typeof node.logicalId === "string" ? `${node.logicalId.replace(".", "-")}@${rigName}` : null;
+      const session = typeof node.canonicalSessionName === "string" ? node.canonicalSessionName : null;
+      if (address && (session === seat || address === seat)) return { session, address };
+    }
+    return null;
+  };
+  /** A write's answer, with what its seat's roster entry says about taking requests when that applies. */
+  const withRequestsAdvisory = async (res: DaemonResponse, seat: unknown, remote: boolean): Promise<DaemonResponse> => {
+    if (res.status >= 400 || remote || typeof seat !== "string" || !res.data || typeof res.data !== "object") return res;
+    // The write has landed: finding or reading the roster never turns it into an unknown outcome.
+    const advisory = await Promise.resolve()
+      .then(() => requestsAdvisoryFor(rostersFolder(), seat, selfHostId, () => nodeOf(seat), { offered: offered("rig_team"), nodeEntries: !!access?.external }))
+      .catch(() => ({ seat, takesRequests: "unknown", message: TAKES_REQUESTS_UNKNOWN }));
+    return advisory ? { ...res, data: { ...res.data, requestsAdvisory: advisory } } : res;
+  };
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
   // With no seat (none configured, or one an app left unfilled), messages, new tasks and chat still go through, as an
   // unknown sender. Its label is this server's own and no seat's, so two unknown callers never count as one author (a
@@ -1571,7 +1658,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_create")) server.registerTool(
     "rig_queue_create",
     {
-      ...worded("rig_queue_create", "Hand a task to another seat as a durable queue item. Returns its qitemId: read the answer later with rig_queue_show. If the call times out, check rig_queue_show with the same qitemId before retrying; never retry with a new id. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", ADDITIVE),
+      ...worded("rig_queue_create", `Hand a task to another seat as a durable queue item. ${offered("rig_queue_show")
+        ? "Returns its qitemId: follow the request and its answer with rig_queue_show. Pass a qitemId you choose, so an uncertain create can be checked: if the call times out or errors after sending, check rig_queue_show with that qitemId first, and retry only with the same id, never a new one."
+        : "Returns its qitemId. Pass a qitemId you choose, and retry an uncertain create (a timeout, or an error after sending) only with that same id, never a new one: a retry of one that landed returns the stored item."} When the seat's roster entry says it takes no requests, the item is still written and requestsAdvisory says so, with the owner's note. To ask for a revision of earlier work, name it in revises: the new item opens with 'Revision of <id>' and records it in its chainOfRecord. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.`, ADDITIVE),
       inputSchema: z.object({
         destination: access?.external
           ? z.string().optional().describe("Destination seat: member@rig, or its name alone as the team shows it (e.g. workshop-lead) within this connection's team; omit to use the connected team's configured receiver")
@@ -1581,7 +1670,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         tags: z.array(z.string()).optional().describe("Tags, e.g. mission:<name>"),
         priority: z.string().optional().describe("Priority (as rig queue create --priority)"),
         tier: z.string().optional().describe("Tier (as rig queue create --tier)"),
-        qitemId: z.string().optional().describe("Request id to reuse when retrying the same create (default: a new id)"),
+        qitemId: z.string().optional().describe("A request id you choose, unique to this request (for example qitem- and random letters), so an uncertain create can be checked by it; pass the same one to retry, never a new one (default: a new id)"),
         revises: z.string().optional().describe("The qitemId of the work this asks to revise"),
         alert: z.boolean().optional().describe("For an ask to a person that's urgent: something only they can do, or an approval whose wait costs now (as rig queue create --alert). It stands out in Slack. Without it the ask still posts to Slack unless the person's Slack subscription is urgent-only, in which case it waits on Steering and the TUI"),
         host: z.string().min(1).optional().describe("Act on a REGISTERED remote host's daemon instead of this one (rig host list shows the hosts; as --host on the matching rig verb); a write there names this server's seat (rig_whoami) as its sender, as a local write does"),
@@ -1696,7 +1785,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // An unknown sender has no return address, so it says how to follow the task.
         const sent = note && res.status < 400 && res.data && typeof res.data === "object" ? { ...res, data: { ...res.data,
           unknownSender: { label: unknownSender, followUp: `No return address: read this task with rig_queue_show and qitemId ${id}${target.remote && target.name ? ` and host ${target.name}` : ""}.` } } } : res;
-        return mapResult(view && sent.status < 400 ? { ...sent, data: projectForExternal(sent.data, view) } : sent, undefined, { structured: true });
+        // A seat whose roster entry says it takes no requests still gets the item, and the answer says so, on a retry too.
+        return mapResult(await withRequestsAdvisory(view && sent.status < 400 ? { ...sent, data: projectForExternal(sent.data, view) } : sent,
+          destination, target.remote), undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
         const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id}${target.remote && target.name ? ` and host ${target.name}` : ""} before retrying, and retry only with that same qitemId.`;
@@ -1813,7 +1904,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         // An authenticated caller sees only the rows in its scope, whatever the filters matched.
         if (scope && res.status < 400 && Array.isArray(res.data)) {
           const view = externalView(scope);
-          const rows = res.data.filter((row) => scope.item(row));
+          const rows = res.data.filter((row) => scope.item(row)).map(withoutDaemonLinkedRows);
           const result = mapResult({ ...res, data: view ? rows.map((row) => projectForExternal(row, view)) : rows }, undefined, { structured: true });
           // An external caller's empty inbox says so in a line its assistant can repeat, naming the team as the person
           // knows it. The rows keep their shape; the line rides beside them, only when nothing narrowed the list. The
@@ -1856,7 +1947,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_queue_update")) server.registerTool(
     "rig_queue_update",
     {
-      ...worded("rig_queue_update", "Update a queue item: add a note, block it, close it, or reopen a closed one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps; note records why this transition happened. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", DESTRUCTIVE),
+      ...worded("rig_queue_update", "Update a queue item: add a note, block it, close it, or reopen a closed one. To answer a task, close it with state done, a closure reason and the answer in resolution, which the item keeps and its sender reads on this same item; note records why this transition happened. host needs the daemon's owner (the stdio server, an HTTP owner token, or unauthenticated loopback), not an ordinary scoped grant.", DESTRUCTIVE),
       inputSchema: z.object({
         qitemId: z.string().describe("The queue item to update"),
         state: z.string().optional().describe("New state (e.g. in-progress, blocked, done)"),
@@ -1935,6 +2026,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     async ({ cursor, start, rigId, nodeId, limit }) => {
       try {
         const params = new URLSearchParams();
+        const ignored = [cursor === "" ? "cursor" : undefined, nodeId === "" ? "nodeId" : undefined, rigId === "" ? "rigId" : undefined]
+          .filter((name): name is string => name !== undefined);
         if (rigId) {
           const rig = await rigIdFor(client, rigId);
           if ("content" in rig) return rig;
@@ -1948,7 +2041,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (start) params.set("start", start);
         if (nodeId) params.set("nodeId", nodeId);
         if (limit !== undefined) params.set("limit", String(limit));
-        return mapResult(await client.get(`/api/telemetry/v1/events?${params.toString()}`));
+        const response = await client.get<Record<string, unknown>>(`/api/telemetry/v1/events?${params.toString()}`);
+        if (response.status < 400 && ignored.length) {
+          return mapResult({ ...response, data: { ...response.data, note: `Ignored empty optional argument(s): ${ignored.join(", ")}.` } });
+        }
+        return mapResult(response);
       } catch (err) {
         return caught(err);
       }
@@ -2015,7 +2112,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_team")) server.registerTool(
     "rig_team",
     {
-      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by.", READ_ONLY),
+      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by. An entry with takesRequests: false is one whose owner says it takes no requests (takesRequestsNote says why): work sent to it is written, and isn't expected to be picked up.", READ_ONLY),
       inputSchema: z.object({
         rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
@@ -2076,8 +2173,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
             ...(typeof row.reason === "string" ? { reason: row.reason } : {}) };
         };
         const hosted = await hostedMembersOf(rostersFolder(), rigName, nodeSeats,
-          async () => inventory.find((seat) => typeof seat.hostSelfId === "string")?.hostSelfId
-            ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null),
+          async () => inventory.find((seat) => typeof seat.hostSelfId === "string")?.hostSelfId ?? await selfHostId(),
           async (seat) => {
             // An external caller's own seat is listed so it can see its address, without a line about its own activity.
             if (ownNames.has(seat)) return null;
@@ -2422,6 +2518,14 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           const partial = recorded.length || unknown ? { recorded, ...(indeterminate ? { indeterminate } : {}), notRecorded } : {};
           return refuse(code, `${why} ${said}`.trim(), { ...partial, ...extra });
         };
+        // The daemon's operator gate guards this route (401 without it on a daemon started with OPENRIG_AUTH_BEARER_TOKEN).
+        // The credential is the operator one the CLI's other operator writes send (operatorAuthHeaders: this process's
+        // OPENRIG_AUTH_BEARER_TOKEN, else the terminal's own), on this call only, never on the client: the person's other
+        // calls and the seat's never carry it, and the actor stays the person's session. A value that is not one line of
+        // visible ASCII is not sent: fetch would reject it quoting the value, and that error would reach this tool's caller.
+        const operatorHeaders = operatorAuthHeaders();
+        const operatorAuth = /^Bearer [\x21-\x7E]+$/.test(operatorHeaders.Authorization ?? "")
+          ? { headers: operatorHeaders } : undefined;
         let expected = revision;
         let next = 0;
         let fresh = 0;
@@ -2431,7 +2535,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           try {
             res = await personClient.post<Record<string, any>>("/api/mission-control/action", {
               verb, qitemId, ...steps[next], expectedRevision: expected, auditNotes: { operationId: `${operation}:${next}`, ...route },
-            });
+            }, operatorAuth);
           } catch (err) {
             // No answer from the daemon (a timeout, a body that isn't JSON): this step may or may not have landed.
             const failed = caught(err).structuredContent as { code: string; message: string };
@@ -2576,9 +2680,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         return caught(err);
       }
       try {
-        return mapResult(await hostPost(target, `/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
+        return mapResult(await withRequestsAdvisory(await hostPost(target, `/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
           toSession: to, body, transitionNote: note, summary, tags, priority, evidenceRef,
-        }), undefined, { structured: true });
+        }), to, target.remote), undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
         const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${qitemId}${target.remote && target.name ? ` and host ${target.name}` : ""} before retrying. If it reads handed off, its successor is the new item, so don't hand it off again.`;

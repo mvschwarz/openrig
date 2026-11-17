@@ -63,8 +63,9 @@ The daemon reads two tokens from its environment at start:
 A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
 `GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
 or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it. `rig host
-approve|deny` and the TUI's answers to asks send `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also
-takes `--bearer`), and otherwise the terminal token; refused for want of it, they say what to set.
+approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` (on the answer's writes only) send
+`OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
+refused for want of it, `rig host` and the TUI say what to set.
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
@@ -180,7 +181,8 @@ With `needs-me.read` supported:
   `revision` and `about`. `revision` is the request's opaque decision revision: the same value as that row's
   `decisionRevision`, and what an answer can name as `expectedRevision` so it applies only to the version the person
   read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
-  about the open rows blocked on it (at most 100; empty when none are recorded).
+  about the open rows blocked on it (the newest 100, with `aboutTruncated: true` when there are more). An empty `about`
+  isn't proof that it's about nothing: a request that names it only in its text isn't counted.
 - **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
   `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
   already reflected in it. A click that records or changes an answer emits `queue.answer_recorded` even while the set
@@ -192,7 +194,49 @@ With `needs-me.read` supported:
   footer. `episode` names the park an answer belongs to, or is null. `recordedIdentity` is the identity provenance
   recorded when the answer row was created. An answer row's own read has `replyTo`, the request it answers. A partial
   set of choices stays on the request's `humanAnswers` until the whole set is returned. A runner's permission request
-  or a host pairing request is answered in place, with no answer row.
+  or a host pairing request is answered in place, with no answer row. `answersFrom: "this-daemon"` says where they were
+  read: an answer another host holds isn't among them, so an empty list isn't proof that nobody answered.
+
+### What a connection supports, and what happened to a delivery (`member-connection.v1`)
+
+`GET /api/member-connection/capabilities` lists each delivery route this daemon declares, with what it supports in four
+groups: `observe` (`dialog`, `turnStart`), `control` (`submit`), `nativeIdentity` (`sessionId`, `resume`) and
+`continuity` (`managedCompaction`, `restorePacketConfirmation`, `fork`). The routes are `typed` (OpenRig types into the
+member's terminal; capabilities by runtime, with `*` for any other), `codex-queue` (Codex's own queue command), a hosted
+member's `hosted-trigger`, and a person's `gateway`. A route with `armed: false` is declared but not used: nothing is
+delivered on it until a setting arms it.
+
+Each capability reads `supported`, `not-supported`, `unavailable` (the route has it, but this member can't use it now,
+such as a seat with no session recorded as current), `not-applicable` (it means nothing on this route) or `unknown`. A
+missing key means `unknown`. None of them means idle or success, and a declaration isn't readiness: whether a seat has a
+current session comes from what OpenRig has recorded, not from looking at its pane or process. A daemon without the route (HTTP 404) predates the contract: treat
+every capability as unknown and keep using what works today.
+
+`?session=<address>` adds `member`: `{ member, route, runtime, capabilities, reason? }` for the member that address
+names: a person the human registry resolves (or the terminal person's own `human@host`), a hosted member, or a seat. An
+address shaped like a person's, such as `<id>@external`, is a person only when the registry resolves it. A person is
+resolved first, so when the registry can't be read, any address it could resolve to a person (`<id>@external`, or any
+`member@rig`, since a person's id can be spelled that way) comes back unknown, even if a seat or hosted member has that name. That
+answer, and an address none of them has, comes back with `route: null`, every capability `unknown`, and the reason.
+
+Each typed send also records what happened to it, in the daemon's `transport.delivery_evidence` event, as
+`outcome: { fact, reporter, route }`. `fact` is `accepted` (typed and submitted, with `renderVerified: true` when
+the screen showed it), `held`, `not-delivered`, `failed-effect-unknown` or `unknown`. A prompt answer typed without Enter on a send that
+succeeded is `unknown`: whether the prompt took it isn't known; if the send failed after typing, it's
+`failed-effect-unknown`. `reporter` says who established it.
+None of them means the member read the work: picking it up is a claim on the row.
+
+What reads these declarations:
+- **A handover's packet.** Only a runtime declared with `continuity.restorePacketConfirmation` has its input box read
+  until the restore or priming packet leaves it. On any other runtime the handover's result carries
+  `restorePacket: { status: "accepted", reason }`: typed and submitted, not seen consumed. `sideEffects.startupContextDelivered`
+  stays `true` there for existing readers and means the same thing, accepted; read `restorePacket` for what was seen.
+- **A send's dialog check.** After a fresh hook, the dialog and picker checks run before typing only on a runtime
+  declared with `observe.dialog`. The other screen checks before a send don't read the declaration.
+- **A watchdog's history.** When a send returns, the watchdog's history records its `deliveryFact` and, when the screen
+  showed it, `deliveryRenderVerified: true`. Exceptions and receipt reconciliation may have no fact; absence of a fact
+  or render flag establishes no positive delivery or verification claim. These are outcome words, not a capability
+  gate: the reminder's status, receipts and retries don't change with them.
 
 ## Route details
 
@@ -208,8 +252,8 @@ With `needs-me.read` supported:
   seats, newest first; `?senderSession=<session>` still returns one sender's. One of the two is required; with
   both, `senderSession` is used and `rig` is ignored. `limit` defaults to 100. No event is sent when a message is delivered, so read this list to see delivery
   states.
-- **`GET /api/queue/recent-transitions`** returns at most 20 rows. A positive `limit` above 20 is capped at 20;
-  a missing, zero, negative or unparseable `limit` means 20.
+- **`GET /api/queue/recent-transitions`** returns at most 1,000 rows. A positive `limit` above 1,000 is capped at 1,000;
+  a missing, zero, negative or unparseable `limit` defaults to 20.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
   marked it from the sender identity, not from the body.
 - **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body
@@ -278,18 +322,23 @@ These routes use the existing terminal bearer token.
 
 1. Read `GET /api/startup/<rigId>/nodes/<nodeId>/original?snapshotId=<id>&historySessionId=<id>`.
    The preview uses that explicitly retained usable snapshot, even when a newer snapshot exists.
-   It returns `revision`, the selected history and current model, effort, cwd, permission and runtime-home
-   provenance. `accountHome.authentication: "unconfirmed"` means that the home selection is configuration,
-   not proof of an authenticated account. A `daemon_environment` home is the daemon fallback, not a seat setting;
+   It returns `revision`, the selected history and current model, effort, cwd and permission.
+   `settingsSource.accountHome` describes the seat's current effective home configuration;
+   `settingsSource.runtimeHome.uses` describes the home bound to this reviewed attempt, which can differ.
+   Neither home selection proves an authenticated account; `accountHome.authentication` remains
+   `"unconfirmed"`. A `daemon_environment` home is the daemon fallback, not a seat setting;
    `native_default` means the runtime default.
 2. POST to the same `/original` path, without query fields, with `action: "resume"`, `snapshotId`,
    `historySessionId`, that `revision`, an `operationId` UUID, and `expectedOriginal` containing the banked
    `nodeId`, `sessionName`, `runtime` (`claude-code` or `codex`) and `nativeId`.
    Keep native conversation IDs in the private bank and request body. They are not returned in diagnostics.
 
-The operation keeps the current selected launch choices. Its original-only native effect uses the retained
-history and existing selected-history ownership checks. A positively established matching original already
-running returns `code: "already_running_original"` and `nativeEffect: false`. A confirmed resume returns
+The operation keeps the current model, cwd, effort and permission choices. The reviewed
+`settingsSource.runtimeHome.uses` plan can first apply the selected original's recorded home as a new
+revision before launch, rather than using the current home reported by `settingsSource.accountHome`.
+Its original-only native effect uses the retained history and existing selected-history ownership checks.
+A positively established matching original already running returns `code: "already_running_original"`
+and `nativeEffect: false`. A confirmed resume returns
 `code: "resumed"`, with `sourceSessionId`, `resultSessionId` and `operationId`.
 
 An unavailable source, changed selection, different occupant, restoring-only result or unconfirmed native

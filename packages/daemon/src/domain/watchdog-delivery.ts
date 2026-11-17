@@ -2,7 +2,8 @@ import { OutboxHandlerError, type OutboxHandler } from "./outbox-handler.js";
 import { withWatchdogReceipts } from "./watchdog-delivery-receipts.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { PARKED_OWNER_COMPACTION_PENDING, PARKED_OWNER_POLICY_NAME } from "./policies/parked-owner-consumer.js";
-import type { SessionTransport } from "./session-transport.js";
+import { writtenFact, type SessionTransport } from "./session-transport.js";
+import { readSendOutcome } from "./connection-contract.js";
 import {
   formatWatchdogDeliveryMessage,
   type DeliveryFn,
@@ -44,10 +45,11 @@ export function makeWatchdogDeliver(deps: {
         // Typed, never queued for a seat's hook bridge: the watchdog's receipts and accounting read only a typed outcome,
         // so a queued reminder would read delivered before anything took it (#3270).
         { actorSession: "watchdog@system", openrigNotice: true, auditPointer: source.jobId, noHookBridge: true, ...(beforeWrite ? { beforeWrite } : {}) });
-      if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
+      const fact = readSendOutcome(result, writtenFact(result));
+      if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted, fact };
       return result.ok
-        ? { status: "ok", continuityActionCompleted }
-        : { status: "failed", error: result.error, sent: result.sent, ...(result.reason ? { transportReason: result.reason } : {}),
+        ? { status: "ok", continuityActionCompleted, fact }
+        : { status: "failed", fact, error: result.error, sent: result.sent, ...(result.reason ? { transportReason: result.reason } : {}),
           ...(result.inputPhase ? { inputPhase: result.inputPhase } : {}),
           ...(result.sent === false && result.inputPhase === "not_reached" && result.noInputCode ? { code: result.noInputCode } : {}), continuityActionCompleted };
     } catch (err) {

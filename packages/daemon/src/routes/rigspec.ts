@@ -10,7 +10,7 @@ import { RigSpecCodec } from "../domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
 import { RigSpecSchema } from "../domain/rigspec-schema.js";
 import { rigPreflight } from "../domain/rigspec-preflight.js";
-import { RigNotFoundError } from "../domain/errors.js";
+import { ExportRefusedError, RigNotFoundError } from "../domain/errors.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
 import { execRuntimeProbe } from "../adapters/runtime-probe-exec.js";
 import { RigSpecParseError, validateRigSpecImport } from "../domain/spec-validation-service.js";
@@ -26,6 +26,15 @@ function getDeps(c: { get: (key: string) => unknown }) {
     podInstantiator: c.get("podInstantiator" as never) as PodRigInstantiator,
     rigRepo: c.get("rigRepo" as never) as RigRepository,
   };
+}
+
+/** What an export leaves out, for the X-OpenRig-Export-Warnings header on both formats. */
+function exportWarnings(exporter: RigSpecExporter, rigId: string, podAware: boolean): Record<string, string> {
+  const warnings: Array<{ logicalId: string; reason: string }> = [
+    ...(podAware ? exporter.memberStartupNotCarried(rigId) : []),
+    ...exporter.claudeAutoModeNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "claude_auto_mode can't be read; not carried" })),
+  ];
+  return warnings.length ? { "X-OpenRig-Export-Warnings": encodeURIComponent(JSON.stringify(warnings)) } : {};
 }
 
 // GET /api/rigs/:rigId/spec -> YAML
@@ -45,11 +54,13 @@ export function handleExportYaml(c: Context): Response {
       .map((seat) => `# Not carried: ${seat}'s launch additions (agent_file, append_system_prompt_file, plugin_dirs); add them back by hand.\n`);
     notCarried.push(...exporter.claudeMcpNotCarried(rigId)
       .map((seat) => `# Not carried: ${seat}'s claude_mcp: none; add it again if this exported copy is switched back to Claude.\n`));
+    notCarried.push(...exporter.claudeAutoModeNotCarried(rigId)
+      .map((seat) => `# Not carried: ${seat}'s claude_auto_mode, because the saved block can't be read; set it again with rig seat set-permissions --auto-mode.\n`));
     const memberStartupOmissions = isPodAware ? exporter.memberStartupNotCarried(rigId)
       .map(({ logicalId, reason }) => `# Member startup not carried for ${JSON.stringify(logicalId)} (${reason}); inspect the source before importing.\n`) : [];
     const yaml = notCarried.join("") + memberStartupOmissions.join("") + serialized;
     const startupLayers = rigRepo.getRigStartupLayers(rigId);
-    const headers: Record<string, string> = { "Content-Type": "text/yaml" };
+    const headers: Record<string, string> = { "Content-Type": "text/yaml", ...exportWarnings(exporter, rigId, isPodAware) };
     if (startupLayers?.root) {
       headers["X-Rig-Root"] = encodeURIComponent(startupLayers.root);
     }
@@ -60,6 +71,9 @@ export function handleExportYaml(c: Context): Response {
   } catch (err) {
     if (err instanceof RigNotFoundError) {
       return c.json({ error: err.message }, 404);
+    }
+    if (err instanceof ExportRefusedError) {
+      return c.json({ error: err.message, code: "export_refused" }, 409);
     }
     return c.json({ error: "Export failed" }, 500);
   }
@@ -72,11 +86,13 @@ export function handleExportJson(c: Context): Response {
 
   try {
     const spec = exporter.exportRig(rigId);
-    const omissions = "pods" in spec ? exporter.memberStartupNotCarried(rigId) : [];
-    return c.json(spec, 200, omissions.length ? { "X-OpenRig-Export-Warnings": encodeURIComponent(JSON.stringify(omissions)) } : {});
+    return c.json(spec, 200, exportWarnings(exporter, rigId, "pods" in spec));
   } catch (err) {
     if (err instanceof RigNotFoundError) {
       return c.json({ error: err.message }, 404);
+    }
+    if (err instanceof ExportRefusedError) {
+      return c.json({ error: err.message, code: "export_refused" }, 409);
     }
     return c.json({ error: "Export failed" }, 500);
   }

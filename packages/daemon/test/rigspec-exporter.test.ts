@@ -19,7 +19,7 @@ import { LegacyRigSpecCodec as RigSpecCodec } from "../src/domain/rigspec-codec.
 import { RigSpecSchema as PodRigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { RigSpecCodec as PodRigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
-import { RigNotFoundError } from "../src/domain/errors.js";
+import { ExportRefusedError, RigNotFoundError } from "../src/domain/errors.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
@@ -239,6 +239,23 @@ describe("RigSpecExporter", () => {
     const parsed = RigSpecCodec.parse(yaml);
     const result = RigSpecSchema.validate(parsed);
     expect(result.valid).toBe(true);
+  });
+
+  it("#3253: exports a seat's process limits, and refuses (naming that seat) when its stored value can't be read", () => {
+    const rig = rigRepo.createRig("legacy-limits-export");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "codex", cwd: "/repo", processLimits: { tasksMax: 512 } });
+    rigRepo.addNode(rig.id, "other", { runtime: "codex", cwd: "/repo" });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "worker")?.processLimits).toEqual({ tasksMax: 512 });
+    expect(exported.nodes.find((n) => n.id === "other")?.processLimits).toBeUndefined();
+    db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", node.id);
+    // an export that silently left it out would drop the request on re-import
+    expect(() => exporter.exportRig(rig.id)).toThrow(ExportRefusedError);
+    expect(() => exporter.exportRig(rig.id)).toThrow(new RegExp(`^Cannot export seat 'worker': Seat ${node.id} process_limits.*` +
+      "re-applying the spec with process_limits: \\{ tasks_max: <N> \\}, or clear it with process_limits: \\{\\}"));
+    const unrelated = rigRepo.createRig("legacy-limits-unrelated");
+    rigRepo.addNode(unrelated.id, "worker", { runtime: "codex", cwd: "/repo" });
+    expect(() => exporter.exportRig(unrelated.id)).not.toThrow();
   });
 
   it("exports launch_wrapper on legacy flat pi, codex and claude-code nodes, omits cleared/absent, and round-trips through codec/schema/reimport", () => {
@@ -571,6 +588,24 @@ describe("RigSpecExporter (pod-aware)", () => {
     const parsed = PodRigSpecCodec.parse(yaml);
     const result = PodRigSpecSchema.validate(parsed);
     expect(result.valid).toBe(true);
+  });
+
+  it("#3253: round-trips process_limits through pod-aware export, serialize, parse and validate, and refuses an unreadable one by its seat", () => {
+    const { rig, n2 } = seedPodRig();
+    rigRepo.setNodeProcessLimits(n2.id, { tasksMax: 512 });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const devMembers = exported.pods.find((p) => p.id === "dev")!.members;
+    expect(devMembers.find((m) => m.id === "qa")?.processLimits).toEqual({ tasksMax: 512 });
+    expect(devMembers.find((m) => m.id === "impl")?.processLimits).toBeUndefined();
+    const yaml = PodRigSpecCodec.serialize(exported);
+    expect(yaml).toContain("tasks_max: 512");
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "qa")?.processLimits).toEqual({ tasksMax: 512 });
+    db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", n2.id);
+    expect(() => exporter.exportRig(rig.id)).toThrow(ExportRefusedError);
+    expect(() => exporter.exportRig(rig.id)).toThrow(/^Cannot export seat 'dev\.qa': .*clear it with process_limits: \{\}/);
   });
 
   it("exports selected launch_wrapper array for pi and codex pod members only and round-trips through codec/schema", () => {

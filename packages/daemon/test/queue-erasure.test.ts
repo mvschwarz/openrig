@@ -1057,3 +1057,104 @@ describe("OpenRig's own wakes and notices", () => {
     expect(everything()).not.toContain("secret-t-");
   });
 });
+
+describe("native receipt content erasure", () => {
+  it.each(["scrub", "delete"] as const)("%s removes a group's composed payload/results, retains ordering tombstones and fences late replies", async action => {
+    await row("native-one", A, B, [{ state: "done", daysAgo: 3 }]);
+    await row("native-two", A, B, [{ state: "done", daysAgo: 3 }]);
+    const outbox = new OutboxHandler(db), first = "wake-intent-native-one", second = "wake-intent-native-two";
+    const original = outbox.getById(first)!;
+    const input = { outboxId: first, senderSession: original.senderSession, destinationSession: original.destinationSession, body: original.body,
+      nodeId: "seat", runId: "run", kind: "input" as const, inputRoute: "native" as const,
+      memberIds: [first, second], payload: { text: "secret-native-one composed secret-native-two" } };
+    outbox.admitRunner(input);
+    outbox.updateRunner("seat", "run", first, 1, "offered");
+    outbox.updateRunner("seat", "run", first, 1, "accepted");
+    outbox.updateRunner("seat", "run", first, 1, "submitted");
+    outbox.updateRunner("seat", "run", first, 1, "completed", { result: { answer: "secret-native-one answer" } });
+    const erased = await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "native-one", action }] }, apply: true, nowIso: NOW });
+    expect(erased.linked).toMatchObject({ outbox: 1, nativeCustodyRetained: 1 });
+    const restarted = new OutboxHandler(db);
+    expect(restarted.runnerReceipt(first)).toMatchObject({ sequence: 1, erasedAt: NOW, payload: {}, bindingHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(restarted.runnerReceipt(second)?.erasedAt).toBe(NOW);
+    expect(everything()).not.toContain("secret-native-one");
+    expect(restarted.getById(second)?.body).toContain("secret-native-two");
+    expect(() => restarted.updateRunner("seat", "run", first, 1, "completed", { result: { answer: "secret-native-one revived" } })).toThrow(/erased/);
+    expect(() => restarted.admitRunner(input)).toThrow(/erased/);
+    expect(restarted.claimForDelivery(second)).toBe(false);
+    const next = restarted.admitRunner({ outboxId: "fresh", senderSession: A, destinationSession: B, body: "fresh", nodeId: "seat", runId: "run",
+      kind: "input", inputRoute: "native", payload: { text: "fresh" } });
+    expect(next.sequence).toBe(2);
+    await eraseQueue(db, { scope: { kind: "ids", entries: [{ qitemId: "native-two", action: "delete" }] }, apply: true, nowIso: NOW });
+    expect(restarted.runnerReceipt(first)?.sequence).toBe(1);
+    expect(restarted.runnerReceipt(second)?.erasedAt).toBe(NOW);
+    expect(everything()).not.toContain("secret-native-two");
+  });
+});
+
+
+describe("members-scope native custody without queue ownership", () => {
+  it.each([["input", false], ["wake", false], ["input", true], ["wake", true]] as const)("erases unlinked %s content (group=%s) while reporting retained custody", async (kind, grouped) => {
+    const outbox = new OutboxHandler(db), ids = grouped ? ["unlinked-native", "unlinked-member"] : ["unlinked-native"];
+    for (const id of ids) outbox.record({ outboxId: id, senderSession: A, destinationSession: B, body: `private ${id}` });
+    outbox.record({ outboxId: "ordinary-typed", senderSession: A, destinationSession: B, body: "legacy" });
+    const input = { outboxId: ids[0]!, senderSession: A, destinationSession: B, body: `private ${ids[0]}`,
+      nodeId: "seat", runId: "same-run", kind, inputRoute: "native" as const, ...(grouped ? { memberIds: ids } : {}),
+      payload: kind === "wake" ? { question: "private composed question" } : { text: "private composed prompt" } };
+    outbox.admitRunner(input); outbox.updateRunner("seat", "same-run", ids[0]!, 1, "offered");
+    outbox.updateRunner("seat", "same-run", ids[0]!, 1, "accepted");
+    outbox.updateRunner("seat", "same-run", ids[0]!, 1, "submitted");
+    outbox.updateRunner("seat", "same-run", ids[0]!, 1, "completed", { result: { answer: "private native answer" } });
+    expect(db.prepare("SELECT count(*) AS n FROM queue_items").get()).toEqual({ n: 0 });
+    const options = { scope: { kind: "members" as const, members: [A, B] }, nowIso: NOW };
+    const dry = await eraseQueue(db, { ...options, apply: false });
+    const applied = await eraseQueue(db, { ...options, apply: true });
+    expect(dry.unlinked).toMatchObject({ outbox: 1, nativeCustodyRetained: ids.length });
+    expect(applied.unlinked).toEqual(dry.unlinked);
+    const restarted = new OutboxHandler(db);
+    for (const id of ids) {
+      expect(restarted.getById(id)).toMatchObject({ body: "", senderSession: "", destinationSession: "" });
+      expect(restarted.runnerReceipt(id)).toMatchObject({ requestId: ids[0], erasedAt: NOW, sequence: 1, payload: {} });
+      expect(restarted.claimForDelivery(id)).toBe(false);
+    }
+    expect(restarted.getById("ordinary-typed")).toBeNull();
+    expect(everything()).not.toContain("private");
+    expect(() => restarted.admitRunner(input)).toThrow(/erased/);
+    expect(() => restarted.updateRunner("seat", "same-run", ids[0]!, 1, "completed", { result: { answer: "private restored" } })).toThrow(/erased/);
+    expect(restarted.admitRunner({ ...input, outboxId: "new-operation", memberIds: undefined, body: "new", payload: { text: "new" } }).sequence).toBe(2);
+  });
+  it("erases held native route-only rows without inventing a run or permitting ID reuse", async () => {
+    const outbox = new OutboxHandler(db);
+    const held = { outboxId: "held-native", senderSession: A, destinationSession: B, body: "private held prompt" };
+    outbox.retain(held, { nodeId: "seat", session: B, occupant: "generation", pane: "%1" });
+    outbox.bindInputRoute(held, "native");
+    outbox.retire(held.outboxId, "private retiring actor", "private retirement explanation");
+    const retiredAt = outbox.getById(held.outboxId)!.retiredAt;
+    const report = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
+    expect(report.unlinked).toMatchObject({ outbox: 0, nativeCustodyRetained: 1 });
+    expect(outbox.getById(held.outboxId)).toMatchObject({ body: "", senderSession: "", destinationSession: "" });
+    expect(outbox.getById(held.outboxId)).toMatchObject({ retirementReason: null, retiredAt, retiredBy: null });
+    expect(everything()).not.toContain("private retirement explanation");
+    expect(everything()).not.toContain("private retiring actor");
+    expect(outbox.runnerPrimary(held.outboxId)).toBe(held.outboxId);
+    expect(outbox.runnerReceipt(held.outboxId)).toBeNull();
+    expect(outbox.claimForDelivery(held.outboxId)).toBe(false);
+    expect(() => outbox.admitRunner({ ...held, nodeId: "seat", runId: "run", kind: "input", inputRoute: "native", payload: { text: held.body } })).toThrow(/unavailable|erased/);
+    expect(everything()).not.toContain("private held prompt");
+  });
+  it("selecting an unlinked group member sanitizes the operation while preserving a foreign member's standalone history", async () => {
+    const outbox = new OutboxHandler(db);
+    outbox.record({ outboxId: "foreign-primary", senderSession: OUT, destinationSession: B, body: "foreign original history" });
+    outbox.record({ outboxId: "owned-member", senderSession: A, destinationSession: B, body: "selected private history" });
+    outbox.admitRunner({ outboxId: "foreign-primary", senderSession: OUT, destinationSession: B, body: "foreign original history",
+      nodeId: "seat", runId: "run", kind: "input", inputRoute: "native", memberIds: ["foreign-primary", "owned-member"],
+      payload: { text: "selected private composed text" } });
+    db.prepare("UPDATE outbox_entries SET retired_by='foreign actor',retirement_reason='foreign reason',retired_at=? WHERE outbox_id='foreign-primary'").run(NOW);
+    const result = await eraseQueue(db, { scope: { kind: "members", members: [A, B] }, apply: true, nowIso: NOW });
+    expect(result.unlinked).toMatchObject({ outbox: 0, nativeCustodyRetained: 1, mixedEntries: 1 });
+    expect(outbox.getById("foreign-primary")).toMatchObject({ retiredBy: "foreign actor", retirementReason: "foreign reason", retiredAt: NOW });
+    expect(outbox.getById("foreign-primary")?.body).toBe("foreign original history");
+    expect(outbox.runnerReceipt("foreign-primary")?.erasedAt).toBe(NOW);
+    expect(everything()).not.toContain("selected private");
+  });
+});

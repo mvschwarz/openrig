@@ -58,7 +58,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     const filed = findingsTo("root@front");
     expect(filed).toHaveLength(1);
     const notice = filed[0]!;
-    expect(notice).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (3 rows)" });
+    expect(notice).toMatchObject({ state: "pending", summary: "Checked on root@front's work: 3 items nobody has picked up" });
     expect(notice.tags).toContain("stuck-sweep:unclaimed-backlog:root@front");
     // What the seat reads: each row, how to list them, and how to send these findings to a seat that watches it.
     for (const row of rows) expect(notice.body).toContain(row.qitemId);
@@ -73,7 +73,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     await sweep();
     const after = findingsTo("root@front");
     expect(after).toHaveLength(1);
-    expect(after[0]).toMatchObject({ qitemId: notice.qitemId, state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (4 rows)" });
+    expect(after[0]).toMatchObject({ qitemId: notice.qitemId, state: "pending", summary: "Checked on root@front's work: 4 items nobody has picked up" });
     expect(after[0]!.body).toContain(fourth.qitemId);
   });
 
@@ -84,7 +84,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     queue.claim({ qitemId: claimed.qitemId, destinationSession: "root@front" });
     await sweep();
     const [notice] = findingsTo("root@front");
-    expect(notice).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (1 row)" });
+    expect(notice).toMatchObject({ state: "pending", summary: "Checked on root@front's work: 1 item nobody has picked up" });
     expect(notice!.body).toContain(waiting.qitemId);
     expect(notice!.body).not.toContain(claimed.qitemId);
     queue.claim({ qitemId: waiting.qitemId, destinationSession: "root@front" });
@@ -106,7 +106,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     await sweep();
     const reopened = findingsTo("root@front").filter(isOpen);
     expect(reopened).toHaveLength(1);
-    expect(reopened[0]!.summary).toBe("Stuck sweep: unclaimed-backlog on root@front (2 rows)");
+    expect(reopened[0]!.summary).toBe("Checked on root@front's work: 2 items nobody has picked up");
     expect(reopened[0]!.body).toContain(old.qitemId);
     expect(reopened[0]!.body).toContain(newer.qitemId);
   });
@@ -235,7 +235,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     queue.update({ qitemId: laddered.qitemId, actorSession: "wake-ladder@system", transitionNote: "wake-attempt: 1 of 3" });
     await sweep();
     const after = queue.getById(notice!.qitemId)!;
-    expect(after).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (2 rows)" });
+    expect(after).toMatchObject({ state: "pending", summary: "Checked on root@front's work: 2 items nobody has picked up" });
     expect(after.body).toContain(laddered.qitemId);
     expect(after.body).toContain(other.qitemId);
   });
@@ -318,7 +318,7 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     for (const r of rows) if (r.qitemId !== counted.qitemId) queue.claim({ qitemId: r.qitemId, destinationSession: "root@front" });
     await sweep(120);
     const after = queue.getById(notice!.qitemId)!;
-    expect(after).toMatchObject({ state: "pending", summary: "Stuck sweep: unclaimed-backlog on root@front (1 row)" });
+    expect(after).toMatchObject({ state: "pending", summary: "Checked on root@front's work: 1 item nobody has picked up" });
     expect(after.body).toContain(`- ${counted.qitemId}`);
   });
 });

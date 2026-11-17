@@ -74,6 +74,19 @@ describe("Rigspec export routes", () => {
       .toEqual([{ logicalId: "dev.old", reason: "source unavailable" }]);
   });
 
+  it("names an unreadable claude_auto_mode in the export warnings header of both formats, and exports without it", async () => {
+    const rig = rigRepo.createRig("auto-mode-export");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    db.prepare("UPDATE nodes SET claude_auto_mode_json='broken' WHERE id=?").run(node.id);
+    const warning = [{ logicalId: "worker", reason: "claude_auto_mode can't be read; not carried" }];
+    for (const path of ["spec", "spec.json"]) {
+      const response = await app.request(`/api/rigs/${rig.id}/${path}`);
+      expect(response.status).toBe(200);
+      expect(JSON.parse(decodeURIComponent(response.headers.get("X-OpenRig-Export-Warnings")!))).toEqual(warning);
+      expect(await response.text()).not.toMatch(/claude_auto_mode:|"claudeAutoMode"/);
+    }
+  });
+
   it("GET /api/rigs/:rigId/spec -> 200 + YAML content-type", async () => {
     const rig = rigRepo.createRig("r99");
     rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
@@ -241,6 +254,21 @@ describe("Rigspec export routes", () => {
 
     const res = await app.request(`/api/rigs/${rig.id}/spec`);
     expect(res.status).toBe(500);
+  });
+
+  it("#3253: an export refused for a seat's unreadable process_limits is a 409 naming the seat, on YAML and JSON", async () => {
+    const rig = rigRepo.createRig("limits-rig");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: pod.id, agentRef: "local:agents/impl", profile: "default",
+      cwd: ".", processLimits: { tasksMax: 512 } });
+    db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", node.id);
+    for (const path of [`/api/rigs/${rig.id}/spec`, `/api/rigs/${rig.id}/spec.json`]) {
+      const res = await app.request(path);
+      expect(res.status, path).toBe(409);
+      const body = await res.json() as { error: string; code: string };
+      expect(body.code).toBe("export_refused");
+      expect(body.error).toMatch(/^Cannot export seat 'dev\.impl': .*clear it with process_limits: \{\}/);
+    }
   });
 });
 

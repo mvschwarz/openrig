@@ -94,12 +94,26 @@ describe("Slice-11 slack-api — GRANTED-scope-from-headers (item 5, the setup t
 
 describe("Slice-11 slack-api — channel membership + socket (item 5, inbound)", () => {
   it("verifyChannelMembership reflects is_member", async () => {
-    const inFetch = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel: { is_member: true, name: "founder" } } } } });
+    const inFetch = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel: { is_member: true, is_private: true, name: "founder" } } } } });
     const inR = await verifyChannelMembership("xoxb-t", "C1", inFetch);
-    expect(inR).toMatchObject({ ok: true, isMember: true, name: "founder" });
+    expect(inR).toMatchObject({ ok: true, isMember: true, isPrivate: true, name: "founder" });
 
-    const outFetch = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel: { is_member: false } } } } });
-    expect((await verifyChannelMembership("xoxb-t", "C1", outFetch)).isMember).toBe(false);
+    const outFetch = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel: { is_member: false, is_private: false } } } } });
+    expect(await verifyChannelMembership("xoxb-t", "C1", outFetch)).toMatchObject({ ok: true, isMember: false, isPrivate: false });
+  });
+
+  it.each([
+    { name: "absent", channel: { is_member: true } },
+    { name: "string", channel: { is_member: true, is_private: "true" } },
+    { name: "number", channel: { is_member: true, is_private: 1 } },
+  ])("projects the $name privacy field as unknown", async ({ channel }) => {
+    const fetchImpl = fakeSlack({ methods: { "conversations.info": { json: { ok: true, channel } } } });
+    expect(await verifyChannelMembership("xoxb-t", "C1", fetchImpl)).toMatchObject({ ok: true, isMember: true, isPrivate: null });
+  });
+
+  it("keeps failed conversations.info privacy unknown", async () => {
+    const fetchImpl = fakeSlack({ methods: { "conversations.info": { status: 403, json: { ok: false, error: "channel_not_found" } } } });
+    expect(await verifyChannelMembership("xoxb-t", "C1", fetchImpl)).toMatchObject({ ok: false, isMember: false, isPrivate: null, error: "channel_not_found" });
   });
 
   it("openSocketConnection returns the ws url", async () => {

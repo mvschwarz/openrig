@@ -153,6 +153,10 @@ export function parseQuestionAction(blockId: unknown, actionId: unknown): { ques
   return questionId && optionId ? { questionId, optionId } : null;
 }
 
+export function recommendationLabel(label: string, recommended = false): string {
+  return recommended && !/\(recommended\)/i.test(label) ? `${label} (recommended)` : label;
+}
+
 /** #193 — the questions as blocks (a section, then a button row, per question) plus the
  *  complete text they must also appear as in the accessible fallback. Without buttons (a shared channel, where a click
  *  records nothing), each question's options are a list and the reader is asked to reply in the thread. */
@@ -161,7 +165,7 @@ function buildQuestionBlocks(questions: readonly HumanQuestion[], buttons = true
   const lines: string[] = [];
   for (const q of questions) {
     const question = bounded(`*${inert(q.question)}*`, SLACK_SECTION_CAP, "question");
-    const options = q.options.map((o) => `• ${inert(o.label)}${o.recommended ? " (recommended)" : ""}`);
+    const options = q.options.map((o) => `• ${recommendationLabel(inert(o.label), o.recommended)}`);
     blocks.push({ type: "section", text: { type: "mrkdwn", text: question } });
     lines.push(question, ...options);
     // A resolved decision keeps its questions as history: options as text, no live buttons, no reply hint.
