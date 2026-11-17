@@ -33,11 +33,10 @@ export const PROCESS_LIMITS_TASKS_MAX_MAX = 4_194_304;
  *  so only a value that is a multiple of every page size up to 1 MiB reads back exactly as asked (the probe and the
  *  status compare it as written, as they do pids.max). */
 const MIB = 1_048_576;
-/** The accepted `memory_max` range, each end from what enforces it: the floor is what the limit's own probe needs, a
- *  throwaway /bin/sh run inside a scope with that MemoryMax= (16 MiB is a margin for that shell, not a measured
- *  minimum; no runtime-wide floor is imposed, as for tasks_max); the top is the largest MiB multiple up to
- *  Number.MAX_SAFE_INTEGER, past which the daemon (which keeps and compares bytes as a JS number) is no longer exact. */
-export const PROCESS_LIMITS_MEMORY_MAX_MIN = 16 * MIB;
+/** The largest accepted `memory_max`: the largest MiB multiple up to Number.MAX_SAFE_INTEGER, past which the daemon
+ *  (which keeps and compares bytes as a JS number) is no longer exact. There is no floor here: the limit's own probe,
+ *  a throwaway /bin/sh run inside a scope with that MemoryMax=, decides the low end, and a value too small for it to
+ *  start in is refused by name at launch (as for tasks_max, no runtime-wide floor is imposed). */
 export const PROCESS_LIMITS_MEMORY_MAX_MAX = 2 ** 53 - 2 ** 20;
 /** The size suffixes `memory_max` takes, base 1024 as systemd reads them. */
 const SIZE_SUFFIXES: Record<string, number> = { K: 2 ** 10, M: 2 ** 20, G: 2 ** 30, T: 2 ** 40 };
@@ -91,8 +90,8 @@ function parseMemoryMax(raw: unknown, label: string): number {
   } else {
     throw new Error(`${label}: ${form}`);
   }
-  if (bytes < PROCESS_LIMITS_MEMORY_MAX_MIN || bytes > PROCESS_LIMITS_MEMORY_MAX_MAX) {
-    throw new Error(`${label}: must be from 16M (${PROCESS_LIMITS_MEMORY_MAX_MIN} bytes) to ${PROCESS_LIMITS_MEMORY_MAX_MAX} bytes`);
+  if (bytes > PROCESS_LIMITS_MEMORY_MAX_MAX) {
+    throw new Error(`${label}: must be at most ${PROCESS_LIMITS_MEMORY_MAX_MAX} bytes`);
   }
   if (bytes % MIB !== 0) throw new Error(`${label}: must be a whole number of MiB (a multiple of ${MIB} bytes)`);
   return bytes;

@@ -1024,8 +1024,9 @@ describe("member process_limits (#3253)", () => {
     expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ tasksMax: 256, memoryMax: 1073741824 });
   });
 
-  it("takes memory_max from its floor (16M) to its top (2^53 - 2^20 bytes)", () => {
-    for (const [value, memoryMax] of [["16M", 16777216], [9007199253692416, 9007199253692416], ["1T", 2 ** 40]] as const) {
+  it("takes memory_max from 1M (no floor: the probe decides the low end) to its top (2^53 - 2^20 bytes)", () => {
+    for (const [value, memoryMax] of [["1M", 1048576], [1048576, 1048576], ["15M", 15728640], [9007199253692416, 9007199253692416],
+      ["1T", 2 ** 40]] as const) {
       const spec = withMember({ process_limits: { memory_max: value } });
       expect(RigSpecSchema.validate(spec).errors).toEqual([]);
       expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ memoryMax });
@@ -1046,9 +1047,9 @@ describe("member process_limits (#3253)", () => {
     [{ memory_max: "1048576" }, "process_limits.memory_max: a number of bytes is an integer, not a string"],
     [{ memory_max: 16777216 + 4096 }, "process_limits.memory_max: must be a whole number of MiB"],
     [{ memory_max: "16388K" }, "process_limits.memory_max: must be a whole number of MiB"],
-    [{ memory_max: "15M" }, "process_limits.memory_max: must be from 16M (16777216 bytes) to 9007199253692416 bytes"],
-    [{ memory_max: 2 ** 53 }, "process_limits.memory_max: must be from 16M (16777216 bytes) to 9007199253692416 bytes"],
-    [{ memory_max: "8193T" }, "process_limits.memory_max: must be from 16M (16777216 bytes) to 9007199253692416 bytes"],
+    [{ memory_max: "1K" }, "process_limits.memory_max: must be a whole number of MiB"],
+    [{ memory_max: 2 ** 53 }, "process_limits.memory_max: must be at most 9007199253692416 bytes"],
+    [{ memory_max: "8193T" }, "process_limits.memory_max: must be at most 9007199253692416 bytes"],
     [{ tasks_max: 256, cpu_quota: "50%" }, "process_limits.cpu_quota: not supported"],
     [{ tasks_max: 0 }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
     [{ tasks_max: 4194305 }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],

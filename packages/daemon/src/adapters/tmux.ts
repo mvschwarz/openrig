@@ -477,8 +477,8 @@ export interface SeatProcessLimitsReport {
    *  limit (pids.events `max`). */
   pidsMax?: string; pidsCurrent?: number; limitHits?: number;
   /** Only when read, and memory_max was requested: the scope's memory.max and memory.current, how many times its usage
-   *  hit the limit and was reclaimed (memory.events `max`), and how many processes the limit's OOM killer killed
-   *  (memory.events `oom_kill`). */
+   *  was about to go over the limit (memory.events `max`), and how many processes in the scope an OOM killer killed
+   *  (memory.events `oom_kill`, any OOM killer: not proof that this limit ended the seat). */
   memoryMax?: string; memoryCurrent?: number; memoryLimitHits?: number; oomKills?: number;
   /** The seat's scope unit, when the process is in one. */
   scope?: string;
@@ -492,7 +492,7 @@ export interface SeatProcessLimitsReport {
  *    memory.max is not the limit, MemoryMax= refused);
  *  - `setup`: the host may well make the scope, but this setup or launch path can't use it (terminal.
  *    inherit_tmux_environment on, a daemon with no launch environment, a restart in place that keeps or respawns a
- *    process without the seat's scope), with the way out;
+ *    process without the seat's scope, a memory_max too small for the probe's shell to start in), with the way out;
  *  - `unverified`: not known either way, and worth retrying (the user bus timed out, the probe read nothing, an error
  *    not recognized, or such a failure cached `ageSeconds` ago);
  *  - `invalid`: the seat's stored request can't be read. */
@@ -645,6 +645,13 @@ type CreatedIdentity = { pane: string; session: string; server: { pid: string; s
 function createdIdentity(printed: string): CreatedIdentity | null {
   const m = /^(%\d+) (\$\d+) (\d+) (\d+)$/.exec(printed);
   return m ? { pane: m[1]!, session: m[2]!, server: { pid: m[3]!, start: m[4]! } } : null;
+}
+
+/** A command that ended by SIGKILL: the signal itself (the shell replaced by the command) or 137 (128 + 9, from a shell
+ *  that ran it, or from timeout, which exits that way when the command it ran was killed). */
+function killedBySigkill(error: unknown): boolean {
+  const e = error as { code?: unknown; signal?: unknown };
+  return e.signal === "SIGKILL" || e.code === 137;
 }
 
 /** A check's failure, classified (#3253): `unsupported` only on a positive answer that the facility is not there. */
@@ -989,6 +996,14 @@ export class TmuxAdapter {
         const stderr = execStderrText(error);
         if (opts.literal && NO_EXPAND_ENVIRONMENT.test(stderr)) { opts.literal = false; continue; }
         if (opts.oomPolicy && NO_OOM_POLICY.test(stderr)) { opts.oomPolicy = false; continue; }
+        // The probe's shell killed (SIGKILL, directly or as timeout's 128+9) under a memory limit: the OOM killer at
+        // that MemoryMax=, so the value is too small for anything to start in. Refused by name, and not retryable: a
+        // retry at the same value would be killed the same way.
+        if (limits.memoryMax !== undefined && killedBySigkill(error)) {
+          return { ok: false, problem: { kind: "setup", limit: "memory_max",
+            reason: `memory_max ${limits.memoryMax} is too small to start in: a throwaway scope with MemoryMax=${limits.memoryMax} ` +
+              "had its /bin/sh killed (SIGKILL, the OOM killer at that limit); give memory_max a larger value" } };
+        }
         return { ok: false, problem: classifyScopeFailure(error, "a throwaway seat scope") };
       }
       const got = out.trim();
@@ -1072,7 +1087,7 @@ export class TmuxAdapter {
   /** The seat scope a pane's process runs in, read from the kernel: unknown when it can't be read, outside a seat scope,
    *  or in one, with the files of the limits requested only: for tasks_max, its pids.max, pids.current and how many
    *  times a fork hit the limit (pids.events `max`); for memory_max, its memory.max, memory.current, how many times its
-   *  usage hit the limit (memory.events `max`) and how many processes the OOM killer killed (memory.events `oom_kill`). */
+   *  usage was about to go over the limit (memory.events `max`) and how many of its processes an OOM killer killed (memory.events `oom_kill`). */
   private async readPaneScope(paneTarget: string, requested: SeatProcessLimits): Promise<
     | { at: "unknown"; reason: string; scope?: string }
     | { at: "outside"; scope: string }
@@ -1112,7 +1127,7 @@ export class TmuxAdapter {
 
   /** Where a seat's limits stand, read back from its pane's process (#3253): its cgroup must be a seat scope whose
    *  pids.max and memory.max are the requested values (each one requested). pids.events `max` counts the forks the
-   *  limit refused; memory.events `max` the times usage hit the memory limit, and `oom_kill` the processes it killed.
+   *  limit refused; memory.events `max` the times usage was about to go over the memory limit, and `oom_kill` the processes in the scope any OOM killer killed.
    *  `paneTarget` is the seat's pane id (`%N`) when known, else its session (whose active pane is read). With `nodeId`, a
    *  seat in an environment guest reads `not_applied` (its pane holds only a local viewer). Read only. */
   async readSeatProcessLimits(paneTarget: string, requested: SeatProcessLimits, nodeId?: string): Promise<SeatProcessLimitsReport> {
