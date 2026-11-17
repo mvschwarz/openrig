@@ -50,6 +50,12 @@ export interface RosterMember extends Reference {
   /** Why an authored `takes_requests` or `takes_requests_note` can't be used. The roster still loads; a note that can't be
    *  used leaves the flag in place. */
   takes_requests_problem?: string;
+  /** Which client the participant uses and what kind of participant it is, as the service that issued its access recorded
+   *  them (authored as `app` and `kind`): each a short lowercase token, passed through as recorded. That service owns the
+   *  values; absent is unknown, never inferred from a name or label. Not a seat's node kind. */
+  participant?: { app?: string; kind?: string };
+  /** Why an authored `app` or `kind` isn't used. Each is dropped on its own, and the roster still loads. */
+  participant_problem?: string;
 }
 export interface Roster {
   version: 1;
@@ -99,6 +105,17 @@ function shownTextProblem(field: string, value: unknown): string | null {
   return null;
 }
 
+/** A participant's `app` or `kind` as recorded: a letter, then up to 31 lowercase letters, digits or hyphens. */
+const PARTICIPANT_TOKEN = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** An authored `app` or `kind`: the token, or why it isn't used. Absent or empty is unknown, with nothing to say. */
+function participantField(field: "app" | "kind", value: unknown): { token?: string; problem?: string } {
+  if (value === undefined || value === "") return {};
+  if (typeof value === "string" && PARTICIPANT_TOKEN.test(value)) return { token: value };
+  const shown = JSON.stringify(value) ?? String(value);
+  return { problem: `${field} ${shown.length > 40 ? `${shown.slice(0, 40)}…` : shown} isn't a short lowercase token (a letter, then up to 31 lowercase letters, digits or hyphens)` };
+}
+
 /** Select authored fields only: a file cannot supply runtime or observed-model facts. */
 export function parseRoster(value: unknown): Roster {
   if (!object(value) || value.version !== 1 || !reference(value.curator) ||
@@ -127,6 +144,10 @@ export function parseRoster(value: unknown): Roster {
     const takesProblem = takes !== undefined && typeof takes !== "boolean" ? `takes_requests ${JSON.stringify(takes)} isn't true or false`
       : takesNote !== undefined && takes !== false ? "takes_requests_note is for a member with takes_requests: false"
         : takesNote !== undefined ? shownTextProblem("takes_requests_note", takesNote) : null;
+    // So does an app or kind that isn't a token: that one is dropped, and the problem says why.
+    const app = participantField("app", m.app), kind = participantField("kind", m.kind);
+    const participant = { ...(app.token ? { app: app.token } : {}), ...(kind.token ? { kind: kind.token } : {}) };
+    const participantProblem = [app.problem, kind.problem].filter(Boolean).join("; ");
     return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
       use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
       ...(m.hosted === true ? { hosted: true } : {}), ...(m.wake === undefined ? {} : { wake: parseWake(m.wake) }),
@@ -135,7 +156,9 @@ export function parseRoster(value: unknown): Roster {
       ...(m.label === undefined ? {} : badLabel ? { label_problem: badLabel } : { label: (m.label as string).trim() }),
       ...(takes === false ? { takes_requests: false as const } : {}),
       ...(takes === false && takesNote !== undefined && !takesProblem ? { takes_requests_note: (takesNote as string).trim() } : {}),
-      ...(takesProblem ? { takes_requests_problem: takesProblem } : {}) };
+      ...(takesProblem ? { takes_requests_problem: takesProblem } : {}),
+      ...(Object.keys(participant).length ? { participant } : {}),
+      ...(participantProblem ? { participant_problem: participantProblem } : {}) };
   });
   return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
     curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
