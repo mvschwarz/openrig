@@ -2477,7 +2477,7 @@ describe("RestoreOrchestrator", () => {
     expect(codex.resume).not.toHaveBeenCalled();
   });
 
-  it("checkpoint written to exactly {cwd}/.rigged-checkpoint-<session>.md with summary", async () => {
+  it("checkpoint written to exactly {cwd}/.rigged-checkpoint-<session>-<digest>.md with summary", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd: tmpDir }],
@@ -2493,7 +2493,7 @@ describe("RestoreOrchestrator", () => {
     if (result.ok) {
       expect(result.result.nodes[0]!.status).toBe("rebuilt");
       // Verify exact file path and content
-      const filePath = path.join(tmpDir, ".rigged-checkpoint-r99-worker.md");
+      const filePath = path.join(tmpDir, ".rigged-checkpoint-r99-worker-824c4bb0.md");
       expect(fs.existsSync(filePath)).toBe(true);
       const content = fs.readFileSync(filePath, "utf-8");
       expect(content).toContain("Was working on feature X");
@@ -2538,7 +2538,7 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (result.ok) {
         expect(result.result.nodes[0]!.status).toBe("rebuilt");
-        expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker.md"), "utf-8")).toContain("Was working on feature X");
+        expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker-824c4bb0.md"), "utf-8")).toContain("Was working on feature X");
       }
       expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.cwd).toBeNull();
     } finally {
@@ -2571,9 +2571,43 @@ describe("RestoreOrchestrator", () => {
 
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (result.ok) expect(result.result.nodes.map((n) => n.status)).toEqual(["rebuilt", "rebuilt"]);
-      expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker-a.md"), "utf-8")).toContain("Was working on feature X");
-      expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker-b.md"), "utf-8")).toContain("Worker B's own work");
+      expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker-a-a188dde1.md"), "utf-8")).toContain("Was working on feature X");
+      expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker-b-4691906c.md"), "utf-8")).toContain("Worker B's own work");
       expect(fs.existsSync(path.join(tmpDir, ".rigged-checkpoint.md"))).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // #3347 r3: names that become the same safe text in a file name ("alpha beta" and "alpha-beta", both accepted bound
+  // names) still get different files: the name carries a digest of the exact session name.
+  it("two seats bound as 'alpha beta' and 'alpha-beta' in one folder each keep their own checkpoint", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
+    try {
+      const seeded = seedRigAndSnapshot({
+        nodes: [
+          { logicalId: "worker-a", role: "worker", runtime: "claude-code", cwd: tmpDir },
+          { logicalId: "worker-b", role: "worker", runtime: "claude-code", cwd: tmpDir },
+        ],
+        resumeType: "none",
+        edges: [],
+        withCheckpoint: "worker-a",
+      });
+      const nodes = rigRepo.getRig(seeded.rigId)!.nodes;
+      const nodeA = nodes.find((n) => n.logicalId === "worker-a")!.id;
+      const nodeB = nodes.find((n) => n.logicalId === "worker-b")!.id;
+      sessionRegistry.updateBinding(nodeA, { tmuxSession: "alpha beta" });
+      sessionRegistry.updateBinding(nodeB, { tmuxSession: "alpha-beta" });
+      const snap = updateSnapshotData(seeded, (data) => {
+        const own = Object.values(data.checkpoints)[0] as Record<string, unknown>;
+        data.checkpoints[nodeB] = { ...own, nodeId: nodeB, summary: "Worker B's own work" };
+      });
+      const result = await createOrchestrator().restore(snap.id, { freshLogicalIds: ["worker-a", "worker-b"] });
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (result.ok) expect(result.result.nodes.map((n) => n.status)).toEqual(["rebuilt", "rebuilt"]);
+      expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-alpha-beta-1a989ea8.md"), "utf-8")).toContain("Was working on feature X");
+      expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-alpha-beta-a8b405ab.md"), "utf-8")).toContain("Worker B's own work");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

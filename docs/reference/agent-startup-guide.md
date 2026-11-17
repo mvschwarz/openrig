@@ -923,7 +923,7 @@ relative to that directory.
 | `.claude/agents/`, `.claude/plugins/<id>/`, `.claude/extensions/<id>/`; `.agents/<id>.yaml`, `.codex/plugins/<id>/`, `.agents/extensions/<id>/` | When the seat's projection includes subagents, plugins or runtime resources (Claude, then Codex). | Leaves them in place. |
 | `.claude/skills/<id>/`, `.agents/skills/<id>/` | Only for a seat without seat storage. New Claude and Codex seats keep their skills under `$OPENRIG_HOME/state/seats/`, outside the project. | Leaves them in place. |
 | The managed compaction preparation folder described in [Claude compaction preparation directory](#claude-compaction-preparation-directory), with its `.gitignore` of `*` and each attempt's `RESTORE-MAP.md` | Managed Claude compaction, unless a preparation root is configured elsewhere. | Leaves it in place. |
-| `.rigged-checkpoint-<session>.md`, named for the seat's session name | A restore that didn't resume a seat's native conversation (by choice or not) and had a checkpoint to hand it. Seats restored into one folder each get their own file. | Leaves it in place. |
+| `.rigged-checkpoint-<session>-<digest>.md`, named for the seat: its session name made safe for a file name, then the first 8 hex characters of the SHA-256 of the exact name | A restore that didn't resume a seat's native conversation (by choice or not) and had a checkpoint to hand it. Seats restored into one folder each get their own file. | Leaves it in place. |
 
 `rig down` leaves a file alone while another seat still uses it: a running seat of the same rig, or any seat of
 another rig that isn't archived. That is decided file by file. A guidance file is kept while another seat's

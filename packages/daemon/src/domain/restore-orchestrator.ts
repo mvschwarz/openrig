@@ -9,6 +9,7 @@ import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydra
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
+import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
@@ -288,10 +289,13 @@ export interface RestoreOrchestratorDeps {
   harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
 }
 
-/** A restored seat's checkpoint file in its working directory, named for the seat (its session name), so seats restored
- *  into one folder (a run's `--cwd`, or a saved folder they share) each keep their own. */
+/** A restored seat's checkpoint file in its working directory, named for the seat, so seats restored into one folder (a
+ *  run's `--cwd`, or a saved folder they share) each keep their own: the session name made safe for a file name, then the
+ *  first 8 hex of the SHA-256 of the exact name. Names that become the same safe text (`alpha beta`, `alpha-beta`) or
+ *  differ only in case (on a case-insensitive filesystem) still get different files; no name is refused. */
 function checkpointFileName(sessionName: string): string {
-  return `.rigged-checkpoint-${sessionName.replace(/[^A-Za-z0-9._@-]/g, "-")}.md`;
+  const digest = createHash("sha256").update(sessionName).digest("hex").slice(0, 8);
+  return `.rigged-checkpoint-${sessionName.replace(/[^A-Za-z0-9._@-]/g, "-")}-${digest}.md`;
 }
 
 export class RestoreOrchestrator {
