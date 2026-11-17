@@ -440,6 +440,10 @@ export function workflowRoutes(): Hono {
     const body = await c.req
       .json<{ occurrenceId?: string; decision?: string; ownerSession?: string; actorSession?: string }>()
       .catch(() => ({}) as never);
+    // A named owner that is empty is a typo, not a request for the resolved owner.
+    if (body.ownerSession !== undefined && (typeof body.ownerSession !== "string" || !body.ownerSession.trim())) {
+      return c.json({ error: "ownerSession must be a non-empty session when given" }, 400);
+    }
     const actor = requireSenderIdentity(c, { verb: "workflow resume", bodyClaim: body.actorSession });
     if (!actor.ok) return actor.response;
     try {

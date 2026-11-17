@@ -119,6 +119,18 @@ describe("S06 lifecycle HTTP surface", () => {
     expect(recoveryRows()).toEqual(before);
   });
 
+  it.each(["", "  "])("rejects an empty named owner (%j) instead of falling back to the resolved owner", async ownerSession => {
+    const failed = await failedBranches();
+    const before = recoveryRows();
+    const response = await app.request(`/api/workflow/${failed.instanceId}/resume`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ actorSession: "orch@rig", ownerSession }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining("ownerSession") });
+    expect(recoveryRows()).toEqual(before);
+  });
+
   it("still selects the sole omitted occurrence and absorbs its explicit replay", async () => {
     const failed = await failedBranches();
     const response = await app.request(`/api/workflow/${failed.instanceId}/resume`, {
