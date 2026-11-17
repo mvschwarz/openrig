@@ -1,3 +1,4 @@
+import stringWidth from "string-width";
 import { describe, expect, it } from "vitest";
 import { createViewState } from "../src/state.js";
 import { parseCommand } from "../src/grammar.js";
@@ -402,4 +403,22 @@ describe("PULSE view (5.2 Wave B) — tab-strip active PULSE renders bold [P2]",
     // the trailing active "PULSE" is the bold token; "[ PULSE ]" is dim, not bold
     expect(boldText(tabLine)).toContain("PULSE");
   });
+});
+
+it.each([
+  { kind: "wide characters", label: "界".repeat(36), clipped: true },
+  { kind: "combining characters", label: "e\u0301".repeat(36), clipped: true },
+  { kind: "short combining labels", label: "e\u0301".repeat(12), clipped: false },
+])("holds the next Pulse lane at its terminal column after $kind", ({ label, clipped }) => {
+  const { lanes } = demoPulseModel();
+  const [now, finished] = lanes;
+  now.rows[0]!.label = label;
+  finished.rows[0]!.label = "finish-marker";
+  const plain = renderLanes(lanes)[0]!.text;
+  const at = plain.indexOf("finish-marker");
+  expect(at).toBeGreaterThan(0);
+  const prefix = `${finished.rows[0]!.glyph} ${finished.rows[0]!.time ?? ""}`.trimEnd() + " ";
+  expect(stringWidth(plain.slice(0, at))).toBe(33 + stringWidth(prefix));
+  if (clipped) expect(plain).toContain("…   ");
+  else expect(plain).toContain(label);
 });
