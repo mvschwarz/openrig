@@ -391,9 +391,9 @@ Recognized runtime resource types:
 
 Unknown runtime resource types are still copied to the Claude or Codex runtime extension directory for agent-visible context.
 
-##The `omp-tui` adapter loads native OMP extensions and selected portable plugin skills. It writes managed guidance under the seat’s private agent directory. See [OMP plugin hooks](omp-plugin-hooks.md).
+The `omp-tui` adapter loads native OMP extensions and selected portable plugin skills. It writes managed guidance under the seat’s private agent directory. See [OMP plugin hooks](omp-plugin-hooks.md).
 
-## Writing a `codex_config_fragment`
+#### Writing a `codex_config_fragment`
 
 **Begin the fragment with a table header.** A fragment must be a valid TOML
 document on its own, and every key it sets must sit under a table it declares.
