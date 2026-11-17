@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { claudeCommandForkParent, codexCommandResumeToken, explainNativeRejection, findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, observeCodexForkProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { claudeCommandForkParent, codexCommandResumeToken, explainNativeRejection, findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, observeCodexForkProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneEmptyShell, verifyPaneIdleShell, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 
@@ -719,6 +719,31 @@ describe("observeClaudeDelivery's idle-shell policy: delivery versus launch", ()
     expect((await observeClaudeDelivery(input([shell], starting), { unknownKeepsIdle: false })).state).toBe("unknown");
     expect((await observeClaudeDelivery(input(starting, [shell]), { unknownKeepsIdle: false })).state).toBe("unknown");
     expect((await observeClaudeDelivery(input([shell], [shell]), { unknownKeepsIdle: false })).state).toBe("idle_shell");
+  });
+});
+
+// Linux rows carry the run state read with them. A shell waking (R) and sleeping again (S) between two samples is still
+// the same shell; a different start time is another shell.
+describe("an idle shell whose run state changes between samples", () => {
+  const startedAt = "Fri Oct 9 07:00:00 2026";
+  const shell: NativeProcessRow = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: "/bin/bash", executableName: "bash", startedAt, state: "S" };
+  const woke: NativeProcessRow = { ...shell, state: "R" };
+  const input = (...samples: NativeProcessRow[][]) => {
+    let call = 0;
+    return { target: "%1", tmux: { getPanePid: async () => 10 }, listProcesses: async () => samples[Math.min(call++, samples.length - 1)]! };
+  };
+
+  it("still reads idle, empty and one shell", async () => {
+    expect.soft(await verifyPaneIdleShell(input([shell], [woke]))).toBe(true);
+    expect.soft(await verifyPaneEmptyShell(input([woke], [shell]))).toBe(true);
+    expect.soft((await observeClaudeDelivery(input([shell], [woke]), { unknownKeepsIdle: false })).state).toBe("idle_shell");
+  });
+
+  it("a shell with another start time is still another shell", async () => {
+    const replaced: NativeProcessRow = { ...woke, startedAt: "Fri Oct 9 07:00:05 2026" };
+    expect(await verifyPaneIdleShell(input([shell], [replaced]))).toBe(false);
+    expect(await verifyPaneEmptyShell(input([shell], [replaced]))).toBe(false);
+    expect((await observeClaudeDelivery(input([shell], [replaced]), { unknownKeepsIdle: false })).state).toBe("conflict");
   });
 });
 
