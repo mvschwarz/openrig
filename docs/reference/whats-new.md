@@ -21,8 +21,8 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   (`171_claude_auto_mode`, `171_node_input_route`, `172_queue_return_route`,
   `173_node_process_limits`); each adds columns or indexes. Going back to
   0.7.17 after them isn't established.
-- **The plugins:** openrig-core moves to 0.1.32, because its skills and refocus
-  hook changed; `openrig` stays 0.7.17.
+- **The plugins:** `openrig` carries 0.7.18, and openrig-core moves to 0.1.32
+  because its skills and refocus hook changed.
 
 ## Your person's own conversation
 

@@ -52,8 +52,8 @@ assistants, including many contributions from people using OpenRig.
 - **Four migrations run before the daemon listens** (two numbered 171, then 172
   and 173). Each adds columns or indexes. Going back to 0.7.17 after them isn't
   established; keep the backup. ([#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3318](https://github.com/mvschwarz/openrig/pull/3318), [#3332](https://github.com/mvschwarz/openrig/pull/3332))
-- **The plugins:** openrig-core moves to 0.1.32, because its skills and refocus
-  hook changed; `openrig` stays 0.7.17.
+- **The plugins:** `openrig` carries 0.7.18, and openrig-core moves to 0.1.32
+  because its skills and refocus hook changed.
 
 ### Your team's questions, in your own conversation
 
