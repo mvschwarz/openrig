@@ -826,6 +826,27 @@ describe("RigTeardownOrchestrator", () => {
       expect(result.errors).toEqual([]);
     });
 
+    // #3416: launch writes both entries with a leading `exec` now, and settings written before that hold them without it.
+    it("takes back the relay hooks and the status line both with and without the leading exec", async () => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const s = claudeCwd(own);
+      const written = JSON.parse(fs.readFileSync(s.settings, "utf-8")) as { statusLine: { command: string } };
+      expect(written.statusLine.command.startsWith("exec ")).toBe(true);
+      addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }],
+        PreToolUse: [{ hooks: [{ type: "command", command: `exec ${s.relay}`, timeout: 5 }] }] });
+
+      await teardownWith(s.asset).teardown(claudeRig("claude-rig", s.cwd));
+      expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+
+      const old = claudeCwd(own);
+      const current = JSON.parse(fs.readFileSync(old.settings, "utf-8")) as Record<string, any>;
+      current["statusLine"]["command"] = current["statusLine"]["command"].replace(/^exec /, "");
+      fs.writeFileSync(old.settings, JSON.stringify(current, null, 2));
+
+      await teardownWith(old.asset).teardown(claudeRig("claude-rig-old", old.cwd));
+      expect(fs.readFileSync(old.settings, "utf-8")).toBe(own);
+    });
+
     it("keeps settings.local.json as {} when OpenRig's entries were all it held, since nothing says who created it", async () => {
       const s = claudeCwd();
       addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });

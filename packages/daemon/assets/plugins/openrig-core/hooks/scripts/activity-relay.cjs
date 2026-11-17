@@ -411,11 +411,12 @@ function uid() {
 const SETTINGS_RELAY_TAIL = "state/claude-activity-hooks/activity-relay.cjs";
 
 // Keep this finite Node-command grammar in parity with parseManagedClaudeNodeCommand.
-// Canonical POSIX quotes and literal unquoted words only; no expansion or wrappers.
+// Canonical POSIX quotes and literal unquoted words only, optionally after one leading `exec` (the shape OpenRig writes
+// since #3416; the one without it is an earlier version's); no expansion or other wrappers.
 function settingsRelayPath(command) {
   if (/[\r\n]/.test(command)) return null;
   const token = /'(?:[^']|'"'"')*'|[-A-Za-z0-9_./:@%+=,]+/.source;
-  const m = new RegExp(`^(${token})[ \t]+(${token})$`).exec(command.trim());
+  const m = new RegExp(`^(${token})[ \t]+(${token})$`).exec(command.trim().replace(/^exec[ \t]+/, ""));
   if (!m) return null;
   const decode = token => token.startsWith("'") ? token.slice(1, -1).split(`'"'"'`).join("'") : token;
   const quote = value => "'" + value.replace(/'/g, `'"'"'`) + "'";

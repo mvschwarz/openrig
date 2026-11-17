@@ -1425,8 +1425,9 @@ interface ActivityHookOutcome {
 function managedClaudeNodeCommand(executable: string, ...args: string[]): string {
   const quotedArgs = args.map(shellQuote).join(" ");
   const pinned = `${shellQuote(executable)} ${quotedArgs}`;
-  // Keep legacy PATH resolution if this runtime's name is outside our ownership grammar.
-  return parseManagedClaudeNodeCommand(pinned) ? pinned : `node ${quotedArgs}`;
+  // Keep legacy PATH resolution if this runtime's name is outside our ownership grammar. `exec` lets `sh -c` become
+  // Node instead of waiting on it (dash keeps the shell otherwise, #3416); the matchers still own the shape without it.
+  return `exec ${parseManagedClaudeNodeCommand(pinned) ? pinned : `node ${quotedArgs}`}`;
 }
 
 function hashContent(content: string): string {

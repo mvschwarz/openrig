@@ -33,8 +33,9 @@ printf '%s' "$input" | my-statusline
 ```
 
 Take the collector path and both directory arguments from the existing generated
-`statusLine.command` in that seat's `.claude/settings.local.json`; the instance
-home is the selected `OPENRIG_HOME`. Keep paths quoted, including paths with
+`statusLine.command` in that seat's `.claude/settings.local.json`, leaving out
+its leading `exec`: it only lets the generated single command replace its shell,
+and a wrapper doesn't need it. The instance home is the selected `OPENRIG_HOME`. Keep paths quoted, including paths with
 spaces. Each command needs the same status line JSON on stdin: simply running
 the collector and renderer in sequence against a single stdin lets the first
 consume the input.

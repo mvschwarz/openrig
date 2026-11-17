@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\"",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\"",
             "timeout": 5
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\"",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\"",
             "timeout": 5
           }
         ]
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
             "timeout": 60
           }
         ]
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/skills/claude-compaction-restore/scripts/precompact-hook.mjs\"",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/skills/claude-compaction-restore/scripts/precompact-hook.mjs\"",
             "timeout": 30
           }
         ]
@@ -66,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\"",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs\"",
             "timeout": 5
           }
         ]
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
             "timeout": 60
           }
         ]
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -108,7 +108,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -117,7 +117,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
             "timeout": 60
           }
         ]
@@ -128,7 +128,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
@@ -139,7 +139,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
+            "command": "exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin",
             "timeout": 5
           }
         ]
