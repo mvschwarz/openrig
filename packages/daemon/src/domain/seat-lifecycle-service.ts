@@ -1762,17 +1762,28 @@ export class SeatLifecycleService {
       if ("code" in currentSession) return currentSession;
       // Without --stop, validation passed only for a pane that held just a shell. The pane observation since may have
       // seen a start, so prove it again right before the stop, and have the stop re-read the record at its effect.
-      let shellOnly: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]> } | undefined;
+      let shellOnly: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]>;
+        prove: () => Promise<SeatRefusal | null> } | undefined;
       if (input.stop !== true) {
         if (!await this.holdsUnstartedShell(node.id, currentSession.id, this.sessionRegistry.getBindingForNode(node.id)?.tmuxPane)) {
           return { ok: false, code: "session_live", message: `Seat "${canonicalSessionName}" is live; fresh launch refuses without --stop.`,
             guidance: "Its pane no longer holds only a failed start's shell. Re-run with --stop to end exactly this managed occupant." };
         }
         viewWarnings.push(UNSTARTED_SHELL_REPLACED);
+        // At each effect, after the adapter's own reads: the pane's processes are observed again, then the record re-read.
         const guard = this.tmuxAdapter.deliveryGuard;
-        if (guard) shellOnly = { guard, selection: () => this.unstartedShellMarked(node.id, currentSession.id) ? null : {
-          ok: false, code: "selection_changed", message: `A startup event for "${canonicalSessionName}" arrived before the stop, so its `
-            + "pane may no longer hold only a shell; nothing was stopped. Re-run with --stop to end exactly this managed occupant." } };
+        const changed = (what: string): SeatRefusal => ({ ok: false, code: "selection_changed", message: `${what}, so the pane of `
+          + `"${canonicalSessionName}" may no longer hold only a shell; the session wasn't killed. Re-run with --stop to end `
+          + "exactly this managed occupant." });
+        if (guard) shellOnly = { guard,
+          prove: async () => {
+            const pane = this.sessionRegistry.getBindingForNode(node.id)?.tmuxPane;
+            return pane && await verifyPaneEmptyShell({ target: pane, tmux: this.tmuxAdapter,
+              ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) })
+              ? null : changed("Right before the stop, its shell had a process under it or couldn't be observed");
+          },
+          selection: () => this.unstartedShellMarked(node.id, currentSession.id) ? null
+            : changed("A startup event or a newer session arrived before the stop") };
       }
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
@@ -2140,12 +2151,17 @@ export class SeatLifecycleService {
     reason: string,
     operator: string | null | undefined,
     recordStopIntent: boolean,
-    checked?: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]> },
+    checked?: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]>;
+      /** Fresh evidence observed right before each effect, after the adapter's own reads; the selection follows it. */
+      prove?: () => Promise<SeatRefusal | null> },
   ): Promise<StopSeatResult> {
     const seat = this.describe(resolved);
-    const beforeEffect = checked && (() => {
+    const refuse = (refusal: SeatRefusal): never => { throw Object.assign(new Error(refusal.message), { code: refusal.code }); };
+    const beforeEffect = checked && (async () => {
+      const unproven = await checked.prove?.();
+      if (unproven) refuse(unproven);
       const changed = checked.selection();
-      if (changed) throw Object.assign(new Error(changed.message), { code: changed.code });
+      if (changed) refuse(changed);
       checked.guard.checkInput(resolved.nodeId);
     });
     const kill = checked

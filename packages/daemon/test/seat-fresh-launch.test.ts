@@ -748,9 +748,9 @@ describe("SeatLifecycleService.launchFresh", () => {
       listProcesses = async () => idleShell();
       Object.defineProperty(tmux, "deliveryGuard", { value: {
         ownsLifecycle: () => true, checkInput: () => undefined, preference: () => ({ desired: false, effective: false }) } });
-      tmux.killSession = vi.fn(async (name: string, beforeEffect?: () => void): Promise<TmuxResult> => {
+      tmux.killSession = vi.fn(async (name: string, beforeEffect?: () => void | Promise<void>): Promise<TmuxResult> => {
         eventBus.emit({ type: "node.startup_ready", rigId: seat.rig.id, nodeId: seat.node.id });
-        try { beforeEffect?.(); } catch (error) {
+        try { await beforeEffect?.(); } catch (error) {
           return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: (error as Error).message } as TmuxResult;
         }
         killed.push(name);
