@@ -17,13 +17,16 @@ import type { ProcessTableRow } from "../src/domain/process-table.js";
 // The process table as the daemon's own observers see it. `live` is the table now, and `hidden` the pids whose stat this
 // user can't read (Linux hidepid). The shared read models another observer's census still in flight: it listed the
 // processes once, when it began, and every caller asking meanwhile joins it. A census that begins now sees `live`.
+// `children` is the shell's own children list (Linux), null where the kernel keeps none.
 // (`readProcessTableNow` is round 3's rows-only read, kept so that round's code can run against these cells.)
-const table = vi.hoisted(() => ({ live: [] as ProcessTableRow[], shared: null as ProcessTableRow[] | null, hidden: [] as number[] }));
+const table = vi.hoisted(() => ({ live: [] as ProcessTableRow[], shared: null as ProcessTableRow[] | null, hidden: [] as number[],
+  children: [] as number[] | null }));
 vi.mock("../src/domain/process-table.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/domain/process-table.js")>()),
   readProcessTable: async () => (table.shared ??= [...table.live]),
   readProcessTableCensusNow: async () => ({ rows: [...table.live], permissionHiddenPids: [...table.hidden] }),
   readProcessTableNow: async () => [...table.live],
+  readProcessChildrenNow: async () => table.children && [...table.children],
 }));
 
 // #3392 (CR-F1): the last empty-shell sample before the stop must be a census begun for it. With no lister injected, as
@@ -54,6 +57,7 @@ describe("a fresh launch without --stop, with the daemon's own process reads", (
     table.live = [shell];
     table.shared = null;
     table.hidden = [];
+    table.children = [];
     named = undefined;
     onIdentity = undefined;
     const adapter = new TmuxAdapter(async command => {
@@ -128,6 +132,24 @@ describe("a fresh launch without --stop, with the daemon's own process reads", (
     expect(killIssued()).toBe(false);
     expect(result).toMatchObject({ ok: false, code: "session_live" });
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(seat.session.id) as { status: string }).status).toBe("running");
+  });
+
+  // #3392 r5: under hidepid=2 another user's process is missing from the census altogether, hidden pid and all. The
+  // shell's own children list still names it, so the launch keeps --stop.
+  it("keeps --stop when the shell's own children list names a process the census doesn't show", async () => {
+    const seat = failedStartSeat();
+    table.children = [7000];
+    const result = await service.launchFresh({ seatRef: seat.name, fresh: true, reason: "replace the shell" });
+    expect(killIssued()).toBe(false);
+    expect(result).toMatchObject({ ok: false, code: "session_live" });
+    expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(seat.session.id) as { status: string }).status).toBe("running");
+  });
+
+  it("kills on the census alone where the kernel keeps no children list", async () => {
+    const seat = failedStartSeat();
+    table.children = null;
+    await service.launchFresh({ seatRef: seat.name, fresh: true, reason: "replace the shell" }).catch(() => undefined);
+    expect(killIssued()).toBe(true);
   });
 
   it("kills when the shell stays empty, read anew at each sample", async () => {

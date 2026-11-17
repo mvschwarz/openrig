@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import { parseLinuxProcessArguments } from "./native-process-arguments.js";
@@ -56,6 +57,34 @@ export function readProcessTableCensus(): Promise<ProcessTableCensus> {
 export function readProcessTableCensusNow(): Promise<ProcessTableCensus> {
   return process.platform === "linux" ? readProcCensus(procRoot)
     : readPsTable().then(rows => ({ rows, permissionHiddenPids: [] }));
+}
+
+/** A process's children as Linux lists them, read now: every owner's, including those /proc's hidepid=2 leaves out of
+ *  a census. Null where there's no such list (another platform, or a kernel without it). */
+export function readProcessChildrenNow(pid: number): Promise<number[] | null> {
+  return process.platform === "linux" ? readProcChildren(pid, procRoot) : Promise.resolve(null);
+}
+
+/** The pids in a process's `task/<tid>/children` files (`root` for tests). Each lists the children one thread started,
+ *  so every thread's is read; a thread that exited meanwhile has none. The files are the process's own, readable under
+ *  any hidepid. Null when no thread has one (a kernel without CONFIG_PROC_CHILDREN). Rejects when the threads can't be
+ *  listed (the process is gone) or a file that exists can't be read. */
+export async function readProcChildren(pid: number, root = "/proc"): Promise<number[] | null> {
+  const task = `${root}/${pid}/task`;
+  let listed = false;
+  const children: number[] = [];
+  for (const tid of await fs.promises.readdir(task)) {
+    let text: string;
+    try {
+      text = await fs.promises.readFile(`${task}/${tid}/children`, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    listed = true;
+    for (const child of text.split(/\s+/)) if (child) children.push(Number(child));
+  }
+  return listed ? children : null;
 }
 
 /** Points the Linux read at a /proc of a test's own, so a scenario's processes reach the observers through it; no

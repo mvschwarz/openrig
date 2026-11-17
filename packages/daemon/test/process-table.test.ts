@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readProcessTable, readProcessTableCensusNow, readProcTable, readProcessTableCensus, readProcCensus } from "../src/domain/process-table.js";
+import { readProcChildren, readProcessChildrenNow, readProcessTable, readProcessTableCensusNow, readProcTable, readProcessTableCensus, readProcCensus } from "../src/domain/process-table.js";
 import { claudeCommandSessionToken, listNativeProcesses, processArgv, verifyCodexPaneProcess, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 import { defaultListProcessesStrict } from "../src/domain/resume-metadata-refresher.js";
 import { restoreProc, serveProcRoot, writeFakeProc, readPermissionHiddenProc } from "./helpers/fake-proc.js";
@@ -175,6 +175,48 @@ describe("readProcTable", () => {
     const ps = (columns: string) => execFileSync("ps", ["-o", columns, "-p", String(process.pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim();
     expect(self).toMatchObject({ ppid: Number(ps("ppid=")), pgid: Number(ps("pgid=")), tpgid: Number(ps("tpgid=")), executableName: ps("ucomm="), command: ps("args=") });
     expect(self.startedAt).toBe(ps("lstart="));
+  });
+});
+
+describe("readProcChildren", () => {
+  /** A thread's children file under the fake process 7, or (null) the thread's directory alone. */
+  const thread = (root: string, tid: number, children: string | null) => {
+    fs.mkdirSync(path.join(root, "7", "task", String(tid)), { recursive: true });
+    if (children !== null) fs.writeFileSync(path.join(root, "7", "task", String(tid), "children"), children);
+  };
+
+  it("lists the children every thread started, as the kernel writes them, skipping a thread with no file", async () => {
+    const root = fakeProc(0, { 7: { stat: stat(7, "bash", "S", 1, 7, 7, 0), cmdline: "bash\0" } });
+    thread(root, 7, "8 9 ");
+    thread(root, 70, "10 ");
+    thread(root, 71, null);
+    expect((await readProcChildren(7, root))?.sort((a, b) => a - b)).toEqual([8, 9, 10]);
+    thread(root, 7, "");
+    thread(root, 70, "");
+    expect(await readProcChildren(7, root)).toEqual([]);
+  });
+
+  it("is null where no thread has the file, and rejects when the threads or a file can't be read", async () => {
+    const root = fakeProc(0, { 7: { stat: stat(7, "bash", "S", 1, 7, 7, 0), cmdline: "bash\0" } });
+    // The process is gone, or its threads can't be listed.
+    await expect(readProcChildren(7, root)).rejects.toThrow(/ENOENT/);
+    // A kernel without CONFIG_PROC_CHILDREN.
+    thread(root, 7, null);
+    expect(await readProcChildren(7, root)).toBeNull();
+    // A file that exists but can't be read (EISDIR here, as root reads past a permission).
+    fs.mkdirSync(path.join(root, "7", "task", "7", "children"));
+    await expect(readProcChildren(7, root)).rejects.toThrow(/EISDIR/);
+  });
+
+  it("names a child this process started, on Linux, and nothing elsewhere", async () => {
+    const child = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      const children = await readProcessChildrenNow(process.pid);
+      if (process.platform === "linux") expect(children).toContain(child.pid);
+      else expect(children).toBeNull();
+    } finally {
+      child.kill();
+    }
   });
 });
 

@@ -4,7 +4,7 @@ import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readNativeProcessArguments } from "./native-process-arguments.js";
-import { readProcessTable, readProcessTableCensusNow } from "./process-table.js";
+import { readProcessChildrenNow, readProcessTable, readProcessTableCensusNow } from "./process-table.js";
 
 export interface NativeProcessRow {
   pid: number;
@@ -1030,7 +1030,8 @@ export async function verifyPaneIdleShell(input: {
  *  another process group, is a child, so it isn't empty. For ending a pane without --stop; delivery keeps the
  *  foreground rule above. A missing or failed listing isn't empty. Each sample reads the table anew, after its pane
  *  read: another observer's shared read still in flight may predate a job started since. A process hidden from this user
- *  (Linux hidepid) could be the shell's child, so a census with any hidden pid isn't empty either. */
+ *  (Linux hidepid) could be the shell's child, so a census with any hidden pid isn't empty either, nor is a shell whose
+ *  own children list (Linux, where the kernel keeps one) names any process. */
 export async function verifyPaneEmptyShell(input: {
   target: string;
   tmux: { getPanePid(target: string): Promise<number | null> };
@@ -1045,6 +1046,9 @@ export async function verifyPaneEmptyShell(input: {
           const census = await readProcessTableCensusNow();
           // A hidden stat can't show its parent; even an unrelated one leaves the shell's children unknown.
           if (census.permissionHiddenPids.length > 0) throw new Error("some processes are hidden from this user");
+          // hidepid=2 leaves another user's process out of the census altogether; the shell's own list still names it.
+          const children = await readProcessChildrenNow(pid);
+          if (children && children.length > 0) throw new Error("the shell has a child process");
           return census.rows;
         });
       const root = idleShellRoot(rows, pid);
