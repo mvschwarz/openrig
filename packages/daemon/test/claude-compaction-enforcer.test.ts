@@ -319,6 +319,29 @@ describe("ClaudeCompactionEnforcer", () => {
     } finally { db.close(); }
   });
 
+  it("contains a throwing completion notice without changing the successful drain or retrying bookkeeping", async () => {
+    const { transport } = makeSessionTransport();
+    const completion = vi.fn(async () => { throw new Error("storage unavailable"); });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, onRestoreDeliveryComplete: completion,
+      } as never);
+      const sessionName = "claude-seat@rig";
+      await enforcer.maybeAutoCompact({ sessionName, runtime: "claude-code", usedPercentage: 90 });
+      await enforcer.maybeAutoCompact({ sessionName, runtime: "claude-code", usedPercentage: 91 });
+      const input = { sessionName, runtime: "claude-code" };
+      await enforcer.drainPendingPostCompactStage(input);
+      await enforcer.drainPendingPostCompactStage(input);
+      await expect(enforcer.drainPendingPostCompactStage(input)).resolves.toEqual({ triggered: true });
+      expect(completion).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledWith("[compaction] restore completion notice failed", expect.objectContaining({ sessionName, errorClass: "Error" }));
+      expect(enforcer.getOwedRestore(sessionName)).toBeNull();
+      await expect(enforcer.drainPendingPostCompactStage(input)).resolves.toMatchObject({ reason: "no_pending_stage" });
+      expect(completion).toHaveBeenCalledTimes(1);
+    } finally { warning.mockRestore(); }
+  });
+
   it("publishes one target-generation-keyed width receipt callback after restore compliance", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport } = makeSessionTransport();

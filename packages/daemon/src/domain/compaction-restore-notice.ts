@@ -59,13 +59,21 @@ export async function reportRestoreDeliveryFailure(db: Database.Database, queue:
     : "";
   const existing = queue.getById(qitemId);
   if (existing) {
-    // An owner's closed disposition stands. Only completion of all owed stages retires this attempt's notice.
-    if (!["pending", "in-progress", "blocked"].includes(existing.state)) return;
+    // A system completion settles the current sequence; a late compaction report may owe it again.
+    // Preserve owner dispositions, using the actual closing transition rather than a later receipt/note.
+    if (!["pending", "in-progress", "blocked"].includes(existing.state)) {
+      if (!lastDelivery.ok && existing.state === "done" && existing.closureReason === "no-follow-on"
+        && queue.closingTransition(qitemId, existing.state)?.actorSession === "system:compaction") {
+        queue.update({ qitemId, actorSession: "system:compaction", state: "pending", reopen: true, summary,
+          transitionNote: `${summary}. A re-owed sequence failed after this attempt's automatic completion; its earlier completion remains in the history.` });
+      }
+      return;
+    }
     if (options?.completed && lastDelivery.ok && lastDelivery.stage === "compliance_prompt") {
       const caveat = lastDelivery.reason === "delivered_over_unreadable_pane" ? " over an unreadable pane"
         : lastDelivery.reason === "delivered_over_unreadable_input_box" ? " over an unreadable input box" : "";
-      const completed = `Managed restore for ${sessionName}: ${lastDelivery.stage} delivered at ${lastDelivery.at}${caveat}; all owed stages delivered`;
-      const note = `${completed}. This records delivery, not proof the seat read it. Previous notice: ${existing.summary ?? "restore delivery was owed"}`;
+      const completed = `Managed restore for ${sessionName}: ${lastDelivery.stage} delivered at ${lastDelivery.at}${caveat}; current restore sequence delivered`;
+      const note = `${completed}. This records delivery, not proof the seat read it. A late compaction report can owe another sequence for this attempt. Previous notice: ${existing.summary ?? "restore delivery was owed"}`;
       queue.update({ qitemId, actorSession: "system:compaction", state: "done", closureReason: "no-follow-on",
         summary: completed, resolution: note, transitionNote: note });
       return;

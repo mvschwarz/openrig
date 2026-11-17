@@ -1096,9 +1096,15 @@ export class ClaudeCompactionEnforcer {
       // The awaited lifecycle has settled: notice work must not inherit its active lease.
       const lastDelivery = record?.record.lastDelivery;
       if (record?.record.phase === "done") {
-        await this.onRestoreDeliveryComplete?.({ sessionName: input.sessionName, attemptId: record.record.attemptId,
-          mapPath: record.record.mapPath, lastDelivery: lastDelivery ?? { stage: "compliance_prompt", ok: true,
-            at: new Date(record.record.updatedAt).toISOString(), reason: "delivered", failures: 0 } });
+        // Bookkeeping is best-effort: a storage failure cannot turn delivered input into a failed drain.
+        try {
+          await this.onRestoreDeliveryComplete?.({ sessionName: input.sessionName, attemptId: record.record.attemptId,
+            mapPath: record.record.mapPath, lastDelivery: lastDelivery ?? { stage: "compliance_prompt", ok: true,
+              at: new Date(record.record.updatedAt).toISOString(), reason: "delivered", failures: 0 } });
+        } catch (error) {
+          console.warn("[compaction] restore completion notice failed", { sessionName: input.sessionName,
+            attemptId: record.record.attemptId, errorClass: error instanceof Error ? error.name : typeof error });
+        }
       }
       const deliveredUnreadable = lastDelivery?.reason === "delivered_over_unreadable_pane";
       // Unknown readiness from an attempt without #2818's bounded fallback waits for that fallback to be tried. It opens after
