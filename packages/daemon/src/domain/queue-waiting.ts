@@ -6,6 +6,7 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { nextDueAt } from "./watchdog-due.js";
 import type { WatchdogJob } from "./watchdog-jobs-repository.js";
+import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 
 export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "decidedBy" | "backgroundWork"> | null;
 
@@ -185,10 +186,13 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   }
   if (row.state === "blocked") {
     const hasTimers = statements.hasTable("queue_transition_wakes");
-    const timer = hasTimers ? statements.statement(`SELECT j.job_id, j.policy, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.scan_interval_seconds, j.spec_yaml
+    const timer = hasTimers ? readWithCurrentParkBoundary(boundary => statements.statement(`SELECT j.job_id, j.policy, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.scan_interval_seconds, j.spec_yaml
       FROM queue_transition_wakes w JOIN watchdog_jobs j ON j.job_id = w.wake_ref
       WHERE w.qitem_id = ? AND w.phase = 'armed' AND j.state = 'active'
-      ORDER BY w.transition_id DESC LIMIT 1`).get(id) as { job_id: string; policy: WatchdogJob["policy"]; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; scan_interval_seconds: number | null; spec_yaml: string } | undefined : undefined;
+        AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+          WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+        ${boundary}
+      ORDER BY w.transition_id DESC LIMIT 1`).get(id)) as { job_id: string; policy: WatchdogJob["policy"]; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; scan_interval_seconds: number | null; spec_yaml: string } | undefined : undefined;
     // The scheduler's own due time: a never-evaluated reminder fires one interval after registration (#801),
     // and the wake-now marker is due now (#860).
     const timerDue = timer ? nextDueAt({ policy: timer.policy, specYaml: timer.spec_yaml, registeredAt: timer.registered_at,

@@ -55,3 +55,16 @@ it("an unreadable registry is not read as nobody registered: no offer, and the s
   expect(logs).toEqual(["Daemon started on port 7433 (pid 4242)"]);
   expect(process.exitCode).toBeUndefined();
 });
+
+it("says a workspace.root holding a project of its own was left as it is, as the daemon's log does", async () => {
+  // After a move, workspace.root named the person's own project, and only the daemon's log said so.
+  const root = join(home, "my-project");
+  mkdirSync(root);
+  writeFileSync(join(root, "project.yaml"), "id: my-project\n");
+  vi.stubEnv("OPENRIG_WORKSPACE_ROOT", root);
+  expect(addHumanFragment({ entityId: "ada", class: "human", displayName: "Ada", address: "ada@external", connectorBindings: [], prefs: { deliveryClass: "B" } }, home).ok).toBe(true);
+  await start();
+  expect(logs).toEqual(["Daemon started on port 7433 (pid 4242)",
+    `workspace.root holds a project of its own (${join(root, "project.yaml")}); OpenRig left it as it is and reads that project's own id.`]);
+  expect(process.exitCode).toBeUndefined();
+});

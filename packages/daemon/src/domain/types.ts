@@ -235,7 +235,11 @@ export type RigEvent =
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
       wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
       /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
-      outcome: ReturnType<typeof readSendOutcome> }
+      outcome: ReturnType<typeof readSendOutcome>;
+      /** Slice 13: the seat routes through its hook bridge, which couldn't take this send (its waiter expired, say), so it
+       *  went to typed delivery: why, as the sender's warning said it. A message queued for the bridge and typed later is
+       *  named by `transport.hook_bridge_fallback` instead. */
+      hookBridgeUnavailable?: string }
   /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
    *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
    *  queued messages were handed back to typed delivery because the bridge had no live arm. */
@@ -424,7 +428,7 @@ export type RigEvent =
   | { type: "workflow.next_qitem_projected"; instanceId: string; nextQitemId: string; nextOwner: string; nextStepId: string }
   | { type: "workflow.completed"; instanceId: string; workflowName: string }
   | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
-  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number }
+  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number; ownerSession?: string; ownerSource?: "named" | "resolved" }
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.

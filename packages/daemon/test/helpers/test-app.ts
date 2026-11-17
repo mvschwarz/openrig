@@ -346,6 +346,8 @@ export function createTestApp(
     /** Optional persisted fresh-launch callbacks for restore-to-instantiator integration tests. */
     freshLaunch?: import("../../src/domain/restore-orchestrator.js").RestoreOrchestratorDeps["freshLaunch"];
     freshLaunchAvailable?: (rigId: string, nodeId: string) => boolean;
+    /** The launcher's folder creation, as startup wires it; omitted, a launch creates no folder. */
+    createFolder?: (path: string) => void;
     /** Wire the ready runtime adapters into the routes' `runtimeAdapters`, as startup does, so a
      *  route launch can start harnesses. Off by default: existing tests keep no route adapters. */
     wireRuntimeAdapters?: boolean;
@@ -370,7 +372,8 @@ export function createTestApp(
   const tmux = opts?.tmux ?? mockTmuxAdapter();
   const cmux = opts?.cmux ?? unavailableCmuxAdapter();
   const transcriptStore = opts?.transcriptStore ?? new TranscriptStore("/tmp/openrig-test-transcripts");
-  const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+  const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux,
+    ...(opts?.createFolder ? { createFolder: opts.createFolder } : {}) });
   const snapshotRepo = new SnapshotRepository(db);
   const checkpointStore = new CheckpointStore(db);
   const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });

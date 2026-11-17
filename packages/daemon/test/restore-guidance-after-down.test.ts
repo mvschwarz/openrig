@@ -35,11 +35,19 @@ import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { replaceFile } from "../src/adapters/replace-file.js";
+import { ContextMonitor } from "../src/domain/context-monitor.js";
+import { folderPresent } from "../src/domain/cwd-resolution.js";
 import { getNodeDetail } from "../src/domain/node-inventory.js";
 
 const TOKEN = "tok-lead";
 
-function mockTmux(opts: { noPane?: boolean } = {}): TmuxAdapter {
+/** `panesAfterLaunch`: what tmux lists after the launch's own pane observation (the first listing): other panes, or a
+ *  listing that fails. */
+function mockTmux(opts: { noPane?: boolean; paneCwd?: string; panesAfterLaunch?: Array<{ id: string; cwd: string }> | "fails" } = {}): TmuxAdapter {
+  let listings = 0;
+  const first = () => (opts.noPane ? [] : [{ id: "%1", index: 0, cwd: opts.paneCwd ?? "/", width: 80, height: 24, active: true }]);
   return {
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
@@ -50,7 +58,12 @@ function mockTmux(opts: { noPane?: boolean } = {}): TmuxAdapter {
     capturePaneContent: vi.fn(async () => ""),
     listSessions: async () => [],
     listWindows: async () => [],
-    listPanes: async () => (opts.noPane ? [] : [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
+    listPanes: async () => {
+      listings += 1;
+      if (listings === 1 || !opts.panesAfterLaunch) return first();
+      if (opts.panesAfterLaunch === "fails") throw new Error("tmux list-panes failed");
+      return opts.panesAfterLaunch.map((pane, index) => ({ ...pane, index, width: 80, height: 24, active: index === 0 }));
+    },
     hasSession: async () => false,
   } as unknown as TmuxAdapter;
 }
@@ -79,6 +92,8 @@ interface SeatOptions {
   piAgentFile?: boolean;
   /** A launch from before the context-entry floor: the saved selection has the built-in openrig-start.md and no floor. */
   legacyStart?: boolean;
+  /** With piAgentFile: the recorded agent file sits inside the seat's folder, in a child folder named `..agent`. */
+  piAgentInsideCwd?: boolean;
 }
 
 /** The resume type each runtime records for its native session. */
@@ -182,7 +197,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     const actions = [{ type: "send_text", value: "STARTUP-PROMPT-MUST-NOT-REPLAY", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true }];
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
       .run(node.id, JSON.stringify(entries), JSON.stringify(files), JSON.stringify(actions), runtime);
-    const guidanceFile = opts.piAgentFile ? path.join(tmp, "pi-state", sessionName, "agent", "AGENTS.md")
+    const guidanceFile = opts.piAgentFile ? (opts.piAgentInsideCwd ? path.join(cwd, "..agent", "AGENTS.md") : path.join(tmp, "pi-state", sessionName, "agent", "AGENTS.md"))
       : path.join(cwd, runtime === "claude-code" ? (opts.claudeManagedBlockFile ?? "CLAUDE.md") : "AGENTS.md");
     if (opts.piAgentFile) {
       fs.mkdirSync(path.dirname(guidanceFile), { recursive: true });
@@ -199,9 +214,10 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
 
   /** `rig down` (the real teardown), then `rig up --existing` from its auto snapshot. Records
    *  the guidance file's content at the moment the native harness was started. */
-  async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean; routerLine?: "yes" | "no" } = {}) {
+  async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean; routerLine?: "yes" | "no"; paneCwd?: string; fsOps?: true;
+    panesAfterLaunch?: Array<{ id: string; cwd: string }> | "fails"; realClaude?: ClaudeCodeAdapter } = {}) {
     const runtime = opts.runtime ?? "claude-code";
-    const tmux = mockTmux({ noPane: opts.noPane });
+    const tmux = mockTmux({ noPane: opts.noPane, paneCwd: opts.paneCwd, panesAfterLaunch: opts.panesAfterLaunch });
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus })
       .teardown(rigId);
     expect(down.snapshotId).toBeTruthy();
@@ -216,8 +232,10 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     const adapter = {
       runtime,
       listInstalled: vi.fn(async () => []),
-      project: vi.fn(async (plan: { entries: Array<{ effectiveId: string }> }) =>
-        ({ projected: plan.entries.map((e) => e.effectiveId), skipped: [], failed: [] })),
+      // `realClaude`: the real adapter's projection, which writes the activity hooks into the seat's folder.
+      project: vi.fn(async (plan: { entries: Array<{ effectiveId: string }> }, binding?: unknown) => opts.realClaude
+        ? opts.realClaude.project(plan as never, binding as never)
+        : ({ projected: plan.entries.map((e) => e.effectiveId), skipped: [], failed: [] })),
       deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
       checkReady: vi.fn(async () => ({ ready: true })),
       launchHarness: vi.fn(async () => {
@@ -227,7 +245,10 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     };
     const restore = new RestoreOrchestrator({
       db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture, checkpointStore,
-      nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux }),
+      // A launcher that can create folders, as in production: a restore never asks it to (no createCwd), so a saved folder
+      // missing on this machine stays missing.
+      nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux,
+        createFolder: (dir: string) => { fs.mkdirSync(dir, { recursive: true }); } }),
       tmuxAdapter: tmux, claudeResume, codexResume,
       ...(opts.routerLine ? { routerLineSettings: { resolveOne: () => ({ value: opts.routerLine === "yes", source: "file", defaultValue: false }) } as never } : {}),
       // The pane's process tree shows the same native session resumed (the joined-resume proof).
@@ -236,7 +257,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
         { pid: 1235, ppid: 1234, command: runtime === "codex" ? `codex resume ${TOKEN}` : runtime === "pi" ? `pi --session ${TOKEN}` : `claude --resume ${TOKEN}` },
       ],
     });
-    const up = await restore.restore(down.snapshotId!, { adapters: { [runtime]: adapter as never } });
+    const up = await restore.restore(down.snapshotId!, { adapters: { [runtime]: adapter as never }, ...(opts.fsOps ? { fsOps: nodeFs } : {}) });
     expect(up.ok).toBe(true);
     if (!up.ok) throw new Error("restore did not run");
     expect(fileAtHarnessStart, "the native harness was started exactly once").toHaveLength(1);
@@ -256,6 +277,82 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(lead?.status).toBe("resumed");
     expect(lead?.guidanceGaps).toBeUndefined();
     expect(result.rigResult).toBe("fully_restored");
+  });
+
+  // OpenRig's home moved, so the seat's saved folder isn't on this machine and its terminal starts in the
+  // tmux server's fallback folder. The restore names the folder the seat started in, doesn't recreate the old one just to
+  // hold a guidance file nothing reads there, and reports the seat running without that guidance.
+  it("a saved folder this machine doesn't have: names where the seat started, recreates nothing, and reports the guidance gap", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const startedIn = path.join(tmp, "home-b");
+    fs.mkdirSync(startedIn);
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile,
+      { betweenDownAndUp: () => fs.rmSync(cwd, { recursive: true, force: true }), paneCwd: startedIn, fsOps: true });
+    expect(fs.existsSync(cwd), "the missing saved folder is not recreated").toBe(false);
+    expect(fileAtHarnessStart).toBeNull();
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("resumed");
+    expect([...(lead?.guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "lead-role"]);
+    expect(result.warnings).toContain(`Restore: lead's working directory ${cwd} doesn't exist on this machine, so it started in `
+      + `${startedIn}. To launch this rig's seats in another directory for this run: rig up poc --existing --cwd <dir>.`);
+    expect(result.warnings.join("\n")).toContain(`lacks the OpenRig blocks lead-role, SOP.md, because ${cwd} doesn't exist on this machine`);
+    expect(result.warnings.join("\n")).not.toContain("put back missing blocks");
+  });
+
+  // A guidance file outside the missing folder, such as a Pi agent folder's own AGENTS.md, is read wherever the seat runs,
+  // so it is still put back.
+  it("a saved folder this machine doesn't have: a Pi agent folder's AGENTS.md still gets its blocks back", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "pi", piAgentFile: true });
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, { podAware: true, runtime: "pi",
+      betweenDownAndUp: () => fs.rmSync(cwd, { recursive: true, force: true }), fsOps: true });
+    expect(fs.existsSync(cwd)).toBe(false);
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("lead-role"));
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
+  });
+
+  // The line names only the seat's own pane: when tmux lists only another pane, or can't list them, it names no folder.
+  it.each(["another pane", "a failed listing"] as const)("a saved folder this machine doesn't have: %s never names a folder as the seat's", async (after) => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const elsewhere = path.join(tmp, "another-pane");
+    const { result } = await downThenUpExisting(rigId, guidanceFile, { betweenDownAndUp: () => fs.rmSync(cwd, { recursive: true, force: true }),
+      paneCwd: path.join(tmp, "home-b"), fsOps: true, panesAfterLaunch: after === "another pane" ? [{ id: "%2", cwd: elsewhere }] : "fails" });
+    expect(result.warnings).toContain(`Restore: lead's working directory ${cwd} doesn't exist on this machine. To launch this rig's seats `
+      + "in another directory for this run: rig up poc --existing --cwd <dir>.");
+    expect(result.warnings.join("\n")).not.toContain("started in");
+  });
+
+  // A recorded file in a child folder whose name starts with two dots is still inside the missing folder.
+  it("a saved folder this machine doesn't have: a recorded file in its `..agent` child folder doesn't bring the folder back", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "pi", piAgentFile: true, piAgentInsideCwd: true });
+    expect(guidanceFile).toBe(path.join(cwd, "..agent", "AGENTS.md"));
+    const { result } = await downThenUpExisting(rigId, guidanceFile, { podAware: true, runtime: "pi",
+      betweenDownAndUp: () => fs.rmSync(cwd, { recursive: true, force: true }), fsOps: true });
+    expect(fs.existsSync(cwd)).toBe(false);
+    expect([...(result.nodes[0]?.guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "lead-role"]);
+  });
+
+  // The other writers into a seat's folder follow the same rule: the restore's reapplied activity hooks, and the context
+  // monitor's collector on every poll, don't bring back a saved folder this machine doesn't have.
+  it("a saved folder this machine doesn't have stays absent through the restore's hooks and a context poll", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const collector = path.join(tmp, "collector.cjs");
+    fs.writeFileSync(collector, "// collector\n");
+    const claude = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...nodeFs, copyFile: replaceFile, homedir: os.homedir(), folderPresent },
+      stateDir: path.join(tmp, "openrig"), collectorAssetPath: collector,
+      activityRelayPath: path.join(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"),
+      claudeHooksManifestPath: path.join(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json") });
+    const project = vi.spyOn(claude, "project");
+    const provision = vi.spyOn(claude, "ensureContextCollector");
+    const { result } = await downThenUpExisting(rigId, guidanceFile,
+      { betweenDownAndUp: () => fs.rmSync(cwd, { recursive: true, force: true }), fsOps: true, realClaude: claude });
+    expect(project).toHaveBeenCalledWith(expect.objectContaining({ entries: [expect.objectContaining({ effectiveId: "activity-hooks" })] }),
+      expect.objectContaining({ cwd }));
+    expect(fs.existsSync(cwd), "after the restore").toBe(false);
+    expect(result.warnings.join("\n")).toContain(`activity-hooks: not written, because ${cwd} doesn't exist on this machine`);
+    await new ContextMonitor(db, { readAndNormalize: () => null, readCodexAndNormalize: () => null } as never, claude).pollOnce();
+    expect(provision).toHaveBeenCalledWith(expect.objectContaining({ cwd }));
+    expect(fs.existsSync(cwd), "after one context poll").toBe(false);
   });
 
   // The seat-skills line comes back only with the person's yes, as at a start: after a no, an exact resume leaves the file

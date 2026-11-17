@@ -173,7 +173,8 @@ export class RigInstantiator {
     const instantiateWarnings: string[] = [];
 
     for (const logicalId of launchOrder) {
-      const result = await this.nodeLauncher.launchNode(rigId!, logicalId, opts?.env ? { env: opts.env } : undefined);
+      // A spec launch: the member's declared folder is created if it isn't there yet (createCwd).
+      const result = await this.nodeLauncher.launchNode(rigId!, logicalId, { createCwd: true, ...(opts?.env ? { env: opts.env } : {}) });
       if (result.ok) {
         nodeResults.push({ logicalId, status: "launched" });
         launchedSessionNames.push(result.sessionName);
@@ -1076,6 +1077,7 @@ export class PodRigInstantiator {
       }
 
       const launched = await this.launchValidatedMember({
+        createCwd: true,
         rigId: targetRigId,
         rigSpec,
         rigRoot,
@@ -1425,7 +1427,7 @@ export class PodRigInstantiator {
     if (finalRefusal) return refuse(finalRefusal);
     const launchMember = limitsReadable ? member : { ...member, processLimits: undefined };
     const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member: launchMember,
-      resolveResult: resolved, configResult: launchConfig, keepRecordedAdditions: true });
+      resolveResult: resolved, configResult: launchConfig, keepRecordedAdditions: true, createCwd: true });
     if (result.status !== "launched") {
       return { ok: false, code: result.code ?? result.status, message: result.error ?? "First-start retry did not reach readiness.",
         ...(result.retryable !== undefined ? { retryable: result.retryable } : {}),
@@ -1786,6 +1788,7 @@ export class PodRigInstantiator {
         }
 
         const launched = await this.launchExistingAgentMember({
+          createCwd: true,
           rigId,
           rigSpec,
           rigRoot,
@@ -2066,6 +2069,7 @@ export class PodRigInstantiator {
     }
 
     const launched = await this.launchExistingTerminalMember({
+      createCwd: true,
       rigId,
       rigSpec,
       rigRoot,
@@ -2182,6 +2186,8 @@ export class PodRigInstantiator {
     envOverride?: SeatEnv;
     resolveResult?: ReturnType<typeof resolveAgentRef>;
     processLimitsMode?: ProcessLimitsMode;
+    createCwd?: boolean;
+    launchCwd?: string;
   }) {
     return this.launchBinding(input);
   }
@@ -2210,6 +2216,11 @@ export class PodRigInstantiator {
     resolveResult?: ReturnType<typeof resolveAgentRef>;
     /** #3253: how the launch treats a process limit it can't apply (default fresh: refused). A restore passes "recovery". */
     processLimitsMode?: ProcessLimitsMode;
+    /** A spec entry point: create the member's declared working folder if it isn't there yet (NodeLauncher's createCwd).
+     *  A restore leaves it unset, so a saved folder missing on this machine isn't recreated. */
+    createCwd?: boolean;
+    /** A folder the person chose for this run (a restore's --cwd): the terminal starts there, not in the saved folder. */
+    launchCwd?: string;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string;
     warnings?: string[]; retryable?: boolean; processLimits?: LaunchLimits }> {
     return input.member.agentRef === "builtin:terminal"
@@ -2274,6 +2285,9 @@ export class PodRigInstantiator {
       cwdOverride: opts?.cwdOverride ?? node.cwd ?? undefined,
       resolveResult,
       ...(opts?.processLimitsMode ? { processLimitsMode: opts.processLimitsMode } : {}),
+      // A restore's saved folder missing on this machine isn't recreated. A --cwd the person gave for this run is where the
+      // terminal starts (the launch otherwise starts in the saved folder), and it's created if it isn't there yet.
+      ...(opts?.cwdOverride ? { launchCwd: opts.cwdOverride, createCwd: true } : {}),
     });
     const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
     // #3253: the recovery notice is what a restore reports; a fresh refusal's problem stays in the code and message.
@@ -2498,6 +2512,8 @@ export class PodRigInstantiator {
      *  start recorded rather than read an empty request as "none". */
     keepRecordedAdditions?: boolean;
     processLimitsMode?: ProcessLimitsMode;
+    createCwd?: boolean;
+    launchCwd?: string;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
     retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
@@ -2656,6 +2672,8 @@ export class PodRigInstantiator {
     }
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, {
       sessionName: canonicalSessionName,
+      ...(input.createCwd ? { createCwd: true } : {}),
+      ...(input.launchCwd ? { cwd: input.launchCwd } : {}),
       silenceWindowSeconds: configResult.config.activity?.silenceWindowSeconds,
       env: input.envOverride,
       pluginPaths: selectedPluginPaths(configResult.config.selectedResources),
@@ -2991,6 +3009,8 @@ export class PodRigInstantiator {
     cwdOverride?: string;
     envOverride?: SeatEnv;
     processLimitsMode?: ProcessLimitsMode;
+    createCwd?: boolean;
+    launchCwd?: string;
   }): Promise<{ status: "launched" | "failed"; code?: string; error?: string; sessionName?: string; warnings?: string[];
     retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
@@ -3019,7 +3039,8 @@ export class PodRigInstantiator {
     if (input.member.statuslineThrottle !== undefined) {
       this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
     }
-    const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, env: input.envOverride,
+    const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, ...(input.createCwd ? { createCwd: true } : {}),
+      ...(input.launchCwd ? { cwd: input.launchCwd } : {}), env: input.envOverride,
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });
     if (!launchResult.ok) {
       // #3253: a refusal for the seat's limit says whether a retry may pass and why, also past this launcher.
