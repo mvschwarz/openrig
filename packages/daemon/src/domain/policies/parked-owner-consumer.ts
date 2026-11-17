@@ -151,6 +151,8 @@ export function currentParkedOwnerNoInputFailure(transitions: RowTransitionView[
   const key = reserve?.transitionNote && keyOfNote(reserve.transitionNote);
   if (!key || !openKeysOnRow(transitions).includes(key)) return null;
   for (const t of [...transitions].reverse()) {
+    // A later held note (the seat turned queue-only, #3076) supersedes an earlier refusal: input there stops by the level.
+    if (t.transitionNote?.startsWith(HELD_PREFIX)) return null;
     if (t.transitionNote?.startsWith(`${FAILED_PREFIX} ${key}${QUOTA_NO_INPUT}`)) return { code: "retained_quota_full", ts: t.ts, transitionId: t.transitionId };
     if (t.transitionNote?.startsWith(`${FAILED_PREFIX} ${key}${TERMINAL_NO_INPUT}`)) return { code: "terminal_seat", ts: t.ts, transitionId: t.transitionId };
   }

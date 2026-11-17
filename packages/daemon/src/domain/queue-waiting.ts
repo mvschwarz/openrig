@@ -89,6 +89,15 @@ export class WaitingStatements {
   }
 }
 
+/** Whether a row's stored tags (a JSON array, or null) carry every one of `wanted`. */
+function hasTags(tags: string | null, wanted: string[]): boolean {
+  if (!tags) return false;
+  try {
+    const parsed: unknown = JSON.parse(tags);
+    return Array.isArray(parsed) && wanted.every(t => parsed.includes(t));
+  } catch { return false; }
+}
+
 /** The queue_items columns a waiting view reads from its own row. */
 export interface WaitingRow {
   qitem_id: string; source_session: string; destination_session: string; state: string; blocked_on: string | null; closure_required_at: string | null; tags: string | null;
@@ -183,6 +192,12 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     view.nextBackstop.owner = recoveryOwner ?? row.destination_session;
     view.nextBackstop.dueAt = base ? new Date(Date.parse(base) + delay * 1000).toISOString() : null;
     view.nextBackstop.mechanism = row.state === "pending" ? "queue-stuck-sweep:unclaimed" : "queue-stuck-sweep:pickup (activity checked at detection)";
+    // A queue-only seat's cold watchdog reminder (#3076) waits, with no nudge, for a person or the seat's next turn; the
+    // stuck sweep files no unclaimed finding for it, so none is promised here.
+    if (row.state === "pending" && row.source_session === "watchdog@system" && hasTags(row.tags, ["watchdog", "queue-only"])) {
+      view.nextBackstop = { owner: row.destination_session, mechanism: "none (queue-only reminder row: a person or the seat's next turn picks it up)",
+        dueAt: null, intervalSeconds: null };
+    }
   }
   if (row.state === "blocked") {
     const hasTimers = statements.hasTable("queue_transition_wakes");

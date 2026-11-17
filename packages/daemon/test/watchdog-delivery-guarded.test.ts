@@ -935,6 +935,18 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
     expect(s.repo.waitingView(r.qitemId)!.nextBackstop.mechanism).toBe("unconsumed wait notice; delivery=ok");
   });
 
+  it("a pending cold row shows no stuck-sweep backstop it won't get; once claimed, the pickup check applies as for any row", async () => {
+    const { s, wdRows, operatorReminder, tick } = queueOnly();
+    const job = operatorReminder();
+    await tick(job.jobId);
+    const [row] = wdRows();
+    expect(s.repo.getById(row!.qitem_id)!.state).toBe("pending");
+    expect(s.repo.waitingView(row!.qitem_id)!.nextBackstop).toMatchObject({ owner: seat, dueAt: null, intervalSeconds: null,
+      mechanism: expect.stringMatching(/^none \(queue-only reminder row/) });
+    s.repo.claim({ qitemId: row!.qitem_id, destinationSession: seat });
+    expect(s.repo.waitingView(row!.qitem_id)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:pickup (activity checked at detection)");
+  });
+
   it("a parked-owner reminder reaching a seat that turned queue-only after the policy decided is held: no cold row, no note, nothing typed", async () => {
     const sends = vi.fn().mockResolvedValue({ ok: true });
     const createQueueRow = vi.fn(async (row: Row) => ({ qitemId: row.qitemId, state: "pending" }));

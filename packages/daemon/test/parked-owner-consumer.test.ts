@@ -907,6 +907,18 @@ describe("a queue-only seat and the parked-owner reminder (#3076)", () => {
     } finally { db.close(); }
   });
 
+  it("a no-input failure recorded before the seat turned queue-only is superseded by the held note: no stuck-sweep finding", async () => {
+    const store = new RowStore();
+    await makeParkedOwnerConsumerPolicy({ ...makeDeps([parkedSeat()], store), isTerminalSeat: () => true }).evaluate(makeJob());
+    const row = store.appended[0]!.qitemId;
+    expect(currentParkedOwnerNoInputFailure(store.deps().listTransitions(row))).toMatchObject({ code: "terminal_seat" });
+    // The seat is now queue-only (and no longer bound to a terminal): its reminder is held, and the old refusal no longer
+    // says why input stopped, so the stuck sweep's parked-owner-no-input check finds nothing to report.
+    expect((await queueOnly(store, true).evaluate(makeJob())).action).toBe("skip");
+    expect(store.appended.at(-1)!.note.startsWith("parked-owner wake held:")).toBe(true);
+    expect(currentParkedOwnerNoInputFailure(store.deps().listTransitions(row))).toBeNull();
+  });
+
   it("a bound terminal seat stays a terminal seat at queue-only: refused as one, never held", async () => {
     const store = new RowStore();
     const policy = makeParkedOwnerConsumerPolicy({ ...makeDeps([parkedSeat()], store), isQueueOnlySeat: () => true, isTerminalSeat: () => true });
