@@ -1060,8 +1060,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   (typed stays the default; a native seat's work isn't cancelled when a permission is withdrawn).
   On Linux/systemd hosts, `process_limits: { tasks_max: N }` on a member requests a cap on the tasks
   its own processes may hold (`docs/reference/rig-spec.md`): a fresh start whose limit isn't seen to
-  take effect is refused, a recovery that can't apply it starts without it with a warning, and a start
-  that can't be told reads unknown, never retried. An export names a stored limit it can't read.
+  take effect is refused, a recovery that can't apply it may try without the limit (with a warning),
+  and an uncertain start is reported and not retried. An export names a stored limit it can't read.
 - **`rig seat set-permissions <seat> --mode <mode> --reason <text>`** — select one seat's native
   permission mode for its future managed launches; it relaunches nothing, and `inherit` clears the
   selection. `rig seat status` reports the selection, but a status read does not prove the

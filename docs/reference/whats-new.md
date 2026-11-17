@@ -64,12 +64,12 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   `rig seat set-permissions --auto-mode`); and on Linux with systemd, a
   requested task limit, `process_limits: { tasks_max: N }`. A fresh start whose
   limit isn't seen to take effect is refused; a recovery that can't apply it
-  starts without it, with a warning; a start that can't be told reads unknown.
+  may try without the limit, with a warning; an uncertain start is reported and
+  not retried.
 - **`rig compact <pi-seat>`** requests Pi's own compaction; `--state` reports
   the attempt.
 - **Queue:** `rig queue tag <id> --add <tag>` adds tags to an existing row, and
-  `rig queue list` names a handed-off row's successors. This release makes no
-  speed claim.
+  `rig queue list` names a handed-off row's successors.
 
 ## Limits to keep in view
 

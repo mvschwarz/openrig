@@ -92,7 +92,8 @@ Linux, a task limit. Many fixes come from people using OpenRig.
 - **Also:** a later `rig down` no longer exits 2 over a released session's kept
   skills (a plain `down` of a stopped rig still exits 1); Codex 0.167.1 and
   0.167.2 seats read their real activity; an adopted, still-running seat's
-  hooks read as its own; and refocus orients from the seat's selected project. ([#3303](https://github.com/mvschwarz/openrig/pull/3303), [#3182](https://github.com/mvschwarz/openrig/pull/3182), [#3365](https://github.com/mvschwarz/openrig/pull/3365), [#3351](https://github.com/mvschwarz/openrig/pull/3351))
+  hooks read as its own; and refocus orients from the seat's selected project
+  when no task is in progress. ([#3303](https://github.com/mvschwarz/openrig/pull/3303), [#3182](https://github.com/mvschwarz/openrig/pull/3182), [#3365](https://github.com/mvschwarz/openrig/pull/3365), [#3351](https://github.com/mvschwarz/openrig/pull/3351))
 
 ### Queue, delivery and settings
 
@@ -101,9 +102,9 @@ Linux, a task limit. Many fixes come from people using OpenRig.
   `autoMode` block (`claude_auto_mode`, or `rig seat set-permissions
   --auto-mode`); and, on Linux with systemd, a requested task limit
   (`process_limits: { tasks_max: N }`). A fresh start whose limit isn't seen to
-  take effect is refused; a recovery that can't apply it starts without it,
-  with a warning; and a start that can't be told reads unknown. An export names
-  a stored limit it can't read instead of refusing the rig. ([#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3332](https://github.com/mvschwarz/openrig/pull/3332), [#3390](https://github.com/mvschwarz/openrig/pull/3390))
+  take effect is refused; a recovery that can't apply it may try without the
+  limit, with a warning; and an uncertain start is reported and not retried.
+  An export names a stored limit it can't read instead of refusing the rig. ([#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3332](https://github.com/mvschwarz/openrig/pull/3332), [#3390](https://github.com/mvschwarz/openrig/pull/3390))
 - **`rig compact` on a Pi seat** requests Pi's own compaction, and `--state`
   reports the attempt. ([#3013](https://github.com/mvschwarz/openrig/pull/3013))
 - **Queue and workflows:** `rig queue tag` adds tags to an existing row;
