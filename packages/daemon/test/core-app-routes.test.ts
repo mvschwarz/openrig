@@ -649,14 +649,27 @@ it("retains an unfinished permission submission's own choice/checkpoint while en
 });
 
 
-it("treats a permission ask whose node was positively deleted as stale, not an outage", async () => {
-  const f = await permissionFixture();
+it.each(["unanswered", "answered"] as const)("treats a permission ask whose node was positively deleted as stale, not an outage (%s)", async kind => {
+  const f = await permissionFixture(), ask = f.repo.getById(f.askId)!;
+  const binding = { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
+    expectedRevision: f.repo.decisionRevision(ask), answer: { kind: "option", optionId: "allow" } };
+  let receipt: { submission: unknown } | undefined;
+  if (kind === "answered") {
+    const first = await f.send("/v1/answers/answer_before_delete", binding, f.token);
+    expect(first.status).toBe(200); receipt = await first.json();
+    await new Promise(resolve => setImmediate(resolve));
+  }
   f.db.prepare("DELETE FROM nodes WHERE id = ?").run(f.node.id);
   expect(f.db.prepare("SELECT COUNT(*) n FROM occupant_tenures WHERE node_id = ?").get(f.node.id)).toEqual({ n: 0 });
   const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+  // Positive absence is stale in result metadata too (not unknown); an answered ask keeps its original saved receipt.
+  const result = await f.send(`/v1/requests/${f.askId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
+  expect(result.status).toBe(200);
+  expect(await result.json()).toMatchObject({ permissionDecision: { status: "stale", nativeEffect: "unknown" },
+    ...(receipt ? { submissions: expect.arrayContaining([expect.objectContaining({ answerId: "answer_before_delete", submission: receipt.submission })]) } : {}) });
   const response = await f.send(`/v1/requests/${f.askId}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ requestId: f.askId, answer: null, unsupportedReason: "request_stale" });
+  expect(await response.json()).toMatchObject({ requestId: f.askId, answer: null, unsupportedReason: kind === "answered" ? "request_not_pending" : "request_stale" });
   const needs = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
   expect(needs.sources).toEqual([{ source: "queue", state: "available" }]); expect(needs.requests).toEqual([]);
   expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);

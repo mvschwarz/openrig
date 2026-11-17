@@ -197,7 +197,7 @@ export class CoreAppJob {
     const stale = [...transitions].reverse().find(t => t.transitionNote?.startsWith("runner-permission-stale"));
     const source = (t: NonNullable<typeof withdrawal>) => ({ sourceQitemId: live!.qitemId, sourceTransitionId: t.transitionId, decider: t.actorSession, reason: t.transitionNote });
     if (withdrawal) return { status: "withdrawn", nativeEffect: "unknown", ...source(withdrawal) };
-    if (stale || generation && generation !== origin.generation) return { status: "stale", nativeEffect: "unknown", ...(stale ? source(stale) : { sourceQitemId: item.qitemId }) };
+    if (stale || generation === null || generation && generation !== origin.generation) return { status: "stale", nativeEffect: "unknown", ...(stale ? source(stale) : { sourceQitemId: item.qitemId }) };
     if (!generation) return { status: "unknown", nativeEffect: "unknown", reason: "occupant_unavailable" };
     // Only transitions in the current final state establish a decision, as the receiving-agent owner requires.
     let decision: ReturnType<QueueRepository["listTransitions"]>[number] | undefined;
