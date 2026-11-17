@@ -1135,7 +1135,8 @@ export function makePermissionPromptReader(deps: {
       const current = hook?.evidenceSource === "runtime_hook" && hook.generationProvenance === "resolved"
         && (hook.stale !== true || hook.reason === "stale_runtime_hook");
       const retainedState = current ? latestHookState(hook, runtime) : "unknown";
-      const permission = hook?.rawSubtype === "permission_prompt" || hook?.rawEvent === "PermissionPromptConfirmed";
+      const permission = hook?.rawSubtype === "permission_prompt" || hook?.rawEvent === "PermissionPromptConfirmed"
+        || runtime === "claude-code" && hook?.rawEvent === "PermissionRequest";
       const state = !current ? "unknown"
         : retainedState === "needs_input" && permission || latestHookPermissionPending(hook, runtime) ? "blocked"
         : hook?.rawEvent === "PermissionPromptCleared" || retainedState === "running" || retainedState === "idle" ? "clear" : "unknown";
@@ -1538,8 +1539,11 @@ async function advancePromptRefusals(
     if (tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|hook-review:`))
       && (!hookObservations.has(dest) || hookObservations.get(dest)?.state === "unknown")) continue;
     const sameEpisode = group?.keys.some(key => tags.includes(key));
+    const permission = permissionObservations.get(dest);
     const state = tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|permission-hook:`))
-      ? permissionObservations.get(dest)?.state ?? "unknown" : promptState(dest, aggregate.tsCreated);
+      ? permission && tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|permission-hook:${permission.episode}|after:`))
+        ? permission.state : "unknown"
+      : promptState(dest, aggregate.tsCreated);
     const cleared = state === "clear";
     // Keep the prompt boundary without closing the owner's hold. A later refusal is a new episode even if
     // no reminder was delivered between them; repeated clear ticks do not move that boundary forward.
@@ -1974,7 +1978,7 @@ async function ensureEscalationRow(
   if (existing) {
     const row = deps.queueRepo.getById(existing.qitem_id);
     const permissionHook = extraTags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|permission-hook:`));
-    if (row && permissionHook && row.destinationSession === dest && evidenceRef && !row.evidenceRef)
+    if (row && permissionHook && evidenceRef && !row.evidenceRef)
       deps.queueRepo.update({ qitemId: row.qitemId, actorSession: row.sourceSession, state: row.state,
         evidenceRef, transitionNote: "permission-hook evidence recorded" });
     const localFeed = permissionHook && orch === "human@kernel" && row?.destinationSession === orch;

@@ -600,3 +600,52 @@ it.each(["open", "closed"])("a mismatched hook-only clear preserves a %s alert w
     expect(repo.list({ limit: 100 })).toHaveLength(1);
   } finally { await scheduler.stop(); }
 });
+
+it("a row-less Claude PermissionRequest raises one permission alert", async () => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("PermissionRequest", null, 0);
+  expect(repo.list({ limit: 100 })).toEqual([]);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    await scheduler.runTickNow();
+    const alerts = repo.listAttention();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.destinationSession).toBe("human@kernel");
+    expect(alerts[0]!.evidenceRef).toContain(`rig telemetry events --start retained --node ${f.node.id}`);
+    expect(repo.list({ limit: 100 })).toHaveLength(1);
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  } finally { await scheduler.stop(); }
+});
+
+it("a later occupant's clear does not retire the earlier permission alert", async () => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("Notification", "permission_prompt", 0);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    const alert = repo.listAttention()[0]!;
+    expect(alert).toBeDefined();
+    await runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value, log: () => {},
+      readPermissionPrompts: () => [{ destination: f.name, state: "clear", episode: "later-occupant",
+        observedAt: f.clock.value.toISOString(), evidenceRef: "retained hook" }] });
+    expect(repo.getById(alert.qitemId)?.state).toBe("pending");
+    expect(repo.listTransitions(alert.qitemId).some(t => t.transitionNote === "prompt escalation: the seat's prompt read clear")).toBe(false);
+  } finally { await scheduler.stop(); }
+});
+
+it("an existing Feed permission carrier gains missing hook evidence", async () => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("Notification", "permission_prompt", 0);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    const alert = repo.listAttention()[0]!;
+    expect(alert.destinationSession).toBe("human@kernel");
+    f.db.prepare("UPDATE queue_items SET evidence_ref=NULL WHERE qitem_id=?").run(alert.qitemId);
+    await scheduler.runTickNow();
+    expect(repo.getById(alert.qitemId)?.evidenceRef).toContain(`rig telemetry events --start retained --node ${f.node.id}`);
+    expect(repo.list({ limit: 100 })).toHaveLength(1);
+  } finally { await scheduler.stop(); }
+});
