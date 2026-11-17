@@ -2,9 +2,15 @@ import { OutboxHandler } from "./outbox-handler.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { resolveWakeRetryCap, resolveWakeRetryIntervalSeconds } from "./queue-wake-ladder.js";
 import type { DeliveryFn, DeliveryOutcome, WatchdogDeliverySource } from "./watchdog-policy-engine.js";
-import { isQueueOnlyDeliveryCode, type QueueOnlyDeliveryCode } from "./watchdog-history-log.js";
+import { isQueueOnlyDeliveryCode, QUEUED_AS_ROW, type QueueOnlyDeliveryCode } from "./watchdog-history-log.js";
 
 const PREFIX = "watchdog-occurrence-";
+
+/** The id of the cold row a reminder occurrence becomes at a queue-only seat: a retried occurrence (or digest) finds the
+ *  same row. */
+export function queueOnlyRowId(occurrenceId: string): string {
+  return `qitem-watchdog-${occurrenceId.replace(/[^A-Za-z0-9-]/g, "-")}`;
+}
 type Receipt = { attempts: number; retryAt?: string; message: string; nextAction?: string; terminalReason?: string; ended?: boolean; error?: string; heldIds?: string[];
   /** At a queue-only seat (#3076), what the occurrence became; its outbox `delivered` is custody, not typed input. */
   queueOnly?: { code: QueueOnlyDeliveryCode; qitemId?: string };
@@ -54,11 +60,20 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
           error: receipt.error ?? receipt.terminalReason, occurrenceComplete: true, terminalReason: receipt.terminalReason, nextAction: receipt.nextAction };
       if (entry.deliveryState === "sending" || entry.deliveryState === "indeterminate") {
         if (selected.length > 1) return { status: "failed", occurrenceTracked: true, deferred: true };
-        // At a queue-only seat the interrupted write was a queue row or note: nothing could have been typed.
-        if (receipt?.queueOnlyTarget) return { status: "failed", occurrenceTracked: true, occurrenceComplete: true,
-          inputPhase: "attempted", error: "The reminder's queue row is unconfirmed; nothing was typed and no replay was attempted.",
-          outboxIds: selected.map(m => m.id),
-          nextAction: `Inspect outbox ${entry.outboxId} and the queue of ${entry.destinationSession} for the reminder's row before any manual replay. This occurrence ends; the next regular cycle is a new occurrence.` };
+        // At a queue-only seat the interrupted write was a queue row or note: nothing could have been typed, so the
+        // occurrence isn't ended. Its own open row is its delivery; without one it's owed again, under the same id (the
+        // row is created idempotently by that id), so a park's one-shot wake isn't spent without a row or note.
+        if (receipt?.queueOnlyTarget) {
+          const qitemId = queueOnlyRowId(selected[0]!.occurrenceId);
+          const row = outbox.db.prepare("SELECT state FROM queue_items WHERE qitem_id=?").get(qitemId) as { state: string } | undefined;
+          const queued = !!row && ["pending", "in-progress", "blocked"].includes(row.state);
+          if (entry.deliveryState === "indeterminate") outbox.claimForDelivery(entry.outboxId);
+          outbox.finalizeDelivery(entry.outboxId, queued ? "delivered" : "failed");
+          if (!queued) return null;
+          save(entry.outboxId, { ...receipt, queueOnly: { code: QUEUED_AS_ROW, qitemId } });
+          return { status: "ok", occurrenceTracked: true, reconciled: true, outboxIds: [entry.outboxId], sentMessage: receipt.message,
+            code: QUEUED_AS_ROW, queuedQitemId: qitemId };
+        }
         return { status: "failed", occurrenceTracked: true, occurrenceComplete: true,
           inputPhase: "attempted", error: "Prior scheduled input is unconfirmed; no replay was attempted.",
           outboxIds: selected.map(m => m.id),
