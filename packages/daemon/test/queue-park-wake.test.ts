@@ -89,6 +89,45 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     return repo.create({ sourceSession: "orch@rig", destinationSession, body: "work", nudge: false });
   }
 
+  it.each(["waiting view", "swap timers"])("unavailable park history preserves the prior %s selection", async (reader) => {
+    const row = await item();
+    const read = () => reader === "waiting view" ? readWaitingView(db, row.qitemId)?.nextBackstop.mechanism
+      : new QueueWakeRepository(db).currentParkTimerIds();
+    const prepare = db.prepare.bind(db);
+    let failReads = false, failures = 0;
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql) => {
+      const statement = prepare(sql);
+      if (!sql.includes("FROM queue_transitions t") || !sql.includes("t.transition_id > w.transition_id")) return statement;
+      // The waiting view caches statements: fail their execution, not just preparation.
+      return new Proxy(statement, { get(target, key) {
+        const value = Reflect.get(target, key);
+        if (key === "get" || key === "all") return (...args: unknown[]) => {
+          if (failReads) { failures++; throw new Error("park history unavailable"); }
+          return value.apply(target, args);
+        };
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    });
+    try {
+      repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+        blockedOn: "external:window", wakeAfterSeconds: 90, transitionNote: "wait" });
+      const before = read();
+      failReads = true;
+      expect(read()).toEqual(before);
+      expect(failures).toBeGreaterThan(0);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("unavailable park history does not hide an original wake selection failure", () => {
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql) => {
+      if (sql.includes("FROM queue_transition_wakes w")) throw new Error("wake selection unavailable");
+      return prepare(sql);
+    });
+    try { expect(() => new QueueWakeRepository(db).currentParkTimerIds()).toThrow("wake selection unavailable"); }
+    finally { spy.mockRestore(); }
+  });
+
   it.each(["status", "receipt targets", "live attachments", "generated timers", "owed one-shot", "swap timers", "waiting view"])(
     "current-park boundary: %s drops a wake after leaving blocked and reparking without an arm", async (reader) => {
       const row = await item();
