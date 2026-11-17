@@ -576,12 +576,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return linked ? { file: null, note: `${this.runtime}: ${linked} is a link, so this seat's managed guidance stays in its repository AGENTS.md` } : { file };
   }
 
-  /** The file this launch merges guidance into: the one its startup chose (guidanceFileFor, or a restore's saved choice),
-   *  else the repository AGENTS.md in the managed cwd. Null when a chosen file has since become a link (#2432): nothing is
-   *  written through it, and nothing falls back to the repository file. */
   /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
   private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
 
+  /** The file this launch merges guidance into: the one its startup chose (guidanceFileFor, or a restore's saved choice),
+   *  else the repository AGENTS.md in the managed cwd. Null when a chosen file has since become a link (#2432): nothing is
+   *  written through it, and nothing falls back to the repository file. Null too when the file lies in a seat folder this
+   *  machine doesn't have, which isn't recreated to hold it (insideMissingFolder). */
   private guidanceTarget(binding: NodeBinding, warnings: string[], blockId: string): string | null {
     const target = binding.guidanceFile ?? nodePath.join(binding.cwd, "AGENTS.md");
     // A seat folder this machine doesn't have isn't recreated to hold it (insideMissingFolder); an agent folder's own

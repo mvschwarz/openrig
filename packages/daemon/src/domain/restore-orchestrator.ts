@@ -2121,8 +2121,8 @@ export class RestoreOrchestrator {
         warnings?.push(...(result.warnings ?? []));
         for (const skipped of result.skipped) warnings?.push(`Restore activity hooks: skipped ${skipped}; saved hooks could not be reapplied.`);
         for (const failure of result.failed) warnings?.push(`Restore activity hooks: ${failure.error}`);
-        // Saved hooks not reapplied are a restore gap, as for the current selection (restoreCurrentActivityHooks): the seat
-        // runs, but without its hooks, so the rig doesn't read fully restored.
+        // Saved hooks that couldn't be reapplied are a restore gap, as for the current selection (restoreCurrentActivityHooks),
+        // so the rig doesn't read fully restored. Hooks already in the seat's settings may remain: a failed check writes nothing.
         const detail = [...result.skipped.map((skipped) => `skipped ${skipped}`), ...result.failed.map((failure) => failure.error)].join("; ");
         if (detail) activityHookGaps?.push(`claude_activity_hooks: the saved hooks could not be reapplied: ${detail}.`);
       } catch (error) {

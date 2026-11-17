@@ -1461,10 +1461,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.provisionWorkspaceTrust(binding.cwd ?? null, this.homeFor(binding));
   }
 
-  /** Copy one selected resource, preserving source modes and recording owned seat-skill files after writing. */
   /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
   private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
 
+  /** Copy one selected resource, preserving source modes and recording owned seat-skill files after writing. */
   private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string,
     home?: string, binding?: NodeBinding): boolean {
     if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, home)) {

@@ -358,7 +358,8 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
   });
 
   // Saved hooks the restore couldn't reapply are a restore gap, as for the current selection: with its guidance whole, the
-  // seat would otherwise read fully restored without its hooks. Here the install's relay is missing, so they're skipped.
+  // seat would otherwise read fully restored although its saved hooks weren't reapplied. Here the install's relay is
+  // missing, so they're skipped.
   it("saved activity hooks the restore skips are a restore gap, so the rig doesn't read fully restored", async () => {
     const { rigId, guidanceFile } = launchedSeat();
     const claude = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...nodeFs, copyFile: replaceFile, homedir: os.homedir(), folderPresent },
