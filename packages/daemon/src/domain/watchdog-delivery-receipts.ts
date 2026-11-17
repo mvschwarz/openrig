@@ -2,14 +2,20 @@ import { OutboxHandler } from "./outbox-handler.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { resolveWakeRetryCap, resolveWakeRetryIntervalSeconds } from "./queue-wake-ladder.js";
 import type { DeliveryFn, DeliveryOutcome, WatchdogDeliverySource } from "./watchdog-policy-engine.js";
+import { isQueueOnlyDeliveryCode, type QueueOnlyDeliveryCode } from "./watchdog-history-log.js";
 
 const PREFIX = "watchdog-occurrence-";
-type Receipt = { attempts: number; retryAt?: string; message: string; nextAction?: string; terminalReason?: string; ended?: boolean; error?: string; heldIds?: string[] };
+type Receipt = { attempts: number; retryAt?: string; message: string; nextAction?: string; terminalReason?: string; ended?: boolean; error?: string; heldIds?: string[];
+  /** At a queue-only seat (#3076), what the occurrence became; its outbox `delivered` is custody, not typed input. */
+  queueOnly?: { code: QueueOnlyDeliveryCode; qitemId?: string };
+  /** The attempt was to a queue-only seat: it writes a queue row or note, never terminal input. */
+  queueOnlyTarget?: boolean };
 
 /** Occurrence custody uses the existing outbox. The watchdog's own loop is its only retry driver.
  * Condition policies keep their existing receipts; this is for scheduled periodic reminders, including digests. */
 export function withWatchdogReceipts(send: DeliveryFn, deps: {
   outbox: OutboxHandler; now?: () => Date; retryIntervalSeconds?: number; retryCap?: number;
+  isQueueOnlySeat?: (sessionName: string) => boolean;
 }): DeliveryFn {
   const { outbox } = deps;
   const wakes = new QueueWakeRepository(outbox.db);
@@ -31,7 +37,9 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
     if (!selected.length) return null;
     const entries = selected.map(m => outbox.getById(m.id));
     if (entries.every(e => e?.deliveryState === "delivered")) {
-      return { status: "ok", occurrenceTracked: true, reconciled: true, outboxIds: selected.map(m => m.id), sentMessage: read(selected[0]!.id)?.message };
+      const first = read(selected[0]!.id);
+      return { status: "ok", occurrenceTracked: true, reconciled: true, outboxIds: selected.map(m => m.id), sentMessage: first?.message,
+        ...(first?.queueOnly ? { code: first.queueOnly.code, ...(first.queueOnly.qitemId ? { queuedQitemId: first.queueOnly.qitemId } : {}) } : {}) };
     }
     if (entries.every(e => e?.deliveryState === "retained" || e?.deliveryState === "retired")) {
       return { status: "retained", occurrenceTracked: true, reconciled: true,
@@ -46,6 +54,11 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
           error: receipt.error ?? receipt.terminalReason, occurrenceComplete: true, terminalReason: receipt.terminalReason, nextAction: receipt.nextAction };
       if (entry.deliveryState === "sending" || entry.deliveryState === "indeterminate") {
         if (selected.length > 1) return { status: "failed", occurrenceTracked: true, deferred: true };
+        // At a queue-only seat the interrupted write was a queue row or note: nothing could have been typed.
+        if (receipt?.queueOnlyTarget) return { status: "failed", occurrenceTracked: true, occurrenceComplete: true,
+          inputPhase: "attempted", error: "The reminder's queue row is unconfirmed; nothing was typed and no replay was attempted.",
+          outboxIds: selected.map(m => m.id),
+          nextAction: `Inspect outbox ${entry.outboxId} and the queue of ${entry.destinationSession} for the reminder's row before any manual replay. This occurrence ends; the next regular cycle is a new occurrence.` };
         return { status: "failed", occurrenceTracked: true, occurrenceComplete: true,
           inputPhase: "attempted", error: "Prior scheduled input is unconfirmed; no replay was attempted.",
           outboxIds: selected.map(m => m.id),
@@ -75,10 +88,11 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
       }
       // Synchronous transaction: no other drainer can claim a subset between the check and these writes.
       if (selected.some(m => !["pending", "failed"].includes(outbox.getById(m.id)!.deliveryState))) return false;
+      const queueOnlyTarget = deps.isQueueOnlySeat?.(request.targetSession) === true;
       for (const member of selected) {
         outbox.claimForDelivery(member.id);
         const receipt = read(member.id)!;
-        save(member.id, { attempts: (receipt?.attempts ?? 0) + 1, message: request.message });
+        save(member.id, { attempts: (receipt?.attempts ?? 0) + 1, message: request.message, ...(queueOnlyTarget ? { queueOnlyTarget } : {}) });
       }
       return true;
     })();
@@ -119,6 +133,8 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
         const ended = result.status === "failed" && (!noInput || unavailable || exhausted);
         outbox.finalizeDelivery(member.id, state);
         save(member.id, { ...receipt, ...(ended ? { ended: true, error: result.error } : {}), ...(result.status === "retained" ? { heldIds: result.outboxIds ?? [] } : {}),
+          ...(result.status === "ok" && isQueueOnlyDeliveryCode(result.code)
+            ? { queueOnly: { code: result.code, ...(result.queuedQitemId ? { qitemId: result.queuedQitemId } : {}) } } : {}),
           ...(retryAt ? { retryAt } : {}), ...(nextAction ? { nextAction } : {}),
           ...(terminalReason ? { terminalReason } : {}) });
         memberOutcomes[member.jobId] = { ...result, occurrenceTracked: true, ...(ended ? { occurrenceComplete: true } : {}),

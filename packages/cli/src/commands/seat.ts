@@ -231,6 +231,7 @@ const LEVEL_WORDS: Record<string, string> = {
   "openrig-urgent": "OpenRig's own messages and anything marked urgent type.",
   "urgent-only": "Only messages marked urgent type.",
   "sends-only": "Deliberate sends from people and agents type; OpenRig's own notices are held.",
+  "queue-only": "Deliberate sends type, never over a draft; OpenRig's reminders arrive as queue rows, never typed.",
 };
 
 // JSON escapes C0; also escape C1, format/separator and default-ignorable characters.
@@ -595,7 +596,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
     });
   cmd.command("set-typing-guard").argument("<seat>")
     .option("--enabled <boolean>", "Compatibility: true selects hold; false selects off")
-    .option("--mode <mode>", "off, draft-aware, openrig-urgent, urgent-only, sends-only or hold; choose this or --enabled")
+    .option("--mode <mode>", "off, draft-aware, openrig-urgent, urgent-only, sends-only, queue-only or hold; choose this or --enabled")
     .requiredOption("--reason <text>").option("--json").description("Choose how this seat's typing guard handles automatic input")
     .addHelpText("after", `
 This one persistent guard defaults off. Hold pauses ALL automatic input, including
@@ -616,11 +617,19 @@ Between off (always interrupt) and hold (full quiet):
                   item at priority urgent or critical).
   sends-only      deliberate sends from people and agents type; OpenRig's own
                   notices are held. A terminal member defaults to this.
-What openrig-urgent and urgent-only let through never types over a draft.
+  queue-only      for a seat a person types in: deliberate sends type as
+                  draft-aware (never over a draft); OpenRig's notices, urgent
+                  ones included, never type. A watchdog reminder becomes a cold
+                  queue row with no nudge, or a note on each parked row it is
+                  about; the parked-owner reminder is skipped and recorded once
+                  as held on the row (the open rows already are the reminder);
+                  other notices are held. A cold row wakes nobody: a person or
+                  the seat's next turn picks it up.
+What openrig-urgent, urgent-only and queue-only let through never types over a draft.
 sends-only types like off: a terminal member's typing isn't protected, as today
 (its shell input can't be read). Everything else is held, the sender is told, and
-held messages stay readable. Lifecycle work is refused at openrig-urgent and
-urgent-only, as at hold.
+held messages stay readable. Lifecycle work (including managed compaction) is
+refused at openrig-urgent, urgent-only and queue-only, as at hold.
 Messages use the existing outbox. Uncertain writes never replay automatically.
 Direct human input remains available. Other seats keep their own guard mode.
 
@@ -646,8 +655,8 @@ Examples:
     .action(async (seat: string, opts: { enabled?: string; mode?: string; reason: string; json?: boolean }) => {
       if ((opts.enabled === undefined) === (opts.mode === undefined)
         || opts.enabled !== undefined && !["true", "false"].includes(opts.enabled)
-        || opts.mode !== undefined && !["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold"].includes(opts.mode)) {
-        console.error("Choose --enabled true|false or --mode off|draft-aware|openrig-urgent|urgent-only|sends-only|hold.");
+        || opts.mode !== undefined && !["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "queue-only", "hold"].includes(opts.mode)) {
+        console.error("Choose --enabled true|false or --mode off|draft-aware|openrig-urgent|urgent-only|sends-only|queue-only|hold.");
         process.exitCode = 1; return;
       }
       await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, {

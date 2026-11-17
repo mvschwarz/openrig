@@ -243,6 +243,19 @@ describe("seat typing guard commands", () => {
     expect(status.logs.join("\n")).toContain("Typing guard: urgent-only; 2 retained\nOnly messages marked urgent type. Other automatic input is held, readable with rig seat held-messages dev-impl@seat-rig.");
   });
 
+  it("sets queue-only through the same control, and status says deliberate sends type and OpenRig's reminders queue (#3076)", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const set = makeDeps({ status: 200, data: { effectiveMode: "hold", effectiveLevel: "queue-only", pending: false } }, paths, bodies);
+    const result = await captureLogs(() => makeCommand(set).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--mode", "queue-only", "--reason", "I type in this terminal", "--json"]).then(() => undefined));
+    expect(result.exitCode).toBeUndefined();
+    expect(bodies).toEqual([{ mode: "queue-only", reason: "I type in this terminal" }]);
+    const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", effectiveLevel: "queue-only", pending: false, heldCount: 0 } } }, []);
+    const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(status.logs.join("\n")).toContain("Typing guard: queue-only");
+    expect(status.logs.join("\n")).toContain("Deliberate sends type, never over a draft; OpenRig's reminders arrive as queue rows, never typed.");
+  });
+
   it("sends draft-aware mode through the existing control", async () => {
     const paths: string[] = [], bodies: unknown[] = [];
     const deps = makeDeps({ status: 200, data: { effectiveMode: "draft-aware", pending: false } }, paths, bodies);

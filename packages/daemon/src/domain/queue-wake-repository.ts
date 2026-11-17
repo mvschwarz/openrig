@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { isQueueWait } from "./queue-wait-backoff.js";
+import { deliveryReachedSeat } from "./watchdog-history-log.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
 import { isHumanSeatSessionRef } from "./session-name.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
@@ -181,7 +182,7 @@ export class QueueWakeRepository {
         WHERE qitem_id = ? AND phase = 'fired' AND wake_ref = ? AND transition_id > ?
         ORDER BY transition_id DESC LIMIT 1`,
     ).get(qitemId, armed.wake_ref, armed.transition_id) as { delivery_status: string | null } | undefined;
-    if (fired?.delivery_status !== "ok") return false;
+    if (!deliveryReachedSeat(fired?.delivery_status)) return false;
     // A refusal never reaches the row's own records (it isn't a delivery attempt), so the job's latest evaluation
     // must itself be a delivered send. Latest = the history log's own order: evaluated_at, then history_id (a ULID).
     const hasHistory = this.db.prepare(
@@ -194,7 +195,7 @@ export class QueueWakeRepository {
       `SELECT outcome, delivery_status, delivery_target_session FROM watchdog_history
         WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 1`,
     ).get(armed.wake_ref) as { outcome: string; delivery_status: string | null; delivery_target_session: string | null } | undefined;
-    return latest?.outcome === "sent" && latest.delivery_status === "ok"
+    return latest?.outcome === "sent" && deliveryReachedSeat(latest.delivery_status)
       && latest.delivery_target_session === job.destination_session;
   }
 
@@ -223,6 +224,34 @@ export class QueueWakeRepository {
       const r = row as { qitem_id: string; wake_kind: "watchdog" | "timer" };
       return { qitemId: r.qitem_id, kind: r.wake_kind };
     });
+  }
+
+  /** The blocked rows of `owner` whose CURRENT park this job wakes and hasn't consumed: the latest arm, with no exit
+   *  from `blocked` since (a row parked again with no wake of its own, by a gate or a person, wrote no arm). Read only
+   *  by a queue-only seat's delivery (#3076), where the reminder becomes a note on these rows, never typed. */
+  findCurrentParkRowsByWatchdog(jobId: string, owner: string): string[] {
+    if (!this.available) return [];
+    return this.db.prepare(
+      `SELECT DISTINCT w.qitem_id
+         FROM queue_transition_wakes w
+         JOIN queue_items q ON q.qitem_id = w.qitem_id
+        WHERE w.phase = 'armed' AND w.wake_ref = ?
+          AND w.wake_kind IN ('watchdog', 'timer') AND q.state = 'blocked' AND q.destination_session = ?
+          AND w.transition_id = (
+            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+             WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM queue_transitions t
+             WHERE t.qitem_id = w.qitem_id AND t.transition_id > w.transition_id AND t.state <> 'blocked'
+          )
+          AND (? OR NOT EXISTS (
+            SELECT 1 FROM queue_transition_wakes f
+             WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
+               AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
+               AND (f.delivery_status IS NULL OR f.delivery_status != 'retained')
+          ))`,
+    ).all(jobId, owner, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => (row as { qitem_id: string }).qitem_id);
   }
 
   /** Queue rows bound to a park-generated timer, regardless of whether that

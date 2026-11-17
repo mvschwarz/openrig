@@ -5,6 +5,7 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { nextDueAt } from "./watchdog-due.js";
+import { isQueueOnlyDeliveryCode } from "./watchdog-history-log.js";
 import type { WatchdogJob } from "./watchdog-jobs-repository.js";
 
 export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "decidedBy" | "backgroundWork"> | null;
@@ -205,7 +206,9 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
         notice = state?.notice;
         if (state?.evidence?.attention?.scope && state.attentionRevision) view.attention = { scope: state.evidence.attention.scope, revision: state.attentionRevision, source: "last observed by wait timer" };
       } catch { /* operator YAML has no queue notice */ }
-      if (notice) view.nextBackstop = { owner: recoveryOwner ?? row.source_session, mechanism: `unconsumed wait notice; delivery=${notice.deliveryStatus}`, intervalSeconds: sweepInterval,
+      // A queue-only seat's notice (#3076) was noted on the row or became a queue row: held at the seat, and the stuck
+      // sweep files no unconsumed-wait finding for it. The timer stays the backstop.
+      if (notice && !isQueueOnlyDeliveryCode(notice.deliveryStatus)) view.nextBackstop = { owner: recoveryOwner ?? row.source_session, mechanism: `unconsumed wait notice; delivery=${notice.deliveryStatus}`, intervalSeconds: sweepInterval,
         dueAt: new Date(Date.parse(notice.at) + resolvePickupThresholdMinutes() * 60_000).toISOString() };
     }
   }

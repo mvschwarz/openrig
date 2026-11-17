@@ -52,8 +52,9 @@ export interface GuardPreference {
 export const TYPING_GUARD_MODES = ["off", "draft-aware", "hold"] as const;
 export type TypingGuardMode = (typeof TYPING_GUARD_MODES)[number];
 /** The middle interruption levels, and a terminal member's default. `off` is always interrupt and `hold` is full quiet;
- *  these sit between, deciding by the input's source and urgency. */
-export const INTERRUPTION_LEVELS = ["openrig-urgent", "urgent-only", "sends-only"] as const;
+ *  these sit between, deciding by the input's source and urgency. `queue-only` is for a seat a person types in: deliberate
+ *  sends type draft-aware, and OpenRig's own notices never type (#3076). */
+export const INTERRUPTION_LEVELS = ["openrig-urgent", "urgent-only", "sends-only", "queue-only"] as const;
 export type InterruptionLevel = (typeof INTERRUPTION_LEVELS)[number];
 export interface TypingGuardSettings { mode: TypingGuardMode; level?: InterruptionLevel }
 export interface TypingGuardConfig extends TypingGuardSettings { revision: string }
@@ -80,6 +81,9 @@ export interface AdmissionInput { source: "openrig" | "agent"; urgent: boolean; 
 
 /** Whether a level lets this input type. Every other input at the seat is held, never refused or lost. */
 export function levelAdmits(level: InterruptionLevel, input: AdmissionInput): boolean {
+  // queue-only decides before urgency: OpenRig's own notice never types there, urgent ones included (no hidden urgent
+  // bypass). It is held with its urgency, or reaches the seat as a queue row (#3076).
+  if (level === "queue-only") return input.source === "agent";
   if (input.urgent) return true;
   if (level === "openrig-urgent") return input.source === "openrig";
   if (level === "sends-only") return input.source === "agent";
@@ -97,7 +101,7 @@ export function parseTypingGuardSettings(value: unknown): TypingGuardSettings {
     return { mode: level === "sends-only" ? "off" : "hold", level };
   }
   if (!(TYPING_GUARD_MODES as readonly unknown[]).includes(config.mode)) {
-    throw new DeliveryGuardError("invalid_typing_guard", "mode must be off, draft-aware, openrig-urgent, urgent-only, sends-only or hold.");
+    throw new DeliveryGuardError("invalid_typing_guard", "mode must be off, draft-aware, openrig-urgent, urgent-only, sends-only, queue-only or hold.");
   }
   if (config.holdSeconds !== undefined || config.maxAttempts !== undefined) throw new DeliveryGuardError("invalid_typing_guard", "Draft-aware sends return their result immediately; retry settings are not supported.");
   return { mode: config.mode as TypingGuardMode };
@@ -180,6 +184,13 @@ export class SeatDeliveryGuard {
     return { nodeId, desired: desired.mode === "hold", effective: effective.mode === "hold", pending: desired.revision !== effective.revision,
       desiredMode: desired.mode, effectiveMode: effective.mode,
       ...(desired.level ? { desiredLevel: desired.level } : {}), ...(effective.level ? { effectiveLevel: effective.level } : {}) };
+  }
+
+  /** Whether the seat is at the queue-only level, desired or effective: OpenRig's own reminders reach it as queue rows or
+   *  notes on its rows, never typed (#3076). */
+  queueOnly(nodeId: string): boolean {
+    const { desired, effective } = this.configuration(nodeId);
+    return desired.level === "queue-only" || effective.level === "queue-only";
   }
 
   /** Whether the seat's configuration would hold this input now (desired or effective, as the operation decides). */
@@ -303,8 +314,8 @@ export class SeatDeliveryGuard {
         throw new DeliveryGuardError("typing_guard_enabled", "Automatic input is paused for this seat. Select off or draft-aware mode explicitly before this writing operation.");
       }
       // Input a middle level lets through still never types over a person's draft: it's delivered as draft-aware.
-      const admittedByLevel = !!input && (config.desired.level === "openrig-urgent" || config.desired.level === "urgent-only"
-        || config.effective.level === "openrig-urgent" || config.effective.level === "urgent-only");
+      const draftAwareLevel = (level?: InterruptionLevel) => level === "openrig-urgent" || level === "urgent-only" || level === "queue-only";
+      const admittedByLevel = !!input && (draftAwareLevel(config.desired.level) || draftAwareLevel(config.effective.level));
       const lease: Lease = { target: bound, active: true, origin: "automatic", humanEpoch: this.humanEpochs.get(bound.nodeId) ?? 0,
         // Explicit interaction keeps serialization/binding checks; its own last-paste reader replaces automatic draft retention.
         config: input?.override ? DEFAULT_GUARD : admittedByLevel ? { mode: "draft-aware", revision: config.desired.revision }

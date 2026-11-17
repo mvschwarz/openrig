@@ -1074,8 +1074,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   delivery), `draft-aware` (retained at once when the input box is busy or unreadable),
   `sends-only` (deliberate sends from people and agents type; OpenRig's own notices are held),
   `openrig-urgent` (OpenRig's own messages and anything marked urgent type), `urgent-only` (only
-  urgent messages type) or `hold` (no automatic input; one held notice per wake instead of
-  re-nudges). `--enabled true|false` remains compatible: true selects hold, false selects off.
+  urgent messages type), `queue-only` (for a seat a person types in: deliberate sends type, never
+  over a draft; OpenRig's notices never type, and a watchdog reminder arrives as a cold queue row or
+  a note on the parked row it's about) or `hold` (no automatic input; one held notice per wake
+  instead of re-nudges). `--enabled true|false` remains compatible: true selects hold, false selects off.
   Known limit: in `draft-aware`, a multi-line message to a Claude seat can stay unsubmitted when the
   paste changes Claude's footer hint, and later sends wait behind it; check the seat's composer.
   Since 0.7.15 `draft-aware` re-checks right before an automatic paste and holds after recent

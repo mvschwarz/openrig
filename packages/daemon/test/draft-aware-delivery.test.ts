@@ -700,6 +700,24 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(oldPrerequisite).not.toHaveBeenCalled();
   });
 
+  it("at queue-only, a deliberate send never types over a person's draft and is delivered once the input is empty; OpenRig's own notice is held (#3076)", async () => {
+    const f = fixture(); await f.guard.set("a", { mode: "queue-only" }, "human@test", "a person types here");
+    f.bodies.a = "a person's draft";
+    for (const urgent of [undefined, { by: "lead@test" }]) {
+      expect(await f.send(`qo-draft-${urgent ? "urgent" : "plain"}`, "deliberate send", { verify: false, ...(urgent ? { urgent } : {}) }))
+        .toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    }
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("a person's draft");
+    f.bodies.a = "";
+    expect(await f.send("qo-empty", "deliberate send", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["deliberate send"]);
+    const notice = await f.send("qo-notice", "OpenRig notice", { verify: false, openrigNotice: true, urgent: { by: "OpenRig" } });
+    // Held for the seat, not refused nor failed: retained in its outbox, nothing written.
+    expect(notice).toMatchObject({ ok: true, outcome: "retained", sent: false, reason: "typing_guard_enabled", outboxIds: ["qo-notice"] });
+    expect(f.submissions).toEqual(["deliberate send"]);
+  });
+
   it("delivers at an ordinary empty prompt when receipt bookkeeping is unavailable", async () => {
     const f = fixture(); await f.enable();
     f.db.exec("CREATE TRIGGER fail_delivery_receipt BEFORE UPDATE OF guard_delivery ON outbox_entries BEGIN SELECT RAISE(ABORT, 'fixture receipt unavailable'); END;");
@@ -1151,7 +1169,7 @@ describe("deliberate override preserves existing input", () => {
     expect(f.writes).toEqual([]);
   });
 
-  it.each(["off", "draft-aware", "hold", "openrig-urgent", "urgent-only", "sends-only"])("stops and shows typed input under %s without retaining it", async mode => {
+  it.each(["off", "draft-aware", "hold", "openrig-urgent", "urgent-only", "sends-only", "queue-only"])("stops and shows typed input under %s without retaining it", async mode => {
     const f = fixture();
     await f.guard.set("a", { mode }, "human@test", "fixture policy");
     const draft = "私の下書き😀\n  second line U3-private";

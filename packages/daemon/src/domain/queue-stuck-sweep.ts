@@ -4,6 +4,7 @@ import { BACKLOG_FOLDED_TAG, createRecoveryLookup, findQueueRecovery, freshRecov
 export { BACKLOG_FOLDED_TAG };
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { queueWaitNotice } from "./queue-wait-backoff.js";
+import { isQueueOnlyDeliveryCode } from "./watchdog-history-log.js";
 import { lastMeaningfulTransition, pendingSince } from "./queue-waiting.js";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 // S02 (OPR.0.5.5.2) — STANDING STUCK SWEEP. `queue overdue` and `queue undelivered` are the
@@ -928,6 +929,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!row || row.state !== "blocked" || deps.queueRepo.getParkWakeStatus(row.qitemId)?.ref !== jobId) return null;
       const response = lastMeaningfulTransition(deps.db, row.qitemId);
       if (response && Date.parse(response.at) > Date.parse(notice.at)) return null;
+      // A queue-only seat's wait notice (#3076) was noted on the row or became a queue row, with no nudge: held and
+      // readable at the seat, for a person or its next turn, not stuck. A finding would be a poller compensating.
+      if (isQueueOnlyDeliveryCode(notice.deliveryStatus)) return null;
       const ownerActivity = deps.queueRepo.ownerActivity(row.destinationSession);
       if (ownerActivity?.activity === "working" && !ownerActivity.needsInput.count && notice.deliveryStatus === "ok") return null;
       return { kind: "unconsumed-wait", row, route: resolveOrch(row.destinationSession, row) ?? row.sourceSession,
@@ -1062,6 +1066,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // The seat's typing guard or interruption level held its wake on purpose: it's held and readable at the seat, not
       // stuck. (A handed-off baton's one held notice is the wake ladder's.)
       if (row.lastNudgeResult === "retained:typing_guard") return null;
+      // A queue-only seat's cold watchdog reminder (#3076) waits, with no nudge, for a person or the seat's next turn:
+      // held and readable at the seat, not stuck. A finding would be a poller compensating for the level.
+      if (row.sourceSession === "watchdog@system" && row.tags?.includes("watchdog") && row.tags.includes("queue-only")) return null;
       // The ladder check runs LAST here too: a row the ladder alone would have stopped is
       // ladder-suppressed, and its finding stays open (#1419).
       if (hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)) {

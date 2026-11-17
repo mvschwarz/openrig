@@ -108,6 +108,8 @@ import {
   type ParkWakeStatus,
 } from "./queue-wake-repository.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
+import { NOTED_ON_QUEUED_ROW, QUEUED_AS_ROW, isQueueOnlyDeliveryCode } from "./watchdog-history-log.js";
+import { parkedRowNotePrefix, queuedAsRowNote } from "./park-wake-text.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, formatHumanAnswers, humanAnswerText, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
 import { slackMicros } from "./gateway/slack/state-store.js";
@@ -4357,21 +4359,80 @@ export class QueueRepository {
     return { qitemId: row.qitemId, summary: row.summary ?? null, continuation: this.currentParkContinuation(row.qitemId) };
   }
 
+  /** The parked rows of `owner` whose current park this job wakes (QueueWakeRepository.findCurrentParkRowsByWatchdog):
+   *  at a queue-only seat the reminder is noted on them, never another row (#3076). */
+  parkedRowsOwnedBy(jobId: string, owner: string): string[] {
+    return this.wakeRepo.findCurrentParkRowsByWatchdog(jobId, owner);
+  }
+
+  /** Notes a queue-only seat's park wake on each parked row it is about (#3076), in one transaction, each only while
+   *  the row is still `owner`'s and its current park is still the job's; nothing is typed. Returns the rows noted. */
+  noteParkedRows(owner: string, notes: Array<{ qitemId: string; jobId: string; note: string }>): string[] {
+    const written = this.db.transaction(() => notes.flatMap(({ qitemId, jobId, note }) => {
+      if (!this.wakeRepo.findCurrentParkRowsByWatchdog(jobId, owner).includes(qitemId)) return [];
+      this.transitionLog.append({ qitemId, state: "blocked", actorSession: "watchdog@system", transitionNote: note });
+      return [{ qitemId, event: this.eventBus.persistWithinTransaction({ type: "queue.updated", qitemId, fromState: "blocked", toState: "blocked",
+        closureReason: null, closureTarget: null, actorSession: "watchdog@system", summary: this.getById(qitemId)?.summary ?? null }) }];
+    })).immediate();
+    for (const { event } of written) this.eventBus.notifySubscribers(event);
+    return written.map(({ qitemId }) => qitemId);
+  }
+
+  /** Notes a later occurrence of a watchdog job on its earlier cold row at a queue-only seat (#3076), while that row is
+   *  open (pending, in progress or blocked, claimed or not): the reminder is already in the queue, so no second row. The
+   *  row is chosen and noted in one write transaction, so a close can't land between them. Returns the row's id, or null. */
+  noteOpenWatchdogRow(jobId: string, destinationSession: string, note: string): string | null {
+    const noted = this.db.transaction(() => {
+      const row = this.db.prepare(
+        `SELECT qitem_id FROM queue_items
+          WHERE destination_session = ? AND state IN ('pending', 'in-progress', 'blocked') AND source_session = 'watchdog@system'
+            AND tags IS NOT NULL AND json_valid(tags)
+            AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'queue-only')
+            AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
+          ORDER BY ts_created DESC, rowid DESC LIMIT 1`,
+      ).get(destinationSession, `watchdog-job:${jobId}`) as { qitem_id: string } | undefined;
+      if (!row) return null;
+      return { qitemId: row.qitem_id, ...this.updateInTransactionalContext({ qitemId: row.qitem_id, actorSession: "watchdog@system", transitionNote: note }) };
+    }).immediate();
+    if (!noted) return null;
+    for (const event of noted.persistedEvents) this.eventBus.notifySubscribers(event);
+    return noted.qitemId;
+  }
+
   /** Called by the watchdog engine after the delivery attempt is durably
    *  audited. The queue transition records that attempt independently of
-   *  whether the HELD row's owner consumed it. */
-  recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string, retryAt?: string): void {
+   *  whether the HELD row's owner consumed it. At a queue-only seat (#3076), `receipt.targetSession`, nothing is
+   *  written on that seat's rows here: the delivery already noted the rows its reminder was about, and their fire is
+   *  recorded on that note; a row of the seat it didn't note (parked again with no wake of its own) wasn't that
+   *  reminder's. Another owner's row bound to the job says what the reminder became (`receipt.queuedQitemId`). */
+  recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string, retryAt?: string,
+    receipt?: { queuedQitemId?: string; targetSession?: string }): void {
     const bindings = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
     if (bindings.length === 0) return;
     // Both receipt ownership and timer lifecycle follow the current park.
     const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
-    const recordFired = ({ qitemId, kind }: (typeof targets)[number]): PersistedEvent => {
+    const queueOnlySeat = !retryAt && isQueueOnlyDeliveryCode(deliveryStatus) ? receipt?.targetSession : undefined;
+    const noteOfDelivery = queueOnlySeat === undefined ? null : this.db.prepare(
+      `SELECT t.transition_id FROM queue_transitions t
+        WHERE t.qitem_id = ? AND t.actor_session = 'watchdog@system' AND substr(t.transition_note, 1, length(?)) = ?
+          AND t.transition_id > (SELECT MAX(a.transition_id) FROM queue_transition_wakes a WHERE a.qitem_id = t.qitem_id AND a.phase = 'armed')
+          AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.transition_id = t.transition_id)
+        ORDER BY t.transition_id DESC LIMIT 1`,
+    );
+    const recordFired = ({ qitemId, kind }: (typeof targets)[number]): PersistedEvent | null => {
+      if (noteOfDelivery && this.getById(qitemId)?.destinationSession === queueOnlySeat) {
+        const noted = noteOfDelivery.get(qitemId, parkedRowNotePrefix(jobId), parkedRowNotePrefix(jobId)) as { transition_id: number } | undefined;
+        if (noted) this.wakeRepo.record({ transitionId: noted.transition_id, qitemId, phase: "fired", kind, ref: jobId, deliveryStatus });
+        return null;
+      }
       const transition = this.transitionLog.append({
         qitemId,
         state: "blocked",
         actorSession: "watchdog@system",
         transitionNote: retryAt ? `park wake failed: watchdog ${jobId}; delivery=${deliveryStatus}; occurrence remains owed; retry at ${retryAt}` : deliveryStatus === "retained"
           ? `park wake retained: watchdog ${jobId}; not delivered; blocked work unchanged`
+          : deliveryStatus === QUEUED_AS_ROW || deliveryStatus === NOTED_ON_QUEUED_ROW
+            ? queuedAsRowNote(jobId, deliveryStatus, receipt?.queuedQitemId)
           : `park wake fired: watchdog ${jobId}; delivery=${deliveryStatus}; awaiting owner consumption`,
       });
       if (!retryAt) this.wakeRepo.record({
@@ -4406,7 +4467,7 @@ export class QueueRepository {
     // resolving the blocker is a provider-limit outcome, not a timer one.
     const parkGeneratedTimer = this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).length > 0;
     const events = this.db.transaction(() => {
-      const firedEvents = targets.map(recordFired);
+      const firedEvents = targets.map(recordFired).filter((event): event is PersistedEvent => event !== null);
       if (retryAt || deliveryStatus === "retained") return firedEvents;
       if (usageLimitBlockers.length === 0) {
         const jobsRepo = this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db);
