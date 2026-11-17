@@ -39,7 +39,7 @@ import { getNodeDetail } from "../src/domain/node-inventory.js";
 
 const TOKEN = "tok-lead";
 
-function mockTmux(opts: { noPane?: boolean } = {}): TmuxAdapter {
+function mockTmux(opts: { noPane?: boolean; paneCwd?: string } = {}): TmuxAdapter {
   return {
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
@@ -50,7 +50,7 @@ function mockTmux(opts: { noPane?: boolean } = {}): TmuxAdapter {
     capturePaneContent: vi.fn(async () => ""),
     listSessions: async () => [],
     listWindows: async () => [],
-    listPanes: async () => (opts.noPane ? [] : [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
+    listPanes: async () => (opts.noPane ? [] : [{ id: "%1", index: 0, cwd: opts.paneCwd ?? "/", width: 80, height: 24, active: true }]),
     hasSession: async () => false,
   } as unknown as TmuxAdapter;
 }
@@ -199,9 +199,9 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
 
   /** `rig down` (the real teardown), then `rig up --existing` from its auto snapshot. Records
    *  the guidance file's content at the moment the native harness was started. */
-  async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean; routerLine?: "yes" | "no" } = {}) {
+  async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean; routerLine?: "yes" | "no"; paneCwd?: string; fsOps?: true } = {}) {
     const runtime = opts.runtime ?? "claude-code";
-    const tmux = mockTmux({ noPane: opts.noPane });
+    const tmux = mockTmux({ noPane: opts.noPane, paneCwd: opts.paneCwd });
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus })
       .teardown(rigId);
     expect(down.snapshotId).toBeTruthy();
@@ -236,7 +236,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
         { pid: 1235, ppid: 1234, command: runtime === "codex" ? `codex resume ${TOKEN}` : runtime === "pi" ? `pi --session ${TOKEN}` : `claude --resume ${TOKEN}` },
       ],
     });
-    const up = await restore.restore(down.snapshotId!, { adapters: { [runtime]: adapter as never } });
+    const up = await restore.restore(down.snapshotId!, { adapters: { [runtime]: adapter as never }, ...(opts.fsOps ? { fsOps: nodeFs } : {}) });
     expect(up.ok).toBe(true);
     if (!up.ok) throw new Error("restore did not run");
     expect(fileAtHarnessStart, "the native harness was started exactly once").toHaveLength(1);
@@ -256,6 +256,38 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(lead?.status).toBe("resumed");
     expect(lead?.guidanceGaps).toBeUndefined();
     expect(result.rigResult).toBe("fully_restored");
+  });
+
+  // OpenRig's home moved, so the seat's saved folder isn't on this machine and its terminal starts in the
+  // tmux server's fallback folder. The restore names the folder the seat started in, doesn't recreate the old one just to
+  // hold a guidance file nothing reads there, and reports the seat running without that guidance.
+  it("a saved folder this machine doesn't have: names where the seat started, recreates nothing, and reports the guidance gap", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const startedIn = path.join(tmp, "home-b");
+    fs.mkdirSync(startedIn);
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile,
+      { betweenDownAndUp: () => fs.rmSync(cwd, { recursive: true, force: true }), paneCwd: startedIn, fsOps: true });
+    expect(fs.existsSync(cwd), "the missing saved folder is not recreated").toBe(false);
+    expect(fileAtHarnessStart).toBeNull();
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("resumed");
+    expect([...(lead?.guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "lead-role"]);
+    expect(result.warnings).toContain(`Restore: lead's working directory ${cwd} doesn't exist on this machine, so it started in `
+      + `${startedIn}. To launch this rig's seats in another directory for this run: rig up poc --existing --cwd <dir>.`);
+    expect(result.warnings.join("\n")).toContain(`lacks the OpenRig blocks lead-role, SOP.md, because ${cwd} doesn't exist on this machine`);
+    expect(result.warnings.join("\n")).not.toContain("put back missing blocks");
+  });
+
+  // A guidance file outside the missing folder, such as a Pi agent folder's own AGENTS.md, is read wherever the seat runs,
+  // so it is still put back.
+  it("a saved folder this machine doesn't have: a Pi agent folder's AGENTS.md still gets its blocks back", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "pi", piAgentFile: true });
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, { podAware: true, runtime: "pi",
+      betweenDownAndUp: () => fs.rmSync(cwd, { recursive: true, force: true }), fsOps: true });
+    expect(fs.existsSync(cwd)).toBe(false);
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("lead-role"));
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
   });
 
   // The seat-skills line comes back only with the person's yes, as at a start: after a no, an exact resume leaves the file

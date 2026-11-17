@@ -7,6 +7,7 @@ import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
 import { personRegistrationOffer } from "../person-registration-offer.js";
+import { ensureDefaultWorkspace } from "@openrig/daemon/instance-initialization";
 import {
   startDaemon,
   stopDaemon,
@@ -272,6 +273,12 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           getDeps(),
         );
         console.log(`Daemon started on port ${state.port} (pid ${state.pid})`);
+        // The daemon leaves a workspace.root that holds a project of its own as it is, and its log says so; so does this
+        // output, from the same read-only check.
+        const workspace = ensureDefaultWorkspace({ root: config.workspace.root, dryRun: true });
+        if (workspace.existingProject) {
+          console.log(`workspace.root holds a project of its own (${workspace.existingProject}); OpenRig left it as it is and reads that project's own id.`);
+        }
 
         // V0.3.1 slice 05 forward-fix #3 architectural — --wait-for-kernel
         // post-bind polling. Kernel boot is fire-and-forget after the

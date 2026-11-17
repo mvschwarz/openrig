@@ -11,7 +11,7 @@ import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -170,6 +170,14 @@ export function launchStatusIsRunning(status: string): boolean {
 }
 
 /** The facts effectiveRestorePolicy reads for one saved seat: its saved runtime, the runtime it has now, and its recorded sessions. */
+/** The guidance file lies in the seat's saved folder, and that folder isn't on this machine. A file outside it, such as a
+ *  Pi agent folder's own AGENTS.md, is read wherever the seat runs. */
+function guidanceInMissingFolder(targetPath: string, cwd: string | null | undefined): boolean {
+  if (!cwd || existsSync(cwd)) return false;
+  const inside = relative(cwd, targetPath);
+  return inside !== "" && !inside.startsWith("..") && !isAbsolute(inside);
+}
+
 function seatFacts(data: SnapshotData, nodeId: string, savedRuntime: string | null, currentRuntime: string | null): RestoreSeatFacts {
   return { savedRuntime, currentRuntime, recordedSessions: data.sessions.filter((session) => session.nodeId === nodeId) };
 }
@@ -1305,9 +1313,11 @@ export class RestoreOrchestrator {
     // A seat's saved directory that isn't on this machine (a workspace restored onto another home) is named plainly, with
     // the way to launch elsewhere; nothing is refused here, and the launch below goes on as before.
     const savedCwd = node.cwd ?? liveNode?.cwd;
-    if (!opts?.cwdOverride && savedCwd && isAbsolute(savedCwd) && opts?.fsOps && !opts.fsOps.exists(savedCwd)) {
-      warnings?.push(`Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine. To launch this rig's `
-        + `seats in another directory for this run: rig up ${data.rig?.name ?? rigId} --existing --cwd <dir>.`);
+    const launchElsewhere = `To launch this rig's seats in another directory for this run: rig up ${data.rig?.name ?? rigId} --existing --cwd <dir>.`;
+    // Where the line is, so that once the launch below has run it can also name the folder the seat started in.
+    let missingCwdAt = -1;
+    if (!opts?.cwdOverride && savedCwd && isAbsolute(savedCwd) && opts?.fsOps && !opts.fsOps.exists(savedCwd) && warnings) {
+      missingCwdAt = warnings.push(`Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine. ${launchElsewhere}`) - 1;
     }
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
@@ -1634,6 +1644,17 @@ export class RestoreOrchestrator {
     if (launchResult.warnings?.length) {
       warnings?.push(...launchResult.warnings);
     }
+    // tmux starts a terminal whose folder is missing in a fallback folder of its own (its server's HOME), which the launch's
+    // record doesn't hold, so the folder the seat started in is read from its pane.
+    if (missingCwdAt >= 0 && warnings) {
+      let panes: Array<{ id: string; cwd: string }> = [];
+      try { panes = await this.tmuxAdapter.listPanes(launchResult.sessionName); } catch { /* unread: the line stays as it was */ }
+      const startedIn = (panes.find((pane) => pane.id === launchResult.binding.tmuxPane) ?? panes[0])?.cwd;
+      if (startedIn && startedIn !== savedCwd) {
+        warnings[missingCwdAt] = `Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine, so it started in `
+          + `${startedIn}. ${launchElsewhere}`;
+      }
+    }
 
     // A selected launch's own blank rolled back after the shell started (postLaunchRestore has many return points).
     const compensation = { ran: false };
@@ -1792,6 +1813,7 @@ export class RestoreOrchestrator {
     // Every status with a live session; attention_required keeps its status and gains the disclosure.
     if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
     let guidance: ReturnType<typeof seatGuidance>;
+    let guidanceCwd: string | null | undefined;
     try {
       // The seat was launched in the snapshot node's cwd when set, else the
       // live node's cwd — the same resolved launch directory the hook
@@ -1799,7 +1821,7 @@ export class RestoreOrchestrator {
       // no guidance at all when the snapshot node has no cwd. No "." fallback:
       // when neither cwd exists the old skip is kept, so no guidance file is
       // written into the daemon's own working directory.
-      const guidanceCwd = node.cwd
+      guidanceCwd = node.cwd
         ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId)?.cwd;
       guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, guidanceCwd,
         this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
@@ -1822,7 +1844,9 @@ export class RestoreOrchestrator {
       missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
     }
     if (missing.length === 0) return noted;
-    const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}.`;
+    // A saved folder this machine doesn't have got nothing put back (see postLaunchRestore): say why the blocks are missing.
+    const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}`
+      + (guidanceInMissingFolder(guidance.targetPath, guidanceCwd) ? `, because ${guidanceCwd} doesn't exist on this machine.` : ".");
     warnings?.push(`Restore: ${gap}`);
     return { ...noted, guidanceGaps: missing };
   }
@@ -2129,11 +2153,12 @@ export class RestoreOrchestrator {
     // reaches the conversation; no action, skill or plugin runs. Never blocks the resume.
     if (resumeRequested && resumeToken && launchResult) {
       let guidance: ReturnType<typeof seatGuidance> = null;
+      let guidanceCwd: string | null | undefined;
       try {
         // Same resolved directory as launchCwd, without its "." fallback:
         // when neither the snapshot nor the live node has a cwd, keep the
         // old skip instead of writing guidance into the daemon's folder.
-        const guidanceCwd = node.cwd
+        guidanceCwd = node.cwd
           ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
             && (!selected || current.id === node.id))?.cwd;
         guidance = seatGuidance(startupCtx, guidanceCwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
@@ -2173,6 +2198,9 @@ export class RestoreOrchestrator {
           deliveryHint: "guidance_merge" as const, required: false, appliesOn: ["fresh_start" as const, "restore" as const] }));
         guidance = { ...guidance, items: guidance.items.filter((item) => !carried.includes(item)) };
       }
+      // A saved folder this machine doesn't have isn't created just to hold the file: the seat's terminal started elsewhere
+      // (the restore names where), so nothing would read it there. The check after the launch reports the blocks it lacks.
+      if (guidance && guidanceInMissingFolder(guidance.targetPath, guidanceCwd)) guidance = null;
       if (guidance && guidance.items.length > 0) {
         // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
         // left as it is and named (the check after the launch carries the names onto the seat's result).
