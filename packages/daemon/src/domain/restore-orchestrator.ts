@@ -2320,6 +2320,12 @@ export class RestoreOrchestrator {
           warnings?.push(`Restore: ${retired.error}`);
           return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: retired.error };
         }
+        // The retired provisional shell's process-limits line no longer describes the seat: the replacement reports its
+        // own (or none, when it applied the limit), and a replacement that fails to launch runs nothing, so the line
+        // goes before the launch is awaited and the same notice is never printed twice.
+        const staleLimits = launchResult.processLimits ? noticeLine(launchResult.processLimits) : undefined;
+        const stale = staleLimits && warnings ? warnings.lastIndexOf(staleLimits) : -1;
+        if (stale >= 0) warnings!.splice(stale, 1);
         const replacementExists = () => this.sessionRegistry.getSessionsForRig(rigId)
           .some((candidate) => candidate.nodeId === node.id
             && candidate.status === "running"
@@ -2328,11 +2334,6 @@ export class RestoreOrchestrator {
           // #3253: this replaces the provisional shell of a restore, so it is a recovery too: a limit that can't be
           // applied doesn't stop the seat, and its notice is the node's.
           const fresh = await this.freshLaunch(rigId, node.id, { processLimitsMode: "recovery" });
-          // The retired provisional shell's process-limits line no longer describes the seat: the replacement reports its
-          // own (or none, when it applied the limit), so the same notice is never printed twice.
-          const staleLimits = launchResult.processLimits ? noticeLine(launchResult.processLimits) : undefined;
-          const stale = staleLimits && warnings ? warnings.lastIndexOf(staleLimits) : -1;
-          if (stale >= 0) warnings!.splice(stale, 1);
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
           // The replacement's own outcome, also when it applied the limit (no notice): the retired provisional shell's
           // notice no longer describes the seat (the key is set either way, so the caller doesn't fall back to it).

@@ -4378,6 +4378,40 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.warnings).not.toContain(noticeLine(notice));
   });
 
+  it("#3253: a fresh replacement that throws leaves no process-limits line from the retired provisional shell", async () => {
+    const rig = rigRepo.createRig("limits-throw-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-limits-throw", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-limits-throw" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@limits-throw-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const notice = { state: "not_applied" as const, kind: "setup" as const, retryable: false, requested: { tasksMax: 256 },
+      reason: "terminal.inherit_tmux_environment is on" };
+    const tmux = mockTmux();
+    (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true as const, processLimits: notice,
+      warnings: [noticeLine(notice)] });
+    const freshLaunch = vi.fn(async () => { throw new Error("recipe vanished"); });
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const result = await createOrchestrator({ tmux, freshLaunch }).restore(snap.id, {
+      adapters: { "claude-code": mockAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+    expect(freshLaunch).toHaveBeenCalled();
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "failed" });
+    expect(result.result.nodes[0].processLimits).toBeUndefined();
+    expect(result.result.warnings).not.toContain(noticeLine(notice));
+  });
+
   it("keeps the provisional shell when retirement is not confirmed", async () => {
     const rig = rigRepo.createRig("retire-refusal-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-retire-refusal", rig.id, "Dev");

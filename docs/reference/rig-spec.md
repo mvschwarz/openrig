@@ -1174,10 +1174,11 @@ members:
   the limit only when the seat's command is seen not to have started in the scope; when that can't be told (the start
   wasn't seen in time, or the command started in the scope and ended), nothing is run a second time, and the warning
   reads `state: "unknown"`, with `commandStarted` (`true` or `"unknown"`) as in the fresh refusal; its `retryable` only
-  says the limit check may pass at the next fresh launch, since nothing is refused or run again. A restart in place keeps the process tree it has (and a limit already applied to it); when
-  that process's limit can't be read back, its warning reads `unknown`. A bare agent pane's respawn carries no seat
-  environment: it keeps the limit, in a new scope, only when the running process reads back as `applied` and a new
-  scope can be made; otherwise it comes back without the limit, with the warning.
+  says the limit check may pass at the next fresh launch, since nothing is refused or run again. A restart in place
+  keeps the process tree it has (and a limit already applied to it); when that process's limit can't be read back, its
+  warning reads `unknown`. A bare agent pane's respawn carries no seat environment: it keeps the limit, in a new scope,
+  only when the running process reads back as `applied` and a new scope can be made; otherwise it comes back without
+  the limit, with the warning.
 - **When it applies:** Each launch reads the stored value and starts the seat's new pane in a new scope. A seat that is
   already running is never moved or stopped: a changed value applies at that seat's next launch. A daemon restart
   relaunches nothing, so running seats keep the scope they started in.
