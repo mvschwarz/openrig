@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety-three top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.17`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.18`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -405,7 +405,9 @@ your context, your compaction and your replacement — and it is the only thing 
   up to the 30-second default, even when Slack isn't set up or the row won't be posted. With `output.compact` on (off by default;
   `rig config set output.compact true`), the queue write commands print a short receipt, `rig queue show` leaves out empty fields,
   `rig queue transitions` shows the latest five, and `rig whoami --json` bounds its peer list; `--full` (or `--all-peers`) prints
-  everything.
+  everything. Since 0.7.18 `rig queue tag <id> --add <tag>` adds tags to a row that already
+  exists, in any state, without changing its state, claim or closure; an added `project:`,
+  `mission:` or `slice:` tag reaches the scope views like a create-time tag.
 - **`rig queue show`** — what a row *actually says*. The header is not the body. On a closed row,
   `--full` adds `closingTransition`: how it ended, who closed it and the closing note.
   `rig queue show`, `list`, `transitions`, `update` and `block` take `--host <id>` for a row on
@@ -620,8 +622,18 @@ that conversation, so a question waits until the person returns; a prompt that c
 capture and the key can take the key. In 0.7.17's first trial, with Claude Code and a simulated
 person, a reviewer's permission question never reached the person, the person's agent twice offered a
 bare terminal attachment as a way to answer a seat's prompt, and the work didn't reach a reviewed
-commit; this guidance doesn't reliably complete that journey, and a second trial wasn't run. The
-skill also follows a task handed on to another
+commit; this guidance doesn't reliably complete that journey, and a second trial wasn't run.
+Since 0.7.18, `rig queue create --return-route auto` hands the goal over and gives the person's
+conversation an address (`--return-route self` for a session that joined the team, or another
+conversation's address). Every handoff carries the route, and when routed work is held at a seat's
+prompt or waits on it, a prompt that isn't a choice dialog is sent to the route as a task. Choice
+prompts, a prompt already with the gateway, and a route that can't be used (another host's, two that
+disagree, or a relay that couldn't be made) keep their existing path. It arrives on the
+conversation's next turn: nothing wakes an idle conversation, arrival isn't guaranteed, and a prompt
+can still change between its capture and the key. In two measured Claude first-user runs the return
+route was NOT MET: one agent set no route, and the other set it and finished reviewed, committed work
+but read the prompt relays only after the prompts had been answered. Without `--return-route`
+nothing changes. The skill also follows a task handed on to another
 host with `rig queue show <id> --host <host>`.
 
 `starter` and `factory` are built in: preview the team, inspect `rig up <team> --cwd . --plan`,
@@ -946,8 +958,15 @@ version, from checking the environment to a useful report to the OpenRig team.
   conversation or failed start keeps its own status. restore-check reads that seat yellow. Both warn when a snapshot's named Codex profile was cleared
   from the current seat. On 0.7.16 a rig could still read `fully_restored` past a seat restore didn't start
   or one left attached; since 0.7.17 such a rig reads `partially_restored` and restore names the
-  skipped seat, though restore-check's recovery plan still counts seats restore leaves alone. A seat
-  left as a bare shell still counts as running in `rig ps`. Since 0.7.17 one banked original
+  skipped seat, though restore-check's recovery plan still counts seats restore leaves alone. In
+  0.7.17 a seat left as a bare shell still counted as running in `rig ps`; since 0.7.18 it doesn't,
+  and a seat with a delegation parent or escalation destination gets that owner one queue item per
+  restore, listing its shells, each cause and the next step (others stay in the result's `unrouted`
+  list). Since
+  0.7.18 `rig up --existing --cwd` honors `--cwd`, each restored seat's checkpoint is its own file
+  (`.rigged-checkpoint-<session>-<digest>.md`; the seat isn't told where it is, and a written file
+  isn't proof it was read), and restore and restore-check name agents that share a recorded
+  conversation, leaving the choice to you. Since 0.7.17 one banked original
   conversation can be resumed through the daemon's opt-in `/api/startup/<rigId>/nodes/<nodeId>/original`
   route; a result it can't prove stays partial, and it never substitutes a fresh conversation
   (`docs/reference/daemon-http-clients.md`).
@@ -981,7 +1000,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   successor is running, `rig seat handover <seat> --recover --reason "<why>"` adopts it instead of
   leaving the seat with its retiring occupant: it proves the successor from the failed attempt's
   record and records the conversation it holds now (or, with a warning, the one its launch named).
-  Recovery from a real failed handover wasn't checked when 0.7.16 was tested.
+  Recovery from a real failed handover wasn't checked when 0.7.16 was tested. Since 0.7.18 it
+  accepts a successor that is the only pane of its session's current window, as the launch does.
 - **`rig seat clear-attention` / `set-resume-token`** — clear a stale attention flag, or repair a
   lost resume handle so restore works next time.
 - **`rig seat continue <seat>`** — a launch stopped on Claude's bypass-permissions consent dialog.
@@ -1037,6 +1057,13 @@ version, from checking the environment to a useful report to the OpenRig team.
   home selected for that original. A stale expectation returns
   `runtime_home_conflict` and applies nothing. The result says whether the home and the original
   conversation are found there, and reports the running process as unverified.
+- **Per-seat choices since 0.7.18, all opt-in:** `rig seat set-input-route <seat> --route native
+  --reason <text>` gives a seat with a capable live runner native input instead of terminal typing
+  (typed stays the default; a native seat's work isn't cancelled when a permission is withdrawn).
+  On Linux/systemd hosts, `process_limits: { tasks_max: N }` on a member requests a cap on the tasks
+  its own processes may hold (`docs/reference/rig-spec.md`): a fresh start whose limit isn't seen to
+  take effect is refused, a recovery that can't apply it may try without the limit (with a warning),
+  and an uncertain start is reported and not retried. An export names a stored limit it can't read.
 - **`rig seat set-permissions <seat> --mode <mode> --reason <text>`** — select one seat's native
   permission mode for its future managed launches; it relaunches nothing, and `inherit` clears the
   selection. `rig seat status` reports the selection, but a status read does not prove the
@@ -1107,6 +1134,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   changes no native permissions or typing-guard level. `rig seat status` shows it.
 - **`rig compact-plan`** → **`rig compact`** — who is near the context wall, then act on it.
   **Ordering matters: running `compact` without the plan is guessing which seat needed it.**
+  Since 0.7.18 `rig compact <pi-seat>` requests Pi's own compaction through the seat's guarded send
+  path instead of refusing, and `--state` reports that attempt.
   Managed compaction waits for the seat's restore map before compacting; `rig compact --state`,
   `--cancel` and `--skip-map` inspect, stop or skip that wait; since 0.7.14 `--state` also names the
   input check behind a `draft_input_unknown` stop (`inputReadFailure`). If preparation stops at an ordinary
@@ -1177,8 +1206,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   cached hook keeps that trust, as with any hook trusted in Codex; the trust covers that
   `CODEX_HOME`, so your own Codex sessions there load the plugin too, and its hooks do nothing
   outside an OpenRig seat; adding your own Codex hook can trigger a re-review of one OpenRig hook.
-  On 0.7.17, when a Codex seat's `config.toml` or `hooks.json` is a symbolic link, OpenRig records
-  its hook trust under the link's target, as in 0.7.14, and such a seat may be asked to review hooks
+  On 0.7.17 and 0.7.18, when a Codex seat's `config.toml` or `hooks.json` is a symbolic link, OpenRig
+  records its hook trust under the link's target, as in 0.7.14, and such a seat may be asked to review hooks
   again. With a linked `config.toml`, OpenRig can also miss a setting stored for it that turns
   OpenRig's hooks off, and set those hooks up anyway when it moves them into `hooks.json` (#3078).
   Since 0.7.15, when a new openrig-core changes one of those six hook declarations, the boot or

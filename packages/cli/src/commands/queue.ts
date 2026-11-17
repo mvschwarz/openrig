@@ -1328,7 +1328,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--human-questions-file <path>", "#193: JSON array of 1-4 questions for a decision, each {id, question, options: [{id, label, recommended?}]} with 2-4 options; Slack shows them as buttons")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
-    .option("--return-route <route>", "For work a person answers from their own conversation: auto (OpenRig issues this conversation an address and prints it; use it from then on), self (this session's own address, for a session that joined), or an address you were given. The work carries it through handoffs, and its seats' prompts and stuck steps come to that address as tasks, ahead of the person's Slack connection, for this work only. Without it, nothing changes")
+    .option("--return-route <route>", "For work a person answers from their own conversation: auto (OpenRig issues this conversation an address and prints it; use it from then on), self (this session's own address, for a session that joined), or an address you were given. The work carries it through handoffs, and a seat's prompt that isn't a choice dialog, and stuck steps, are sent to that address as tasks, ahead of the person's Slack connection, for this work only. Choice prompts and a route on another host keep their usual path; the conversation sees a task on its next turn. Without it, nothing changes")
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
     .option("--verify", "Boundedly wait after persistence for the existing receipts: the gateway receipt for a person, or the wake result and any claim already present for a seat, plus the gateway receipt when the gateway may also post to that seat (a registered person with a pane; eligible to post, not guaranteed). Never retries the create or the wake, and never claims the message was read")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
@@ -1568,7 +1568,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // The address this work's questions come to, and the line to read them by.
           if (status < 400 && typeof created?.returnRoute === "string") {
             const route = created.returnRoute;
-            console.error(`Return route: ${route}. This work's questions and its seats' prompts come there as tasks; read them with ` +
+            console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
               `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
               (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
           }

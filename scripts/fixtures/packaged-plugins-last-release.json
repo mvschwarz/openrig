@@ -1,10 +1,10 @@
 {
-  "release": "0.7.16",
-  "archiveSha256": "2eaffe7887dff5356b979cbb9dbd563b16685b968ab340a2a3db8b12d18c190b",
+  "release": "0.7.17",
+  "archiveSha256": "a5018cb818b4d3eb35b5c06274b65248107bd2aba1f3998ac141e36280f3f044",
   "plugins": {
     "openrig": {
-      "version": "0.7.16",
-      "sha256": "1ddbced4e0ba5e1893b8d92c6a7737467dbc3632beb39291112ae1b9b36fe5de"
+      "version": "0.7.17",
+      "sha256": "60081dfc0d0ce8ca056d694287de62028d028df264634958381932aeac0b94fc"
     },
     "openrig-core": {
       "version": "0.1.31",

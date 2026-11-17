@@ -1,4 +1,108 @@
-# What changed in OpenRig 0.7.17
+# What changed in OpenRig 0.7.18
+
+This note is for an agent on an install that was just upgraded to 0.7.18.
+OpenRig 0.7.18 can send a team's seat prompts to the conversation your person
+handed the work over from, restore says more truthfully what it left running,
+and three settings can be chosen per seat: native input, Claude's auto mode
+and, on Linux, a task limit. It adds four database migrations. If you upgraded
+from 0.7.16 or earlier, also read "What changed in OpenRig 0.7.17" below, and so
+on back. For the full capability map, read
+`rig context get onboarding-width/public-what-you-can-do.md`. After the upgraded
+daemon starts, `rig context get reference/whats-new.md` describes this version.
+Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`.
+
+## After the upgrade
+
+- **Restart the daemon** (`rig daemon stop`, then `rig daemon start`), with a
+  database backup first. Your agents keep running through it; don't use
+  `rig down`. If the daemon was started with `--db`, back up that path and pass
+  the same `--db` to `rig daemon start`. Four migrations run before it listens
+  (`171_claude_auto_mode`, `171_node_input_route`, `172_queue_return_route`,
+  `173_node_process_limits`); each adds columns or indexes. Going back to
+  0.7.17 after them isn't established.
+- **The plugins:** `openrig` carries 0.7.18, and openrig-core moves to 0.1.32
+  because its skills and refocus hook changed.
+
+## Your person's own conversation
+
+- **A return route:** when your person stays in their own conversation, hand
+  their goal over with `rig queue create --return-route auto` (or
+  `--return-route self` from a session that joined the team). Every handoff
+  carries the route. When routed work is held at a seat's prompt, or waits on
+  it, a prompt that isn't a choice dialog is sent to that conversation as a
+  task. Choice prompts, a prompt already with the gateway, and a route that
+  can't be used (another host's, two that disagree, or a relay that couldn't be
+  made) keep their existing path. The `rigs` skill teaches this.
+- **Guidance:** the kernel operator is instructed to answer a registered person
+  where they wrote (not proof an answer is delivered), and
+  `messaging-the-human` says how to close the ask an answer settles.
+- **Slack and MCP:** a button answer keeps each option's history and who gave
+  it; a click that fails to record enters the existing retry path, which fills
+  only a still-unanswered question; and `rig_question_answer` sends the
+  operator token when the daemon requires one.
+
+## Recovery
+
+- **A bare shell restore leaves no longer counts as running** in `rig ps`,
+  including a recreated seat; a seat with a delegation parent or escalation
+  destination gets that owner one queue item per restore.
+- **After OpenRig's home moved:** `rig up --existing --cwd` honors `--cwd`,
+  names a missing saved folder and leaves a declared project folder
+  unscaffolded, and Claude seats keep the core plugin. Each restored seat's
+  checkpoint is its own file, `.rigged-checkpoint-<session>-<digest>.md`.
+- **Restore and `restore-check` name agents that share a recorded
+  conversation,** and `rig seat handover --recover` accepts a successor alone in
+  its session's current window.
+- **Also:** a later `rig down` no longer exits 2 over a released session's kept
+  skills (a plain `down` of a stopped rig still exits 1), and Codex 0.167.1 and
+  0.167.2 seats read their real activity.
+
+## Queue, delivery and settings
+
+- **Per-seat choices, all opt-in:** `rig seat set-input-route <seat> --route
+  native --reason <text>`; Claude's `autoMode` (`claude_auto_mode`, or
+  `rig seat set-permissions --auto-mode`); and on Linux with systemd, a
+  requested task limit, `process_limits: { tasks_max: N }`. A fresh start whose
+  limit isn't seen to take effect is refused; a recovery that can't apply it
+  may try without the limit, with a warning; an uncertain start is reported and
+  not retried. OpenRig 0.7.17 rejects teams whose exported `rig.yaml` contains
+  `claude_auto_mode` or `process_limits`. Upgrade the receiving install to
+  0.7.18, or remove those fields from a copy only if you intend to share without
+  those per-seat settings.
+- **`rig compact <pi-seat>`** requests Pi's own compaction; `--state` reports
+  the attempt.
+- **Queue:** `rig queue tag <id> --add <tag>` adds tags to an existing row, and
+  `rig queue list` names a handed-off row's successors.
+
+## Limits to keep in view
+
+- **A routed prompt waits for the conversation's next turn;** nothing wakes an
+  idle one, and arrival isn't guaranteed. A prompt can still change between
+  OpenRig reading it and sending the key.
+- **Checkpoints:** the seat isn't told where its file is, and a written file
+  isn't proof it was read. After a `--cwd` restore, `rig down` doesn't clean
+  OpenRig's Claude settings, hooks and collector from that folder. When a full
+  restore recreates a seat, its result can still list it as not started.
+- **Native input route:** withdrawing a permission doesn't cancel a native
+  seat's work in progress.
+- **Queue help** says a human seat such as `human@host` asks no one; that holds
+  only for an unregistered one.
+- **The older notes below are each version's own:** their upgrade steps install
+  that version, and where one points to a 0.7.8 or 0.7.9 section below, read
+  that version's GitHub Release instead. 0.7.17's maintenance drain lets
+  delivery go on when its record can't be read; the daemon log then says
+  `control read unavailable; allowing automatic delivery`.
+- **Linked Codex config files:** when a Codex seat's `config.toml` or
+  `hooks.json` is a symbolic link, OpenRig records its hook trust under the
+  link's target, as in 0.7.14. A change to key it by the file's own name isn't
+  in this release, and such a seat may be asked to review hooks again. With a
+  linked `config.toml`, OpenRig can also miss a setting stored for it that
+  turns OpenRig's hooks off, and set those hooks up anyway when it moves them
+  into `hooks.json`.
+- **0.7.17's limits below still apply,** except the bare-shell count, the
+  second `rig down`'s exit 2 and Codex 0.167.1 and 0.167.2's `unknown`.
+
+## What changed in OpenRig 0.7.17
 
 This note is for an agent on an install that was just upgraded to 0.7.17.
 OpenRig 0.7.17 teaches the installer, the kernel operator and the `rigs` skill
@@ -16,7 +120,7 @@ the full capability map, read
 daemon starts, `rig context get reference/whats-new.md` describes this version.
 Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`.
 
-## After the upgrade
+### After the upgrade
 
 - **Restart the daemon** (`rig daemon stop`, then `rig daemon start`), with a
   database backup first. Your agents keep running through it; don't use
@@ -28,7 +132,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - **One new setting:** `ui.topology_remote_seats` (off by default) lets the TUI's
   topology TABLE read a remote rig's seats, read-only.
 
-## Your person's own conversation
+### Your person's own conversation
 
 - **If your person installed OpenRig from their own Claude Code conversation and
   stays there,** the installer is instructed to hand their goal to the team as a
@@ -54,7 +158,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   startup text; read it from the `rigs` skill's
   `references/installing-for-someone.md` when you need it.
 
-## Recovery
+### Recovery
 
 - **Restore** reads `partially_restored`, and names the seat, when it skipped a
   seat that isn't in the snapshot's roster or left one attached. Which seats
@@ -88,7 +192,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   leaves the token unknown; discovered handover resolves a relative
   `CLAUDE_CONFIG_DIR` against the seat's directory.
 
-## Delivery, workflows and tools
+### Delivery, workflows and tools
 
 - **Three daemon read paths changed:** the stuck sweep reads undelivered ids in
   windows and yields between them (a window and one row's derivation are still
@@ -138,7 +242,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   confirmation hide a hub URL's query string (`--json` keeps the full URL);
   `rig setup` prints the harness login line.
 
-## Limits to keep in view
+### Limits to keep in view
 
 - **Your person's conversation isn't woken.** A seat's question waits until
   they return to it, and a prompt that changes between the capture and the key
