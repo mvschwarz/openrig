@@ -3,6 +3,7 @@ import { isQueueWait } from "./queue-wait-backoff.js";
 import { isTypedGateBlocker } from "./queue-blocker.js";
 import { isHumanSeatSessionRef } from "./session-name.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress } from "./gateway/human-registry.js";
+import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 
 export type ParkWakeKind = "watchdog" | "timer" | "blocker";
 export type ParkWakePhase = "armed" | "fired";
@@ -200,7 +201,7 @@ export class QueueWakeRepository {
 
   findBlockedQitemsByWatchdog(jobId: string, latestArmedOnly = false): Array<{ qitemId: string; kind: "watchdog" | "timer" }> {
     if (!this.available) return [];
-    return this.db.prepare(
+    const select = (boundary: string) => this.db.prepare(
       `SELECT DISTINCT w.qitem_id, w.wake_kind
          FROM queue_transition_wakes w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
@@ -212,6 +213,7 @@ export class QueueWakeRepository {
             SELECT MAX(a.transition_id) FROM queue_transition_wakes a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
           ))
+          ${boundary}
           AND (? OR NOT EXISTS (
             SELECT 1 FROM queue_transition_wakes f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
@@ -219,7 +221,8 @@ export class QueueWakeRepository {
                -- A retained attempt was not delivered: the one-shot binding still owns the next attempt.
                AND (f.delivery_status IS NULL OR f.delivery_status != 'retained')
           ))`,
-    ).all(jobId, latestArmedOnly ? 1 : 0, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => {
+    ).all(jobId, latestArmedOnly ? 1 : 0, this.isRepeatingTimer(jobId) ? 1 : 0);
+    return (latestArmedOnly ? readWithCurrentParkBoundary(select) : select("")).map((row) => {
       const r = row as { qitem_id: string; wake_kind: "watchdog" | "timer" };
       return { qitemId: r.qitem_id, kind: r.wake_kind };
     });
@@ -246,7 +249,7 @@ export class QueueWakeRepository {
    *  A retained attempt never consumes it; a failed one does, except on a repeating timer, which retries. */
   findLiveQitemsByAttachedWatchdog(jobId: string): Array<{ qitemId: string; state: string }> {
     if (!this.available) return [];
-    return this.db.prepare(
+    return readWithCurrentParkBoundary(boundary => this.db.prepare(
       `SELECT DISTINCT w.qitem_id, q.state
          FROM queue_transition_wakes w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
@@ -256,6 +259,7 @@ export class QueueWakeRepository {
             SELECT MAX(a.transition_id) FROM queue_transition_wakes a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
           )
+          ${boundary}
           AND NOT EXISTS (
             SELECT 1 FROM queue_transition_wakes f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
@@ -266,7 +270,7 @@ export class QueueWakeRepository {
                  f.delivery_status != 'failed' AND f.delivery_status NOT LIKE 'failed:%'
                ))
           )`,
-    ).all(jobId, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => {
+    ).all(jobId, this.isRepeatingTimer(jobId) ? 1 : 0)).map((row) => {
       const r = row as { qitem_id: string; state: string };
       return { qitemId: r.qitem_id, state: r.state };
     });
@@ -291,7 +295,7 @@ export class QueueWakeRepository {
    *  them; any other job the retiring occupant registered still stops. */
   currentParkTimerIds(): string[] {
     if (!this.available) return [];
-    return this.db.prepare(
+    return readWithCurrentParkBoundary(boundary => this.db.prepare(
       `SELECT w.wake_ref
          FROM queue_transition_wakes w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
@@ -301,8 +305,9 @@ export class QueueWakeRepository {
           AND w.transition_id = (
             SELECT MAX(a.transition_id) FROM queue_transition_wakes a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
-          )`,
-    ).all().map((row) => (row as { wake_ref: string }).wake_ref);
+          )
+          ${boundary}`,
+    ).all()).map((row) => (row as { wake_ref: string }).wake_ref);
   }
 
   private isLive(kind: ParkWakeKind, ref: string): boolean {

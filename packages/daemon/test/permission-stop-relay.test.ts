@@ -41,7 +41,7 @@ describe("synthetic passive PermissionRequest observer failure isolation", () =>
   it("declares the passive relay with the existing hook timeout in the real shipped manifest", () => {
     const manifest = JSON.parse(readFileSync(new URL("../assets/plugins/openrig-core/hooks/claude.json", import.meta.url), "utf8"));
     expect(manifest.hooks.PermissionRequest).toEqual([{ hooks: [{ type: "command",
-      command: '\"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin', timeout: 5 }] }]);
+      command: 'exec \"${OPENRIG_NODE:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\" --from-plugin', timeout: 5 }] }]);
   });
 
   it.each(["missing", "throws"])("emits no decision or edited input when the formatter %s", formatter => {

@@ -33,7 +33,8 @@ npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.17/skills/rigs --s
 
 Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what you want built. The skill has your agent tell
 you what it will run and change before it does, install OpenRig, open the OpenRig view and pass your goal to
-OpenRig's operator.
+OpenRig's operator. If Claude Code was already running when you added the skill, type `/reload-skills` first, or start
+a new session: a session doesn't see a skills folder created after it started.
 
 You need Node.js 22 or 24 (22 on Apple silicon), tmux, macOS or Linux (WSL2 on Windows), and Claude Code or Codex
 signed in. One provider is enough to start.

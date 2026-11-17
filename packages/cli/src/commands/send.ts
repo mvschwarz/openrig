@@ -63,6 +63,8 @@ export interface EnvelopeMeta {
   replyToQitem?: string;
   /** Twin of pane-envelope's field (#2895 (a)): false ⇒ the reply line names no `rig send`. ABSENT or true ⇒ today's hint. */
   senderReachable?: boolean;
+  /** Twin of pane-envelope's field (#3268): false ⇒ an @external sender the queue would refuse gets no reply command. */
+  senderRegistered?: boolean;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability). */
@@ -111,7 +113,9 @@ export function wrapSendBody(
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
   const reply = senderLabel.endsWith("@external")
-    ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
+    ? meta?.senderRegistered === false
+      ? `↩ No reply route: ${senderLabel} isn't a registered person (rig gateway human list lists who's registered).`
+      : `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
     : personAddress === UNATTRIBUTED_PERSON
       ? `↩ ${senderLabel} names no person: a reply there asks no one. It waits on Steering and in the Feed, and OpenRig reports it as undeliverable. To ask the person back, use their registered address (rig gateway human list lists who's registered).`
     : isHumanSeatSessionRef(personAddress)

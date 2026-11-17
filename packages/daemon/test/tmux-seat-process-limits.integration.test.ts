@@ -2,7 +2,8 @@
 // the adapter runs; this one checks the effect. Through TmuxAdapter.createSession on a private tmux server, seat A
 // (`tasks_max: 8`) and seat B (no limit) each fork 13 sleeps. A's pane process must be in its own openrig-seat-*.scope,
 // whose pids.events counts the refused forks, and A's batch must stop short; B and the tmux server stay in the server's
-// cgroup and fork all 13 without a hit.
+// cgroup and fork all 13 without a hit. The memory limit (`memory_max`) has no real-host case here: the synthetic suite
+// pins its commands, probe and readback.
 //
 // Opt-in, and skipped (never passed) unless all of these hold: Linux, OPENRIG_TEST_SEAT_SCOPE=1, a systemd user manager
 // that answers through XDG_RUNTIME_DIR (or /run/user/<uid>), cgroup v2 and tmux on PATH. It creates real transient
