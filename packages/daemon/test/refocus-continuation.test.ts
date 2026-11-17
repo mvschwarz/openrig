@@ -52,8 +52,8 @@ describe("refocus continuation", () => {
   it("OMP ignores growth thresholds and does not unwrap Claude pasted content", () => {
     const f = fixture(false, "omp");
     expect(f.run("UserPromptSubmit")).toBe("");
-    writeFileSync(f.transcript, "x".repeat(2_000_000));
-    expect(f.run("UserPromptSubmit")).toBe("");
+    writeFileSync(f.transcript, "x".repeat(2_048));
+    expect(f.run("UserPromptSubmit", "continue", true, { OPENRIG_REFOCUS_BYTES: "1000" })).toBe("");
     expect(f.run("PostCompact")).toBe("");
     expect(f.run("UserPromptSubmit", `<pasted_content id="fixture">${boundary}</pasted_content id="fixture">`)).toContain("just compacted");
     expect(f.state().pendingOn).toBeUndefined();
