@@ -7,7 +7,7 @@ import { OutboxHandler, OutboxHandlerError, type RunnerAdmission, type RunnerRec
 export function runnerChannelKind(binding: RunGrantBinding | null): "managed-pi" | "preset" | "hosted-pi-rpc" | null {
   if (binding?.runner === AGENT_RUNNER_PRESET) return "preset";
   if (binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) return "hosted-pi-rpc";
-  return binding?.runner === 0 && binding.runtime === "pi" ? "managed-pi" : null;
+  return binding?.runner === 0 && (binding.runtime === "pi" || binding.runtime === "omp") ? "managed-pi" : null;
 }
 
 export class RunnerChannelError extends Error {
@@ -22,7 +22,7 @@ export class RunnerChannel {
   private readonly listeners = new Set<() => void>();
   // Implemented contract families, not program names or inferred qualification of compatible forks.
   constructor(private readonly grants: ActivityGrantStore, readonly outbox: OutboxHandler,
-    private readonly implementedKinds: ReadonlySet<string> = new Set(["managed-pi", "preset"]),
+    private readonly implementedKinds: ReadonlySet<string> = new Set(["managed-pi", "preset", "hosted-pi-rpc"]),
     private readonly events = new EventBus(outbox.db)) {}
 
   /** A failed standing read cannot establish replacement or revoke retained custody. */
@@ -113,7 +113,10 @@ export class RunnerChannel {
       // actual run authorize an optional operation; neither a wrapper nor hello establishes program qualification.
       const kind = runnerChannelKind(grant.binding);
       const supported = kind !== null && this.implementedKinds.has(kind);
-      const capabilities: Capabilities = { input: supported && declared.input === true, wake: supported && declared.wake === true, cancel: supported && declared.cancel === true };
+      // The shared hosted RPC path implements input for OMP/forks, not Pi's invocation mapping.
+      const mappedInvocation = kind === "preset" || grant.binding?.runtime === "pi" && grant.binding.runner === 0;
+      const capabilities: Capabilities = { input: supported && declared.input === true,
+        wake: supported && mappedInvocation && declared.wake === true, cancel: supported && mappedInvocation && declared.cancel === true };
       if (!body.retained) {
         this.outbox.forgetRunnerMap(grant.nodeId, grant.runId);
         // Person turns and completed input may have no unresolved receipt. A not-retained report invalidates prior

@@ -277,7 +277,7 @@ describe("Rigspec export routes", () => {
       expect(limitWarnings(yamlRes)).toEqual(warning);
       const yaml = await yamlRes.text();
       expect(yaml).toContain(`# Not carried: ${seat}'s process_limits, because the saved value can't be read; it stays stored as it is. ` +
-        "Fix it by re-applying the spec with process_limits: { tasks_max: <N> }, or clear it with process_limits: {}");
+        "Fix it by re-applying the spec with process_limits: { tasks_max: <N>, memory_max: <size> }, or clear it with process_limits: {}");
       // the other seat's valid limit still exports; the unreadable one isn't invented or emptied
       expect(yaml.split("\n").filter((line) => !line.startsWith("#") && line.includes("tasks_max:")).map((line) => line.trim()))
         .toEqual(["tasks_max: 64"]);

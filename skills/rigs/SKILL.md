@@ -13,6 +13,11 @@ working on what the person wants, and shows how to work with that team from here
 if the person asks you to. When they say what they want built, give it to OpenRig's operator (step 2) instead of
 building it yourself.
 
+**If `/rigs` or your skill tool said this skill doesn't exist** right after it was added to a running Claude Code
+session: that session doesn't see a skills folder created after it started. Ask the person to type `/reload-skills`
+(Claude Code 2.1.152 or later), or start a new session, then `/rigs`. Until then, read this whole file before you act on
+it; a step skipped here changes where the person answers the team.
+
 Tell the person what you're about to run and why before you run it. Don't install system packages or change their
 machine without a yes, and don't start a team, including `rig up`, without their yes to what it will start; a yes they
 already gave for that same launch counts, so don't ask twice. Starting OpenRig and a team writes files: Codex hooks and settings in
@@ -175,16 +180,21 @@ commands; if the two ever differ, this step is right.
     <seat>@<rig>`), on their yes only.
   - A machine they'll pair with needs its own person: registering here doesn't give that machine one.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
-  said. Hand it over by where the person will answer the team, from what they've already told you:
-  - **They stay here** (they said so, or they can't use the operator's pane): hand the goal over as a task with a
-    return route ("If the person stays with you" below), giving the operator your return address for the team's questions and
+  said. Hand it over by where the person will answer the team. Staying here is the default: the pane route needs their
+  explicit choice.
+  - **They stay here** (they said so, or they haven't chosen the pane): hand the goal over as a task with a return
+    route ("If the person stays with you" below), giving the operator your return address for the team's questions and
     result. A seat's prompt may still not reach this conversation. Tell them in a line that this goal's route selects
-    this conversation ahead of a Slack connection they've registered; their other work doesn't change. Don't tell
-    the operator they'll answer in its pane.
-  - **They'll talk to the operator in its pane:** find the `operator.agent` row in `rig ps --nodes --rig kernel --json`,
-    take its `canonicalSessionName` (never the logical ID or a guessed name) and send:
+    this conversation ahead of a Slack connection they've registered; their other work doesn't change, and they can
+    talk to the operator in its pane instead whenever they like. Don't tell the operator they'll answer in its pane.
+  - **They'll talk to the operator in its pane** (when they chose it): offer the pane only once the view opened where
+    they can see it; check how `rig terminal open` ended, above, first. If they chose it and no view can open, give them
+    the connection step above and keep their choice, and say the pane is pending until they open or attach to it.
+    Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName` (never the
+    logical ID or a guessed name) and send:
     `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
-  - Ask where they want to answer only when it's genuinely unclear, and only once.
+  - **Their choice holds:** a later goal goes by the route they chose until they say otherwise. Don't ask where they'll
+    answer before the handoff, and don't switch routes on your own.
 
   Carry their constraints, which logins they have (an installed provider that isn't signed in doesn't count), and any
   permission choice they made, chosen or declined, in either handoff.

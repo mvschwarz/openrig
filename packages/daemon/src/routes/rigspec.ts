@@ -59,7 +59,7 @@ export function handleExportYaml(c: Context): Response {
       .map((seat) => `# Not carried: ${seat}'s claude_auto_mode, because the saved block can't be read; set it again with rig seat set-permissions --auto-mode.\n`));
     notCarried.push(...exporter.processLimitsNotCarried(rigId)
       .map((seat) => `# Not carried: ${seat}'s process_limits, because the saved value can't be read; it stays stored as it is. Fix it by ` +
-        "re-applying the spec with process_limits: { tasks_max: <N> }, or clear it with process_limits: {} (an ordinary re-apply: a " +
+        "re-applying the spec with process_limits: { tasks_max: <N>, memory_max: <size> }, or clear it with process_limits: {} (an ordinary re-apply: a " +
         "first-start retry keeps an unreadable value as stored).\n"));
     const memberStartupOmissions = isPodAware ? exporter.memberStartupNotCarried(rigId)
       .map(({ logicalId, reason }) => `# Member startup not carried for ${JSON.stringify(logicalId)} (${reason}); inspect the source before importing.\n`) : [];

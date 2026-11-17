@@ -316,3 +316,45 @@ it("updates a persisted registered-person alias without adding agent-only prepar
     expect(JSON.stringify(queue.listTransitions(qitemId))).not.toContain("/private/");
   } finally { db.close(); }
 });
+
+// Completion is distinct from an intermediate delivery: only the final owed stage retires the notice.
+it.each(["delivered", "delivered_over_unreadable_pane"])("closes only the completed attempt's open notice without another wake: %s", async (reason) => {
+  const db = createDb(); migrate(db, ALL_MIGRATIONS);
+  try {
+    const send = vi.fn(async () => ({ ok: true, verified: true }));
+    const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, transport: { send } });
+    const failure: RestoreDeliveryFailure = { sessionName: "writer@demo", attemptId: "completed", mapPath: "/maps/restore.md",
+      lastDelivery: { stage: "compliance_prompt", at: "2026-01-01T00:00:00Z", ok: false, reason: "target_activity_unknown", failures: 2 } };
+    for (const id of ["completed", "other"]) await queue.create({ qitemId: `qitem-compaction-restore-${id}`, sourceSession: "writer@demo", destinationSession: "owner@demo", body: "Restore still owed", nudge: false });
+    const landed = { ...failure, lastDelivery: { ...failure.lastDelivery, ok: true, reason, failures: 0, at: "2026-01-01T00:01:00Z",
+      ...(reason === "delivered_over_unreadable_pane" ? { activity: { state: "unknown" as const, reason: "no_activity_signal" } } : {}) } };
+    await reportRestoreDeliveryFailure(db, queue, landed, { completed: true });
+    const row = queue.getById("qitem-compaction-restore-completed")!;
+    expect(row).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+    expect(row.summary).toContain("compliance_prompt delivered at 2026-01-01T00:01:00Z");
+    const closed = queue.listTransitions(row.qitemId).at(-1)!;
+    expect(closed.actorSession).toBe("system:compaction");
+    expect(closed.transitionNote).toContain("not proof the seat read it");
+    if (reason === "delivered_over_unreadable_pane") expect(closed.transitionNote).toContain("unreadable pane");
+    expect(queue.getById("qitem-compaction-restore-other")?.state).toBe("pending");
+    const before = queue.listTransitions(row.qitemId);
+    await reportRestoreDeliveryFailure(db, queue, landed, { completed: true });
+    expect(queue.listTransitions(row.qitemId)).toEqual(before);
+    expect(send).not.toHaveBeenCalled();
+  } finally { db.close(); }
+});
+
+it.each(["intermediate", "failed", "owner-closed", "absent"])("preserves a notice without completed owed stages or after owner disposition: %s", async (kind) => {
+  const db = createDb(); migrate(db, ALL_MIGRATIONS);
+  try {
+    const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const id = "qitem-compaction-restore-kept";
+    if (kind !== "absent") await queue.create({ qitemId: id, sourceSession: "writer@demo", destinationSession: "owner@demo", body: "owed", nudge: false });
+    if (kind === "owner-closed") queue.update({ qitemId: id, actorSession: "owner@demo", state: "done", closureReason: "no-follow-on", resolution: "Handled by owner" });
+    const before = queue.listTransitions(id);
+    await reportRestoreDeliveryFailure(db, queue, { sessionName: "writer@demo", attemptId: "kept", mapPath: "/maps/restore.md",
+      lastDelivery: { stage: kind === "intermediate" ? "restore_prompt" : "compliance_prompt", at: "2026-01-01T00:01:00Z", ok: kind !== "failed", reason: "delivery", failures: 0 } }, { completed: true });
+    expect(queue.getById(id)?.state).toBe(kind === "absent" ? undefined : kind === "owner-closed" ? "done" : "pending");
+    if (kind === "owner-closed" || kind === "absent") expect(queue.listTransitions(id)).toEqual(before);
+  } finally { db.close(); }
+});

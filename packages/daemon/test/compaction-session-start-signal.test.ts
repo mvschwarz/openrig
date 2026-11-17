@@ -17,6 +17,12 @@ import {RigRepository} from '../src/domain/rig-repository.js';
 import {SessionRegistry} from '../src/domain/session-registry.js';
 import {EventBus} from '../src/domain/event-bus.js';
 import {AgentActivityStore} from '../src/domain/agent-activity-store.js';
+import {QueueRepository} from '../src/domain/queue-repository.js';
+import {createDb} from '../src/db/connection.js';
+import {migrate} from '../src/db/migrate.js';
+import {ALL_MIGRATIONS} from '../src/db/all-migrations.js';
+import {reportRestoreDeliveryFailure} from '../src/domain/compaction-restore-notice.js';
+import type {RestoreDeliveryFailure} from '../src/domain/claude-compaction-enforcer.js';
 
 const seat = 'writer@demo', high = {sessionName: seat, runtime: 'claude-code', usedPercentage: 90};
 const POLL = 30_000;
@@ -54,7 +60,7 @@ function fixture() {
   const daemon = (options: NonNullable<ConstructorParameters<typeof ClaudeCompactionEnforcer>[2]> = {}) =>
     new ClaudeCompactionEnforcer(settings as any, transport, {openrigHome: home, daemonInstance: randomUUID(), now: () => clock, sleep: async (ms) => { clock += ms; },
       resolveOccupantGeneration: () => generation, compactSignalSince: since, ...options});
-  return {daemon, writes, policy, since, signals, home, now: () => clock, advance: (ms: number) => { clock += ms; }, generation: (g: string) => { generation = g; }};
+  return {daemon, transport, writes, policy, since, signals, home, now: () => clock, advance: (ms: number) => { clock += ms; }, generation: (g: string) => { generation = g; }};
 }
 type F = ReturnType<typeof fixture>;
 const compacts = (f: F) => f.writes.filter((t) => t.startsWith('/compact'));
@@ -377,3 +383,42 @@ it('a cancel after the fallback sequence ends the late-report watch, also across
   expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
 });
 
+
+it('a late signal re-owes the same attempt: repeated failure reopens only its system completion, preserving owner closure and sending no wake', async () => {
+  const db = createDb(); migrate(db, ALL_MIGRATIONS);
+  try {
+    const queueSend = vi.fn(async () => ({ok: true, verified: true}));
+    const queue = new QueueRepository(db, new EventBus(db), {validateRig: () => true, loadHumanRegistry: () => ({ok: true, entities: []}), transport: {send: queueSend}});
+    const complete = vi.fn(async (receipt: RestoreDeliveryFailure) => reportRestoreDeliveryFailure(db, queue, receipt, {completed: true}));
+    const failure = vi.fn(async (receipt: RestoreDeliveryFailure) => reportRestoreDeliveryFailure(db, queue, receipt));
+    const f = fixture(); const e = await compact(f, {onRestoreDeliveryComplete: complete, onRestoreDeliveryFailure: failure});
+    const attemptId = e.getPreparationState(seat)!.attemptId;
+    const id = `qitem-compaction-restore-${attemptId}`;
+    await queue.create({qitemId: id, sourceSession: seat, destinationSession: 'owner@demo', summary: 'restore owed', body: 'restore owed', nudge: false});
+    f.advance(COMPACT_SIGNAL_WAIT_MS_DEFAULT);
+    for (let i = 0; i < 4; i++) await tick(e);
+    expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+    expect(queue.getById(id)?.state).toBe('done');
+    const firstClose = queue.closingTransition(id, 'done')!;
+    expect(firstClose.actorSession).toBe('system:compaction');
+    expect(complete).toHaveBeenCalledTimes(1);
+    vi.spyOn(f.transport, 'send').mockResolvedValue({ok: false, reason: 'target_needs_input'});
+    f.advance(20 * POLL);
+    f.signals.push({observedAt: f.now(), generation: 'generation-one'});
+    await tick(e); // This poll reseeds; the next polls attempt delivery.
+    expect(e.hasPendingPostCompactStage(seat)).toBe(true);
+    await tick(e); await tick(e); await Promise.resolve();
+    expect(recordOf(e).attemptId).toBe(attemptId);
+    expect(failure).toHaveBeenCalled();
+    expect(queue.getById(id)).toMatchObject({state: 'pending', summary: expect.stringContaining('target_needs_input')});
+    expect(queue.listTransitions(id)).toContainEqual(firstClose);
+    expect(queue.listTransitions(id).at(-1)?.transitionNote).toContain('re-owed');
+    queue.update({qitemId: id, actorSession: 'owner@demo', state: 'done', closureReason: 'no-follow-on', resolution: 'Owner handled this restore', transitionNote: 'Owner handled this restore'});
+    const ownerClosed = queue.listTransitions(id);
+    await tick(e); await tick(e); await Promise.resolve();
+    expect(queue.getById(id)?.state).toBe('done');
+    expect(queue.listTransitions(id)).toEqual(ownerClosed);
+    expect(queueSend).not.toHaveBeenCalled();
+    expect(queue.list({destinationSession: 'owner@demo', state: 'done'})).toHaveLength(1);
+  } finally { db.close(); }
+});
