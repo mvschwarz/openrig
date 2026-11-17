@@ -1,13 +1,16 @@
-import { privateTerminalTmuxDeps } from "../../../test/terminal-tmux-isolation.js";
+import { beginPrivateTerminalTmux, endPrivateTerminalTmux, privateTerminalTmuxDeps } from "../../../test/terminal-tmux-isolation.js";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
 import type { OpenViewResult, TerminalProvider } from "../src/domain/terminal/terminal-provider.js";
 import type { LiveSeatRow } from "../src/domain/terminal/terminal-views-store.js";
+
+const terminalTmuxRoot = beginPrivateTerminalTmux(tmpdir());
+afterAll(() => { endPrivateTerminalTmux(terminalTmuxRoot); });
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -172,12 +175,12 @@ function makeInMemoryHerdr(opts?: {
       if (noun === "workspace" && verb === "list") return JSON.stringify({ result: { workspaces } });
       if (noun === "tab" && verb === "list") return JSON.stringify({ result: { tabs: tabs.filter(t => t.workspace_id === id) } });
       if (noun === "pane" && verb === "list") return JSON.stringify({ result: { panes: panes.filter(p => p.workspace_id === id) } });
-      if (noun === "pane" && verb === "process-info") return JSON.stringify({ result: { process_info: { pane_id: id, foreground_processes: [{ pid: 901 }] } } });
+      if (noun === "pane" && verb === "process-info") return JSON.stringify({ result: { process_info: { pane_id: id, foreground_processes: [{ pid: 901 + panes.findIndex(p => p.pane_id === id) }] } } });
       throw new Error(`unexpected ${args.join(" ")}`);
     },
     exec: async (file: string, args: string[]) => {
       if (file === "/bin/sh" && args[1] === "command -v tmux") return "/usr/bin/tmux\n";
-      return panes.filter(p => Boolean(p.tmuxSession)).map((p) => `901\t${p.tmuxSession}\t0`).join("\n");
+      return panes.flatMap((p, index) => p.tmuxSession ? [`${901 + index}\t${p.tmuxSession}\t0`] : []).join("\n");
     },
   } : undefined;
 
@@ -672,8 +675,72 @@ it("opens the live rig by stable ID when a stopped rig has the same display name
   expect(result.rigs.find(r => r.rigId === "live-id")).toMatchObject({ rig: "alpha", view: "rig:live-id", outcome: "opened" });
   expect(result.rigs.find(r => r.rigId === "stopped-id")).toMatchObject({ rig: "alpha", view: "rig:stopped-id", outcome: "absent" });
   expect(listRigSeats.mock.calls.map(([id]) => id).sort()).toEqual(["live-id", "stopped-id"]);
+  expect(h.workspaces.map(workspace => workspace.label)).toEqual(["alpha"]);
   const views = await svc.listViews(true);
   expect(views.rigs).toEqual(["alpha", "alpha"]);
   expect(views.rigIdentities).toHaveLength(2);
   expect(views.catalog?.filter(entry => entry.kind === "derived").map(entry => entry.view).sort()).toEqual(["rig:live-id", "rig:stopped-id"]);
+});
+
+it.each(["alpha", "rig:alpha", "rig:live-id"])("combined canonical identity reuses %s and bulk opens in both directions", async alias => {
+  for (const singleFirst of [true, false]) {
+    const h = makeInMemoryHerdr({ reuseLive: true });
+    const dir = tempDir("canonical-reuse-");
+    const svc = new TerminalService({ ...privateTerminalTmuxDeps(),
+      resolveProvider: () => h.adapter, viewsStore: { get: () => null, list: () => [] },
+      listRigs: () => [{ id: "live-id", name: "alpha" }], listRigNames: () => ["alpha"],
+      listRigSeats: key => key === "live-id" || key === "alpha" ? [makeRigSeat("alpha", "op")] : null,
+      listPodSeats: () => null, hasSession: () => true, resolveHost: () => null, rigViewersDir: dir,
+    });
+    const single = () => svc.openView({ view: alias, provider: "herdr", reuseLive: true });
+    const bulk = () => svc.openAll({ provider: "herdr", reuseLive: true });
+    const first = await (singleFirst ? single() : bulk());
+    expect(first.ok).toBe(true);
+    const records = readRecords(dir);
+    const effects = h.calls.filter(call => call.method === "layout.apply").length;
+    const next = await (singleFirst ? bulk() : single());
+    expect(next.ok).toBe(true);
+    if ("rigs" in next) expect(next.rigs[0]).toMatchObject({ rigId: "live-id", rig: "alpha", outcome: "reused" });
+    else expect(next.reusedWorkspace?.id).toBe("w1");
+    expect(h.workspaces.map(workspace => workspace.label)).toEqual(["alpha"]);
+    expect(h.tabs.some(tab => tab.label.startsWith("openrig:rig:live-id#"))).toBe(true);
+    expect(h.calls.filter(call => call.method === "layout.apply")).toHaveLength(effects);
+    expect(h.calls.some(call => call.method === "workspace.close")).toBe(false);
+    expect(readRecords(dir)).toEqual(records);
+    const byName = await svc.previewView({ view: alias, provider: "herdr", bulk: true });
+    const byId = await svc.previewView({ view: "rig:live-id", provider: "herdr", bulk: true });
+    expect((byName as any).planId).toBe((byId as any).planId);
+  }
+});
+
+it.each([true, false])("combined same-name live rigs retain separate reuse identities, shared attachments=%s", async shared => {
+  const h = makeInMemoryHerdr({ reuseLive: true });
+  const svc = new TerminalService({ ...privateTerminalTmuxDeps(), resolveProvider: () => h.adapter,
+    viewsStore: { get: () => null, list: () => [] }, listRigNames: () => ["alpha", "alpha"],
+    listRigs: () => [{ id: "first-id", name: "alpha" }, { id: "second-id", name: "alpha" }],
+    listRigSeats: id => [makeRigSeat("alpha", shared ? "same" : id)], listPodSeats: () => null,
+    hasSession: () => true, resolveHost: () => null,
+  });
+  const first = await svc.openAll({ provider: "herdr", reuseLive: true });
+  expect(first.rigs.map(row => row.outcome)).toEqual(["opened", "opened"]);
+  expect(h.workspaces.map(workspace => workspace.label)).toEqual(["alpha", "alpha (2)"]);
+  const second = await svc.openAll({ provider: "herdr", reuseLive: true });
+  expect(second.rigs.map(row => row.outcome)).toEqual(["reused", "reused"]);
+  expect(h.workspaces).toHaveLength(2);
+  expect(h.calls.filter(call => call.method === "workspace.close")).toEqual([]);
+});
+
+it("combined exact ID wins over another rig name and complete ownership has no incomplete warning", async () => {
+  const h = makeInMemoryHerdr();
+  const seats = vi.fn((id: string) => [makeRigSeat(id === "collision" ? "wanted" : "collision", "op")]);
+  const svc = new TerminalService({ ...privateTerminalTmuxDeps(), resolveProvider: () => h.adapter,
+    viewsStore: { get: () => null, list: () => [] }, listRigNames: () => ["collision", "wanted"],
+    listRigs: () => [{ id: "other", name: "collision" }, { id: "collision", name: "wanted" }],
+    listRigSeats: seats, listPodSeats: () => null, hasSession: () => true, resolveHost: () => null,
+  });
+  const result = await svc.openView({ view: "rig:collision", provider: "herdr" });
+  expect(result.ok).toBe(true);
+  expect(seats).toHaveBeenCalledWith("collision");
+  expect(h.workspaces.map(workspace => workspace.label)).toEqual(["wanted"]);
+  expect(result.notes?.some(note => note.includes("could not be confirmed completely"))).toBe(false);
 });

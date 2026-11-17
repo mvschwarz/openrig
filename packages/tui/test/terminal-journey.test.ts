@@ -69,6 +69,16 @@ beforeEach(() => {
   snap = emptySnapshot(); view = createViewState({ instanceId: "fixture", getSnapshot: () => snap });
 });
 async function refresh() { snap = await hydrateSnapshot(client, undefined, null, null, null, view.get()); }
+it("combined rig preview shows its human name while its Open action retains the ID", async () => {
+  const preview = await client.previewTerminal("rig:fixture", "herdr");
+  const state = { ...view.get(), terminalView: "rig:identity-id" };
+  const snapshot = { ...snap, terminals: { catalog: [], preview: { ...preview, view: "rig:identity-id",
+    composed: { ...preview.composed, id: "rig:identity-id", rigName: "Human display" } } } };
+  const lines = terminalLines(state, snapshot, 100);
+  expect(lines.some(line => line.text === "Human display")).toBe(true);
+  expect(lines.some(line => line.text === "rig:identity-id")).toBe(false);
+  expect(lines.find(line => line.action?.type === "act")?.action).toMatchObject({ act: "open-terminal", view: "rig:identity-id" });
+});
 function draw(cols: number, rows: number) {
   const screen = renderScreen(view.get(), snap, { cols, rows });
   view.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });

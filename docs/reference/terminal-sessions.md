@@ -214,8 +214,7 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 - `POST /api/terminal/open`: `{ view, provider?: "herdr", session?: string, expectedPlan?: string }`.
 - `POST /api/terminal/open-all` (bearer auth): `{ provider?: "herdr", session?: string, viewportColumns?: number, reuseLive?: boolean }`.
 - `POST /api/terminal/close-all` (bearer auth): `{ provider?: "herdr" | "tmux", session?: string }`. Maps a corrupt ownership ledger (`corrupt_ledger`) to HTTP 500 without overwriting ledger files.
-- `POST /api/terminal/rig-viewers` and `DELETE /api/terminal/rig-viewers` (bearer auth): record and retire CLI-created plain-tmux `rig:` viewer sessions (`DELETE` accepts JSON body or query parameters).
-- `GET /api/terminal/preview?view=<view>&provider=herdr&session=<name>` (optional `&bulk=1` for `rig:<name>` bulk partitioning).
+- `GET /api/terminal/preview?view=<view>&provider=herdr&session=<name>` (optional `&bulk=1` for `rig:<id>` bulk partitioning).
 - `GET /api/terminal/status?provider=herdr&session=<name>`.
 - The alias `POST /api/rigs/:rigId/terminal/open` accepts the same session and
   preview binding, with the rig determining the view.
@@ -243,7 +242,7 @@ preflighted, then applying per-rig workspaces), or `--provider tmux --window`
 daemon inventory projection in `toLiveSeatRow` does not populate `host`), and
 stopped/unbound/external seats become `absent`.
 
-Repeated bulk opens through the tmux fallback create another recorded viewer per
+Repeated bulk opens through the tmux fallback create another viewer session per
 non-empty rig. That path does not confirm or reuse an earlier viewer's current plan.
 
 Bulk open uses each rig's ID. Names are display text. The views response keeps
@@ -251,10 +250,23 @@ its existing name list and adds `rigIdentities` for clients that need stable IDs
 The bulk tmux window client requires that identity list. Individual named views
 remain supported; an exact ID takes precedence in lookup.
 
+Herdr rig workspaces show the human rig name. Their tab plan markers and live
+reuse keys use the canonical rig ID. Name and ID aliases for the same current
+rig resolve to that identity before composition. Two rigs with the same name
+retain separate reuse identities, even when their attachments match. Kernel and
+saved named views keep their existing label and reuse rules. Legacy workspaces
+with name-based tab markers are not renamed or closed. They may not match a new
+ID-based reuse request.
+
 For Herdr, a new rig viewer with complete workspace, tab, tab-label and pane
 identity has an ownership entry per endpoint under `private/terminal-rig-viewers`.
 Reused or incomplete Herdr workspaces get no new entry. Both single and bulk rig
 opens report incomplete ownership or a failed record write.
+During close, a viewer's failed journal removal returns a failed viewer result.
+Earlier results remain and later viewers and endpoints continue. An endpoint
+failure after iteration preserves gathered results and reports unresolved
+viewers. A failed removal does not establish that the journal entry is gone.
+Corrupt-ledger preflight still refuses before viewer iteration.
 
 For tmux, the proof lives in session options. `@openrig_rig_viewer_proof` contains
 the original session ID/name, window/pane IDs, view, endpoint and nonce in a
@@ -269,7 +281,7 @@ remaining session options again.
 
 Saved (including `saved:rig:...`), pod, seat and task viewers get no tmux ownership
 options. Pre-existing viewers without complete options are left untouched.
-If a CLI `tmux
+If a bulk CLI `tmux
 --window` launch fails after creating a rig viewer, OpenRig verifies matching
 nonce, window/pane inventory, and zero attached clients before killing the
 session (`cleanup: "closed"`, or `"already_gone"` if the viewer

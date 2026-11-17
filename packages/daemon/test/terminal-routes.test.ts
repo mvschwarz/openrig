@@ -1,4 +1,4 @@
-import { privateTerminalTmuxDeps } from "../../../test/terminal-tmux-isolation.js";
+import { beginPrivateTerminalTmux, endPrivateTerminalTmux, privateTerminalTmuxDeps } from "../../../test/terminal-tmux-isolation.js";
 // OPR.0.4.6.02 C3 — the terminal routes: canonical composer + rig-scoped thin
 // alias. Pins the route wiring + status mapping + the one shared body contract:
 //  - POST /api/terminal/open → the TerminalService result body verbatim;
@@ -8,7 +8,7 @@ import { privateTerminalTmuxDeps } from "../../../test/terminal-tmux-isolation.j
 //  - service absent → 503 (never a crash);
 //  - the rig-scoped alias composes view = rig:<rigId> and delegates (arch R1).
 
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { afterAll, afterEach, describe, it, expect, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,6 +18,9 @@ import type { OpenViewResult } from "../src/domain/terminal/terminal-provider.js
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
 import { RigViewerLedger, tmuxEndpointKey } from "../src/domain/terminal/rig-viewer-records.js";
 import { TerminalService } from "../src/domain/terminal/terminal-service.js";
+
+const terminalTmuxRoot = beginPrivateTerminalTmux(tmpdir());
+afterAll(() => { endPrivateTerminalTmux(terminalTmuxRoot); });
 
 type OpenReq = { provider?: string; view: string };
 

@@ -1,16 +1,19 @@
-import { privateTerminalTmuxDeps, privateTerminalTmuxEnvironment } from "../../../test/terminal-tmux-isolation.js";
+import { beginPrivateTerminalTmux, endPrivateTerminalTmux, privateTerminalTmuxDeps, privateTerminalTmuxEnvironment } from "../../../test/terminal-tmux-isolation.js";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
 import { encodeTmuxViewerProof, TMUX_VIEWER_PROOF_OPTION, type TmuxViewerProof } from "../src/domain/terminal/tmux-viewer-guard.js";
-import { RigViewerLedger, tmuxEndpointKey } from "../src/domain/terminal/rig-viewer-records.js";
+import { RigViewerLedger, tmuxEndpointKey, type HerdrRigViewerRecord } from "../src/domain/terminal/rig-viewer-records.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
 import type { LiveSeatRow } from "../src/domain/terminal/terminal-views-store.js";
+
+const terminalTmuxRoot = beginPrivateTerminalTmux(tmpdir());
+afterAll(() => { endPrivateTerminalTmux(terminalTmuxRoot); });
 
 const dirs: string[] = [];
 const sockets: string[] = [];
@@ -176,6 +179,70 @@ function seedLegacyTmux(dir: string, record: Record<string, unknown>): void {
   const hash = createHash("sha256").update(String(record.endpoint)).digest("hex");
   writeFileSync(path.join(dir, `${hash}.json`), JSON.stringify({ version: 1, entries: { legacy: record } }), { mode: 0o600 });
 }
+
+it.each(["remove", "endpoint", "partial-endpoint"])("combined bookkeeping %s failure preserves earlier results and later work", async fault => {
+  const dir = tempDir("bookkeeping-");
+  const h = makeCloseHerdr();
+  const run = vi.fn(async () => "");
+  const svc = new TerminalService({ ...privateTerminalTmuxDeps(), tmuxExec: run,
+    resolveProvider: () => h.adapter, viewsStore: { get: () => null, list: () => [] },
+    listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null,
+    hasSession: () => false, resolveHost: () => null, rigViewersDir: dir,
+  });
+  const ledger = (svc as unknown as { rigViewers: RigViewerLedger }).rigViewers;
+  const endpoint = h.adapter.endpointKey();
+  for (const name of ["earlier", "middle", "later"]) {
+    await ledger.upsert({ kind: "herdr", endpoint, view: `rig:${name}`, workspaceId: name,
+      tabIds: [name + ":t"], paneIds: [name + ":p"], planId: "fixture", createdAt: new Date(0).toISOString(), phase: "created" } satisfies HerdrRigViewerRecord);
+  }
+  const other = makeCloseHerdr({ socketPath: "/fixture/later-endpoint.sock" });
+  await ledger.upsert({ kind: "herdr", endpoint: other.adapter.endpointKey(), view: "rig:last-endpoint", workspaceId: "last-endpoint",
+    tabIds: ["last:t"], paneIds: ["last:p"], planId: "fixture", createdAt: new Date(0).toISOString(), phase: "created" });
+  const list = ledger.listAll.bind(ledger);
+  const order = ["earlier", "middle", "later", "last-endpoint"];
+  vi.spyOn(ledger, "listAll").mockImplementation(async () => (await list()).sort((a, b) => order.indexOf(a.record.workspaceId) - order.indexOf(b.record.workspaceId)));
+  if (fault === "remove") {
+    const writable = ledger as unknown as { writeJournal(endpoint: string, journal: { entries: Record<string, unknown> }): void };
+    const write = writable.writeJournal.bind(writable);
+    vi.spyOn(writable, "writeJournal").mockImplementation((selected, journal) => {
+      if (selected === endpoint && !("herdr:middle" in journal.entries) && "herdr:later" in journal.entries) throw new Error("fixture journal removal failed");
+      write(selected, journal);
+    });
+  }
+  const original = ledger.runExclusive.bind(ledger);
+  vi.spyOn(ledger, "runExclusive").mockImplementation((selected, fn) => {
+    if (selected !== endpoint) return original(selected, fn);
+    if (fault === "endpoint") return Promise.reject(new Error("fixture endpoint transaction failed"));
+    return original(selected, fn);
+  });
+  if (fault === "partial-endpoint") {
+    vi.spyOn(svc as any, "closeHerdrEndpoint").mockImplementation(async (...args: any[]) => {
+      const selected = args[0] as string;
+      const viewers = args[4] as any[];
+      if (selected === endpoint) {
+        viewers.push({ view: "rig:earlier", provider: "herdr", target: "earlier", outcome: "kept", code: "fixture_prior_result" });
+        (args[5] as Set<string>).add("herdr:earlier");
+        throw new Error("fixture endpoint failed after prior result");
+      }
+      viewers.push({ view: "rig:last-endpoint", provider: "herdr", target: "last-endpoint", outcome: "kept" });
+    });
+  }
+  const result = await svc.closeAll({});
+  expect(result.ok).toBe(false);
+  expect(result.viewers.map(viewer => viewer.target)).toEqual(["earlier", "middle", "later", "last-endpoint"]);
+  expect(result.viewers.find(viewer => viewer.target === "middle")).toMatchObject({ outcome: "failed" });
+  expect(result.viewers.find(viewer => viewer.target === "middle")?.reason).toMatch(/fixture .*failed/);
+  if (fault === "remove") {
+    expect(result.viewers.find(viewer => viewer.target === "earlier")?.outcome).toBe("already_gone");
+    expect(result.viewers.find(viewer => viewer.target === "later")?.outcome).toBe("already_gone");
+    expect(Object.keys(readRecords(dir))).toContain("herdr:middle");
+    expect(Object.keys(readRecords(dir))).not.toContain("herdr:earlier");
+    expect(Object.keys(readRecords(dir))).not.toContain("herdr:later");
+  } else expect(Object.keys(readRecords(dir))).toEqual(expect.arrayContaining(["herdr:earlier", "herdr:middle", "herdr:later"]));
+  if (fault === "partial-endpoint") expect(result.viewers[0]).toMatchObject({ outcome: "kept", code: "fixture_prior_result" });
+  expect(run).toHaveBeenCalledExactlyOnceWith(["list-sessions", "-F", "#{session_id}|#{session_name}|#{@openrig_rig_viewer_proof}"]);
+  expect(h.closedWorkspaces).toEqual([]); expect(other.closedWorkspaces).toEqual([]);
+});
 
 describe("#3081 TerminalService.closeAll (Herdr + isolated tmux)", () => {
   it("pins selected tmux endpoint throughout the conditional close", async () => {

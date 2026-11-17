@@ -1,5 +1,5 @@
-import { privateTerminalTmuxDeps, privateTerminalTmuxEnvironment } from "../../../test/terminal-tmux-isolation.js";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beginPrivateTerminalTmux, endPrivateTerminalTmux, privateTerminalTmuxDeps, privateTerminalTmuxEnvironment } from "../../../test/terminal-tmux-isolation.js";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -10,6 +10,9 @@ import { openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../
 import { parseTmuxViewerProof, TMUX_VIEWER_PROOF_OPTION } from "../../daemon/src/domain/terminal/tmux-viewer-guard.js";
 import { TerminalService } from "../../daemon/src/domain/terminal/terminal-service.js";
 import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
+
+const terminalTmuxRoot = beginPrivateTerminalTmux(tmpdir());
+afterAll(() => { endPrivateTerminalTmux(terminalTmuxRoot); });
 
 // Real isolated tmux servers; the desktop launcher alone is inert.
 const sockets: string[] = [];
@@ -32,6 +35,17 @@ function tmux(socket: string, args: string[]): string {
 }
 const isViewerClose = (args: string[]) => args.includes("kill-session")
   || (args.includes("if-shell") && args.some(arg => arg.startsWith("kill-session -t ")));
+it("combined CLI consumer rejects ambiguous selectors before an inert executor", async () => {
+  const run = vi.fn(async () => "");
+  const service = new TerminalService({ ...privateTerminalTmuxDeps(), tmuxExec: run,
+    tmuxServerArgs: () => ["-S", "/unregistered/never-connect.sock", "-L", "owned"],
+    resolveProvider: () => null, viewsStore: { get: () => null, list: () => [] },
+    listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null,
+    hasSession: () => false, resolveHost: () => null,
+  });
+  await expect(service.closeAll({ provider: "tmux" })).rejects.toThrow("Unisolated");
+  expect(run).not.toHaveBeenCalled();
+});
 afterEach(() => {
   proofObservers.clear();
   for (const socket of sockets.splice(0)) {
