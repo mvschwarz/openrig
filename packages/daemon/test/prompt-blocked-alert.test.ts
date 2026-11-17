@@ -803,6 +803,34 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     await tick(engine(posts)); expect(posts).toEqual([]); expect(alerts()).toHaveLength(0);
   });
 
+  it.each(["row", "seat"])("a recovery parked on the prompted %s leaves its hold intact and reaches the operator once", async blocker => {
+    const row = await refusal();
+    const rigs = new RigRepository(db), kernel = rigs.createRig("kernel");
+    const operator = rigs.addNode(kernel.id, "operator.agent", { role: "operator", runtime: "claude-code" });
+    const sessions = new SessionRegistry(db);
+    sessions.updateStatus(sessions.registerSession(operator.id, "operator-agent@kernel").id, "running");
+    const recovery = await repo.create({ sourceSession: "sender@fixture", destinationSession: "lead@fixture",
+      body: "Waiting for the reviewer", tags: [`recovery-for:${row.qitemId}`], nudge: false });
+    repo.update({ qitemId: recovery.qitemId, actorSession: "lead@fixture", state: "blocked",
+      blockedOn: blocker === "row" ? row.qitemId : seat });
+    const before = repo.listTransitions(recovery.qitemId);
+    const posts: unknown[] = [], wakes: string[] = [], port = engine(posts, false);
+    const opts = { resolveOrchestrator: () => "lead@fixture",
+      attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };
+    await tick(port, opts);
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.destinationSession).toBe("operator-agent@kernel");
+    expect(notes(alerts()[0]!.qitemId).join("\n")).toContain("undeliverable:no-registered-human");
+    await tick(port, opts);
+    expect(alerts()).toHaveLength(1);
+    expect(wakes).toEqual([]);
+    expect(posts).toEqual([]);
+    expect(repo.listTransitions(recovery.qitemId)).toEqual(before);
+    expect(repo.getById(recovery.qitemId)).toMatchObject({ state: "blocked",
+      blockedOn: blocker === "row" ? row.qitemId : seat, body: "Waiting for the reviewer" });
+    expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
+  });
+
   it("ordinary orchestrator receives one aggregate and no human post", async () => {
     await refusal(2); const posts: unknown[] = []; const port = engine(posts); const wakes: string[] = [];
     const opts = { resolveOrchestrator: () => "lead@fixture", attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };

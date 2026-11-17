@@ -67,6 +67,7 @@ import {
   USAGE_LIMIT_POOL_TAG_PREFIX,
 } from "./queue-wake-repository.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { resolveDefaultReceiver } from "./default-receiver.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
 import { parseSessionName } from "./session-name.js";
 import {
@@ -1238,7 +1239,7 @@ function gatewayOwnsEscalation(deps: WakeLadderDeps, row: QueueItem): boolean {
 // The operator engine owns actual human delivery. Its non-nudged queue carrier
 // must still be locally admissible; cross-host source provenance is not a local destination.
 function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string): string {
-  const candidates = [resolveOperatorSeat(), source];
+  const candidates = [resolveOperatorSeat(), resolveDefaultReceiver(deps.db).session, source];
   return candidates.find((candidate): candidate is string => Boolean(candidate && !knownPerson(deps, candidate) && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
 }
 
@@ -1514,6 +1515,7 @@ async function advancePromptRefusals(
     // Recovery owned elsewhere already has a route. A fallback finding sent
     // into this same blocked seat does not: include it in the aggregate while
     // retaining its original body/custody, rather than treating it as delivery.
+    const waitingRecoveryOwners = new Set<string>();
     const ownedElsewhere = members.some(({ row }) => {
       if (hasConsumedEscalationHop(deps.db, row.qitemId)) return false;
       const recovery = findQueueRecovery(deps.db, row.qitemId);
@@ -1521,6 +1523,13 @@ async function advancePromptRefusals(
       const held = deps.queueRepo.getById(recovery.qitemId);
       if (!held) return false;
       if (held.tags?.includes(PROMPT_ALERT_TAG)) return false;
+      // A recovery parked on this same prompted work cannot clear it. Keep its owner's
+      // hold, but let the prompt reach the operator instead of routing back into that wait.
+      if (held.destinationSession !== dest && held.state === "blocked"
+          && (held.blockedOn === row.qitemId || held.blockedOn === dest)) {
+        waitingRecoveryOwners.add(held.destinationSession);
+        return false;
+      }
       return held.destinationSession !== dest;
     });
     if (ownedElsewhere) continue;
@@ -1581,7 +1590,7 @@ async function advancePromptRefusals(
     const resolution = resolveEscalationReturnRoute(deps.db,
       { qitemId: "", tags: [...members.map(m => recoveryTag(m.row.qitemId)), ...waiterTags] });
     const routed = !(group.choice && !group.other) && resolution.kind === "route" && routeOnThisHost(resolution.route) !== null;
-    const toOperator = orch === null || orch === dest || routed;
+    const toOperator = orch === null || orch === dest || waitingRecoveryOwners.has(orch) || routed;
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
     const reason = (group.hookReview
