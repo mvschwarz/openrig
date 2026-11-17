@@ -38,6 +38,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
+import { folderPresent } from "../src/domain/cwd-resolution.js";
 import { getNodeDetail } from "../src/domain/node-inventory.js";
 
 const TOKEN = "tok-lead";
@@ -244,7 +245,10 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     };
     const restore = new RestoreOrchestrator({
       db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture, checkpointStore,
-      nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux }),
+      // A launcher that can create folders, as in production: a restore never asks it to (no createCwd), so a saved folder
+      // missing on this machine stays missing.
+      nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux,
+        createFolder: (dir: string) => { fs.mkdirSync(dir, { recursive: true }); } }),
       tmuxAdapter: tmux, claudeResume, codexResume,
       ...(opts.routerLine ? { routerLineSettings: { resolveOne: () => ({ value: opts.routerLine === "yes", source: "file", defaultValue: false }) } as never } : {}),
       // The pane's process tree shows the same native session resumed (the joined-resume proof).
@@ -334,8 +338,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     const { rigId, guidanceFile } = launchedSeat();
     const collector = path.join(tmp, "collector.cjs");
     fs.writeFileSync(collector, "// collector\n");
-    const claude = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...nodeFs, copyFile: replaceFile, homedir: os.homedir(),
-        isDirectory: (p: string) => fs.existsSync(p) && fs.statSync(p).isDirectory() },
+    const claude = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...nodeFs, copyFile: replaceFile, homedir: os.homedir(), folderPresent },
       stateDir: path.join(tmp, "openrig"), collectorAssetPath: collector,
       activityRelayPath: path.join(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"),
       claudeHooksManifestPath: path.join(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json") });

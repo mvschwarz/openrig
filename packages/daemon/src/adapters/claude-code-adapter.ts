@@ -51,8 +51,9 @@ export interface ClaudeAdapterFsOps {
   readdir?(dirPath: string): string[];
   /** User home directory (for session file lookup). */
   homedir?: string;
-  /** Whether a folder is there (to leave a missing seat folder uncreated). Optional: a folder reads as present if absent. */
-  isDirectory?(path: string): boolean;
+  /** Whether a folder is there (cwd-resolution's folderPresent), to leave a missing seat folder uncreated. Optional: a
+   *  folder reads as present if absent. */
+  folderPresent?(path: string): boolean;
 }
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -941,7 +942,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   /** Copy one selected resource, preserving source modes and recording owned seat-skill files after writing. */
   /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
-  private readonly folderPresent = (path: string): boolean => this.fs.isDirectory?.(path) ?? true;
+  private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
 
   private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string): boolean {
     // A seat folder this machine doesn't have isn't recreated to project into it (insideMissingFolder). A skill in the

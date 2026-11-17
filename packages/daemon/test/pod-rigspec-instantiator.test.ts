@@ -82,6 +82,7 @@ describe("PodRigInstantiator", () => {
     onboardingEnabledResolver?: () => boolean,
     continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">,
     extraDeps?: Record<string, unknown>,
+    launcherDeps?: Record<string, unknown>,
   ) {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);
@@ -89,7 +90,7 @@ describe("PodRigInstantiator", () => {
     const sessionRegistry = new SessionRegistry(db);
     const eventBus = new EventBus(db);
     const tmux = mockTmux();
-    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, ...(launcherDeps ?? {}) });
     const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
     const adapter = mockAdapter();
     const codexAdapter = mockAdapter("codex");
@@ -324,6 +325,30 @@ describe("PodRigInstantiator", () => {
     expect(launchHarness).toHaveBeenCalled();
     expect(launchHarness.mock.calls[0]?.[0].model).toBe("gpt-5.5");
     db.close();
+  });
+
+  // A member's declared working folder that isn't there yet is created before the seat's terminal starts, so the seat
+  // starts in it, as the kernel creates its own folder. A restore never creates one (restore-guidance-after-down.test.ts).
+  it("creates a member's declared working folder before its terminal starts, when it isn't there yet", async () => {
+    const parent = fs.mkdtempSync(nodePath.join(os.tmpdir(), "declared-folder-"));
+    const project = nodePath.join(parent, "new", "project");
+    const createFolder = vi.fn((dir: string) => { fs.mkdirSync(dir, { recursive: true }); });
+    const { db, inst, tmux } = setup(undefined, undefined, undefined, undefined, undefined, undefined, { createFolder });
+    const presentAtStart: boolean[] = [];
+    vi.mocked(tmux.createSession).mockImplementation(async (_name: string, cwd?: string) => {
+      presentAtStart.push(!!cwd && fs.existsSync(cwd));
+      return { ok: true as const };
+    });
+    try {
+      const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec({ pods: [{ id: "dev", label: "Dev",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project }], edges: [] }] })), RIG_ROOT);
+      expect(result.ok).toBe(true);
+      expect(createFolder).toHaveBeenCalledWith(project);
+      expect(presentAtStart).toEqual([true]);
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+      db.close();
+    }
   });
 
   it("uses cwdOverride for launched nodes without changing spec-relative agent resolution", async () => {
