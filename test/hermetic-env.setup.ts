@@ -190,16 +190,26 @@ if (process.env["VITEST"]) {
     const actual = await importOriginal<typeof import("../packages/daemon/src/domain/terminal/terminal-service.js")>();
     const server = await import("../packages/daemon/src/adapters/tmux-server.js");
     return { ...actual, TerminalService: class TerminalService extends actual.TerminalService {
+      private closeAllDepth = 0;
       constructor(deps: import("../packages/daemon/src/domain/terminal/terminal-service.js").TerminalServiceDeps) {
+        let instance: TerminalService;
         // Keep live fixture mutations visible, as the production constructor does.
         super(new Proxy(deps, { get(target, property, receiver) {
           if (property !== "tmuxServerArgs") return Reflect.get(target, property, receiver);
           return () => {
             const args = target.tmuxServerArgs?.() ?? server.daemonTmuxServerArgs();
-            assertPrivateTerminalTmux(args, process.env);
+            // Composition only embeds this value in a plan. Close-all can execute
+            // against it, so every read during that operation remains guarded.
+            if (instance.closeAllDepth > 0) assertPrivateTerminalTmux(args, process.env);
             return args;
           };
         } }));
+        instance = this;
+      }
+      override async closeAll(req: Parameters<typeof actual.TerminalService.prototype.closeAll>[0]) {
+        this.closeAllDepth++;
+        try { return await super.closeAll(req); }
+        finally { this.closeAllDepth--; }
       }
     } };
   });

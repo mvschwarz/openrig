@@ -114,6 +114,42 @@ describe("#3081 rig terminal open/close --all CLI", () => {
     vi.restoreAllMocks();
   });
 
+  it("sends the configured bearer on Herdr bulk status and readiness reads", async () => {
+    const options = { headers: { Authorization: "Bearer cli-test-token" } };
+    const get = vi.fn(async (_url: string, request?: unknown) => request === undefined
+      ? { status: 401, data: {} }
+      : { status: 200, data: { session: "work", providers: [{ liveness: { alive: true }, status: { launch: { socketPath: "/tmp/herdr-fixture.sock" } } }] } });
+    const post = vi.fn(async () => ({ status: 200, data: { ok: true, provider: "herdr", session: "work", rigs: [] } }));
+    const client = { baseUrl: "http://localhost:7433", isLocalInstance: async () => true, get, post } as unknown as DaemonClient;
+    const deps: WindowDeps = { platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, exists: () => false,
+      exec: async file => file === "/usr/bin/osascript" ? "window" : "/fixture/herdr", launch: async () => {},
+      sleep: async () => {}, id: () => "auth-herdr", herdrConfig: () => "/fixture/config" };
+    const result = await openAllTerminalWindows(client, "herdr", deps, "work");
+    expect(result.ok).toBe(true);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenNthCalledWith(1, "/api/terminal/status?provider=herdr&session=work", options);
+    expect(get).toHaveBeenNthCalledWith(2, "/api/terminal/status?provider=herdr&session=work", options);
+    expect(post).toHaveBeenCalledOnce();
+  });
+
+  it("sends the configured bearer on tmux bulk status, views and preview reads", async () => {
+    const options = { headers: { Authorization: "Bearer cli-test-token" } };
+    const get = vi.fn(async (url: string, request?: unknown) => {
+      if (request === undefined) return { status: 401, data: {} };
+      if (url === "/api/terminal/status") return { status: 200, data: { tmux: { mode: "inherit", serverArgs: [] } } };
+      if (url === "/api/terminal/views") return { status: 200, data: { rigIdentities: [{ id: "id-1", name: "one" }] } };
+      return { status: 200, data: { composed: { opened: [], absent: [], degraded: [], pages: [], columns: 1 } } };
+    });
+    const client = { baseUrl: "http://localhost:7433", isLocalInstance: async () => true, get } as unknown as DaemonClient;
+    const deps: WindowDeps = { platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, exists: () => false,
+      exec: async () => "/fixture/tmux", launch: async () => {}, sleep: async () => {}, id: () => "auth-tmux", herdrConfig: () => "" };
+    const result = await openAllTerminalWindows(client, "tmux", deps);
+    expect(result.rigs).toHaveLength(1);
+    expect(get).toHaveBeenCalledWith("/api/terminal/status", options);
+    expect(get).toHaveBeenCalledWith("/api/terminal/views", options);
+    expect(get).toHaveBeenCalledWith("/api/terminal/preview?view=rig%3Aid-1&provider=herdr&bulk=1", options);
+  });
+
   it("rejects conflicting flags with --all before calling daemon or tmux", async () => {
     const conflicts: string[][] = [
       ["open", "myrig", "--all"],

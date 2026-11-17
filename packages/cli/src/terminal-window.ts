@@ -793,7 +793,7 @@ async function openAllHerdrWindow(
   let openAllRequested = false;
   try {
     const sessionQuery = session === undefined ? "" : `&session=${encodeURIComponent(session)}`;
-    const statusRes = await client.get<{ session?: string; tmux?: { mode?: "inherit" | "isolated" }; providers: Array<{ liveness?: { alive: boolean }; status?: { launch?: { socketPath?: string; session?: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
+    const statusRes = await client.get<{ session?: string; tmux?: { mode?: "inherit" | "isolated" }; providers: Array<{ liveness?: { alive: boolean }; status?: { launch?: { socketPath?: string; session?: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`, { headers: terminalAuthHeaders() });
     if (statusRes.status >= 400) {
       return { ok: false, provider: "herdr", ...(session !== undefined ? { session } : {}), rigs: [], windowAttempted: false, code: "terminal_window_failed", error: `Could not read terminal status (HTTP ${statusRes.status}).` };
     }
@@ -835,7 +835,7 @@ async function openAllHerdrWindow(
     }
     let alive = false;
     for (let attempt = 0; attempt < 20; attempt++) {
-      const probe = await client.get<{ providers: Array<{ liveness: { alive: boolean }; status?: { launch?: { socketPath?: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
+      const probe = await client.get<{ providers: Array<{ liveness: { alive: boolean }; status?: { launch?: { socketPath?: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`, { headers: terminalAuthHeaders() });
       const ready = probe.data.providers?.[0];
       if (ready?.liveness.alive && ready.status?.launch?.socketPath === socket) { alive = true; break; }
       await deps.sleep(250);
@@ -916,7 +916,7 @@ async function openAllTmuxWindows(
     if (!tmux) {
       return { ok: false, provider: "tmux", rigs: [], windowAttempted: false, code: "terminal_window_failed", error: "tmux is unavailable; run rig setup first." };
     }
-    const statusRes = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
+    const statusRes = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status", { headers: terminalAuthHeaders() });
     if (statusRes.status >= 400) {
       return { ok: false, provider: "tmux", rigs: [], windowAttempted: false, code: "terminal_window_failed", error: `Cannot inspect tmux status (HTTP ${statusRes.status}).` };
     }
@@ -926,7 +926,7 @@ async function openAllTmuxWindows(
     const serverWords = tmuxServer.map((arg, index) => index % 2 ? shellQuote(arg) : arg).join(" ");
     tmuxCommand = `${shellQuote(tmux)}${serverWords ? ` ${serverWords}` : ""}`;
 
-    const viewsRes = await client.get<{ rigIdentities?: Array<{ id: string; name: string }>; error?: string }>("/api/terminal/views");
+    const viewsRes = await client.get<{ rigIdentities?: Array<{ id: string; name: string }>; error?: string }>("/api/terminal/views", { headers: terminalAuthHeaders() });
     if (viewsRes.status >= 400 || !Array.isArray(viewsRes.data?.rigIdentities)) {
       return {
         ok: false, provider: "tmux", rigs: [], windowAttempted: false, code: "views_unavailable",
@@ -963,7 +963,7 @@ async function openAllTmuxWindows(
     let previewData: Preview | OpenViewResult | undefined;
     let previewStatus = 200;
     try {
-      const previewRes = await client.get<Preview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr&bulk=1`);
+      const previewRes = await client.get<Preview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr&bulk=1`, { headers: terminalAuthHeaders() });
       previewStatus = previewRes.status;
       previewData = previewRes.data;
     } catch (err) {
