@@ -193,6 +193,8 @@ commands; if the two ever differ, this step is right.
     Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName` (never the
     logical ID or a guessed name) and send:
     `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
+    If no view opened, put this in place of its second sentence: "The person chose to answer in your pane; it isn't open
+    for them yet, so your questions wait there until they open or attach to it."
   - **Their choice holds:** a later goal goes by the route they chose until they say otherwise. Don't ask where they'll
     answer before the handoff, and don't switch routes on your own.
 
