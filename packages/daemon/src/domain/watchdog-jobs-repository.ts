@@ -588,8 +588,9 @@ export class WatchdogJobsRepository {
   /**
    * Daemon start, one target at a time (#3437): `ensureAutoRegistrationResolvingDuplicates`, but any
    * other failure for this target (e.g. `auto_registration_state_invalid` from a row in an unknown
-   * state) is warned with its error and the rows are left as they are, so one bad target never
-   * stops the daemon from starting.
+   * state) is warned with its error and startup moves on to the next target, so one bad target
+   * never stops the daemon from starting. The failure may come after duplicates were already
+   * retired, so the warning makes no claim that this target's jobs are unchanged.
    */
   ensureAutoRegistrationAtStartup(
     input: EnsureAutoRegistrationInput,
@@ -603,7 +604,7 @@ export class WatchdogJobsRepository {
         ? `; details=${JSON.stringify(error.details)}`
         : "";
       warn(
-        `[watchdog] startup could not ensure ${input.policy}/${input.targetSession}; left its jobs as they are and continued: ` +
+        `[watchdog] startup could not finish ensuring ${input.policy}/${input.targetSession} and continued: ` +
         `${message}${details}`,
       );
       return null;

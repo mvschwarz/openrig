@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -639,6 +639,27 @@ describe("WatchdogJobsRepository — duplicate auto-registration rows (#3437)", 
     expect(warnings[0]).toContain("parked-owner-consumer/parked-owner-consumer@demo");
     expect(warnings[0]).toContain("auto_registration_state_invalid");
     expect(warnings[0]).toContain(bad.jobId);
+  });
+
+  it("startup failing after the duplicates were retired keeps the retirement and claims no unchanged state", () => {
+    const older = repo.register(job("daemon@kernel"));
+    const newer = repo.register(job("operator@demo"));
+    const original = repo.ensureAutoRegistration.bind(repo);
+    let calls = 0;
+    vi.spyOn(repo, "ensureAutoRegistration").mockImplementation((input, historical) => {
+      calls += 1;
+      if (calls === 2) throw new Error("second ensure failed");
+      return original(input, historical);
+    });
+    const warnings: string[] = [];
+    expect(repo.ensureAutoRegistrationAtStartup(job("daemon@kernel"), (m) => warnings.push(m))).toBeNull();
+    expect(calls).toBe(2);
+    expect(repo.getById(older.jobId)?.state).toBe("terminal");
+    expect(repo.getById(newer.jobId)?.state).toBe("active");
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain(`retired ${older.jobId}`);
+    expect(warnings[1]).toContain("could not finish ensuring parked-owner-consumer/parked-owner-consumer@demo and continued: second ensure failed");
+    expect(warnings[1]).not.toMatch(/as they are|unchanged/);
   });
 
   it("register does not replace idle-gate-qitem rows, whose key is the seat's alias set", () => {
