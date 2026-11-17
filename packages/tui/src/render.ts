@@ -34,7 +34,7 @@ import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { hostLabel, hostReachabilityLabel } from "./topology/host-label.js";
 import { connectedAssistantLines } from "./connected-assistants.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
-import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
+import { columnIndex, columns, explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
 import { terminalLines } from "./terminals/terminal-model.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, sliceWhole, wrapDetailLines } from "./detail.js";
@@ -1597,11 +1597,12 @@ function truncateSegs(
   for (const s of segs) {
     if (used >= width) break;
     const room = width - used;
-    if (s.text.length <= room) {
+    const w = columns(s.text);
+    if (w <= room) {
       out.push(s);
-      used += s.text.length;
+      used += w;
     } else {
-      out.push({ ...s, text: s.text.slice(0, room) });
+      out.push({ ...s, text: s.text.slice(0, columnIndex(s.text, room)) });
       break;
     }
   }
@@ -1739,8 +1740,10 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
     // the per-cell bg on the segs (mock affordance), so the content marker slot
     // stays blank — no "›" chevron (the native affordance the mock overrides).
     const citem = visiblePulse[i];
-    const contentText = (citem?.text ?? "").slice(0, contentWidth);
-    lines.push(pad(`${left}┃ ${contentText}`, cols));
+    const fullText = citem?.text ?? "";
+    const contentText = fullText.slice(0, columnIndex(fullText, contentWidth));
+    const line = `${left}┃ ${contentText}${" ".repeat(Math.max(contentWidth - columns(contentText), 0))}`;
+    lines.push(columns(line) > cols ? pad(line, cols) : line);
     if (row) {
       pushExplorerTargets(hitMap, row, explorerDisplay[explorerIndex] ?? row.label, y, explW);
       explorerRows.push({ ...row, y });

@@ -422,3 +422,23 @@ it.each([
   if (clipped) expect(plain).toContain("…   ");
   else expect(plain).toContain(label);
 });
+
+it("keeps UP NEXT on the rendered Pulse screen when a NOW label has combining marks", () => {
+  const combining = structuredClone(snap);
+  combining.inProgress.find((q) => q.destinationSession === "dev50-driver@openrig-build")!.summary = "e\u0301".repeat(36);
+  const v = createViewState({ instanceId: "t", getSnapshot: () => combining });
+  v.dispatch({ type: "tab", tab: "pulse" });
+  const screen = renderScreen(v.get(), combining, { cols: 120, rows: 44, nowMs: DEMO_NOW, colorMode: "truecolor" });
+  const index = screen.lines.findIndex((line) => line.includes("e\u0301"));
+  expect(index).toBeGreaterThan(0);
+  const plain = screen.lines[index]!;
+  expect(stringWidth(plain)).toBe(120);
+  expect(plain).toContain("○ RM ceremony");
+
+  const styled = stylizeLines(screen, createStyle("truecolor"))[index]!;
+  expect(styled.replace(/\x1b\[[0-9;]*m/g, "")).toBe(plain);
+  expect(styled).toContain("RM ceremony");
+
+  const upNextColumn = stringWidth(plain.slice(0, plain.indexOf("○ RM ceremony"))) + 1;
+  expect(screen.contentTargets.some((t) => t.y === index + 1 && t.x1 <= upNextColumn && upNextColumn <= t.x2)).toBe(true);
+});
