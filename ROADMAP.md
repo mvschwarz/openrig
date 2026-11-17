@@ -33,10 +33,6 @@ tie. Feel free to coordinate on the issue first.
 - **More harnesses:** we're working out one way for any coding-agent CLI to plug into OpenRig. More on this soon
   (design discussion: #43).
 
-## Slack
-
-- **A DM or private channel for single-user setups** (#313).
-
 ## Reliability and everyday use
 
 - **Draft-aware delivery** (#48): automated sends wait while someone is typing in a seat, or a seat can be set to
