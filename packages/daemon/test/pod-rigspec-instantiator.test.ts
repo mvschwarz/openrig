@@ -2512,7 +2512,7 @@ state: 2-named
       }
     });
 
-    it("a first-start retry whose keep_alive differs from the failed first start is refused, and the stored value stays", async () => {
+    it("a first-start retry whose member resolves keep_alive differently isn't refused: it carries the seat's saved value", async () => {
       const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
         [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
         [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
@@ -2533,15 +2533,57 @@ state: 2-named
         sessionRegistry.clearBinding(worker.id);
         tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
 
+        // Without the member's keep_alive, its agent spec resolves it off; the recovery keeps the saved value instead.
         const { keep_alive: _dropped, ...withoutKeepAlive } = memberRaw;
-        const refused = await inst.retryFirstStart(rigId, worker.id, withoutKeepAlive, RIG_ROOT);
-        expect(refused, JSON.stringify(refused)).toMatchObject({ ok: false });
-        expect(JSON.stringify(refused)).toContain("keep_alive differs");
-        expect(keepOf(db, worker.id)).toBe(1);
-
-        const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
+        const retried = await inst.retryFirstStart(rigId, worker.id, withoutKeepAlive, RIG_ROOT);
         expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
         expect(keepOf(db, worker.id)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a re-applied keep_alive: false stays off across export and import; a member that never declares it exports no key", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: keptAgentYaml("impl"),
+        [`${RIG_ROOT}/agents/plain/agent.yaml`]: agentYaml("plain"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const spec = (name: string, keepAlive?: boolean) => RigSpecCodec.serialize(makeRigSpec({ name, pods: [{ id: "dev", label: "Dev", members: [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: ".", ...(keepAlive === undefined ? {} : { keepAlive }) },
+          { id: "plain", agentRef: "local:agents/plain", profile: "default", runtime: "codex" as const, cwd: "." },
+        ], edges: [] }] }));
+        const mat = await inst.materialize(spec("kept-rt"), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const impl = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.impl")!;
+        expect(keepOf(db, impl.id)).toBe(1);
+        // The member turns off what its agent spec turns on, in a spec re-applied after the seat was created.
+        const reapplied = await inst.launchMaterialized(spec("kept-rt", false), RIG_ROOT, rigId);
+        expect(reapplied.ok, JSON.stringify(reapplied)).toBe(true);
+        expect(keepOf(db, impl.id)).toBe(0);
+
+        const { RigSpecExporter } = await import("../src/domain/rigspec-exporter.js");
+        const exported = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) }).exportRig(rigId) as RigSpec;
+        const members = exported.pods.find((p) => p.id === "dev")!.members;
+        expect(members.find((m) => m.id === "impl")?.keepAlive).toBe(false);
+        expect("keepAlive" in members.find((m) => m.id === "plain")!).toBe(false);
+
+        const imported = await inst.materialize(RigSpecCodec.serialize({ ...exported, name: "kept-rt-imported" }), RIG_ROOT);
+        expect(imported.ok, JSON.stringify(imported)).toBe(true);
+        if (!imported.ok) return;
+        const back = rigRepo.getRig(imported.result.rigId)!.nodes;
+        expect(Object.fromEntries(back.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual({ "dev.impl": 0, "dev.plain": 0 });
+
+        // The first start of a materialized seat launches its saved, resolved settings, not a declaration of the member's:
+        // the member that never declared keep_alive still exports without it.
+        const first = await inst.launchFirstMaterializedNode(imported.result.rigId, back.find((n) => n.logicalId === "dev.plain")!.id);
+        expect(first, JSON.stringify(first)).toMatchObject({ ok: true });
+        const reexported = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) }).exportRig(imported.result.rigId) as RigSpec;
+        expect("keepAlive" in reexported.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "plain")!).toBe(false);
       } finally {
         db.close();
       }

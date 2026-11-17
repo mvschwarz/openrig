@@ -558,18 +558,20 @@ export class SessionRegistry {
   }
 
   /** A supported stop is distinct from an observed exit: this confirms one (status exited, request kept). Only a new
-   *  session row (a later start or resume) is without it. */
+   *  session row (a later start or resume) is without it. #2940: confirming clears the attempt that recorded the
+   *  request; a request whose attempt is still set is pending, whatever the row's status. */
   markIntentionallyStopped(sessionId: string): void {
     new ActivityGrantStore(this.db).revokeForSession(sessionId, "stopped");
     this.db.prepare(
-      "UPDATE sessions SET status = 'exited', intentionally_stopped = 1, last_seen_at = datetime('now') WHERE id = ?",
+      `UPDATE sessions SET status = 'exited', intentionally_stopped = 1${stopAttemptCleared(this.db)}, last_seen_at = datetime('now') WHERE id = ?`,
     ).run(sessionId);
   }
 
   /** Record a supported stop on a row that keeps its status: a rolled-back launch's superseded session is
-   * occupant history, and turning it into an exit would make it a restore candidate. */
+   * occupant history, and turning it into an exit would make it a restore candidate. Confirmed, like
+   * markIntentionallyStopped: the attempt is cleared. */
   recordStopIntent(sessionId: string): void {
-    this.db.prepare("UPDATE sessions SET intentionally_stopped = 1 WHERE id = ?").run(sessionId);
+    this.db.prepare(`UPDATE sessions SET intentionally_stopped = 1${stopAttemptCleared(this.db)} WHERE id = ?`).run(sessionId);
   }
 
   updateStartupStatus(sessionId: string, status: "pending" | "ready" | "attention_required" | "failed", completedAt?: string): void {
@@ -1025,6 +1027,17 @@ interface BindingRow {
 }
 
 const sessionsHaveCommunityHarness = new WeakMap<Database.Database, boolean>();
+const sessionsHaveStopAttempt = new WeakMap<Database.Database, boolean>();
+
+/** #2940: the assignment that clears a confirmed stop's attempt, on a database that has the column (none before it). */
+function stopAttemptCleared(db: Database.Database): string {
+  let has = sessionsHaveStopAttempt.get(db);
+  if (has === undefined) {
+    has = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "stop_attempt");
+    sessionsHaveStopAttempt.set(db, has);
+  }
+  return has ? ", stop_attempt = NULL" : "";
+}
 
 /** The SQL that reads a session's recorded community harness: the retained storage column, or NULL on a schema without that column
  *  (as other optional columns are read), so a partial schema reads every seat as before. The schema check is made

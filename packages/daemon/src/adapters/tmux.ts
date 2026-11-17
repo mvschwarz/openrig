@@ -174,6 +174,14 @@ export function probeShowsNoServer(probe: { state: string; cause?: string }): bo
   return probe.state === "transport_unavailable" && /^no server running on /.test(tmuxDiagnosticStart(probe.cause ?? ""));
 }
 
+/** Only a reported missing server permits starting an empty one (a reboot's /tmp cleanup removes the socket); other
+ *  unreadable/permission results do not. Shared by `rig down` and the keep_alive reconcile (#2940). */
+export function isMissingTmuxServer(probe: SessionProbe): boolean {
+  if (probe.state !== "transport_unavailable" || /permission denied|operation not permitted|EACCES|EPERM/i.test(probe.cause)) return false;
+  return /no server running/i.test(probe.cause)
+    || /(?:error connecting to|tmux-\d+)[^\n]*(?:No such file or directory|Connection refused)/i.test(probe.cause);
+}
+
 /** Injected executors may retain exec's one-line command wrapper instead of stderr. */
 function tmuxDiagnosticStart(message: string): string {
   return message.replace(/^Command failed:[^\r\n]*\r?\n/, "");

@@ -102,6 +102,7 @@ interface InventoryRow {
   session_community_harness?: string | null;
   session_community_runner?: number | null;
   intentionally_stopped: number | null;
+  stop_attempt: string | null;
   startup_status: string | null;
   resume_type: string | null;
   resume_token: string | null;
@@ -869,6 +870,9 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
   // #2940: a keep_alive seat's recovery incident, on a database that has the budget table.
   const keepAliveBudget = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'node_keep_alive_budget'").get();
   const keepAliveColumn = (name: string) => keepAliveBudget ? `kb.${name}` : "NULL";
+  // #2940: the attempt that recorded a session's stop request, on a database that has it.
+  const sessionStopAttemptSelect = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>)
+    .some((column) => column.name === "stop_attempt") ? "s.stop_attempt" : "NULL";
   const stmt = db.prepare(`
     SELECT
       n.id as node_id,
@@ -921,6 +925,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${sessionCommunityHarnessSelect(db)} as session_community_harness,
       ${sessionCommunityRunnerSelect(db)} as session_community_runner,
       s.intentionally_stopped,
+      ${sessionStopAttemptSelect} as stop_attempt,
       s.startup_status,
       s.resume_type,
       s.resume_token,
@@ -1066,6 +1071,10 @@ function buildInventoryItem(
     ? { attempts: row.keep_alive_attempts, exhausted: row.keep_alive_exhausted_at !== null,
       lastError: row.keep_alive_last_error, lastAttemptAt: row.keep_alive_last_attempt_at }
     : null;
+  // #2940: a stop is confirmed once its request no longer carries the attempt that recorded it (a confirmation clears it;
+  // a row recorded before attempts were kept has none), the session reads exited or superseded, and no binding is left.
+  const stopConfirmed = row.intentionally_stopped === 1 && row.stop_attempt === null
+    && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null;
   const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required" : deriveNodeLifecycleState({
     sessionStatus,
     startupStatus,
@@ -1094,12 +1103,10 @@ function buildInventoryItem(
     sessionStatus,
     storedSessionStatus: row.session_status,
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
-    intentionallyStopped: row.intentionally_stopped === 1
-      && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null,
-    // #2940: a stop recorded but not confirmed yet (the session not yet gone, or the daemon lost mid-stop).
-    ...(row.intentionally_stopped === 1
-      && !((row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null)
-      ? { stopRequested: true } : {}),
+    intentionallyStopped: stopConfirmed,
+    // #2940: a stop recorded but not confirmed yet (the session not yet gone, the daemon lost mid-stop, or a request
+    // recorded on a row already exited or superseded that no probe has proven absent: its attempt is still set).
+    ...(row.intentionally_stopped === 1 && !stopConfirmed ? { stopRequested: true } : {}),
     // #2940: the seat declares keep_alive (absent = off, so other seats' output is unchanged).
     ...(row.keep_alive === 1 ? { keepAlive: true } : {}),
     ...(keepAliveIncident ? { keepAliveIncident } : {}),

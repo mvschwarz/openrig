@@ -12,7 +12,7 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator, type NarrowLaunchResult } from "../src/domain/restore-orchestrator.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
-import { KeepAliveSupervisor, type KeepAliveSupervisorDeps } from "../src/domain/keep-alive-supervisor.js";
+import { KeepAliveSupervisor, keepAliveIncidentAdopts, type KeepAliveSupervisorDeps } from "../src/domain/keep-alive-supervisor.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { restoreExistingRigUnattended, automaticRestoreInProgress } from "../src/domain/existing-rig-restore.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -302,12 +302,12 @@ describe("KeepAliveSupervisor (#2940)", () => {
     expect(launch).not.toHaveBeenCalled();
   });
 
-  it("skips a seat asked to stop, and ends its incident", async () => {
+  it("skips a seat stopped on purpose, and ends its incident", async () => {
     const failing = launchReturns({ ok: true, launched: [{ nodeId, logicalId: "dev.driver", status: "failed" } as never] });
     const keep = supervisor(failing);
     await keep.runTickNow();
     expect(budget()).toMatchObject({ attempts: 1 });
-    sessionRegistry.requestStop(fallenId, "down-1");
+    sessionRegistry.markIntentionallyStopped(fallenId);
     nowMs += 10 * BACKOFF;
     await keep.runTickNow();
     expect(failing).toHaveBeenCalledOnce();
@@ -529,11 +529,29 @@ describe("KeepAliveSupervisor (#2940)", () => {
     const keep = supervisor(failing, { attempts: 1 });
     await keep.runTickNow();
     expect(budget()!.exhausted_at).not.toBeNull();
-    sessionRegistry.requestStop(fallenId, "stop-1");
+    sessionRegistry.markIntentionallyStopped(fallenId);
     nowMs += BACKOFF;
     await keep.runTickNow();
     expect(budget()).toBeUndefined();
     expect(failing).toHaveBeenCalledOnce();
+  });
+
+  it("a stop request still pending keeps the incident and its budget; only a confirmed stop ends it", async () => {
+    const failing = launchReturns({ ok: true, launched: [{ nodeId, logicalId: "dev.driver", status: "failed" } as never] });
+    const keep = supervisor(failing, { attempts: 3 });
+    await keep.runTickNow();
+    const incident = budget()!.incident_id;
+    sessionRegistry.requestStop(fallenId, "stop-1");
+    nowMs += 10 * BACKOFF;
+    await keep.runTickNow();
+    expect(failing).toHaveBeenCalledOnce();
+    expect(budget()).toMatchObject({ incident_id: incident, attempts: 1 });
+
+    // The checked stop proves its kill had no effect and puts the request back: the same incident goes on.
+    db.prepare("UPDATE sessions SET intentionally_stopped = 0, stop_attempt = NULL WHERE id = ?").run(fallenId);
+    await keep.runTickNow();
+    expect(failing).toHaveBeenCalledTimes(2);
+    expect(budget()).toMatchObject({ incident_id: incident, attempts: 2 });
   });
 
   it("a daemon that died during the last allowed launch exhausts the incident after the restart, launching nothing more", async () => {
@@ -564,6 +582,130 @@ describe("KeepAliveSupervisor (#2940)", () => {
     probes.set("dev-driver@r01", { state: "transport_unavailable", cause: "no server running on /tmp/tmux-1000/default" });
     await keep.runTickNow();
     expect(launch).toHaveBeenCalledOnce();
+  });
+
+  it("retries the incident's own failed launch only on proof it is gone, whatever status that launch left", async () => {
+    // The failed launch leaves its session exited, a status the reconcile used to skip without probing it.
+    const launch = vi.fn(async (): Promise<NarrowLaunchResult> => {
+      const session = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
+      sessionRegistry.updateStatus(session.id, "exited");
+      return { ok: true, launched: [{ nodeId, logicalId: "dev.driver", status: "failed", error: "harness died" } as never] };
+    });
+    const keep = supervisor(launch, { attempts: 3 });
+    await keep.runTickNow();
+    expect(launch).toHaveBeenCalledOnce();
+
+    probes.set("dev-driver@r01", { state: "transport_unavailable", cause: "error connecting to /tmp/tmux-1000/default (Permission denied)" });
+    nowMs += 10 * BACKOFF;
+    await keep.runTickNow();
+    expect(launch).toHaveBeenCalledOnce();
+    expect(budget()).toMatchObject({ attempts: 1 });
+
+    probes.set("dev-driver@r01", "absent");
+    await keep.runTickNow();
+    expect(launch).toHaveBeenCalledTimes(2);
+  });
+
+  it("an automatic restore at daemon start keeps the incident and its budget; only a person's start ends it", async () => {
+    const snapshotRepo = new SnapshotRepository(db);
+    const checkpointStore = new CheckpointStore(db);
+    const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
+    snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+    const failing = launchReturns({ ok: true, launched: [{ nodeId, logicalId: "dev.driver", status: "failed" } as never] });
+    const keep = supervisor(failing, { attempts: 3 });
+    await keep.runTickNow();
+    const incident = budget()!.incident_id;
+    expect(budget()).toMatchObject({ attempts: 1 });
+
+    // The daemon restarts and its restore brings the seat back on a session of its own.
+    let restoredId = "";
+    const restore = vi.fn(async (_snapshotId: string, opts: { onSessionLaunched?: (nodeId: string, sessionId: string) => void }) => {
+      const session = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
+      sessionRegistry.updateStatus(session.id, "running");
+      restoredId = session.id;
+      opts.onSessionLaunched?.(nodeId, session.id);
+      return { ok: true, result: { rigResult: "fully_restored", nodes: [] } };
+    });
+    await restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture,
+      restoreOrchestrator: { restore } as unknown as RestoreOrchestrator }, rigId, () => false);
+    expect(restore).toHaveBeenCalledOnce();
+    probes.set("dev-driver@r01", "present");
+    nowMs += BACKOFF;
+    await keep.runTickNow();
+    expect(budget()).toMatchObject({ incident_id: incident, attempts: 1, launched_session_id: restoredId });
+
+    // It falls again before the stable period: the same incident goes on with the attempts it has left.
+    probes.set("dev-driver@r01", "absent");
+    nowMs += BACKOFF;
+    await keep.runTickNow();
+    expect(failing).toHaveBeenCalledTimes(2);
+    expect(budget()).toMatchObject({ incident_id: incident, attempts: 2 });
+  });
+
+  it("a missing tmux socket (a reboot's /tmp cleanup) is proven absent once an empty server is started", async () => {
+    let serverUp = false;
+    const startServer = vi.fn(async () => { serverUp = true; return { ok: true as const }; });
+    const rebooted = {
+      probeSession: async () => serverUp ? { state: "absent" as const }
+        : { state: "transport_unavailable" as const, cause: "error connecting to /tmp/tmux-1000/default (No such file or directory)" },
+      startServer,
+    } as unknown as TmuxAdapter;
+    // The seat's process recorded for this very session, since it began, is no longer running.
+    createdAt(fallenId, T0 - 60_000);
+    new SeatIdentityStore(db).upsert({
+      nodeId, verdict: "verified", evidenceSource: null, reason: null,
+      evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
+      sessionName: "dev-driver@r01", observedAt: new Date(T0 - 30_000).toISOString(),
+    });
+    const launch = relaunches();
+    await supervisor(launch, {
+      reconciler: new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: rebooted, readProcesses: async () => processes }),
+    }).runTickNow();
+    expect(startServer).toHaveBeenCalledOnce();
+    expect(launch).toHaveBeenCalledOnce();
+  });
+
+  it("a released claimed session still running in its owner's tmux doesn't hold back the seat's own proven fall", async () => {
+    // `rig unclaim` leaves the released row detached, without a stop request, while its owner's session runs on.
+    const released = sessionRegistry.registerClaimedSession(nodeId, "owner-pane");
+    sessionRegistry.updateStatus(released.id, "detached");
+    createdAt(released.id, T0 - 120_000);
+    createdAt(fallenId, T0 - 60_000);
+    probes.set("owner-pane", "present");
+    const launch = relaunches();
+    await supervisor(launch).runTickNow();
+    expect(launch).toHaveBeenCalledOnce();
+  });
+
+  it("an older session of the seat under another tmux name that the probe couldn't settle holds back the retry", async () => {
+    const older = sessionRegistry.registerSession(nodeId, "dev-driver-old@r01");
+    sessionRegistry.updateStatus(older.id, "superseded");
+    createdAt(older.id, T0 - 120_000);
+    createdAt(fallenId, T0 - 60_000);
+    probes.set("dev-driver-old@r01", { state: "transport_unavailable", cause: "error connecting to /tmp/tmux-1000/old (Permission denied)" });
+    const launch = relaunches();
+    await supervisor(launch).runTickNow();
+    expect(launch).not.toHaveBeenCalled();
+    expect(budget()).toBeUndefined();
+  });
+
+  it("an automatic restore's session adopted into an exhausted incident ends it once a tick has seen it run stable", async () => {
+    const failing = launchReturns({ ok: true, launched: [{ nodeId, logicalId: "dev.driver", status: "failed" } as never] });
+    const keep = supervisor(failing, { attempts: 1 });
+    await keep.runTickNow();
+    expect(budget()!.exhausted_at).not.toBeNull();
+
+    const restored = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
+    sessionRegistry.updateStatus(restored.id, "running");
+    keepAliveIncidentAdopts(db, nodeId, restored.id, new Date(nowMs));
+    probes.set("dev-driver@r01", "present");
+    nowMs += BACKOFF;
+    await keep.runTickNow();
+    expect(budget()!.exhausted_at).not.toBeNull();
+    nowMs += STABLE;
+    await keep.runTickNow();
+    expect(budget()).toBeUndefined();
+    expect(failing).toHaveBeenCalledOnce();
   });
 
   it("leaves a rig to daemon start's restore while it runs, and acts once it has settled", async () => {
@@ -695,6 +837,8 @@ describe("KeepAliveSupervisor (#2940)", () => {
     expect(fakeTmux.createSession).not.toHaveBeenCalled();
     expect(sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === nodeId)).toHaveLength(1);
 
+    // The down confirms its stop once the session is gone, and the incident ends with it.
+    sessionRegistry.markIntentionallyStopped(fallenId);
     nowMs += 10 * BACKOFF;
     await keep.runTickNow();
     expect(racing).toHaveBeenCalledOnce();

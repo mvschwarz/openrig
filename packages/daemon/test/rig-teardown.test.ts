@@ -834,6 +834,55 @@ describe("RigTeardownOrchestrator", () => {
       expect(row(plain)).toEqual({ status: "superseded", intentionally_stopped: 0 });
     });
 
+    it("with nothing live to kill, reports a stop request it couldn't record", async () => {
+      const rig = rigRepo.createRig("down-idle");
+      const node = rigRepo.addNode(rig.id, "dev.kept", { runtime: "claude-code", cwd: tmpDir, keepAlive: true });
+      sessionRegistry.markSuperseded(sessionRegistry.registerSession(node.id, "kept@down-idle").id);
+      vi.spyOn(sessionRegistry, "requestStop").mockImplementation(() => { throw new Error("database is locked"); });
+      const result = await buildTeardown(mockTmux()).teardown(rig.id);
+      expect(result.alreadyStopped).toBe(true);
+      expect(result.errors).toContainEqual(expect.stringContaining("Stop request could not be recorded"));
+      expect(result.errors).toContainEqual(expect.stringContaining("database is locked"));
+    });
+
+    it("a request it records on an unbound exited or superseded seat isn't a confirmed stop until the probe proves it absent", async () => {
+      const rig = rigRepo.createRig("down-pending");
+      const seed = (name: string, status: string) => {
+        const node = rigRepo.addNode(rig.id, `dev.${name}`, { runtime: "claude-code", cwd: tmpDir, keepAlive: true });
+        const session = sessionRegistry.registerSession(node.id, `${name}@down-pending`);
+        sessionRegistry.updateStatus(session.id, status);
+        const skills = seatSkillPaths({ rigId: rig.id, logicalId: `dev.${name}`, runtime: "claude-code" });
+        fs.mkdirSync(skills.root, { recursive: true });
+        fs.writeFileSync(path.join(skills.root, "marker"), "x");
+        return { nodeId: node.id, sessionId: session.id };
+      };
+      const seats = [seed("exited", "exited"), seed("rolled", "superseded")];
+      const tmux = mockTmux();
+      tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause: "socket unavailable" })) as TmuxAdapter["probeSession"];
+      tmux.startServer = vi.fn(async () => ({ ok: false })) as TmuxAdapter["startServer"];
+      const pending = await buildTeardown(tmux).teardown(rig.id);
+      // Requested, so keep_alive leaves them down, but nothing proved them gone: the skills stay, and nothing reads stopped.
+      for (const seat of seats) expect(row(seat.sessionId)).toMatchObject({ intentionally_stopped: 1 });
+      expect(pending.errors).toContainEqual(expect.stringContaining("Seat skills for dev.exited kept"));
+      expect(pending.errors).toContainEqual(expect.stringContaining("Seat skills for dev.rolled kept"));
+      for (const seat of seats) {
+        expect(getNodeInventory(db, rig.id).find((entry) => entry.nodeId === seat.nodeId))
+          .toMatchObject({ intentionallyStopped: false, stopRequested: true });
+      }
+      // The next down probes them again; tmux proves them absent, and the stop is confirmed.
+      tmux.probeSession = vi.fn(async () => ({ state: "absent" })) as TmuxAdapter["probeSession"];
+      const confirmed = await buildTeardown(tmux).teardown(rig.id);
+      expect(tmux.probeSession).toHaveBeenCalledTimes(2);
+      expect(confirmed.errors.filter((error) => error.includes("Seat skills for"))).toEqual([]);
+      expect(row(seats[0]!.sessionId)).toEqual({ status: "exited", intentionally_stopped: 1 });
+      expect(row(seats[1]!.sessionId)).toEqual({ status: "superseded", intentionally_stopped: 1 });
+      for (const seat of seats) {
+        const entry = getNodeInventory(db, rig.id).find((candidate) => candidate.nodeId === seat.nodeId);
+        expect(entry).toMatchObject({ intentionallyStopped: true });
+        expect(entry).not.toHaveProperty("stopRequested");
+      }
+    });
+
     it("keeps a keep_alive seat whose latest launched session exited without a stop down too; a seat without keep_alive waits for the probe", async () => {
       const { rigId, ids } = rigOfThree();
       sessionRegistry.updateStatus(ids[2]!.sessionId, "exited");

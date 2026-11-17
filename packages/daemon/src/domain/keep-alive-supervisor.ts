@@ -18,9 +18,14 @@ import type { RigEvent } from "./types.js";
  *     carries a stop request (a seat stop or a rig down, which also ends its incident); a rig whose restore is running;
  *     and a seat whose recovery ran out;
  *   - it reconciles the seat alone, asking for proof of absence, then acts only on a fall proven by absence: the latest
- *     session `detached` with no stop request. A probe that proves nothing (an unreachable tmux socket, a probe error)
- *     or a recorded process still running leaves the session as it was, and the tick does nothing for the seat. An
- *     `exited` session without a stop request ended cleanly or by an internal action, and is left as it is;
+ *     session `detached` with no stop request, or the incident's own failed launch in any status, proven gone. Anything
+ *     the reconcile couldn't settle on a session that decides the fall (the latest one and the seat's sessions under its
+ *     tmux name, and the incident's own; never a claimed one, which is its owner's) leaves the seat as it was, and the
+ *     tick does nothing for it: a probe that proves nothing, such as an unreachable tmux socket or a probe error; a row
+ *     tmux still shows; a recorded process still running, or one an unreadable process table can't check. A tmux socket
+ *     a reboot's /tmp cleanup removed is the exception when the seat's process recorded for its latest session is
+ *     proven gone: as `rig down` does, the reconcile starts an empty server and probes again.
+ *     An `exited` session without a stop request ended cleanly or by an internal action, and is left as it is;
  *   - it relaunches through the existing one-seat launch (`launchSingleNode` with `keepAlive`), which under the seat's
  *     lifecycle lease refuses if a stop was recorded meanwhile, or if the daemon began shutting down while the launch
  *     waited for the lease. It never asks for a fresh start.
@@ -33,12 +38,15 @@ import type { RigEvent } from "./types.js";
  * latest session), the incident is exhausted once, with its event, and the seat shows attention until someone starts
  * or stops it. A launch refused because the daemon is shutting down gives its attempt back.
  *
- * An incident ends when a tick has seen the recovered session run for the stable period, when a person stops the seat,
- * or when a person starts it (a session that is neither the incident's fallen nor its launched one). The one exception
- * is a launch whose outcome was never written (the daemon stopped in the middle of it): a session created after that
- * attempt began is taken as that launch's, so the restart never resets the budget. The stable period counts only what
- * a tick saw: a recovered seat that falls while the daemon was down, without a tick having seen it run for the stable
- * period, stays in its incident.
+ * An incident ends when a tick has seen the recovered session run for the stable period, when a person's stop of the
+ * seat is confirmed (a request still pending keeps it), or when a person starts it (a session that is neither the
+ * incident's fallen nor its launched one). An automatic restore at daemon start isn't a person's start: the session it
+ * launches for a seat in an incident is recorded as the incident's as it is registered (`keepAliveIncidentAdopts`), so
+ * the incident and its budget carry on; in an exhausted incident it ends the incident only once a tick has seen it run
+ * for the stable period. The other exception is a launch whose outcome was never written (the daemon stopped in the
+ * middle of it): a session created after that attempt began is taken as that launch's, so the restart never resets the
+ * budget. The stable period counts only what a tick saw: a recovered seat that falls while the daemon was down, without
+ * a tick having seen it run for the stable period, stays in its incident.
  *
  * Concurrency and shutdown follow the watchdog scheduler: one tick at a time, seats in sequence; stop() prevents any new
  * attempt at once and waits a bounded time for the tick in flight. A shutdown writes nothing to sessions.
@@ -92,8 +100,12 @@ export interface KeepAliveSupervisorDeps {
 }
 
 interface Seat { nodeId: string; rigId: string; logicalId: string }
-interface LatestSession { id: string; status: string; origin: string | null; flag: number; created_at: string }
-/** What the last attempt's launch came to; null while it runs, or when the daemon stopped before writing it. */
+interface LatestSession {
+  id: string; session_name: string; status: string; origin: string | null; flag: number; stop_attempt: string | null; created_at: string;
+}
+/** What the last attempt's launch came to; null while it runs, or when the daemon stopped before writing it.
+ *  `adopted`: a session the supervisor didn't see launched taken as the incident's (a launch whose outcome was lost, or
+ *  daemon start's automatic restore). */
 type LaunchOutcome = "recovered" | "failed" | "exhausted" | "adopted";
 interface Budget {
   incident_id: string;
@@ -124,6 +136,7 @@ export class KeepAliveSupervisor {
   private readonly clearTimer: (handle: NodeJS.Timeout) => void;
   private readonly onTickError: (err: unknown) => void;
 
+  private sessionsHaveStopAttempt: boolean | null = null;
   private timer: NodeJS.Timeout | null = null;
   private inflight: Promise<void> | null = null;
   private stopping = false;
@@ -223,9 +236,11 @@ export class KeepAliveSupervisor {
     if (!latest || latest.origin === "claimed" || this.attachedFromOutside(seat.nodeId)) return;
     let budget = this.readBudget(seat.nodeId);
     if (latest.flag === 1) {
-      // A seat stop or a rig down: the seat stays down, and its incident, if any, ends with it. An exhausted seat a
-      // person stopped stops asking for attention, and a later start begins clean.
-      if (budget) this.endIncident(seat.nodeId);
+      // A seat stop or a rig down: the seat stays down, and its incident, if any, ends once the stop is confirmed. An
+      // exhausted seat a person stopped stops asking for attention, and a later start begins clean. A request still
+      // pending keeps the incident as it is: a checked stop whose kill proves to have had no effect puts the request
+      // back, and the seat was never stopped.
+      if (budget && latest.stop_attempt === null) this.endIncident(seat.nodeId);
       return;
     }
     if (this.restoreInProgress(seat.rigId)) return;
@@ -243,7 +258,9 @@ export class KeepAliveSupervisor {
         budget = null;
       }
     }
-    if (budget?.exhausted_at) return;
+    // An exhausted incident waits for a person, save for the session an automatic restore brought back into it: a tick
+    // that sees that session run for the stable period ends the incident, below.
+    if (budget?.exhausted_at && !(budget.last_outcome === "adopted" && latest.id === budget.launched_session_id)) return;
 
     const reconciled = await this.reconciler.reconcile(seat.rigId, { nodeIds: [seat.nodeId], absenceProof: "positive" });
     if (this.stopping) return;
@@ -259,7 +276,17 @@ export class KeepAliveSupervisor {
     const open = !!budget && !budget.recovered_at && budget.attempts > 0;
     if (current.status === "running") {
       if (!budget || current.id !== budget.launched_session_id) return;
-      if (open) {
+      if (budget.exhausted_at) {
+        // An automatic restore's session in an exhausted incident: the first tick that sees it running starts its stable
+        // period, and one that sees it still running after that period ends the incident.
+        if (!budget.recovered_at) {
+          const at = this.now().toISOString();
+          this.db.prepare("UPDATE node_keep_alive_budget SET recovered_at = ?, updated_at = ? WHERE node_id = ? AND incident_id = ?")
+            .run(at, at, seat.nodeId, budget.incident_id);
+        } else if (this.ranStable(budget)) {
+          this.endIncident(seat.nodeId);
+        }
+      } else if (open) {
         // Only a launch's own session counts. One whose outcome the daemon lost to a restart runs, so it recovered; one
         // a failed launch left behind is a pane without its agent, and waits for a person.
         if (budget.last_outcome === "adopted") this.markRecovered(seat, budget, current.id, "running");
@@ -269,10 +296,21 @@ export class KeepAliveSupervisor {
       }
       return;
     }
+    // An automatic restore's session that fell keeps its exhausted incident waiting for a person.
+    if (budget?.exhausted_at) return;
     // A fall is a session the reconcile proved absent. A probe that proved nothing or a recorded process still running
-    // leaves it as it was above. An open incident's own failed launch counts as still down whatever status it left.
+    // leaves it as it was above. An open incident's own failed launch counts as down whatever status it left, once the
+    // reconcile proved it gone.
     const ownFailedLaunch = open && current.id === budget!.launched_session_id;
     if (current.status !== "detached" && !ownFailedLaunch) return;
+    // A retry needs positive absence. The reconcile covers this seat alone, so anything it couldn't settle on any of the
+    // seat's sessions (a probe that proved nothing, a row tmux still shows, a recorded process still running or one the
+    // process table couldn't check, an error) leaves the seat as it is. A claimed session is the exception: released, it
+    // runs on in its owner's tmux, and it would hold the seat back forever.
+    const claimed = this.claimedSessions(seat.nodeId);
+    const unsettled = (entries?: ReadonlyArray<{ sessionId: string }>) => !!entries?.some((entry) => !claimed.has(entry.sessionId));
+    if (unsettled(reconciled?.undetermined) || unsettled(reconciled?.unseen) || unsettled(reconciled?.errors)
+      || !reconciled?.provenAbsent?.includes(current.id)) return;
 
     if (budget && budget.attempts >= this.attempts) {
       this.markExhausted(seat, budget, undefined, budget.last_error ?? "the recovery attempts ran out");
@@ -451,10 +489,20 @@ export class KeepAliveSupervisor {
   }
 
   private latestSession(nodeId: string): LatestSession | null {
+    this.sessionsHaveStopAttempt ??= (this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>)
+      .some((column) => column.name === "stop_attempt");
     return (this.db.prepare(
-      `SELECT id, status, origin, intentionally_stopped AS flag, created_at FROM sessions WHERE node_id = ?
-       ORDER BY created_at DESC, id DESC LIMIT 1`,
+      `SELECT id, session_name, status, origin, intentionally_stopped AS flag,
+         ${this.sessionsHaveStopAttempt ? "stop_attempt" : "NULL AS stop_attempt"}, created_at
+       FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
     ).get(nodeId) as LatestSession | undefined) ?? null;
+  }
+
+  /** The seat's claimed sessions, released ones included. Each is its owner's: its tmux session may run on under its
+   *  owner, and it says nothing about this seat's own. */
+  private claimedSessions(nodeId: string): Set<string> {
+    const rows = this.db.prepare("SELECT id FROM sessions WHERE node_id = ? AND origin = 'claimed'").all(nodeId) as Array<{ id: string }>;
+    return new Set(rows.map((row) => row.id));
   }
 
   private attachedFromOutside(nodeId: string): boolean {
@@ -469,6 +517,22 @@ export class KeepAliveSupervisor {
          last_outcome
        FROM node_keep_alive_budget WHERE node_id = ?`,
     ).get(nodeId) as Budget | undefined) ?? null;
+  }
+}
+
+/** #2940: an automatic restore at daemon start is not a person's start. The session it launches for a seat in a
+ *  keep_alive incident becomes the incident's (`adopted`), so the budget carries on: an open incident takes it as its
+ *  recovery, and an exhausted one keeps waiting for a person until a tick has seen that session run for the stable
+ *  period, which ends the incident. Either way the stable period counts from a tick that sees it running. Called as the
+ *  restore registers the session; never throws, so it can't fail a restore. */
+export function keepAliveIncidentAdopts(db: Database.Database, nodeId: string, sessionId: string, now = new Date()): void {
+  try {
+    db.prepare(
+      `UPDATE node_keep_alive_budget SET launched_session_id = ?, last_outcome = 'adopted', recovered_at = NULL, updated_at = ?
+       WHERE node_id = ?`,
+    ).run(sessionId, now.toISOString(), nodeId);
+  } catch {
+    // A database without the budget table has no incident to keep.
   }
 }
 

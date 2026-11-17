@@ -845,6 +845,22 @@ export class RigRepository {
     );
   }
 
+  /** #2940: keep the seat's launch recipe current with the keep_alive its member declares in the spec applied now
+   *  (undefined: it declares none). The recipe is written when the seat is created, while each applied spec rewrites the
+   *  resolved value; an export reads the member's own declaration from the recipe, so without this a later
+   *  `keep_alive: false` would be exported as nothing and come back on from the agent spec. */
+  setNodeAuthoredKeepAlive(nodeId: string, logicalId: string, keepAlive: boolean | undefined): void {
+    const recipe = this.getNodeLaunchRecipe(nodeId);
+    if (!recipe || !Array.isArray(recipe.rigSpec.pods)) return;
+    const [podId, memberId] = logicalId.split(".");
+    const pods = recipe.rigSpec.pods.filter((pod) => pod && pod.id === podId);
+    const members = pods.length === 1 && Array.isArray(pods[0]!.members) ? pods[0]!.members.filter((member) => member && member.id === memberId) : [];
+    if (members.length !== 1 || members[0]!.keepAlive === keepAlive) return;
+    if (keepAlive === undefined) delete members[0]!.keepAlive;
+    else members[0]!.keepAlive = keepAlive;
+    this.db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), nodeId);
+  }
+
   /** Return the durable source for rebuilding a pod-aware seat, if available. */
   getNodeLaunchRecipe(nodeId: string): NodeLaunchRecipe | null {
     if (!this.hasNodeColumn("launch_recipe_json")) return null;

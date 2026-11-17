@@ -1257,7 +1257,8 @@ It's off by default. Without it, nothing relaunches a fallen seat, as before: yo
   agent turns on. It's a flat key on the member, beside `restore_policy`, not a `lifecycle` block. Terminal members can
   declare it too. The resolved value is stored with the seat when it's created and again when the spec launches it;
   `rig export` writes `keep_alive: true` for a seat that has it, `keep_alive: false` for a member that turned off what
-  its agent turns on, and nothing for a seat that declares nothing.
+  its agent turns on (in the spec last applied to the seat, a re-applied one included), and nothing for a seat that
+  declares nothing. A first-start retry keeps the seat's stored value.
 - **A fall versus a stop on purpose.** A fall is a seat whose session is gone without a stop request: its process
   exited, crashed or was killed from outside, or the host or the daemon went down unplanned. `rig seat stop` and
   `rig down` are stops on purpose and the seat stays down. Each records its stop request before the first step that
@@ -1271,15 +1272,24 @@ It's off by default. Without it, nothing relaunches a fallen seat, as before: yo
   `rig down`, not with a daemon stop.
 - **How it comes back.** The daemon checks its keep_alive seats every 30 seconds while it runs. It first reconciles the
   seat against tmux and acts only when the session is proven gone (tmux reports it absent, or no tmux server is running):
-  an unreachable socket or another unreadable probe, or a process still running, is not a fall, and a session that ended cleanly (`exited` without a stop request) is left as it is. It relaunches through the
+  an unreachable socket or another unreadable probe, or a process still running, is not a fall, and a session that ended cleanly (`exited` without a stop request) is left as it is.
+  A retry of a failed relaunch needs the same proof, whatever status that launch left. Anything the check can't settle
+  on any of the seat's sessions (a probe that proves nothing, a session tmux still shows, a recorded process still
+  running, or one it can't check because the process table can't be read) leaves the seat as it is until a later check
+  can. Only the sessions that decide the fall count: the seat's latest session, its other sessions under the same tmux
+  name and the incident's own; a session you claimed and released is its owner's and never holds the seat back. A tmux
+  socket removed by a reboot's `/tmp` cleanup is not left undecided when the process recorded for the seat's latest
+  session, observed since that session began, is no longer running: as `rig down` does, the daemon starts an empty tmux
+  server and probes again, so a seat that is really gone is proven gone. Without that proof (no such record, or one for
+  another session) the seat waits. It relaunches through the
   same one-seat launch as `rig launch <rig> <seat>`, under the seat's `restore_policy`: it resumes the conversation when
   it can and never asks for a fresh start of its own (only a declared `restore_policy` starts one fresh), so a seat
   whose conversation can't be resumed waits for a person instead of silently starting blank. A live session that
   survived is never launched a second time. Right before it starts, under the seat's lifecycle lease, the launch checks
   again: a `rig seat stop` or `rig down` that got there first wins, and nothing is launched. A seat lost while the
   daemon was down is recovered on the daemon's first checks after it starts, once its startup reconcile has run; a rig
-  being restored is left to its restore. Once a daemon shutdown begins, a relaunch still waiting for the seat's lease
-  starts nothing, and its attempt isn't counted.
+  being restored is left to its restore. Once a daemon shutdown begins, a relaunch still waiting for the seat's lease,
+  or still preparing its launch, starts nothing, and its attempt isn't counted.
 - **Not covered:** a seat attached from outside, joined as an external CLI or through a tmux session OpenRig claimed
   rather than started (`rig attach`), is its owner's, and the daemon never relaunches it. Seats of an archived rig
   aren't watched.
@@ -1290,7 +1300,12 @@ It's off by default. Without it, nothing relaunches a fallen seat, as before: yo
   relaunch leaves behind belongs to its incident, whatever the launch's outcome; a session a launch created just
   before the daemon stopped, with its outcome not yet written, is taken as that launch's when the daemon is back. The
   incident ends, and the next fall starts a new one, when a check has seen the relaunched seat run for 10 minutes,
-  when you stop the seat, or when you start it yourself, at any point of the incident. Only what a check saw counts:
+  when your stop of the seat is confirmed (a stop still pending keeps it, so a stop that turns out to have had no
+  effect leaves the budget as it was), or when you start it yourself, at any point of the incident. Daemon start's
+  automatic restore of a kernel isn't a start of yours: the session it brings back belongs to the incident, which goes
+  on with the attempts it has left (or, exhausted, keeps waiting for you), and the 10 minutes count again from when a
+  check sees that session running. An exhausted incident whose restored session a check has seen run for 10 minutes
+  ends too, so the next fall is recovered again. Only what a check saw counts:
   a relaunched seat that falls while the daemon is down, before a check saw it run for 10 minutes, stays in its
   incident. The attempts, the wait and the 10 minutes are fixed in this version; there is no setting for them yet.
 - **When the attempts run out,** or a launch ends in a way a retry can't change (`awaiting-decision`,

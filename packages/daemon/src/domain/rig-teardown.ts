@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
-import { probeShowsNoServer, type TmuxAdapter, type SessionProbe } from "../adapters/tmux.js";
+import { isMissingTmuxServer, probeShowsNoServer, type TmuxAdapter } from "../adapters/tmux.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { EventBus } from "./event-bus.js";
 import { RigNotFoundError } from "./errors.js";
@@ -89,13 +89,6 @@ interface LatestNodeSession {
   origin?: string | null;
 }
 
-/** Only a reported missing server permits a bootstrap; other unreadable/permission results do not. */
-function isMissingTmuxServer(probe: SessionProbe): boolean {
-  if (probe.state !== "transport_unavailable" || /permission denied|operation not permitted|EACCES|EPERM/i.test(probe.cause)) return false;
-  return /no server running/i.test(probe.cause)
-    || /(?:error connecting to|tmux-\d+)[^\n]*(?:No such file or directory|Connection refused)/i.test(probe.cause);
-}
-
 /**
  * Graceful rig shutdown. Kills tmux sessions, clears bindings, marks
  * sessions exited. Optionally snapshots before teardown, optionally
@@ -144,11 +137,13 @@ export class RigTeardownOrchestrator {
 
     // 3. Check if already stopped
     if (liveSessions.length === 0) {
-      // Additional intent is best-effort; keep down's existing result if it cannot be recorded. A keep_alive seat's
-      // request can't wait for the probe below, which may prove nothing: the supervisor would bring it back.
+      // A keep_alive seat's request can't wait for the probe below, which may prove nothing: the supervisor would bring
+      // it back. A failure to record it doesn't stop the down, and is reported as the main path reports its own.
       try {
         this.db.transaction(() => this.requestDownedSeatsStop(rigId, randomUUID(), { keepAliveOnly: true }))();
-      } catch {}
+      } catch (err) {
+        result.errors.push(`Stop request could not be recorded for the keep_alive seats already down, so they may be relaunched: ${(err as Error).message}`);
+      }
       await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
       this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets(), result);
       this.cleanupClaudeCwds(rigId, result);
@@ -351,8 +346,9 @@ export class RigTeardownOrchestrator {
   private settledSkillSeats(seats: ReadonlyArray<{ id: string }>): { settled: Set<string>; heldByReleased: Map<string, string[]> } {
     const settled = new Set<string>();
     const heldByReleased = new Map<string, string[]>();
-    // #2940: confirmed, not only requested: a pending stop's session may still be running and using its skills.
-    const latest = this.db.prepare(`SELECT s.id, (s.intentionally_stopped = 1 AND s.status IN ('exited', 'superseded')
+    // #2940: confirmed, not only requested: a pending stop's session may still be running and using its skills. A request
+    // still carrying its attempt is pending, also on a row that already read exited or superseded when it was recorded.
+    const latest = this.db.prepare(`SELECT s.id, (s.intentionally_stopped = 1 AND s.stop_attempt IS NULL AND s.status IN ('exited', 'superseded')
         AND NOT EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = s.node_id)) AS stopped
       FROM sessions s WHERE s.node_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT 1`);
     const released = this.db.prepare(`SELECT id, session_name AS name FROM sessions WHERE node_id = ? AND origin = 'claimed'
@@ -416,7 +412,8 @@ export class RigTeardownOrchestrator {
    * anything else, so neither a daemon lost midway nor a probe that proves nothing lets keep_alive bring it back.
    * Claimed and external sessions are their owners'. recordAlreadyStoppedIntent confirms the stop later. With
    * keepAliveOnly (a down with nothing live to kill), only keep_alive seats get it ahead of the probe; the others keep
-   * waiting for the probe's proof, as before. */
+   * waiting for the probe's proof, as before. A request on an exited or superseded row is pending, not a confirmed stop,
+   * until that probe proves the session absent. */
   private requestDownedSeatsStop(rigId: string, attemptId: string, opts?: { keepAliveOnly?: boolean }): void {
     const downed = this.db.prepare(`
       SELECT s.id, s.node_id, s.status, ${this.hasKeepAliveColumn() ? "n.keep_alive" : "0"} AS keep_alive
@@ -442,14 +439,14 @@ export class RigTeardownOrchestrator {
 
   /** An explicit down also covers already-detached seats, and a failed start's rolled-back (superseded) session,
    * but neither a stale row nor an unavailable probe proves that its session is absent. A requested stop that isn't
-   * confirmed yet (its status still detached, or its binding still there) is checked again. */
+   * confirmed yet (its attempt still set, its status still detached, or its binding still there) is checked again. */
   private async recordAlreadyStoppedIntent(rigId: string): Promise<void> {
     const probe = this.deps.tmuxAdapter.probeSession;
     if (!probe) return;
     const eligible = this.db.prepare(`
       SELECT s.id, s.node_id, s.session_name, s.status FROM sessions s JOIN nodes n ON n.id = s.node_id
       WHERE n.rig_id = ? AND s.status IN ('exited', 'detached', 'superseded')
-        AND (s.intentionally_stopped = 0 OR s.status = 'detached'
+        AND (s.intentionally_stopped = 0 OR s.stop_attempt IS NOT NULL OR s.status = 'detached'
           OR EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = n.id))
         AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
           ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)

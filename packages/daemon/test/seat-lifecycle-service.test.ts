@@ -380,6 +380,19 @@ describe("SeatLifecycleService", () => {
       expect(getNodeInventory(db, dead.rig.id).find((entry) => entry.nodeId === dead.node.id)?.intentionallyStopped).not.toBe(true);
     });
 
+    // #2940: a stop left pending (a daemon lost mid-stop) on a seat whose session is gone: clean proves it gone, so the
+    // stop is confirmed rather than left pending for good on an exited row no reconcile looks at again.
+    it("confirms a pending stop when it cleans the seat it was recorded on", async () => {
+      const pending = seatFixture("pending-clean", "dev.qa");
+      seatFixture("pending-clean", "dev.impl");
+      sessionRegistry.requestStop(pending.session.id, "lost-attempt");
+      tmux.setAlive(pending.sessionName, false);
+      expect((await service.cleanSeat({ seatRef: pending.sessionName, reason: "clean after a lost stop" })).ok).toBe(true);
+      const entry = getNodeInventory(db, pending.rig.id).find((node) => node.nodeId === pending.node.id)!;
+      expect(entry).toMatchObject({ sessionStatus: "exited", intentionallyStopped: true });
+      expect(entry.stopRequested).toBeUndefined();
+    });
+
     // #2940: the request is recorded before the kill, so a stop whose confirming transaction fails after the kill
     // (the same state a daemon lost between kill and commit leaves) is pending, never a fall: not reported as exited,
     // binding and skills kept, and confirmed by the reconcile once the session is gone.

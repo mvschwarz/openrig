@@ -12,6 +12,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { Reconciler } from "../src/domain/reconciler.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -272,6 +273,101 @@ describe("Reconciler", () => {
     expect(byName("r01-dev1-qa").status).toBe("detached");
     expect(byName("r01-dev1-ops").status).toBe("detached");
     expect(result).toMatchObject({ detached: 2, errors: [] });
+  });
+
+  it("#2940: with positive proof asked for, a terminal row is probed without being rewritten, and only proof counts", async () => {
+    const { rig, nodes } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "exited" },
+      { logicalId: "dev1-qa", sessionName: "r01-dev1-qa", status: "superseded" },
+      { logicalId: "dev1-ops", sessionName: "r01-dev1-ops", status: "running" },
+    ]);
+    const byName = (name: string) => sessionRegistry.getSessionsForRig(rig.id).find((s) => s.sessionName === name)!;
+    // The ops seat's last observed process can't be checked: the process table is unreadable.
+    new SeatIdentityStore(db).upsert({
+      nodeId: nodes[2]!.id, verdict: "verified", evidenceSource: null, reason: null,
+      evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
+      sessionName: "r01-dev1-ops", observedAt: new Date().toISOString(),
+    });
+    const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: mockTmuxAdapter({ "r01-dev1-qa": true }),
+      readProcesses: async () => { throw new Error("ps failed"); } });
+
+    const result = await reconciler.reconcile(rig.id, { absenceProof: "positive" });
+
+    expect(result.provenAbsent).toEqual([byName("r01-dev1-impl").id]);
+    expect(result.undetermined).toEqual([
+      { sessionId: byName("r01-dev1-qa").id, sessionName: "r01-dev1-qa", cause: "the session is present in tmux" },
+      { sessionId: byName("r01-dev1-ops").id, sessionName: "r01-dev1-ops", cause: "the process table couldn't be read" },
+    ]);
+    expect(["r01-dev1-impl", "r01-dev1-qa", "r01-dev1-ops"].map((name) => byName(name).status)).toEqual(["exited", "superseded", "running"]);
+    expect(result).toMatchObject({ detached: 0, errors: [] });
+    // Without the option terminal rows are still skipped, as at boot.
+    const boot = await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: mockTmuxAdapter({ "r01-dev1-qa": true }),
+      readProcesses: async () => { throw new Error("ps failed"); } }).reconcile(rig.id);
+    expect(boot.provenAbsent).toBeUndefined();
+    expect(boot.checked).toBe(1);
+  });
+
+  it("#2940: a missing socket starts an empty server only for a seat's latest session whose recorded process is proven gone", async () => {
+    const { rig, nodes } = seedRigWithSessions([{ logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" }]);
+    const session = sessionRegistry.getSessionsForRig(rig.id)[0]!;
+    let serverUp = false;
+    const startServer = vi.fn(async () => { serverUp = true; return { ok: true as const }; });
+    const tmux = mockTmuxAdapter({});
+    tmux.probeSession = async () => serverUp ? { state: "absent" as const }
+      : { state: "transport_unavailable" as const, cause: "error connecting to /tmp/tmux-1000/default (No such file or directory)" };
+    (tmux as unknown as { startServer: typeof startServer }).startServer = startServer;
+    const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, readProcesses: async () => [] });
+    const evidenceFor = (sessionName: string) => new SeatIdentityStore(db).upsert({
+      nodeId: nodes[0]!.id, verdict: "verified", evidenceSource: null, reason: null,
+      evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
+      sessionName, observedAt: new Date(Date.now() + 1_000).toISOString(),
+    });
+
+    // No evidence, then evidence for another session: nothing proves the seat's server is gone, so none is started.
+    for (const evidence of [null, "r01-dev1-impl-earlier"]) {
+      if (evidence) evidenceFor(evidence);
+      const unknown = await reconciler.reconcile(rig.id, { absenceProof: "positive" });
+      expect(startServer).not.toHaveBeenCalled();
+      expect(unknown.undetermined?.map((entry) => entry.sessionId)).toEqual([session.id]);
+      expect(unknown.provenAbsent).toEqual([]);
+    }
+    expect(sessionRegistry.getSessionsForRig(rig.id)[0]!.status).toBe("running");
+
+    // The process recorded for this very session no longer runs: an empty server is started once, and absence proven.
+    evidenceFor("r01-dev1-impl");
+    const proven = await reconciler.reconcile(rig.id, { absenceProof: "positive" });
+    expect(startServer).toHaveBeenCalledOnce();
+    expect(proven.provenAbsent).toEqual([session.id]);
+    expect(sessionRegistry.getSessionsForRig(rig.id)[0]!.status).toBe("detached");
+  });
+
+  it("#2940: a missing socket starts no empty server while a tmux server still runs: it may only have lost its socket", async () => {
+    const { rig, nodes } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
+      { logicalId: "dev1-qa", sessionName: "r01-dev1-qa", status: "running" },
+    ]);
+    const startServer = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmuxAdapter({});
+    tmux.probeSession = async () =>
+      ({ state: "transport_unavailable" as const, cause: "error connecting to /tmp/tmux-1000/default (No such file or directory)" });
+    (tmux as unknown as { startServer: typeof startServer }).startServer = startServer;
+    // The impl seat's process recorded for its session is gone; the qa seat has no evidence.
+    new SeatIdentityStore(db).upsert({
+      nodeId: nodes[0]!.id, verdict: "verified", evidenceSource: null, reason: null,
+      evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
+      sessionName: "r01-dev1-impl", observedAt: new Date(Date.now() + 1_000).toISOString(),
+    });
+    // A tmux server whose socket was removed still runs, and may still run the qa seat.
+    const orphan = { pid: 777, ppid: 1, pgid: 777, tpgid: -1, executableName: "tmux: server",
+      startedAt: "Mon Nov 16 10:00:00 2026", command: "tmux -D" };
+    const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, readProcesses: async () => [orphan] });
+
+    const result = await reconciler.reconcile(rig.id, { absenceProof: "positive" });
+
+    expect(startServer).not.toHaveBeenCalled();
+    expect(result.provenAbsent).toEqual([]);
+    expect(result.undetermined?.map((entry) => entry.sessionName)).toEqual(["r01-dev1-impl", "r01-dev1-qa"]);
+    expect(sessionRegistry.getSessionsForRig(rig.id).map((s) => s.status)).toEqual(["running", "running"]);
   });
 
   it("without absenceProof an unreachable tmux still detaches, as at boot", async () => {

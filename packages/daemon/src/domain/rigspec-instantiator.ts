@@ -993,7 +993,8 @@ export class PodRigInstantiator {
     if (saved.effortChoice && saved.effortChoice !== (context.member.effort ?? null)) changes.push("saved effort choice");
     if (saved.policyRef !== (context.member.permissionPolicy ?? null)
       || saved.rigPolicyRef !== (source.spec.permissionPolicy ?? null)) changes.push("permission policy");
-    const launched = await this.launchValidatedSpec(selected, source.root, rigId);
+    // #2940: the synthetic spec carries the seat's resolved keep_alive, not a declaration of the member's.
+    const launched = await this.launchValidatedSpec(selected, source.root, rigId, undefined, { authoredKeepAlive: false });
     if (!launched.ok) return failure(launched.code, "message" in launched ? launched.message : launched.errors.join("; "));
     const result = launched.result.nodes[0]!;
     if (changes.length) preflight.warnings.push(`First start uses the seat's current saved ${changes.join(", ")} instead of the materialized declaration.`);
@@ -1046,7 +1047,7 @@ export class PodRigInstantiator {
     rigRoot: string,
     targetRigId: string,
     cwdOverride?: string,
-    launchOpts?: { keepRecordedAdditions?: boolean },
+    launchOpts?: { keepRecordedAdditions?: boolean; authoredKeepAlive?: boolean },
   ): Promise<LaunchMaterializedOutcome> {
     const launchOrder = this.computePodLaunchOrder(rigSpec);
     const podWarnings: string[] = [];
@@ -1075,6 +1076,12 @@ export class PodRigInstantiator {
         continue;
       }
 
+      // #2940: an authored spec applied now is the member's current keep_alive declaration, as its launch rewrites the
+      // resolved value; the recipe an export reads keeps it. A synthetic spec built from the seat's saved settings
+      // (`authoredKeepAlive: false`) declares nothing.
+      if (launchOpts?.authoredKeepAlive !== false) {
+        try { this.deps.rigRepo.setNodeAuthoredKeepAlive(node.id, logicalId, memberContext.member.keepAlive); } catch { /* best-effort */ }
+      }
       const launched = await this.launchValidatedMember({
         createCwd: true,
         rigId: targetRigId,
@@ -1406,12 +1413,13 @@ export class PodRigInstantiator {
     if (!config.ok) return refuse(config.errors.join("; "));
     // A seat whose first start failed before Advisor support recorded no Advisor, though its unchanged agent spec (the
     // hash above) may name one. Its retry keeps the launch it recorded: no Advisor, stored and launched alike. Any
-    // other Advisor difference changes the launch and is refused below.
-    const launchConfig = node.advisor == null && member.advisor === undefined && config.config.advisor != null
+    // other Advisor difference changes the launch and is refused below. #2940: the retry carries the seat's saved
+    // keep_alive, whatever the member now resolves: it is a recovery of the seat as it was, not a change to it.
+    const advisorKept = node.advisor == null && member.advisor === undefined && config.config.advisor != null
       ? { ...config, config: { ...config.config, advisor: undefined } } : config;
-    if (!same(launchConfig.config.model, node.model) || !same(launchConfig.config.effort, node.effort) || !same(launchConfig.config.advisor, node.advisor) || !same(launchConfig.config.cwd, node.cwd) || !same(launchConfig.config.restorePolicy, node.restorePolicy)
-      || launchConfig.config.keepAlive !== (node.keepAlive === true)) {
-      return refuse("Resolved model, effort, advisor, cwd, restore policy or keep_alive differs from the failed first start.");
+    const launchConfig = { ...advisorKept, config: { ...advisorKept.config, keepAlive: node.keepAlive === true } };
+    if (!same(launchConfig.config.model, node.model) || !same(launchConfig.config.effort, node.effort) || !same(launchConfig.config.advisor, node.advisor) || !same(launchConfig.config.cwd, node.cwd) || !same(launchConfig.config.restorePolicy, node.restorePolicy)) {
+      return refuse("Resolved model, effort, advisor, cwd or restore policy differs from the failed first start.");
     }
     const preflight = await preflightValidatedSpec(rigSpec, { rigRoot, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(),
       ...this.systemWorldResolutionContext(), rigNameOverride: rig.rig.name, inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId), exec: this.deps.exec });
@@ -2200,6 +2208,7 @@ export class PodRigInstantiator {
     processLimitsMode?: ProcessLimitsMode;
     createCwd?: boolean;
     launchCwd?: string;
+    beforeNativeDispatch?: () => boolean;
   }) {
     return this.launchBinding(input);
   }
@@ -2233,6 +2242,8 @@ export class PodRigInstantiator {
     createCwd?: boolean;
     /** A folder the person chose for this run (a restore's --cwd): the terminal starts there, not in the saved folder. */
     launchCwd?: string;
+    /** #2940: an agent seat's last read before its native dispatch (startNode's beforeNativeLaunch); absent asks nothing. */
+    beforeNativeDispatch?: () => boolean;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string;
     warnings?: string[]; retryable?: boolean; processLimits?: LaunchLimits }> {
     return input.member.agentRef === "builtin:terminal"
@@ -2254,6 +2265,9 @@ export class PodRigInstantiator {
       processLimitsMode?: ProcessLimitsMode;
       /** A restore run's `--cwd`, used ahead of the saved folder for this launch only; the saved folder is unchanged. */
       cwdOverride?: string;
+      /** #2940: asked again just before the native dispatch into the new shell (after configuration, shell and startup
+       *  preparation are awaited); false dispatches nothing and the launch fails as a refused native start does. */
+      beforeNativeDispatch?: () => boolean;
     },
   ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
     processLimits?: SeatProcessLimitsNotice }> {
@@ -2300,6 +2314,7 @@ export class PodRigInstantiator {
       // A restore's saved folder missing on this machine isn't recreated. A --cwd the person gave for this run is where the
       // terminal starts (the launch otherwise starts in the saved folder), and it's created if it isn't there yet.
       ...(opts?.cwdOverride ? { launchCwd: opts.cwdOverride, createCwd: true } : {}),
+      ...(opts?.beforeNativeDispatch ? { beforeNativeDispatch: opts.beforeNativeDispatch } : {}),
     });
     const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
     // #3253: the recovery notice is what a restore reports; a fresh refusal's problem stays in the code and message.
@@ -2528,6 +2543,7 @@ export class PodRigInstantiator {
     processLimitsMode?: ProcessLimitsMode;
     createCwd?: boolean;
     launchCwd?: string;
+    beforeNativeDispatch?: () => boolean;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
     retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
@@ -2959,6 +2975,7 @@ export class PodRigInstantiator {
       isRestore: false,
       ...(forkSourceOpt ?? {}),
       ...(rebuildArtifactsOpt ?? {}),
+      ...(input.beforeNativeDispatch ? { beforeNativeLaunch: input.beforeNativeDispatch } : {}),
     });
 
     // Bump fork_count only on launch success. lastUsedAt already

@@ -1367,7 +1367,10 @@ export class SeatLifecycleService {
     let persisted: PersistedEvent | null = null;
     const tx = this.db.transaction(() => {
       for (const row of nonTerminal) {
-        this.sessionRegistry.updateStatus(row.id, "exited");
+        // #2940: each row was just proven gone, so a stop still pending on it (a daemon lost mid-stop) is confirmed;
+        // left pending on an exited row, nothing would look at it again.
+        if (this.stopStillRequested(row.id)) this.sessionRegistry.markIntentionallyStopped(row.id);
+        else this.sessionRegistry.updateStatus(row.id, "exited");
         sessionsExited.push(row.session_name);
       }
       this.sessionRegistry.clearBinding(resolved.nodeId);
@@ -2230,7 +2233,9 @@ export class SeatLifecycleService {
         if (changed) return changed;
         checked.guard.checkInput(resolved.nodeId);
       }
-      if (recordStopIntent && (kill?.ok || goneBeforeKill)) {
+      if ((recordStopIntent && (kill?.ok || goneBeforeKill))
+        // #2940: a request the row still carries (an earlier stop's) is confirmed once tmux proves the session gone.
+        || ((kill?.ok || (kill && !kill.ok && kill.code === "session_not_found")) && this.stopStillRequested(session.id))) {
         this.sessionRegistry.markIntentionallyStopped(session.id);
       } else {
         // An internal replacement stop or an unconfirmed kill must still affect health.
@@ -2266,6 +2271,12 @@ export class SeatLifecycleService {
       ...(communityHarnessOf(session.community_harness, (this.db.prepare("SELECT runtime FROM nodes WHERE id=?").get(resolved.nodeId) as { runtime: string | null } | undefined)?.runtime) ? { paneOnly: true } : {}) };
   }
 
+  /** #2940: whether the session row still carries a stop request. */
+  private stopStillRequested(sessionId: string): boolean {
+    return (this.db.prepare("SELECT intentionally_stopped AS flag FROM sessions WHERE id = ?").get(sessionId) as
+      { flag: number | null } | undefined)?.flag === 1;
+  }
+
   /** #2940: a seat that declares keep_alive, whose latest session OpenRig launched (not claimed, not attached from
    *  outside). When its session is already gone, a stop is recorded instead of refused: `rig seat stop` means stay down,
    *  and without the record the supervisor would bring the seat back. Other seats keep the refusal. */
@@ -2283,9 +2294,9 @@ export class SeatLifecycleService {
       ?.keep_alive === 1;
   }
 
-  /** #2940: record the stop of a keep_alive seat whose session tmux already shows absent, under the lifecycle lease. A
-   *  fallen or exited row is confirmed stopped; a failed relaunch's superseded row keeps its status (restore reads it as
-   *  occupant history) and gets the request. The binding is cleared as on any confirmed stop. */
+  /** #2940: record the stop of a keep_alive seat whose session tmux already shows absent, under the lifecycle lease. The
+   *  stop is confirmed; a failed relaunch's superseded row keeps its status (restore reads it as occupant history). The
+   *  binding is cleared as on any confirmed stop. */
   private recordKeepAliveSeatDown(
     resolved: ResolvedSeat,
     session: LatestSessionRow,
@@ -2298,7 +2309,7 @@ export class SeatLifecycleService {
     const changed = this.db.transaction((): SeatRefusal | null => {
       const stale = selection?.();
       if (stale) return stale;
-      if (session.status === "superseded") this.sessionRegistry.requestStop(session.id, randomUUID());
+      if (session.status === "superseded") this.sessionRegistry.recordStopIntent(session.id);
       else this.sessionRegistry.markIntentionallyStopped(session.id);
       this.sessionRegistry.clearBinding(resolved.nodeId);
       persisted = this.eventBus.persistWithinTransaction({

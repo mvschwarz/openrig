@@ -91,6 +91,33 @@ describe("a community harness that takes the seat's declared model", () => {
     expect(result).toMatchObject({ ok: false, recovery: "attention_required", modelInput: { model: "vendor/model", dispatch: "confirmed" } });
   });
 
+  it("starts nothing when the caller withdraws the launch while its command is prepared (#2940)", async () => {
+    const dir = scratch();
+    writeFileSync(join(dir, "synth.yaml"), `${OPTED}first_input: true\n`);
+    const typed: string[] = [];
+    // As the real terminal does: the pre-input check runs before any write, and a refusal there types nothing.
+    const sendShellCommand = vi.fn(async (_session: string, command: string, beforeInput?: () => void) => {
+      try { beforeInput?.(); } catch (error) { return { ok: false as const, code: "refused", message: (error as Error).message }; }
+      typed.push(command);
+      return { ok: true as const };
+    });
+    const tmux = { hasSession: vi.fn(async () => true), getPaneCommand: vi.fn(async () => "node"), sendShellCommand };
+    let running = true;
+    const command = vi.fn(async (_session: string, program: string, target?: { launcherPrefix?: string }) => {
+      await Promise.resolve();
+      running = false; // a daemon shutdown begins while the launch is being prepared
+      return (target?.launcherPrefix ?? "") + program;
+    });
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir, launchResultRoot: () => join(dir, "state", "launch-results"),
+      seatLaunchEnvironment: { command, resolveLaunchWrapper: wrapper => [...wrapper] } });
+    const result = await app.launchHarness(binding("model-a"),
+      { name: "w@r", firstInputText: "hello", beforeNativeDispatch: () => running });
+    expect(command).toHaveBeenCalledOnce();
+    expect(typed).toEqual([]);
+    expect(result).toEqual({ ok: false, recovery: "attention_required",
+      error: 'The launch was withdrawn during community harness "synth" preparation; no native command was sent.' });
+  });
+
   it("accepts passes_model only as true or false", () => {
     const { dir } = seat(`${PRESET}passes_model: please\n`);
     expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: false, message: expect.stringContaining("passes_model must be true or false") });

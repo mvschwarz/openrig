@@ -11,6 +11,7 @@ import type Database from "better-sqlite3";
 import type { RestoreSnapshotSelection, Snapshot } from "./types.js";
 import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "./rehydrate-eligibility.js";
 import { resolveActiveSnapshotSession } from "./active-occupant.js";
+import { keepAliveIncidentAdopts } from "./keep-alive-supervisor.js";
 
 export interface ExistingRigRestoreDeps {
   rigRepo: RigRepository;
@@ -302,7 +303,11 @@ export function restoreExistingRigUnattended(
     const run = runExistingRigRestore(deps, choice, {
       exists, automatic: true,
       onSnapshot: (id) => { entry.snapshotId = id; },
-      onSessionLaunched: (nodeId, sessionId) => { entry.launched.set(nodeId, sessionId); },
+      onSessionLaunched: (nodeId, sessionId) => {
+        entry.launched.set(nodeId, sessionId);
+        // #2940: this restore isn't a person's start, so a keep_alive incident on the seat carries on.
+        keepAliveIncidentAdopts(deps.snapshotRepo.db, nodeId, sessionId);
+      },
     });
     return { ok: true, staleSnapshot: choice.staleSnapshot, ...await run };
   })();

@@ -294,7 +294,8 @@ export class RigSpecExporter {
         const rp = getRestorePolicy(node.id);
         if (rp) member.restorePolicy = rp;
         // #2940: the seat's resolved keep_alive, written when on, so an export of a rig without it is unchanged. Off is
-        // written only when the member itself said so: re-imported without it, its agent spec could turn it back on.
+        // written only when the member itself said so, in the spec last applied to it (kept in its recipe): re-imported
+        // without it, its agent spec could turn it back on.
         if (node.keepAlive) member.keepAlive = true;
         else if (this.authoredMember(rigId, node)?.member.keepAlive === false) member.keepAlive = false;
         return member;
