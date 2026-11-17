@@ -4,7 +4,7 @@ import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readNativeProcessArguments } from "./native-process-arguments.js";
-import { readProcessTable } from "./process-table.js";
+import { readProcessTable, readProcessTableNow } from "./process-table.js";
 
 export interface NativeProcessRow {
   pid: number;
@@ -1028,7 +1028,8 @@ export async function verifyPaneIdleShell(input: {
 /** Whether the bound pane holds nothing but its idle shell: `verifyPaneIdleShell`'s two matching samples, and in each
  *  the shell has no child process at all. A harness or any other job started from it, suspended or in the background in
  *  another process group, is a child, so it isn't empty. For ending a pane without --stop; delivery keeps the
- *  foreground rule above. A missing or failed listing isn't empty. */
+ *  foreground rule above. A missing or failed listing isn't empty. Each sample reads the table anew, after its pane
+ *  read: another observer's shared read still in flight may predate a job started since. */
 export async function verifyPaneEmptyShell(input: {
   target: string;
   tmux: { getPanePid(target: string): Promise<number | null> };
@@ -1038,7 +1039,7 @@ export async function verifyPaneEmptyShell(input: {
     try {
       const pid = await input.tmux.getPanePid(input.target);
       if (!pid) return null;
-      const rows = await (input.listProcesses ?? (() => runAsyncSite("codex.runtime.list_processes", readProcessTable)))();
+      const rows = await (input.listProcesses ?? (() => runAsyncSite("codex.runtime.list_processes", readProcessTableNow)))();
       const root = idleShellRoot(rows, pid);
       return root && !rows.some(row => row.ppid === pid) ? JSON.stringify(root) : null;
     } catch { return null; }

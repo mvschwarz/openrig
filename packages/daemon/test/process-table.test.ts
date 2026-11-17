@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readProcessTable, readProcTable, readProcessTableCensus, readProcCensus } from "../src/domain/process-table.js";
+import { readProcessTable, readProcessTableNow, readProcTable, readProcessTableCensus, readProcCensus } from "../src/domain/process-table.js";
 import { claudeCommandSessionToken, listNativeProcesses, processArgv, verifyCodexPaneProcess, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 import { defaultListProcessesStrict } from "../src/domain/resume-metadata-refresher.js";
 import { restoreProc, serveProcRoot, writeFakeProc, readPermissionHiddenProc } from "./helpers/fake-proc.js";
@@ -188,6 +188,17 @@ describe("readProcessTable", () => {
     const second = readProcessTable();
     expect(second).not.toBe(first);
     await second;
+  });
+
+  it("a read for evidence begins its own census, joining none in flight", async () => {
+    const shared = readProcessTable();
+    const now = readProcessTableNow(), again = readProcessTableNow();
+    expect(now).not.toBe(shared);
+    expect(again).not.toBe(now);
+    expect(readProcessTable()).toBe(shared);
+    const [sharedRows, nowRows] = await Promise.all([shared, now, again]);
+    expect(nowRows).not.toBe(sharedRows);
+    expect(nowRows.some((row) => row.pid === process.pid)).toBe(true);
   });
 
   it("clears both shared accessors after a failed census so a later read can recover", async () => {
