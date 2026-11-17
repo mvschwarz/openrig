@@ -308,6 +308,46 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(upBodies.filter(b => b.plan === false)).toHaveLength(0);
   });
 
+  it.each([false, true])("reports restore_error fresh outcome as unknown (json=%s)", async json => {
+    setupCandidateRig("one");
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : { _httpStatus: 400, code: "restore_error", error: "completion record failed" };
+    const { logs, exitCode } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@one", ...(json ? ["--json"] : [])]); });
+    expect(exitCode).toBe(1);
+    if (json) {
+      const result = JSON.parse(logs.at(-1)!).restoredRigs[0];
+      expect(result).toMatchObject({ rigId: "rig-1", status: "restore_error", freshOutcomeUnknown: ["dev.impl"] });
+      expect(result.freshRequestedNotApplied).toBeUndefined();
+    } else {
+      expect(logs.join(" ")).toContain("dev.impl: fresh outcome unknown");
+      expect(logs.join(" ")).not.toContain("fresh requested, not applied");
+    }
+  });
+
+  it.each([false, true])("identifies same-named rigs with distinct results (json=%s)", async json => {
+    routes["/api/rigs/summary"] = () => ["rig-1", "rig-2"].map(id => ({ id, name: "same", lifecycleState: "recoverable" })) as never;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : body._rigId === "rig-1" ? { status: "restored", rigResult: "fully_restored", nodes: [{ logicalId: "dev.impl", status: "fresh-primed" }] }
+        : { _httpStatus: 409, code: "rig_not_stopped", error: "still running" };
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--all", "--fresh", "dev.impl@rig-1", "dev.impl@rig-2", ...(json ? ["--json"] : [])]); });
+    if (json) expect(JSON.parse(logs.at(-1)!).restoredRigs).toMatchObject([{ rigId: "rig-1", status: "fully_restored" }, { rigId: "rig-2", status: "rig_not_stopped", freshRequestedNotApplied: ["dev.impl"] }]);
+    else { expect(logs.join(" ")).toContain("same (rig-1): fully_restored"); expect(logs.join(" ")).toContain("same (rig-2): still running"); }
+  });
+
+  it.each([false, true])("skips an unverified agent on a running rig when its node lookup fails (json=%s)", async json => {
+    routes["/api/rigs/summary"] = () => [{ id: "rig-1", name: "one", lifecycleState: "running" }, { id: "rig-2", name: "two", lifecycleState: "recoverable" }] as never;
+    routes["/api/rigs/:id/nodes"] = (_req, body) => body._rigId === "rig-1" ? { _httpStatus: 503 } : [{ logicalId: "dev.impl", sessionStatus: "detached", intentionallyStopped: false }] as never;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.impl", intendedAction: "resume-original" }] }
+      : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    const { logs } = await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "start", "--last", "--fresh", "dev.impl@one", ...(json ? ["--json"] : [])]); });
+    expect(upBodies.filter(b => b.plan === false).map(b => b._rigIdRoute)).toEqual(["rig-2"]);
+    if (json) expect(JSON.parse(logs.at(-1)!).skippedFresh).toMatchObject([{ rigId: "rig-1", logicalId: "dev.impl", reason: expect.stringContaining("seat unverified") }]);
+    else expect(logs.join(" ")).toContain("seat unverified");
+  });
+
   it("--last restores all candidates with ZERO prompts", async () => {
     setupCandidateRig("my-rig");
     const prompt = vi.fn(async () => true);
@@ -504,7 +544,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(exitCode).toBe(1);
     const parsed = jsonResult(logs);
     expect(parsed.keptDown).toEqual([]);
-    expect(parsed.restoredRigs).toEqual([{ rigName: "partial-live", status: "rig_not_stopped", nodes: [] }]);
+    expect(parsed.restoredRigs).toEqual([{ rigId: "rig-partial-live", rigName: "partial-live", status: "rig_not_stopped", error: "Rig still has live sessions", nodes: [] }]);
   });
 
   // T5 no-CLI-memory
@@ -745,7 +785,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
       expect(exitCode).toBe(1);
       const result = JSON.parse(logs.find((line) => line.startsWith("{"))!);
       expect(result.candidates).toEqual([{ rigName: "on-demand", lifecycleState: "degraded" }]);
-      expect(result.restoredRigs).toEqual([{ rigName: "on-demand", status: "rig_not_stopped", nodes: [] }]);
+      expect(result.restoredRigs).toEqual([{ rigId: "rig-1", rigName: "on-demand", status: "rig_not_stopped", error: "Rig still has live sessions", nodes: [] }]);
       expect(upBodies.map((body) => body.plan)).toEqual([true, false]);
     });
 
@@ -763,7 +803,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
       expect(exitCode ?? 0).toBe(0);
       const result = JSON.parse(logs.find((line) => line.startsWith("{"))!);
       expect(result.candidates).toEqual([{ rigName: "on-demand", lifecycleState: "degraded" }]);
-      expect(result.restoredRigs).toEqual([{ rigName: "on-demand", status: "already_running", nodes: [] }]);
+      expect(result.restoredRigs).toEqual([{ rigId: "rig-1", rigName: "on-demand", status: "already_running", nodes: [] }]);
       expect(upBodies.map((body) => body.plan)).toEqual([true]);
     });
   });

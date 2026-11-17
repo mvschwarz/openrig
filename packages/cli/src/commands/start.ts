@@ -535,7 +535,11 @@ back with rig up kernel --existing.
             const nodes = await client.get<Array<{ logicalId: string }>>(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
             if (nodes.status !== 200 || !Array.isArray(nodes.data)) throw new Error(`HTTP ${nodes.status}`);
             if (nodes.data.filter(node => node.logicalId === logicalId).length !== 1) { refuseFresh(`--fresh seat '${ref}' is not a unique seat in ${rig.name}.`); return; }
-          } catch (err) { refuseFresh(`Could not read seats for ${rig.name} (${rig.id}): ${err instanceof Error ? err.message : String(err)}.`); return; }
+          } catch (err) {
+            const reason = `rig already running; seat unverified because lookup failed: ${err instanceof Error ? err.message : String(err)}`;
+            if (!skippedFresh.some(s => s.rigId === rig.id && s.logicalId === logicalId)) skippedFresh.push({ rigId: rig.id, rigName: rig.name, logicalId, reason });
+            continue;
+          }
           if (!skippedFresh.some(s => s.rigId === rig.id && s.logicalId === logicalId)) skippedFresh.push({ rigId: rig.id, rigName: rig.name, logicalId, reason: "rig already running" });
           continue;
         }
@@ -556,21 +560,22 @@ back with rig up kernel --existing.
       // ---- PHASE 5: restore each selected rig via id-based route (compose slice-02 path) ----
       if (!opts.json) console.log(`\nRestoring ${selectedCandidates.length} rig(s)...\n`);
 
-      const results: Array<{ rigName: string; status: string; nodes: Array<{ logicalId: string; status: string; error?: string }>; warnings?: string[]; freshRequestedNotApplied?: string[] }> = [];
+      const results: Array<{ rigId: string; rigName: string; status: string; nodes: Array<{ logicalId: string; status: string; error?: string }>; error?: string; warnings?: string[]; freshRequestedNotApplied?: string[]; freshOutcomeUnknown?: string[] }> = [];
 
       for (const candidate of selectedCandidates) {
         const rigName = candidate.rigName;
         const rigId = candidate.rigId;
+        const rigLabel = allSummaries.filter(r => r.name === rigName).length > 1 ? `${rigName} (${rigId})` : rigName;
 
         // Check if the rig is already running (idempotent rerun: reconcile, don't relaunch).
         try {
           const freshSummary = await client.get<RigSummary[]>("/api/rigs/summary");
           const current = (freshSummary.data ?? []).find((r) => r.id === rigId);
           if ((current?.restoreLifecycleState ?? current?.lifecycleState) === "running") {
-            if (!opts.json) console.log(`  ${rigName}: already running (skipping)`);
+            if (!opts.json) console.log(`  ${rigLabel}: already running (skipping)`);
             const notApplied = freshByRig.get(rigId) ?? [];
             if (!opts.json) for (const id of notApplied) console.log(`    ${id}: fresh requested, not applied (rig already running).`);
-            results.push({ rigName, status: "already_running", nodes: [], ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}) });
+            results.push({ rigId, rigName, status: "already_running", nodes: [], ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}) });
             continue;
           }
         } catch { /* proceed with restore attempt */ }
@@ -591,20 +596,23 @@ back with rig up kernel --existing.
             const code = res.data["code"] as string | undefined;
             const errorText = String(res.data["error"] ?? "restore failed");
             if (code === "pre_restore_validation_failed") {
-              console.error(`  ${rigName}: restore blocked (pre-validation failed)`);
+              console.error(`  ${rigLabel}: restore blocked (pre-validation failed)`);
               const blockers = (res.data["blockers"] as Array<{ message: string; remediation: string }>) ?? [];
               for (const b of blockers) {
                 console.error(`    ${b.message}`);
                 console.error(`      fix: ${b.remediation}`);
               }
             } else {
-              console.error(`  ${rigName}: ${errorText} (${code ?? `HTTP ${res.status}`})`);
+              console.error(`  ${rigLabel}: ${errorText} (${code ?? `HTTP ${res.status}`})`);
             }
-            const notApplied = freshByRig.get(rigId) ?? [];
+            const requested = freshByRig.get(rigId) ?? [];
+            const preLaunchRefusal = code === "pre_restore_validation_failed" || code === "rig_not_stopped";
             const restoreWarnings = (res.data["warnings"] as string[] | undefined) ?? [];
-            if (!opts.json) for (const id of notApplied) console.log(`    ${id}: fresh requested, not applied.`);
+            if (!opts.json) for (const id of requested) console.log(preLaunchRefusal
+              ? `    ${id}: fresh requested, not applied.` : `    ${id}: fresh outcome unknown; inspect the rig before retrying.`);
             if (!opts.json) for (const warning of restoreWarnings) console.log(`    Warning: ${warning}`);
-            results.push({ rigName, status: code ?? "error", nodes: [], ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}),
+            results.push({ rigId, rigName, status: code ?? "error", error: errorText, nodes: [], ...(requested.length ? preLaunchRefusal
+              ? { freshRequestedNotApplied: requested } : { freshOutcomeUnknown: requested } : {}),
               ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}) });
             continue;
           }
@@ -616,7 +624,7 @@ back with rig up kernel --existing.
           const notApplied = (freshByRig.get(rigId) ?? []).filter(id => !nodes.some(node => node.logicalId === id && node.status === "fresh-primed"));
 
           if (!opts.json) {
-            console.log(`  ${rigName}: ${rigResult ?? resStatus}`);
+            console.log(`  ${rigLabel}: ${rigResult ?? resStatus}`);
             for (const n of nodes) {
               if ((n.status === "awaiting-decision" || n.status === "left_attached") && n.error) {
                 console.log(`    ${n.logicalId}: ${n.status} -- ${n.error}`);
@@ -661,18 +669,19 @@ back with rig up kernel --existing.
             }
           }
 
-          results.push({ rigName, status: rigResult ?? resStatus, nodes, ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}),
+          results.push({ rigId, rigName, status: rigResult ?? resStatus, nodes, ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}),
             ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}) });
         } catch (err) {
           const requested = freshByRig.get(rigId) ?? [];
           if (err instanceof DaemonConnectionError) {
-            console.error(`  ${rigName}: timed out; the daemon may still be processing. Verify with: rig ps`);
-            results.push({ rigName, status: "timeout", nodes: [] });
+            console.error(`  ${rigLabel}: timed out; the daemon may still be processing. Verify with: rig ps`);
+            if (!opts.json) for (const id of requested) console.error(`    ${id}: fresh outcome unknown; inspect the rig before retrying.`);
+            results.push({ rigId, rigName, status: "timeout", nodes: [], ...(requested.length ? { freshOutcomeUnknown: requested } : {}) });
           } else {
             const msg = err instanceof Error ? err.message : String(err);
-            console.error(`  ${rigName}: ${msg}`);
+            console.error(`  ${rigLabel}: ${msg}`);
             if (!opts.json) for (const id of requested) console.error(`    ${id}: fresh outcome unknown; inspect the rig before retrying.`);
-            results.push({ rigName, status: "error", nodes: [] });
+            results.push({ rigId, rigName, status: "error", nodes: [], ...(requested.length ? { freshOutcomeUnknown: requested } : {}) });
           }
         }
       }
@@ -695,7 +704,7 @@ back with rig up kernel --existing.
       // and non-clean rigResult values (partially_restored, failed, not_attempted).
       const NON_CLEAN_STATUSES = new Set(["timeout", "error", "skipped", "partially_restored", "failed", "not_attempted", "rig_not_stopped", "ambiguous_name", "pre_restore_validation_failed"]);
       const hasFailure = previewErrors.length > 0 || results.some((r) =>
-        NON_CLEAN_STATUSES.has(r.status) ||
+        NON_CLEAN_STATUSES.has(r.status) || !!r.error ||
         r.nodes.some((n) => n.status === "failed" || n.status === "awaiting-decision"),
       );
       if (hasFailure) process.exitCode = 1;
