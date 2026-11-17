@@ -150,10 +150,15 @@ it("executes both actual generated commands with no Node on PATH and quoted inte
     expect(JSON.parse(fs.readFileSync(path.join(f.state, "state/context-usage/fixture-worker.json"), "utf8")))
       .toMatchObject({ session_id: "fixture-id", context_window: { used_percentage: 37 } });
     fs.unlinkSync(executable);
+    const sidecar = path.join(f.state, "state/context-usage/fixture-worker.json");
+    fs.unlinkSync(sidecar);
     const missing = spawnSync("/bin/sh", ["-c", result.statusLine.command], {
       cwd: f.cwd, env: { PATH: process.env.PATH }, input: JSON.stringify(sample), encoding: "utf8", timeout: 5000,
     });
-    expect(missing.status).toBe(127); // no hidden fallback to a different PATH interpreter
+    // No hidden fallback to a different PATH interpreter: the shell can't run the pinned one and nothing else runs.
+    // dash and current bash report a missing file to `exec` as 127; the bash 3.2 behind macOS /bin/sh reports 126.
+    expect([126, 127], missing.stderr).toContain(missing.status);
+    expect(fs.existsSync(sidecar)).toBe(false);
   } finally { await new Promise<void>(ok => server.close(() => ok())); }
 });
 
