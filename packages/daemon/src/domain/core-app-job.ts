@@ -89,7 +89,10 @@ export class CoreAppJob {
   request(credential: CoreAppCredential, requestId: string, actor: string) {
     const item = this.queue.getById(requestId);
     if (!item) throw new CoreAppError("request_not_found", 404);
-    const unsupportedReason = this.unsupported(item);
+    return this.project(credential, item, this.unsupported(item), actor);
+  }
+  private project(credential: CoreAppCredential, item: QueueItem, unsupportedReason: string | null, actor: string) {
+    const requestId = item.qitemId;
     if (unsupportedReason === "unsupported_request_kind" || unsupportedReason === "source_unavailable") return { requestId, answer: null, unsupportedReason, links: this.links(requestId, actor) };
     return { requestId, asker: item.sourceSession, askedPerson: item.destinationSession,
       actor: { address: actor, assurance: "app-attributed", appId: credential.appId }, state: item.state,
@@ -105,11 +108,13 @@ export class CoreAppJob {
       const view = feedPerspective(this.queue, actor);
       // One ask's unknown permission tenure omits only that ask; healthy asks stay, and coverage says so.
       let unknown = 0;
-      const requests = current.filter(item => {
-        if (!view.inView(item.destinationSession)) return false;
-        try { return !this.unsupported(item); }
-        catch (error) { if (error instanceof CoreAppError && error.code === "app_job_unavailable") { unknown++; return false; } throw error; }
-      }).map(item => this.request(credential, item.qitemId, actor));
+      const requests = current.flatMap(item => {
+        if (!view.inView(item.destinationSession)) return [];
+        try { // one authority probe per item, projected in the same boundary
+          const reason = this.unsupported(item);
+          return reason ? [] : [this.project(credential, item, null, actor)];
+        } catch (error) { if (error instanceof CoreAppError && error.code === "app_job_unavailable") { unknown++; return []; } throw error; }
+      });
       const detail = unknown ? `${unknown} request(s) omitted: their permission authority is unknown; absence does not establish resolution.` : undefined;
       return { version: 1, sources: [{ source: "queue", state: partial || unknown ? "partial" : "available", ...(detail ? { detail } : {}) }], requests };
       } catch { return { version: 1, sources: [{ source: "queue", state: "unavailable", detail: "Queue source unavailable; absence does not establish resolution." }], requests: [] }; }

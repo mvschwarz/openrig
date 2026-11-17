@@ -679,6 +679,23 @@ it("keeps healthy asks usable when one permission ask has unknown tenure, with t
   expect(healthy.sources).toEqual([{ source: "queue", state: "available" }]);
 });
 
+it("keeps healthy asks when a permission tenure read becomes unavailable only while that ask is projected", async () => {
+  const f = await permissionFixture();
+  const ordinary = await f.repo.create({ sourceSession: "builder@test", destinationSession: PERSON, body: "Ordinary ask", humanIntent: "decision",
+    humanQuestions: [questions[0]!], nudge: false });
+  const real = SessionRegistry.prototype.currentOccupantTenure; let reads = 0;
+  const fault = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(function (this: SessionRegistry, nodeId: string) {
+    if (++reads > 1) throw new Error("tenure read lost");
+    return real.call(this, nodeId);
+  });
+  try {
+    const body = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+    expect(reads).toBe(1); // one authority probe per item, no duplicate projection probe
+    expect(body.requests.map((r: any) => r.requestId).sort()).toEqual([f.askId, ordinary.qitemId].sort());
+    expect(body.sources).toEqual([{ source: "queue", state: "available" }]);
+  } finally { fault.mockRestore(); }
+});
+
 it.each(["missing", "failed"] as const)("retains an unfinished permission answer through a %s tenure read and recovers its original submission", async cause => {
   const f = await permissionFixture(), ask = f.repo.getById(f.askId)!;
   const binding = { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
