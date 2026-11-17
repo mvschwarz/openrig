@@ -183,6 +183,12 @@ With `needs-me.read` supported:
   read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
   about the open rows blocked on it (the newest 100, with `aboutTruncated: true` when there are more). An empty `about`
   isn't proof that it's about nothing: a request that names it only in its text isn't counted.
+- **Only the asks, for a badge you poll:** add `kind=action`
+  (`GET /api/attention?view=<person-id>&kind=action`). It reads only the queue's asks and parks, the items with
+  `kind: "action"`, and gives exactly the ones the full read gives for that view, with the same `revision` and `about`.
+  It skips the updates, proof judgments, mission outcomes and health the full read also builds, and `sources` says so
+  with a `kind` entry marked `partial`. `kind=update` reads the rest. A `view` naming no registered person returns its
+  `perspective` with no items, without reading anything else.
 - **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
   `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
   already reflected in it. A click that records or changes an answer emits `queue.answer_recorded` even while the set

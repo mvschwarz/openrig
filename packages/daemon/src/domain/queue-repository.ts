@@ -5256,6 +5256,8 @@ export class QueueRepository {
     targetRepo?: string;
     handedOffFrom?: string;
     updatedSince?: string;
+    /** false: leave out each row's waiting view, a per-row read most of this listing's cost, for a reader that never shows it. */
+    includeWaiting?: boolean;
   }): QueueItem[] {
     const limit = opts?.limit ?? 100;
     const states = opts?.state
@@ -5324,7 +5326,7 @@ export class QueueRepository {
       LIMIT ?
     `;
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
-    return rows.map((r) => this.rowToItem(r));
+    return rows.map((r) => this.rowToItem(r, opts?.includeWaiting ?? true));
   }
 
   /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for, and a
