@@ -2385,15 +2385,16 @@ export class ClaudeCompactionEnforcer {
   /** A draft-aware (protected) seat whose binding records no tmux pane. The input layer refuses every write to a
    *  managed seat without a known pane, so compaction refuses it before preparing anything. "Protected" is the
    *  mode an automatic input lease takes from the guard's configuration (desired draft-aware, else effective),
-   *  the mode needsInputCheck then reads. It is read synchronously, so the manual path's in-progress guard
-   *  (no await before an attempt is registered) is unchanged. */
+   *  the mode needsInputCheck then reads; a queue-only seat's lifecycle lease takes draft-aware too (#3076). It is
+   *  read synchronously, so the manual path's in-progress guard (no await before an attempt is registered) is
+   *  unchanged. */
   private paneUnknownProtected(sessionName: string): boolean {
     const guard = this.sessionTransport.deliveryGuard;
     const target = guard?.maybeTarget(sessionName);
     if (!guard || !target || target.pane) return false;
     try {
       const config = guard.configuration(target.nodeId);
-      return (config.desired.mode === "draft-aware" ? config.desired : config.effective).mode === "draft-aware";
+      return (config.desired.mode === "draft-aware" ? config.desired : config.effective).mode === "draft-aware" || guard.queueOnly(target.nodeId);
     } catch { return false; }
   }
 

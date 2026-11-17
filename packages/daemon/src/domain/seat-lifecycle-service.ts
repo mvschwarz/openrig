@@ -28,6 +28,7 @@ import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
 import { NativePermissionStore } from "./native-permission-store.js";
+import { preferenceHoldsLifecycle } from "./seat-delivery-guard.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -1601,8 +1602,7 @@ export class SeatLifecycleService {
     const warnings = ["Snapshot only; execution resolves and validates again. Native readiness is not checked."];
     let complete = true;
     let tmuxUnknown = false;
-    const guard = this.tmuxAdapter.deliveryGuard?.preference(node.id);
-    if (guard?.effective || guard?.desired) blockers.push({ code: "typing_guard_enabled", message: "Typing protection blocks lifecycle operations for this seat." });
+    if (preferenceHoldsLifecycle(this.tmuxAdapter.deliveryGuard?.preference(node.id))) blockers.push({ code: "typing_guard_enabled", message: "Typing protection blocks lifecycle operations for this seat." });
     const record = (error: SeatRefusal) => {
       if (error.code === "tmux_probe_failed") {
         complete = false;
@@ -2088,8 +2088,7 @@ export class SeatLifecycleService {
     if (node.runtime !== "codex") {
       return { ok: false, code: "not_codex", message: `Seat "${seatRef}" runs ${node.runtime ?? "an unknown runtime"}; in-place restart supports Codex seats only.` };
     }
-    const preference = this.tmuxAdapter.deliveryGuard?.preference(node.id);
-    if (preference?.effective || preference?.desired) {
+    if (preferenceHoldsLifecycle(this.tmuxAdapter.deliveryGuard?.preference(node.id))) {
       return { ok: false, code: "typing_guard_enabled", message: "Typing protection blocks lifecycle operations for this seat; nothing was restarted." };
     }
     const session = this.latestSession(node.id);

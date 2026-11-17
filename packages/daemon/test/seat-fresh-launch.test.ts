@@ -589,6 +589,23 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.createSession).not.toHaveBeenCalled();
   });
 
+  // #3076: queue-only refuses no lifecycle work, so the plan names no typing-protection blocker there, as execution
+  // under lifecycle() doesn't; an explicit hold and urgent-only still do.
+  it.each([
+    [{ desired: true, effective: true, desiredLevel: "queue-only", effectiveLevel: "queue-only" }, false],
+    [{ desired: true, effective: true }, true],
+    [{ desired: true, effective: true, desiredLevel: "urgent-only", effectiveLevel: "urgent-only" }, true],
+    [{ desired: true, effective: false, desiredLevel: "queue-only" }, false],
+  ])("the plan's typing-protection blocker follows lifecycle's rule (%j: %s)", async (preference, blocked) => {
+    const seat = seedSeat({ clean: true });
+    const lifecycle = vi.fn();
+    Object.defineProperty(tmux, "deliveryGuard", { value: { preference: () => preference, lifecycle } });
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true }) as { blockers?: Array<{ code: string }> };
+    expect((result.blockers ?? []).some(b => b.code === "typing_guard_enabled")).toBe(blocked);
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
   it("uses a captured sibling snapshot if the rig disappears during asynchronous observation", async () => {
     const seat = seedSeat({ clean: true });
     vi.mocked(tmux.probeSession).mockImplementation(async () => {

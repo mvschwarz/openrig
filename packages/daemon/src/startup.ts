@@ -655,6 +655,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
+  /** The seat's typing guard is at queue-only (#3076). An unknown seat, or a guard that can't be read, is not: the
+   *  guard's own level still holds OpenRig's input there. */
+  const isQueueOnlyGuardSeat = (sessionName: string): boolean => {
+    try {
+      const target = resolveGuardTarget(db, sessionName);
+      return !!target && deliveryGuard.queueOnly(target.nodeId);
+    } catch { return false; }
+  };
   tmuxAdapter.deliveryGuard = deliveryGuard;
 
   // Slice 15 — Seat-activity service for the `terminal-active` primitive.
@@ -2493,6 +2501,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
         hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
         createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),
+        // #3076: at a queue-only seat a reminder is a note on its parked row or on the job's unclaimed cold row, or one
+        // cold row in the seat's queue with no nudge; never typed.
+        isQueueOnlySeat: isQueueOnlyGuardSeat,
+        createQueueRow: (row) => queueRepoInstance.create({ ...row, sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" })
+          .then(({ qitemId, state }) => ({ qitemId, state })),
+        resolveParkedRows: ({ jobId, targetSession }) => queueRepoInstance.parkedRowsOwnedBy(jobId, targetSession),
+        noteParkedRows: ({ owner, notes }) => queueRepoInstance.noteParkedRows(owner, notes),
+        noteQueuedRow: ({ jobId, destinationSession, note }) => queueRepoInstance.noteOpenWatchdogRow(jobId, destinationSession, note),
       }),
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
       // occupant_tenures) so a generation-bound wake is refused once the target has handed over.
@@ -2510,8 +2526,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       resolvePreDeliveryTerminalReason: ({ jobId }) =>
         queueRepoInstance.resolveWatchdogPreDeliveryTerminalReason(jobId),
       resolveQueueWait: (input) => queueRepoInstance.evaluateWaitReminder(input),
-      onWakeAttempt: ({ jobId, deliveryStatus, retryAt }) => {
-        queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus, retryAt);
+      onWakeAttempt: ({ jobId, deliveryStatus, retryAt, queuedQitemId, targetSession }) => {
+        queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus, retryAt, { queuedQitemId, targetSession });
       },
       // Due parked-row reminders for one seat in one scheduler pass go as one message.
       resolveDigestEntry: ({ jobId, message }) => queueRepoInstance.parkReminderDigestEntry(jobId, message),
@@ -2532,7 +2548,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           ensureStuckExceptionItem: workflowExceptionEnsurer,
           reconcileStuckExceptions: (id) => workflowRuntime?.reconcileStuckExceptions(id) ?? 0,
         }),
-        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService }),
+        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService, isQueueOnlySeat: isQueueOnlyGuardSeat }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation
@@ -2591,6 +2607,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
               queueRepoInstance.listOpenObligations(destinationSession, 500).map((r) => r.qitemId),
           },
           isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
+          isQueueOnlySeat: isQueueOnlyGuardSeat,
           retentionState: (sessionName) => {
             const target = resolveGuardTarget(db, sessionName);
             if (!target) return null;

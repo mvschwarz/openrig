@@ -1,9 +1,9 @@
 # Per-seat terminal delivery
 
-The typing guard has six modes. `off` and `hold` are the two ends. Draft-aware adds an
+The typing guard has seven modes. `off` and `hold` are the two ends. Draft-aware adds an
 opt-in check for unfinished input without a second control or daemon-owned retry
-scheduler. Between off and hold, three interruption levels choose which automatic messages may
-type: `openrig-urgent`, `urgent-only` and `sends-only`. Sibling seats keep their own mode.
+scheduler. Between off and hold, four interruption levels choose which automatic messages may
+type: `openrig-urgent`, `urgent-only`, `sends-only` and `queue-only`. Sibling seats keep their own mode.
 
 | Mode | Terminal input | When input is unavailable |
 |---|---|---|
@@ -12,9 +12,33 @@ type: `openrig-urgent`, `urgent-only` and `sends-only`. Sibling seats keep their
 | `openrig-urgent` | OpenRig's own messages (watchdogs, scheduled wakes, notices) and anything marked urgent type, never over a draft | Other agents' messages are held, the sender is told, and held messages stay readable |
 | `urgent-only` | Only messages marked urgent type (`rig send --urgent`, `urgent: true` on `POST /api/transport/send`, or a queue item at priority urgent or critical), never over a draft | Everything else is held, the sender is told, and held messages stay readable |
 | `sends-only` | Deliberate sends from people and agents type, as with `off`; a terminal member's typing isn't protected, because its shell input can't be read | OpenRig's own notices are held. A terminal member defaults to this level |
+| `queue-only` | For a seat a person types in. Deliberate sends from people and agents type, urgent or not, never over a draft; OpenRig's own notices never type, urgent ones included | A watchdog reminder reaches the seat's queue instead (below); other notices from OpenRig are held with their urgency, and held messages stay readable |
 | `hold` | No automatic terminal input, even at an empty prompt | Retain for inspection outside the pane |
 
-Lifecycle work is refused at `openrig-urgent` and `urgent-only`, as at `hold`.
+Lifecycle work is refused at `openrig-urgent` and `urgent-only`, as at `hold`. At `queue-only` it goes ahead: the
+level only changes how OpenRig's notices reach the seat, so managed compaction and its restore still run there, and the
+seat still compacts when its context runs out. Each write they make is checked as at `draft-aware`, so it never types
+over a person's draft or an input it can't read (it waits for a later attempt), but an active seat isn't refused the
+way `draft-aware` refuses lifecycle work. Binding reconciliation stays refused, as at every level but `off`.
+
+At `queue-only` a watchdog reminder never types. One about the seat's parked rows (a park timer, a wait, a
+`--wake-watchdog` attachment) is noted on each row of the seat whose current park that job wakes, with the reminder's
+own text unless it is the park's default wake (`park wake noted on this row: …`). The note is written before the
+delivery is recorded; a row that left its park meanwhile isn't noted, and the reminder stays due. A row of another
+seat attached to the same job gets its usual park record, naming what the reminder became. Any other reminder becomes
+one cold row in the seat's queue, from `watchdog@system`, tagged `watchdog`, `queue-only` and `watchdog-job:<job>`,
+created with no nudge; its id comes from the reminder's occurrence. A later occurrence of the same job, or a retry,
+while that row is still open (pending, or claimed and not yet closed), is recorded on it rather than making a second
+row; once it's closed the occurrence gets a new row with a derived id (`<id>-2`, `<id>-3`, …), never the closed one. A
+cold row wakes nobody: a person, or the seat's next ordinary turn, picks it up, and its waiting view says so, with no
+timed sweep promised. The stuck sweep doesn't report it as
+unclaimed, nor a wait whose notice was noted or queued as unconsumed. The parked-owner reminder isn't typed either
+(the seat's open rows already are the reminder): it's skipped, recorded once on the row as `parked-owner wake held: …;
+code queue_only_seat`, and stays out of the job's history until the seat's open rows or occupant change. An idle seat
+isn't woken for a pending gate row either. The job's history records these with the outcome `sent` and the status
+`queued_as_row`, `noted_on_parked_row` or `noted_on_queued_row`, never `ok`: in the queue, not typed. Wakes of rows
+that agents and people create and send are deliberate sends: they type, never over a draft. Wakes of rows OpenRig
+creates are OpenRig's own and are held. An older daemon reads `queue-only` as `hold`, lifecycle work included.
 
 A terminal member (`runtime: terminal`) defaults to `sends-only`, which holds OpenRig's own notices. Set one
 to `off` and those notices, such as park reminders and other watchdog messages, type into whatever the pane
@@ -206,7 +230,7 @@ rig seat held-messages dev-impl@my-rig --id <outbox-id> --json
 rig seat retire-held-message dev-impl@my-rig <outbox-id> --reason "read outside the pane"
 ~~~
 
-Use exactly one of `--mode off|draft-aware|openrig-urgent|urgent-only|sends-only|hold` or the compatible
+Use exactly one of `--mode off|draft-aware|openrig-urgent|urgent-only|sends-only|queue-only|hold` or the compatible
 `--enabled true|false`: true selects hold, false selects off. There are no
 retry settings or deadlines. Activation waits for an already-started seat operation
 to finish. The API may return HTTP 202 with `pending: true`; wait for
@@ -441,7 +465,7 @@ current transport result; an unknown write is not proof that nothing arrived.
 The transport still protects approval/question prompts and recipient identity. Under the default
 `transport.draft_delivery` (`deliver`), an ordinary send or work notice that meets a person's draft at a Claude Code or
 Codex prompt is pasted into it and the combined input is submitted, unless the seat's typing guard holds input
-(`draft-aware`, `openrig-urgent`, `urgent-only` or `hold`). With `refuse`, a draft refuses the send. Scheduler timing,
+(`draft-aware`, `openrig-urgent`, `urgent-only`, `queue-only` or `hold`). With `refuse`, a draft refuses the send. Scheduler timing,
 current parked-row eligibility and stop checks still apply. This changes message retries, not the idempotence of
 structured continuity actions such as creating a cutover baton.
 
