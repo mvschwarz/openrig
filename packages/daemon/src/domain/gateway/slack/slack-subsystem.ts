@@ -37,8 +37,7 @@ import { resolveInboundChannelDestination, resolveOutboundChannel, unsupportedCh
 import { resolveRigRepresentative } from "../../queue-owner.js";
 import { recoveryTag } from "../../queue-recovery.js";
 import { getSelfHostId } from "../../hosts/fanout-contract.js";
-import { SettingsStore } from "../../user-settings/settings-store.js";
-import { RESERVED_SELF_HOST_SEEDS } from "../../seat-identity-reconciler.js";
+import { SettingsStore, type ResolvedSetting } from "../../user-settings/settings-store.js";
 import { envelopeChannel, forwardChannelProblems, makeEnvelopeForwarder } from "./forwarding.js";
 import type { HostRegistryLoadResult } from "../../hosts/hosts-registry-reader.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
@@ -300,14 +299,11 @@ function deadLetterBacklogFields(
   return { deadLetterBacklog: records, deadLetterBacklogState: "ok" };
 }
 
-/** The Slack sender-line machine label: the operator's display name (host.name)
- *  when it names something human — a reserved/default token ("localhost", "local", …)
- *  never renders — else the daemon's durable self-host id. Display-only: the queue
- *  record keeps the identity; this only chooses what a person reads after "on".
- *  Pure so tests cover every branch without a daemon. */
-export function selfMachineLabel(displayName: string | null | undefined, selfId: string | null): string | null {
-  const name = typeof displayName === "string" ? displayName.trim() : "";
-  if (name && !RESERVED_SELF_HOST_SEEDS.has(name.toLowerCase())) return name;
+/** The chosen host.name is display-only, including reserved-looking names. Only
+ *  an unconfigured default or empty name falls back to the durable self-host id. */
+export function selfMachineLabel(displayName: Pick<ResolvedSetting, "value" | "source"> | null | undefined, selfId: string | null): string | null {
+  const name = displayName?.source !== "default" && typeof displayName?.value === "string" ? displayName.value.trim() : "";
+  if (name) return name;
   return selfId;
 }
 
@@ -332,7 +328,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   //  ONCE here so no settings read sits on the per-post path (restart picks up a
   //  rename, the same pickup cadence as the rest of the connector config).
   const machineLabel = selfMachineLabel(
-    (() => { try { return String(new SettingsStore().resolveOne("host.name").value ?? ""); } catch { return ""; } })(),
+    (() => { try { return new SettingsStore().resolveOne("host.name"); } catch { return null; } })(),
     getSelfHostId(),
   );
   const receiver = (() => { try { return resolveDefaultReceiver(opts.queueRepo.db); } catch { return null; } })();
