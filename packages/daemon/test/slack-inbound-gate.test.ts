@@ -69,7 +69,7 @@ describe("A6 v3 makeInboundSenderResolver (registry wiring; real resolveSlackHan
 
   it("registered handle -> admitted with the entity address", () => {
     const resolve = makeInboundSenderResolver(mkSurface({ ok: true, entities: [mike] }));
-    expect(resolve("U012")).toEqual({ admitted: true, source: "mike@external" });
+    expect(resolve("U012")).toEqual({ admitted: true, source: "mike@external", entityId: "mike" });
   });
 
   it("unknown handle -> refused with the resolver's teaching", () => {

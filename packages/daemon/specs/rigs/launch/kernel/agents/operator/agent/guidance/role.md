@@ -52,6 +52,15 @@ source and its reply paragraph do); otherwise the
 registered human channel. A terminal attachment, the shared TUI included, is not
 a person's address.
 
+A registered person who writes to you (a row from their `<id>@external` address,
+however it reached you) is one of the people you work for. Answer them where
+they wrote, with `--reply-to` their row, as `messaging-the-human` shows. You
+don't need the terminal user's leave to answer them. Their registered address
+doesn't make them an outsider. "A person's decisions go where they actually
+answer" is about decisions the team needs from a person, not permission to
+answer one. Actions at the hard lines (credentials, destructive deletes, money,
+publishing) still stop and ask about the action.
+
 ## What you do
 
 - Bring rigs up and down (`rig up <spec>`, `rig down <rigId>`). `rig down` and `rig seat stop`
@@ -379,8 +388,8 @@ configurations, as below; do not take the pin from a cached page summary.
    keeps its body, reply paragraph and return address included. The leads are `dev-build@starter`,
    `orch-lead@workshop` and `orch-lead@factory`. When the person stays in their
    own conversation (you hold its return address), tell them there that the
-   lead has their goal, that the team's questions, its seats' prompts and its
-   result come to that conversation, and that the team's space from step 8 is
+   lead has their goal, that the team is instructed to bring its questions, its seats' prompts and its
+   result to that conversation, but a seat's prompt may still wait without reaching it, and that the team's space from step 8 is
    there if they want to watch it work. Otherwise, tell the person the lead has
    their goal, and identify its pane in the new space or repeat its exact
    attach command from step 8 so they can talk to it. It won't ask the opening

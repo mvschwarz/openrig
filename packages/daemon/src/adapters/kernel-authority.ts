@@ -1,4 +1,5 @@
 import { validateClaudePermissionRules } from "../domain/claude-permission-rules.js";
+import { claudeAutoModeForLaunch, validateClaudeAutoMode } from "../domain/claude-auto-mode.js";
 import type { NodeBinding } from "../domain/runtime-adapter.js";
 import { nonInterruptiveArgs } from "./non-interruptive.js";
 import { isValidThresholdPercent } from "../domain/claude-compaction-enforcer.js";
@@ -10,7 +11,7 @@ import { existsSync } from "node:fs";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../../assets/claude-permission-policies.cjs";
 export { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK };
 
-type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode" | "claudePermissions"> & {
+type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode" | "claudePermissions" | "claudeAutoMode"> & {
   /** Whether OpenRig's managed compaction acts on this Claude launch; read from the policy when absent. */
   managedCompaction?: boolean;
 };
@@ -60,17 +61,30 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
       choice.kernelAuthority ? { launchPosture: "full_bypass", nonInterruptive: true } : choice)];
   }
   if (runtime === "claude-code") {
-    const args = withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive());
-    if (choice.claudePermissions === undefined) return args;
-    const rules = validateClaudePermissionRules(choice.claudePermissions);
-    const at = args.indexOf("--settings");
-    const settings = at < 0 ? {} : JSON.parse(args[at + 1]!) as Record<string, unknown>;
-    const permissions = (settings.permissions ?? {}) as { allow?: string[]; deny?: string[] };
-    const value = JSON.stringify({ ...settings, permissions: { ...permissions,
-      allow: [...(permissions.allow ?? []), ...rules.allow], deny: [...(permissions.deny ?? []), ...rules.deny] } });
-    return at < 0 ? [...args, "--settings", value] : [...args.slice(0, at + 1), value, ...args.slice(at + 2)];
+    let args = withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive());
+    if (choice.claudePermissions !== undefined) {
+      const rules = validateClaudePermissionRules(choice.claudePermissions);
+      args = withSettings(args, settings => {
+        const permissions = (settings.permissions ?? {}) as { allow?: string[]; deny?: string[] };
+        return { ...settings, permissions: { ...permissions,
+          allow: [...(permissions.allow ?? []), ...rules.allow], deny: [...(permissions.deny ?? []), ...rules.deny] } };
+      });
+    }
+    const { block } = claudeAutoModeForLaunch(choice.claudeAutoMode);
+    if (block !== undefined) {
+      const autoMode = validateClaudeAutoMode(block);
+      args = withSettings(args, settings => ({ ...settings, autoMode }));
+    }
+    return args;
   }
   return choice.kernelAuthority ? [] : nonInterruptiveArgs(runtime, choice);
+}
+
+/** Rewrites the launch's one --settings value, or adds it. */
+function withSettings(args: string[], change: (settings: Record<string, unknown>) => Record<string, unknown>): string[] {
+  const at = args.indexOf("--settings");
+  const value = JSON.stringify(change(at < 0 ? {} : JSON.parse(args[at + 1]!) as Record<string, unknown>));
+  return at < 0 ? [...args, "--settings", value] : [...args.slice(0, at + 1), value, ...args.slice(at + 2)];
 }
 
 /** Applies kernel or eligible team defaults before falling back to the explicit launch posture. */

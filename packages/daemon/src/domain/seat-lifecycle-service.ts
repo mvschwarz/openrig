@@ -1,5 +1,6 @@
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
 import type { NativeProcessLister } from "./native-process-lineage.js";
@@ -8,7 +9,8 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import type { TmuxAdapter, SessionProbe, StopPhase } from "../adapters/tmux.js";
+import { problemText, type TmuxAdapter, type SessionProbe, type StopPhase, type SeatProcessLimitsNotice,
+  type SeatProcessLimitsProblem } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
@@ -188,12 +190,17 @@ export interface SeatRefusal {
     | "selection_changed"
     | "stop_uncertain"
     | "missing_permissions_to"
+    /** #3253: an explicit fresh launch whose process limit can't be applied, refused before anything is stopped. */
+    | ProcessLimitsCode
     | "runtime_home_unsupported"
     | "permissions_to_not_a_person"
     | "permissions_to_unavailable";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
+  /** #3253: with a `process_limits_*` code, whether a retry may succeed, and the limit's problem. */
+  retryable?: boolean;
+  processLimits?: SeatProcessLimitsProblem;
 }
 
 export type RestartInPlaceResult = InPlaceRestartReport | InPlaceRestartRefusal | SeatRefusal;
@@ -291,6 +298,20 @@ function validStopPrecondition(value: unknown): value is StopPrecondition {
 export type CleanSeatResult =
   | { ok: true; seat: SeatDescriptor; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | SeatRefusal;
+
+type ProcessLimitsCode = "process_limits_unsupported" | "process_limits_setup" | "process_limits_unverified" | "process_limits_invalid";
+
+/** #3253: a launch refused because the seat's process limit can't be applied. */
+function isProcessLimitsCode(code: string): code is ProcessLimitsCode {
+  return code === "process_limits_unsupported" || code === "process_limits_setup" || code === "process_limits_unverified"
+    || code === "process_limits_invalid";
+}
+
+/** The problem of a plan's warning, as a refused launch returns it. */
+function processLimitsProblem(notice: SeatProcessLimitsNotice): SeatProcessLimitsProblem {
+  const { state: _state, retryable: _retryable, ...problem } = notice;
+  return problem;
+}
 
 export type LaunchFreshResult =
   | {
@@ -905,8 +926,8 @@ export class SeatLifecycleService {
     return probe.state === "present" ? { state: "yes" } : { state: "no", detail: "tmux session absent" };
   }
 
-  async setPermissions(input: SeatSettingTarget & { mode?: string; rules?: unknown; codexPermissions?: unknown; codexProfile?: string; reason: string; actor: string }): Promise<
-    | { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown; observation?: unknown }
+  async setPermissions(input: SeatSettingTarget & { mode?: string; rules?: unknown; autoMode?: unknown; codexPermissions?: unknown; codexProfile?: string; reason: string; actor: string }): Promise<
+    | { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; replaced?: unknown; observation?: unknown; advisories?: string[] }
     | SeatRefusal
   > {
     input = { ...input };
@@ -917,8 +938,9 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const runtime = resolved.entry.runtime ?? "unknown";
-    const choices = [input.mode, input.rules, input.codexPermissions, input.codexProfile].filter(value => value !== undefined).length;
-    if (choices !== 1) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode, rules, codex permissions or codex profile." };
+    const choices = [input.mode, input.rules, input.autoMode, input.codexPermissions, input.codexProfile].filter(value => value !== undefined).length;
+    if (choices !== 1) return { ok: false, code: "permission_selection_refused", message: "Choose exactly one of mode, rules, auto mode, codex permissions or codex profile." };
+    if (input.autoMode !== undefined) return this.setClaudeAutoMode(seat, runtime, input.autoMode, input.actor.trim(), input.reason.trim());
     if (input.codexPermissions !== undefined) return this.setCodexPermissions(seat, runtime, input.codexPermissions, input.actor.trim(), input.reason.trim());
     if (input.codexProfile !== undefined) return this.setCodexProfile(seat, runtime, input.codexProfile, resolved.entry.cwd ?? undefined,
       input.actor.trim(), input.reason.trim(), input.nodeId !== undefined);
@@ -988,6 +1010,34 @@ export class SeatLifecycleService {
     } catch (error) {
       return { ok: false, code: "permission_selection_refused", message: (error as Error).message };
     }
+  }
+
+  /** Replaces the seat's Claude autoMode block, or clears it when `value` is null. */
+  private setClaudeAutoMode(seat: SeatDescriptor, runtime: string, value: unknown, actor: string, reason: string):
+    { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string; advisories: string[] } | SeatRefusal {
+    if (runtime !== "claude-code") return { ok: false, code: "permission_selection_refused", message: "claude_auto_mode is only supported for claude-code seats." };
+    try {
+      const to = value === null ? null : validateClaudeAutoMode(value);
+      let persisted: PersistedEvent | null = null;
+      const result = this.db.transaction(() => {
+        // Read the current record for the audit; malformed old bytes stay visible as such and are replaced.
+        const row = this.db.prepare("SELECT claude_auto_mode_json FROM nodes WHERE id = ? AND runtime = 'claude-code'").get(seat.nodeId) as { claude_auto_mode_json: string | null } | undefined;
+        if (!row) throw new Error("Seat runtime changed; the auto mode block was not changed.");
+        let from: unknown = null;
+        try { from = readClaudeAutoMode(this.db, seat.nodeId) ?? null; }
+        catch { from = { state: "invalid", stored: row.claude_auto_mode_json }; }
+        const changed = JSON.stringify(from) !== JSON.stringify(to);
+        if (changed) {
+          this.db.prepare("UPDATE nodes SET claude_auto_mode_json = ? WHERE id = ?").run(to === null ? null : JSON.stringify(to), seat.nodeId);
+          persisted = this.eventBus.persistWithinTransaction({ type: "node.claude_auto_mode_changed", rigId: seat.rigId,
+            nodeId: seat.nodeId, from, to, actor, reason, effect: "future_launches_only" });
+        }
+        return { ok: true as const, seat, from, to, changed, advisories: to === null ? [] : claudeAutoModeAdvisories(to),
+          effect: `${to === null ? "Clearing this seat's block stops OpenRig passing one; your user and managed auto mode settings are unaffected and still apply." : "The block is added to the seat's launch settings beside your user and managed auto mode settings."} It applies at the next separately authorized managed launch or resume. The current process, permission mode and history are unchanged. Older readers may ignore it.` };
+      })();
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      return result;
+    } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
   }
 
   /** A Codex seat's envelope: its explicit permission choice, which replaces a recorded mode in the same write. */
@@ -1612,6 +1662,16 @@ export class SeatLifecycleService {
     const { seat, node, adapter, startup, canonicalSessionName, nodeLauncher, startupOrchestrator } = prepared;
     const historyRefusal = await this.validateFreshHistory(seat, canonicalSessionName, input.seatRef);
     if (historyRefusal) return historyRefusal;
+    // #3253: an explicit fresh launch that can't get the seat's limit says so before anything is probed, stopped,
+    // cleaned or superseded, for a running seat and a stopped one alike (a stop or clean followed by a refused launch
+    // would leave the seat with no process, or its history retired for nothing).
+    const limits = await this.tmuxAdapter.seatProcessLimitsRecoveryPlan?.(resolved.nodeId);
+    if (limits) {
+      return { ok: false, code: `process_limits_${limits.kind}`,
+        message: `Nothing was stopped or cleaned: process_limits is set for this seat, but ${problemText(limits)}.` +
+          (limits.retryable ? " This may be temporary: retry." : ""),
+        retryable: limits.retryable, processLimits: processLimitsProblem(limits) };
+    }
     const retiringRows = this.nonTerminalSessions(node.id);
     // Detached is terminal for process cleanup, but remains a reboot candidate.
     // A deliberate fresh launch must retire that prior history as well.
@@ -1738,6 +1798,12 @@ export class SeatLifecycleService {
       occupantKind: "fresh",
     });
     if (!launch.ok) {
+      // #3253: a launch refused for the seat's limit (its check failed after the plan passed) keeps its code.
+      if (isProcessLimitsCode(launch.code)) {
+        return { ok: false, code: launch.code, message: launch.message, warnings: viewWarnings,
+          ...(launch.retryable !== undefined ? { retryable: launch.retryable } : {}),
+          ...(launch.processLimits ? { processLimits: launch.processLimits } : {}) };
+      }
       return { ok: false, code: "launch_failed", message: launch.message, warnings: viewWarnings };
     }
     // #2426: the launch's own notes (such as what became of openrig-core's earlier skill copies) reach the result.

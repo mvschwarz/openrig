@@ -337,3 +337,31 @@ describe("rig spec", () => {
     expect(exitCode).toBeUndefined();
   });
 });
+
+describe("#3253 rig spec show: the daemon's export refusal", () => {
+  const refusal = { error: "Cannot export seat 'dev.impl': Seat n1 process_limits: stored value is not valid JSON. Fix it by re-applying the spec " +
+    "with process_limits: { tasks_max: <N> }, or clear it with process_limits: {}; then export again.", code: "export_refused" };
+  const deps = (status: number): RigDeps => ({
+    lifecycleDeps: runningLifecycleDeps(1),
+    clientFactory: () => ({
+      get: vi.fn(async () => ({ status, data: status === 404 ? { error: "Rig r1 not found" } : refusal })),
+      getText: vi.fn(async () => ({ status, data: status === 404 ? JSON.stringify({ error: "Rig r1 not found" }) : JSON.stringify(refusal) })),
+    }) as unknown as DaemonClient,
+    readFile: vi.fn(() => ""),
+  });
+  const show = (status: number, ...args: string[]) => {
+    const program = new Command();
+    program.addCommand(rigCommand(deps(status)));
+    return captureLogs(() => program.parseAsync(["node", "rig", "spec", "show", "r1", ...args]).then(() => undefined));
+  };
+
+  it.each([[[]], [["--json"]]])("prints the refusal, not 'not found' (%j)", async (args) => {
+    const out = await show(409, ...args);
+    expect(out.exitCode).toBe(1);
+    expect(out.logs).toEqual([`Export of rig r1 failed: ${refusal.error}`]);
+  });
+
+  it("a 404 still reads not found", async () => {
+    expect((await show(404)).logs).toEqual(["Rig r1 was not found."]);
+  });
+});

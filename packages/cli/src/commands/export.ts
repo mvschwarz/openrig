@@ -7,6 +7,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { rigIdForHandle } from "../rig-handle.js";
+import { daemonErrorText } from "./rig.js";
 
 export interface ExportDeps extends StatusDeps {
   writeFile: (path: string, content: string) => void;
@@ -83,7 +84,7 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
         console.error(`Rig '${rigId}' not found`);
         process.exitCode = 1;
       } else if (res.status >= 400) {
-        console.error(`Export failed: ${res.data}`);
+        console.error(`Export failed: ${daemonErrorText(res.data)}`);
         process.exitCode = 1;
       } else {
         const written = cmd.getOptionValueSource("output") === "default"

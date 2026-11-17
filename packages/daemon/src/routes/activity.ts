@@ -1,3 +1,4 @@
+import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
@@ -145,6 +146,71 @@ function nextHookSeq(key: string): number {
 }
 
 export const activityRoutes = new Hono();
+
+function channelService(c: Context): RunnerChannel {
+  const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;
+  if (!channel) throw new RunnerChannelError("runner_channel_unavailable", "Runner channel unavailable.", 503);
+  return channel;
+}
+function channelToken(c: Context): string | undefined {
+  const auth = c.req.header("Authorization");
+  return auth?.startsWith("Bearer ") ? auth.slice(7) : c.req.header("x-openrig-activity-token");
+}
+function channelFailure(c: Context, error: unknown): Response {
+  return error instanceof RunnerChannelError ? c.json({ error: error.message, code: error.code,
+    ...(error.code === "runner_grant_unverified" ? { retryable: true } : {}) }, error.status)
+    : c.json({ error: "Runner channel unavailable.", code: "runner_channel_unavailable" }, 503);
+}
+activityRoutes.post("/runner-channel", async c => {
+  try {
+    const channel = channelService(c), token = channelToken(c);
+    channel.authenticate(token);
+    const body = await c.req.json().catch(() => null);
+    return c.json(channel.post(token, body));
+  } catch (error) { return channelFailure(c, error); }
+});
+activityRoutes.get("/runner-channel", c => {
+  try {
+    const channel = channelService(c), token = channelToken(c);
+    channel.authenticate(token);
+    const raw = c.req.header("Last-Event-ID");
+    if (raw !== undefined && !/^(0|[1-9][0-9]*)$/.test(raw)) throw new RunnerChannelError("invalid_runner_cursor", "Invalid run-local cursor.", 400);
+    const cursor = raw === undefined ? 0 : Number(raw);
+    channel.frames(token, cursor); // Validate before sending HTTP headers; offered custody is retained if writing fails.
+    return streamSSE(c, async stream => {
+      const disconnect = channel.connect(token);
+      const written = new Set<number>();
+      let finish!: () => void, closed = false, draining = false, again = false;
+      const ended = new Promise<void>(resolve => { finish = resolve; });
+      const close = () => { if (!closed) { closed = true; finish(); } };
+      const drain = async () => {
+        if (draining) { again = true; return; }
+        draining = true;
+        try {
+          do {
+            again = false;
+            for (const frame of channel.frames(token, cursor)) {
+              if (written.has(frame.sequence)) continue;
+              const data = JSON.stringify(frame);
+              channel.authenticate(token); // Recheck immediately before each run-local write.
+              await stream.write(`: runner-frame-chars=${data.length}\n`);
+              channel.authenticate(token); // The comment write yielded; recheck before exposing the receipt.
+              await stream.writeSSE({ id: String(frame.sequence), event: "request", data });
+              written.add(frame.sequence);
+            }
+          } while (again && !closed);
+        } catch { close(); }
+        finally { draining = false; }
+      };
+      // Subscribe before the retained read. Notifications are hints; the outbox is authority.
+      const unsubscribe = channel.subscribe(() => { void drain(); });
+      const timer = setInterval(() => { void drain(); }, 250);
+      stream.onAbort(close);
+      try { await drain(); await ended; }
+      finally { clearInterval(timer); unsubscribe(); disconnect(); await stream.close(); }
+    });
+  } catch (error) { return channelFailure(c, error); }
+});
 
 /** A seat activity grant's post, bound to the grant. A post that names another seat, or claims a generation the grant
  *  wasn't issued for, is refused; so is a grant whose occupant was replaced (stale) or hasn't registered yet (pending).
@@ -1071,8 +1137,9 @@ activityRoutes.get("/parked", (c) => {
   const { diagnoseSeatParked, diagnoseRigParked, PARKED_OBLIGATION_LIMIT } = parkedQuery;
   const deps = {
     getSeatState: (id: string) => nodeExecutorConfirmedStopped(rigRepo.db, id) ? null : oracle.getSeatState(id),
-    // The obligation face only: the same rows, order and limit as a full list() of this destination's open states,
-    // without the per-row projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
+    // The obligation face only: the same order and limit as a full list() of this destination's open states, and the same
+    // rows less an unheld wake escalation about the seat's own prompt (listOpenObligations), without the per-row
+    // projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
     listOpenObligations: (destination: string, limit: number) => ({
       rows: queueRepo.listOpenObligations(destination, limit),
       limit,

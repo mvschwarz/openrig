@@ -80,6 +80,21 @@ describe("rig terminal CLI", () => {
     process.exitCode = undefined;
   });
 
+  it.each(["status", "views"])("authenticates terminal %s GETs with the terminal bearer", async command => {
+    vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", "synthetic-terminal-command-token");
+    try {
+      const { deps } = makeDeps();
+      const client = deps.clientFactory("http://localhost:7433");
+      deps.clientFactory = () => client;
+      await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", command, "--json"]);
+      expect(client.get).toHaveBeenCalledWith(`/api/terminal/${command}`, {
+        headers: { Authorization: "Bearer synthetic-terminal-command-token" },
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("registers open/close/views/status/attach subcommands", () => {
     const { deps } = makeDeps();
     const program = createProgram({ terminalDeps: deps });

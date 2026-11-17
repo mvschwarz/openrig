@@ -7,6 +7,8 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
+import { typingGuardModesSchema } from "../src/db/migrations/100_typing_guard_modes.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
@@ -58,6 +60,8 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       queueItemsSchema,
       queueTransitionsSchema,
       outboxEntriesSchema,
+      seatDeliveryGuardSchema,
+      typingGuardModesSchema,
       watchdogJobsSchema,
       watchdogHistorySchema,
       queueItemSummarySchema,

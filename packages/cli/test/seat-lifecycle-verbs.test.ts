@@ -589,6 +589,26 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     expect(text).toContain("Remaining step: Codex is waiting for a hook review decision");
   });
 
+  it("#3253: says, by the restart's outcome, that it went on without the seat's process limit, or that whether it runs under it is unknown", async () => {
+    const restart = async (data: Record<string, unknown>) => (await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, [])).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "x"]).then(() => undefined))).logs.join("\n");
+    const notApplied = { state: "not_applied", kind: "setup", requested: { tasksMax: 256 }, retryable: false,
+      reason: "a restart in place respawns a bare pane without the seat's environment" };
+    expect(await restart({ ...report("restarted_account_unverified"), processLimits: notApplied })).toContain(
+      "Process limits: tasks_max 256: requested, not applied; the restart went on without it (setup: a restart in place respawns a bare pane " +
+      "without the seat's environment). The request stays stored, and a fresh launch applies it.");
+    expect(await restart({ ...report("not_started"), processLimits: notApplied }))
+      .toContain("nothing was restarted, so the seat keeps the process it had; a restart would go on without it (setup:");
+    expect(await restart({ ...report("incomplete"), processLimits: { ...notApplied, kind: "unverified", retryable: true, ageSeconds: 12 } }))
+      .toContain("the restart did not finish; what it started runs without it (unverified: a restart in place respawns a bare pane without " +
+        "the seat's environment, observed 12s ago; this may be temporary)");
+    expect(await restart({ ...report("restarted_account_unverified"), processLimits: { state: "unknown", kind: "unverified", retryable: true,
+      requested: { tasksMax: 256 }, reason: "the scope start was not confirmed" } })).toContain(
+      "Process limits: tasks_max 256: unknown (unverified: the scope start was not confirmed; this may be temporary); whether the restarted " +
+      "seat runs under the limit can't be told, and nothing was run a second time.");
+    expect(await restart(report("restarted_account_unverified"))).not.toContain("Process limits");
+  });
+
   it("requires a reason before contacting the daemon, and refuses --plan with --verify", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const missing = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
@@ -672,4 +692,16 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
       expect(output.exitCode).toBe(1);
     }
   });
+});
+
+
+it("set-input-route posts the explicit seat choice and validates unsupported routes locally", async () => {
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const deps = makeDeps({ status: 200, data: { inputRoute: "typed" } }, calls);
+  await captureLogs(() => makeCommand(deps).parseAsync(["seat", "set-input-route", "dev@rig", "--route", "typed", "--reason", "use pane", "--json"], { from: "user" }));
+  expect(calls).toEqual([{ path: "/api/seat/set-input-route/dev%40rig", body: { route: "typed", reason: "use pane" } }]);
+  calls.length = 0;
+  const result = await captureLogs(() => makeCommand(deps).parseAsync(["seat", "set-input-route", "dev@rig", "--route", "automatic", "--reason", "no"], { from: "user" }));
+  expect(result.exitCode).toBe(1);
+  expect(calls).toEqual([]);
 });

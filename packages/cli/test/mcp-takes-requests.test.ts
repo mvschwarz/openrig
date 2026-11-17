@@ -149,6 +149,29 @@ describe("a roster entry that takes no requests", () => {
     } finally { await s.close(); }
   });
 
+  it("says it isn't known when a roster that can't be read could hold the entry that wins, and goes ahead", async () => {
+    const send = async (folder: string, destination: string) => {
+      const s = await connect(folder, true);
+      try {
+        const sent = await s.call("rig_queue_create", { destination, body: "Review the diff", qitemId: `qitem-${destination}` });
+        expect(sent.isError).toBeFalsy();
+        expect(s.post).toHaveBeenCalledWith("/api/queue/create", expect.objectContaining({ destinationSession: destination }));
+        return sent.structuredContent.requestsAdvisory;
+      } finally { await s.close(); }
+    };
+    // An unreadable roster ahead of the entry, by file name, could hold that seat's entry instead.
+    const ahead = studio();
+    fs.writeFileSync(path.join(ahead, "a-broken.json"), "{");
+    expect(await send(ahead, "dev-review@team")).toEqual({ seat: "dev-review@team", takesRequests: "unknown", message: expect.stringContaining("isn't known") });
+    // One after it can't: the earlier roster's entry is the one rig_team applies.
+    const after = studio();
+    fs.writeFileSync(path.join(after, "z-broken.json"), "{");
+    expect(await send(after, "dev-review@team")).toMatchObject({ seat: "dev-review@team", takesRequests: false, takesRequestsNote: NOTE });
+    // For a node whose entry was found under its logical address, any unreadable roster could hold its session's entry, which
+    // comes first.
+    expect(await send(after, "dev-lead-2@team")).toEqual({ seat: "dev-lead-2@team", takesRequests: "unknown", message: expect.stringContaining("isn't known") });
+  });
+
   it("hands work on to it as asked and says so, and leaves a handoff to an ordinary seat as it was", async () => {
     const s = await connect(studio(), false);
     try {

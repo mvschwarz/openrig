@@ -10,7 +10,7 @@ import type {
   QueuePriority,
   QueueState,
 } from "../domain/queue-repository.js";
-import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker } from "../domain/queue-repository.js";
+import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker, DEFAULT_RECENT_TRANSITIONS_LIMIT } from "../domain/queue-repository.js";
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
@@ -42,7 +42,8 @@ import {
   type RoleOrientation,
 } from "../domain/current-work.js";
 import { listProjects, projectCatalogPaths } from "../domain/workspace/project-read.js";
-import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
+import { inferCatalogProject, ProjectReadError, readProjectCatalog, rigFromSession, selectCatalogProject } from "../domain/workspace/project-catalog.js";
+import { physicalSessionName } from "../domain/session-registry.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope, type HostClass } from "../domain/queue-erasure.js";
@@ -1382,6 +1383,7 @@ export function queueRoutes(): Hono {
     // workspace.root, and the trace can only ascend to a root it knows (#2693).
     let workRoots: string[] = [];
     let catalogPath: string | null = null;
+    let catalogError: unknown;
     try {
       catalogPath = projectCatalogPaths(c).catalog;
     } catch {
@@ -1399,8 +1401,38 @@ export function queueRoutes(): Hono {
         }]));
         workRoots = projects.filter((project) => !project.error).map((project) => project.root);
       }
-    } catch {
+    } catch (error) {
       catalogStatus = "unavailable";
+      catalogError = error;
+    }
+    // The project this seat's broad refocus orientation belongs to when no typed baton names
+    // one (#3320), chosen as work-install chooses: the only catalog entry, then the rig's
+    // association, the seat's working folder, the only unclaimed entry. No unique answer is
+    // reported with its reason, never guessed.
+    let workProject: { id: string; root: string; selectedBy: string } | { error: string } | undefined;
+    const unselected = (error: unknown) => {
+      const candidates = error instanceof ProjectReadError && error.candidates?.length ? ` (candidates: ${error.candidates.join(", ")})` : "";
+      return { error: `${error instanceof Error ? error.message : String(error)}${candidates}` };
+    };
+    // An unreadable catalog selects nothing; say why, and the trace keeps the workspace root.
+    if (catalogStatus === "unavailable") workProject = unselected(catalogError);
+    if (catalogPath && catalogStatus === "usable") {
+      try {
+        const only = selectCatalogProject(catalogPath);
+        if (only) workProject = { ...only, selectedBy: "single" };
+      } catch (error) {
+        if (error instanceof ProjectReadError && error.code === "project_required") {
+          let cwd: string | null = null;
+          try {
+            const db = c.get("db" as never) as Database.Database | undefined;
+            const seat = db && db.prepare("SELECT n.cwd FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.session_name = ? ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1")
+              .get(physicalSessionName(db, session)) as { cwd: string | null } | undefined;
+            cwd = seat?.cwd ?? null;
+          } catch { /* No recorded working folder: selection continues without it. */ }
+          try { workProject = inferCatalogProject(catalogPath, error, { rigName: rigFromSession(session), cwd }, []); }
+          catch (inferred) { workProject = unselected(inferred); }
+        } else workProject = unselected(error);
+      }
     }
     const currentWorkRoot: MissionsRootResolver = (row: CurrentWorkRow) => {
       const projectIds = [...new Set((row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
@@ -1458,11 +1490,11 @@ export function queueRoutes(): Hono {
         },
         missionsRoot,
       );
-      return c.json({ ...position, ...derived, ...choiceField, role, workRoots,
+      return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}),
         // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
         workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, ...choiceField, role, workRoots });
+    return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}) });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
@@ -1687,8 +1719,8 @@ export function queueRoutes(): Hono {
       return c.json({ error: "rig_required", message: "rig is required for a rig RECENT read" }, 400);
     }
     const raw = c.req.query("limit");
-    const parsed = raw == null ? 20 : Number.parseInt(raw, 10);
-    const limit = Number.isInteger(parsed) && parsed > 0 ? parsed : 20;
+    const parsed = raw == null ? DEFAULT_RECENT_TRANSITIONS_LIMIT : Number.parseInt(raw, 10);
+    const limit = Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_RECENT_TRANSITIONS_LIMIT;
     const scope = scopeKind === "instance"
       ? { kind: "instance" } as const
       : { kind: "rig", rig: rig! } as const;

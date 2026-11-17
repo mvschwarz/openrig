@@ -530,6 +530,29 @@ describe("first-user return route", () => {
       expect(relays()).toHaveLength(1);
     });
 
+    // 0.7.18 rehearsal (#3318): the summary said "0 baton(s) stuck" while the alert was about a routed goal.
+    it("an alert about a routed goal alone counts the goal in its summary, and its body has no empty baton list", async () => {
+      await waitingGoal("front@kernel", "seat");
+      await tick();
+      const [alert] = alerts();
+      expect(alert!.summary).toContain(`Wake escalation: 1 routed goal(s) waiting on ${reviewer} — `);
+      expect(alert!.summary).not.toContain("baton(s)");
+      expect(alert!.body).not.toContain("stuck batons");
+      expect(alert!.body).toContain("work handed over with a return route, stuck at its prompt (1):");
+    });
+
+    // #3393 r1: a routed goal the reviewer holds, whose wake was also refused, is one row and counts once.
+    it("a routed goal whose wake was also refused counts once in the summary; the body still names it under both", async () => {
+      const routed = await waitingGoal("front@kernel", "held");
+      await refuseWake([routed.qitemId], `Refused: '${reviewer}' is at an interactive prompt (target_needs_input). No text was sent.`);
+      await tick();
+      const [alert] = alerts();
+      expect(alert!.summary).toContain(`Wake escalation: 1 routed goal(s) waiting on ${reviewer} — `);
+      expect(alert!.summary).not.toContain("baton(s)");
+      expect(alert!.body).toContain("stuck batons (1):");
+      expect(alert!.body).toContain("work handed over with a return route, stuck at its prompt (1):");
+    });
+
     it("a seat reporting a permission prompt takes the route too", async () => {
       kind = "permission";
       await waitingGoal("front@kernel", "held");

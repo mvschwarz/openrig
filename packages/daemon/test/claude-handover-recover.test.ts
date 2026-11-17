@@ -59,6 +59,8 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
   let panes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
   /** Panes of the seat's session in its other windows: tmux lists them only with `-s` (listPanes(target, true)). */
   let otherWindowPanes: () => Array<{ id: string; index: number; cwd: string; width: number; height: number; active: boolean }>;
+  /** The other window is the session's current one: a listing by the session's name answers with its panes. */
+  let otherWindowCurrent: boolean;
   const calls = { respawnPane: vi.fn(), sendText: vi.fn(), sendKeys: vi.fn(), killSession: vi.fn(), signalPaneProcess: vi.fn() };
   const startedAtMs = Date.parse("2026-11-10T16:21:00Z");
   const startedAt = "Tue Nov 10 16:21:00 2026";
@@ -75,7 +77,13 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     return {
       hasSession: vi.fn(async () => true),
       createSession: vi.fn(async () => ({ ok: true })),
-      listPanes: vi.fn(async (_target: string, allWindows = false) => (allWindows ? [...panes(), ...otherWindowPanes()] : panes())),
+      // By target, as tmux answers: -s lists every window of the session; a pane id, that pane's own window; the session
+      // name alone, its current window.
+      listPanes: vi.fn(async (target: string, allWindows = false) => {
+        if (allWindows) return [...panes(), ...otherWindowPanes()];
+        if (target.startsWith("%")) return [panes(), otherWindowPanes()].find((window) => window.some((pane) => pane.id === target)) ?? [];
+        return otherWindowCurrent ? otherWindowPanes() : panes();
+      }),
       killSession: vi.fn(async (...a: unknown[]) => { calls.killSession(...a); return { ok: true }; }),
       respawnPane: vi.fn(async (...a: unknown[]) => { calls.respawnPane(...a); return { ok: true }; }),
       setRemainOnExit: vi.fn(async () => ({ ok: true })),
@@ -185,6 +193,7 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     managedLaunch = null;
     panes = () => [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     otherWindowPanes = () => [];
+    otherWindowCurrent = false;
     paneProcesses = () => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 102 : 100, command: "-zsh", executableName: "zsh", startedAt } as NativeProcessRow,
       ...(running() ? [claudeIn(successorToken)] : []),
@@ -340,10 +349,34 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
     expect(state()).toEqual(before);
   });
 
-  // CodeRabbit on the merge head (:1003): a pane in another window of the seat's session is a second pane too.
-  it("refuses when the seat's session has a second window, its pane the only one of the active window", async () => {
+  // #3218 item 5: the launch and its readiness check read the session's active window, so another window of the seat's
+  // session isn't a second pane of this seat. The recorded pane is found anywhere in the session, alone in its window.
+  it("adopts when the seat's session has a second window, the recorded pane alone in its own window", async () => {
+    await failedHandover();
+    otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+    expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: true });
+  });
+
+  // The launch's own rule: the successor is the only pane of the session's current window, the one a send to the session's
+  // name reaches and its readiness check reads. One alone in another window, not the current one, isn't adopted: the
+  // person selects that window and runs the recovery again. Nothing changes their tmux layout.
+  it("refuses a successor alone in a window that isn't the session's current one, and says to select that window", async () => {
     await failedHandover();
     const before = state();
+    otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
+    otherWindowCurrent = true;
+    const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+    expect(result).toMatchObject({ ok: false, code: "successor_identity_unproven" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.message).toContain("isn't the session's current window");
+    expect(result.message).toContain("select the successor's window");
+    expect(state()).toEqual(before);
+  });
+
+  it("refuses when the recorded pane isn't in the seat's session any more, even with a pane alone in another window", async () => {
+    await failedHandover();
+    const before = state();
+    panes = () => [{ id: "%12", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     otherWindowPanes = () => [{ id: "%11", index: 0, cwd: "/project", width: 80, height: 24, active: true }];
     expect(await service().recover({ seatRef: SEAT, reason: "adopt" })).toMatchObject({ ok: false, code: "successor_identity_unproven" });
     expect(state()).toEqual(before);
@@ -369,8 +402,11 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
 
   it("refuses when the pane changes while the successor is being proven", async () => {
     await failedHandover();
-    let listed = 0;
-    panes = () => ++listed === 1 ? [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }]
+    // A second pane appears once the proof has read the pane's processes: the check before it sees one, the recheck two.
+    let proven = false;
+    const processes = paneProcesses;
+    paneProcesses = () => { proven = true; return processes(); };
+    panes = () => !proven ? [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }]
       : [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }, { id: "%10", index: 1, cwd: "/project", width: 80, height: 24, active: false }];
     const before = state();
     const result = await service().recover({ seatRef: SEAT, reason: "adopt" });

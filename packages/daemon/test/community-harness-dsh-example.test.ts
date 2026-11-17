@@ -61,6 +61,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const text = message.params.prompt.map((part) => part.text).join("");
       const end = (stopReason) => reply({ stopReason });
       if (text.includes("EXIT")) process.exit(0);
+      if (text === "BUSY") { say("old unrelated output"); return setTimeout(() => end("end_turn"), 150); }
+      if (text.startsWith("WAKE:")) { if (text !== "WAKE:EMPTY") say("actual " + text); return setTimeout(() => text === "WAKE:FAIL" ? send({ id: message.id, error: { code: -32603, message: "turn failed" } }) : end(text === "WAKE:CANCEL" ? "cancelled" : text === "WAKE:UNKNOWN" ? "unreported" : "end_turn"), 100); }
       const two = ["TWOASK", "TWOTALK", "TWOQUIT"].find((word) => text.includes(word));
       if (two) {
         // Two permission requests at once; the turn ends once both are answered. After the first answer, TWOTALK says
@@ -122,6 +124,7 @@ afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 
 async function fakeOpenRig(permissions: Permissions) {
   const hooks: Hook[] = [];
+  const channelRequests: string[] = [];
   const submits: Array<{ auth: string | undefined; body: Record<string, unknown>; at: number }> = [];
   const withdraws: Array<{ askId: string; body: Record<string, unknown> }> = [];
   const server: Server = createServer((req, res) => {
@@ -131,6 +134,7 @@ async function fakeOpenRig(permissions: Permissions) {
       const json = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
       const url = new URL(req.url ?? "/", "http://openrig.test");
       const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      if (url.pathname === "/api/activity/runner-channel") channelRequests.push(req.method ?? "unknown");
       if (req.method === "POST" && url.pathname === "/api/activity/hooks") { hooks.push({ auth: req.headers.authorization, body, at: Date.now() }); return json(200, { ok: true }); }
       if (permissions === "absent") return json(404, { error: "not found" });
       if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
@@ -181,7 +185,7 @@ async function fakeOpenRig(permissions: Permissions) {
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   cleanups.push(() => server.close());
   const address = server.address() as { port: number };
-  return { url: `http://127.0.0.1:${address.port}`, hooks, submits, withdraws };
+  return { url: `http://127.0.0.1:${address.port}`, hooks, submits, withdraws, channelRequests };
 }
 
 function start(openrig: { url: string }, env: Record<string, string> = {}, binVar = "OPENRIG_DSH") {
@@ -229,6 +233,16 @@ const requests = (log: Array<Record<string, unknown>>, method: string) => log.fi
 const responseTo = (log: Array<Record<string, unknown>>, id: string) => log.find((entry) => entry.id === id && entry.method === undefined);
 
 describe("the documented dsh example runner", () => {
+  it("keeps legacy install-token input independent of an inherited run claim", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RUN_ID: "inherited-predecessor" });
+    await waitFor(seat.launch, "the launch record");
+    seat.type("legacy input");
+    await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "ordinary legacy input completion");
+    expect(requests(seat.log(), "session/prompt")).toHaveLength(1);
+    expect(openrig.channelRequests).toEqual([]);
+  });
+
   it("opens a conversation, writes the launch record, and only then reads ready, with uploads off and no hook token for dsh", async () => {
     const openrig = await fakeOpenRig("absent");
     // A DSH_HOME the person's shell exports (its startup files run after the seat's env:) isn't the seat's home.
@@ -721,5 +735,170 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(loadCommunityHarnessPreset("dsh", EXAMPLE)).toMatchObject({ ok: true, preset: {
       command: "openrig-dsh-runner.mjs", runner: true, launchResult: true, namesConversation: false, resume: false, firstInput: true,
     } });
+  });
+});
+
+
+async function nativeChannelFixture(lostResultId = "WAKE:A", refusal?: { status: number; code: string }, frameHint?: string) {
+  const frames: Array<Record<string, unknown>> = [], stages = new Map<string, string>(), posts: Array<Record<string, unknown>> = [];
+  const streams = new Set<import("node:http").ServerResponse>();
+  let lostAck = refusal !== undefined, lostResult = false, refusalSent = false;
+  let refusedAck: import("node:http").ServerResponse | undefined;
+  const offer = () => {
+    const frame = frames.find(f => stages.get(String(f.requestId)) === "offered") ?? frames.find(f => !stages.has(String(f.requestId)));
+    if (!frame) return; stages.set(String(frame.requestId), "offered");
+    const data = JSON.stringify(frame);
+    const wire = `${frame.stage === "offered" && frameHint !== "omit" ? `: runner-frame-chars=${frameHint ?? data.length}\n` : ""}event: request\nid: ${frame.sequence}\ndata: ${data}\n\n`;
+    for (const stream of streams) {
+      if (wire.length > 2 * 1024 * 1024) {
+        // A JSON escape can cross HTTP chunks; send its backslash before the remainder.
+        const split = wire.indexOf("\\") + 1;
+        stream.write(wire.slice(0, split)); setTimeout(() => { if (!stream.destroyed) stream.write(wire.slice(split)); }, 10);
+      } else stream.write(wire);
+    }
+  };
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/api/activity/runner-channel") {
+      res.writeHead(200, { "content-type": "text/event-stream" }); res.flushHeaders(); streams.add(res); offer(); req.on("close", () => streams.delete(res)); return;
+    }
+    let raw = ""; req.on("data", chunk => { raw += chunk; }); req.on("end", () => {
+      const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      const reply = (value: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(value)); };
+      if (req.url !== "/api/activity/runner-channel") return reply({ ok: true, tokenPersisted: true });
+      posts.push(body);
+      if (body.type === "hello") return reply({ capabilities: { input: true, wake: true, cancel: false }, receipts: [] });
+      stages.set(String(body.requestId), String(body.type));
+      if (body.type === "ack") {
+        offer();
+        if (refusal && body.requestId === "FIRST" && !refusalSent) { refusedAck = res; return; }
+        if (refusal && body.requestId === "LATER") {
+          reply({ receipt: { stage: body.type } });
+          setTimeout(() => { refusalSent = true; refusedAck!.writeHead(refusal.status, { "content-type": "application/json" }); refusedAck!.end(JSON.stringify({ code: refusal.code })); }, 25); return;
+        }
+        if (!lostAck) { lostAck = true; res.destroy(); return; }
+      }
+      if (body.type === "result" && body.requestId === lostResultId && !lostResult) { lostResult = true; res.destroy(); return; }
+      reply({ receipt: { stage: body.type } });
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => { for (const stream of streams) stream.destroy(); server.closeAllConnections(); server.close(); });
+  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, posts,
+    push: (ids: string[], payloadText?: string) => { for (const id of ids) frames.push({ version: 1, runId: "native-run", requestId: id, sequence: frames.length + 1,
+      kind: id.startsWith("WAKE:") ? "wake" : "input", payload: id.startsWith("WAKE:") ? { question: payloadText ?? id } : { text: payloadText ?? id } }); offer(); },
+    pushNativeInput: (members: number, body: string) => {
+      const requestId = "GROUP";
+      const frame = { version: 1, requestId, nodeId: "node-🧭", runId: "native-run", sequence: frames.length + 1,
+        kind: "input", inputRoute: "native", stage: "offered", bindingHash: "b".repeat(64),
+        ...(members > 1 ? { memberIds: Array.from({ length: members }, (_, index) => index === 0 ? requestId : `source-🧭-${index}`) } : {}),
+        payload: { text: Array.from({ length: members }, () => body).join("\n") } };
+      frames.push(frame); offer(); return frame;
+    },
+    reconnect: () => { for (const stream of streams) stream.end(); } };
+}
+
+describe("the actual dsh runner native channel", () => {
+  it.each(["omit", "invalid", "9007199254740991", "1"])("the production dsh reader refuses an invalid or unannounced oversized frame (%s)", async hint => {
+    const channel = await nativeChannelFixture("none", undefined, hint), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.pushNativeInput(2, hint === "omit" ? "q" + "\0".repeat(1024 * 1024 - 1) : "q");
+    await waitFor(() => channel.posts.filter(post => post.type === "hello").length >= 2, "reader rejection and reconnect", 2000);
+    expect(channel.posts.filter(post => post.type === "ack")).toEqual([]);
+    expect(requests(runner.log(), "session/prompt")).toEqual([]);
+  });
+
+  it.each([{ members: 1, character: "\0" }, { members: 2, character: "\0" }, { members: 9, character: "\n" }])("the production dsh reader accepts $members-source ordinary or grouped escaped native input", async ({ members, character }) => {
+    const channel = await nativeChannelFixture("none"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    const body = "q" + character.repeat((members === 1 ? 2 : 1) * 1024 * 1024 - 1);
+    const frame = channel.pushNativeInput(members, body);
+    if (members === 1) {
+      expect(frame).not.toHaveProperty("memberIds");
+      expect(JSON.stringify(frame).length).toBeGreaterThan(6 * 1024 * 1024 + 64 * 1024);
+    }
+    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "GROUP"), "native input acknowledged", 5000);
+    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "GROUP"), "native input completion", 5000);
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    const prompts = requests(runner.log(), "session/prompt");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({ params: { prompt: [{ type: "text", text: Array.from({ length: members }, () => body).join("\n") }] } });
+    channel.push(["WAKE:AFTER-GROUP"]); // An unhinted successor uses its own legacy bound, including after reconnect.
+    await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "WAKE:AFTER-GROUP"), "unhinted successor");
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  });
+
+  it.each([
+    { status: 409, code: "runner_receipt_erased", later: true },
+    { status: 401, code: "runner_grant_revoked", later: false },
+    { status: 409, code: "runner_grant_stale", later: false },
+    { status: 409, code: "runner_grant_pending", later: true },
+    { status: 409, code: "runner_grant_unverified", later: true },
+  ])("ACK refusal $code preserves custody, progress and person controls", async ({ status, code, later }) => {
+    const channel = await nativeChannelFixture("none", { status, code }), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["BUSY", "FIRST", "LATER"]);
+    await waitFor(() => channel.posts.filter(post => post.type === "ack").length >= 3, "all acknowledgements");
+    await new Promise(resolve => setTimeout(resolve, 350));
+    if (later) await waitFor(() => channel.posts.some(post => post.type === "result" && post.requestId === "LATER"), "later progress without a person pump", 1000);
+    runner.type("person after refusal");
+    await waitFor(() => requests(runner.log(), "session/prompt").some(command => JSON.stringify(command).includes("person after refusal")), "person input");
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    const prompts = requests(runner.log(), "session/prompt").map(command => (command.params as { prompt: Array<{ text: string }> }).prompt[0]!.text);
+    expect(prompts.filter(text => text === "FIRST")).toHaveLength(code === "runner_grant_pending" || code === "runner_grant_unverified" ? 1 : 0);
+    expect(prompts.filter(text => text === "LATER")).toHaveLength(later ? 1 : 0);
+    expect(prompts.filter(text => text === "BUSY")).toHaveLength(1);
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "BUSY" }));
+    expect(requests(runner.log(), "session/cancel")).toEqual([]);
+  });
+  it.each(["\n", "\0"])("accepts a full escaped question through the production dsh SSE reader (%j)", async character => {
+    const channel = await nativeChannelFixture("none"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    const question = "q" + character.repeat(1024 * 1024 - 1);
+    channel.push(["WAKE:LARGE"], question);
+    await waitFor(() => channel.posts.some(post => post.type === "ack" && post.requestId === "WAKE:LARGE"), "large question acknowledgement", 3000);
+    expect(channel.posts.filter(post => post.type === "ack" && post.requestId === "WAKE:LARGE")).toHaveLength(1);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  });
+
+  it("flushes an active managed turn's terminal receipt after child exit and a lost result reply", async () => {
+    const channel = await nativeChannelFixture("WAKE:EXIT"), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["WAKE:EXIT"]);
+    await waitFor(() => channel.posts.filter(post => post.type === "result" && post.requestId === "WAKE:EXIT").length === 2, "terminal receipt retry before exit", 3000);
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "WAKE:EXIT",
+      result: expect.objectContaining({ completion: "unknown", answer: null, submissionUnknown: true }) }));
+    expect(await runner.exited).toBe(0);
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(1);
+  });
+
+  it("uses one native prompt per request, queues busy wakes, and returns only dedicated answers despite lost receipt replies", async () => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);
+    channel.push(["BUSY", "WAKE:A", "WAKE:B", "LATER"]);
+    await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "LATER"), "all native results");
+    const prompts = requests(runner.log(), "session/prompt").map(p => (p.params as { prompt: Array<{ text: string }> }).prompt[0]!.text);
+    expect(prompts).toEqual(["BUSY", "WAKE:A", "WAKE:B", "LATER"]);
+    for (const id of ["WAKE:A", "WAKE:B"]) expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: id,
+      result: expect.objectContaining({ kind: "wake", answer: `actual ${id}`, completion: "completed" }) }));
+    channel.reconnect(); await new Promise(resolve => setTimeout(resolve, 350));
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(4);
+    expect(runner.log()[0]).toMatchObject({ start: { token: false } });
+  });
+  it("structured slash text never invokes the person's global abort parser", async () => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(post => post.type === "hello"), "native hello", 2000);
+    channel.push(["WAKE:CONTROL"], "/abort");
+    await waitFor(() => channel.posts.find(post => post.type === "result" && post.requestId === "WAKE:CONTROL"), "literal answer");
+    expect(requests(runner.log(), "session/cancel")).toEqual([]);
+    expect(requests(runner.log(), "session/prompt")[0]).toMatchObject({ params: { prompt: [{ type: "text", text: "/abort" }] } });
+  });
+  it.each([["CANCEL", "interrupted"], ["FAIL", "failed"], ["UNKNOWN", "unknown"], ["EMPTY", "unknown"]] as const)("terminal %s releases the wake barrier without an answer", async (suffix, completion) => {
+    const channel = await nativeChannelFixture(), runner = start(channel, { OPENRIG_ACTIVITY_HOOK_TOKEN: "oag_native_fixture", OPENRIG_RUN_ID: "native-run" });
+    await waitFor(() => channel.posts.some(p => p.type === "hello"), "native hello", 2000);
+    channel.push([`WAKE:${suffix}`, "WAKE:AFTER"]);
+    await waitFor(() => channel.posts.find(p => p.type === "result" && p.requestId === "WAKE:AFTER"), "barrier released");
+    expect(channel.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: `WAKE:${suffix}`, result: expect.objectContaining({ answer: null, completion }) }));
+    expect(requests(runner.log(), "session/prompt")).toHaveLength(2);
   });
 });
