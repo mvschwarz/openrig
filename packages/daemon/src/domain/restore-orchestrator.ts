@@ -288,6 +288,12 @@ export interface RestoreOrchestratorDeps {
   harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
 }
 
+/** A restored seat's checkpoint file in its working directory, named for the seat (its session name), so seats restored
+ *  into one folder (a run's `--cwd`, or a saved folder they share) each keep their own. */
+function checkpointFileName(sessionName: string): string {
+  return `.rigged-checkpoint-${sessionName.replace(/[^A-Za-z0-9._@-]/g, "-")}.md`;
+}
+
 export class RestoreOrchestrator {
   readonly db: Database.Database;
   private activeRestores = new Set<string>();
@@ -2266,7 +2272,7 @@ export class RestoreOrchestrator {
       if (!node.cwd) {
         return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: "Checkpoint available but node has no cwd" };
       }
-      const written = this.writeCheckpointFile(node.cwd, checkpoint);
+      const written = this.writeCheckpointFile(node.cwd, sessionName, checkpoint);
       if (written) {
         baseStatus = "rebuilt";
       } else {
@@ -3147,9 +3153,9 @@ export class RestoreOrchestrator {
     return { attemptId: started.seq, status: completed ? nodeStatusIn(completed.payload) : null };
   }
 
-  private writeCheckpointFile(cwd: string, checkpoint: Checkpoint): boolean {
+  private writeCheckpointFile(cwd: string, sessionName: string, checkpoint: Checkpoint): boolean {
     try {
-      const filePath = join(cwd, ".rigged-checkpoint.md");
+      const filePath = join(cwd, checkpointFileName(sessionName));
       const content = [
         "# OpenRig Checkpoint",
         "",

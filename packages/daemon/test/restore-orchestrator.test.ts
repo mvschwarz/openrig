@@ -2477,7 +2477,7 @@ describe("RestoreOrchestrator", () => {
     expect(codex.resume).not.toHaveBeenCalled();
   });
 
-  it("checkpoint written to exactly {cwd}/.rigged-checkpoint.md with summary", async () => {
+  it("checkpoint written to exactly {cwd}/.rigged-checkpoint-<session>.md with summary", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd: tmpDir }],
@@ -2493,7 +2493,7 @@ describe("RestoreOrchestrator", () => {
     if (result.ok) {
       expect(result.result.nodes[0]!.status).toBe("rebuilt");
       // Verify exact file path and content
-      const filePath = path.join(tmpDir, ".rigged-checkpoint.md");
+      const filePath = path.join(tmpDir, ".rigged-checkpoint-r99-worker.md");
       expect(fs.existsSync(filePath)).toBe(true);
       const content = fs.readFileSync(filePath, "utf-8");
       expect(content).toContain("Was working on feature X");
@@ -2538,9 +2538,42 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (result.ok) {
         expect(result.result.nodes[0]!.status).toBe("rebuilt");
-        expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint.md"), "utf-8")).toContain("Was working on feature X");
+        expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker.md"), "utf-8")).toContain("Was working on feature X");
       }
       expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.cwd).toBeNull();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // #3347 r2: seats restored into one folder each keep their own checkpoint, so each "rebuilt" is true. A run's --cwd puts
+  // every seat in one folder; on main, seats whose saved folder is the same already shared it.
+  it.each(["--cwd", "shared saved folder"] as const)("two seats in one folder (%s) each get their own checkpoint", async (mode) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
+    try {
+      const seeded = seedRigAndSnapshot({
+        nodes: [
+          { logicalId: "worker-a", role: "worker", runtime: "claude-code", ...(mode === "--cwd" ? {} : { cwd: tmpDir }) },
+          { logicalId: "worker-b", role: "worker", runtime: "claude-code", ...(mode === "--cwd" ? {} : { cwd: tmpDir }) },
+        ],
+        resumeType: "none",
+        edges: [],
+        withCheckpoint: "worker-a",
+      });
+      const nodeB = rigRepo.getRig(seeded.rigId)!.nodes.find((n) => n.logicalId === "worker-b")!.id;
+      const snap = updateSnapshotData(seeded, (data) => {
+        const own = Object.values(data.checkpoints)[0] as Record<string, unknown>;
+        data.checkpoints[nodeB] = { ...own, nodeId: nodeB, summary: "Worker B's own work" };
+      });
+      const result = await createOrchestrator().restore(snap.id, {
+        freshLogicalIds: ["worker-a", "worker-b"], ...(mode === "--cwd" ? { cwdOverride: tmpDir } : {}),
+      });
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (result.ok) expect(result.result.nodes.map((n) => n.status)).toEqual(["rebuilt", "rebuilt"]);
+      expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker-a.md"), "utf-8")).toContain("Was working on feature X");
+      expect(fs.readFileSync(path.join(tmpDir, ".rigged-checkpoint-r99-worker-b.md"), "utf-8")).toContain("Worker B's own work");
+      expect(fs.existsSync(path.join(tmpDir, ".rigged-checkpoint.md"))).toBe(false);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
