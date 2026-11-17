@@ -22,7 +22,7 @@ import { SeatStructuralActivityService } from "../src/domain/seat-structural-act
 import { activityRoutes } from "../src/routes/activity.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
-import { runWakeLadderTick, makePromptStateReader, classifyPromptAfterRefusal, queueRecoveryOwnsWake } from "../src/domain/queue-wake-ladder.js";
+import { runWakeLadderTick, makePermissionPromptReader, makePromptStateReader, classifyPromptAfterRefusal, queueRecoveryOwnsWake } from "../src/domain/queue-wake-ladder.js";
 import { startWakeLadderScheduler } from "../src/index.js";
 
 const databases: Database.Database[] = [];
@@ -80,7 +80,7 @@ function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName:
   const readPromptState = makePromptStateReader({ db,
     getSeatState: (nodeId) => oracle.getSeatState(nodeId),
     getLatestHook: (sessionName) => store.getLatestForNode({ sessionName }) });
-  return { db, bus, node, name, store, hook, transport, paste, enter, clock, readPromptState,
+  return { db, bus, node, name, generation, store, hook, transport, paste, enter, clock, readPromptState,
     oracle: () => oracle, reconstruct: () => { oracle = newOracle(); }, structural, show: (next: string) => { screen.value = next; },
     changeGeneration: (g: string | null) => { currentGeneration = g; } };
 }
@@ -445,18 +445,15 @@ it.each([false, true])("a hook-only operator permission alerts elsewhere, never 
   } finally { await scheduler.stop(); }
 });
 
-it("a stale hook-only permission is unknown and creates no alert; a fresh current hook then alerts", async () => {
+it.each([null, "different-generation"])("a hook-only permission with unresolved or mismatched occupant %s stays unknown", async generation => {
   const f = permissionFixture();
   const repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
   await f.hook("Notification", "permission_prompt", 6 * 60_000);
-  expect(f.store.getLatestForNode({ sessionName: f.name })).toMatchObject({ state: "unknown", stale: true });
+  f.changeGeneration(generation);
   const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
   try {
     await scheduler.runTickNow();
     expect(repo.list({ limit: 100 })).toEqual([]);
-    await f.hook("Notification", "permission_prompt", 0);
-    await scheduler.runTickNow();
-    expect(repo.listAttention()).toHaveLength(1);
     expect(f.paste).not.toHaveBeenCalled();
     expect(f.enter).not.toHaveBeenCalled();
   } finally { await scheduler.stop(); }
@@ -479,4 +476,102 @@ it("a later confirmation of the same hook-only permission does not reopen its ow
     expect(repo.list({ limit: 100 })).toHaveLength(1);
     expect(repo.getById(alerts[0]!.qitemId)?.state).toBe("done");
   } finally { await scheduler.stop(); }
+});
+
+
+it("a hook-only clear after the owner closes an alert gives a later prompt one new alert", async () => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("Notification", "permission_prompt", 0);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    const first = repo.listAttention()[0]!;
+    expect(first).toBeDefined();
+    repo.update({ qitemId: first.qitemId, actorSession: "human@kernel", state: "done", closureReason: "no-follow-on" });
+    f.clock.value = new Date(f.clock.value.getTime() + 1000);
+    await f.hook("PermissionPromptCleared", null, 0);
+    await scheduler.runTickNow();
+    expect(repo.getById(first.qitemId)?.state).toBe("done");
+    expect(repo.listAttention()).toEqual([]);
+    f.clock.value = new Date(f.clock.value.getTime() + 1000);
+    await f.hook("Notification", "permission_prompt", 0);
+    await scheduler.runTickNow();
+    await scheduler.runTickNow();
+    expect(repo.list({ limit: 100 })).toHaveLength(2);
+    expect(repo.listAttention()).toHaveLength(1);
+    expect(repo.listAttention()[0]!.qitemId).not.toBe(first.qitemId);
+  } finally { await scheduler.stop(); }
+});
+
+it("the timer sees a retained hook-only prompt arriving after its read, even when the next read is over 300 seconds later", async () => {
+  vi.useFakeTimers();
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  const read = f.store.getLatestForNode.bind(f.store);
+  let posted = false;
+  const hookRead = vi.spyOn(f.store, "getLatestForNode").mockImplementation(input => {
+    f.clock.value = new Date();
+    const result = read(input);
+    if (!posted) {
+      posted = true;
+      // The hook arrives after this tick's inventory read, while that tick still runs.
+      f.store.recordHookEvent({ sessionName: f.name, runtime: "claude-code", generation: f.generation,
+        hookEvent: "Notification", subtype: "permission_prompt" });
+      vi.setSystemTime(Date.now() + 10_000);
+    }
+    return result;
+  });
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(posted).toBe(true);
+    expect(repo.listAttention()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(repo.listAttention()).toHaveLength(1);
+    expect(hookRead).toHaveBeenCalledTimes(3); // inventory per tick, then one destination-scoped send read
+    f.clock.value = new Date();
+    await f.hook("PermissionPromptCleared", null, 0);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(repo.listAttention()).toEqual([]); // retained clear is still clear at the following tick
+    expect(f.paste).not.toHaveBeenCalled();
+  } finally { await scheduler.stop(); hookRead.mockRestore(); vi.useRealTimers(); }
+});
+
+it("one failed hook-only inventory read does not hide a healthy seat and only the destination is re-read", async () => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  const bad = new RigRepository(f.db).addNode(f.node.rigId, "worker.bad", { role: "worker", runtime: "claude-code" });
+  const badName = "worker-bad@r1001", registry = new SessionRegistry(f.db);
+  const badSession = registry.registerSession(bad.id, badName);
+  registry.updateStatus(badSession.id, "running");
+  await f.hook("Notification", "permission_prompt", 0);
+  const log = vi.fn(), reads: string[] = [];
+  const reader = makePermissionPromptReader({ db: f.db, log, getLatestHook: destination => {
+    reads.push(destination);
+    if (destination === badName) throw new Error("fixture hook unavailable");
+    return f.store.getLatestForNode({ sessionName: destination });
+  } });
+  const result = await runWakeLadderTick({ db: f.db, queueRepo: repo, readPermissionPrompts: reader, log });
+  expect(result.outcome).not.toBe("failed");
+  expect(repo.listAttention()).toHaveLength(1);
+  expect(repo.listAttention()[0]!.tags).toContain(`prompt-destination:${f.name}`);
+  expect(reads.filter(name => name === badName)).toHaveLength(1);
+  expect(reads.filter(name => name === f.name)).toHaveLength(2);
+  expect(log.mock.calls.flat().join(" ")).toContain(badName);
+});
+
+it("a failed hook-only send-boundary re-read is contained and named", async () => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("Notification", "permission_prompt", 0);
+  const read = makePermissionPromptReader({ db: f.db,
+    getLatestHook: destination => f.store.getLatestForNode({ sessionName: destination }) });
+  const log = vi.fn();
+  const reader = vi.fn((destination?: string) => {
+    if (reader.mock.calls.length === 2) throw new Error("fixture send read unavailable");
+    return read(destination);
+  });
+  const result = await runWakeLadderTick({ db: f.db, queueRepo: repo, readPermissionPrompts: reader, log });
+  expect(result.outcome).not.toBe("failed");
+  expect(reader.mock.calls[1]).toEqual([f.name]);
+  expect(log.mock.calls.flat().join(" ")).toContain(f.name);
+  const alert = repo.list({ limit: 100 })[0]!;
+  expect(repo.listTransitions(alert.qitemId).some(t => t.transitionNote?.includes("operator rung resolved"))).toBe(false);
 });

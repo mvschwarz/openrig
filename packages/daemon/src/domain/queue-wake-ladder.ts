@@ -6,7 +6,7 @@ import { seatRuntimeHomeBySession } from "./seat-runtime-home.js";
 import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
-import { AGENT_ACTIVITY_FRESHNESS_MS, latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
+import { latestHookState, latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
@@ -219,7 +219,7 @@ export interface WakeLadderDeps {
   /** The kind of prompt a seat's cached activity reports (its needs-input reason); "unknown" when it doesn't say. */
   readPromptKind?: (destination: string) => PromptKind;
   /** Current-occupant permission hooks; no capture or attempted wake is needed. */
-  readPermissionPrompts?: () => PermissionPromptObservation[];
+  readPermissionPrompts?: (destination?: string) => PermissionPromptObservation[];
   /** Fresh bound kernel Codex screens only; no native input or new scheduler. */
   readHookReviews?: () => Promise<HookReviewObservation[]>;
   now?: Date;
@@ -1115,24 +1115,29 @@ export interface PermissionPromptObservation extends HookReviewObservation {
   evidenceRef: string;
 }
 
-/** A permission hook can need an answer even when its seat holds no work. Use the store's
- * freshness and generation verdict; retained stale evidence never starts this path. */
+/** A permission hook can need an answer even when its seat holds no work. Like the refusal path,
+ * read the latest retained hook, with its current-occupant verdict, until a newer hook moves on. */
 export function makePermissionPromptReader(deps: {
   db: Database.Database;
   getLatestHook: (destination: string, runtime: string | null) => AgentActivity | null | undefined;
-}): () => PermissionPromptObservation[] {
-  return () => (deps.db.prepare(`SELECT n.id AS nodeId, s.session_name AS destination, n.runtime
+  log?: (line: string) => void;
+}): (destination?: string) => PermissionPromptObservation[] {
+  return (onlyDestination) => (deps.db.prepare(`SELECT n.id AS nodeId, s.session_name AS destination, n.runtime
     FROM sessions s JOIN nodes n ON n.id=s.node_id JOIN rigs r ON r.id=n.rig_id
     WHERE r.archived_at IS NULL AND s.status NOT IN ('stopped','exited','detached','superseded')
+      AND (? IS NULL OR s.session_name = ?)
       AND s.id=(SELECT latest.id FROM sessions latest
       WHERE latest.node_id=n.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)`)
-    .all() as Array<{ nodeId: string; destination: string; runtime: string | null }>).map(({ nodeId, destination, runtime }) => {
-      const hook = deps.getLatestHook(destination, runtime);
-      const fresh = hook?.evidenceSource === "runtime_hook" && hook.stale === false
-        && hook.generationProvenance === "resolved";
-      const state = !fresh ? "unknown"
-        : hook.state === "needs_input" && hook.reason === "permission_prompt" || latestHookPermissionPending(hook, runtime) ? "blocked"
-        : hook.rawEvent === "PermissionPromptCleared" || hook.state === "running" || hook.state === "idle" ? "clear" : "unknown";
+    .all(onlyDestination ?? null, onlyDestination ?? null) as Array<{ nodeId: string; destination: string; runtime: string | null }>).map(({ nodeId, destination, runtime }) => {
+      let hook: AgentActivity | null | undefined;
+      try { hook = deps.getLatestHook(destination, runtime); }
+      catch (error) { (deps.log ?? console.error)(`[wake-ladder] permission hook unreadable for ${JSON.stringify(destination)}: ${String(error)}`); }
+      const current = hook?.evidenceSource === "runtime_hook" && hook.generationProvenance === "resolved";
+      const retainedState = current ? latestHookState(hook, runtime) : "unknown";
+      const permission = hook?.rawSubtype === "permission_prompt" || hook?.rawEvent === "PermissionPromptConfirmed";
+      const state = !current ? "unknown"
+        : retainedState === "needs_input" && permission || latestHookPermissionPending(hook, runtime) ? "blocked"
+        : hook?.rawEvent === "PermissionPromptCleared" || retainedState === "running" || retainedState === "idle" ? "clear" : "unknown";
       return { destination, state, episode: hook?.generation ?? "unknown", observedAt: hook?.eventAt ?? "",
         evidenceRef: `rig telemetry events --start retained --node ${nodeId} --limit 128 --json` };
     });
@@ -1402,13 +1407,24 @@ async function advancePromptRefusals(
   }
 
   const permissionObservations = new Map<string, PermissionPromptObservation>();
-  const permissionState = (observation: HookReviewObservation): HookReviewObservation["state"] =>
-    Number.isFinite(Date.parse(observation.observedAt))
-      && Math.abs(now.getTime() - Date.parse(observation.observedAt)) <= AGENT_ACTIVITY_FRESHNESS_MS ? observation.state : "unknown";
   try {
     for (const observation of deps.readPermissionPrompts?.() ?? []) {
-      const state = permissionState(observation);
-      permissionObservations.set(observation.destination, { ...observation, state });
+      const { state } = observation;
+      permissionObservations.set(observation.destination, observation);
+      // An owner may already have closed the alert. A later clear still bounds that episode,
+      // without reopening or changing the owner's disposition; the next prompt gets a new key.
+      if (state === "clear") {
+        const prefix = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}|after:`;
+        const latest = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE ${PROMPT_ALERT_ROWS}
+          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+          AND EXISTS (SELECT 1 FROM json_each(tags) WHERE substr(value, 1, ?) = ?)
+          ORDER BY ts_created DESC, qitem_id DESC LIMIT 1`).get(PROMPT_ALERT_TAG, prefix.length, prefix) as { qitem_id: string } | undefined;
+        const row = latest && deps.queueRepo.getById(latest.qitem_id);
+        if (row && !["pending", "in-progress", "blocked"].includes(row.state)
+          && !deps.queueRepo.listTransitions(row.qitemId).some(t => t.actorSession === LADDER_ACTOR && t.transitionNote === PROMPT_CLEARED_NOTE)) {
+          appendMarker(deps.queueRepo, row, PROMPT_CLEARED_NOTE);
+        }
+      }
       if (state !== "blocked" || deps.queueRepo.deliveryDrains.holds(observation.destination)) continue;
       const key = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
       if (closedEpisode(key)) continue;
@@ -1719,8 +1735,13 @@ async function advancePromptRefusals(
     if (view.lastMarkerTs !== null && now.getTime() - view.lastMarkerTs < intervalS * 1000) continue;
     // Re-read at the send boundary after aggregate persistence.
     if (group.permissionHook) {
-      const current = deps.readPermissionPrompts?.().find(o => o.destination === dest);
-      if (!current || permissionState(current) !== "blocked"
+      let current: PermissionPromptObservation | undefined;
+      try { current = deps.readPermissionPrompts?.(dest).find(o => o.destination === dest); }
+      catch (error) {
+        (deps.log ?? console.error)(`[wake-ladder] permission hook send read unreadable for ${JSON.stringify(dest)}: ${String(error)}`);
+        continue;
+      }
+      if (!current || current.state !== "blocked"
           || current.episode !== permissionObservations.get(dest)?.episode) continue;
     }
     if (group.hookReview) {
