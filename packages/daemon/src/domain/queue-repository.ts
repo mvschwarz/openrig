@@ -73,7 +73,7 @@ export interface RecordRelayOwnerNotificationTransportFailedInput extends Format
   actorSession?: string;
 }
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
-import { physicalSessionName } from "./session-registry.js";
+import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
@@ -2360,8 +2360,10 @@ export class QueueRepository {
   /** The lookup and create's insert run synchronously before its first delivery await.
    * Every new surface uses the same ID; old IDs and their original bodies remain intact. An answer to a decision parked
    * on the person it asked belongs to that park's question (`episodeKey`): its ID includes it, and only that ID counts. */
-  async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string; episodeKey?: string }): Promise<QueueItem> {
-    const { episodeKey, ...create } = input;
+  async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string; episodeKey?: string;
+    /** In-process guard, evaluated inside the first reply write transaction. Never a wire field. */
+    verifyBeforeCreate?: () => void }): Promise<QueueItem> {
+    const { episodeKey, verifyBeforeCreate, ...create } = input;
     // A runner's permission request is answered in its ask, and the runner reads the answer back. No reply row: it
     // would wake the runner's terminal, where typed text reads as a prompt to its agent. A host pairing request is
     // answered in its ask too: the pairing poll reads it there, and nothing reads a reply.
@@ -2373,7 +2375,7 @@ export class QueueRepository {
     // One reply per ask: another person's answer already returned is the answer, so it comes back, and the caller says so.
     const answered = this.getById(qitemId);
     if (answered) return answered;
-    return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] });
+    return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] }, verifyBeforeCreate);
   }
 
   /** Every answer this person returned to the ask (one per park), oldest first: after close, a replay finds the one its
@@ -2440,7 +2442,7 @@ export class QueueRepository {
     return row?.sourceSession === actorSession ? row : null;
   }
 
-  async create(input: QueueCreateInput): Promise<QueueItem & {
+  async create(input: QueueCreateInput, verifyBeforeCreate?: () => void): Promise<QueueItem & {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };
   }> {
@@ -2458,6 +2460,7 @@ export class QueueRepository {
     // record, but its wake comes from OpenRig: the seat named as source didn't send it.
     const wakeFrom = input.wakeTrigger === "openrig" && !isOpenRigSender(input.sourceSession) ? OPENRIG_SENDER : input.sourceSession;
     const txn = this.db.transaction(() => {
+      verifyBeforeCreate?.();
       const created = this.createInTransactionalContext(input);
       if (this.outbox && input.nudge !== false) {
         try {
@@ -2723,27 +2726,35 @@ export class QueueRepository {
     }
   }
 
-  /** A person by address or by the registry: a registered person may be addressed as their seat or an alias. */
-  /** A runner's permission ask whose seat has since been relaunched can't be answered: its request died with the
-   *  occupant. Close it (canceled), so the person sees it isn't waiting, and return true. An unreadable ledger
-   *  closes nothing. */
+  /** Where a runner permission ask's seat stands, read once from the live tenure ledger. Only `replaced` (a later occupant holds
+   *  the seat) and `absent` (the node itself is gone) are positive evidence that the ask can never be answered. `no-tenure`
+   *  (the node exists but its ledger has no tenure) and `unreadable` (the read threw) prove neither that the ask is current
+   *  nor that it is stale: they are unknown. */
+  runnerPermissionAuthority(origin: { nodeId: string; generation: string }): "current" | "replaced" | "absent" | "no-tenure" | "unreadable" {
+    try {
+      const tenure = new SessionRegistry(this.db).currentOccupantTenure(origin.nodeId);
+      if (tenure) return tenure.generationUuid === origin.generation ? "current" : "replaced";
+      return this.db.prepare("SELECT 1 FROM nodes WHERE id = ?").get(origin.nodeId) ? "no-tenure" : "absent";
+    } catch {
+      return "unreadable";
+    }
+  }
+
+  /** A runner's permission ask whose seat has since been relaunched (or gone) can't be answered: its request died with the
+   *  occupant. Close it (canceled), so the person sees it isn't waiting, and return true. Authority that is merely unknown
+   *  (no tenure yet, or an unreadable ledger) closes nothing. */
   private closeStaleRunnerPermission(qitemId: string): boolean {
     const item = this.getById(qitemId);
     const origin = item?.state === "pending" ? runnerPermissionOrigin(item) : null;
     if (!item || !origin) return false;
-    let current: string | null;
-    try {
-      current = (this.db.prepare("SELECT generation_uuid FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1")
-        .get(origin.nodeId) as { generation_uuid: string } | undefined)?.generation_uuid ?? null;
-    } catch {
-      return false;
-    }
-    if (current === origin.generation) return false;
+    const authority = this.runnerPermissionAuthority(origin);
+    if (authority !== "replaced" && authority !== "absent") return false;
     this.update({ qitemId, actorSession: item.sourceSession, state: "canceled",
       transitionNote: "runner-permission-stale reason=relaunched: a later occupant holds this seat, so any answer here is not sent." });
     return true;
   }
 
+  /** A person by address or by the registry: a registered person may be addressed as their seat or an alias. */
   isPersonAddress(destination: string): boolean {
     if (!destination.includes("@")) return false;
     if (isHumanSeatSessionRef(destination)) return true;
@@ -4751,9 +4762,10 @@ export class QueueRepository {
     // The click is on the ask before anyone hears of it; a failed event never takes it back or holds up its return.
     if (changed && result.status === "recorded") {
       try {
-        this.eventBus.emit({ type: "queue.answer_recorded", qitemId: input.qitemId, actorSession: input.actorSession,
+        const event = this.eventBus.persistWithinTransaction({ type: "queue.answer_recorded", qitemId: input.qitemId, actorSession: input.actorSession,
           questionId: input.questionId, answered: changed.answered, questions: result.questions.length,
           complete: result.complete, summary: changed.summary });
+        if (!this.eventBus.registerPersistedWithinActiveEnvelope(event)) this.eventBus.notifySubscribers(event);
       } catch (error) {
         console.warn(`[queue] ${input.qitemId}'s recorded answer has no event`, error);
       }
@@ -4777,6 +4789,22 @@ export class QueueRepository {
   }
 
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
+  /** Bounded recorded relations for an opened request/result. No inference from seats, summaries or timestamps. */
+  relatedTo(qitemId: string, limit = 101): Array<{ item: QueueItem; relation: "reply-to" | "handed-off-from" | "blocked-on" }> {
+    const rows = this.db.prepare(`SELECT qitem_id, reply_to, handed_off_from, blocked_on FROM queue_items
+      WHERE reply_to = ? OR handed_off_from = ? OR blocked_on = ? ORDER BY rowid LIMIT ?`)
+      .all(qitemId, qitemId, qitemId, Math.min(101, Math.max(1, limit))) as Array<{ qitem_id: string; reply_to: string | null; handed_off_from: string | null; blocked_on: string | null }>;
+    return rows.flatMap(row => {
+      const item = this.getById(row.qitem_id);
+      if (!item) return [];
+      const relations: Array<"reply-to" | "handed-off-from" | "blocked-on"> = [];
+      if (row.reply_to === qitemId) relations.push("reply-to");
+      if (row.handed_off_from === qitemId) relations.push("handed-off-from");
+      if (row.blocked_on === qitemId) relations.push("blocked-on");
+      return relations.map(relation => ({ item, relation }));
+    });
+  }
+
   /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions, and the evidence it
    *  points to, when it has any) and its decision state (open, blocked or terminal; who it's addressed to or parked on; its
    *  answers, a decision made for them, the current park, and the replies returned). A label, a wake, a claim or a note on a
