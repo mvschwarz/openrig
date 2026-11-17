@@ -214,7 +214,8 @@ export class CoreAppJob {
       if (!request || request.contentErasedAt) throw new CoreAppError("source_unavailable", 404);
       if (appAskUnsupported(this.queue, request) === "unsupported_request_kind") throw new CoreAppError("unsupported_request_kind", 422);
       const graph = this.graph(credential.appId, requestId), permission = this.permission(request, graph.nodes);
-      const reply = [...graph.nodes.values()].find(item => item.replyTo === requestId && item.tags?.includes("human-answer"));
+      const answers = new Set(this.queue.answersForAsk(requestId).map(answer => answer.qitemId));
+      const reply = [...graph.nodes.values()].find(item => item.replyTo === requestId && answers.has(item.qitemId));
       const isPermission = !!runnerPermissionOrigin(request);
       const answerReturn = reply ? { status: "returned", replyQitemId: reply.qitemId, source: reply.sourceSession, target: reply.destinationSession,
         body: reply.body, replyTo: reply.replyTo, links: { self: this.workLink(reply.qitemId, requestId, actor) } }

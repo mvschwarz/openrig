@@ -160,6 +160,29 @@ describe("submission interruption and fencing", () => {
     expect(f.log.countAll()).toBe(1);
     expect(observed).toEqual(["queue.answer_recorded", "mission_control.action_executed"]);
   });
+  it("publishes a complete choice only after its checkpoint commits and retries without duplicate notifications", async () => {
+    const f = await jobFixture(), binding = f.binding();
+    const observed: Array<{ type: string; inTransaction: boolean }> = [];
+    closes.push(f.bus.subscribe(event => observed.push({ type: event.type, inTransaction: f.db.inTransaction })));
+    const prepare = f.db.prepare.bind(f.db); let failCheckpoint = true;
+    vi.spyOn(f.db, "prepare").mockImplementation(sql => {
+      if (failCheckpoint && sql.startsWith("UPDATE core_app_submissions SET checkpoint_json")) {
+        failCheckpoint = false; throw new Error("fixture checkpoint failure");
+      }
+      return prepare(sql);
+    });
+    const seq = f.bus.maxSeq();
+    expect((await f.send("/v1/answers/answer_complete_atomic", binding, f.token)).status).toBe(503);
+    expect(f.repo.getById(f.ask.qitemId)?.humanAnswers ?? {}).toEqual({});
+    expect(f.bus.maxSeq()).toBe(seq); expect(f.log.countAll()).toBe(0); expect(observed).toEqual([]);
+    const checkpoint = f.db.prepare("SELECT checkpoint_json,receipt_json FROM core_app_submissions").get() as { checkpoint_json: string; receipt_json: string | null };
+    expect(JSON.parse(checkpoint.checkpoint_json).before.humanAnswers ?? {}).toEqual({}); expect(checkpoint.receipt_json).toBeNull();
+    expect((await f.send("/v1/answers/answer_complete_atomic", binding, f.token)).status).toBe(200);
+    expect(observed.filter(event => event.type === "queue.answer_recorded")).toEqual([{ type: "queue.answer_recorded", inTransaction: false }]);
+    const committed = { seq: f.bus.maxSeq(), actions: f.log.countAll(), notifications: observed.length };
+    expect(await (await f.send("/v1/answers/answer_complete_atomic", binding, f.token)).json()).toMatchObject({ replayed: true });
+    expect({ seq: f.bus.maxSeq(), actions: f.log.countAll(), notifications: observed.length }).toEqual(committed);
+  });
   it.each(["typed-reply", "option"])("recovers an unclosed %s return after restart and nondecision annotations, including uncheckpointed own reply", async kind => {
     const f = await jobFixture(), binding = { ...f.binding(), answer: kind === "option" ? { kind, optionId: "yes" } : { kind, text: "Original words" } };
     const resolve = f.repo.resolveDirectHumanReply.bind(f.repo);
@@ -269,6 +292,21 @@ it("preserves the original-return disposition when a fresh identical choice fini
 
 
 describe("follow actual results and erase retained submissions", () => {
+  it.each(["legacy", "recovered", "post-close"] as const)("uses the answer owner to classify an untagged Slack %s reply", async mode => {
+    const f = await jobFixture();
+    if (mode === "post-close") f.repo.update({ qitemId: f.ask.qitemId, actorSession: PERSON, state: "done", closureReason: "no-follow-on" });
+    const reply = await f.repo.create({ qitemId: `qitem-slack-inbound-${mode}`, sourceSession: PERSON, destinationSession: "builder@test",
+      inboundReplyTo: f.ask.qitemId, body: "Original Slack words", tags: ["inbound"], nudge: false,
+      ...(mode === "recovered" ? { summary: "[Recovered after gap] earlier context" } : {}) });
+    if (mode === "post-close") f.db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run("2099-01-01T00:00:00.000Z", reply.qitemId);
+    const owned = f.repo.answersForAsk(f.ask.qitemId).map(answer => answer.qitemId);
+    expect(owned).toEqual(mode === "legacy" ? [reply.qitemId] : []);
+    const response = await f.send(`/v1/requests/${f.ask.qitemId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
+    expect(response.status).toBe(200);
+    expect((await response.json()).answerReturn).toMatchObject(mode === "legacy"
+      ? { status: "returned", replyQitemId: reply.qitemId, body: "Original Slack words", replyTo: f.ask.qitemId }
+      : { status: "not-returned", replyQitemId: null });
+  });
   it("follows A -> R and captured A -> W -> Z after attention disappears, without exposing unrelated work", async () => {
     const f = await jobFixture();
     const work = await f.repo.create({ sourceSession: "builder@test", destinationSession: "builder@test", body: "Prepare report", nudge: false });
