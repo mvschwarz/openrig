@@ -36,8 +36,8 @@ export interface TeardownResult {
    *  (settings that don't parse, a collector that isn't the shipped one), as `<file>: <why>`. Present only when
    *  something was kept. */
   keptFiles?: string[];
-  /** Claude seats whose latest launch was before OpenRig recorded the folder a launch uses, as `<session>: <saved folder>`:
-   *  down cleaned their saved folder, and can't tell whether that launch ran somewhere else. Present only when there was one. */
+  /** Claude seats whose latest launch recorded no folder (one started before launches recorded it), as
+   *  `<session>: <saved folder>`: down can't tell whether it ran somewhere else. Present only when there was one. */
   launchFolderUnrecorded?: string[];
   /** Sessions of seats joined with `rig attach` as an external CLI, which down doesn't stop or check. Without --delete
    *  each keeps its claim as it was, whether or not the app still runs. Present only when there was one. */

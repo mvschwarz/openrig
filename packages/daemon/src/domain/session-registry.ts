@@ -310,14 +310,18 @@ export class SessionRegistry {
         "INSERT INTO sessions (id, node_id, session_name) VALUES (?, ?, ?)"
       )
       .run(id, nodeId, sessionName);
-    if (opts?.launchedCwd) {
-      try { this.db.prepare("UPDATE sessions SET launched_cwd = ? WHERE id = ?").run(opts.launchedCwd, id); } catch { /* no column */ }
-    }
+    this.recordLaunchedCwd(id, opts?.launchedCwd);
     this.mintOccupantTenureBestEffort(nodeId, kind, reservedGeneration); // atom-B: mint this occupant generation
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
     );
+  }
+
+  /** The folder a launch started this session in, which rig down also cleans. A database without the column records none. */
+  recordLaunchedCwd(sessionId: string, cwd: string | null | undefined): void {
+    if (!cwd) return;
+    try { this.db.prepare("UPDATE sessions SET launched_cwd = ? WHERE id = ?").run(cwd, sessionId); } catch { /* no column */ }
   }
 
   /** Register a claimed session — skips naming validation, sets origin='claimed', startup_status='ready'. */

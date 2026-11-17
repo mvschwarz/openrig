@@ -17,6 +17,7 @@ import { queueRoutes } from "../src/routes/queue.js";
 import { seatRoutes } from "../src/routes/seat.js";
 import { transportRoutes } from "../src/routes/transport.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -415,6 +416,18 @@ describe("live seat runtime switch", () => {
       .toMatchObject({ ok: true, changed: false, accountHome: null });
     expect((db.prepare("SELECT claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as { claude_token_ref: string }).claude_token_ref).toBe(token);
     expect(fakeTmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("a switched Claude successor records the folder it was launched in, so rig down doesn't name it as unrecorded (#3409)", async () => {
+    const svc = service({ runtimeAdapters: { "claude-code": adapter("claude-code") } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Ordinary switch" })).toMatchObject({ ok: true });
+    expect(db.prepare("SELECT origin, launched_cwd FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1").get(nodeId))
+      .toEqual({ origin: "launched", launched_cwd: "/project" });
+    const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id;
+    const teardown = new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus,
+      tmuxAdapter: { killSession: async () => ({ ok: true }) } as never,
+      snapshotCapture: { db, captureSnapshot: () => ({ id: "snap" }) } as never });
+    expect((await teardown.teardown(rigId)).launchFolderUnrecorded).toBeUndefined();
   });
 
   it("an ordinary runtime switch without an account override retains legacy launch semantics", async () => {

@@ -90,8 +90,8 @@ interface TeardownResult {
   keptGuidance?: string[];
   /** Files in a Claude seat's cwd that keep OpenRig's additions because down couldn't safely change them, as `<file>: <why>`. */
   keptFiles?: string[];
-  /** Claude seats last launched before OpenRig recorded a launch's folder, as `<session>: <saved folder>`: only the saved
-   *  folder was cleaned. */
+  /** Claude seats whose latest launch recorded no folder (one started before launches recorded it), as
+   *  `<session>: <saved folder>`: down can't tell whether it ran somewhere else. */
   launchFolderUnrecorded?: string[];
   /** Seats joined with `rig attach` as an external CLI, which OpenRig doesn't stop. */
   leftRunning?: string[];
@@ -316,7 +316,7 @@ the command warns and exits without stopping; re-run with --yes to confirm expli
         for (const file of result.keptFiles) console.log(`  ${file}`);
       }
       if (result.launchFolderUnrecorded && result.launchFolderUnrecorded.length > 0) {
-        console.log(`Cleaned only the saved folder of ${result.launchFolderUnrecorded.length} Claude seat(s) last started before OpenRig recorded where a launch runs; if one was started elsewhere (rig up --existing --cwd), check that folder's .claude/settings.local.json and .openrig by hand:`);
+        console.log(`The launch folder was not recorded for ${result.launchFolderUnrecorded.length} Claude seat(s). Only saved and recorded folders can be checked automatically; if one was started elsewhere (rig up --existing --cwd), check that folder's .claude/settings.local.json and .openrig by hand:`);
         for (const seat of result.launchFolderUnrecorded) console.log(`  ${seat}`);
       }
 
