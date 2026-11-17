@@ -1124,7 +1124,11 @@ version, from checking the environment to a useful report to the OpenRig team.
   managed compaction, refocus waits for the restore request, which names the `refocusing` skill
   (the daemon installs it globally); three failed refocus attempts in a row for one occupant post
   one issue to the stream. The turn boundary, restore request and read-depth audit reach a seat
-  that stays quiet after `/compact`; they don't wait for its next turn. The managed `/compact` is
+  that stays quiet after `/compact`; they don't wait for its next turn. They do wait for the seat to
+  report that it compacted (a SessionStart hook with source `compact`), because Claude Code holds an
+  accepted `/compact` behind the turn the seat is running; after 10 minutes with no report they go
+  ahead, subject to the existing delivery checks, and a report that comes later owes the sequence
+  once more only if it arrives within two hours of the `/compact` write. The managed `/compact` is
   kept short enough to run as a command and is sent only to an idle seat; its own result reads
   `submitted, unconfirmed` (it reached the seat, not proof compaction ran), `uncertain` (not
   replayed) or `not sent`, so confirm by effect. Before each paste (preparation prompt, `/compact`,

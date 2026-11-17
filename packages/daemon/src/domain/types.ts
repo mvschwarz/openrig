@@ -232,6 +232,14 @@ export type RigEvent =
       wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
       /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
       outcome: ReturnType<typeof readSendOutcome> }
+  /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
+   *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
+   *  queued messages were handed back to typed delivery because the bridge had no live arm. */
+  | { type: "transport.hook_bridge_armed"; nodeId: string; sessionName: string; armId: string; hookEvent: string; generation: string | null }
+  | { type: "transport.hook_bridge_wake"; nodeId: string; sessionName: string; armId: string; outboxIds: string[]; hookEvent: string }
+  | { type: "transport.hook_bridge_expired"; nodeId: string; sessionName: string; armId: string }
+  | { type: "transport.hook_bridge_fallback"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
+  | { type: "transport.hook_bridge_uncertain"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's

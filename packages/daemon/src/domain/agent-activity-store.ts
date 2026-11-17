@@ -302,6 +302,56 @@ export class AgentActivityStore {
     } catch { return unknown("binding_unverified"); }
   }
 
+  /** #3389: the seat's own report of a compaction: the earliest SessionStart hook with source `compact` recorded for it
+   *  at or after `sinceMs` that came from this occupant, read from the persisted events (a daemon that restarted between
+   *  the hook and the read still finds it). "This occupant" is the asked generation, or one that only no-launch adoptions
+   *  have followed: an adoption mints a new generation for the same live process, whose hooks keep the one it launched
+   *  with (#2796, as the activity read and the session-identity route treat it). A report with no generation, or one
+   *  from an occupant a later launch replaced, is stored as such and is never returned, so it cannot stand in front of
+   *  a later report from this occupant. The generation it carried is returned.
+   *
+   *  The read is bounded at the write, not by how much the seat has recorded: a report is recorded after it is made, so
+   *  one recorded before the second the write started cannot be the report asked for, and the scan starts after the
+   *  newest such record. `events.created_at` has whole-second precision, so the bound is the second before the write's
+   *  second. The hook's own `eventAt` is still checked on every row that is read. */
+  findCompactSessionStart(input: { sessionName: string; sinceMs: number; generation: string }): { observedAt: number; generation: string } | null {
+    if (!input.generation || !Number.isFinite(input.sinceMs)) return null;
+    const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
+    if (!nodeId) return null;
+    const recordedBefore = new Date(Math.floor(input.sinceMs / 1000) * 1000 - 1000).toISOString().slice(0, 19).replace("T", " ");
+    const rows = this.db.prepare(`
+      SELECT payload FROM events
+      WHERE node_id = ? AND type = 'agent.activity'
+        AND seq > COALESCE((SELECT seq FROM events WHERE node_id = ? AND type = 'agent.activity' AND created_at < ?
+                            ORDER BY seq DESC LIMIT 1), 0)
+        AND json_extract(payload, '$.activity.rawEvent') = 'SessionStart'
+        AND json_extract(payload, '$.activity.rawSubtype') = 'compact'
+        AND json_extract(payload, '$.activity.generation') IS NOT NULL
+        AND json_extract(payload, '$.activity.eventAt') >= ?
+      ORDER BY seq DESC LIMIT 200`).all(nodeId, nodeId, recordedBefore, new Date(input.sinceMs).toISOString()) as EventPayloadRow[];
+    const same = new Map<string, boolean>();
+    const fromThisOccupant = (generation: string): boolean => {
+      if (generation === input.generation) return true;
+      let known = same.get(generation);
+      if (known === undefined) {
+        try {
+          known = !!this.isRegisteredOccupantGeneration?.(nodeId, generation) && !!this.isOccupantContinuedByAdoption?.(nodeId, generation);
+        } catch { known = false; }
+        same.set(generation, known);
+      }
+      return known;
+    };
+    let earliest: { observedAt: number; generation: string } | null = null;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      const observedAt = activity?.eventAt ? Date.parse(activity.eventAt) : NaN;
+      const generation = activity?.generation;
+      if (!(observedAt >= input.sinceMs) || typeof generation !== "string" || !fromThisOccupant(generation)) continue;
+      if (!earliest || observedAt < earliest.observedAt) earliest = { observedAt, generation };
+    }
+    return earliest;
+  }
+
   getLatestForNode(input: {
     nodeId?: string | null;
     sessionName?: string | null;
