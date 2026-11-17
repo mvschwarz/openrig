@@ -151,7 +151,7 @@ export function watchdogRoutes(): Hono {
       const specYaml = isContextUsageThreshold && body.watchedFilePath && body.watchedFilePath !== specWatchedFile
         ? withWatchedFile(body.specYaml, body.watchedFilePath)
         : body.specYaml;
-      const job = jobsRepo.register({
+      const { job, replaced } = jobsRepo.registerReplacing({
         policy: body.policy,
         specYaml,
         targetSession: body.targetSession,
@@ -176,7 +176,8 @@ export function watchdogRoutes(): Hono {
         targetSession: job.targetSession,
         registeredBy: job.registeredBySession,
       });
-      return c.json(job, 201);
+      // #3437: an auto-registered policy keeps one row per target; say which rows this one replaced.
+      return c.json(replaced.length > 0 ? { ...job, replaced } : job, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
