@@ -29,6 +29,8 @@ including contributions from people using OpenRig.
   backup. If you installed OpenRig another way, use that in place of the
   `npm install` line.
 
+  If you started the daemon with `--db`, set `DB` to that same path instead of using `rig config get db.path`, and pass that path with `--db` to each `rig daemon start` below, including recovery.
+
   ```sh
   rig daemon stop &&
   DB="$(rig config get db.path)" &&
