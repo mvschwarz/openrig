@@ -324,7 +324,10 @@ cited here by number with the code that carries them):
   samples, unchanged PID, with the launch's executable as readiness has it),
   takes the conversation that process holds now from Claude's
   `sessions/<pid>.json` (`readClaudePidSessionId`, as the resume refresher
-  does; a `/clear` rotates it) as the seat's resume target, even when it is the
+  does; a `/clear` rotates it, and the conversation title is not compared)
+  as the seat's resume target. Recovery also reads the fork parent's process
+  file, checking that its pane belongs to the parent session before and after
+  the read. This applies even when the conversation is the
   retiring occupant's or a fork parent's (`recoveredConversation`: the result
   says so, and a fork on its parent's conversation reports `forkId: "none"`,
   not a distinct fork; the token is written to the successor's session row only,
