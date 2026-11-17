@@ -6,6 +6,49 @@ import { collectAllowlistedProviderAuthEnv } from "../src/startup.js";
 const sessionName = "omp-worker@rig";
 const sessionFile = "/openrig/state/omp/omp-worker@rig/sessions/2026_0197.jsonl";
 
+describe("input-only managed RPC consumers", () => {
+  it.each(["omp", "arbitrary-rpc"])("%s accepts correlated input without inheriting Pi wake or epoch ownership", async runtime => {
+    const rpc: Record<string, unknown>[] = [], posts: Record<string, unknown>[] = [];
+    const core = new RunnerCore({ sendRpc: command => { rpc.push(command); }, mirrorLine: () => {}, writeSidecar: () => {},
+      postActivity: () => {}, sessionFileExists: () => true, now: () => "2026-09-24T12:00:00Z",
+      postRunner: async body => { posts.push(body); return true; } }, { sessionName, runId: "actual-run" }, { runtime });
+    expect(core.nativeChannelCapabilities()).toEqual({ input: false, wake: false, cancel: false });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true,
+      data: { sessionFile, isStreaming: false, pendingMessageCount: 0 } }));
+    expect(core.nativeChannelCapabilities()).toEqual({ input: true, wake: false, cancel: false });
+    const frame = (id: string, sequence: number) => ({ version: 1 as const, runId: "actual-run", requestId: id, sequence, kind: "input" as const, payload: { text: id } });
+    const beforeStale = rpc.length;
+    await core.acceptRunnerRequest({ ...frame("stale", 1), runId: "old-run" });
+    expect(rpc).toHaveLength(beforeStale);
+    for (const [id, sequence, data] of [["local", 1, { agentInvoked: false }], ["start", 2, { disposition: "started" }], ["busy", 3, {}]] as const) {
+      if (id === "busy") core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+      await core.acceptRunnerRequest(frame(id, sequence));
+      expect(rpc.at(-1)).toMatchObject({ id: `openrig-native-${id}`, type: "prompt", message: id, streamingBehavior: "steer" });
+      core.handlePiLine(JSON.stringify({ type: "response", id: `openrig-native-${id}`, command: "prompt", success: true, data }));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(posts).toContainEqual(expect.objectContaining({ type: "result", requestId: id, result: { kind: "input", accepted: true } }));
+    }
+    await core.acceptRunnerRequest(frame("busy", 3));
+    expect(rpc.filter(command => command.message === "busy")).toHaveLength(1);
+    await expect(core.acceptRunnerRequest(frame("other", 3))).rejects.toThrow(/sequence/);
+    await core.acceptRunnerRequest(frame("refused", 4));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "openrig-native-refused", success: false, error: "native refused" }));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(posts).toContainEqual(expect.objectContaining({ type: "rejected", requestId: "refused" }));
+    expect(posts.some(post => post.type === "turn" || post.nativeTurnId !== undefined || post.acceptedTurnId !== undefined)).toBe(false);
+    const before = rpc.length;
+    await core.acceptRunnerRequest({ version: 1, runId: "actual-run", requestId: "wake", sequence: 5, kind: "wake", payload: { question: "no native mapping" } });
+    await core.acceptRunnerRequest({ version: 1, runId: "actual-run", requestId: "cancel", sequence: 6, kind: "cancel", payload: { target: { runId: "actual-run", nativeTurnId: "invented" } } });
+    expect(rpc).toHaveLength(before);
+    core.handlePiExit(1);
+    expect(core.nativeChannelCapabilities()).toEqual({ input: false, wake: false, cancel: false });
+    const afterExit = rpc.length;
+    await core.acceptRunnerRequest(frame("after-exit", 7));
+    expect(rpc).toHaveLength(afterExit);
+  });
+});
+
 function runner() {
   const rpc: Record<string, unknown>[] = [];
   const activity: Record<string, unknown>[] = [];
@@ -55,13 +98,15 @@ describe("OMP runner command and child isolation", () => {
   });
 
   it("passes only declared provider key and managed identity, not daemon activity credentials", () => {
-    const env = buildPiChildEnv({ PATH: "/usr/bin", HOME: "/operator", ANTHROPIC_API_KEY: "seat-key", OPENAI_API_KEY: "other-key", OPENRIG_ACTIVITY_HOOK_TOKEN: "private-token", OPENRIG_OCCUPANT_GENERATION: "occupant-42", AWS_SECRET_ACCESS_KEY: "other-secret" }, { runtime: "omp", agentDir: "/openrig/state/omp/seat/agent", sessionsDir: "/openrig/state/omp/seat/sessions", model: "anthropic/claude-sonnet", sessionName, nodeId: "node-1", openrigHome: "/openrig", openrigUrl: "http://127.0.0.1:3000" });
+    const env = buildPiChildEnv({ PATH: "/usr/bin", HOME: "/operator", ANTHROPIC_API_KEY: "seat-key", OPENAI_API_KEY: "other-key", OPENRIG_ACTIVITY_HOOK_TOKEN: "private-token", OPENRIG_RUN_ID: "omp-actual-run", OPENRIG_RUN_GRANT_PRIVATE: "private-token", OPENRIG_OCCUPANT_GENERATION: "occupant-42", AWS_SECRET_ACCESS_KEY: "other-secret" }, { runtime: "omp", agentDir: "/openrig/state/omp/seat/agent", sessionsDir: "/openrig/state/omp/seat/sessions", model: "anthropic/claude-sonnet", sessionName, nodeId: "node-1", openrigHome: "/openrig", openrigUrl: "http://127.0.0.1:3000" });
     // OMP children get the same accepted identity allowlist as Pi (including
     // the occupant generation), plus the seat HOME and pinned identity.
     expect(env).toMatchObject({ HOME: "/openrig/state/omp/seat", PI_CODING_AGENT_DIR: "/openrig/state/omp/seat/agent", PI_CODING_AGENT_SESSION_DIR: "/openrig/state/omp/seat/sessions", ANTHROPIC_API_KEY: "seat-key", OPENRIG_SESSION_NAME: sessionName, OPENRIG_NODE_ID: "node-1", OPENRIG_RUNTIME: "omp", OPENRIG_HOME: "/openrig", OPENRIG_URL: "http://127.0.0.1:3000", OPENRIG_OCCUPANT_GENERATION: "occupant-42" });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
     expect(env).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
     expect(env).not.toHaveProperty("OPENRIG_ACTIVITY_HOOK_TOKEN");
+    expect(env).not.toHaveProperty("OPENRIG_RUN_ID");
+    expect(env).not.toHaveProperty("OPENRIG_RUN_GRANT_PRIVATE");
   });
 
   it("forwards the accepted OPENRIG_* identity to Pi children without OMP's seat HOME", () => {

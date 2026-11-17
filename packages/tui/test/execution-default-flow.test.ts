@@ -68,4 +68,112 @@ describe("#2761 execution view on the default flow", () => {
     expect(body).toContain("WAVE w1 · 3 slices · 3 planned");
     expect(text(executionContentLines(execution, scopes, [], "evidence", 400))).not.toContain("records:");
   });
+
+  type ReadinessItemState = "accepted" | "rejected" | "withdrawn";
+  type Row = { word: string; bucket: string; items?: ReadinessItemState[]; nextUp?: true };
+
+  /** A mission whose slices each carry the status word the daemon bucketed, and optionally judged proof items. */
+  function missionOf(rows: Row[]) {
+    const ids = rows.map((_, i) => `ND.${i + 1}`);
+    const dir = (i: number) => `0${i + 1}-nd`;
+    const execution = {
+      view: "execution",
+      mission: "non-delivery-flow",
+      derived_at: "2026-11-11T00:00:00.000Z",
+      sources: { git: { basis: "no reachable repo context" }, build_info: { commit: null } },
+      q1_lanes: [],
+      q2_sequencing: ids.map((id, i) => ({ slice_id: id, dir: dir(i), depends_on: [], blocked_on_rows: [], next_up: rows[i]!.nextUp ?? "INDETERMINATE",
+        next_up_basis: "own completion rung INDETERMINATE", next_up_rank: null })),
+      q3_care: ids.map((id) => ({ slice_id: id, build_wave: "w1" })),
+      q4_ladder: ids.map((id, i) => ({
+        slice_id: id,
+        dir: dir(i),
+        recorded_status: { word: rows[i]!.word, bucket: rows[i]!.bucket, basis: "SPEC.md frontmatter status:" },
+        locked: { value: false, basis: "no approved-spec-at" },
+        built: { candidate_sha: "INDETERMINATE", basis: UNRECORDED },
+        reviewed: { value: "INDETERMINATE", basis: "no candidate", legs: [] },
+        folded: { value: "INDETERMINATE", basis: "no candidate" },
+        adopted: { value: "INDETERMINATE", basis: "no candidate" },
+      })),
+      q5_park: [],
+    } as NonNullable<FleetSnapshot["execution"]>;
+    const template = demoSnapshot().scopes![0]!.slices[0]!;
+    const readinessOf = (items: ReadinessItemState[] | undefined) => items === undefined
+      ? { configured: false, state: "not-ready" as const, revision: "r1", items: [], issues: [] }
+      : {
+          configured: true,
+          state: items.every((state) => state === "accepted") ? "ready" as const : "not-ready" as const,
+          revision: "r1",
+          items: items.map((state, k) => ({ id: `item-${k}`, index: k + 1, text: `Item ${k + 1}`, state, reason: "judged", judgment: { id: `receipt-${k}` } })),
+          issues: [],
+        };
+    const scopes = [{
+      mission: "non-delivery-flow",
+      slices: rows.map((row, i) => ({
+        ...template, id: ids[i]!, dirName: dir(i), displayName: `ND ${i + 1}`, status: row.word,
+        readiness: readinessOf(row.items), proof: { paired: 0, total: 1 },
+      })),
+    }];
+    return { execution, scopes, ids, dir };
+  }
+
+  it("#2727 reads every closed-<reason> word as closed, with the reason kept on the strip, whatever the proof judgments say", () => {
+    const words = ["closed-deferred", "closed-superseded", "closed-wontfix", "closed-stale"];
+    const rows: Row[] = words.flatMap((word) => [
+      { word, bucket: "closed" },
+      { word, bucket: "closed", items: ["accepted"] },
+      { word, bucket: "closed", items: ["rejected"] },
+    ]);
+    const { execution, scopes, ids, dir } = missionOf(rows);
+
+    const body = text(executionContentLines(execution, scopes, [], null, 200));
+    for (const word of ["declared done", "planned", "outcomes pending", "outcome complete", "reopened"]) expect(body).not.toContain(word);
+    expect(body).not.toMatch(/\d+ (deferred|superseded)/);
+    expect(body).toContain("12 closed");
+    rows.forEach((row, i) => {
+      const strip = text(executionSliceStripLines(execution, ids[i]!, dir(i), 200, row.word));
+      expect(strip).toContain(`declared    ${row.word} (slice file)`);
+      expect(strip).toContain(`next        none — declared ${row.word}`);
+    });
+  });
+
+  it("#2727 keeps an in-place closed-deferred slice whose dependencies are met out of NEXT, so it never reads ready to start", () => {
+    // The daemon's sequencing sets next_up without reading the status, so a slice closed in place with nothing left to wait
+    // on still arrives marked next_up. Neither the ready-to-start pick nor the overview's fallback pick may land on it.
+    const { execution, scopes } = missionOf([
+      { word: "closed-deferred", bucket: "closed", nextUp: true },
+      { word: "active", bucket: "active" },
+    ]);
+    const body = text(executionContentLines(execution, scopes, [], null, 200));
+    expect(body).toContain("NEXT      ND.2 · dependency eligibility unknown");
+    expect(body).not.toContain("ready to start");
+    const page = text(executionContentLines(execution, scopes, [], "slice:ND.1", 200));
+    expect(page).toContain("next:         no next transition derived");
+    expect(page).not.toContain("ready to start");
+  });
+
+  it("#2727 keeps a delivered slice's accepted proof reading outcome complete and an open slice's rejected proof reading reopened", () => {
+    const { execution, scopes } = missionOf([
+      { word: "done", bucket: "done", items: ["accepted"] },
+      { word: "active", bucket: "active", items: ["rejected"] },
+    ]);
+    const body = text(executionContentLines(execution, scopes, [], null, 200));
+    expect(body).toContain("1 outcome complete");
+    expect(body).toContain("1 reopened");
+  });
+
+  it("#2727 leaves bare wontfix/stale/superseded planned and bare deferred as it read before", () => {
+    const { execution, scopes } = missionOf([
+      { word: "wontfix", bucket: "active" },
+      { word: "stale", bucket: "active" },
+      { word: "superseded", bucket: "active" },
+      { word: "deferred", bucket: "active" },
+      { word: "deferred", bucket: "active", items: ["rejected", "accepted"] },
+    ]);
+    const body = text(executionContentLines(execution, scopes, [], null, 200));
+    expect(body).toContain("3 planned");
+    expect(body).toContain("1 deferred");
+    expect(body).toContain("1 reopened");
+    expect(body).not.toContain("closed");
+  });
 });

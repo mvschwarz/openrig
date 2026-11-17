@@ -64,6 +64,17 @@ async function failedAdd(memberOverrides?: Record<string, unknown>) {
 }
 
 describe("explicit first-start retry after projection failure", () => {
+  it("#3253: a first-start retry whose limit can't be applied keeps the refusal's code (422 unsupported)", async () => {
+    const f = await failedAdd({ process_limits: { tasks_max: 8 } });
+    const problem = { kind: "unsupported" as const, reason: "this host can't make the seat scope", requested: { tasksMax: 8 } };
+    f.tmux.createSession = vi.fn(async () => ({ ok: false as const, code: "process_limits_unsupported", message: "refused for its limit",
+      retryable: false, processLimits: problem }));
+    const res = await f.request({ ...f.effectiveMember });
+    const body = await res.json();
+    expect({ status: res.status, body }, JSON.stringify(body)).toMatchObject({ status: 422,
+      body: { ok: false, code: "process_limits_unsupported", retryable: false, processLimits: problem } });
+  });
+
   // A seat's saved effort choice (rig seat set-effort reaches a never-started seat) is what its first
   // start sends; without one, the authored value just resolved, exactly as before.
   it("a first start sends the seat's saved effort choice, and keeps the authored value apart", async () => {

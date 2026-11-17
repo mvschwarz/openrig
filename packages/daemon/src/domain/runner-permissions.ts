@@ -6,6 +6,7 @@
 // seat's opt-in (`--deny`) refuses every request. Each default permit leaves one pull-only record on the stream.
 
 import type Database from "better-sqlite3";
+import { ActivityGrantStore } from "./activity-grants.js";
 import { createHash } from "node:crypto";
 import { isHumanSeatSessionRef } from "./session-name.js";
 import { resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
@@ -22,6 +23,8 @@ const QUESTION_ID = "permission";
 const NODE_TAG = "permission-node:";
 const GENERATION_TAG = "permission-generation:";
 const TURN_TAG = "permission-turn:";
+const RUN_TAG = "permission-run:";
+const NATIVE_TURN_TAG = "permission-native-turn:";
 const WITHDRAWN_NOTE = "runner-permission-withdrawn";
 const STALE_NOTE = "runner-permission-stale";
 /** The agent's own allow and reject options, kept on the ask so a person's yes or no in words maps to them. */
@@ -101,13 +104,15 @@ export type RunnerPermissionSeat = { nodeId: string; sessionName: string; genera
 export type RunnerPermissionOption = { optionId: string; name: string; kind: string };
 export type RunnerPermissionRequest = {
   nativeRef: string;
+  runId?: string;
+  nativeTurnId?: string;
   turnId: string;
   requestId: string;
   toolCall: { title?: string; kind?: string };
   options: RunnerPermissionOption[];
 };
 
-export type SubmitRefusalCode = "denied_by_seat" | "duplicate_request" | "invalid_permission_request" | "options_unsupported";
+export type SubmitRefusalCode = "denied_by_seat" | "duplicate_request" | "invalid_permission_request" | "options_unsupported" | "turn_withdrawn";
 export type SubmitResult =
   | { ok: true; askId: string; created: boolean }
   | { ok: true; state: "permitted"; optionId: string; reason: string }
@@ -140,6 +145,9 @@ export function runnerPermissionOrigin(item: Pick<QueueItem, "tags">): { nodeId:
 export function parseRunnerPermissionRequest(body: Record<string, unknown>): { ok: true; request: RunnerPermissionRequest } | { ok: false; message: string } {
   const nativeRef = text(body.nativeRef), turnId = idText(body.turnId), requestId = idText(body.requestId);
   if (!nativeRef || !turnId || !requestId) return { ok: false, message: "A permission request needs nativeRef, turnId and requestId." };
+  if ((body.runId !== undefined || body.nativeTurnId !== undefined)
+    && (!text(body.runId) || !text(body.nativeTurnId) || String(body.runId).length > 1024 || String(body.nativeTurnId).length > 1024))
+    return { ok: false, message: "Native permission correlation requires both runId and nativeTurnId." };
   if (!Array.isArray(body.options)) return { ok: false, message: "A permission request needs options[]." };
   const options: RunnerPermissionOption[] = [];
   for (const raw of body.options as unknown[]) {
@@ -150,10 +158,21 @@ export function parseRunnerPermissionRequest(body: Record<string, unknown>): { o
   }
   const toolCall = (body.toolCall ?? {}) as Record<string, unknown>;
   return { ok: true, request: { nativeRef, turnId, requestId, options,
+    ...(body.runId ? { runId: text(body.runId)!, nativeTurnId: text(body.nativeTurnId)! } : {}),
     toolCall: { title: text(toolCall.title) ?? undefined, kind: text(toolCall.kind) ?? undefined } } };
 }
 
 export class RunnerPermissions {
+  // Routes construct short-lived services; counts must span those instances while a queue create awaits.
+  private static readonly submissions = new WeakMap<Database.Database, Map<string, number>>();
+  private submissionKey(nodeId: string, target: { runId?: string; nativeTurnId?: string }): string {
+    return JSON.stringify([nodeId, target.runId, target.nativeTurnId]);
+  }
+  private submissions(): Map<string, number> {
+    let counts = RunnerPermissions.submissions.get(this.deps.db);
+    if (!counts) { counts = new Map(); RunnerPermissions.submissions.set(this.deps.db, counts); }
+    return counts;
+  }
   constructor(private readonly deps: {
     db: Database.Database;
     queueRepo: QueueRepository;
@@ -172,6 +191,7 @@ export class RunnerPermissions {
   }
 
   async submit(seat: RunnerPermissionSeat, request: RunnerPermissionRequest): Promise<SubmitResult> {
+    if (this.turnFenced(seat.nodeId, request)) return { ok: false, code: "turn_withdrawn", message: "Native turn permissions are withdrawn." };
     const selected = this.deps.ownerOf(seat.nodeId);
     if (selected === PERMISSIONS_DENY) {
       return { ok: false, code: "denied_by_seat",
@@ -181,6 +201,7 @@ export class RunnerPermissions {
     const reject = request.options.find((option) => option.kind === "reject_once") ?? request.options.find((option) => option.kind === "reject_always");
     // OpenRig's default is permit: when no one can be asked, the agent gets its own allow option at once.
     const permit = (why: string): SubmitResult => {
+      if (this.turnFenced(seat.nodeId, request)) return { ok: false, code: "turn_withdrawn", message: "Native turn permissions are withdrawn." };
       if (!allow) return { ok: false, code: "options_unsupported", message: `No one can be asked (${why}), and the agent offered no allow option to permit.` };
       // One record per request and turn: a resubmitted request finds its record already there.
       const key = JSON.stringify([seat.nodeId, seat.generation, request.nativeRef, request.requestId, request.turnId]);
@@ -214,33 +235,45 @@ export class RunnerPermissions {
     const kind = clip(request.toolCall.kind ?? "other", MAX_AGENT_TEXT);
     const selection = this.latestSelection(seat.nodeId);
     const offered = request.options.map((option) => `- ${clip(option.name, MAX_AGENT_TEXT)} (${option.kind}, ${option.optionId}): ${NATIVE_MEANING[option.kind]}.`);
-    await this.deps.queueRepo.create({
-      qitemId: askId,
-      sourceSession: seat.sessionName,
-      destinationSession: owner.address,
-      humanIntent: "decision",
-      humanAlert: true,
-      summary: clip(`Permission: ${seat.sessionName} asks to ${title} (${kind})`, 200),
-      humanQuestions: [{ id: QUESTION_ID, question: clip(`Allow ${seat.sessionName} to ${title} (${kind})?`, MAX_QUESTION_TEXT),
-        options: request.options.map((option) => ({ id: option.optionId,
-          label: clip(option.kind.endsWith("_always") ? `${option.name} (remembered by the agent)` : option.name, MAX_OPTION_LABEL) })) }],
-      tags: [RUNNER_PERMISSION_TAG, `${NODE_TAG}${seat.nodeId}`, `${GENERATION_TAG}${seat.generation}`, `${TURN_TAG}${request.turnId}`,
-        ...(allow ? [`${ALLOW_TAG}${allow.optionId}`, `${ALLOW_KIND_TAG}${allow.kind}`] : []), ...(reject ? [`${REJECT_TAG}${reject.optionId}`] : [])],
-      nudge: false,
-      body: [
-        `${seat.sessionName}'s agent asks permission for one tool call, and is waiting on it.`,
-        "",
-        `- **Tool call:** ${title} (${kind}), as the agent described it.`,
-        `- **Conversation:** ${request.nativeRef}, turn ${request.turnId}, request ${request.requestId}.`,
-        `- **Why you:** ${selected ? selection ?? "you are the seat's chosen permission answer owner" : "you are the default person, and no one else is chosen for this seat"}.`,
-        "",
-        "**The options the agent offered:**",
-        ...offered,
-        "",
-        "Your answer, a choice or your own words, goes to this host's receiving agent, which decides this one request while the agent waits: it acts on a clear answer at once, and asks you back when your words aren't clear. Where no agent can decide here, your answer is kept and the request waits, and nothing runs: decide directly with rig seat decide-permission, or set up a receiving agent. Closing this without answering counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
-      ].join("\n"),
-    });
-    return { ok: true, askId, created: true };
+    const counts = this.submissions(), key = this.submissionKey(seat.nodeId, request);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    try {
+      await this.deps.queueRepo.create({
+        qitemId: askId,
+        sourceSession: seat.sessionName,
+        destinationSession: owner.address,
+        humanIntent: "decision",
+        humanAlert: true,
+        summary: clip(`Permission: ${seat.sessionName} asks to ${title} (${kind})`, 200),
+        humanQuestions: [{ id: QUESTION_ID, question: clip(`Allow ${seat.sessionName} to ${title} (${kind})?`, MAX_QUESTION_TEXT),
+          options: request.options.map((option) => ({ id: option.optionId,
+            label: clip(option.kind.endsWith("_always") ? `${option.name} (remembered by the agent)` : option.name, MAX_OPTION_LABEL) })) }],
+        tags: [RUNNER_PERMISSION_TAG, `${NODE_TAG}${seat.nodeId}`, `${GENERATION_TAG}${seat.generation}`, `${TURN_TAG}${request.turnId}`,
+          ...(request.runId && request.nativeTurnId ? [`${RUN_TAG}${request.runId}`, `${NATIVE_TURN_TAG}${request.nativeTurnId}`] : []),
+          ...(allow ? [`${ALLOW_TAG}${allow.optionId}`, `${ALLOW_KIND_TAG}${allow.kind}`] : []), ...(reject ? [`${REJECT_TAG}${reject.optionId}`] : [])],
+        nudge: false,
+        body: [
+          `${seat.sessionName}'s agent asks permission for one tool call, and is waiting on it.`,
+          "",
+          `- **Tool call:** ${title} (${kind}), as the agent described it.`,
+          `- **Conversation:** ${request.nativeRef}, turn ${request.turnId}, request ${request.requestId}.`,
+          `- **Why you:** ${selected ? selection ?? "you are the seat's chosen permission answer owner" : "you are the default person, and no one else is chosen for this seat"}.`,
+          "",
+          "**The options the agent offered:**",
+          ...offered,
+          "",
+          "Your answer, a choice or your own words, goes to this host's receiving agent, which decides this one request while the agent waits: it acts on a clear answer at once, and asks you back when your words aren't clear. Where no agent can decide here, your answer is kept and the request waits, and nothing runs: decide directly with rig seat decide-permission, or set up a receiving agent. Closing this without answering counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
+        ].join("\n"),
+      });
+      if (this.turnFenced(seat.nodeId, request)) {
+        this.withdrawOne(seat, askId, "turn_cancelled");
+        return { ok: false, code: "turn_withdrawn", message: "Native turn ended while the ask was being submitted." };
+      }
+      return { ok: true, askId, created: true };
+    } finally {
+      const remaining = counts.get(key)! - 1;
+      if (remaining) counts.set(key, remaining); else counts.delete(key);
+    }
   }
 
   /** A grant's seat carries its launch generation: it reads only its own launch's requests. Only the current
@@ -249,6 +282,8 @@ export class RunnerPermissions {
     const asked = this.deps.queueRepo.getById(askId);
     const origin = asked ? runnerPermissionOrigin(asked) : null;
     if (!asked || !origin || (seat && origin.nodeId !== seat.nodeId)) return { ok: false, code: "not_found", message: `No permission request ${askId} for this seat.` };
+    if (this.turnFenced(origin.nodeId, { runId: tagValue(asked, RUN_TAG) ?? undefined, nativeTurnId: tagValue(asked, NATIVE_TURN_TAG) ?? undefined }))
+      return { ok: true, state: "withdrawn" };
     const item = this.liveEnd(asked);
     const askIsCurrent = this.deps.currentGeneration(origin.nodeId) === origin.generation;
     const callerMatches = !seat?.generation || seat.generation === origin.generation;
@@ -377,20 +412,58 @@ export class RunnerPermissions {
     return this.read(null, askId);
   }
 
+  withdrawTurn(seat: RunnerPermissionSeat, target: { runId: string; nativeTurnId: string }): { confirmed: boolean; withdrawn: number; pendingSubmissions: number } {
+    if (!target.runId || !target.nativeTurnId) return { confirmed: false, withdrawn: 0, pendingSubmissions: 0 };
+    if (this.deps.currentGeneration(seat.nodeId) !== seat.generation) {
+      const grants = new ActivityGrantStore(this.deps.db), active = grants.activeForNode(seat.nodeId);
+      if (!active || active.runId !== target.runId || active.generation !== seat.generation || grants.standing(active.grantId) !== "current")
+        return { confirmed: false, withdrawn: 0, pendingSubmissions: 0 };
+    }
+    if (!this.turnFenced(seat.nodeId, target)) this.deps.eventBus.emit({ type: "agent.runner_turn_fenced", nodeId: seat.nodeId,
+      generation: seat.generation, ...target });
+    const rows = this.deps.db.prepare(`SELECT qitem_id FROM queue_items
+      WHERE EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value=?)
+      AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value=?)
+      AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value=?)`).all(
+        `${NODE_TAG}${seat.nodeId}`, `${RUN_TAG}${target.runId}`, `${NATIVE_TURN_TAG}${target.nativeTurnId}`) as { qitem_id: string }[];
+    let withdrawn = 0, confirmed = true;
+    for (const row of rows) {
+      const result = this.withdrawOne(seat, row.qitem_id, "turn_cancelled", true);
+      if (result.ok && result.state === "withdrawn") withdrawn++;
+      else if (!result.ok || result.state === "pending") confirmed = false;
+    }
+    const pendingSubmissions = this.submissions().get(this.submissionKey(seat.nodeId, target)) ?? 0;
+    return { confirmed: confirmed && pendingSubmissions === 0, withdrawn, pendingSubmissions };
+  }
+
+  private turnFenced(nodeId: string, target: { runId?: string; nativeTurnId?: string }): boolean {
+    return !!(target.runId && target.nativeTurnId && this.deps.db.prepare(`SELECT 1 FROM events WHERE node_id=?
+      AND type='agent.runner_turn_fenced' AND json_extract(payload,'$.runId')=? AND json_extract(payload,'$.nativeTurnId')=? LIMIT 1`)
+      .get(nodeId, target.runId, target.nativeTurnId));
+  }
+
   withdraw(seat: { nodeId: string; generation?: string } | null, askId: string, reason: string): WithdrawResult {
+    return this.withdrawOne(seat, askId, reason);
+  }
+
+  private withdrawOne(seat: { nodeId: string; generation?: string } | null, askId: string, reason: string, requireLocal = false): WithdrawResult {
     if (!WITHDRAW_REASONS.has(reason)) {
       return { ok: false, code: "invalid_permission_request", message: "reason must be turn_cancelled, turn_ended or exited." };
     }
+    const asked = this.deps.queueRepo.getById(askId);
+    const origin = asked ? runnerPermissionOrigin(asked) : null;
+    if (!asked || !origin || seat && (seat.nodeId !== origin.nodeId || seat.generation && seat.generation !== origin.generation))
+      return { ok: false, code: "not_found", message: "Permission request does not belong to this seat." };
     const now = this.read(seat, askId);
-    if (!now.ok || now.state !== "pending") return now;
-    const asked = this.deps.queueRepo.getById(askId)!;
+    if (!now.ok || !["pending", "withdrawn"].includes(now.state)) return now;
     const live = this.liveEnd(asked);
+    if (live && this.withdrawnAfterClose(live)) return { ok: true, state: "withdrawn" };
     // A handoff this host can't follow leaves its rows as they are; the runner just stops waiting. A row closed without a
     // decision (its answer kept, so the request read pending) can't be canceled: the withdrawal is recorded on it instead.
     if (live && (live.state === "pending" || live.state === "in-progress" || live.state === "blocked")) this.close(live, WITHDRAWN_NOTE, reason);
     else if (live) this.deps.queueRepo.update({ qitemId: live.qitemId, actorSession: live.sourceSession, state: live.state,
       transitionNote: `${WITHDRAWN_NOTE} reason=${reason}: the runner's request ended, so any answer or decision here is not sent.` });
-    return { ok: true, state: "withdrawn" };
+    return !requireLocal || live ? { ok: true, state: "withdrawn" } : { ok: true, state: "pending" };
   }
 
   /** A person who closed the ask with their own words, not a choice or a plain yes or no: the read passes them back as

@@ -317,6 +317,18 @@ describe("#69 production detector with a fake executor", () => {
     processMocks.execFile.mockImplementation((_file, _args, _options, callback: HelpCallback) => {
       callback(new Error("spawn codex ENOENT"), "");
     });
-    expect(await codexDaemonSupportProbe(launchPath)(cwd)).toEqual({ kind: "unknown", detail: "codex --help failed: spawn codex ENOENT" });
+    // A working directory that exists: the ENOENT is the executable's.
+    expect(await codexDaemonSupportProbe(launchPath)(process.cwd())).toEqual({ kind: "unknown", detail: "codex --help failed: spawn codex ENOENT" });
+  });
+
+  // A workspace restored onto another home: Node reports the missing working directory as `spawn codex ENOENT`.
+  it("names a working directory that doesn't exist instead of a missing Codex", async () => {
+    processMocks.execFile.mockImplementation((_file, _args, _options, callback: HelpCallback) => {
+      callback(Object.assign(new Error("spawn codex ENOENT"), { code: "ENOENT" }), "");
+    });
+    const missing = "/home/lhs1116/project-that-moved";
+    expect(fs.existsSync(missing)).toBe(false);
+    expect(await codexDaemonSupportProbe(launchPath)(missing)).toEqual({ kind: "unknown",
+      detail: `codex --help failed: the seat's working directory ${missing} doesn't exist` });
   });
 });

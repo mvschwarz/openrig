@@ -1,7 +1,7 @@
 // #2789: a queue wake committed while its seat had no pane froze a guard binding that could never match once the seat
 // was bound, so every re-send was refused as "Committed wake recipient identity changed". These run through the real
 // SessionTransport and SeatDeliveryGuard, with only tmux itself stubbed: its commands are recorded, never run.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { migrate } from "../src/db/migrate.js";
@@ -14,9 +14,12 @@ import { SessionTransport } from "../src/domain/session-transport.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { holdForQuiet } from "../src/domain/policies/quiet-release.js";
+import { quietHoldCustody } from "../src/domain/quiet-hold-custody.js";
 
 /** A seat whose node and first occupant exist but whose pane isn't bound yet, as just after a restart. */
-function unboundSeat() {
+function unboundSeat(hasPendingPostCompactStage?: (session: string) => boolean) {
   const db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS);
   db.exec(`INSERT INTO rigs(id,name) VALUES ('rig','test');
     INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('a','rig','worker','claude-code');
@@ -37,7 +40,7 @@ function unboundSeat() {
   vi.spyOn(tmux, "listPanes").mockImplementation(async (name) => [{ id: guard.target(name).pane! } as never]);
   const transport = new SessionTransport({ db, tmuxAdapter: tmux, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db), sleep: async () => {} });
   const outbox = new OutboxHandler(db);
-  const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true, transport, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
+  const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true, transport, hasPendingPostCompactStage, loadHumanRegistry: () => ({ ok: true, entities: [], warnings: [] }) });
   repo.attachOutbox(outbox);
   /** The seat comes back: a new occupant, and its pane bound. */
   const relaunch = (occupant = "occupant-2", ordinal = 2, pane = "%1") => db.exec(`
@@ -56,7 +59,7 @@ function unboundSeat() {
     expect(writes).toEqual([]);
     return item;
   };
-  return { db, guard, tmux, outbox, repo, writes, relaunch, intentOf, sendsFor, createUnbound };
+  return { db, guard, tmux, transport, outbox, repo, writes, relaunch, intentOf, sendsFor, createUnbound };
 }
 
 describe("a wake committed before its seat had a pane (#2789)", () => {
@@ -132,5 +135,383 @@ describe("a wake committed before its seat had a pane (#2789)", () => {
     await f.repo.retryUnroutableWakesOnReachable("worker@test", "idle");
     expect(f.sendsFor(item.qitemId)).toBe(0);
     expect(f.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:.*changed/);
+  });
+});
+
+
+describe("a failed queue wake when its seat returns", () => {
+  const proof = "queue:wake-pre-input-failure";
+  const open: Database.Database[] = [];
+  afterEach(() => { for (const db of open.splice(0)) db.close(); });
+  type Result = Awaited<ReturnType<SessionTransport["send"]>>;
+  async function failed(result?: Result | "throw", compacting?: () => boolean) {
+    const f = unboundSeat(compacting); open.push(f.db);
+    f.relaunch("occupant-1", 1, "%1");
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "absent" });
+    const send = vi.spyOn(f.transport, "send");
+    if (result === "throw") send.mockRejectedValue(new Error("before input (unproved throw)"));
+    else if (result) send.mockResolvedValue(result);
+    const row = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "finish work once" });
+    await vi.waitFor(() => expect(f.intentOf(row.qitemId).deliveryState).not.toMatch(/^(pending|sending)$/));
+    return { ...f, row, send };
+  }
+  const reachable = (f: Awaited<ReturnType<typeof failed>>) => f.repo.retryUnroutableWakesOnReachable("worker@test", "idle");
+
+  it("uses the real transport's no-input evidence and the same durable intent once the pane returns", async () => {
+    const f = await failed();
+    expect(await f.send.mock.results[0]!.value).toMatchObject({ ok: false, sent: false, inputPhase: "not_reached", reason: "session_missing" });
+    expect(f.repo.getById(f.row.qitemId)!.lastNudgeResult).toMatch(/^failed:/);
+    const before = f.intentOf(f.row.qitemId);
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await reachable(f);
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+    expect(before.tags).toContain(proof);
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ outboxId: before.outboxId, body: before.body, deliveryState: "delivered" });
+    expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
+    expect(String(f.send.mock.calls[1]?.[1])).toContain("failed before input is retried once when the current binding is reachable again");
+    expect(String(f.send.mock.calls[1]?.[1])).not.toContain("delivery may repeat");
+    await reachable(f);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.send).toHaveBeenCalledTimes(2); // failed probe, then one input
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE audit_pointer=?").get(f.row.qitemId)).toEqual({ n: 1 });
+  });
+
+  it.each([
+    { name: "a new pane", occupant: "occupant-1", ordinal: 1, pane: "%2" },
+    { name: "an already-bound successor", occupant: "occupant-2", ordinal: 2, pane: "%1" },
+    { name: "a successor in a new pane", occupant: "occupant-2", ordinal: 2, pane: "%2" },
+  ])("reconciles the original proved-unsent intent to $name in the same seat", async ({ occupant, ordinal, pane }) => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    f.relaunch(occupant, ordinal, pane);
+    const tenures = f.db.prepare("SELECT * FROM occupant_tenures ORDER BY id").all();
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await reachable(f);
+    const after = f.intentOf(f.row.qitemId);
+    expect(after).toMatchObject({ outboxId: before.outboxId, senderSession: before.senderSession,
+      destinationSession: before.destinationSession, body: before.body, auditPointer: before.auditPointer,
+      tsDispatched: before.tsDispatched, deliveryState: "delivered",
+      guardBinding: { nodeId: "a", session: "worker@test", occupant, pane } });
+    expect(after.tags).not.toContain(proof);
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+    expect(String(f.send.mock.calls[1]?.[1])).toContain(`Queue handoff: ${f.row.qitemId}`);
+    expect(String(f.send.mock.calls[1]?.[1])).not.toContain("finish work once");
+    const audit = f.db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id=? AND transition_note LIKE 'queue wake binding reconciled %'").all(f.row.qitemId) as Array<{ transition_note: string }>;
+    expect(audit).toHaveLength(1);
+    expect(JSON.parse(audit[0]!.transition_note.slice("queue wake binding reconciled ".length)))
+      .toEqual({ outboxId: before.outboxId, from: before.guardBinding, to: after.guardBinding });
+    await reachable(f);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.db.prepare("SELECT * FROM occupant_tenures ORDER BY id").all()).toEqual(tenures);
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE audit_pointer=?").get(f.row.qitemId)).toEqual({ n: 1 });
+  });
+
+  it("retains the original proof until the same seat has a current pane", async () => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    f.db.prepare("UPDATE bindings SET tmux_pane=NULL WHERE node_id='a'").run();
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await reachable(f);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: before.guardBinding });
+    expect(f.intentOf(f.row.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    f.relaunch("occupant-2", 2, "%2");
+    await reachable(f);
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "delivered", guardBinding: { occupant: "occupant-2", pane: "%2" } });
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+  });
+
+  it("rolls back the claim and binding if its reconciliation audit cannot be recorded", async () => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    f.relaunch("occupant-2", 2, "%2");
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    const log = (f.repo as unknown as { transitionLog: { append(input: { transitionNote?: string }): void } }).transitionLog;
+    const append = log.append.bind(log);
+    vi.spyOn(log, "append").mockImplementation(input => {
+      if (input.transitionNote?.startsWith("queue wake binding reconciled ")) throw new Error("binding audit unavailable");
+      append(input);
+    });
+    await expect(reachable(f)).rejects.toThrow("binding audit unavailable");
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: before.guardBinding });
+    expect(f.intentOf(f.row.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the same proof-only reconciliation when startup draining reaches the intent first", async () => {
+    const f = await failed();
+    f.relaunch("occupant-2", 2, "%2");
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await f.repo.drainPendingWakeIntents();
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "delivered", guardBinding: { nodeId: "a", occupant: "occupant-2", pane: "%2" } });
+    await reachable(f);
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+    expect(f.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the selected binding frozen if it changes again between selection and input", async () => {
+    const f = await failed();
+    f.relaunch("occupant-2", 2, "%2");
+    vi.mocked(f.tmux.probeSession).mockImplementationOnce(async () => {
+      f.relaunch("occupant-3", 3, "%3"); return { state: "present" };
+    });
+    await reachable(f);
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: { nodeId: "a", occupant: "occupant-2", pane: "%2" } });
+    expect(f.repo.getById(f.row.qitemId)!.lastNudgeResult).toMatch(/^failed:.*changed/);
+    expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.sendsFor(f.row.qitemId)).toBe(0);
+  });
+
+  it.each(["claimed", "transferred", "done", "blocked", "handed-off", "quiet", "quiet released", "compaction", "expected identity", "prompt-owned"])
+    ("preserves the old binding and proof during %s custody, including startup draining", async custody => {
+      let compacting = false;
+      const f = await failed(undefined, () => compacting);
+      const before = f.intentOf(f.row.qitemId);
+      f.relaunch("occupant-2", 2, "%2");
+      vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+      if (custody === "claimed") f.repo.claim({ qitemId: f.row.qitemId, destinationSession: "worker@test" });
+      else if (custody === "transferred") f.db.prepare("UPDATE queue_items SET handed_off_from=? WHERE qitem_id=?").run(f.row.qitemId, f.row.qitemId);
+      else if (["done", "blocked", "handed-off"].includes(custody)) f.db.prepare("UPDATE queue_items SET state=? WHERE qitem_id=?").run(custody, f.row.qitemId);
+      else if (custody === "quiet" || custody === "quiet released") {
+        holdForQuiet({ queueRepo: f.repo, jobsRepo: new WatchdogJobsRepository(f.db), qitemId: f.row.qitemId,
+          entityId: "owner", hold: { windowId: "fixture-quiet", occurrence: "until", revision: 1, notificationKey: f.row.qitemId } });
+        if (custody === "quiet released") f.repo.update({ qitemId: f.row.qitemId, actorSession: "quiet@system",
+          transitionNote: `quiet-release-dispatched notification_key=${f.row.qitemId}` });
+      }
+      else if (custody === "compaction") compacting = true;
+      else if (custody === "expected identity") f.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?").run(
+        JSON.stringify({ expectedIdentity: { nodeId: "a", sessionName: "worker@test", runtime: "claude-code", nativeId: "conversation-1" } }), before.outboxId);
+      else f.db.prepare("UPDATE queue_items SET last_nudge_result=? WHERE qitem_id=?").run("failed:target_needs_input", f.row.qitemId);
+      await reachable(f);
+      await f.repo.drainPendingWakeIntents();
+      expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: before.guardBinding });
+      expect(f.intentOf(f.row.qitemId).tags).toContain(proof);
+      expect(f.send).toHaveBeenCalledTimes(1);
+      expect(f.sendsFor(f.row.qitemId)).toBe(0);
+    });
+
+  it("does not reconcile to a different stable seat that reuses the address", async () => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    f.db.exec(`UPDATE nodes SET logical_id='retired' WHERE id='a'; DELETE FROM bindings WHERE node_id='a';
+      INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('b','rig','worker','claude-code');
+      INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('gb','b',1,'other-seat','fresh');
+      INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('bb','b','worker@test','%2');
+      INSERT INTO sessions(id,node_id,session_name,status) VALUES ('sb','b','worker@test','running');`);
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await reachable(f);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ deliveryState: "failed", guardBinding: before.guardBinding });
+    expect(f.intentOf(f.row.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.sendsFor(f.row.qitemId)).toBe(0);
+  });
+
+  it.each(["target_needs_input", "Refused: waiting at an interactive prompt"])("leaves %s to prompt-clear even with a running reading", async reason => {
+    const f = await failed({ ok: false, sessionName: "worker@test", sent: false, inputPhase: "not_reached", reason });
+    await f.repo.retryPromptWakesOnClear("worker@test", "running", true);
+    await f.repo.retryUnroutableWakesOnReachable("worker@test", "running");
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("failed");
+    f.send.mockResolvedValue({ ok: true, verified: true, sessionName: "worker@test" });
+    await f.repo.retryPromptWakesOnClear("worker@test", "running", false);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("delivered");
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("consumes one return-retry proof even when that retry again fails before input", async () => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId);
+    await reachable(f); // tmux is still unavailable: a second definite no-input outcome.
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.intentOf(f.row.qitemId)).toMatchObject({ outboxId: before.outboxId, deliveryState: "failed" });
+    expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
+    await reachable(f);
+    await f.repo.retryUnroutableWakesOnReachable("worker@test", "running");
+    expect(f.send).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { name: "untyped failure", result: { ok: false, error: "failed before input inputPhase=not_reached" } },
+    { name: "sent false without a phase", result: { ok: false, sent: false, reason: "session_missing" } },
+    { name: "attempted input", result: { ok: false, sent: false, inputPhase: "attempted" } },
+    { name: "written input", result: { ok: false, inputPhase: "written" } },
+    { name: "contradictory sent evidence", result: { ok: false, sent: true, inputPhase: "not_reached" } },
+    { name: "ack unknown", result: { ok: true, verified: false } },
+    { name: "timeout", result: { ok: false, sent: false, inputPhase: "not_reached", reason: "timeout" } },
+    { name: "deliberately retained", result: { ok: false, sent: false, inputPhase: "not_reached", outcome: "retained", reason: "typing_guard_enabled" } },
+    { name: "untyped throw", result: "throw" },
+  ] as const)("does not infer retry proof from $name", async ({ result }) => {
+    const f = await failed(result === "throw" ? result : { ...result, sessionName: "worker@test" });
+    expect(f.intentOf(f.row.qitemId).tags ?? []).not.toContain(proof);
+    const before = f.intentOf(f.row.qitemId);
+    f.relaunch("occupant-2", 2, "%2");
+    f.send.mockResolvedValue({ ok: true, verified: true, sessionName: "worker@test" });
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.intentOf(f.row.qitemId)).toEqual(before);
+  });
+
+  it.each(["sending", "indeterminate", "delivered", "retained", "retired"])("ignores a stale proof tag on a %s intent", async state => {
+    const f = await failed();
+    const before = f.intentOf(f.row.qitemId).guardBinding;
+    f.db.prepare("UPDATE outbox_entries SET delivery_state=? WHERE outbox_id=?").run(state, f.intentOf(f.row.qitemId).outboxId);
+    f.relaunch("occupant-2", 2, "%2");
+    await reachable(f);
+    expect(f.intentOf(f.row.qitemId).guardBinding).toEqual(before);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe(state);
+  });
+
+  it.each(["claimed", "transferred", "done", "blocked", "handed-off"])("leaves %s work out of the return retry", async state => {
+    const f = await failed();
+    if (state === "claimed") f.repo.claim({ qitemId: f.row.qitemId, destinationSession: "worker@test" });
+    else if (state === "transferred") f.db.prepare("UPDATE queue_items SET handed_off_from=? WHERE qitem_id=?").run(f.row.qitemId, f.row.qitemId);
+    else f.db.prepare("UPDATE queue_items SET state=? WHERE qitem_id=?").run(state, f.row.qitemId);
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("failed");
+  });
+
+  it("leaves compaction custody in charge, then retries on return after it clears", async () => {
+    let owed = false;
+    const f = await failed(undefined, () => owed);
+    owed = true;
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    owed = false;
+    await reachable(f);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("delivered");
+    expect(f.sendsFor(f.row.qitemId)).toBe(1);
+  });
+
+  it("rechecks compaction custody before a later intent claims after an awaited retry", async () => {
+    let owed = false;
+    const f = await failed(undefined, () => owed);
+    const peer = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "later work" });
+    await vi.waitFor(() => expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed"));
+    const before = f.intentOf(peer.qitemId);
+    expect(before.tags).toContain(proof);
+    vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+    let finish!: (result: Result) => void;
+    f.send.mockImplementationOnce(() => new Promise<Result>(resolve => { finish = resolve; }));
+    const inFlight = reachable(f);
+    await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3)); // Two original failures, then the first retry.
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("sending");
+    owed = true;
+    finish({ ok: true, verified: true, sessionName: "worker@test" });
+    await inFlight;
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("delivered"); // Already claimed; no cancellation is asserted.
+    expect(f.intentOf(peer.qitemId)).toMatchObject({ outboxId: before.outboxId, body: before.body, deliveryState: "failed" });
+    expect(f.intentOf(peer.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(3);
+    expect(f.sendsFor(peer.qitemId)).toBe(0);
+    owed = false;
+    await reachable(f);
+    expect(f.intentOf(peer.qitemId)).toMatchObject({ outboxId: before.outboxId, deliveryState: "delivered" });
+    expect(f.intentOf(peer.qitemId).tags).not.toContain(proof);
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(4);
+    expect(f.sendsFor(peer.qitemId)).toBe(1);
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE audit_pointer=?").get(peer.qitemId)).toEqual({ n: 1 });
+  });
+
+  it.each(["held", "released"])("leaves deliberate quiet custody %s", async state => {
+    const f = await failed();
+    holdForQuiet({ queueRepo: f.repo, jobsRepo: new WatchdogJobsRepository(f.db), qitemId: f.row.qitemId,
+      entityId: "owner", hold: { windowId: "fixture-quiet", occurrence: "until", revision: 1, notificationKey: f.row.qitemId } });
+    if (state === "released") f.repo.update({ qitemId: f.row.qitemId, actorSession: "quiet@system",
+      transitionNote: `quiet-release-dispatched notification_key=${f.row.qitemId}` });
+    expect(quietHoldCustody(f.db, f.row.qitemId)?.state).toBe(state);
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("failed");
+  });
+
+  it("rolls back a released member's state when restoring its proof throws", async () => {
+    let owed = false;
+    const f = await failed(undefined, () => owed);
+    const peer = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "urgent peer", priority: "urgent" });
+    await vi.waitFor(() => expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed"));
+    for (const row of [f.row, peer]) {
+      const entry = f.intentOf(row.qitemId);
+      f.db.prepare("UPDATE outbox_entries SET tags=? WHERE outbox_id=?").run(JSON.stringify([...(entry.tags ?? []), "queue:return:paired"]), entry.outboxId);
+    }
+    let observed: { before: string; after: string; error: unknown; proofCalls: unknown[] } | undefined;
+    f.send.mockImplementationOnce(async (_session, _text, opts) => {
+      const before = f.intentOf(peer.qitemId).deliveryState;
+      const proofWriter = f.repo as unknown as { setWakePreInputFailure(id: string, proved: boolean): void };
+      const proofWrite = vi.spyOn(proofWriter, "setWakePreInputFailure").mockImplementationOnce(() => { throw new Error("proof write failed"); });
+      let error: unknown;
+      try { opts!.recheckMembers!((input) => !input.urgent, true); }
+      catch (caught) { error = caught instanceof Error ? caught.message : caught; }
+      finally {
+        observed = { before, after: f.intentOf(peer.qitemId).deliveryState, error, proofCalls: [...proofWrite.mock.calls] };
+        proofWrite.mockRestore();
+      }
+      owed = true;
+      return { ok: false, outcome: "retained", reason: "typing_guard_enabled", sent: false, inputPhase: "not_reached", sessionName: "worker@test" };
+    });
+    await reachable(f);
+    // Assert outside the transport callback, whose rejected promise is normally converted into a failed send.
+    expect(observed).toEqual({ before: "sending", after: "sending", error: "proof write failed", proofCalls: [[f.intentOf(peer.qitemId).outboxId, true]] });
+  });
+
+  it("preserves no-input proof for a grouped member removed before the send", async () => {
+    let owed = false;
+    const f = await failed(undefined, () => owed);
+    const peer = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "urgent peer", priority: "urgent" });
+    await vi.waitFor(() => expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed"));
+    for (const row of [f.row, peer]) {
+      const entry = f.intentOf(row.qitemId);
+      f.db.prepare("UPDATE outbox_entries SET tags=? WHERE outbox_id=?").run(JSON.stringify([...(entry.tags ?? []), "queue:return:paired"]), entry.outboxId);
+    }
+    f.relaunch("occupant-2", 2, "%2");
+    f.send.mockImplementationOnce(async (_session, _text, opts) => {
+      // Under the lease the ordinary member is now held; the urgent peer is removed, not attempted.
+      const selected = opts!.recheckMembers!((input) => !input.urgent, true);
+      expect(selected.outboxIds).toEqual([f.intentOf(f.row.qitemId).outboxId]);
+      expect(f.intentOf(peer.qitemId).tags).toContain(proof); // Restored before this member gets its own attempt.
+      vi.mocked(f.tmux.probeSession).mockResolvedValue({ state: "present" });
+      owed = true;
+      return { ok: false, outcome: "retained", reason: "typing_guard_enabled", sent: false, inputPhase: "not_reached", sessionName: "worker@test" };
+    });
+    await reachable(f);
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("retained");
+    expect(f.intentOf(peer.qitemId).deliveryState).toBe("failed");
+    expect(f.intentOf(peer.qitemId).tags).toContain(proof);
+    expect(f.send).toHaveBeenCalledTimes(3);
+    expect(f.sendsFor(peer.qitemId)).toBe(0);
+    owed = false;
+    await reachable(f);
+    expect(f.intentOf(peer.qitemId).deliveryState).toBe("delivered");
+    expect(f.intentOf(peer.qitemId).tags).not.toContain(proof); // Its own send consumed the one retry.
+    expect(f.sendsFor(peer.qitemId)).toBe(1);
+    await reachable(f);
+    expect(f.sendsFor(peer.qitemId)).toBe(1);
+  });
+
+  it("clears proof on claim before an uncertain retry and never treats that retry as unsent", async () => {
+    const f = await failed();
+    let finish!: (result: Result) => void;
+    f.send.mockImplementationOnce(() => new Promise<Result>(resolve => { finish = resolve; }));
+    const inFlight = reachable(f);
+    await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("sending");
+    expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
+    finish({ ok: false, inputPhase: "attempted", reason: "delivery_indeterminate", sessionName: "worker@test" });
+    await inFlight;
+    expect(f.intentOf(f.row.qitemId).deliveryState).toBe("indeterminate");
+    expect(f.intentOf(f.row.qitemId).tags).not.toContain(proof);
+    await reachable(f);
+    expect(f.send).toHaveBeenCalledTimes(2);
   });
 });

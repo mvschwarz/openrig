@@ -1,5 +1,6 @@
 import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { configuredAccount } from "./configured-account.js";
+import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -11,6 +12,7 @@ import { identityVerdictConfirmsSessionMissing, identityVerdictConfirmsExecutorS
 import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
+import { getLatestStartupFailedEvent } from "./startup-orchestrator.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { TranscriptStore } from "./transcript-store.js";
@@ -481,6 +483,8 @@ function deriveContinuityOutcome(
   if (row.continuity_outcome) {
     return row.continuity_outcome as NodeInventoryEntry["continuityOutcome"];
   }
+  // That restore brought back an earlier occupant's conversation, not this one's.
+  if (restore?.retiredOccupant) return null;
   const restoreOutcome = restore?.outcome ?? "n-a";
   if (restoreOutcome === "n-a") return null;
   // Acknowledgment and responsiveness clear attention, not conversation lineage.
@@ -501,6 +505,8 @@ function deriveContinuityOutcome(
 interface RestoreProjection {
   outcome: NodeRestoreOutcome;
   resumedRuntime?: "claude-code" | "codex";
+  /** The attempt started before the node's latest completed handover, so it restored an earlier occupant. */
+  retiredOccupant?: true;
 }
 
 function restoreKey(rigId: string, nodeId: string): string {
@@ -561,11 +567,8 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
         && typeof start?.snapshotId === "string"
         && event?.snapshotId === start.snapshotId && result?.snapshotId === start.snapshotId
         && Array.isArray(result?.nodes) && Array.isArray(roster)) {
-        const intended = new Set(roster.map((node: any) => node?.nodeId));
-        for (const node of result.nodes) {
-          if (typeof node?.nodeId === "string" && intended.has(node.nodeId)) {
-            attempt.outcomes.set(node.nodeId, node.status);
-          }
+        for (const node of restoreOutcomesByIntendedNode(roster, result.nodes).values()) {
+          attempt.outcomes.set(node.nodeId, node.status);
         }
       }
     }
@@ -607,7 +610,27 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
     const fence = fences.get(entry.nodeId);
     if (fence !== undefined && entry.seq < fence) map.delete(key);
   }
+  // A completed handover (a discovered successor included) put a new occupant in the seat. An attempt that started before
+  // it keeps its restore outcome, but its conversation isn't the current occupant's. History is unchanged.
+  const handovers = readHandoverFences(db, rigId);
+  for (const [key, entry] of attemptOf) {
+    const fence = handovers.get(entry.nodeId);
+    const projection = map.get(key);
+    if (projection && fence !== undefined && entry.seq < fence) projection.retiredOccupant = true;
+  }
   return map;
+}
+
+/** Each node's latest completed handover, by event seq. */
+function readHandoverFences(db: Database.Database, rigId?: string): Map<string, number> {
+  // Through each node into its own handover events (idx_events_node_type_seq), as the fresh-launch fence reads.
+  const rows = db.prepare(`
+    SELECT n.id AS nodeId, MAX(e.seq) AS seq FROM nodes n
+    CROSS JOIN events e ON e.node_id = n.id AND e.type = 'seat.handover_completed'
+    ${rigId ? "WHERE n.rig_id = ?" : ""}
+    GROUP BY n.id
+  `).all(...(rigId ? [rigId] : [])) as Array<{ nodeId: string; seq: number }>;
+  return new Map(rows.map((row) => [row.nodeId, row.seq]));
 }
 
 function mapStatus(status: string): NodeRestoreOutcome {
@@ -1090,6 +1113,10 @@ function buildInventoryItem(
     // /api/rigs/:rigId/nodes/:logicalId) — relocation, not loss.
     recoveryGuidance: null,
     latestError: row.startup_status === "ready" ? null : getLatestError(db, row.rig_id, row.node_id),
+    // The stage of this session's own startup failure, when it is the node's newest startup event: a later launch's
+    // attention never inherits an earlier session's stage.
+    latestErrorStage: row.startup_status === "attention_required" && row.session_id
+      ? getLatestStartupFailedEvent(db, row.node_id, row.session_id)?.stage ?? null : null,
     // Extended fields
     model: row.model,
     // Configured launch effort only; an observed level is reported by the
@@ -1616,6 +1643,11 @@ export function attachTerminalActivityAndWork(
           }
         : null;
     }
+    // A seat whose tmux this sweep couldn't reach may be gone: an idle at its prompt is the last thing it said, as
+    // attachAgentActivity reads it. Working and waiting readings stay.
+    if (activityState && unseenByTmux(entry) && activityState.activity === "idle-at-prompt" && activityState.needsInput.count === 0) {
+      activityState = { ...activityState, activity: "unknown", display: "unknown" };
+    }
     const work = countAssignedWorkForEntry(entry, assignedByDest);
     const arbitratedNeedsInput = arbitratedNeedsInputSignal(arb);
     const hook = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
@@ -1840,7 +1872,7 @@ export async function attachAgentActivity(
 ): Promise<NodeInventoryEntry[]> {
   const sampledAt = deps.now ?? new Date();
   const captureFallback = deps.captureFallback ?? false;
-  return Promise.all(entries.map(async (entry) => {
+  const attached = await Promise.all(entries.map(async (entry): Promise<NodeInventoryEntry> => {
     // A cached hook, pane sample or motion cannot revive a confirmed absent executor.
     // Preserve the applicable missing-session or exited-pane observation without probing.
     if (identityVerdictConfirmsExecutorStopped(entry.identityVerdict)) {
@@ -2014,4 +2046,18 @@ export async function attachAgentActivity(
     })),
     };
   }));
+  return attached.map(unseenIdleIsUnknown);
+}
+
+/** This sweep couldn't reach the seat's tmux, so whether it still runs is unknown. */
+function unseenByTmux(entry: NodeInventoryEntry): boolean {
+  return entry.identityVerdict?.reason === "tmux_unavailable";
+}
+
+/** A seat whose tmux this sweep couldn't reach may be gone: an idle reading is the last thing it said, not what it is
+ *  now, so it reads unknown. Working and waiting readings stay, as the agent's own report of work. */
+function unseenIdleIsUnknown(entry: NodeInventoryEntry): NodeInventoryEntry {
+  if (!unseenByTmux(entry) || entry.agentActivity?.state !== "idle") return entry;
+  return { ...entry, agentActivity: { ...entry.agentActivity, state: "unknown", reason: "tmux_unavailable",
+    evidenceSource: "tmux_session", sampledAt: entry.identityVerdict?.observedAt ?? entry.agentActivity.sampledAt } };
 }

@@ -1,4 +1,9 @@
+import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
+import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
+import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
+import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
+import { nodeInputRouteSchema } from "./migrations/171_node_input_route.js";
 import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
 import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
 import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
@@ -14,6 +19,11 @@ import { sessionAddressReadIndexesSchema } from "./migrations/162_session_addres
 import { networkInstallationsSchema } from "./migrations/163_network_installations.js";
 import { queueItemsReplyToIndexSchema } from "./migrations/164_queue_items_reply_to_index.js";
 import { queueListReadIndexesSchema } from "./migrations/166_queue_list_read_indexes.js";
+import { seatHandoverAttemptsSchema } from "./migrations/167_seat_handover_attempts.js";
+import { contextUsageOccupantGenerationSchema } from "./migrations/168_context_usage_occupant_generation.js";
+import { seatRuntimeHomeRecordsSchema } from "./migrations/169_seat_runtime_home_records.js";
+import { claudeAutoModeSchema } from "./migrations/171_claude_auto_mode.js";
+import { seatHookBridgeSchema } from "./migrations/171_seat_hook_bridge.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
 import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
 import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
@@ -335,4 +345,14 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsReplyToIndexSchema,
   runBoundActivityGrantsSchema,
   queueListReadIndexesSchema,
+  seatHandoverAttemptsSchema,
+  contextUsageOccupantGenerationSchema,
+  seatRuntimeHomeRecordsSchema,
+  rigDeliveryDrainsSchema,
+  claudeAutoModeSchema,
+  nodeInputRouteSchema,
+  queueReturnRouteSchema,
+  nodeProcessLimitsSchema,
+  seatHookBridgeSchema,
+  sessionLaunchedCwdSchema,
 ];

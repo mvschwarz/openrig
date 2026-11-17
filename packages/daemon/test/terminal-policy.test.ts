@@ -25,6 +25,8 @@ describe("terminal interaction choices", () => {
       const added = repo.addNode(rig.id, "new", { runtime: "codex" });
       expect(store.account(added.id, "codex")).toMatchObject({ source: "rig_default", preset: "no-peer-interventions",
         supported: { compaction: "not applicable" } });
+      const piSeat = repo.addNode(rig.id, "pi-worker", { runtime: "pi" });
+      expect(store.account(piSeat.id, "pi")).toMatchObject({ supported: { compaction: "managed" } });
       store.write(oldSeat.id, { preset: "full-control", helpers: [], exceptions: {} }, "person", "Future seats", true);
       expect(store.read(oldSeat.id).config.preset).toBe("full-control");
       expect(store.read(added.id).config.preset).toBe("no-peer-interventions");

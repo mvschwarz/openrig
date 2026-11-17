@@ -349,10 +349,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     let authority: RunnerGrantLaunch | undefined;
     let authorityUnavailable = false;
     let dispatchedWithoutAuthority = false;
-    if (this.runtime !== "omp") {
-      try { authority = await this.runnerGrants?.(binding, this.runtime, launchId, this.runtime === "pi" ? 0 : 2); }
-      catch { authorityUnavailable = true; }
-    }
+    try { authority = await this.runnerGrants?.(binding, this.runtime, launchId, this.runtime === "pi" || this.runtime === "omp" ? 0 : 2); }
+    catch { authorityUnavailable = true; }
     let authorizedLaunchSucceeded = false;
     try {
       const prior = this.readRunnerState(location.sessionName, location.stateRoot);
@@ -453,13 +451,14 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
       // OMP lazily creates its JSONL on the first persisted turn. Readiness
       // is real, but until then there is no history to resume after a reboot.
-      if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
       authorizedLaunchSucceeded = true;
+      const warnings = authorityUnavailable ? [dispatchedWithoutAuthority
+        ? "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed."
+        : "Run-bound reporting unavailable; using existing unbound install-token reporting."] : undefined;
+      if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch,
+        ...(authority ? { activityGrantId: authority.grantId } : {}), ...(warnings ? { warnings } : {}) };
       return { ok: true, resumeToken: validation.token, resumeType: this.resumeType, appliedLaunch,
-        ...(authority ? { activityGrantId: authority.grantId } : {}),
-        ...(authorityUnavailable ? { warnings: [dispatchedWithoutAuthority
-          ? "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed."
-          : "Run-bound reporting unavailable; using existing unbound install-token reporting."] } : {}) };
+        ...(authority ? { activityGrantId: authority.grantId } : {}), ...(warnings ? { warnings } : {}) };
     } finally {
       try { await authority?.finish(authorizedLaunchSucceeded); } catch { /* optional reporting cannot change the native launch outcome */ }
     }

@@ -42,17 +42,27 @@ function run(setup: (dir: string) => Record<string, string>) {
   writeFileSync(join(skill, "SKILL.md"), "---\nname: queue-handoff\n---\n");
   writeFileSync(join(skill, "helper.sh"), "#!/bin/sh\n", { mode: 0o755 });
   const fake = join(dir, "pi");
-  writeFileSync(fake, `#!/bin/sh\nprintf '%s\\0' "$@" > "${dir}/args"\nprintf '%s' "$PI_CODING_AGENT_DIR" > "${dir}/agent-dir"\n`);
+  const observe = `legacy=false; [ "\${OPENRIG_ACTIVITY_HOOK_TOKEN-}" != legacy-hook ] || legacy=true
+printf '%s|%s|%s|%s|%s|%s|%s|%s\\n' "\${OPENRIG_RUN_ID+x}" "\${OPENRIG_ACTIVITY_HOOK_TOKEN+x}" "$legacy" "$OPENRIG_NODE_ID" "\${OPENRIG_SESSION_NAME-}" "\${OPENRIG_URL-}" "\${OPENRIG_OCCUPANT_GENERATION-}" "\${ANTHROPIC_API_KEY-}" >> "${dir}/native-env"`;
+  writeFileSync(fake, `#!/bin/sh\n${observe}\nprintf '%s\\0' "$@" > "${dir}/args"\nprintf '%s' "$PI_CODING_AGENT_DIR" > "${dir}/agent-dir"\n`);
   chmodSync(fake, 0o755);
   const env = setup(dir);
   const result = spawnSync(join(EXAMPLE, "openrig-pi-tui-launch"), [], { cwd: dir, encoding: "utf8", timeout: 20_000,
     env: { PATH: process.env["PATH"]!, OPENRIG_PI: fake, OPENRIG_HOME: home, OPENRIG_NODE_ID: "node-1", ...env } });
   const read = (name: string) => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : null;
   return { args: read("args")?.split("\0").slice(0, -1) ?? null, agentDir: read("agent-dir"), exit: result.status, stderr: result.stderr,
-    dir, state, sessions };
+    dir, state, sessions, childEnv: read("native-env")?.trim() };
 }
 
 describe("the documented interactive-Pi launcher and preset", () => {
+  it.each([false, true])("keeps only legacy hook authority for native Pi TUI, bound=%s", bound => {
+    const result = run(() => ({ OPENRIG_CONVERSATION: NAME, ...(bound ? { OPENRIG_RUN_ID: "actual-run" } : {}), OPENRIG_ACTIVITY_HOOK_TOKEN: bound ? "scoped-fixture-secret" : "legacy-hook",
+      OPENRIG_SESSION_NAME: "pi-tui@rig", OPENRIG_URL: "http://fixture.test", OPENRIG_OCCUPANT_GENERATION: "generation", ANTHROPIC_API_KEY: "fixture-provider" }));
+    expect(result.exit).toBe(0);
+    expect(result.childEnv).toBe(`${bound ? "||false" : "|x|true"}|node-1|pi-tui@rig|http://fixture.test|generation|fixture-provider`);
+    expect(JSON.stringify(result)).not.toContain("scoped-fixture-secret");
+    expect(JSON.stringify(result)).not.toContain("actual-run");
+  });
   it("starts Pi on the name OpenRig gave, in the seat's own folders, with the first input as one exact prompt", () => {
     const text = "identity\n'quoted' $literal -x\n";
     const { args, agentDir, state, sessions } = run(dir => {

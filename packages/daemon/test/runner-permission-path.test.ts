@@ -17,6 +17,7 @@ import { MissionControlActionLog } from "../src/domain/mission-control/mission-c
 import { missionControlRoutes } from "../src/routes/mission-control.js";
 import { activityRoutes, guestActivityRoutes } from "../src/routes/activity.js";
 import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { RunnerPermissions } from "../src/domain/runner-permissions.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { describeDefaultReceiver, permissionDeciderFor } from "../src/domain/default-receiver.js";
@@ -694,7 +695,7 @@ describe("an answered request goes to the receiving agent, which decides while t
     expect(handed.body).toContain(`- **Who's who:** ${SEAT} is the agent asking to run the tool; ${asked} is the person it asked; human@host answered.`);
     expect(handed.body).toContain("human@host is how OpenRig records any answer typed at this machine's terminal or TUI");
     expect(handed.body).toContain(`ask them back with an ask to ${asked} that names request ${askId}`);
-    expect(handed.body).toContain("Don't write to human@host: nothing is delivered there.");
+    expect(handed.body).toContain("A row to human@host names no person: it asks no one, waits on Steering and in the Feed, and OpenRig reports it as undeliverable, so don't ask them back there.");
     expect(handed.body).toContain("Closing this item without deciding permits nothing");
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     expect(f.permits()).toHaveLength(0);
@@ -1124,5 +1125,67 @@ describe("the person's note about a runner answer is written under the queue's o
     expect(await f.decide(askId, "allow")).toMatchObject({ status: 200, body: { state: "answered" } });
     expect(await waiting).toMatchObject({ body: { state: "answered", optionId: "allow" } });
     expect(Date.now() - started).toBeLessThan(2500);
+  });
+});
+
+
+describe("native epoch permission withdrawal", () => {
+  it("never authenticates claimed native epoch metadata using the legacy install token", async () => {
+    const f = fixture();
+    expect(await f.submit({ runId: "forged-run", nativeTurnId: "epoch-E" })).toMatchObject({ status: 409, body: { code: "runner_turn_unbound" } });
+    expect(f.queueRepo.list({ limit: 100 })).toEqual([]);
+  });
+
+  function permissions(f: ReturnType<typeof fixture>, people = registry) {
+    return new RunnerPermissions({ db: f.db, queueRepo: f.queueRepo, eventBus: f.bus, humanRegistry: () => people,
+      ownerOf: () => people.entities.length ? PERSON : null, currentGeneration: () => f.generation() });
+  }
+  const request = (id: string, turnId = "1") => ({ nativeRef: "native", turnId, requestId: id, options: OPTIONS,
+    runId: "run-E", nativeTurnId: "epoch-E", toolCall: { title: "write" } });
+  it("an authenticated uncorrelated pending ask keeps deny-only epoch tags and E withdrawal cannot deny F", async () => {
+    const f = fixture({ decider: DECIDER });
+    f.db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('uncorrelated',?,?,'%1')").run(f.runner.id, SEAT);
+    const session = f.db.prepare("SELECT id FROM sessions WHERE node_id=? ORDER BY id DESC LIMIT 1").get(f.runner.id) as { id: string };
+    const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "launch", run: {
+      runId: "run-E", sessionId: session.id, binding: { runtime: "synth", runner: 1, pane: "%1", panePid: 101 } } });
+    expect(f.grants.activate(grant.grantId)).toBe(true);
+    const pending = await f.submit(request("uncorrelated-E"), grant.token);
+    expect(pending).toMatchObject({ status: 200, body: { ok: true, correlation: "unverified" } });
+    const id = String(pending.body.askId); expect(f.queueRepo.getById(id)?.state).toBe("pending");
+    const p = permissions(f), seat = { nodeId: f.runner.id, sessionName: SEAT, generation: f.generation() };
+    expect(p.withdrawTurn(seat, { runId: "run-E", nativeTurnId: "epoch-E" })).toMatchObject({ confirmed: true, withdrawn: 1 });
+    expect(await f.read(id, 0, grant.token)).toMatchObject({ body: { state: "withdrawn" } });
+    expect(await f.decide(id, "allow")).toMatchObject({ body: { state: "withdrawn" } });
+    expect(await f.submit(request("late-E"), grant.token)).toMatchObject({ status: 409, body: { code: "turn_withdrawn" } });
+    const other = await f.submit({ ...request("different-F"), nativeTurnId: "epoch-F" }, grant.token);
+    expect(other).toMatchObject({ status: 200, body: { correlation: "unverified" } });
+    expect(f.queueRepo.getById(String(other.body.askId))?.state).toBe("pending");
+  });
+  it("withdraws every accepted steer ask and blocks late reads/decisions after service reconstruction", async () => {
+    const f = fixture(); const p = permissions(f);
+    const seat = { nodeId: f.runner.id, sessionName: SEAT, generation: f.generation() };
+    const first = await p.submit(seat, request("one")); const second = await p.submit(seat, request("two", "2"));
+    expect(first).toHaveProperty("askId"); expect(second).toHaveProperty("askId");
+    const withdrawn = p.withdrawTurn(seat, { runId: "run-E", nativeTurnId: "epoch-E" });
+    expect(withdrawn).toMatchObject({ confirmed: true, withdrawn: 2 });
+    const reloaded = permissions(f);
+    for (const result of [first, second]) if (result.ok && "askId" in result) {
+      expect(reloaded.read(seat, result.askId)).toMatchObject({ state: "withdrawn" });
+      expect(reloaded.decide(result.askId, "allow", DECIDER, "late")).toMatchObject({ state: "withdrawn" });
+    }
+    expect(await reloaded.submit(seat, request("late"))).toMatchObject({ ok: false, code: "turn_withdrawn" });
+  });
+  it("fences an ask whose queue creation was already in flight, without changing another epoch default permit", async () => {
+    const f = fixture(); const p = permissions(f); const seat = { nodeId: f.runner.id, sessionName: SEAT, generation: f.generation() };
+    const create = f.queueRepo.create.bind(f.queueRepo); let release!: () => void;
+    vi.spyOn(f.queueRepo, "create").mockImplementationOnce(async input => { await new Promise<void>(resolve => { release = resolve; }); return create(input); });
+    const pending = p.submit(seat, request("inflight"));
+    expect(p.withdrawTurn(seat, { runId: "run-E", nativeTurnId: "epoch-E" })).toMatchObject({ confirmed: false, pendingSubmissions: 1 });
+    release(); const submitted = await pending;
+    expect(submitted).toMatchObject({ ok: false, code: "turn_withdrawn" });
+    expect(p.withdrawTurn(seat, { runId: "run-E", nativeTurnId: "epoch-E" })).toMatchObject({ confirmed: true, pendingSubmissions: 0 });
+    const noPeople = permissions(f, { ok: true, entities: [] });
+    expect(await noPeople.submit(seat, request("late-default"))).toMatchObject({ ok: false, code: "turn_withdrawn" });
+    expect(await noPeople.submit(seat, { ...request("other"), nativeTurnId: "epoch-F" })).toMatchObject({ state: "permitted" });
   });
 });
