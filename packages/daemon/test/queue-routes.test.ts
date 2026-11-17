@@ -1009,6 +1009,79 @@ describe("queue routes", () => {
     });
   });
 
+  describe("superseded qitem successors on show and list (#2794)", () => {
+    const read = async (id: string) => {
+      const show = await app.request(`/api/queue/${id}`);
+      const listed = await Promise.all(["", "&compact=1"].map(async (compact) => {
+        const res = await app.request(`/api/queue/list?destinationSession=b@r&state=canceled${compact}`);
+        expect(res.status).toBe(200);
+        return (await res.json()).find((row: { qitemId: string }) => row.qitemId === id);
+      }));
+      expect(show.status).toBe(200);
+      return [await show.json(), ...listed];
+    };
+    const supersede = (id: string, target: string) => app.request(`/api/queue/${id}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ state: "canceled", closureReason: "superseded", closureTarget: target }),
+    });
+
+    it("names a local replacement's current state without changing the closed source", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "old", nudge: false });
+      const replacement = await queueRepo.create({ sourceSession: "b@r", destinationSession: "next@r", body: "new", nudge: false });
+      expect((await supersede(source.qitemId, replacement.qitemId)).status).toBe(200);
+      queueRepo.claim({ qitemId: replacement.qitemId, destinationSession: "next@r" });
+      const stored = () => db.prepare("SELECT state, closure_reason, closure_target FROM queue_items WHERE qitem_id = ?").get(source.qitemId);
+      const before = stored();
+      for (const row of await read(source.qitemId)) {
+        expect(row.successors).toEqual([{ qitemId: replacement.qitemId, destinationSession: "next@r", state: "in-progress", via: "closureTarget" }]);
+        expect(row).not.toHaveProperty("successorNote");
+      }
+      expect(stored()).toEqual(before);
+    });
+
+    it.each([
+      ["qitem-missing", "No successor row was found on this daemon for this supersession."],
+      ["qitem-replacement@far-host", "Its recorded successor on another host is qitem-replacement@far-host. This daemon has no copy."],
+    ])("distinguishes a missing local successor from a remote reference: %s", async (target, note) => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "old", nudge: false });
+      const remote = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected remote probe"));
+      try {
+        expect((await supersede(source.qitemId, target)).status).toBe(200);
+        for (const row of await read(source.qitemId)) {
+          expect(row).toMatchObject({ state: "canceled", successors: [], successorNote: note,
+            handoffAdvisory: { status: "unverified", target } });
+        }
+        expect(remote).not.toHaveBeenCalled();
+      } finally { remote.mockRestore(); }
+    });
+
+    it("keeps a successful close when the optional successor lookup is unavailable", async () => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "old", nudge: false });
+      const list = queueRepo.list.bind(queueRepo);
+      const lookup = vi.spyOn(queueRepo, "list").mockImplementation((opts) => {
+        if (opts?.handedOffFrom === source.qitemId) throw new Error("lookup unavailable");
+        return list(opts);
+      });
+      try {
+        expect((await supersede(source.qitemId, "qitem-replacement@far-host")).status).toBe(200);
+        for (const row of await read(source.qitemId)) {
+          expect(row).toMatchObject({ state: "canceled", successors: [],
+            successorNote: "Its successor couldn't be looked up; the closure target is as recorded." });
+        }
+      } finally { lookup.mockRestore(); }
+    });
+
+    it.each(["next@r", null])("leaves a non-qitem or missing supersession target unchanged: %s", async (target) => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "old", nudge: false });
+      db.prepare("UPDATE queue_items SET state = 'canceled', closure_reason = 'superseded', closure_target = ? WHERE qitem_id = ?").run(target, source.qitemId);
+      for (const row of await read(source.qitemId)) {
+        expect(row).not.toHaveProperty("successors");
+        expect(row).not.toHaveProperty("successorNote");
+        expect(row).not.toHaveProperty("handoffAdvisory");
+      }
+    });
+  });
+
   describe("GET /:qitemId closing transition", () => {
     const update = (qitemId: string, body: Record<string, unknown>) => app.request(`/api/queue/${qitemId}/update`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },

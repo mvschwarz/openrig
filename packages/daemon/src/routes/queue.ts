@@ -10,7 +10,7 @@ import type {
   QueuePriority,
   QueueState,
 } from "../domain/queue-repository.js";
-import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker, DEFAULT_RECENT_TRANSITIONS_LIMIT } from "../domain/queue-repository.js";
+import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker, isTerminalState, DEFAULT_RECENT_TRANSITIONS_LIMIT } from "../domain/queue-repository.js";
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
@@ -128,7 +128,7 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
  *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
 export const HANDOFF_SUCCESSOR_LIMIT = 20;
-export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
   try {
     // Newest first, one past the bound so a cut list is known.
     const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
@@ -145,8 +145,9 @@ export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "
     return {
       successors,
       successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)
-        ? `It was handed to another host; its successor there is ${target}. This daemon has no copy.`
-        : "No row on this daemon was made by this handoff.",
+        ? `${item.closureReason === "superseded" ? "Its recorded successor on another host is" : "It was handed to another host; its successor there is"} ${target}. This daemon has no copy.`
+        : item.closureReason === "superseded" ? "No successor row was found on this daemon for this supersession."
+          : "No row on this daemon was made by this handoff.",
     };
   } catch {
     return { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." };
@@ -1623,6 +1624,7 @@ export function queueRoutes(): Hono {
         repo.recordInboxCheckIn(sender);
       }
       return c.json(items.map((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
+        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-"))
         ? { ...item, ...handoffSuccessors(repo, item) } : item));
     }
 
@@ -1802,8 +1804,9 @@ export function queueRoutes(): Hono {
         actorSession: closing.actorSession,
         transitionNote: closing.transitionNote,
       } } : {}),
-      // #2794: a handed-off row names the row its handoff made (read only; nothing stored changes).
-      ...(item.state === "handed-off" || item.closureReason === "handed_off_to" ? handoffSuccessors(repo, item) : {}),
+      // #2794: a closed handoff or supersession names its successor (read only; nothing stored changes).
+      ...(item.state === "handed-off" || item.closureReason === "handed_off_to"
+        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-")) ? handoffSuccessors(repo, item) : {}),
       destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
       ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
     });
