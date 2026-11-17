@@ -22,6 +22,19 @@ const check = (listProcesses: () => NativeProcessRow[] | Promise<NativeProcessRo
   target: "%1", tmux: { getPanePid: async () => 10 }, listProcesses, expectedToken: token, requireResume: true, ...overrides,
 });
 
+// A launch wrapper killed a child without reaping it and then exec'd Codex, so the zombie, still named codex with no
+// argv, sits in the foreground group under the live Codex (KoscheiiB/openrig#73).
+describe("a zombie child of the live Codex", () => {
+  const zombie: NativeProcessRow = { pid: 14, ppid: 13, pgid: 11, tpgid: 11, executableName: "codex", command: "[codex] <defunct>", argv: null, startedAt };
+  it("isn't a candidate when its state reads Z: the live Codex is the seat", async () => {
+    const observed = await check(() => [...rows(), { ...zombie, state: "Z" }]);
+    expect(observed?.process.pid).toBe(13);
+  });
+  it("still competes when its state wasn't read, as before", async () => {
+    expect(await check(() => [...rows(), zombie])).toBeNull();
+  });
+});
+
 describe("Codex resume options (#1400)", () => {
   const options = [
     "-m gpt-5", "--model gpt-5", "-c model_reasoning_effort=high", "--config model_reasoning_effort=high",

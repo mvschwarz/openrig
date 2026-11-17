@@ -18,6 +18,8 @@ export interface NativeProcessRow {
   /** OS executable path, not argv[0], for otherwise unresolved Claude rows. */
   executablePath?: string;
   startedAt?: string;
+  /** The run state's letter, where it was read (Linux /proc); `Z` is a zombie. */
+  state?: string;
 }
 
 export type NativeRuntime = "claude-code" | "codex";
@@ -689,6 +691,9 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
   for (const row of rows) {
     const osExecutable = runtime === "claude-code" ? executableName(row.executableName ?? "") : row.executableName;
     if (row.pgid !== root.tpgid || row.tpgid !== root.tpgid) continue;
+    // A zombie (an exited child nobody reaped) can't take input or run anything, and its argv is gone. Only a state read
+    // as `Z` excludes it: an unread state is no evidence.
+    if (row.state === "Z") continue;
     if (runtime === "claude-code" ? !claudeRow(row) : osExecutable !== executable) continue;
     // OS-named Codex with unreadable argv still competes for the foreground.
     // A readable argv[0] naming a different executable is positive contrary evidence.
