@@ -440,6 +440,30 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     expect(f.latest()?.state).not.toBe("needs_input");
   });
 
+
+  it("after a successful fork retry with no agent_settled, a turn_start-only run's failure ends at needs-input", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    const err = "429 overloaded";
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    // No agent_settled. The next prompt's run opens WITHOUT an agent_start —
+    // turn_start only — and its untyped failure must be persistent: the
+    // retry-opening exemption was consumed by the retry's own opening.
+    core.handlePiLine(JSON.stringify({ type: "turn_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "fresh failure" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+  });
+
   it("a state-owned finding survives the retry's opening to a successful end", async () => {
     const f = forkFixture({ runtime: "omo", agentRunner: 2, token: { type: "community:omo", value: "/fixture/omo/a.jsonl", provenance: "hook" } });
     const core = f.runner("/fixture/omo/a.jsonl");

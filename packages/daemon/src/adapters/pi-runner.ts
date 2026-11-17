@@ -1311,8 +1311,12 @@ export class RunnerCore {
       // retry's OWN opening also counts as an opening (streaming false→true
       // after agent_end) — there the correlation must SURVIVE, or a failure
       // inside the retry raises persistent and the terminal summary can no
-      // longer match.
-      if (!this.runOpenedAsRetry) {
+      // longer match. The mark is CONSUMED here: exactly one opening — the
+      // retry's — is exempt, so a later run that opens without an agent_start
+      // (turn_start only) still resets the correlation.
+      const retryOwnOpening = this.runOpenedAsRetry;
+      this.runOpenedAsRetry = false;
+      if (!retryOwnOpening) {
         this.retryAttempt = null;
         this.retryFailure = null;
         this.retryOpeningPending = false;
