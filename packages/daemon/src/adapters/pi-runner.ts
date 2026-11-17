@@ -814,6 +814,10 @@ export class RunnerCore {
    *  the retry's opening is exactly one run-opening, so a later new user run
    *  is never mistaken for it (forks that omit agent_settled included). */
   private retryOpeningPending = false;
+  /** True while the CURRENT run opened as an automatic retry's opening: the
+   *  opening-block reset must not clear the retry's own correlation — only a
+   *  genuinely new user run does. */
+  private runOpenedAsRetry = false;
   // Native OMP retry summaries have no message/status. Correlate only within
   // the announced attempt, using the latest typed assistant failure's exact
   // diagnostic as an identity check, never as a transient-error classifier.
@@ -1270,6 +1274,7 @@ export class RunnerCore {
       // everything, as every omp run still does.
       const retryOpening = this.retryOpeningPending;
       this.retryOpeningPending = false;
+      this.runOpenedAsRetry = retryOpening;
       if (!(retryOpening && this.attentionOwner !== null && this.attentionOwner !== "assistant")) this.clearAttention();
       this.runEnded = false;
       this.io.clearStatus?.();
@@ -1302,10 +1307,16 @@ export class RunnerCore {
     if (opening) {
       this.turn += 1;
       // A newly accepted prompt is a new user run: any retry correlation (and
-      // its pending opening mark) ended with the previous run.
-      this.retryAttempt = null;
-      this.retryFailure = null;
-      this.retryOpeningPending = false;
+      // its pending opening mark) ended with the previous run. The automatic
+      // retry's OWN opening also counts as an opening (streaming false→true
+      // after agent_end) — there the correlation must SURVIVE, or a failure
+      // inside the retry raises persistent and the terminal summary can no
+      // longer match.
+      if (!this.runOpenedAsRetry) {
+        this.retryAttempt = null;
+        this.retryFailure = null;
+        this.retryOpeningPending = false;
+      }
       this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
     }
     // OMP writes its JSONL lazily; re-announce identity after each turn until
@@ -1402,6 +1413,7 @@ export class RunnerCore {
       this.retryAttempt = null;
       this.retryFailure = null;
       this.retryOpeningPending = false;
+      this.runOpenedAsRetry = false;
     }
     if (!mapped.activity) return;
     if (event.type === "agent_end" && this.attention === "transient_turn_error") this.clearAttention();

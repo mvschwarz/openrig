@@ -404,12 +404,51 @@ describe("a protocol: pi-rpc fork's identity and attention", () => {
     const core = f.runner();
     core.handlePiLine(JSON.stringify({ type: "agent_start" }));
     core.handlePiLine(JSON.stringify({ type: "response", id: "s-1", command: "steer", success: false, error: "refused" }));
-    // A state-owned attention arrives too: get_state reports no session file.
-    core.handlePiLine(JSON.stringify({ type: "response", id: "gs-1", command: "get_state", success: true, data: { sessionId: "x" } }));
     await f.settle();
     core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
     core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
     // The retry OPENS with agent_start + turn_start, per Pi's loop.
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "turn_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Notification", subtype: "runtime_error" });
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+  });
+
+  it("an exhausted retry settles through its OWN opening in Pi's real order (correlation survives)", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2 });
+    const core = f.runner();
+    const err = "429 overloaded";
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: true }));
+    // The retry opens: auto_retry_start, backoff, then its OWN agent_start +
+    // turn_start — an opening that must NOT clear the correlation.
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "turn_start" }));
+    core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: err } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end", willRetry: false }));
+    // The matched terminal summary, then settled: the run ends released, not needs-input.
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: false, attempt: 2, finalError: err }));
+    await f.settle();
+    core.handlePiLine(JSON.stringify({ type: "agent_settled" }));
+    await f.settle();
+    expect(f.posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(f.latest()?.state).not.toBe("needs_input");
+  });
+
+  it("a state-owned finding survives the retry's opening to a successful end", async () => {
+    const f = forkFixture({ runtime: "omo", agentRunner: 2, token: { type: "community:omo", value: "/fixture/omo/a.jsonl", provenance: "hook" } });
+    const core = f.runner("/fixture/omo/a.jsonl");
+    // The state-owned attention: get_state reports a session other than the requested one.
+    f.getState(core, "/fixture/omo/b.jsonl");
+    await f.settle();
+    expect(f.latest()).toMatchObject({ state: "needs_input", rawSubtype: "runtime_error" });
+    // A provider retry opens and succeeds: the person's state finding still needs them.
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_start", attempt: 2 }));
     core.handlePiLine(JSON.stringify({ type: "agent_start" }));
     core.handlePiLine(JSON.stringify({ type: "turn_start" }));
     core.handlePiLine(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop" } }));
