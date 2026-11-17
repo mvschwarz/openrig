@@ -154,12 +154,21 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
  *  under a grant. Its roster entry authors what it's good at and its limits; it has no node or pane, and OpenRig doesn't
  *  observe it between calls, so its activity is unknown, never idle. */
 type HostedMember = { session: string; label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string;
-  caveat: string | null; pane: null; activity?: "unknown"; presence?: HostedPresence } & TakesRequests;
+  caveat: string | null; pane: null; activity?: "unknown"; presence?: HostedPresence } & TakesRequests & Participant;
 
 /** A node seat's authored roster entry, merged into its own rig_team entry: how the person knows it, what it's good at,
  *  its limits, and what OpenRig last saw of it, so an assistant can tell a disconnected seat from its own history. */
 type SeatRosterEntry = { label?: string; label_problem?: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null;
-  presence?: HostedPresence } & TakesRequests;
+  presence?: HostedPresence } & TakesRequests & Participant;
+
+/** Which client a roster entry's participant uses and what kind it is, as its access's issuing service recorded them, or
+ *  why an authored value isn't used. Apart from a seat's `kind` (its node kind); absent is unknown. */
+type Participant = { participant?: { app?: string; kind?: string }; participantProblem?: string };
+
+function participantOf(member: RosterMember): Participant {
+  return { ...(member.participant ? { participant: member.participant } : {}),
+    ...(member.participant_problem ? { participantProblem: member.participant_problem } : {}) };
+}
 
 /** A roster entry whose owner says it takes no requests, with the owner's reason, or why an authored value isn't used. */
 type TakesRequests = { takesRequests?: false; takesRequestsNote?: string; takesRequestsProblem?: string };
@@ -236,7 +245,7 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
     // A label that can't be used says why, so it doesn't read as absent.
     const named = !external ? {} : member.label ? { label: member.label } : member.label_problem ? { label_problem: member.label_problem } : {};
     const entry = { ...named, roster, capabilities: member.capabilities, useWhen: member.use_when, caveat: member.caveat ?? null,
-      ...takesRequestsOf(member) };
+      ...takesRequestsOf(member), ...participantOf(member) };
     const presence = await presenceOf(member.seat);
     if (nodeSeats.has(member.seat)) seats.set(member.seat, { ...entry, ...(presence ? { presence } : {}) });
     else members.set(member.seat, { session: member.seat, ...entry, pane: null, activity: "unknown", ...(presence ? { presence } : {}) });
@@ -2112,7 +2121,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   if (offered("rig_team")) server.registerTool(
     "rig_team",
     {
-      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by. An entry with takesRequests: false is one whose owner says it takes no requests (takesRequestsNote says why): work sent to it is written, and isn't expected to be picked up.", READ_ONLY),
+      ...worded("rig_team", "Show a rig's team. For an external grant, omit rigId to use its sole rig or see its granted names to choose from. The answer includes its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (roster entries marked hosted): their authored capabilities and limits, with no pane and activity unknown. rig.displayName and a member's label, where a roster authors them, are the names the person knows them by. An entry with takesRequests: false is one whose owner says it takes no requests (takesRequestsNote says why): work sent to it is written, and isn't expected to be picked up. An entry's participant.app and participant.kind, where a roster records them, are which client it uses (such as chatgpt or claude-code) and what kind of participant it is, as the service that gave it access recorded them; absent is unknown, and a seat's own kind is its node kind.", READ_ONLY),
       inputSchema: z.object({
         rigId: z.string().optional().describe("Rig name or id. A connection from outside the rig (an external grant) usually leaves this out, and the tool finds its team; if it passes one, it must be the granted rig's name, never its id or the team's display name."),
       }),
