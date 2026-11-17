@@ -34,6 +34,7 @@ describe("durable tmux server selection", () => {
       { env: { TMUX: "/tmp/tmux-1000/default,1,0" }, serverArgs: [] },
       { env: { TMUX: "/tmp/tmux-1000/personal,1,0" }, serverArgs: ["-L", "personal"] },
       { env: { TMUX: `${oldSocket},1,0`, TMUX_TMPDIR: root }, serverArgs: ["-S", oldSocket] },
+      { env: { TMUX_TMPDIR: root }, serverArgs: ["-S", path.join(fs.realpathSync(root), "tmux-1000", "default")] },
     ];
     for (const { env, serverArgs } of cases) {
       expect(await selectTmuxServer({ ...options(), env })).toMatchObject({

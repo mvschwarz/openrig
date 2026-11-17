@@ -186,16 +186,20 @@ agent doing the setup. Both use this release's tag:
 
 ```sh
 # Claude Code
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs" --skill rigs --agent claude-code
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.17/skills/rigs" --skill rigs --agent claude-code
 
 # Codex
-npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.12/skills/rigs" --skill rigs --agent codex
+npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.17/skills/rigs" --skill rigs --agent codex
 ```
 
 If OpenRig is already installed, use the release tag matching your installed `rig --version` instead: replace the tag
 after `tree/` with it, including its `v` prefix. `rig --version` prints the version and a commit, for example
 `0.6.11 (379f0a0d)`; the tag is `v0.6.11`. The skill is in the repository from v0.6.6; on an older install, use the
 v0.6.6 tag or upgrade first.
+
+A Claude Code session that was already running doesn't see a skills folder created after it started: neither the
+project's `.claude/skills` that this command adds nor the `~/.claude/skills` the daemon fills on its first start. In
+that session, type `/reload-skills` (Claude Code 2.1.152 or later), or start a new one, before `/rigs`.
 
 These are the pinned, per-agent forms used on the [rigs pages](https://openrig.dev/rigs).
 You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
@@ -204,11 +208,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.17/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.12/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.17/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check if the installed checker is
 present (otherwise it reports the check skipped), then runs `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -672,7 +676,7 @@ rig ps --nodes --rig starter
 Preview the selected seats, models and resources. Plan checks resolution and
 preflight for the working directory. The kernel is already your entry point; this step starts the chosen project
 team. Read readiness for the project seats, not only daemon health. Have the person answer a named authentication, trust, hook-review or
-permission prompt before giving that seat work; a launch default, or their answer for another seat, isn't their answer to this one. When a seat stops at such a prompt, `rig up` reports
+permission prompt before giving that seat work; a launch default, or their answer for another seat, isn't their answer to this one. When the person works through their own agent, the `rigs` skill tells that agent to bring each trust, hook-review or permission prompt to them as a question and to send their choice itself, rather than have them open that seat's terminal or type into it; a sign-in still needs the person. When a seat stops at such a prompt, `rig up` reports
 `Status: partial`, prints `Startup attention (<seat>): <reason>` and exits 1;
 `rig ps --nodes` repeats it as "Startup details". The reason ends with the command
 to run once the prompt is answered: `rig seat continue <seat>`, which delivers the
@@ -758,9 +762,9 @@ Herdr, use `rig terminal open starter --provider herdr`; for the shared
 dashboard together with the kernel conversations, use the
 [saved first view](#open-the-kernel-conversations). The equivalent
 cmux provider is also available. Read the opened/absent/degraded result: a
-partial terminal view is not a healthy team. Each `--provider herdr` open adds
-a new workspace, numbered when the name is taken; return to the one already open
-when you want to preserve it. From inside Herdr, `rig terminal open <view> --window`
+partial terminal view is not a healthy team. A `--provider herdr` open focuses a
+workspace that still shows this view live instead of adding a copy; otherwise it
+adds a new workspace, numbered when the name is taken. From inside Herdr, `rig terminal open <view> --window`
 focuses a matching space instead of adding one. Herdr's own status for a seat can
 read idle or unknown while OpenRig shows it waiting (`needs-input`), for example in
 a narrow tile that wraps Claude's footer, or in a tile that shows the inner tmux

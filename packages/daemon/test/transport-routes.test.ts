@@ -25,6 +25,10 @@ import { transportRoutes } from "../src/routes/transport.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { RunnerChannel } from "../src/domain/runner-channel.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 
 function setupDb(): Database.Database {
   return createFullTestDb();
@@ -83,6 +87,38 @@ describe("transport routes", () => {
   afterEach(() => {
     db.close();
   });
+
+  it.each(["claude-code", "codex", "cursor", "hermes", "openclaw", "openclaw-gateway", "pi-tui", "terminal", "stub", "agy"])(
+    "%s stays typed by default and cannot acquire native operations without an actual capable run", async runtime => {
+      // The curated transport fixture excludes native outbox migrations; exercise the production schema here.
+      db.close(); db = createDb(); migrate(db, ALL_MIGRATIONS);
+      rigRepo = new RigRepository(db); sessionRegistry = new SessionRegistry(db);
+      const rig = rigRepo.createRig("matrix"), node = rigRepo.addNode(rig.id, "worker", { runtime });
+      sessionRegistry.registerSession(node.id, "worker@matrix");
+      const grants = new ActivityGrantStore(db), outbox = new OutboxHandler(db), channel = new RunnerChannel(grants, outbox);
+      const effects: string[] = [];
+      const tmux = mockTmux({ sendText: async (_target, text) => { effects.push(text); return { ok: true }; },
+        sendKeys: async () => { effects.push("keys"); return { ok: true }; } });
+      tmux.deliveryGuard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
+      const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, runnerChannel: channel });
+      expect(db.prepare("SELECT input_route FROM nodes WHERE id=?").get(node.id)).toEqual({ input_route: "typed" });
+      expect(grants.activeForNode(node.id)).toBeNull();
+      for (const kind of ["input", "wake", "cancel"] as const) expect(channel.capable(node.id, kind)).toBe(false);
+      for (const kind of ["input", "wake"] as const) expect(() => channel.admit(node.id, { outboxId: kind, senderSession: "sender", destinationSession: "worker@matrix",
+        body: "never offered", kind, inputRoute: "native", payload: kind === "wake" ? { question: "never offered" } : { text: "never offered" } })).toThrow(/capable/);
+      expect(outbox.runnerReceipts(node.id, "invented-run")).toEqual([]);
+      expect(() => channel.cancel(node.id, { requestId: "cancel-refusal", sender: "sender", destination: "worker@matrix",
+        target: { runId: "absent-hosted-run", nativeTurnId: "absent-invocation" } }))
+        .toThrow(expect.objectContaining({ code: "runner_unavailable", status: 409 }));
+      expect(outbox.runnerReceipt("cancel-refusal")).toBeNull();
+      db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(node.id);
+      const result = await transport.send("worker@matrix", "never typed", { deliveryId: "native-refusal", actorSession: "sender" });
+      expect(result.ok).toBe(false);
+      expect(outbox.runnerReceipt("native-refusal")).toBeNull();
+      expect(effects).toEqual([]);
+      // This unavailable-run test creates no host-pane/PID grant or fake native consumer for a raw TUI.
+      expect(db.prepare("SELECT COUNT(*) AS n FROM activity_grants WHERE node_id=?").get(node.id)).toEqual({ n: 0 });
+    });
 
   function seedRig() {
     const rig = rigRepo.createRig("my-rig");

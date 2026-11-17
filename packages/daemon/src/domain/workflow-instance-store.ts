@@ -147,7 +147,7 @@ export class WorkflowInstanceStore {
     // legacy INSERT; production always migrates).
     const boundRigCol = this.hasBoundRigColumn ? ", bound_rig" : "";
     const boundRigVal = this.hasBoundRigColumn ? ", ?" : "";
-    if (input.boundPod && !this.hasBoundPodColumn) throw new WorkflowInstanceError("bound_pod_unavailable", "workflow pod binding requires migration 171");
+    if (input.boundPod && !this.hasBoundPodColumn) throw new WorkflowInstanceError("bound_pod_unavailable", "workflow pod binding requires migration 177");
     const podCol = this.hasBoundPodColumn ? ", bound_pod" : "";
     const podVal = this.hasBoundPodColumn ? ", ?" : "";
     const lifecycleCols = this.hasLifecycleColumns
@@ -222,12 +222,15 @@ export class WorkflowInstanceStore {
     return row ? rowToInstance(row) : null;
   }
 
-  /** Caller wraps cache/binding/receipt/event in one transaction. No packet or trail is rewritten. */
-  reviseLifecycle(instanceId: string, expectedVersion: number, workflowVersion: string, digest: string, binding: Record<string, unknown>): void {
+  /** Caller wraps cache/binding/receipt/event in one transaction. No packet or trail is rewritten. A given `scope`
+   *  replaces the stored one (the revised slice associations); undefined leaves it. */
+  reviseLifecycle(instanceId: string, expectedVersion: number, workflowVersion: string, digest: string, binding: Record<string, unknown>,
+    scope?: WorkflowScope | null): void {
     // A revised lifecycle runs its new generated version, which the cache never overwrites with other bytes.
     const clearSpec = this.hasSpecColumn ? ", spec_source_path = NULL, spec_json = NULL" : "";
-    const result = this.db.prepare(`UPDATE workflow_instances SET workflow_version = ?, compiled_input_digest = ?, lifecycle_binding_json = ?${clearSpec}, version = version + 1 WHERE instance_id = ? AND version = ?`)
-      .run(workflowVersion, digest, JSON.stringify(binding), instanceId, expectedVersion);
+    const setScope = scope !== undefined && this.hasScopeColumn ? ", scope_json = ?" : "";
+    const result = this.db.prepare(`UPDATE workflow_instances SET workflow_version = ?, compiled_input_digest = ?, lifecycle_binding_json = ?${clearSpec}${setScope}, version = version + 1 WHERE instance_id = ? AND version = ?`)
+      .run(workflowVersion, digest, JSON.stringify(binding), ...(setScope ? [scope ? JSON.stringify(scope) : null] : []), instanceId, expectedVersion);
     if (result.changes !== 1) throw new WorkflowInstanceError("instance_version_conflict", "Instance progressed during revision; inspect it again.", { instanceId, expectedVersion });
   }
 

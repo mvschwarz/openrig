@@ -220,6 +220,12 @@ export class SeatDeliveryGuard {
     return a.nodeId === b.nodeId && a.session === b.session && a.occupant === b.occupant && a.pane === b.pane;
   }
 
+  /** Runs `fn` under the seat's delivery lease, after every send already waiting for it: the same owner typed sends take,
+   *  with no admission of its own. The hook bridge's poll claims messages under it (#3270). */
+  exclusive<T>(nodeId: string, fn: () => T | Promise<T>): Promise<T> {
+    return this.serial(nodeId, async () => fn());
+  }
+
   private async serial<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
     const before = this.tails.get(nodeId) ?? Promise.resolve();
     let release!: () => void;
@@ -549,7 +555,9 @@ export class SeatDeliveryGuard {
     const quiet = async () => {
       if (!this.inputActivity) return;
       const last = await this.inputActivity(target).then(at => ({ at }), () => null);
-      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read the recent activity of the seat's terminal clients. Automatic delivery is held; nothing was pasted.");
+      // Its own diagnostic: a caller keeps the last one it was given, which would otherwise be an earlier refusal's.
+      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read the recent activity of the seat's terminal clients. Automatic delivery is held; nothing was pasted.",
+        inputReadDiagnostic("draft-aware", null, "client_activity_unavailable"));
       // tmux reports whole seconds: activity at N.999 s reads as N, so the quiet window counts from the end of that second.
       if (last.at !== null && Date.now() - (last.at + CLIENT_ACTIVITY_PRECISION_MS) < INPUT_QUIET_MS) {
         throw new DeliveryGuardError("draft_input_busy", "A writable client of this seat had recent activity. Automatic delivery is held; nothing was pasted.");

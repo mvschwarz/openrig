@@ -69,7 +69,8 @@ export interface LaunchNodeResult {
 
 export function launchNodeNotice(agent: string, result: LaunchNodeResult): string {
   const notice = result.code === "already_running"
-    ? `agent already running: ${agent}`
+    // The launch kept a live session it couldn't prove is a bare shell; that isn't proof the agent is running.
+    ? `not relaunched, live session (its agent isn't proven running): ${agent}`
     : `agent run requested: ${agent}`;
   return [notice, ...(result.warnings ?? [])].join("\n");
 }
@@ -309,8 +310,10 @@ export class DaemonClient {
   hosts() {
     return this.get(`/api/hosts`);
   }
-  rigNodes(rigId: string) {
-    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
+  /** A rig's node inventory. With `host`, the same route read through this daemon's `?host=` forwarding for a
+   *  registered http-transport host (the read-only allowlist covers /api/rigs/:rigId/nodes). */
+  rigNodes(rigId: string, host?: string) {
+    return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes${host ? `?host=${encodeURIComponent(host)}` : ""}`);
   }
   /** The existing per-seat effort report: requested, saved, emitted and observed.
    * A refusal is an answer, so the page reader doesn't count it as a failed read. */

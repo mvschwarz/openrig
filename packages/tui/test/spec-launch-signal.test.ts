@@ -34,7 +34,7 @@ else if (process.argv[2] === 'up') {
   for (const key of Object.keys(env)) if (/^(OPENRIG_|RIGGED_)/.test(key)) delete env[key];
   Object.assign(env, { HOME: root, OPENRIG_HOME: root, OPENRIG_TUI_CLI_ENTRY: cli, OPENRIG_TUI_SOCKET: path.join(root, "t.sock") });
   const child = spawn(process.execPath, [
-    fileURLToPath(new URL("../../../node_modules/vite-node/vite-node.mjs", import.meta.url)), "--script",
+    "--import", new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url).href,
     fileURLToPath(new URL("../src/main.ts", import.meta.url)), "--instance", "launch-signal", "--no-color",
     "--url", `http://127.0.0.1:${address.port}`,
   ], { env, detached: true, stdio: ["pipe", "pipe", "pipe"] });

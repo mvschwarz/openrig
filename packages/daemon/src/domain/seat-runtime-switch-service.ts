@@ -112,6 +112,8 @@ export interface RuntimeSwitchRefusal {
   committed?: boolean;
   /** The uncommitted successor/pane exchange still needs recovery; do not retry the switch. */
   recoveryPending?: boolean;
+  /** #3253: the staged successor had gone on without the seat's requested process limit before the switch failed. */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
 }
 
 export interface RuntimeSwitchPlan {
@@ -134,7 +136,9 @@ export type SetRuntimeResult =
   /** The seat already runs that runtime and no settings were given: nothing to do. */
   | ({ ok: true; dryRun: boolean; changed: false } & Pick<RuntimeSwitchPlan, "seat" | "from" | "to">)
   | ({ ok: true; dryRun: false; changed: true; switchId: string; generation: string; previousGeneration: string;
-      claimsMoved: number; openRows: number; confirmation: { note: string; at: string }; recoveryPending: boolean } & RuntimeSwitchPlan);
+      claimsMoved: number; openRows: number; confirmation: { note: string; at: string }; recoveryPending: boolean;
+      /** #3253: the switch went ahead without the seat's requested process limit (the request stays stored). */
+      processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice } & RuntimeSwitchPlan);
 
 interface SwitchRow {
   id: string; node_id: string; canonical_session: string; staging_session: string;
@@ -418,13 +422,15 @@ export class SeatRuntimeSwitchService {
         ctx.input.reason, ctx.input.requestedBy ?? null, JSON.stringify(ctx.plan), deadlineAt, stamp(), stamp());
     let successorPane: string | null = null;
     let activityGrantId: string | undefined;
+    let stagedLimits: import("../adapters/tmux.js").SeatProcessLimitsNotice | undefined;
     const abandon = async (why: string): Promise<RuntimeSwitchRefusal> => {
       if (activityGrantId) new ActivityGrantStore(db).revoke({ grantId: activityGrantId }, "cutover_abandoned");
       const retired = await this.retireStaging(row.staging_session, node.id, "Uncommitted successor");
       db.prepare(`UPDATE seat_runtime_switches SET phase = 'abandoned', outcome = ?, attention = ?, updated_at = ? WHERE id = ? AND committed_at IS NULL`)
         .run(why, retired.ok ? null : `The staged successor couldn't be retired: ${retired.message}`, stamp(), id);
       tmux.finishLaunchBinding(row.staging_session);
-      return { ...failed(`${why}${retired.ok ? "" : ` The staged successor couldn't be retired (${retired.message}); recover with rig seat set-runtime ${ctx.seatRef} --recover.`}`, retired.ok ? undefined : `Recovery is pending for ${ctx.seatRef}. Run rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, ...(!retired.ok ? { recoveryPending: true } : {}) };
+      return { ...failed(`${why}${retired.ok ? "" : ` The staged successor couldn't be retired (${retired.message}); recover with rig seat set-runtime ${ctx.seatRef} --recover.`}`, retired.ok ? undefined : `Recovery is pending for ${ctx.seatRef}. Run rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, ...(!retired.ok ? { recoveryPending: true } : {}),
+        ...(stagedLimits ? { processLimits: stagedLimits } : {}) };
     };
 
     // 1. The successor, on the target runtime, beside the predecessor.
@@ -446,7 +452,7 @@ export class SeatRuntimeSwitchService {
         advisor: materials.settings.advisor.value, codexConfigProfile: materials.settings.codexConfigProfile.value,
         claudeMcp,
         ...(launchWrapper?.length ? { launchWrapper } : {}),
-        claudePermissions: override.claudePermissions, kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
+        claudePermissions: override.claudePermissions, claudeAutoMode: override.claudeAutoMode, kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
         ...(override.codexPermissions ? { codexPermissions: override.codexPermissions } : {}),
         nonInterruptive: rigRepo.getRigNonInterruptive(node.rigId), launchPosture, ...(permissionMode ? { permissionMode } : {}),
         seatEnv: withPluginDirs({ ...rigRepo.getEffectiveSeatEnv(node.id, changesPiRuntime || ctx.input.accountHome === undefined),
@@ -485,12 +491,14 @@ export class SeatRuntimeSwitchService {
           ...(ctx.input.accountHome !== undefined ? { accountHome: ctx.input.accountHome, accountToken: ctx.input.accountToken ?? null }
           : ctx.input.clearAccountHome || node.accountHome ? { accountHome: null, ...(node.accountHome ? { accountToken: null } : {}) } : {}), runtimeSwitchFrom: { runtime: node.runtime!, session: sessionName, pane: ctx.predecessorPane, generation: ctx.predecessorGeneration } } },
     });
+    stagedLimits = launch.processLimits;
     if (!launch.ok) {
       const attention = launch.code === "successor_attention_required" ? " It is waiting at a login, trust or approval prompt." : "";
       return abandon(`The ${target} successor didn't start: ${launch.message}.${attention}`);
     }
     activityGrantId = launch.activityGrantId;
     const warnings = [...ctx.plan.warnings, ...(launch.notes ?? [])];
+    const processLimits = launch.processLimits;
 
     // 2. The handover, as the successor's first turn; the confirmation it asks for is the evidence it can carry on.
     const queue = db.prepare(`SELECT qitem_id, state, priority, source_session FROM queue_items WHERE destination_session = ?
@@ -557,7 +565,8 @@ export class SeatRuntimeSwitchService {
         db.prepare("UPDATE seat_runtime_switches SET attention = ?, updated_at = ? WHERE id = ?")
           .run(`The commit failed (${(error as Error).message}) and the panes couldn't be exchanged back: ${back.message}`, stamp(), id);
         return { ...failed(`The commit failed (${(error as Error).message}), and the panes couldn't be put back (${back.message}).`,
-          `The ${node.runtime} occupant still holds ${ctx.seatRef} by record. Recover with rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, recoveryPending: true };
+          `The ${node.runtime} occupant still holds ${ctx.seatRef} by record. Recover with rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, recoveryPending: true,
+          ...(stagedLimits ? { processLimits: stagedLimits } : {}) };
       }
       return abandon(`The commit failed: ${(error as Error).message}.`);
     }
@@ -573,6 +582,7 @@ export class SeatRuntimeSwitchService {
     if (held) warnings.push(held);
     return { ok: true, dryRun: false, changed: true, ...ctx.plan, switchId: id, generation: successorGeneration, previousGeneration: ctx.predecessorGeneration,
       claimsMoved: committed.claimsMoved, openRows: queue.length, confirmation, recoveryPending: !finished.ok,
+      ...(processLimits ? { processLimits } : {}),
       warnings: finished.ok ? warnings : [...warnings, `The switch committed, but ${finished.message} Finish it with rig seat set-runtime ${ctx.seatRef} --recover.`] };
   }
 
@@ -620,6 +630,8 @@ export class SeatRuntimeSwitchService {
       const successor = sessionRegistry.registerClaimedSession(node.id, ctx.sessionName, "handover", ctx.successorGeneration);
       if (sessionRegistry.currentOccupantTenure(node.id)?.generationUuid !== ctx.successorGeneration) throw new Error("the successor's generation couldn't be recorded");
       db.prepare("UPDATE sessions SET origin = 'launched', restore_policy = ? WHERE id = ?").run(ctx.restorePolicy, successor.id);
+      // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
+      sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);
       const hooked = db.prepare("SELECT successor_resume_token FROM seat_runtime_switches WHERE id = ?").get(ctx.id) as { successor_resume_token: string | null };
       const nativeId = hooked.successor_resume_token ?? ctx.launchResume?.token;
       if (nativeId) {

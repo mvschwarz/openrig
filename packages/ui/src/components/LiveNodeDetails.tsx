@@ -427,6 +427,7 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
       <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Context</div>
       {contextUsage?.availability === "known" ? (
         <div className="space-y-0.5 font-mono text-[10px]">
+          {contextUsage.source === "runner_reported" && <InfoRow label="Source" value="runner-reported" />}
           <InfoRow label="Used" value={contextUsage.usedPercentage != null ? `${contextUsage.usedPercentage}%` : null} />
           <InfoRow label="Remaining" value={contextUsage.remainingPercentage != null ? `${contextUsage.remainingPercentage}%` : null} />
           <InfoRow label="Window" value={contextUsage.contextWindowSize?.toLocaleString()} />
@@ -438,8 +439,14 @@ function ContextUsageSection({ data }: { data: NodeDetailData }) {
           )}
         </div>
       ) : (
-        <div className="font-mono text-[10px] text-on-surface-variant">
-          unknown{contextUsage?.reason ? ` (${contextUsage.reason})` : ""}
+        <div className="space-y-0.5 font-mono text-[10px]">
+          <div className="text-on-surface-variant">
+            unknown{contextUsage?.reason ? ` (${contextUsage.reason})` : ""}
+          </div>
+          {contextUsage?.source === "runner_reported" && <InfoRow label="Source" value="runner-reported" />}
+          <InfoRow label="Input tokens" value={contextUsage?.totalInputTokens?.toLocaleString()} />
+          <InfoRow label="Output tokens" value={contextUsage?.totalOutputTokens?.toLocaleString()} />
+          <InfoRow label="Sampled" value={contextUsage?.sampledAt} />
         </div>
       )}
     </section>

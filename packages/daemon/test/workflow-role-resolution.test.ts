@@ -13,7 +13,8 @@ import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { workflowResumeSchema } from "../src/db/migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "../src/db/migrations/052_workflow_instance_bound_rig.js";
-import { workflowBoundPodSchema } from "../src/db/migrations/171_workflow_bound_pod.js";
+import { workflowLifecycleParallelSchema } from "../src/db/migrations/079_workflow_lifecycle_parallel.js";
+import { workflowBoundPodSchema } from "../src/db/migrations/177_workflow_bound_pod.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -241,6 +242,7 @@ describe("FAC-1 C3: the six owner-resolution call sites on a bound rig", () => {
       workflowSpecJsonSchema,
       workflowResumeSchema,
       workflowInstanceBoundRigSchema,
+      workflowLifecycleParallelSchema,
       workflowBoundPodSchema,
     ]);
     bus = new EventBus(db);
@@ -272,6 +274,48 @@ describe("FAC-1 C3: the six owner-resolution call sites on a bound rig", () => {
     expect(runtime.instanceStore.getById(inst.instance.instanceId)?.boundPod).toBe("feature-b");
     const projected = await runtime.projector.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId, exit: "handoff", actorSession: planner });
     expect(projected.nextOwnerSession).toBe(driver);
+  });
+
+  it("routes dependency successors and handler gates within the bound pod", async () => {
+    for (const role of ["planner", "driver", "reviewer", "guard"]) {
+      seedSeat(rigAId, "factory-a", "feature-a", role, { role });
+    }
+    const planner = seedSeat(rigAId, "factory-a", "feature-b", "planner", { role: "planner" });
+    const driver = seedSeat(rigAId, "factory-a", "feature-b", "driver", { role: "driver" });
+    seedSeat(rigAId, "factory-a", "feature-b", "reviewer", { role: "reviewer" });
+    const guard = seedSeat(rigAId, "factory-a", "feature-b", "guard", { role: "guard" });
+    const specPath = writeSpec("pod-dependencies.yaml", `workflow:
+  id: pod-dependencies
+  version: 1
+  target: {rig: factory-a}
+  entry: {role: planner}
+  roles:
+    planner: {}
+    driver: {}
+    reviewer: {}
+    guard: {}
+  steps:
+    - id: plan
+      actor_role: planner
+      depends_on: []
+      allowed_exits: [done]
+    - id: build
+      actor_role: driver
+      depends_on: [plan]
+      allowed_exits: [done]
+    - id: review
+      actor_role: reviewer
+      depends_on: [plan]
+      gate:
+        target: guard
+        summary: check the build
+`);
+    const inst = await runtime.instantiate({ specPath, rootObjective: "t", createdBySession: "orch@factory-a", targetPod: "feature-b" });
+    expect(inst.entryOwnerSession).toBe(planner);
+    await runtime.project({ instanceId: inst.instance.instanceId, currentPacketId: inst.entryQitemId, exit: "done", actorSession: planner });
+    const frontier = runtime.inspect(inst.instance.instanceId).frontier;
+    expect(queueRepo.getById(frontier.find((item) => item.stepId === "build")!.packetId)?.destinationSession).toBe(driver);
+    expect(queueRepo.getById(frontier.find((item) => item.stepId === "review")!.packetId)?.destinationSession).toBe(guard);
   });
 
   it("honors an explicit entry owner outside the pod while requiring later roles in it", async () => {

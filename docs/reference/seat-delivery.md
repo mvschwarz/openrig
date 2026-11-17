@@ -281,6 +281,63 @@ watchdog's reminders (one per job), and an unattributed sender.
 A backlog held before this change clears at that sender's next held message to the
 seat, or at once with `rig seat retire-held-message`.
 
+### Claude hook bridge (opt-in)
+
+A Claude seat can opt in to receiving messages through its own launch-owned hooks instead of typed input. OpenRig then
+doesn't type into the seat's input box or touch a dialog to deliver.
+
+```bash
+rig seat set-hook-bridge dev-impl@my-rig --enabled true --reason "wake at turn boundaries"
+rig seat hook-bridge dev-impl@my-rig
+```
+
+**Who can opt in.** Anyone who can run the command, with a reason. From a terminal with no seat identity, the change is recorded as unattributed, as the typing guard records it.
+
+**When it takes effect.** At the seat's next launch or restore, if its Claude Code is 2.1.287 or later (the first version whose changelog shows the `asyncRewake` hooks; 2.1.306's and 2.1.322's own schemas carry them). An older Claude, or one whose version can't be read, launches unchanged with typed delivery, and `rig seat hook-bridge` says why. The launch adds three hooks to its `--settings`:
+- SessionStart and Stop run one waiter for the seat, as `asyncRewake` command hooks. Exiting 2 wakes Claude with the
+  waiter's output. The hook timeout is 7200 s.
+- UserPromptSubmit runs a quick marker that tells OpenRig a turn started.
+
+The bridge is used only for an occupant launched with it, once its waiter has armed. Until then delivery is typed as before.
+
+**Delivery at a turn boundary.**
+- A message to an opted-in seat is queued as an outbox row (result `outcome: "bridged"`). The waiter armed at the last
+  turn boundary takes the queued messages, oldest first, and writes them into the seat's context.
+- A seat mid-turn, including one at a permission prompt, gets its messages when that turn ends, or after 15 minutes, whichever comes first: a turn that ends without a Stop (an interrupt, an API error), or one running when the daemon restarted, can't hold messages longer than that, even while a waiter polls. That includes a turn the bridge's own wake started: Claude Code reports the woken input as a prompt, and the bridge counts that prompt as part of the same turn.
+- Only a plain message is bridged. A send that carries a check or action at the moment of writing (managed compaction's `/compact` and its stages, a parked-owner reminder's checks, staged or exact text, an idle or draft rule), one bound to an original conversation (an expected identity), a slash command, and every watchdog reminder are typed as before, where those checks run. A watchdog reminder stays typed until its receipts can represent a queued message.
+- Each poll checks again that the seat is still opted in, that a message was queued for that same occupant, and that the typing guard wouldn't hold it now. A message the bridge can't deliver to this occupant (the seat opted out, or the guard holds it now) is typed at once, with the admission it was queued with, and the guard then decides (a hold retains it). One queued for an occupant who has gone isn't typed (below).
+- A message queued for an occupant who has since gone isn't typed into the seat's new occupant: it ends `failed`, with `guard_delivery.state` `not-delivered` and the reason, a `transport.hook_bridge_fallback` event says so, and `rig seat hook-bridge` lists it with its reason. Its sender isn't told; a fresh send reaches the current occupant.
+- A send whose id is already settled (delivered, failed, held) isn't queued again or reported queued: it goes on as it would without the bridge.
+- What the model receives is each message exactly as OpenRig addressed it (its `From:` line names the sender), after
+  one line saying they're ordinary messages that the delivery adds no authority to.
+
+**Handed over is not read or acted on.**
+- The waiter's acknowledgement marks the row `delivered`, with `guard_delivery.state` `handed-to-hook`. It wrote the message to its hook's output and is exiting 2. Claude Code reports nothing back, so that Claude read it isn't observed.
+- A queue wake records `bridged:queued`, then how it ended at the bridge: `bridged:handed-to-hook`, the typed fallback's own result (so a refusal at a prompt is retried when the prompt clears, as for a typed wake), `failed:hook_bridge_not_delivered`, or `indeterminate:hook_bridge_claimed_unacked`.
+- The row's claim and result stay with what the agent actually does.
+- A batch whose answer was lost is handed to the same waiter, for the same seat and occupant, again at its next poll, unless the typing guard holds it by then: then it's left `indeterminate` (`claimed-unacked`), never handed out or requeued.
+- The waiter acknowledges a batch only once it has written all of it to the hook's output; a write that fails isn't acknowledged, and the batch becomes uncertain as below.
+- A batch whose waiter stopped without acknowledging it (its arm replaced, or not polled for 20 s) becomes `indeterminate`, with `guard_delivery.state` `claimed-unacked`. The bridge never resends it: it may or may not have reached the seat. `rig seat hook-bridge` lists those rows, and a `transport.hook_bridge_uncertain` event names each. A queue wake's own recovery may still send it again, saying delivery may repeat: the queue's rule for an uncertain wake.
+
+**When the bridge isn't available** (never armed, expired, or its waiter gone):
+- Messages are typed instead, as before, and the sender's result says the bridge wasn't available.
+- A waiter is live while it has polled within 20 s and its seat is idle or within 15 minutes of its turn's start; with no waiter polling, while the seat is in a turn the bridge waits on, for at most 15 minutes.
+- A new message goes behind messages already queued for the seat, even after the seat opts out, so they're typed in order. A send cancelled while it waits for the seat's lease isn't queued.
+- Messages already queued are typed in order, by one sweep at a time (every 5 s) once they've waited 20 s without a live waiter. The sweep takes back each message under the seat's delivery lease, just before typing it; one the bridge took first isn't typed, and nothing behind it overtakes it. A waiter's poll takes the same lease, so it can't take the next message while an earlier one is being typed.
+- A daemon restart leaves messages that were only queued for the bridge queued; they aren't marked indeterminate. A batch a waiter had taken before the restart is named uncertain by the bridge after it, as above.
+- A waiter exits by itself shortly before its hook timeout and reports that it expired. The next turn re-arms it.
+
+**What still decides first.** The typing guard: hold and the interruption levels hold or refuse as for typed delivery. A rig's delivery drain holds the bridge's automatic deliveries (queue wakes) as it holds typed ones: while the seat's rig is drained, no waiter takes them and no fallback types them, at any point up to the moment of typing, and they're delivered in their order once the drain ends. A direct send and an explicit queue notification pass a drain, and pass any held wakes, as on the typed path. A queue wake whose row no longer wants it (claimed, closed or moved on) isn't handed over: it ends `failed` (`not-delivered`), as the typed path refuses it. If the drain can't be read, delivery goes ahead and the daemon log says so.
+The bridge only replaces how an admitted message reaches the seat. Watchdog reminders and queue wakes take the same path.
+
+**Cost.** Each wake is one model turn on the seat's own login. A burst of messages to an idle seat can cost several.
+`rig seat hook-bridge` shows the wakes since the daemon started.
+
+**Scope.**
+- Claude Code seats managed by OpenRig. Codex isn't covered.
+- Measured on Claude Code 2.1.319 to 2.1.323. Its `rewakeMessage` and `rewakeSummary` fields are internal and unused.
+- A guest-only listener doesn't serve the bridge.
+
 ## Input evidence and outcomes
 
 The cursor-aware reader lives in `session-transport.ts` and shares the composer

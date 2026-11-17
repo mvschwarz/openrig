@@ -254,7 +254,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     provider = herdr ? "herdr" : "tmux";
     // Preview is provider-neutral composition, including saved-view membership, absences and quoting.
     const previewUrl = () => `/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr${sessionQuery}${viewportColumns === undefined ? "" : `&viewportColumns=${viewportColumns}`}`;
-    const preview = await client.get<Preview | OpenViewResult>(previewUrl());
+    const preview = await client.get<Preview | OpenViewResult>(previewUrl(), { headers: terminalAuthHeaders() });
     if (preview.status >= 400 || !("composed" in preview.data)) {
       return failed((preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
     }
@@ -272,7 +272,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     const measureWindow = async () => {
       if (window && "columns" in window && window.columns !== viewportColumns && composed.kernelLayout) {
         viewportColumns = window.columns;
-        const next = await client.get<Preview | OpenViewResult>(previewUrl());
+        const next = await client.get<Preview | OpenViewResult>(previewUrl(), { headers: terminalAuthHeaders() });
         if (next.status >= 400 || !("composed" in next.data)) throw new Error("Could not compose the measured terminal view.");
         await assertLocalTmux(client, next.data.tmux?.mode, "The window launcher must run on the daemon's own desktop; its instance identity could not be confirmed locally.");
         if (session !== undefined && (next.data.session !== session || next.data.status.launch?.socketPath !== launchTarget?.socketPath)) {
@@ -347,7 +347,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       await measureWindow();
       let alive = false;
       for (let attempt = 0; attempt < 20; attempt++) {
-        const status = await client.get<{ session?: string; providers: Array<{ liveness: { alive: boolean }; status?: { launch?: { socketPath: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`);
+        const status = await client.get<{ session?: string; providers: Array<{ liveness: { alive: boolean }; status?: { launch?: { socketPath: string } } }> }>(`/api/terminal/status?provider=herdr${sessionQuery}`, { headers: terminalAuthHeaders() });
         if (session !== undefined && (status.data.session !== session || status.data.providers?.[0]?.status?.launch?.socketPath !== endpoint.socketPath)) {
           throw new Error("The daemon did not confirm the selected Herdr endpoint after the window request. Inspect it before retrying.");
         }

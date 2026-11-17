@@ -16,7 +16,9 @@ function run(env: Record<string, string>, keys: string[] = [], listingExit = 0, 
   const fake = join(dir, "openclaw");
   const listing = JSON.stringify({ sessions: keys.map((key) => ({ agentId: "main", key })) });
   const description = JSON.stringify({ session: gatewayKey ? { key: gatewayKey } : null });
-  writeFileSync(fake, `#!/bin/sh\nif [ "$1" = sessions ]; then echo '${listing}'; exit ${listingExit}; fi\nif [ "$1" = gateway ]; then echo '${description}'; exit ${listingExit}; fi\necho "$@ STATE=$OPENCLAW_STATE_DIR" > "${dir}/started"\nprintf '%s\\0' "$@" > "${dir}/args"\n`);
+  const observe = `legacy=false; [ "\${OPENRIG_ACTIVITY_HOOK_TOKEN-}" != legacy-hook ] || legacy=true
+printf '%s|%s|%s|%s|%s|%s|%s|%s\\n' "\${OPENRIG_RUN_ID+x}" "\${OPENRIG_ACTIVITY_HOOK_TOKEN+x}" "$legacy" "$OPENRIG_NODE_ID" "\${OPENRIG_SESSION_NAME-}" "\${OPENRIG_URL-}" "\${OPENRIG_OCCUPANT_GENERATION-}" "\${ANTHROPIC_API_KEY-}" >> "${dir}/native-env"`;
+  writeFileSync(fake, `#!/bin/sh\n${observe}\nif [ "$1" = sessions ]; then echo '${listing}'; exit ${listingExit}; fi\nif [ "$1" = gateway ]; then echo '${description}'; exit ${listingExit}; fi\necho "$@ STATE=$OPENCLAW_STATE_DIR" > "${dir}/started"\nprintf '%s\\0' "$@" > "${dir}/args"\n`);
   chmodSync(fake, 0o755);
   let failure: string | undefined;
   try {
@@ -24,10 +26,20 @@ function run(env: Record<string, string>, keys: string[] = [], listingExit = 0, 
       OPENRIG_HOME: join(dir, "home"), OPENRIG_NODE_ID: "node-1", ...env }, timeout: 20_000, stdio: "pipe" });
   } catch (error) { failure = String((error as { stderr?: Buffer }).stderr); }
   const started = join(dir, "started");
-  return { args: existsSync(join(dir, "args")) ? readFileSync(join(dir, "args"), "utf8").split("\0").slice(0, -1) : [], started: existsSync(started) ? readFileSync(started, "utf8").trim() : undefined, failure, state: join(dir, "home", "state", "openclaw", "node-1") };
+  return { args: existsSync(join(dir, "args")) ? readFileSync(join(dir, "args"), "utf8").split("\0").slice(0, -1) : [], started: existsSync(started) ? readFileSync(started, "utf8").trim() : undefined, failure, state: join(dir, "home", "state", "openclaw", "node-1"),
+    childEnv: existsSync(join(dir, "native-env")) ? readFileSync(join(dir, "native-env"), "utf8").trim().split("\n") : [] };
 }
 
 describe("the documented OpenClaw launcher and preset", () => {
+  it.each([[false, false], [false, true], [true, false], [true, true]])("fences run authority from lookup and TUI (Gateway %s, bound %s)", (gateway, bound) => {
+    const result = run({ OPENRIG_RESUME_REF: "named", ...(bound ? { OPENRIG_RUN_ID: "actual-run" } : {}), OPENRIG_ACTIVITY_HOOK_TOKEN: bound ? "scoped-fixture-secret" : "legacy-hook",
+      OPENRIG_SESSION_NAME: "claw@rig", OPENRIG_URL: "http://fixture.test", OPENRIG_OCCUPANT_GENERATION: "generation", ANTHROPIC_API_KEY: "fixture-provider" },
+    ["agent:main:named"], 0, gateway ? ["--gateway"] : []);
+    expect(result.failure).toBeUndefined();
+    expect(result.childEnv).toEqual(Array(2).fill(`${bound ? "||false" : "|x|true"}|node-1|claw@rig|http://fixture.test|generation|fixture-provider`));
+    expect(JSON.stringify(result)).not.toContain("scoped-fixture-secret");
+    expect(JSON.stringify(result)).not.toContain("actual-run");
+  });
   it("starts a local chat on the session key OpenRig named, in the seat's own state folder", () => {
     const { started, state } = run({ OPENRIG_CONVERSATION: "openrig-dev-impl-1a2b3c4d" });
     expect(started).toBe(`tui --local --session agent:main:openrig-dev-impl-1a2b3c4d STATE=${state}`);

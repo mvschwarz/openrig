@@ -27,7 +27,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
-import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
+import { NO_HUMAN_CONFIGURED, resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 
 const seat = "worker@fixture";
 const registry = { ok: true as const, entities: [{
@@ -35,6 +35,12 @@ const registry = { ok: true as const, entities: [{
   connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFIXTURE" }],
   prefs: { deliveryClass: "B" as const, availability: "available" as const },
 }] };
+// Nobody registered, in both shapes a read takes: an empty projection, and the registry's own refusal when nothing
+// was ever projected, which is what a fresh install reads.
+const nobodyRegistered: Array<[string, LoadResult]> = [
+  ["an empty list", { ok: true, entities: [] }],
+  ["the registry's nobody-registered refusal", { ok: false, error: NO_HUMAN_CONFIGURED, noHumans: true }],
+];
 
 // Real policy -> durable queue -> real ladder -> production operator port -> real
 // gateway dispatcher/Slack formatter. Only the external HTTP sink is replaced.
@@ -118,6 +124,148 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     }
     return repo.getById(row.qitemId)!;
   }
+
+
+  it.each([false, true])("ordinary operator fallback retains its cross-rig carrier through readiness (consumedHop=%s)", async consumedHop => {
+    const rigs = new RigRepository(db); rigs.createRig("fixture"); const carrierRig = rigs.createRig("carrier");
+    const jobs = new WatchdogJobsRepository(db);
+    const first = await repo.create({ sourceSession: "sender@carrier", destinationSession: "relay@carrier", body: "work", nudge: false,
+      ...(consumedHop ? { tags: ["escalation-route:one-hop"] } : {}) });
+    const { created: row } = await repo.handoff({ qitemId: first.qitemId, fromSession: "relay@carrier", toSession: seat, nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt=?,last_nudge_result='failed:offline' WHERE qitem_id=?")
+      .run(new Date(Date.now() - 3600_000).toISOString(), row.qitemId);
+    const posts: unknown[] = [], dispatchedTo: string[] = [];
+    let release!: (value: { ready: boolean; reason: string }) => void;
+    const pending = new Promise<{ ready: boolean; reason: string }>(resolve => { release = resolve; });
+    const readiness = vi.fn(() => pending);
+    const port = engine(posts, true, dispatchedTo, readiness);
+    const now = new Date(Date.now() + 301_000);
+    const run = () => runWakeLadderTick({ db, queueRepo: repo, now, retryCap: 0, resolveOrchestrator: () => null,
+      readPromptState: () => "clear", humanRung: "always", deliveryEngine: port });
+    const inFlight = run();
+    await vi.waitFor(() => expect(readiness).toHaveBeenCalledTimes(1));
+    const carriers = repo.list({ limit: 100 }).filter(x => x.tags?.includes("recovery-for:" + row.qitemId));
+    expect(carriers).toHaveLength(1);
+    expect(carriers[0]!.destinationSession).toBe("relay@carrier");
+    const before = repo.listTransitions(row.qitemId);
+    const drain = repo.deliveryDrains.begin(carrierRig.id, { drainId: "carrier-readiness", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    release({ ready: true, reason: "readiness resumed after carrier BEGIN" });
+    expect((await inFlight).outcome).not.toBe("failed");
+    expect(dispatchedTo).toEqual([]);
+    expect(new DispatchBuffer(home).pending()).toEqual([]);
+    expect(repo.listTransitions(row.qitemId)).toEqual(before);
+    repo.deliveryDrains.end(carrierRig.id, drain.drainId, jobs);
+    await run();
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(dispatchedTo).toHaveLength(1);
+    expect(repo.list({ limit: 100 }).filter(x => x.tags?.includes("recovery-for:" + row.qitemId)).map(x => x.qitemId)).toEqual([carriers[0]!.qitemId]);
+    await run();
+    expect(dispatchedTo).toHaveLength(1);
+  });
+
+  it.each(["negative", "rejected"])("cross-rig %s readiness during a destination drain preserves the carrier rung", async failure => {
+    const original = await refusal();
+    const rigs = new RigRepository(db), target = rigs.createRig("fixture");
+    rigs.createRig("carrier");
+    db.prepare("UPDATE queue_items SET source_session=? WHERE qitem_id=?").run("sender@carrier", original.qitemId);
+    const jobs = new WatchdogJobsRepository(db);
+    const posts: unknown[] = [], dispatchedTo: string[] = [];
+    let release!: (value: { ready: boolean; reason: string }) => void;
+    let reject!: (error: Error) => void;
+    const pending = new Promise<{ ready: boolean; reason: string }>((resolve, fail) => { release = resolve; reject = fail; });
+    const readiness = vi.fn(() => pending);
+    const port = engine(posts, true, dispatchedTo, readiness);
+    const now = new Date(Date.now() + 120_000);
+    const inFlight = tick(port, { humanRung: "always", now });
+    await vi.waitFor(() => expect(readiness).toHaveBeenCalledTimes(1));
+    const alert = alerts()[0]!;
+    expect(alert.destinationSession).toBe("sender@carrier");
+    const before = repo.listTransitions(alert.qitemId);
+    const lastRung = () => repo.listTransitions(alert.qitemId).filter(t => t.transitionNote?.startsWith("escalation-rung:"));
+    const previousRung = lastRung();
+    expect(previousRung.length).toBeGreaterThan(0);
+    const drain = repo.deliveryDrains.begin(target.id, { drainId: "cross-rig-readiness", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    if (failure === "negative") release({ ready: false, reason: "fixture not ready" });
+    else reject(new Error("fixture readiness rejected"));
+    const result = await inFlight;
+    expect(dispatchedTo).toEqual([]);
+    expect(new DispatchBuffer(home).pending()).toEqual([]);
+    expect(repo.listTransitions(alert.qitemId)).toEqual(before);
+    expect(lastRung()).toEqual(previousRung);
+    expect(result.actions.filter(a => a.action === "escalate-operator")).toEqual([]);
+    repo.deliveryDrains.end(target.id, drain.drainId, jobs);
+    readiness.mockResolvedValue({ ready: true, reason: "ready after END" });
+    // Same time and episode: END must not wait out a marker written during the hold.
+    await tick(port, { humanRung: "always", now });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(dispatchedTo).toHaveLength(1);
+    expect(alerts()[0]?.qitemId).toBe(alert.qitemId);
+    await tick(port, { humanRung: "always", now: new Date(now.getTime() + 120_000) });
+    expect(dispatchedTo).toHaveLength(1);
+  });
+
+  it("a drain begun during operator readiness defers the originating prompt episode before gateway enqueue", async () => {
+    await refusal();
+    const rig = new RigRepository(db).createRig("fixture");
+    const jobs = new WatchdogJobsRepository(db);
+    const posts: unknown[] = [], dispatchedTo: string[] = [];
+    let release!: (value: { ready: boolean; reason: string }) => void;
+    const pending = new Promise<{ ready: boolean; reason: string }>(resolve => { release = resolve; });
+    const readiness = vi.fn(() => pending);
+    const port = engine(posts, true, dispatchedTo, readiness);
+    const inFlight = tick(port, { humanRung: "always" });
+    await vi.waitFor(() => expect(readiness).toHaveBeenCalledTimes(1));
+    const alert = alerts()[0]!;
+    const before = repo.listTransitions(alert.qitemId);
+    const drain = repo.deliveryDrains.begin(rig.id, { drainId: "readiness-window", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    release({ ready: true, reason: "readiness resumed after BEGIN" });
+    await inFlight;
+    expect(dispatchedTo).toEqual([]);
+    expect(new DispatchBuffer(home).pending()).toEqual([]);
+    expect(repo.listTransitions(alert.qitemId)).toEqual(before);
+    repo.deliveryDrains.end(rig.id, drain.drainId, jobs);
+    await tick(port, { humanRung: "always", now: new Date(Date.now() + 240_000) });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(dispatchedTo).toHaveLength(1);
+    expect(alerts()[0]?.qitemId).toBe(alert.qitemId);
+    await tick(port, { humanRung: "always", now: new Date(Date.now() + 360_000) });
+    expect(dispatchedTo).toHaveLength(1);
+  });
+
+  it.each([false, true])("watchdog drain admission uses its target, not registrar (holdTarget=%s)", async holdTarget => {
+    const rigs = new RigRepository(db); const source = rigs.createRig("source"), target = rigs.createRig("fixture");
+    const jobs = new WatchdogJobsRepository(db); const { jobId } = reminder(["refused"]);
+    db.prepare("UPDATE watchdog_jobs SET registered_by_session=? WHERE job_id=?").run("owner@source", jobId);
+    const held = holdTarget ? target : source;
+    repo.deliveryDrains.begin(held.id, { drainId: "watchdog-window", owner: "owner@source",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    const posts: unknown[] = [], to: string[] = []; state = "unknown";
+    const wakes = vi.fn(async () => "verified");
+    // The registrar and the actual escalation carrier are independent roles.
+    await tick(engine(posts, true, to), { resolveOrchestrator: () => "lead@fixture", attemptWake: wakes });
+    if (holdTarget) { expect(alerts()).toEqual([]); expect(wakes).not.toHaveBeenCalled(); }
+    else {
+      expect(alerts()).toHaveLength(1);
+      expect(wakes).toHaveBeenCalledWith(alerts()[0]!.qitemId, "lead@fixture");
+      expect(repo.deliveryDrains.status(source.id, jobs).retained.dueWatchdogJobs).toBe(0);
+    }
+  });
+
+  it("an undrained destination cannot escalate into a drained target", async () => {
+    const row = await refusal(); const rig = new RigRepository(db).createRig("escalation");
+    const jobs = new WatchdogJobsRepository(db);
+    const drain = repo.deliveryDrains.begin(rig.id, { drainId: "escalation-window", owner: "owner@fixture",
+      reviewAt: new Date(Date.now() + 600_000).toISOString() }, jobs);
+    const attemptWake = vi.fn(async () => "verified"); const before = notes(row.qitemId); const port = engine([], false);
+    await tick(port, { resolveOrchestrator: () => "lead@escalation", attemptWake });
+    expect(alerts()).toEqual([]); expect(attemptWake).not.toHaveBeenCalled(); expect(notes(row.qitemId)).toEqual(before);
+    repo.deliveryDrains.end(rig.id, drain.drainId, jobs);
+    await tick(port, { resolveOrchestrator: () => "lead@escalation", attemptWake });
+    expect(attemptWake).toHaveBeenCalledWith(expect.any(String), "lead@escalation"); expect(alerts()).toHaveLength(1);
+  });
 
   it("single seat: prompt refusal reaches the actual notification sink without retrying the seat", async () => {
     const row = await refusal(); const posts: unknown[] = []; const wakeTargets: string[] = [];
@@ -395,9 +543,9 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(repo.listTransitions(row.qitemId).some(t => t.transitionNote?.startsWith("slack-owner-notification-posted "))).toBe(true);
   });
 
-  it("missing human is unresolved, never a delivered or resolved outcome", async () => {
+  it.each(nobodyRegistered)("missing human is unresolved, never a delivered or resolved outcome (%s)", async (_shape, empty) => {
     const row = await refusal(); const posts: unknown[] = [];
-    const result = await engine(posts, false).dispatchEscalation(row, "interactive prompt blocks outstanding work");
+    const result = await engine(posts, () => empty).dispatchEscalation(row, "interactive prompt blocks outstanding work");
     expect(result.decision).toBe("undeliverable:no-registered-human");
     expect(result.resolved).toBe(false);
     expect(posts).toEqual([]);
@@ -655,6 +803,34 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     await tick(engine(posts)); expect(posts).toEqual([]); expect(alerts()).toHaveLength(0);
   });
 
+  it.each(["row", "seat"])("a recovery parked on the prompted %s leaves its hold intact and reaches the operator once", async blocker => {
+    const row = await refusal();
+    const rigs = new RigRepository(db), kernel = rigs.createRig("kernel");
+    const operator = rigs.addNode(kernel.id, "operator.agent", { role: "operator", runtime: "claude-code" });
+    const sessions = new SessionRegistry(db);
+    sessions.updateStatus(sessions.registerSession(operator.id, "operator-agent@kernel").id, "running");
+    const recovery = await repo.create({ sourceSession: "sender@fixture", destinationSession: "lead@fixture",
+      body: "Waiting for the reviewer", tags: [`recovery-for:${row.qitemId}`], nudge: false });
+    repo.update({ qitemId: recovery.qitemId, actorSession: "lead@fixture", state: "blocked",
+      blockedOn: blocker === "row" ? row.qitemId : seat });
+    const before = repo.listTransitions(recovery.qitemId);
+    const posts: unknown[] = [], wakes: string[] = [], port = engine(posts, false);
+    const opts = { resolveOrchestrator: () => "lead@fixture",
+      attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };
+    await tick(port, opts);
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.destinationSession).toBe("operator-agent@kernel");
+    expect(notes(alerts()[0]!.qitemId).join("\n")).toContain("undeliverable:no-registered-human");
+    await tick(port, opts);
+    expect(alerts()).toHaveLength(1);
+    expect(wakes).toEqual([]);
+    expect(posts).toEqual([]);
+    expect(repo.listTransitions(recovery.qitemId)).toEqual(before);
+    expect(repo.getById(recovery.qitemId)).toMatchObject({ state: "blocked",
+      blockedOn: blocker === "row" ? row.qitemId : seat, body: "Waiting for the reviewer" });
+    expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
+  });
+
   it("ordinary orchestrator receives one aggregate and no human post", async () => {
     await refusal(2); const posts: unknown[] = []; const port = engine(posts); const wakes: string[] = [];
     const opts = { resolveOrchestrator: () => "lead@fixture", attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };
@@ -676,8 +852,8 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual(["lead@fixture"]);
   });
 
-  it("no binding stays silent through repeated ticks, then uses a newly bound human once", async () => {
-    await refusal(); let reg: LoadResult = { ok: true, entities: [] }; const posts: unknown[] = []; const port = engine(posts, () => reg);
+  it.each(nobodyRegistered)("no binding stays silent through repeated ticks, then uses a newly bound human once (%s)", async (_shape, empty) => {
+    await refusal(); let reg: LoadResult = empty; const posts: unknown[] = []; const port = engine(posts, () => reg);
     await tick(port);
     const alert = alerts()[0]!; const before = repo.listTransitions(alert.qitemId);
     for (let i = 0; i < 4; i++) expect((await tick(port)).outcome).toBe("clean");

@@ -1,4 +1,4 @@
-import { continuationChoiceNotes, resumedClaudeArguments } from "../domain/claude-continuation-launch.js";
+import { continuationChoiceNotes, resumedClaudeArguments, sentClaudeAutoMode } from "../domain/claude-continuation-launch.js";
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
@@ -29,6 +29,7 @@ import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { claudeStrictTrustRoot } from "../domain/claude-git-trust-root.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
+import { claudeAutoModeForLaunch } from "../domain/claude-auto-mode.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
@@ -77,6 +78,31 @@ function claudeNotFoundReason(line: string): string {
     + "being reinstalled at that moment; relaunch this seat once claude is back.";
 }
 
+/** #3245: Claude Code's own startup refusal when managed settings set `disableSideloadFlags`: what it rejected, then
+ *  `is disabled by your organization's managed settings (disableSideloadFlags)`. Claude's plugin troubleshooting gives that
+ *  line for `--plugin-dir`, and #3245 reports it for `CLAUDE_CODE_PLUGIN_DIRS`. */
+const CLAUDE_SIDELOAD_REFUSAL =
+  /(?:CLAUDE_CODE_PLUGIN_DIRS|--plugin-dir|--plugin-url|--agents|--mcp-config) is disabled by your organi[sz]ation['’]s managed settings \(disableSideloadFlags\)/;
+
+/** The refusal itself, from the last lines of a pane back at its shell; only the refusal is quoted, not the rest of its line.
+ *  A settings file or a sentence that merely names the setting doesn't count. */
+function claudeSideloadRefusalLine(paneContent: string): string | null {
+  for (const line of paneContent.split("\n").map((l) => l.trim()).filter(Boolean).slice(-6).reverse()) {
+    const refusal = CLAUDE_SIDELOAD_REFUSAL.exec(line)?.[0];
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+/** Whether a plain capture may hold a refusal, even one wrapped mid-word; only then is a joined capture read. */
+const mayShowSideloadRefusal = (paneContent: string): boolean => paneContent.replace(/\n/g, "").includes("disableSideloadFlags");
+
+function claudeSideloadRefusalReason(line: string): string {
+  return `the pane shows Claude Code's refusal (${line}). If that line is from this launch, Claude Code's managed settings turn on `
+    + "disableSideloadFlags, which rejects the plugin folders (CLAUDE_CODE_PLUGIN_DIRS) and launch flags OpenRig uses to load "
+    + "this seat's skills and plugins, so this seat can't start while that setting applies.";
+}
+
 /**
  * Claude Code runtime adapter. Projects resources to .claude/ targets
  * and delivers startup files via guidance merge, skill install, or tmux send-text.
@@ -90,6 +116,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private stateDir: string | null;
   private restoreReadPolicy: (() => RestoreReadPolicy | null) | null;
+  private hookBridgeLaunch: ((nodeId: string, executable?: string) => boolean | Promise<boolean>) | null;
   private collectorAssetPath: string | null;
   private nodeExecutable: string;
   private autoDriveProviderPrompts: boolean;
@@ -114,6 +141,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     stateDir?: string;
     /** The compaction settings the restore reads from, so the launch grants those files too. */
     restoreReadPolicy?: () => RestoreReadPolicy | null;
+    /** Slice 13: whether this launch adds a seat's hook bridge (opted in, on a Claude with asyncRewake), read at each
+     *  launch; absent, no launch adds it. */
+    hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
     collectorAssetPath?: string;
     /** Interpreter used to write generated Claude commands; defaults to this daemon runtime. */
     nodeExecutable?: string;
@@ -141,6 +171,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
     this.restoreReadPolicy = deps.restoreReadPolicy ?? null;
+    this.hookBridgeLaunch = deps.hookBridgeLaunch ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.nodeExecutable = deps.nodeExecutable ?? process.execPath;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
@@ -373,13 +404,20 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
       }
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
-      return assertSelected ? this.tmux.sendShellCommand(session, staged, assertSelected, { sourceInPane: true })
-        : this.tmux.sendShellCommand(session, staged, undefined, { sourceInPane: true });
+      // The token step is POSIX shell: a fish pane runs the launch with /bin/sh rather than sourcing it.
+      const shellOptions = { sourceInPane: true, ...(seatToken && staged.includes(seatToken.step) ? { posix: true } : {}) };
+      return assertSelected ? this.tmux.sendShellCommand(session, staged, assertSelected, shellOptions)
+        : this.tmux.sendShellCommand(session, staged, undefined, shellOptions);
     };
     const launchNotes = () => (tokenWarnings.length ? { warnings: [...tokenWarnings] } : {});
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
-    const appliedLaunch = observeClaudePermission(posture);
-    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
+    const autoMode = claudeAutoModeForLaunch(binding.claudeAutoMode);
+    if (autoMode.warning) tokenWarnings.push(autoMode.warning);
+    const appliedWith = (claudeAutoMode: import("../domain/claude-auto-mode.js").AppliedClaudeAutoMode) =>
+      ({ ...observeClaudePermission(posture), claudeAutoMode });
+    const appliedLaunch = appliedWith(autoMode.block ?? null);
+    const hookBridge = (await this.hookBridgeLaunch?.(binding.nodeId, binding.claudeExecutable ?? undefined)) === true;
+    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge }), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
     const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");
@@ -447,7 +485,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
     const permissionMode = permissionArg(launchArgs);
     const nativeArgs = resumedClaudeArguments(opts.resumeToken ? binding.claudeLaunch : undefined, ["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture);
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name], opts.resumeToken ?? generatedSessionId!, effort, posture, autoMode.block ?? null);
     const cmd = managed ? managed.command(nativeArgs, opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
       : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
@@ -457,6 +495,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}exec ${wrapperPrefix}${shellQuote(binding.claudeExecutable)} ${nativeArgs.map(shellQuote).join(" ")}` : cmd);
     if (!managed && binding.claudeLaunch?.configDir !== undefined && !configPrefix) tokenWarnings.push("This classic launch cannot privately apply the captured config selector; ordinary pane selection is used.");
     tokenWarnings.push(...continuationChoiceNotes(binding.claudeLaunch, posture, model));
+    // Recorded from the arguments actually sent: captured continuation arguments carry the running process's settings.
+    const sentNative = !!managed || !!(opts.resumeToken && binding.claudeLaunch?.args && binding.claudeExecutable);
+    const sentAutoMode = sentNative ? sentClaudeAutoMode(nativeArgs) : autoMode.block ?? null;
+    if (sentAutoMode === undefined) tokenWarnings.push("The running Claude's --settings is a file, so this relaunch can't set or check its auto mode block; status shows the block as unknown.");
+    const launchApplied = appliedWith(sentAutoMode === undefined ? { unknown: "settings_file" } : sentAutoMode);
 
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Claude launch preparation; no native command was sent.", recovery: "attention_required" };
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, beforeManagedInput)
@@ -481,12 +524,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // The process readiness pinned first, if it observed one: the caller records it, not a later read.
       const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
       if (!verification.ok) return { ...verification, ...launchedProcess };
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch, ...launchedProcess, ...launchedExecutable, ...launchNotes() };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch: launchApplied, ...launchedProcess, ...launchedExecutable, ...launchNotes() };
     }
 
     // Fresh launches already have an explicit --session-id. A same-name file
     // can belong to another seat sharing the Claude config directory.
-    return { ok: true, resumeToken: generatedSessionId!, resumeType: "claude_id", appliedLaunch, ...launchedExecutable, ...launchNotes() };
+    return { ok: true, resumeToken: generatedSessionId!, resumeType: "claude_id", appliedLaunch: launchApplied, ...launchedExecutable, ...launchNotes() };
   }
 
   async checkReady(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult> {
@@ -519,6 +562,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const notFound = probe.code === "returned_to_shell"
       ? claudeNotFoundLine(paneContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable) : null;
     if (notFound) return { ready: false, reason: claudeNotFoundReason(notFound), code: "returned_to_shell" };
+    // Claude's sideload refusal says why too, read from a joined capture so a wrapped refusal line stays whole. It stays
+    // a wait for the same reason.
+    const refusal = probe.code === "returned_to_shell" && mayShowSideloadRefusal(paneContent)
+      ? claudeSideloadRefusalLine((await this.tmux.capturePaneContent(binding.tmuxSession, 40, { joinWrappedLines: true })) ?? paneContent)
+      : null;
+    if (refusal) return { ready: false, reason: claudeSideloadRefusalReason(refusal), code: "returned_to_shell" };
 
     if (probe.status === "resumed") return "provedWithoutLaunch" in probe ? { ready: true, provedWithoutLaunch: true } : { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
@@ -853,10 +902,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     if (await this.paneReturnedToShell(binding, finalCommand)) {
       const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
+      const refusal = notFound || !mayShowSideloadRefusal(finalContent) ? null
+        : claudeSideloadRefusalLine((await this.tmux.capturePaneContent(tmuxSession, 40, { joinWrappedLines: true })) ?? finalContent);
       return {
         ok: false,
         probe: probeEvidence,
-        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound) : "pane returned to shell instead of entering Claude"}`,
+        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound)
+          : refusal ? claudeSideloadRefusalReason(refusal) : "pane returned to shell instead of entering Claude"}`,
         recovery: "retry_fresh",
       };
     }

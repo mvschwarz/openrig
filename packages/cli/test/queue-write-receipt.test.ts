@@ -49,6 +49,8 @@ function row(over: Row = {}, waiting: Row = {}): Row {
 }
 
 function makeDeps(routes: Record<string, { status: number; data: unknown } | Array<{ status: number; data: unknown }>>): QueueDeps {
+  const transitions: Array<{ transitionId: number; transitionNote: string | null; actorSession: string }> =
+    [{ transitionId: 1, transitionNote: null, actorSession: "stub@rig" }];
   const pick = (key: string, fallback: { status: number; data: unknown }) => {
     const r = routes[key];
     return (Array.isArray(r) ? r.shift() : r) ?? fallback;
@@ -56,8 +58,27 @@ function makeDeps(routes: Record<string, { status: number; data: unknown } | Arr
   return {
     lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
     clientFactory: () => ({
-      get: vi.fn(async (p: string) => pick(`GET ${p}`, { status: 200, data: {} })),
-      post: vi.fn(async (p: string) => pick(`POST ${p}`, { status: 500, data: { error: "unrouted" } })),
+      // The sender this stub stamps; the transitions it records carry it as their actor, as the daemon does.
+      senderIdentity: async () => ({ session: "stub@rig", originUnknown: false }),
+      get: vi.fn(async (p: string) => {
+        const explicit = routes[`GET ${p}`];
+        if (explicit) return Array.isArray(explicit) ? explicit.shift()! : explicit;
+        if (p.endsWith("/transitions")) return { status: 200, data: transitions };
+        const update = routes[`POST ${p}/update`];
+        if (update) {
+          const response = Array.isArray(update) ? update[0] : update;
+          return { status: 200, data: response?.data ?? {} };
+        }
+        return { status: 200, data: {} };
+      }),
+      post: vi.fn(async (p: string, body: unknown) => {
+        const response = pick(`POST ${p}`, { status: 500, data: { error: "unrouted" } });
+        const transitionNote = body && typeof body === "object" ? (body as { transitionNote?: unknown }).transitionNote : undefined;
+        if (response.status < 400 && typeof transitionNote === "string") {
+          transitions.push({ transitionId: transitions.length + 1, transitionNote, actorSession: "stub@rig" });
+        }
+        return response;
+      }),
     }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
   };
 }

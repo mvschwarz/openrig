@@ -7,6 +7,7 @@ import type {
   RestoreSnapshotSelection,
 } from "./types.js";
 import { rollupRestoreRigResult } from "./restore-orchestrator.js";
+import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
 
 export interface RestoreAttemptReceipt {
   ok: true;
@@ -72,7 +73,8 @@ export function deriveRestoreAttemptReceipt(
     const completed = JSON.parse(completedRow.payload) as { result: RestoreResult };
     const originalResult = completed.result;
     const intendedRoster = started.intendedRoster ?? originalResult.intendedRoster ?? originalResult.nodes.map((node) => ({ nodeId: node.nodeId, logicalId: node.logicalId }));
-    const intendedIds = new Set(intendedRoster.map((node) => node.nodeId));
+    const originalByNode = restoreOutcomesByIntendedNode(intendedRoster, originalResult.nodes);
+    const intendedIds = new Set(intendedRoster.map(node => originalByNode.get(node.nodeId)?.nodeId ?? node.nodeId));
     const reconciliationRows = db.prepare(
       "SELECT seq, rig_id, type, payload, created_at FROM events WHERE rig_id = ? AND type = 'restore.outcome_reconciled' AND json_extract(payload, '$.attemptId') = ? ORDER BY seq",
     ).all(rigId, attemptId) as EventRow[];
@@ -81,7 +83,6 @@ export function deriveRestoreAttemptReceipt(
       return intendedIds.has(event.nodeId) ? [{ ...event, seq: row.seq, createdAt: row.created_at }] : [];
     });
     const recovered = new Set(reconciliations.map((event) => event.nodeId));
-    const originalByNode = new Map(originalResult.nodes.map((node) => [node.nodeId, node]));
     const currentNodes = intendedRoster.map((intended) => {
       const node = originalByNode.get(intended.nodeId) ?? {
         nodeId: intended.nodeId,
