@@ -501,10 +501,10 @@ const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|
 
 /** An external grant (openrig.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
  *  only caller. It may hand tasks to its rigs' other seats (never a person or another host's seat, and without team/list
- *  never a caller-shaped seat), read the items it sent and those addressed to it from those seats or from a person (never
- *  team-internal items, other callers' items between themselves, or a person's items to another seat), change only the
- *  items addressed to its own seat (with the claim and update pairs), follow a handed-on item only where it came back to
- *  it, and read the artifacts of its own items under its named roots. */
+ *  never a caller-shaped seat), read the items it sent and those addressed to it from those seats or from an external
+ *  address (never team-internal items, other callers' items between themselves, or an external address's items to
+ *  another seat), change only the items addressed to its own seat (with the claim and update pairs), follow a handed-on
+ *  item only where it came back to it, and read the artifacts of its own items under its named roots. */
 function externalScope(access: McpAccess, seatOf: () => string | undefined): Scope {
   const rigs = new Set(access.rigs);
   // team/list makes the caller one of its rigs' participants: it may reach another connected assistant's seat.
@@ -517,7 +517,11 @@ function externalScope(access: McpAccess, seatOf: () => string | undefined): Sco
     return parts.length === 2 && parts[0] !== "" && parts[1] !== "external" && rigs.has(parts[1]!);
   };
   const team = (value: unknown): boolean => member(value) && !caller(value) && (participant || !CALLER_SHAPED.test(value as string));
-  // A person on this instance (<entityId>@external): only ever the source of an item addressed to the caller's own seat.
+  // An external address as a source (<local>@external), matched by its shape, not a registry check: a registered person's
+  // id, a scheme-prefixed ref and a shared channel's address (which its unregistered writers post under) all match. The
+  // boundary is the exact destination: only an item addressed to the caller's own seat is reached this way, and show and
+  // list then read it, a person's answer row (createHumanAnswer) included. withoutDaemonLinkedRows still drops the linked
+  // rows a read returns without their own scope check.
   const person = (value: unknown): boolean => typeof value === "string" && /^[^@]+@external$/.test(value);
   const field = (row: unknown, name: "sourceSession" | "destinationSession"): unknown => ((row ?? {}) as Record<string, unknown>)[name];
   const item = (row: unknown): boolean => caller(field(row, "sourceSession"))
