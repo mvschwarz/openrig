@@ -394,7 +394,14 @@ configurations, as below; do not take the pin from a cached page summary.
    their goal, and identify its pane in the new space or repeat its exact
    attach command from step 8 so they can talk to it. It won't ask the opening
    question again.
-10. **Tell them when a seat waits on them.** A team seat waiting at a prompt
+10. **Tell them when a seat waits on them.** Before giving a progress report,
+    read the team's current seat activity and its open work, including any recovery
+    row that names a blocker. A claimed row or a running session record does not
+    mean the seat is working. Report a prompt as waiting for an answer, a blocked
+    row as waiting on its named blocker, and unreadable or conflicting evidence
+    as unknown. Capture the named seat when you need its actual prompt; do not
+    call it "still working" without current evidence.
+    A team seat waiting at a prompt
     shows `needs_input` as its `agentActivity.state` in
     `rig ps --nodes --rig <team> --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`,
     and nothing else tells the person. The kernel's own seats can wait too,

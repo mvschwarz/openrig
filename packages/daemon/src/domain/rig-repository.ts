@@ -663,7 +663,7 @@ export class RigRepository {
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
     if (opts?.processLimits) {
-      validateProcessLimits({ tasks_max: opts.processLimits.tasksMax });
+      validateProcessLimits({ tasks_max: opts.processLimits.tasksMax, memory_max: opts.processLimits.memoryMax });
       // Written atomically with creation: a seat never exists without the limit it was created with.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
@@ -961,10 +961,12 @@ export class RigRepository {
   setNodeProcessLimits(nodeId: string, value: ProcessLimits | null): boolean {
     let stored: string | null = null;
     if (value !== null) {
-      // A value without tasks_max would store `{}`, which reads back as invalid: null is the only way to clear.
-      const checked = validateProcessLimits({ tasks_max: value.tasksMax });
-      if (checked.tasksMax === undefined) throw new Error("process_limits: tasks_max is required (pass null to clear)");
-      stored = serializeProcessLimits({ tasksMax: checked.tasksMax });
+      // A value with neither key would store `{}`, which reads back as invalid: null is the only way to clear.
+      const checked = validateProcessLimits({ tasks_max: value.tasksMax, memory_max: value.memoryMax });
+      if (checked.tasksMax === undefined && checked.memoryMax === undefined) {
+        throw new Error("process_limits: tasks_max or memory_max is required (pass null to clear)");
+      }
+      stored = serializeProcessLimits(checked);
     }
     if (!this.hasNodeColumn("process_limits")) {
       if (stored !== null) throw new Error("Cannot persist process_limits: database migration is required");

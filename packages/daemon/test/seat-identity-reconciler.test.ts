@@ -650,17 +650,18 @@ describe("definitive Core exit ends exact run authority", () => {
     } finally { db.close(); }
   });
 
-  it.each(["no reader", "unreadable", "missing", "stale", "pending", "ready", "exited"] as const)("requires current launch evidence before shell exit revocation: %s", async launch => {
+  it.each((["pi", "omp"] as const).flatMap(runtime => (["no reader", "unreadable", "missing", "stale", "pending", "ready", "exited"] as const).map(launch => ({ runtime, launch }))))("requires current $runtime launch evidence before shell exit revocation: $launch", async ({ runtime, launch }) => {
     const db = createFullTestDb();
     try {
-      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "pi", pane: "%1" });
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime, pane: "%1" });
       const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
       const grants = new ActivityGrantStore(db);
       const grant = grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: { runId: "current", sessionId: "sess-n1",
-        binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+        binding: { runtime, runner: 0, pane: "%1", panePid: 101 } } });
       grants.activate(grant.grantId);
       const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 101 }, paneCommand: { "%1": "sh" } });
-      const readPiRunnerState = () => {
+      const readPiRunnerState = (sessionName: string, selectedRuntime?: "pi" | "omp") => {
+        expect([sessionName, selectedRuntime]).toEqual(["s1@rig", runtime]);
         if (launch === "unreadable") throw new Error("sidecar unavailable");
         return launch === "missing" ? null : {
           launchId: launch === "stale" ? "predecessor" : "current", ready: launch === "ready" || launch === "stale",
@@ -668,20 +669,21 @@ describe("definitive Core exit ends exact run authority", () => {
         };
       };
       await new SeatIdentityReconciler({ db, tmux, now: NOW, ...(launch === "no reader" ? {} : { readPiRunnerState }) }).reconcileAll();
+      grants.reconcileBinding("n1");
       expect(grants.standing(grant.grantId)).toBe(launch === "ready" || launch === "exited" ? "revoked" : "current");
       // Readiness limits irreversible authority cleanup; it does not turn the shell into a live agent verdict.
       expect(new SeatIdentityStore(db).getForNode("n1")?.verdict).toBe("mismatch");
     } finally { db.close(); }
   });
 
-  it.each([false, true])("preserves a starting grant through bootstrap and revokes it only on a later established shell exit, late ready=%s", async lateReady => {
+  it.each((["pi", "omp"] as const).flatMap(runtime => [false, true].map(lateReady => ({ runtime, lateReady }))))("preserves a starting $runtime grant through bootstrap and revokes it only on a later established shell exit, late ready=$lateReady", async ({ runtime, lateReady }) => {
     const db = createFullTestDb();
     try {
-      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "pi", pane: "%1" });
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime, pane: "%1" });
       const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
       const grants = new ActivityGrantStore(db);
       const grant = grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: { runId: "current", sessionId: "sess-n1",
-        binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+        binding: { runtime, runner: 0, pane: "%1", panePid: 101 } } });
       grants.activate(grant.grantId);
       const state = { sessions: ["s1@rig"], panePid: { "%1": 101 }, paneCommand: { "%1": "sh" } };
       let ready = false;
@@ -692,12 +694,15 @@ describe("definitive Core exit ends exact run authority", () => {
       const rec = new SeatIdentityReconciler({ db, tmux, now: NOW,
         readPiRunnerState: () => ({ launchId: "current", ready, updatedAt: NOW().toISOString() }) });
       await rec.reconcileAll();
+      grants.reconcileBinding("n1");
       expect(grants.standing(grant.grantId)).toBe("current");
       ready = true; state.paneCommand["%1"] = "node";
       await rec.reconcileAll();
+      grants.reconcileBinding("n1");
       expect(grants.standing(grant.grantId)).toBe("current");
       state.paneCommand["%1"] = "sh";
       await rec.reconcileAll();
+      grants.reconcileBinding("n1");
       expect(grants.standing(grant.grantId)).toBe("revoked");
     } finally { db.close(); }
   });
@@ -719,14 +724,14 @@ describe("definitive Core exit ends exact run authority", () => {
     } finally { db.close(); }
   });
 
-  it.each([false, true])("revokes the sampled run without touching a replacement during the await, replacement=%s", async replace => {
+  it.each((["pi", "omp"] as const).flatMap(runtime => [false, true].map(replace => ({ runtime, replace }))))("revokes sampled $runtime without touching a replacement during the await, replacement=$replace", async ({ runtime, replace }) => {
     const db = createFullTestDb();
     try {
-      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime: "pi", pane: "%1" });
+      seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", runtime, pane: "%1" });
       const generation = new SessionRegistry(db).mintOccupantTenure("n1", "initial").generationUuid;
       const grants = new ActivityGrantStore(db);
       const issue = (runId: string) => grants.issue({ nodeId: "n1", generation, issuedBy: "launch", run: {
-        runId, sessionId: "sess-n1", binding: { runtime: "pi", runner: 0, pane: "%1", panePid: 101 } } });
+        runId, sessionId: "sess-n1", binding: { runtime, runner: 0, pane: "%1", panePid: 101 } } });
       const first = issue("first"); grants.activate(first.grantId);
       let successor: ReturnType<typeof issue> | undefined;
       const tmux = makeTmux({ sessions: ["another@rig"] });

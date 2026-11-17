@@ -1,13 +1,14 @@
 import type { PiRunnerState } from "../adapters/pi-runner-protocol.js";
 import { basename } from "node:path";
 import { readProcessTableCensus } from "./process-table.js";
+import { recordedProcessStillRunning } from "./reconciler.js";
 import { ActivityGrantStore, hasActivityGrantsTable } from "./activity-grants.js";
 import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation, type NativeProcessRow } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { claudeResumeRotation } from "./session-registry.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { probeShowsNoServer, type TmuxAdapter } from "../adapters/tmux.js";
 import type { SeatIdentityVerdict } from "./types.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./seat-identity-store.js";
 import { RESERVED_HOST_IDS, validateHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -97,11 +98,11 @@ type PaneObservation = { pid: number | null; command: string | null; dead?: bool
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
-  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes">>;
+  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes" | "probeSession">>;
   now?: () => Date;
   listProcesses?: NativeProcessLister;
   readProcessTableCensus?: () => Promise<RunnerProcessCensus>;
-  readPiRunnerState?: (sessionName: string) => PiRunnerState | null;
+  readPiRunnerState?: (sessionName: string, runtime?: "pi" | "omp") => PiRunnerState | null;
 }
 
 /**
@@ -195,16 +196,18 @@ export class SeatIdentityReconciler {
     const observedGrants = new Map(seats.map(seat => {
       const grant = grants?.activeForNode(seat.node_id);
       let bootstrapComplete = false;
-      if (grant?.binding?.runtime === "pi" && grant.binding.runner === 0) {
+      const bootstrapRuntime = grant?.binding?.runner === 0 && (grant.binding.runtime === "pi" || grant.binding.runtime === "omp")
+        ? grant.binding.runtime : null;
+      if (bootstrapRuntime) {
         // A shell can be the launch bootstrap. Capture current-attempt readiness BEFORE observing the pane;
         // a later ready result cannot turn an earlier bootstrap-shell sample into a definitive exit.
         try {
-          const state = this.readPiRunnerState?.(seat.session_name);
-          bootstrapComplete = !!state && state.launchId === grant.runId && (state.ready || !!state.exited);
+          const state = this.readPiRunnerState?.(seat.session_name, bootstrapRuntime);
+          bootstrapComplete = !!state && state.launchId === grant?.runId && (state.ready || !!state.exited);
         } catch { /* Missing launch evidence is unknown, not proof that the runner exited. */ }
       }
       return [seat.node_id, grant?.runId && grant.binding?.pane === seat.tmux_pane
-        ? { grantId: grant.grantId, shellExitConfirmed: grant.binding.runtime !== "pi" || grant.binding.runner !== 0 || bootstrapComplete }
+        ? { grantId: grant.grantId, shellExitConfirmed: !bootstrapRuntime || bootstrapComplete }
         : null];
     }));
     // Prune verdicts for nodes no longer running (keep the table bounded), except a released seat's.
@@ -226,8 +229,25 @@ export class SeatIdentityReconciler {
     }
     if (generation !== this.generation) return;
     if (liveSessions === null || liveSessions.size === 0) {
+      // An empty listing can't tell a blip from a server that's gone, but each seat's own probe can: tmux saying no
+      // server runs on the daemon's socket, or a live server without the session, is positive absence, as rig down
+      // reads it. A seat whose recorded process still runs is on a server this daemon doesn't see, as the boot
+      // reconciler reads it, so it stays unavailable, as does anything else.
+      let table: Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }> | null> | undefined;
+      const processes = () => (table ??= this.readRunnerCensus()
+        .then(census => census.rows.flatMap(row => row.startedAt === undefined ? [] : [{ ...row, startedAt: row.startedAt }]))
+        .catch(() => null));
       for (const seat of seats) {
-        this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
+        const probe = await this.tmux.probeSession?.(seat.session_name).catch(() => null) ?? null;
+        if (generation !== this.generation) return;
+        const absent = probe !== null && (probe.state === "absent" || probeShowsNoServer(probe));
+        const elsewhere = absent && await recordedProcessStillRunning(this.db, { nodeId: seat.node_id, sessionName: seat.session_name }, processes);
+        if (generation !== this.generation) return;
+        const gone = absent && !elsewhere;
+        this.store.upsert(gone ? this.sessionMissingVerdict(seat, observedAt) : this.tmuxUnavailableVerdict(seat, observedAt));
+        // As on the observed path below: the run whose grant was captured before this sweep has ended.
+        const observedGrant = observedGrants.get(seat.node_id);
+        if (gone && observedGrant) grants!.revoke({ grantId: observedGrant.grantId }, "runner_exit_observed");
       }
       return;
     }
@@ -321,6 +341,18 @@ export class SeatIdentityReconciler {
         this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
       }
     }
+  }
+
+  private sessionMissingVerdict(seat: RunningSeatRow, observedAt: string): SeatIdentityVerdict {
+    return {
+      nodeId: seat.node_id,
+      verdict: "pane_missing",
+      evidenceSource: "tmux_session",
+      reason: "session_missing",
+      evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: seat.session_name,
+      observedAt,
+    };
   }
 
   private tmuxUnavailableVerdict(seat: RunningSeatRow, observedAt: string): SeatIdentityVerdict {

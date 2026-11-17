@@ -168,6 +168,15 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     }
   });
 
+  // #3268: MIRROR of packages/daemon/test/pane-envelope.test.ts against wrapPaneEnvelope (byte-identity contract).
+  it("#3268: senderRegistered false gives an @external sender no reply command; absent or true keeps the hint", () => {
+    expect(wrapSendBody("some-team@external", "b@r", "hi", { replyToQitem: "q-1", senderRegistered: false }))
+      .toBe("From: some-team@external\nTo: b@r\n---\nhi\n---\n↩ No reply route: some-team@external isn't a registered person (rig gateway human list lists who's registered).");
+    expect(wrapSendBody("alex@external", "b@r", "hi", { replyToQitem: "q-1", senderRegistered: true }))
+      .toBe(wrapSendBody("alex@external", "b@r", "hi", { replyToQitem: "q-1" }));
+    expect(wrapSendBody("a@r", "b@r", "hi", { senderRegistered: false })).toBe(wrapSendBody("a@r", "b@r", "hi"));
+  });
+
   it("(g) byte-exact full envelope with gen (cross-package parity anchor)", () => {
     const out = wrapSendBody("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
     expect(out).toBe('From: a@r\nTo: b@r\nSent: 08-06 17:42Z · gen a1b2c3d4\n---\nhi\n---\n↩ Reply: rig send a@r "..."');
