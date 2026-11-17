@@ -45,9 +45,10 @@ const TOKEN = "tok-lead";
 
 /** `panesAfterLaunch`: what tmux lists after the launch's own pane observation (the first listing): other panes, or a
  *  listing that fails. */
-function mockTmux(opts: { noPane?: boolean; paneCwd?: string; panesAfterLaunch?: Array<{ id: string; cwd: string }> | "fails" } = {}): TmuxAdapter {
+function mockTmux(opts: { noPane?: boolean; paneCwd?: string | (() => string); panesAfterLaunch?: Array<{ id: string; cwd: string }> | "fails" } = {}): TmuxAdapter {
   let listings = 0;
-  const first = () => (opts.noPane ? [] : [{ id: "%1", index: 0, cwd: opts.paneCwd ?? "/", width: 80, height: 24, active: true }]);
+  const paneCwd = () => (typeof opts.paneCwd === "function" ? opts.paneCwd() : opts.paneCwd);
+  const first = () => (opts.noPane ? [] : [{ id: "%1", index: 0, cwd: paneCwd() ?? "/", width: 80, height: 24, active: true }]);
   return {
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
@@ -215,15 +216,19 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
   /** `rig down` (the real teardown), then `rig up --existing` from its auto snapshot. Records
    *  the guidance file's content at the moment the native harness was started. */
   async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean; routerLine?: "yes" | "no"; paneCwd?: string; fsOps?: true;
-    panesAfterLaunch?: Array<{ id: string; cwd: string }> | "fails"; realClaude?: ClaudeCodeAdapter; cwdOverride?: string } = {}) {
+    panesAfterLaunch?: Array<{ id: string; cwd: string }> | "fails"; realClaude?: ClaudeCodeAdapter; cwdOverride?: string;
+    /** The pane's folder once the harness has started (a harness or startup step that changes directory). */
+    paneCwdAfterHarness?: string } = {}) {
     const runtime = opts.runtime ?? "claude-code";
-    const tmux = mockTmux({ noPane: opts.noPane, paneCwd: opts.paneCwd, panesAfterLaunch: opts.panesAfterLaunch });
+    let harnessStarted = false;
+    const tmux = mockTmux({ noPane: opts.noPane, panesAfterLaunch: opts.panesAfterLaunch,
+      paneCwd: opts.paneCwdAfterHarness ? () => (harnessStarted ? opts.paneCwdAfterHarness! : opts.paneCwd ?? "/") : opts.paneCwd });
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus })
       .teardown(rigId);
     expect(down.snapshotId).toBeTruthy();
     opts.betweenDownAndUp?.();
     const fileAtHarnessStart: Array<string | null> = [];
-    const observe = () => { fileAtHarnessStart.push(fs.existsSync(guidanceFile) ? fs.readFileSync(guidanceFile, "utf-8") : null); };
+    const observe = () => { harnessStarted = true; fileAtHarnessStart.push(fs.existsSync(guidanceFile) ? fs.readFileSync(guidanceFile, "utf-8") : null); };
     const claudeResume = {
       canResume: vi.fn((type: string | null) => type === "claude_name" || type === "claude_id"),
       resume: vi.fn(async () => { observe(); return { ok: true as const }; }),
@@ -312,6 +317,21 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.warnings).toContain(`Restore: lead's working directory ${given}, given with --cwd, doesn't exist on this machine, so it `
       + `started in ${startedIn}. To launch this rig's seats in another directory for this run: rig up poc --existing --cwd <dir>.`);
     expect(result.warnings.join("\n")).not.toContain(`working directory ${cwd} doesn't exist`);
+  });
+
+  // Where the seat started is read before the harness and its startup are replayed: a folder the pane moves to during
+  // replay is never named as the one it started in.
+  it("a --cwd folder this machine doesn't have: names the folder the seat started in, not one its harness moved to", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const given = path.join(tmp, "not-here");
+    const startedIn = path.join(tmp, "home-b");
+    const movedTo = path.join(tmp, "moved-during-replay");
+    fs.mkdirSync(startedIn);
+    const { result } = await downThenUpExisting(rigId, guidanceFile,
+      { cwdOverride: given, paneCwd: startedIn, paneCwdAfterHarness: movedTo, fsOps: true });
+    expect(result.warnings).toContain(`Restore: lead's working directory ${given}, given with --cwd, doesn't exist on this machine, so it `
+      + `started in ${startedIn}. To launch this rig's seats in another directory for this run: rig up poc --existing --cwd <dir>.`);
+    expect(result.warnings.join("\n")).not.toContain(movedTo);
   });
 
   // A guidance file outside the missing folder, such as a Pi agent folder's own AGENTS.md, is read wherever the seat runs,

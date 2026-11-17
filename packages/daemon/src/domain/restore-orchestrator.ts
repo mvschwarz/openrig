@@ -1647,16 +1647,21 @@ export class RestoreOrchestrator {
       }
     }
 
+    // A folder given with `--cwd` that isn't on this machine is named the same way. Where the seat started is read now,
+    // before the harness and its startup are replayed, which can change the pane's folder.
+    const givenMissing = opts?.cwdOverride && isAbsolute(opts.cwdOverride) && opts.fsOps && warnings && !folderPresent(opts.cwdOverride)
+      ? opts.cwdOverride : null;
+    const givenStartedIn = givenMissing ? await this.boundPaneFolder(launchResult.sessionName, launchResult.binding.tmuxPane) : null;
+
     // A selected launch's own blank rolled back after the shell started (postLaunchRestore has many return points).
     const compensation = { ran: false };
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
-    // A folder given with `--cwd` that isn't on this machine is named the same way. It's checked once the launch has run:
-    // a fresh launch creates it, and a restore doesn't, so the seat's terminal started in tmux's fallback folder.
-    if (opts?.cwdOverride && isAbsolute(opts.cwdOverride) && opts.fsOps && warnings && !folderPresent(opts.cwdOverride)) {
-      const startedIn = await this.boundPaneFolder(launchResult.sessionName, launchResult.binding.tmuxPane);
-      warnings.push(`Restore: ${node.logicalId}'s working directory ${opts.cwdOverride}, given with --cwd, doesn't exist on this machine`
-        + (startedIn && startedIn !== opts.cwdOverride ? `, so it started in ${startedIn}. ` : ". ") + launchElsewhere);
+    // Whether it's still missing is decided once the launch has run: a fresh launch creates it, and a restore doesn't, so the
+    // seat's terminal started in tmux's fallback folder.
+    if (givenMissing && warnings && !folderPresent(givenMissing)) {
+      warnings.push(`Restore: ${node.logicalId}'s working directory ${givenMissing}, given with --cwd, doesn't exist on this machine`
+        + (givenStartedIn && givenStartedIn !== givenMissing ? `, so it started in ${givenStartedIn}. ` : ". ") + launchElsewhere);
     }
     // Saved inputs stay keyed by the snapshot; the result names the seat that the launcher actually registered.
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings), nodeId: launchResult.session.nodeId,
