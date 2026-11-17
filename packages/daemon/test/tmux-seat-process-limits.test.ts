@@ -1111,23 +1111,34 @@ describe("a seat with memory_max (alone or beside tasks_max)", () => {
     }
   });
 
-  it("a memory_max too small for the probe's shell to start in (killed by SIGKILL) is refused by name, not cached", async () => {
+  it("a probe killed by SIGKILL under memory_max says what was seen, names the limit and stays retryable", async () => {
     const M = 1048576;
     const killed = [Object.assign(new Error("Command failed"), { signal: "SIGKILL", code: null }),
       Object.assign(new Error("Command failed"), { code: 137 })];
     for (const scope of killed) {
       const h = makeAdapter({ limits: { "node-a": { memoryMax: M } }, probe: { scope } });
-      const r = await freshRefused(h, "process_limits_setup");
-      expect(r.message).toMatch(new RegExp(`memory_max ${M} is too small to start in: a throwaway scope with MemoryMax=${M}`));
-      expect(r).toMatchObject({ retryable: false, processLimits: { kind: "setup", limit: "memory_max", requested: { memoryMax: M } } });
-      // Not remembered as unverified: the next launch probes again (and is refused the same way, by name).
-      h.shellCalls.length = 0;
-      expect(await h.adapter.createSession("impl-a@demo", "/work", A)).toMatchObject({ ok: false, code: "process_limits_setup" });
-      expect(h.shellCalls.filter(c => c.includes("openrig-seat-probe-"))).toHaveLength(1);
+      const r = await freshRefused(h, "process_limits_unverified");
+      expect(r.message).toMatch(new RegExp(`/bin/sh was killed \\(SIGKILL\\) inside a scope with MemoryMax=${M}, most ` +
+        "likely by the OOM killer at that limit; a larger memory_max may help"));
+      expect(r.message).not.toMatch(/too small/);
+      expect(r).toMatchObject({ retryable: true, processLimits: { kind: "unverified", limit: "memory_max", requested: { memoryMax: M } } });
     }
-    // A tasks-only probe killed the same way says nothing of a memory value: unverified, as before.
+    // A tasks-only probe killed the same way says nothing of a memory value: unverified, with no limit named.
     const tasks = makeAdapter({ limits: { "node-a": 256 }, probe: { scope: killed[1] } });
-    expect((await freshRefused(tasks, "process_limits_unverified")).processLimits).toMatchObject({ kind: "unverified" });
+    const t = await freshRefused(tasks, "process_limits_unverified");
+    expect(t.processLimits).toMatchObject({ kind: "unverified" });
+    expect(t.processLimits).not.toHaveProperty("limit");
+  });
+
+  it("a memory_max probe that dies another way (not SIGKILL) is the plain unverified failure, with no OOM claim", async () => {
+    for (const scope of [Object.assign(new Error("Command failed"), { signal: "SIGTERM", code: null }),
+      Object.assign(new Error("Command failed"), { code: 143 }), fail("sh: 1: something broke", 2)]) {
+      const r = await freshRefused(makeAdapter({ limits: { "node-a": { memoryMax: G } }, probe: { scope } }), "process_limits_unverified");
+      expect(r.message).toMatch(/a throwaway seat scope failed/);
+      expect(r.message).not.toMatch(/OOM|SIGKILL|larger memory_max/);
+      expect(r).toMatchObject({ retryable: true, processLimits: { kind: "unverified", requested: { memoryMax: G } } });
+      expect(r.processLimits).not.toHaveProperty("limit");
+    }
   });
 
   it("a recovery without the scope goes on, its warning naming memory_max", async () => {

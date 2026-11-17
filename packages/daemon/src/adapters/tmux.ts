@@ -492,7 +492,7 @@ export interface SeatProcessLimitsReport {
  *    memory.max is not the limit, MemoryMax= refused);
  *  - `setup`: the host may well make the scope, but this setup or launch path can't use it (terminal.
  *    inherit_tmux_environment on, a daemon with no launch environment, a restart in place that keeps or respawns a
- *    process without the seat's scope, a memory_max too small for the probe's shell to start in), with the way out;
+ *    process without the seat's scope), with the way out;
  *  - `unverified`: not known either way, and worth retrying (the user bus timed out, the probe read nothing, an error
  *    not recognized, or such a failure cached `ageSeconds` ago);
  *  - `invalid`: the seat's stored request can't be read. */
@@ -998,13 +998,14 @@ export class TmuxAdapter {
         const stderr = execStderrText(error);
         if (opts.literal && NO_EXPAND_ENVIRONMENT.test(stderr)) { opts.literal = false; continue; }
         if (opts.oomPolicy && NO_OOM_POLICY.test(stderr)) { opts.oomPolicy = false; continue; }
-        // The probe's shell killed (SIGKILL, directly or as timeout's 128+9) under a memory limit: the OOM killer at
-        // that MemoryMax=, so the value is too small for anything to start in. Refused by name, and not retryable: a
-        // retry at the same value would be killed the same way.
+        // The probe's shell killed (SIGKILL, directly or as timeout's 128+9) under a memory limit: most likely the OOM
+        // killer at that MemoryMax=, but the host's OOM killer, systemd-oomd or a manual kill send the same signal, and
+        // the scope that could tell (its memory.events `oom`) is collected with the shell. So it says what was seen,
+        // names the limit and stays retryable (unverified); it never calls the value too small on the signal alone.
         if (limits.memoryMax !== undefined && killedBySigkill(error)) {
-          return { ok: false, problem: { kind: "setup", limit: "memory_max",
-            reason: `memory_max ${limits.memoryMax} is too small to start in: a throwaway scope with MemoryMax=${limits.memoryMax} ` +
-              "had its /bin/sh killed (SIGKILL, the OOM killer at that limit); give memory_max a larger value" } };
+          return { ok: false, problem: { kind: "unverified", limit: "memory_max",
+            reason: `the throwaway scope's /bin/sh was killed (SIGKILL) inside a scope with MemoryMax=${limits.memoryMax}, ` +
+              "most likely by the OOM killer at that limit; a larger memory_max may help" } };
         }
         return { ok: false, problem: classifyScopeFailure(error, "a throwaway seat scope") };
       }

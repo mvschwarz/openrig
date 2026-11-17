@@ -1154,12 +1154,13 @@ members:
     `/run/user/<uid>` (start the daemon with `XDG_RUNTIME_DIR` set, or as a systemd user service), coreutils' `timeout`
     not on the daemon's `PATH`, `terminal.inherit_tmux_environment` on (a seat with a limit needs the scoped launch
     environment: set it to false), a daemon that gives seats no launch environment, or a seat placed in an environment
-    guest (its agent runs in the guest, and a scope on this host would hold only the local viewer); or a `memory_max`
-    too small to start in: the probe's `/bin/sh`, run in a throwaway scope with that `MemoryMax=`, was killed by the OOM
-    killer (`processLimits.limit` is `memory_max`; give it a larger value);
+    guest (its agent runs in the guest, and a scope on this host would hold only the local viewer);
   - `process_limits_unverified` (retryable, save where said below) when it isn't known either way: the user manager
     timed out or its socket refused the connection (starting or restarting), the probe read nothing (no `pids.max` or
-    `memory.max` it asked for) or output it could not understand, an error not recognized, a launch setting that
+    `memory.max` it asked for) or output it could not understand, the probe's `/bin/sh` was killed (SIGKILL) inside a
+    scope with `memory_max` (most likely the OOM killer at that limit, so a larger value may help, but the host's OOM
+    killer, systemd-oomd or a manual kill look the same; `processLimits.limit` is `memory_max`), an error not
+    recognized, a launch setting that
     couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
     didn't see in time (its new session is removed, by the identity tmux printed when it made it, and the seat is never
     started again without the limit; when it can't be removed, the refusal says the session may still be running and
@@ -1216,8 +1217,9 @@ members:
   or `<n>T` (base 1024, as systemd reads it; `512M` and `536870912` are the same value), and it must be a whole number
   of MiB: the kernel keeps `memory.max` in pages and reads back the page multiple below, so only a MiB multiple reads
   back exactly as asked on every page size. There is no floor in the spec: the throwaway `/bin/sh` that proves the
-  limit inside a scope with it decides the low end, and a value too small for it to start in is refused at launch
-  (`process_limits_setup`, above). Its top is 2^53 − 2^20 bytes (9007199253692416), the largest MiB multiple the daemon
+  limit inside a scope with it decides the low end. When that shell is killed (SIGKILL) at launch, the refusal is
+  `process_limits_unverified` with `limit: memory_max`, saying a larger value may help (`process_limits_unverified`,
+  above). Its top is 2^53 − 2^20 bytes (9007199253692416), the largest MiB multiple the daemon
   keeps exactly. As for `tasks_max`, no floor is imposed for every runtime, and the OOM kills show in the status. A
   percentage, `infinity`, 0, a negative or fractional value, a lowercase or unknown suffix, an empty string, a number
   of bytes written as a string, a value that isn't a whole number of MiB or one above that top is refused by name.
