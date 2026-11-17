@@ -1547,6 +1547,21 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
     expect(f.bodies.a).toBe(text);
   });
 
+  // Our short paste renders inline, so notePasted records no label. A person's long single line pasted after it collapses
+  // to a count-less token beside our text: the head of our text matches, but the token is someone else's paste.
+  it("holds our unrecorded text with a count-less paste token after it, with no Enter", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = "short reminder";
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      frame(f.bodies.a === text ? (readsAfterPaste++ === 0 ? text : `${text}[Pasted text #2]`) : f.bodies.a ?? ""));
+    const result = await f.send("composite-count-less", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe(text);
+  });
+
   it.each([["a single-line label for a multi-line paste", "one\ntwo\nthree", "[Pasted text #1]"],
     ["a counted label for a single-line paste", `reminder: ${"x".repeat(1190)}`, "[Pasted text #1 +2 lines]"]])(
     "does not submit %s", async (_case, text, label) => {

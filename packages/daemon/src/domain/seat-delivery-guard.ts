@@ -3,7 +3,10 @@ import { hasOtherSeatHistory, isStoppedSeatPredecessor, resolveCurrentSessionAdd
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { COMPOSER_COLLAPSED_PASTE_PATTERN, composerPasteUncertainty, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
+import { composerPasteUncertainty, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
+
+/** Claude Code's collapsed-paste token with no line count (`[Pasted text #K]`): a single-line paste, named only by its ID. */
+const COUNT_LESS_PASTE_TOKEN = /\[Pasted text #\d+\]/;
 
 /** A binding is captured before waiting. Never rebind an old operation to a new occupant. */
 export interface GuardTarget {
@@ -559,11 +562,11 @@ export class SeatDeliveryGuard {
       // The TUI may render the collapsed label only after notePasted's read.
       // If no label was recorded, recognize it in this same lease and original composer. A label without a line count
       // (`[Pasted text #K]`, a single-line paste) says only its paste ID, and a person may have replaced our paste with
-      // their own single line by then: that one counts as ours only when notePasted recorded it (#2429).
+      // their own single line by then, or pasted one after our text: a count-less token, alone or beside other text,
+      // counts as ours only when notePasted recorded it (#2429).
       const late = lease.staged && !lease.staged.collapsedPaste && !!lease.inputFrame
         && lease.inputFrame === input.frame && ownCollapsedPaste(input, lease.staged.text);
-      const label = late ? COMPOSER_COLLAPSED_PASTE_PATTERN.exec(late) : null;
-      const collapsed = !!late && !(label && label[1] === undefined);
+      const collapsed = !!late && !COUNT_LESS_PASTE_TOKEN.test(late.replace(/\s+/g, " "));
       const owned = lease.staged && (composerContainsOwnedText(input, lease.staged.text)
         || !!collapsed || !!lease.staged.collapsedPaste && input.cursorAtEnd && input.collapsedPaste === lease.staged.collapsedPaste);
       if (!owned) throw new DeliveryGuardError("draft_input_changed", "The input no longer contains only this delivery's staged text. Enter was not sent.");
