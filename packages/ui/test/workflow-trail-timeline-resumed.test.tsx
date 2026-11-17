@@ -48,4 +48,19 @@ describe("InstanceTrailTimeline resumed row", () => {
     expect(row.textContent).toContain("↻ resumed");
     expect(row.textContent).not.toContain("? resumed");
   });
+
+  it("does not count a resume row as a closed step after a failure then resume", () => {
+    const failed: WorkflowStepTrailEntry = {
+      ...resumed,
+      trailId: "T-FAILED",
+      closedAt: "2026-07-07T00:04:00.000Z",
+      closureReason: "failed",
+      closureEvidence: null,
+      actorSession: "builder@acme-rig",
+      nextQitemId: null,
+    };
+    const { container } = render(<InstanceTrailTimeline trail={[failed, resumed]} instance={instance} />);
+    expect(container.textContent).toContain("1 closed step ·");
+    expect(container.textContent).not.toContain("2 closed steps");
+  });
 });

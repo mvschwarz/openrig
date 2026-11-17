@@ -107,13 +107,15 @@ export function InstanceTrailTimeline({
   });
 
   const frontierAnchored = anchorStepId != null && anchorStepId === instance.currentStepId;
+  // A resume row records a redrive, not a step closing.
+  const closedSteps = trail.filter((t) => t.closureReason !== "resumed").length;
 
   return (
     <div className="space-y-2">
       <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">
         Routing History
         <span className="ml-2 normal-case tracking-normal">
-          {trail.length} closed step{trail.length === 1 ? "" : "s"} · append-only trail · deterministic path
+          {closedSteps} closed step{closedSteps === 1 ? "" : "s"} · append-only trail · deterministic path
           {instance.currentStepId ? ` → now at ${instance.currentStepId}` : ""}
         </span>
       </div>

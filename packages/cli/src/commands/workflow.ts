@@ -1044,8 +1044,13 @@ Examples:
           + (body.currentOwnerSession && body.currentOwnerSession !== body.ownerSession ? `, now owned by ${body.currentOwnerSession}` : "");
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `${body.absorbedReplay ? "Replay absorbed, nothing redriven: instance" : "Redrove instance"} ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${owner}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)${body.ownerNote ? `; ${body.ownerNote}` : ""}`,
-          state: `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
-          next: `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+          // An absorbed replay changed nothing, and the redrive it points at may already be closed.
+          state: body.absorbedReplay
+            ? `unchanged by this replay; this failure occurrence was already resumed (packet ${body.newPacketId ?? "?"})`
+            : `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
+          next: body.absorbedReplay
+            ? `Check where the instance stands: rig workflow show ${instanceId}`
+            : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
         });
       });
     });
