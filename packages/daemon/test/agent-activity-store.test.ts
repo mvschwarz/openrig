@@ -774,6 +774,23 @@ describe("AgentActivityStore.findCompactSessionStart", () => {
     expect(ask("")).toBeNull();
   });
 
+  it("a report that carries the launch generation counts for the adopted occupant, and not once a later launch replaced it", () => {
+    const { sessionName } = seedSession("claude-code");
+    // Generations as the registry would say: launch -> adopted (no-launch) -> relaunched (a launch).
+    const continued = new Set(["gen-launch", "gen-adopted"]);
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW,
+      isRegisteredOccupantGeneration: () => true,
+      isOccupantContinuedByAdoption: (_node, generation) => continued.has(generation) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-launch", occurredAt: at(5) });
+    const ask = (generation: string) => store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation });
+    expect(ask("gen-adopted")).toEqual({ observedAt: NOW.getTime() + 5, generation: "gen-launch" });
+    continued.delete("gen-launch"); // a later launch followed it: its reports are a retired occupant's
+    expect(ask("gen-relaunched")).toBeNull();
+    // A generation the registry does not know is never the same process.
+    const unregistered = new AgentActivityStore({ db, eventBus, now: () => NOW, isRegisteredOccupantGeneration: () => false, isOccupantContinuedByAdoption: () => true });
+    expect(unregistered.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation: "gen-adopted" })).toBeNull();
+  });
+
   it("finds nothing for an unknown seat, and survives a new store over the same events", () => {
     const { sessionName } = seedSession("claude-code");
     new AgentActivityStore({ db, eventBus, now: () => NOW })

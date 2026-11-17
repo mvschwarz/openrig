@@ -303,12 +303,14 @@ export class AgentActivityStore {
   }
 
   /** #3389: the seat's own report of a compaction: the earliest SessionStart hook with source `compact` recorded for it
-   *  that carried this occupant generation, whose hook time is at or after `sinceMs`. Read from the persisted events, so a
-   *  daemon that restarted between the hook and the read still finds it. The generation is part of the query: a report with
-   *  no generation or another occupant's is stored as such (see `recordHookEvent`), and must not be the one returned, or it
-   *  would stand in front of a later report from this occupant. */
+   *  at or after `sinceMs` that came from this occupant, read from the persisted events (a daemon that restarted between
+   *  the hook and the read still finds it). "This occupant" is the asked generation, or one that only no-launch adoptions
+   *  have followed: an adoption mints a new generation for the same live process, whose hooks keep the one it launched
+   *  with (#2796, as the activity read and the session-identity route treat it). A report with no generation, or one
+   *  from an occupant a later launch replaced, is stored as such and is never returned, so it cannot stand in front of
+   *  a later report from this occupant. The generation it carried is returned. */
   findCompactSessionStart(input: { sessionName: string; sinceMs: number; generation: string }): { observedAt: number; generation: string } | null {
-    if (!input.generation) return null;
+    if (!input.generation || !Number.isFinite(input.sinceMs)) return null;
     const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
     if (!nodeId) return null;
     const rows = this.db.prepare(`
@@ -316,14 +318,28 @@ export class AgentActivityStore {
       WHERE node_id = ? AND type = 'agent.activity'
         AND json_extract(payload, '$.activity.rawEvent') = 'SessionStart'
         AND json_extract(payload, '$.activity.rawSubtype') = 'compact'
-        AND json_extract(payload, '$.activity.generation') = ?
-      ORDER BY seq DESC LIMIT 20`).all(nodeId, input.generation) as EventPayloadRow[];
+        AND json_extract(payload, '$.activity.generation') IS NOT NULL
+        AND json_extract(payload, '$.activity.eventAt') >= ?
+      ORDER BY seq DESC LIMIT 200`).all(nodeId, new Date(input.sinceMs).toISOString()) as EventPayloadRow[];
+    const same = new Map<string, boolean>();
+    const fromThisOccupant = (generation: string): boolean => {
+      if (generation === input.generation) return true;
+      let known = same.get(generation);
+      if (known === undefined) {
+        try {
+          known = !!this.isRegisteredOccupantGeneration?.(nodeId, generation) && !!this.isOccupantContinuedByAdoption?.(nodeId, generation);
+        } catch { known = false; }
+        same.set(generation, known);
+      }
+      return known;
+    };
     let earliest: { observedAt: number; generation: string } | null = null;
     for (const row of rows) {
       const activity = parseActivityPayload(row.payload)?.activity;
       const observedAt = activity?.eventAt ? Date.parse(activity.eventAt) : NaN;
-      if (!(observedAt >= input.sinceMs) || activity?.generation !== input.generation) continue;
-      if (!earliest || observedAt < earliest.observedAt) earliest = { observedAt, generation: input.generation };
+      const generation = activity?.generation;
+      if (!(observedAt >= input.sinceMs) || typeof generation !== "string" || !fromThisOccupant(generation)) continue;
+      if (!earliest || observedAt < earliest.observedAt) earliest = { observedAt, generation };
     }
     return earliest;
   }

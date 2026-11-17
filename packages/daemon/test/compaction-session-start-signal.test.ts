@@ -54,7 +54,7 @@ function fixture() {
   const daemon = (options: NonNullable<ConstructorParameters<typeof ClaudeCompactionEnforcer>[2]> = {}) =>
     new ClaudeCompactionEnforcer(settings as any, transport, {openrigHome: home, daemonInstance: randomUUID(), now: () => clock, sleep: async (ms) => { clock += ms; },
       resolveOccupantGeneration: () => generation, compactSignalSince: since, ...options});
-  return {daemon, writes, since, signals, home, now: () => clock, advance: (ms: number) => { clock += ms; }, generation: (g: string) => { generation = g; }};
+  return {daemon, writes, policy, since, signals, home, now: () => clock, advance: (ms: number) => { clock += ms; }, generation: (g: string) => { generation = g; }};
 }
 type F = ReturnType<typeof fixture>;
 const compacts = (f: F) => f.writes.filter((t) => t.startsWith('/compact'));
@@ -288,10 +288,92 @@ it('a nonmatching report alone, before or after the fallback, releases nothing a
   expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
 });
 
-it('a reader that does not narrow to the asked generation still cannot release the steps', async () => {
+it('a reader\'s answer with no generation, or older than the write, is no answer', async () => {
   const f = fixture();
-  const e = await compact(f, {compactSignalSince: (_s: string, sinceMs: number) => ({observedAt: sinceMs + 1, generation: 'generation-retired'})});
+  const e = await compact(f, {compactSignalSince: (_s: string, sinceMs: number) => ({observedAt: sinceMs + 1, generation: ''} as CompactSignal)});
   for (let i = 0; i < 3; i++) { f.advance(POLL); expect(await tick(e)).toMatchObject({reason: 'awaiting_compact_signal'}); }
+  const g = fixture();
+  const ge = await compact(g, {compactSignalSince: (_s: string, sinceMs: number) => ({observedAt: sinceMs - 1, generation: 'generation-one'})});
+  for (let i = 0; i < 3; i++) { g.advance(POLL); expect(await tick(ge)).toMatchObject({reason: 'awaiting_compact_signal'}); }
   expect(sequences(f)).toEqual({boundaries: 0, restores: 0, audits: 0});
+  expect(sequences(g)).toEqual({boundaries: 0, restores: 0, audits: 0});
+});
+
+// PR review findings (#3399), each proved against the code as it was before its fix.
+
+it('after a no-launch adoption, a report that carries the launch generation releases the steps (adopted occupant)', async () => {
+  const f = fixture();
+  const db = createFullTestDb();
+  try {
+    const repo = new RigRepository(db);
+    const rig = repo.createRig('demo');
+    const node = repo.addNode(rig.id, 'writer', {runtime: 'claude-code'});
+    const registry = new SessionRegistry(db);
+    const session = registry.registerSession(node.id, seat);
+    registry.updateStatus(session.id, 'running');
+    registry.updateBinding(node.id, {tmuxSession: seat, attachmentType: 'tmux'});
+    const launch = registry.currentOccupantTenure(node.id)!.generationUuid;
+    // A reconcile adopts the live process: a new generation, though the process's hooks still carry the one it launched with.
+    const adopted = registry.mintOccupantTenure(node.id, 'adopt').generationUuid;
+    expect(adopted).not.toBe(launch);
+    expect(registry.currentOccupantGenerationForSession(seat)).toBe(adopted);
+    const store = new AgentActivityStore({db, eventBus: new EventBus(db), now: () => new Date(f.now()),
+      resolveOccupantGeneration: (id) => registry.currentOccupantTenure(id)?.generationUuid ?? null,
+      isRegisteredOccupantGeneration: (id, g) => registry.isOccupantGenerationRegistered(id, g),
+      isOccupantContinuedByAdoption: (id, g) => registry.isOccupantContinuedByAdoption(id, g)});
+    const e = await compact(f, {resolveOccupantGeneration: (name: string) => registry.currentOccupantGenerationForSession(name),
+      compactSignalSince: (sessionName: string, sinceMs: number, generation: string) => store.findCompactSessionStart({sessionName, sinceMs, generation})});
+    f.advance(POLL);
+    expect(store.recordHookEvent({runtime: 'claude-code', sessionName: seat, hookEvent: 'SessionStart', subtype: 'compact', generation: launch, occurredAt: new Date(f.now()).toISOString()}).ok).toBe(true);
+    for (let i = 0; i < 4; i++) await tick(e);
+    expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+    // Once a later launch has replaced the launched occupant, its reports are no longer this occupant's.
+    const relaunched = registry.mintOccupantTenure(node.id, 'fresh').generationUuid;
+    expect(store.findCompactSessionStart({sessionName: seat, sinceMs: 0, generation: relaunched})).toBeNull();
+  } finally {
+    db.close();
+  }
+});
+
+it('waiting for the seat\'s report is not a restore-delivery failure: nothing is recorded or reported while it waits', async () => {
+  const f = fixture();
+  const failures: unknown[] = [];
+  const e = await compact(f, {onRestoreDeliveryFailure: async (failure: unknown) => { failures.push(failure); }});
+  for (let i = 0; i < 6; i++) { f.advance(POLL); expect(await tick(e)).toMatchObject({reason: 'awaiting_compact_signal'}); }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(failures).toEqual([]);
+  expect(e.getOwedRestore(seat)).toMatchObject({stage: 'turn_boundary', held: false, detail: expect.stringContaining('reports its compaction')});
+  expect(e.getOwedRestore(seat)?.lastDelivery).toBeUndefined();
+});
+
+it('an operator-initiated manual compaction keeps its authority across a restart: its late report still owes the sequence when automatic compaction is off', async () => {
+  const f = fixture(); f.policy.enabled = false;
+  const first = f.daemon();
+  expect(await first.triggerManualCompact({sessionName: seat, runtime: 'claude-code', usedPercentage: null}, {skipMap: true, operatorInitiated: true}))
+    .toMatchObject({triggered: true});
+  expect(compacts(f)).toHaveLength(1);
+  f.advance(COMPACT_SIGNAL_WAIT_MS_DEFAULT);
+  for (let i = 0; i < 4; i++) await tick(first);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+  const restarted = f.daemon();
+  await tick(restarted);
+  f.advance(POLL);
+  f.signals.push({observedAt: f.now(), generation: 'generation-one'});
+  for (let i = 0; i < 6; i++) await tick(restarted);
+  expect(sequences(f)).toEqual({boundaries: 2, restores: 2, audits: 2});
+});
+
+it('a cancel after the fallback sequence ends the late-report watch, also across a restart', async () => {
+  const f = fixture(); const e = await compact(f);
+  f.advance(COMPACT_SIGNAL_WAIT_MS_DEFAULT);
+  for (let i = 0; i < 4; i++) await tick(e);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+  e.cancelPreparation(seat);
+  f.advance(POLL); f.signals.push({observedAt: f.now(), generation: 'generation-one'});
+  for (let i = 0; i < 4; i++) await tick(e);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+  const restarted = f.daemon();
+  for (let i = 0; i < 4; i++) await tick(restarted);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
 });
 
