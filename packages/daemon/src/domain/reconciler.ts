@@ -152,3 +152,29 @@ export async function recordedProcessStillRunning(
   }
   return null;
 }
+
+/** Positive evidence that the seat's last observed process has ended: the evidence recorded for this very session
+ *  names at least one pid with a readable observation time, the process table is readable, and no recorded pid is a
+ *  process that started at or before that observation. Absent or mismatched evidence, an unreadable time, or an
+ *  unreadable table is not evidence of an end (false), unlike recordedProcessStillRunning's null, which also covers
+ *  "can't tell". */
+export async function recordedProcessEnded(
+  db: Database.Database,
+  session: { nodeId: string; sessionName: string },
+  processes: () => Promise<ProcessTableRow[] | null>,
+): Promise<boolean> {
+  const evidence = new SeatIdentityStore(db).getProcessEvidence(session.nodeId);
+  if (!evidence || evidence.sessionName !== session.sessionName) return false;
+  const observedAt = Date.parse(evidence.observedAt) / 1000;
+  const pids = [evidence.panePid, evidence.pid]
+    .filter((pid): pid is number => typeof pid === "number" && pid > 0);
+  if (!pids.length || Number.isNaN(observedAt)) return false;
+  const rows = await processes();
+  if (!rows) return false;
+  return pids.every((pid) => {
+    const row = rows.find((r) => r.pid === pid);
+    if (!row) return true;
+    const started = lstartToMinTs(row.startedAt);
+    return started !== undefined && started > observedAt;
+  });
+}

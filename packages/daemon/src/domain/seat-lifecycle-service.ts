@@ -57,7 +57,7 @@ import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
-import { recordedProcessStillRunning } from "./reconciler.js";
+import { recordedProcessEnded, recordedProcessStillRunning } from "./reconciler.js";
 import { readProcessTable, type ProcessTableRow } from "./process-table.js";
 import { applySelectedHome, readRuntimeHomeState, recordRuntimeHome, revertSelectedHome, RECORDABLE_HOME_RUNTIMES, type RecordRuntimeHomeResult, type RuntimeHomeRecordRef,
   type RuntimeHomeState, type SelectedHomePlan } from "./seat-runtime-home-record.js";
@@ -1728,20 +1728,22 @@ export class SeatLifecycleService {
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
       // A host restart ends tmux with every seat in it, and the daemon's boot reconcile marks those managed sessions
-      // detached (no server, nothing recorded running) while keeping their bindings. Nothing was stopped on purpose,
-      // but "no server running" then means no sessions, on the same evidence the reconcile used: so reopen an empty
-      // server for that row too. Its binding stays for the stale-row clean below, which proves absence again.
+      // detached while keeping their bindings. Nothing was stopped on purpose, so "no server running" alone isn't
+      // absence: the server may only have lost its socket. Reopen an empty server for that row only on positive
+      // evidence that the seat's recorded process has ended (recordedProcessEnded); unknown keeps the refusal. Its
+      // binding stays for the stale-row clean below, which proves absence again on the reopened server.
       const detachedManaged = latest !== null
         && latest.session_name === canonicalSessionName
         && latest.status === "detached" && latest.origin !== "claimed"
         && this.nonTerminalSessions(node.id).length === 0;
+      const table = (stoppedManagedOccupant && released) || detachedManaged
+        ? this.readProcesses().catch(() => null) : null;
+      const processes = () => table ?? Promise.resolve(null);
       // Unclaim doesn't end the process. While the released (or detached) session's recorded process still runs, its
       // server may only have lost its socket: a server started there would read the session absent and launch a second
       // occupant beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
-      const stillRuns = (stoppedManagedOccupant && released) || detachedManaged
-        ? await recordedProcessStillRunning(this.db, { nodeId: node.id, sessionName: canonicalSessionName },
-          () => this.readProcesses().catch(() => null))
-        : null;
+      const session = { nodeId: node.id, sessionName: canonicalSessionName };
+      const stillRuns = table ? await recordedProcessStillRunning(this.db, session, processes) : null;
       if (stillRuns) {
         return {
           ...canonicalProbe,
@@ -1749,7 +1751,17 @@ export class SeatLifecycleService {
             + "on a tmux server this daemon can't reach. End that process, then launch again.",
         };
       }
-      if (stoppedManagedOccupant || detachedManaged) {
+      const detachedEnded = detachedManaged && !stoppedManagedOccupant
+        && await recordedProcessEnded(this.db, session, processes);
+      if (detachedManaged && !stoppedManagedOccupant && !detachedEnded) {
+        return {
+          ...canonicalProbe,
+          guidance: "This seat's detached session has no proof its recorded process ended (no process evidence for it, or "
+            + "the process table can't be read), so a server that only lost its socket can't be ruled out. Start the "
+            + "terminal server once the seat is known to be gone, then launch again.",
+        };
+      }
+      if (stoppedManagedOccupant || detachedEnded) {
         try {
           const restored = await this.tmuxAdapter.startServer();
           if (restored.ok) {

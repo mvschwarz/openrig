@@ -1114,10 +1114,10 @@ describe("SeatLifecycleService.launchFresh", () => {
     // A host restart ends tmux with every seat in it. The daemon's boot reconcile then marks the managed sessions
     // detached (the server isn't there and nothing recorded is running) and keeps their bindings. Nothing was
     // stopped on purpose, so the first fresh launch after boot meets "no server running" on a managed, detached row.
-    const afterHostRestart = async (stillRunning: boolean) => {
+    const afterHostRestart = async (stillRunning: boolean, opts?: { noEvidence?: boolean }) => {
       const seat = seedSeat();
       const server = modelServerLifetime();
-      new SeatIdentityStore(db).upsert({
+      if (!opts?.noEvidence) new SeatIdentityStore(db).upsert({
         nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
         evidence: { registeredPane: "%old", observedPid: 6161, observedPanePid: 6160, observedCommand: "claude", matchedLayer: 1 },
         sessionName: seat.sessionName, observedAt: observed.toISOString(),
@@ -1145,6 +1145,24 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(tmux.createSession).toHaveBeenCalledTimes(1);
       expect(killed).toEqual([]);
       expect(result.supersededSessionIds).toContain(seat.session!.id);
+    });
+
+    it.each([
+      { name: "the process table can't be read", noEvidence: false,
+        rows: async (): Promise<ProcessTableRow[]> => { throw new Error("ps failed"); } },
+      { name: "no process evidence was recorded for the session", noEvidence: true, rows: async () => [] as ProcessTableRow[] },
+    ])("keeps refusing a detached managed seat when $name (its end isn't proven)", async ({ noEvidence, rows }) => {
+      const { seat } = await afterHostRestart(false, { noEvidence });
+      readProcesses = rows;
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("no proof its recorded process ended") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
     });
 
     it("keeps refusing a running managed seat's fresh launch while its socket is lost", async () => {
