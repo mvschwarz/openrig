@@ -293,8 +293,9 @@ export class SessionRegistry {
     sessionName: string,
     kind: OccupantKind = "initial",
     reservedGeneration?: string | null,
-    /** The launch keeps the name the seat was bound to (an adopted seat's own name): accepted when boundSessionNameProblem finds none. */
-    opts?: { keptBoundName?: boolean },
+    /** The launch keeps the name the seat was bound to (an adopted seat's own name): accepted when boundSessionNameProblem finds none.
+     *  launchedCwd: the folder this launch starts the seat in, which rig down also cleans. */
+    opts?: { keptBoundName?: boolean; launchedCwd?: string },
   ): Session {
     if (!validateSessionName(sessionName) && !(opts?.keptBoundName === true && boundSessionNameProblem(sessionName) === null)) {
       throw new Error(
@@ -309,6 +310,9 @@ export class SessionRegistry {
         "INSERT INTO sessions (id, node_id, session_name) VALUES (?, ?, ?)"
       )
       .run(id, nodeId, sessionName);
+    if (opts?.launchedCwd) {
+      try { this.db.prepare("UPDATE sessions SET launched_cwd = ? WHERE id = ?").run(opts.launchedCwd, id); } catch { /* no column */ }
+    }
     this.mintOccupantTenureBestEffort(nodeId, kind, reservedGeneration); // atom-B: mint this occupant generation
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
     return this.rowToSession(

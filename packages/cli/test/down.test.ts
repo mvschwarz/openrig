@@ -378,6 +378,23 @@ describe("Down CLI", () => {
     expect(exitCode).toBeUndefined();
   });
 
+  it("names each Claude seat whose launch folder wasn't recorded, so only its saved folder was cleaned, and keeps the exit code", async () => {
+    const seat = "dev-impl@rig-1: /work/project";
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 1, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        launchFolderUnrecorded: [seat],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("Cleaned only the saved folder of 1 Claude seat(s) last started before OpenRig recorded where a launch runs; if one was started elsewhere (rig up --existing --cwd), check that folder's .claude/settings.local.json and .openrig by hand:");
+    expect(logs).toContain(`  ${seat}`);
+    expect(exitCode).toBeUndefined();
+  });
+
   it.each([
     { rigName: "workshop", isUniqueName: false },
     {},

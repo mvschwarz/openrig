@@ -907,6 +907,71 @@ describe("RigTeardownOrchestrator", () => {
       }
     });
 
+    /** A Claude seat saved at one folder whose session was launched in another, as `rig up <rig> --existing --cwd` does
+     *  for one run (#3347); `launchedCwd: null` is a session from before launches recorded their folder. */
+    function claudeRigLaunchedIn(name: string, savedCwd: string, launchedCwd: string | null): string {
+      const rig = rigRepo.createRig(name);
+      const node = rigRepo.addNode(rig.id, "dev", { runtime: "claude-code", cwd: savedCwd });
+      sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@${name}`, "initial", undefined,
+        launchedCwd ? { launchedCwd } : undefined).id, "running");
+      return rig.id;
+    }
+
+    it("cleans OpenRig's Claude files in the folder a --cwd restore launched the seat in, and in its saved folder", async () => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const saved = claudeCwd(own), run = claudeCwd(own);
+      for (const s of [saved, run]) addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
+
+      const result = await teardownWith(run.asset).teardown(claudeRigLaunchedIn("claude-rig", saved.cwd, run.cwd));
+
+      for (const s of [saved, run]) {
+        expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+        expect(fs.existsSync(s.collector)).toBe(false);
+        expect(fs.existsSync(path.join(s.cwd, ".openrig"))).toBe(false);
+      }
+      expect(result.launchFolderUnrecorded).toBeUndefined();
+      expect(result.errors).toEqual([]);
+    });
+
+    it("cleans the saved folder of a session from before launches recorded their folder, and names that seat", async () => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const s = claudeCwd(own);
+      addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
+
+      const result = await teardownWith(s.asset).teardown(claudeRigLaunchedIn("claude-rig", s.cwd, null));
+
+      expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+      expect(fs.existsSync(s.collector)).toBe(false);
+      expect(result.launchFolderUnrecorded).toEqual([`dev@claude-rig: ${s.cwd}`]);
+      expect(result.errors).toEqual([]);
+    });
+
+    it.each(["another rig's seat was launched there", "a sibling launched there failed to stop"] as const)(
+      "keeps a run folder's files while %s, and still cleans the saved folder", async (consumer) => {
+        const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+        const saved = claudeCwd(own), run = claudeCwd(own);
+        addHooks(run.settings, { Stop: [{ hooks: [{ type: "command", command: run.relay }] }] });
+        const before = fs.readFileSync(run.settings, "utf-8");
+        const rigId = claudeRigLaunchedIn("claude-rig", saved.cwd, run.cwd);
+        const tmux = mockTmux();
+        if (consumer === "another rig's seat was launched there") {
+          claudeRigLaunchedIn("other-rig", fs.mkdtempSync(path.join(tmpDir, "other-saved-")), run.cwd);
+        } else {
+          const sibling = rigRepo.addNode(rigId, "survivor", { runtime: "claude-code", cwd: fs.mkdtempSync(path.join(tmpDir, "survivor-saved-")) });
+          sessionRegistry.updateStatus(sessionRegistry.registerSession(sibling.id, "survivor@claude-rig", "initial", undefined,
+            { launchedCwd: run.cwd }).id, "running");
+          tmux.killSession = vi.fn(async target => target === "survivor@claude-rig"
+            ? { ok: false, code: "kill_failed", message: "tmux error" } : { ok: true });
+        }
+
+        await teardownWith(run.asset, tmux).teardown(rigId);
+
+        expect(fs.readFileSync(run.settings, "utf-8")).toBe(before);
+        expect(fs.readFileSync(run.collector, "utf-8")).toBe(COLLECTOR);
+        expect(fs.readFileSync(saved.settings, "utf-8")).toBe(own);
+        expect(fs.existsSync(saved.collector)).toBe(false);
+      });
+
     // A link below the cwd shares a file between two directories: the stopping seat's cwd A and a live seat's cwd B. Whichever
     // way the link points, the shared target stays and is named; A's own, unshared targets still go.
     it.each(["B's .claude and .openrig link to A's", "A's .claude and .openrig link to B's", "settings.local.json is hardlinked"] as const)(
