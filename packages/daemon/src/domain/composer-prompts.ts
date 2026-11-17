@@ -152,7 +152,9 @@ export interface ComposerInput {
   ghost?: { line: number; offset: number; continuationRows: number };
 }
 
-export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+ \+(\d+) lines\]$/;
+// Claude Code adds the line count only when the paste has line breaks: a single line over its collapse threshold
+// (800 characters in 2.1.326) shows as `[Pasted text #N]` (#2429).
+export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+(?: \+(\d+) lines)?\]$/;
 
 /** Preserve characters and spaces within rows. Only a real line break, a full
  * terminal row, or a word that cannot fit may explain a rendered row boundary.
@@ -216,5 +218,5 @@ export function composerPasteUncertainty(input: ComposerInput, text: string): "c
 export function ownCollapsedPaste(input: ComposerInput, expected: string): string | null {
   if (input.collapsedPaste && input.cursorAtEnd && input.pasteMatchesExpected) return input.collapsedPaste;
   const match = input.collapsedPaste && input.cursorAtEnd ? COMPOSER_COLLAPSED_PASTE_PATTERN.exec(input.collapsedPaste) : null;
-  return match && Number(match[1]) === expected.split("\n").length - 1 ? input.collapsedPaste : null;
+  return match && Number(match[1] ?? 0) === expected.split("\n").length - 1 ? input.collapsedPaste : null;
 }
