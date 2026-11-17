@@ -1309,7 +1309,8 @@ export class RestoreOrchestrator {
     const launchElsewhere = `To launch this rig's seats in another directory for this run: rig up ${data.rig?.name ?? rigId} --existing --cwd <dir>.`;
     // Where the line is, so that once the launch below has run it can also name the folder the seat started in.
     let missingCwdAt = -1;
-    if (!opts?.cwdOverride && savedCwd && isAbsolute(savedCwd) && opts?.fsOps && !opts.fsOps.exists(savedCwd) && warnings) {
+    // Only a confirmed absence is named missing (folderPresent): a folder that can't be looked into isn't.
+    if (!opts?.cwdOverride && savedCwd && isAbsolute(savedCwd) && opts?.fsOps && !folderPresent(savedCwd) && warnings) {
       missingCwdAt = warnings.push(`Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine. ${launchElsewhere}`) - 1;
     }
 
