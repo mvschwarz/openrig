@@ -709,3 +709,62 @@ describe("AgentActivityStore — generation identity (W2a-1)", () => {
     });
   });
 });
+
+// #3389: the seat's own report of a compaction (SessionStart, source compact), read back from the persisted events.
+describe("AgentActivityStore.findCompactSessionStart", () => {
+  let db: Database.Database;
+  let rigRepo: RigRepository;
+  let sessionRegistry: SessionRegistry;
+  let eventBus: EventBus;
+  let rigId: string | null;
+
+  beforeEach(() => {
+    rigId = null;
+    db = createFullTestDb();
+    rigRepo = new RigRepository(db);
+    sessionRegistry = new SessionRegistry(db);
+    eventBus = new EventBus(db);
+  });
+  afterEach(() => { db.close(); });
+
+  function seedSession(runtime: "claude-code" | "codex" = "claude-code") {
+    rigId ??= rigRepo.createRig("test-rig").id;
+    const rig = { id: rigId };
+    const node = rigRepo.addNode(rig.id, runtime === "codex" ? "dev.qa" : "dev.impl", { runtime });
+    const sessionName = runtime === "codex" ? "dev-qa@test-rig" : "dev-impl@test-rig";
+    const session = sessionRegistry.registerSession(node.id, sessionName);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName, attachmentType: "tmux" });
+    return { rig, node, session, sessionName };
+  }
+
+  // Hook times are offsets from NOW.
+  const at = (offsetMs: number) => new Date(NOW.getTime() + offsetMs).toISOString();
+
+  it("returns the earliest compact SessionStart at or after the given time, with its generation, and ignores everything else", () => {
+    const { sessionName } = seedSession("claude-code");
+    const other = seedSession("codex");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "startup", generation: "gen-1", occurredAt: at(-5_000) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-0", occurredAt: at(-4_000) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "UserPromptSubmit", occurredAt: at(1_000) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", occurredAt: at(2_000) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", occurredAt: at(2_003) });
+    store.recordHookEvent({ runtime: "codex", sessionName: other.sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-x", occurredAt: at(100) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "Stop", occurredAt: at(3_000) });
+    // Later events of other kinds never hide it, and the earlier compact or startup one is not counted.
+    expect(store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime() })).toEqual({ observedAt: NOW.getTime() + 2_000, generation: "gen-1" });
+    expect(store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime() + 2_001 })).toEqual({ observedAt: NOW.getTime() + 2_003, generation: "gen-1" });
+    expect(store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime() + 2_004 })).toBeNull();
+    expect(store.findCompactSessionStart({ sessionName: other.sessionName, sinceMs: NOW.getTime() })).toEqual({ observedAt: NOW.getTime() + 100, generation: "gen-x" });
+  });
+
+  it("carries no generation when the hook carried none, finds nothing for an unknown seat, and survives a new store over the same events", () => {
+    const { sessionName } = seedSession("claude-code");
+    new AgentActivityStore({ db, eventBus, now: () => NOW })
+      .recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", occurredAt: at(10) });
+    const reopened = new AgentActivityStore({ db, eventBus, now: () => new Date(NOW.getTime() + 3_600_000) });
+    expect(reopened.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime() })).toEqual({ observedAt: NOW.getTime() + 10, generation: null });
+    expect(reopened.findCompactSessionStart({ sessionName: "nobody@test-rig", sinceMs: 0 })).toBeNull();
+  });
+});

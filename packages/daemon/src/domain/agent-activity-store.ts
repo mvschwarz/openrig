@@ -302,6 +302,28 @@ export class AgentActivityStore {
     } catch { return unknown("binding_unverified"); }
   }
 
+  /** #3389: the seat's own report of a compaction: the earliest SessionStart hook with source `compact` recorded for it
+   *  whose hook time is at or after `sinceMs`. Read from the persisted events, so a daemon that restarted between the
+   *  hook and the read still finds it. It carries the emitting occupant's generation, which the caller compares to its own. */
+  findCompactSessionStart(input: { sessionName: string; sinceMs: number }): { observedAt: number; generation: string | null } | null {
+    const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
+    if (!nodeId) return null;
+    const rows = this.db.prepare(`
+      SELECT payload FROM events
+      WHERE node_id = ? AND type = 'agent.activity'
+        AND json_extract(payload, '$.activity.rawEvent') = 'SessionStart'
+        AND json_extract(payload, '$.activity.rawSubtype') = 'compact'
+      ORDER BY seq DESC LIMIT 20`).all(nodeId) as EventPayloadRow[];
+    let earliest: { observedAt: number; generation: string | null } | null = null;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      const observedAt = activity?.eventAt ? Date.parse(activity.eventAt) : NaN;
+      if (!(observedAt >= input.sinceMs)) continue;
+      if (!earliest || observedAt < earliest.observedAt) earliest = { observedAt, generation: activity?.generation ?? null };
+    }
+    return earliest;
+  }
+
   getLatestForNode(input: {
     nodeId?: string | null;
     sessionName?: string | null;
