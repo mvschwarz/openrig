@@ -6,7 +6,7 @@ import { runBoundActivityGrantsSchema } from "../../src/db/migrations/165_run_bo
 import { seatRuntimeHomeRecordsSchema } from "../../src/db/migrations/169_seat_runtime_home_records.js";
 import { claudeAutoModeSchema } from "../../src/db/migrations/171_claude_auto_mode.js";
 import { nodeInputRouteSchema } from "../../src/db/migrations/171_node_input_route.js";
-import { coreAppAccessSchema } from "../../src/db/migrations/168_core_app_access.js";
+import { coreAppAccessSchema } from "../../src/db/migrations/175_core_app_access.js";
 import { piAccountSwitchesSchema } from "../../src/db/migrations/151_pi_account_switches.js";
 import { eventsRetentionMarksSchema } from "../../src/db/migrations/153_events_retention_marks.js";
 import { queueErasureSchema } from "../../src/db/migrations/155_queue_erasure.js";

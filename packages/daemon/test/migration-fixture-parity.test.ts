@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { migrationsForFullTestDb, migrationsForFullTestDbExclusions } from "./helpers/test-app.js";
 import { assertExplicitSubsetOfAllMigrations } from "./helpers/migration-subset-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { coreAppAccessSchema } from "../src/db/migrations/168_core_app_access.js";
+import { coreAppAccessSchema } from "../src/db/migrations/175_core_app_access.js";
 import { nodeInputRouteSchema } from "../src/db/migrations/171_node_input_route.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";

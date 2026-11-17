@@ -1,7 +1,7 @@
 import type { Migration } from "../migrate.js";
 
 export const coreAppAccessSchema: Migration = {
-  name: "168_core_app_access.sql",
+  name: "175_core_app_access.sql",
   sql: `
     CREATE TABLE core_app_credentials (
       credential_id TEXT PRIMARY KEY,
