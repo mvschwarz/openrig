@@ -41,6 +41,9 @@ signed in. One provider is enough to start.
 
 Already have OpenRig? Use the tag that matches `rig --version`, or upgrade first.
 
+If `rig seat set-runtime --help` lists `omp-tui`, you can tell the agent “Use Oh My Pi’s terminal UI for the reviewer.”
+That selects `runtime: omp-tui` for the reviewer. Other OMP seats use the RPC runner (`runtime: omp`) by default.
+
 Prefer to type the commands yourself? [Install it yourself ↓](#install-it-yourself)
 
 Setting up Node.js on Linux, on a Mac where you aren't an administrator, or on Windows (WSL2)? See [Before you start](docs/reference/getting-started.md#before-you-start).
