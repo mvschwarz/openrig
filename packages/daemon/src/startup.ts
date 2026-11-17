@@ -2827,8 +2827,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),
           // #3389: the post-compaction steps wait for the seat's own SessionStart(compact) report, as the daemon recorded it.
-          compactSignalSince: (sessionName, sinceMs) =>
-            agentActivityStore.findCompactSessionStart({ sessionName, sinceMs }),
+          compactSignalSince: (sessionName, sinceMs, generation) =>
+            agentActivityStore.findCompactSessionStart({ sessionName, sinceMs, generation }),
           onPostRestoreComplete: (receipt) => {
             recordManagedWidthReceipt(
               receipt,

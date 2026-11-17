@@ -100,8 +100,10 @@ export interface CompactSignal {
   /** The occupant generation the emitting hook carried, null when it carried none. */
   generation: string | null;
 }
-/** The earliest report of a compaction recorded for the seat at or after `sinceMs`, or null. */
-export type CompactSignalSince = (sessionName: string, sinceMs: number) => CompactSignal | null;
+/** The earliest report of a compaction recorded for the seat at or after `sinceMs` that carried this occupant generation,
+ *  or null. The generation is part of the question, not a check on its answer: a report with no generation or another one
+ *  (a retired occupant's, say) must not stand in front of a later report from this occupant. */
+export type CompactSignalSince = (sessionName: string, sinceMs: number, generation: string) => CompactSignal | null;
 
 export interface EnforcerInput {
   nodeId?: string;
@@ -1895,9 +1897,12 @@ export class ClaudeCompactionEnforcer {
   /** The report that belongs to this wait: from the same occupant generation the /compact went to (a report with no
    *  generation, or another one, proves nothing here), and not older than the write. */
   private matchingCompactSignal(session: string, wait: CompactSignalWait): CompactSignal | null {
+    // An attempt that names no occupant has nothing to match a report against.
+    if (wait.generation === null) return null;
     let signal: CompactSignal | null = null;
-    try { signal = this.compactSignalSince?.(session, wait.writeAt) ?? null; } catch { return null; }
-    if (!signal || wait.generation === null || signal.generation !== wait.generation || !(signal.observedAt >= wait.writeAt)) return null;
+    try { signal = this.compactSignalSince?.(session, wait.writeAt, wait.generation) ?? null; } catch { return null; }
+    // The reader already asked for this generation; the check stays so a reader that doesn't narrow can't release the steps.
+    if (!signal || signal.generation !== wait.generation || !(signal.observedAt >= wait.writeAt)) return null;
     return signal;
   }
 

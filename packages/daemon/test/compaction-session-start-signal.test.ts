@@ -12,6 +12,11 @@ import {randomUUID} from 'node:crypto';
 import {ClaudeCompactionEnforcer, COMPACT_SIGNAL_WAIT_MS_DEFAULT, LATE_COMPACT_SIGNAL_WATCH_MS_DEFAULT, buildPostCompactTurnBoundaryPrompt, type CompactSignal} from '../src/domain/claude-compaction-enforcer.js';
 import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
+import {createFullTestDb} from './helpers/test-app.js';
+import {RigRepository} from '../src/domain/rig-repository.js';
+import {SessionRegistry} from '../src/domain/session-registry.js';
+import {EventBus} from '../src/domain/event-bus.js';
+import {AgentActivityStore} from '../src/domain/agent-activity-store.js';
 
 const seat = 'writer@demo', high = {sessionName: seat, runtime: 'claude-code', usedPercentage: 90};
 const POLL = 30_000;
@@ -41,8 +46,10 @@ function fixture() {
   const settings = {resolveClaudeCompactionPolicy: () => policy};
   // The seat's own reports of a compaction, as the daemon would find them in its recorded SessionStart hook events.
   const signals: CompactSignal[] = [];
-  const since = vi.fn((_session: string, sinceMs: number): CompactSignal | null =>
-    signals.filter((s) => s.observedAt >= sinceMs).sort((a, b) => a.observedAt - b.observedAt)[0] ?? null);
+  // The reader is asked for one occupant generation, as the real store is: reports of another generation, or of none, are not
+  // candidates, so they cannot stand in front of a later report from this occupant.
+  const since = vi.fn((_session: string, sinceMs: number, generation: string): CompactSignal | null =>
+    signals.filter((s) => s.observedAt >= sinceMs && s.generation === generation).sort((a, b) => a.observedAt - b.observedAt)[0] ?? null);
   // A daemon process: a new one shares the instance home, the seat, the clock and the recorded reports, and nothing in memory.
   const daemon = (options: NonNullable<ConstructorParameters<typeof ClaudeCompactionEnforcer>[2]> = {}) =>
     new ClaudeCompactionEnforcer(settings as any, transport, {openrigHome: home, daemonInstance: randomUUID(), now: () => clock, sleep: async (ms) => { clock += ms; },
@@ -212,3 +219,79 @@ it('a report source that throws is no report: the bound still releases the steps
   for (let i = 0; i < 4; i++) await tick(e);
   expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
 });
+
+// A report that carries no generation, or a retired occupant's, is stored as such. It must not be the one the lookup returns:
+// asked for this occupant's reports, the lookup skips it, so a later valid report still releases the steps (and, after the
+// fallback, still owes the second sequence).
+it('a persisted report with no generation does not hide a persisted current-occupant report (the real store)', async () => {
+  const f = fixture();
+  const db = createFullTestDb();
+  try {
+    const repo = new RigRepository(db);
+    const rig = repo.createRig('demo');
+    const node = repo.addNode(rig.id, 'writer', {runtime: 'claude-code'});
+    const registry = new SessionRegistry(db);
+    const session = registry.registerSession(node.id, seat);
+    registry.updateStatus(session.id, 'running');
+    registry.updateBinding(node.id, {tmuxSession: seat, attachmentType: 'tmux'});
+    const store = new AgentActivityStore({db, eventBus: new EventBus(db), now: () => new Date(f.now())});
+    const e = await compact(f, {compactSignalSince: (sessionName: string, sinceMs: number, generation: string) => store.findCompactSessionStart({sessionName, sinceMs, generation})});
+    f.advance(POLL);
+    expect(store.recordHookEvent({runtime: 'claude-code', sessionName: seat, hookEvent: 'SessionStart', subtype: 'compact', occurredAt: new Date(f.now()).toISOString()}).ok).toBe(true);
+    f.advance(1);
+    expect(store.recordHookEvent({runtime: 'claude-code', sessionName: seat, hookEvent: 'SessionStart', subtype: 'compact', generation: 'generation-one', occurredAt: new Date(f.now()).toISOString()}).ok).toBe(true);
+    for (let i = 0; i < 4; i++) await tick(e);
+    expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+  } finally {
+    db.close();
+  }
+});
+
+it.each([null, 'generation-retired'])('a nonmatching report (%s) does not hide this occupant\'s report, before the fallback', async (generation) => {
+  const f = fixture(); const e = await compact(f);
+  f.advance(POLL);
+  f.signals.push({observedAt: f.now(), generation});
+  f.advance(1);
+  f.signals.push({observedAt: f.now(), generation: 'generation-one'});
+  for (let i = 0; i < 4; i++) await tick(e);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+  // The one report that released the steps owes nothing more, however long it stays on record.
+  f.advance(COMPACT_SIGNAL_WAIT_MS_DEFAULT);
+  for (let i = 0; i < 4; i++) await tick(e);
+  f.advance(POLL);
+  for (let i = 0; i < 4; i++) await tick(e);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+});
+
+it.each([null, 'generation-retired'])('a nonmatching report (%s) does not hide a late report of this occupant after the fallback', async (generation) => {
+  const f = fixture(); const e = await compact(f);
+  f.advance(COMPACT_SIGNAL_WAIT_MS_DEFAULT);
+  for (let i = 0; i < 4; i++) await tick(e);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+  f.advance(POLL);
+  f.signals.push({observedAt: f.now(), generation});
+  f.advance(1);
+  f.signals.push({observedAt: f.now(), generation: 'generation-one'});
+  for (let i = 0; i < 6; i++) await tick(e);
+  expect(sequences(f)).toEqual({boundaries: 2, restores: 2, audits: 2});
+});
+
+it('a nonmatching report alone, before or after the fallback, releases nothing and owes nothing', async () => {
+  const f = fixture(); const e = await compact(f);
+  f.signals.push({observedAt: f.now(), generation: null}, {observedAt: f.now(), generation: 'generation-retired'});
+  await tick(e); expect(sequences(f)).toEqual({boundaries: 0, restores: 0, audits: 0});
+  f.advance(COMPACT_SIGNAL_WAIT_MS_DEFAULT);
+  for (let i = 0; i < 4; i++) await tick(e);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+  f.advance(POLL); f.signals.push({observedAt: f.now(), generation: 'generation-retired'});
+  for (let i = 0; i < 4; i++) await tick(e);
+  expect(sequences(f)).toEqual({boundaries: 1, restores: 1, audits: 1});
+});
+
+it('a reader that does not narrow to the asked generation still cannot release the steps', async () => {
+  const f = fixture();
+  const e = await compact(f, {compactSignalSince: (_s: string, sinceMs: number) => ({observedAt: sinceMs + 1, generation: 'generation-retired'})});
+  for (let i = 0; i < 3; i++) { f.advance(POLL); expect(await tick(e)).toMatchObject({reason: 'awaiting_compact_signal'}); }
+  expect(sequences(f)).toEqual({boundaries: 0, restores: 0, audits: 0});
+});
+

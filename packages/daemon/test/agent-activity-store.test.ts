@@ -741,7 +741,7 @@ describe("AgentActivityStore.findCompactSessionStart", () => {
   // Hook times are offsets from NOW.
   const at = (offsetMs: number) => new Date(NOW.getTime() + offsetMs).toISOString();
 
-  it("returns the earliest compact SessionStart at or after the given time, with its generation, and ignores everything else", () => {
+  it("returns the earliest compact SessionStart of the asked generation at or after the given time, and ignores everything else", () => {
     const { sessionName } = seedSession("claude-code");
     const other = seedSession("codex");
     const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
@@ -753,18 +753,33 @@ describe("AgentActivityStore.findCompactSessionStart", () => {
     store.recordHookEvent({ runtime: "codex", sessionName: other.sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-x", occurredAt: at(100) });
     store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "Stop", occurredAt: at(3_000) });
     // Later events of other kinds never hide it, and the earlier compact or startup one is not counted.
-    expect(store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime() })).toEqual({ observedAt: NOW.getTime() + 2_000, generation: "gen-1" });
-    expect(store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime() + 2_001 })).toEqual({ observedAt: NOW.getTime() + 2_003, generation: "gen-1" });
-    expect(store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime() + 2_004 })).toBeNull();
-    expect(store.findCompactSessionStart({ sessionName: other.sessionName, sinceMs: NOW.getTime() })).toEqual({ observedAt: NOW.getTime() + 100, generation: "gen-x" });
+    const ask = (sinceMs: number, generation = "gen-1") => store.findCompactSessionStart({ sessionName, sinceMs, generation });
+    expect(ask(NOW.getTime())).toEqual({ observedAt: NOW.getTime() + 2_000, generation: "gen-1" });
+    expect(ask(NOW.getTime() + 2_001)).toEqual({ observedAt: NOW.getTime() + 2_003, generation: "gen-1" });
+    expect(ask(NOW.getTime() + 2_004)).toBeNull();
+    expect(ask(NOW.getTime() - 10_000, "gen-0")).toEqual({ observedAt: NOW.getTime() - 4_000, generation: "gen-0" });
+    expect(store.findCompactSessionStart({ sessionName: other.sessionName, sinceMs: NOW.getTime(), generation: "gen-x" })).toEqual({ observedAt: NOW.getTime() + 100, generation: "gen-x" });
   });
 
-  it("carries no generation when the hook carried none, finds nothing for an unknown seat, and survives a new store over the same events", () => {
+  it("a report with no generation, or another occupant's, is never returned and never stands in front of this occupant's later one", () => {
+    const { sessionName } = seedSession("claude-code");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", occurredAt: at(10) });
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-retired", occurredAt: at(11) });
+    const ask = (generation: string) => store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation });
+    expect(ask("gen-1")).toBeNull();
+    store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", occurredAt: at(12) });
+    expect(ask("gen-1")).toEqual({ observedAt: NOW.getTime() + 12, generation: "gen-1" });
+    expect(ask("gen-retired")).toEqual({ observedAt: NOW.getTime() + 11, generation: "gen-retired" });
+    expect(ask("")).toBeNull();
+  });
+
+  it("finds nothing for an unknown seat, and survives a new store over the same events", () => {
     const { sessionName } = seedSession("claude-code");
     new AgentActivityStore({ db, eventBus, now: () => NOW })
-      .recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", occurredAt: at(10) });
+      .recordHookEvent({ runtime: "claude-code", sessionName, hookEvent: "SessionStart", subtype: "compact", generation: "gen-1", occurredAt: at(10) });
     const reopened = new AgentActivityStore({ db, eventBus, now: () => new Date(NOW.getTime() + 3_600_000) });
-    expect(reopened.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime() })).toEqual({ observedAt: NOW.getTime() + 10, generation: null });
-    expect(reopened.findCompactSessionStart({ sessionName: "nobody@test-rig", sinceMs: 0 })).toBeNull();
+    expect(reopened.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation: "gen-1" })).toEqual({ observedAt: NOW.getTime() + 10, generation: "gen-1" });
+    expect(reopened.findCompactSessionStart({ sessionName: "nobody@test-rig", sinceMs: 0, generation: "gen-1" })).toBeNull();
   });
 });

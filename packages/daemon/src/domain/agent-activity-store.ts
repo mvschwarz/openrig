@@ -303,9 +303,12 @@ export class AgentActivityStore {
   }
 
   /** #3389: the seat's own report of a compaction: the earliest SessionStart hook with source `compact` recorded for it
-   *  whose hook time is at or after `sinceMs`. Read from the persisted events, so a daemon that restarted between the
-   *  hook and the read still finds it. It carries the emitting occupant's generation, which the caller compares to its own. */
-  findCompactSessionStart(input: { sessionName: string; sinceMs: number }): { observedAt: number; generation: string | null } | null {
+   *  that carried this occupant generation, whose hook time is at or after `sinceMs`. Read from the persisted events, so a
+   *  daemon that restarted between the hook and the read still finds it. The generation is part of the query: a report with
+   *  no generation or another occupant's is stored as such (see `recordHookEvent`), and must not be the one returned, or it
+   *  would stand in front of a later report from this occupant. */
+  findCompactSessionStart(input: { sessionName: string; sinceMs: number; generation: string }): { observedAt: number; generation: string } | null {
+    if (!input.generation) return null;
     const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
     if (!nodeId) return null;
     const rows = this.db.prepare(`
@@ -313,13 +316,14 @@ export class AgentActivityStore {
       WHERE node_id = ? AND type = 'agent.activity'
         AND json_extract(payload, '$.activity.rawEvent') = 'SessionStart'
         AND json_extract(payload, '$.activity.rawSubtype') = 'compact'
-      ORDER BY seq DESC LIMIT 20`).all(nodeId) as EventPayloadRow[];
-    let earliest: { observedAt: number; generation: string | null } | null = null;
+        AND json_extract(payload, '$.activity.generation') = ?
+      ORDER BY seq DESC LIMIT 20`).all(nodeId, input.generation) as EventPayloadRow[];
+    let earliest: { observedAt: number; generation: string } | null = null;
     for (const row of rows) {
       const activity = parseActivityPayload(row.payload)?.activity;
       const observedAt = activity?.eventAt ? Date.parse(activity.eventAt) : NaN;
-      if (!(observedAt >= input.sinceMs)) continue;
-      if (!earliest || observedAt < earliest.observedAt) earliest = { observedAt, generation: activity?.generation ?? null };
+      if (!(observedAt >= input.sinceMs) || activity?.generation !== input.generation) continue;
+      if (!earliest || observedAt < earliest.observedAt) earliest = { observedAt, generation: input.generation };
     }
     return earliest;
   }
