@@ -3,6 +3,8 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createProcessLiveness, realDeps } from "../src/commands/daemon.js";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
@@ -2438,6 +2440,53 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     expect(seen!.aborted).toBe(true);
     expect(abortedBeforeSignal).toBe(true);
     expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+  });
+
+  it("with realDeps' fetch and a local server that sends headers and holds the body open, the check's request is aborted and its socket closed by the 250 ms deadline", async () => {
+    vi.useRealTimers();
+    let arrived: number | undefined;
+    let closed: number | undefined;
+    let seen: AbortSignal | undefined;
+    let socketClosed!: () => void;
+    const closedOnce = new Promise<void>((resolve) => { socketClosed = resolve; });
+    const server = createHttpServer((req, res) => {
+      arrived = Date.now();
+      req.socket.on("close", () => { closed = Date.now(); socketClosed(); });
+      // Headers go out; the body never ends.
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"pid":');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    process.env["OPENRIG_URL"] = `http://127.0.0.1:${port}`;
+    try {
+      // Only the check's own listener read carries a signal: that one goes over the real fetch to the server.
+      const deps = reservedDeps({
+        lock: header() + childRecord({ port }),
+        probe: (init) => {
+          if (!init?.signal) return neverFetch();
+          seen = init.signal;
+          return realDeps().fetch(`http://127.0.0.1:${port}/healthz`, init);
+        },
+      });
+      const kill = deps.kill as ReturnType<typeof vi.fn>;
+      const realKill = kill.getMockImplementation()!;
+      let abortedBeforeSignal: boolean | undefined;
+      // The kill stays mocked: no real process gets a signal. It only records whether the request was already aborted.
+      kill.mockImplementation((pid: number, signal: string) => { abortedBeforeSignal = seen?.aborted; return realKill(pid, signal); });
+      const outcome = await stopDaemon(deps).catch((e: Error) => e);
+      await Promise.race([closedOnce, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      expect(outcome).toBe("stopped");
+      expect(arrived).toBeDefined();
+      expect(closed).toBeDefined();
+      // The deadline is 250 ms; the margin covers the event loop of a loaded test host.
+      expect(closed! - arrived!).toBeLessThan(250 + 500);
+      expect(abortedBeforeSignal).toBe(true);
+      expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("refuses from another pid namespace than the reservation's", async () => {
