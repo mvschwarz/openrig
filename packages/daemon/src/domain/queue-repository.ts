@@ -6326,11 +6326,14 @@ export class QueueRepository {
   private handoffAdvisory(row: QueueItemRow): QueueItem["handoffAdvisory"] {
     // Generic updates can write handed-off and retain a previous handoff's owner
     // after reopening. Skip only when that owner still matches this closure.
-    if ((row.state === "handed-off" && matchesRecordedHandoffTarget(row.qitem_id, row.handed_off_to, row.closure_target)) || !isTerminalState(row.state)
-      || row.closure_reason !== "handed_off_to" || !row.closure_target) return undefined;
+    if ((row.state === "handed-off" && matchesRecordedHandoffTarget(row.qitem_id, row.handed_off_to, row.closure_target)) || (!isTerminalState(row.state) && !(row.state === "canceled" && row.closure_reason === "superseded"))
+      || !row.closure_target || (row.closure_reason !== "handed_off_to"
+        && !(row.closure_reason === "superseded" && row.closure_target.startsWith("qitem-")))) return undefined;
     const target = row.closure_target;
     try {
-      if (hasLinkedSuccessor(this.db, row.qitem_id, target)) return undefined;
+      if (row.closure_reason === "superseded"
+        ? this.db.prepare("SELECT 1 FROM queue_items WHERE qitem_id = ?").get(target)
+        : hasLinkedSuccessor(this.db, row.qitem_id, target)) return undefined;
     } catch {
       // Optional reporting must not fail a close that has already committed,
       // or describe an unavailable lookup as proof of a missing local row.
@@ -6341,7 +6344,11 @@ export class QueueRepository {
       status: "unverified",
       target,
       reason: "no-live-local-successor",
-      message: foreignTarget
+      message: row.closure_reason === "superseded"
+        ? `Successor custody for '${target}' is unverified on this daemon: ${foreignTarget
+          ? "the recorded successor is on another host; read it there"
+          : "no local row with this ID was found; reconcile the recorded successor by ID"}. This row records supersession, not proof of transfer or pickup.`
+        : foreignTarget
         ? `Successor custody for '${target}' is unverified on this daemon: the successor is named on that host, and this daemon cannot read its custody. This closure records a handoff claim, not proof of transfer or pickup. Use 'rig queue handoff' or 'handoff-and-complete' with '--to <seat@rig>'; add '--host <registered-host>' for another host instead of manually closing to the successor ID; a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`
         : `Successor custody for '${target}' is unverified on this daemon: no local row with this source's lineage was found. A successor may exist on another host. This closure records a handoff claim, not proof of transfer or pickup; reconcile the successor by ID. Use 'rig queue handoff' or 'handoff-and-complete' with '--to <seat@rig>'; add '--host <registered-host>' for another host instead of manually closing to the successor ID; a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`,
     };
