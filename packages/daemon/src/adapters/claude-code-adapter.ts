@@ -116,6 +116,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private stateDir: string | null;
   private restoreReadPolicy: (() => RestoreReadPolicy | null) | null;
+  private hookBridgeLaunch: ((nodeId: string, executable?: string) => boolean | Promise<boolean>) | null;
   private collectorAssetPath: string | null;
   private nodeExecutable: string;
   private autoDriveProviderPrompts: boolean;
@@ -140,6 +141,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     stateDir?: string;
     /** The compaction settings the restore reads from, so the launch grants those files too. */
     restoreReadPolicy?: () => RestoreReadPolicy | null;
+    /** Slice 13: whether this launch adds a seat's hook bridge (opted in, on a Claude with asyncRewake), read at each
+     *  launch; absent, no launch adds it. */
+    hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
     collectorAssetPath?: string;
     /** Interpreter used to write generated Claude commands; defaults to this daemon runtime. */
     nodeExecutable?: string;
@@ -167,6 +171,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
     this.restoreReadPolicy = deps.restoreReadPolicy ?? null;
+    this.hookBridgeLaunch = deps.hookBridgeLaunch ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.nodeExecutable = deps.nodeExecutable ?? process.execPath;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
@@ -411,7 +416,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const appliedWith = (claudeAutoMode: import("../domain/claude-auto-mode.js").AppliedClaudeAutoMode) =>
       ({ ...observeClaudePermission(posture), claudeAutoMode });
     const appliedLaunch = appliedWith(autoMode.block ?? null);
-    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
+    const hookBridge = (await this.hookBridgeLaunch?.(binding.nodeId, binding.claudeExecutable ?? undefined)) === true;
+    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge }), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
     const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");

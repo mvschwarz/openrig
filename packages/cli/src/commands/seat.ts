@@ -39,6 +39,10 @@ interface SeatStatusResponse {
   runtimeSwitch?: { id: string; phase: string; from: string; to: string; committed: boolean; startedAt: string; attention: string | null; outcome: string | null };
   compaction?: { stage: string; detail: string };
   current_occupant: string | null;
+  /** #3253: the seat's process limits, read back from its process (applied; requested, not applied; unsupported; unknown;
+   *  or invalid: the stored value can't be read). `readFrom` says which process was read. */
+  processLimits?: { state: "applied" | "not_applied" | "unsupported" | "unknown" | "invalid"; requested?: { tasksMax: number };
+    reason?: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number; scope?: string; readFrom?: string };
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
   terminalPolicy?: {
@@ -105,6 +109,8 @@ interface SeatStatusError {
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
   clients?: Array<{ name: string; session: string }>;
+  /** #3253: the process-limit notice of a failure after a launch that went on without the limit (or the refusal's problem). */
+  processLimits?: Record<string, unknown>;
 }
 
 interface SeatHandoverPlan {
@@ -267,6 +273,13 @@ function printHuman(status: SeatStatusResponse): void {
   // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
   if (status.permissions_to || status.runner) {
     console.log(`Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
+  }
+  if (status.processLimits) {
+    const l = status.processLimits;
+    const read = l.pidsMax !== undefined ? ` (pids.max ${l.pidsMax}, current ${l.pidsCurrent ?? "?"}, limit hit ${l.limitHits ?? 0} times)` : "";
+    const state = l.state === "not_applied" ? "requested, not applied" : l.state === "invalid" ? "stored value invalid" : l.state;
+    const asked = l.requested ? `tasks_max ${l.requested.tasksMax}` : "process_limits";
+    console.log(`Process limits: ${asked}: ${state}${read}${l.reason ? `; ${l.reason}` : ""}${l.readFrom ? ` (read from ${l.readFrom})` : ""}`);
   }
   if (status.runtime_home) {
     const h = status.runtime_home;
@@ -506,6 +519,10 @@ function printSeatError(error: SeatStatusError, fallback: string): void {
   if (error.guidance) {
     console.error(error.guidance);
   }
+  // #3253: the JSON carries the process-limit notice; the plain output names it too (a handover's packet or
+  // finalization failure after a successor that went on without its limit).
+  const limits = failureProcessLimitsLine(error.processLimits);
+  if (limits) console.error(limits);
   if (error.code === "seat_ambiguous" && error.matches?.length) {
     for (const match of error.matches) {
       console.error(`  ${match.logical_id}@${match.rig_name} (${display(match.current_occupant)})`);
@@ -636,6 +653,37 @@ Examples:
       await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, {
         ...(opts.mode === undefined ? { enabled: opts.enabled === "true" } : { mode: opts.mode }), reason: opts.reason,
       }, opts.json);
+    });
+  cmd.command("set-hook-bridge").argument("<seat>")
+    .requiredOption("--enabled <boolean>", "true opts this Claude seat in to its hook bridge; false opts it out")
+    .requiredOption("--reason <text>").option("--json").description("Opt a Claude seat in or out of delivery through its launch-owned hook bridge")
+    .addHelpText("after", `
+Opted in, a Claude seat's next launch or restore adds two asyncRewake hooks (SessionStart, Stop) that run one waiter
+for the seat, and a quick UserPromptSubmit marker. Messages to the seat are then queued and delivered into its
+context at its next turn boundary: OpenRig doesn't type into its input box or touch a dialog. A seat mid-turn gets
+them when the turn ends.
+
+It takes effect only for an occupant launched with it, on Claude Code 2.1.287 or later, once its waiter has armed;
+until then delivery is typed as before. With no live waiter (never armed, expired after the hook timeout, gone, or a
+turn past 15 minutes), messages are typed after 20 s, and the sender is told the bridge wasn't available. The typing
+guard's hold and levels still decide first. From a terminal with no seat identity, the change is recorded as
+unattributed.
+
+Each wake is one model turn on the seat's own login. A delivered message is recorded as handed to Claude's hook, not as
+read or acted on: a queue row's claim and result stay with the agent.
+
+Examples:
+  rig seat set-hook-bridge dev-impl@my-rig --enabled true --reason "wake at turn boundaries"
+  rig seat hook-bridge dev-impl@my-rig
+`)
+    .action(async (seat: string, opts: { enabled: string; reason: string; json?: boolean }) => {
+      if (!["true", "false"].includes(opts.enabled)) { console.error("Choose --enabled true or false."); process.exitCode = 1; return; }
+      await guardRequest("POST", `/api/hook-bridge/seat/${encodeURIComponent(seat)}`, { enabled: opts.enabled === "true", reason: opts.reason }, opts.json);
+    });
+  cmd.command("hook-bridge").argument("<seat>").option("--json")
+    .description("Show a seat's hook bridge: opted in, effective for this occupant, its waiter, queued messages and wakes")
+    .action(async (seat: string, opts: { json?: boolean }) => {
+      await guardRequest("GET", `/api/hook-bridge/seat/${encodeURIComponent(seat)}`, undefined, opts.json);
     });
   cmd.command("held-messages").argument("<seat>").option("--limit <n>", "Page size", "100").option("--offset <n>", "Page offset", "0").option("--id <id>", "Read one retained or retired record by ID").option("--json")
     .description("Read retained messages outside the protected terminal; reading never delivers them")
@@ -1968,6 +2016,50 @@ function printEffortReport(data: Record<string, unknown>): void {
   if (!precedence.decided) console.log(`Note: ${precedence.detail}`);
 }
 
+/** #3253: a restart in place that can't keep or re-apply the seat's process limit says so, by what the restart did. */
+type ProcessLimitsNoticeView = { state?: "not_applied" | "unknown"; kind: string; reason: string;
+  requested?: { tasksMax: number }; ageSeconds?: number; retryable?: boolean };
+
+/** The parts every process-limit line shares: what was asked, and why it wasn't applied. */
+function processLimitsAskedWhy(notice: ProcessLimitsNoticeView): { asked: string; why: string } {
+  const asked = notice.requested ? `tasks_max ${notice.requested.tasksMax}` : "process_limits";
+  const why = `${notice.kind}: ${notice.reason}${notice.ageSeconds !== undefined ? `, observed ${notice.ageSeconds}s ago` : ""}` +
+    (notice.retryable ? "; this may be temporary" : "");
+  return { asked, why };
+}
+
+/** The process-limit line of a failed seat command: what the launch it made runs under, in the restart line's form. */
+function failureProcessLimitsLine(raw: Record<string, unknown> | undefined): string | null {
+  if (!raw || typeof raw["kind"] !== "string" || typeof raw["reason"] !== "string") return null;
+  const notice = raw as unknown as ProcessLimitsNoticeView;
+  const { asked, why } = processLimitsAskedWhy(notice);
+  if (notice.state === "unknown") {
+    return `Process limits: ${asked}: unknown (${why}); whether what it started runs under the limit can't be told, and ` +
+      "nothing was run a second time. The request stays stored, and a fresh launch applies it.";
+  }
+  if (notice.state === "not_applied") {
+    return `Process limits: ${asked}: requested, not applied; what it started runs without it (${why}). The request stays ` +
+      "stored, and a fresh launch applies it.";
+  }
+  return `Process limits: ${asked}: not applied (${why}).`;
+}
+
+function restartProcessLimitsLine(data: Record<string, unknown>): string | null {
+  const notice = data["processLimits"] as (ProcessLimitsNoticeView & { state: "not_applied" | "unknown" }) | undefined;
+  if (!notice) return null;
+  const { asked, why } = processLimitsAskedWhy(notice);
+  const outcome = data["outcome"] as string | undefined;
+  if (notice.state === "unknown") {
+    return `Process limits: ${asked}: unknown (${why}); whether the restarted seat runs under the limit can't be told, and ` +
+      "nothing was run a second time. rig seat status reads where it stands; the request stays stored, and a fresh launch applies it.";
+  }
+  const what = !outcome ? "this restart would go on without it"
+    : outcome === "not_started" ? "nothing was restarted, so the seat keeps the process it had; a restart would go on without it"
+    : outcome === "restarted_account_unverified" || outcome === "moved" ? "the restart went on without it"
+    : "the restart did not finish; what it started runs without it";
+  return `Process limits: ${asked}: requested, not applied; ${what} (${why}). The request stays stored, and a fresh launch applies it.`;
+}
+
 function printRestartReport(data: Record<string, unknown>): void {
   const seat = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
   console.log(`${data["outcome"] ? String(data["outcome"]) : "preview"}: ${seat?.logicalId}@${seat?.rigName} (${String(data["sessionName"])}, pane ${String(data["pane"])}, ${String(data["paneShape"])}).`);
@@ -1993,6 +2085,8 @@ function printRestartReport(data: Record<string, unknown>): void {
   if (held) console.log(`Pane held (remain-on-exit on): ${held.detail}`);
   const seen = data["observedAfterStop"] as { detail: string } | undefined;
   if (seen) console.log(`Observed after the stop: ${seen.detail}.`);
+  const limits = restartProcessLimitsLine(data);
+  if (limits) console.log(limits);
   if (data["remainingStep"]) console.log(`Remaining step: ${String(data["remainingStep"])}`);
   if (data["recoveryCommand"]) console.log(`Recovery command: ${String(data["recoveryCommand"])}`);
   for (const item of (data["couldNotSee"] as string[] | undefined) ?? []) console.log(`Could not see: ${item}`);

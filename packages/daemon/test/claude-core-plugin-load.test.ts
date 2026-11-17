@@ -32,7 +32,7 @@ import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js
 import { SEAT_ENV_KEYS_VAR } from "../src/domain/seat-env.js";
 import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "../src/domain/claude-core-plugin-env.js";
 import {
-  persistedPluginPaths, seatCorePluginDir, vendoredCorePluginDir, withCorePlugin,
+  persistedPluginPaths, pluginPathsOf, seatCorePluginDir, vendoredCorePluginDir, withCorePlugin,
 } from "../src/domain/claude-core-plugin-env.js";
 import { ensureSeatSkillPlugin, recordSeatSkillFollowing, recordSeatSkillWrite, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
@@ -176,6 +176,30 @@ describe("which Claude seats load the vendored plugin", () => {
       expect(pick(ids[4]!)).toBeUndefined(); // unreadable context
       expect(persistedPluginPaths(db, ids[0]!)).toEqual([vendored]);
       expect(persistedPluginPaths(db, ids[3]!)).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  // A workspace restored onto another home keeps each seat's saved selection, which names the old home's folder. A
+  // plugin selected under the OpenRig home (`openrig-home:`) is read in the home that holds pluginsDir, so a relaunch or
+  // handover still loads it; one saved as a path of its own is not rewritten.
+  it("reads a saved selection made under the OpenRig home in the running home, after the home moved", () => {
+    const { pluginsDir, vendored } = vendoredPlugins(root);
+    const db = createFullTestDb();
+    try {
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("moved");
+      const [underHome, ownPath] = ["under-home", "own-path"].map((l) => rigRepo.addNode(rig.id, l, { runtime: "claude-code" }).id);
+      const save = (nodeId: string, entry: Record<string, string>) =>
+        db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')").run(nodeId, JSON.stringify([entry]));
+      save(underHome!, { category: "plugin", resourcePath: "openrig-home:plugins/openrig-core", absolutePath: "/old-home/.openrig/plugins/openrig-core" });
+      save(ownPath!, { category: "plugin", resourcePath: "/old-home/.openrig/plugins/openrig-core", absolutePath: "/old-home/.openrig/plugins/openrig-core" });
+      expect(seatCorePluginDir({ id: underHome!, runtime: "claude-code" }, db, undefined, pluginsDir)).toBe(vendored);
+      expect(persistedPluginPaths(db, underHome!, root)).toEqual([vendored]);
+      expect(seatCorePluginDir({ id: ownPath!, runtime: "claude-code" }, db, undefined, pluginsDir)).toBeUndefined();
+      expect(pluginPathsOf([{ category: "plugin", resourcePath: "openrig-home:plugins/openrig-core", absolutePath: "/old-home/.openrig/plugins/openrig-core" }], "/new-home/.openrig"))
+        .toEqual(["/new-home/.openrig/plugins/openrig-core"]);
     } finally {
       db.close();
     }
@@ -608,6 +632,21 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     const own = restoreHarness([], { [PLUGIN_ENV]: OWN_LIST });
     await own.run();
     expect(own.created[0]).toMatchObject({ [PLUGIN_ENV]: OWN_LIST });
+  });
+
+  // The lost-host exercise: the snapshot was taken under /old-home, and the daemon now runs with its home at `root`.
+  it("restore onto a moved home: a plugin selected under the OpenRig home is the running home's, and the seat gets it", async () => {
+    const { vendored } = vendoredPlugins(root);
+    vi.stubEnv("OPENRIG_HOME", root);
+    try {
+      const moved = restoreHarness([{ category: "plugin", resourcePath: "openrig-home:plugins/openrig-core",
+        sourcePath: "/old-home/opt/openrig/daemon/specs/agents/shared", absolutePath: "/old-home/.openrig/plugins/openrig-core" }]);
+      await moved.run();
+      expect(moved.created).toHaveLength(1);
+      expect(moved.created[0]).toMatchObject({ [PLUGIN_ENV]: vendored });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

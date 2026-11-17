@@ -326,6 +326,52 @@ describe("SuccessorSessionLauncher", () => {
     expect(launchHarness).toHaveBeenCalledTimes(1);
   });
 
+  it("#3253: a handover chooses its path before the retiree is signalled, and a limit never stops it after that", async () => {
+    const order: string[] = [];
+    const notice = { state: "not_applied", kind: "unsupported", reason: "not Linux", retryable: false, requested: { tasksMax: 256 } };
+    const seatProcessLimitsRecoveryPlan = vi.fn(async (nodeId: string) => { order.push("plan"); return nodeId === "n" ? notice : null; });
+    const signal = vi.fn(async (...a: unknown[]) => { order.push("signal"); return (signalPaneProcess as any)(...a); });
+    // the respawn goes ahead without the limit, with the warning (the adapter's recovery mode), never a refusal
+    const respawn = vi.fn(async (...a: unknown[]) => ({ ...(await (respawnPane as any)(...a)), processLimits: notice,
+      warnings: ["process_limits requested, not applied: …"] }));
+    const tmux = { createSession, listPanes, killSession, respawnPane: respawn, setRemainOnExit, signalPaneProcess: signal, isPaneDead,
+      getDefaultShell, getPaneCommand, seatProcessLimitsRecoveryPlan } as unknown as TmuxAdapter;
+    const l = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+      sessionEnv: { OPENRIG_HOME: "/home" }, newId: () => "01ABCDEFG", runtimeAdapters: { codex: fakeAdapter("codex") },
+      readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
+    });
+    const res = await l.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: true, processLimits: notice });  // the structured warning reaches the caller
+    expect(order[0]).toBe("plan");
+    expect(respawn).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ processLimitsMode: "recovery" }));
+  });
+
+  it("#3253: readiness failure after a respawn without the limit forwards the notice", async () => {
+    const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+    respawnPane.mockResolvedValue({ ok: true, processLimits: notice });
+    checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, step: "start_agent", successorLaunched: true, processLimits: notice });
+  });
+
+  it("#3253: the staged successor (provider switch) is created in recovery mode and carries the notice, also when it fails", async () => {
+    const notice = { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true, requested: { tasksMax: 256 } };
+    const line = "process_limits requested, not applied: the user manager timed out";
+    createSession.mockResolvedValue({ ok: true, processLimits: notice, warnings: [line] });
+    const stage = () => launcher().stageSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, canonicalSession: "a@r",
+      stagingSession: "openrig-switch-1", occupantGeneration: "gen-1", onPaneCreated: () => {}, staged: { prepare: async () => [] } });
+    const res = await stage();
+    expect(createSession).toHaveBeenCalledWith("openrig-switch-1", "/w", expect.anything(), { processLimitsMode: "recovery" });
+    expect(res).toMatchObject({ ok: true, processLimits: notice });
+    expect((res as { notes?: string[] }).notes).toContain(line);
+
+    checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
+    expect(await stage()).toMatchObject({ ok: false, processLimits: notice });
+    // a step after the create that throws keeps it too
+    listPanes.mockRejectedValueOnce(new Error("lost server"));
+    expect(await stage()).toMatchObject({ ok: false, code: "successor_launch_failed", processLimits: notice });
+  });
+
   it("retiree NEVER exits (survives TERM and KILL) → structured retiree_not_terminated, NO respawn (never clobber a live retiree)", async () => {
     isPaneDead.mockResolvedValue(false); // never becomes dead
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });

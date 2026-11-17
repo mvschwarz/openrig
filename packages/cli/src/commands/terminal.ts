@@ -355,6 +355,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
             providers?: Array<{ status?: { available?: boolean; launch?: { socketPath?: string } } }>;
           }>(
             `/api/terminal/status?provider=herdr-app&appHome=${encodeURIComponent(selectedHerdrApp.appHome)}`,
+            { headers: terminalAuthHeaders() },
           );
           const report = probe.data?.providers?.[0]?.status ?? probe.data;
           if (probe.status >= 400 || typeof report?.available !== "boolean") {
@@ -392,7 +393,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         }
         let expectedPlan = opts.expectedPlan;
         if (session !== undefined) {
-          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider ?? "herdr")}&session=${encodeURIComponent(session)}`);
+          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider ?? "herdr")}&session=${encodeURIComponent(session)}`, { headers: terminalAuthHeaders() });
           if (preview.status >= 400 || preview.data.session !== session || typeof preview.data.planId !== "string") {
             printResult(opts.json ?? false, { error: preview.data.error ?? "The daemon did not confirm the requested Herdr session. Update the daemon before opening a named session.", code: "terminal_session_unconfirmed" }, preview.status >= 400 ? preview.status : 409); return;
           }
@@ -425,7 +426,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .action(async (opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.get<unknown>("/api/terminal/views");
+        const res = await client.get<unknown>("/api/terminal/views", { headers: terminalAuthHeaders() });
         printResult(opts.json ?? false, res.data, res.status);
       });
     });
@@ -526,7 +527,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         if (opts.provider === "herdr-app") path += `&appHome=${encodeURIComponent(opts.appHome ? resolve(opts.appHome) : herdrAppHome(deps.env ?? process.env))}`;
         const session = opts.session?.trim();
         if (session !== undefined) path += `${opts.provider ? "&" : "?"}session=${encodeURIComponent(session)}`;
-        const res = await client.get<{ session?: string; error?: string }>(path);
+        const res = await client.get<{ session?: string; error?: string }>(path, { headers: terminalAuthHeaders() });
         if (session !== undefined && res.status < 400 && res.data.session !== session) {
           printResult(opts.json ?? false, { error: "The daemon did not confirm the requested Herdr session. Update the daemon before inspecting a named session.", code: "terminal_session_unconfirmed" }, 409); return;
         }
@@ -544,7 +545,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           if (client.baseUrl && !isLocalTmuxHost(client.baseUrl)) {
             throw new Error("Terminal attachment uses local tmux; run this command on the selected daemon's machine.");
           }
-          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
+          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status", { headers: terminalAuthHeaders() });
           if (response.status >= 400) throw new Error(`Cannot read the tmux server (HTTP ${response.status}).`);
           if (response.data.tmux?.serverArgs === undefined) {
             throw new Error("This daemon cannot report its tmux server. Update and restart it before using terminal attach.");

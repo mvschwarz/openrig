@@ -3,6 +3,7 @@ import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
+import { parseStoredProcessLimits, serializeProcessLimits, validateProcessLimits, type ProcessLimits } from "./process-limits.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
@@ -336,6 +337,8 @@ interface NodeOptions {
   claudeTokenRef?: ClaudeSeatTokenRef;
   claudeMcp?: ClaudeMcp;
   launchWrapper?: readonly string[] | null;
+  /** The seat's own process limits (spec `process_limits`); null/absent = none. */
+  processLimits?: ProcessLimits | null;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -659,6 +662,11 @@ export class RigRepository {
       validateLaunchWrapper(opts.launchWrapper);
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    if (opts?.processLimits) {
+      validateProcessLimits({ tasks_max: opts.processLimits.tasksMax });
+      // Written atomically with creation: a seat never exists without the limit it was created with.
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       validateClaudePermissionRules(opts.claudePermissions);
@@ -814,6 +822,7 @@ export class RigRepository {
     if (opts?.launchWrapper !== undefined && opts.launchWrapper !== null && opts.launchWrapper.length > 0) {
       this.setNodeLaunchWrapper(id, opts.launchWrapper);
     }
+    if (opts?.processLimits) this.setNodeProcessLimits(id, opts.processLimits);
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -945,6 +954,32 @@ export class RigRepository {
       }
     }
     return this.db.prepare("UPDATE nodes SET launch_wrapper = ? WHERE id = ?").run(stored, nodeId).changes > 0;
+  }
+
+  /** Persist or clear (null) a seat's process limits (spec `process_limits`, #3253). The terminal reads them as it
+   *  creates the seat's pane, so a re-applied spec must write them before that launch. */
+  setNodeProcessLimits(nodeId: string, value: ProcessLimits | null): boolean {
+    let stored: string | null = null;
+    if (value !== null) {
+      // A value without tasks_max would store `{}`, which reads back as invalid: null is the only way to clear.
+      const checked = validateProcessLimits({ tasks_max: value.tasksMax });
+      if (checked.tasksMax === undefined) throw new Error("process_limits: tasks_max is required (pass null to clear)");
+      stored = serializeProcessLimits({ tasksMax: checked.tasksMax });
+    }
+    if (!this.hasNodeColumn("process_limits")) {
+      if (stored !== null) throw new Error("Cannot persist process_limits: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run(stored, nodeId).changes > 0;
+  }
+
+  /** A seat's stored process limits, read at each new launch of its pane; undefined = none. A malformed stored value
+   *  throws: a limit the operator set is never silently dropped. */
+  getNodeProcessLimits(nodeId: string): ProcessLimits | undefined {
+    if (!this.hasNodeColumn("process_limits")) return undefined;
+    const row = this.db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as
+      { process_limits: string | null } | undefined;
+    return parseStoredProcessLimits(row?.process_limits, `Seat ${nodeId} process_limits`);
   }
 
   setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
@@ -1196,6 +1231,12 @@ export class RigRepository {
 
   private rowToNode(row: NodeRow): Node {
     const launchWrapper = parseStoredLaunchWrapper(row.launch_wrapper, `Seat ${row.id} launch_wrapper`);
+    // #3253: a malformed stored limit stays local to its seat: the rig read goes on, the node says why, and the stored
+    // value is kept (that seat's launch and status read it as invalid).
+    let processLimits: ProcessLimits | undefined;
+    let processLimitsError: string | undefined;
+    try { processLimits = parseStoredProcessLimits(row.process_limits, `Seat ${row.id} process_limits`); }
+    catch (error) { processLimitsError = (error as Error).message; }
     if (launchWrapper && !isLaunchWrapperRuntime(row.runtime)) {
       throw new Error(`Seat ${row.id} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
     }
@@ -1211,6 +1252,8 @@ export class RigRepository {
       advisor: row.advisor ?? null,
       claudeMcp: row.claude_mcp ?? null,
       ...(launchWrapper ? { launchWrapper } : {}),
+      ...(processLimits ? { processLimits } : {}),
+      ...(processLimitsError ? { processLimitsError } : {}),
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
@@ -1309,6 +1352,7 @@ interface NodeRow {
   advisor?: string | null;
   claude_mcp?: ClaudeMcp | null;
   launch_wrapper?: string | null;
+  process_limits?: string | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   claude_token_ref?: string | null;

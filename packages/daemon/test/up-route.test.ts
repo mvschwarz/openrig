@@ -235,6 +235,53 @@ describe("Up API route", () => {
     expect(tmuxAdapter.sendText).toHaveBeenCalledWith("r00-fresh-down-up-worker", expect.stringContaining("--resume 'fresh-native-session'"));
   });
 
+  // A workspace restored onto another home (the lost-host exercise): `rig up <rig> --existing --cwd <dir>` launches the
+  // restored seats there for this run, and a saved directory this machine doesn't have is named with that way out.
+  // A remote `rig up --host` sends --cwd as typed: a relative one is resolved on the daemon, as a fresh launch resolves it.
+  it.each(["absolute", "relative", "none"] as const)("restores into --cwd (%s), and names a saved working directory this machine doesn't have", async (given) => {
+    const moved = "/home/lhs1116/project-that-moved";
+    expect(fs.existsSync(moved)).toBe(false);
+    const here = fs.mkdtempSync(path.join(os.tmpdir(), "restore-cwd-"));
+    const withOverride = given !== "none";
+    const cwdOverride = given === "relative" ? path.relative(process.cwd(), here) : here;
+    if (given === "relative") expect(path.isAbsolute(cwdOverride)).toBe(false);
+    try {
+      const rig = rigRepo.createRig("moved-home");
+      const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: moved });
+      const session = sessionRegistry.registerSession(node.id, "worker@moved-home", "fresh");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "claude_name", "moved-native-session", "hook");
+      const down = await app.request("/api/down", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rigId: rig.id, force: true }),
+      });
+      expect(down.status).toBe(200);
+      const restoreSpy = vi.spyOn(restoreOrchestrator, "restore");
+
+      const res = await app.request("/api/up", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: rig.name, ...(withOverride ? { cwdOverride } : {}) }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { status: string; warnings?: string[] };
+      expect(body.status).toBe("restored");
+      const launchedIn = (tmuxAdapter.createSession as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1)?.[1];
+      const named = (body.warnings ?? []).filter((w) => w.includes("doesn't exist on this machine"));
+      if (withOverride) {
+        expect(restoreSpy).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ cwdOverride: here }));
+        expect(launchedIn).toBe(here);
+        expect(named).toEqual([]);
+      } else {
+        expect(launchedIn).toBe(moved);
+        expect(named).toEqual([`Restore: worker's working directory ${moved} doesn't exist on this machine. To launch this rig's `
+          + "seats in another directory for this run: rig up moved-home --existing --cwd <dir>."]);
+      }
+      // The saved directory stays as it was: --cwd is for this run only.
+      expect(rigRepo.getRig(rig.id)!.nodes[0]!.cwd).toBe(moved);
+    } finally {
+      fs.rmSync(here, { recursive: true, force: true });
+    }
+  });
+
   it.each([[false, true, true], [true, undefined, true], [true, false, false], [false, undefined, false]] as const)("non-interruptive stored %s / option %s restores as %s; plan does not write", async (stored, option, expected) => {
     const rig = rigRepo.createRig("saved-choice");
     rigRepo.setRigNonInterruptive(rig.id, stored);

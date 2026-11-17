@@ -103,6 +103,14 @@ export class RigSpecExporter {
       .map((node) => node.logicalId).sort();
   }
 
+  /** #3253: seats whose stored process_limits can't be read. The export leaves the field out of that seat, exports the
+   *  rest of the rig, and keeps the stored value as it is. */
+  processLimitsNotCarried(rigId: string): string[] {
+    return (this.rigRepo.getRig(rigId)?.nodes ?? [])
+      .filter((node) => node.processLimitsError !== undefined)
+      .map((node) => node.logicalId).sort();
+  }
+
   private savedAutoMode(nodeId: string): { block?: import("./claude-auto-mode.js").ClaudeAutoMode; unreadable?: boolean } {
     const choice = readClaudeAutoModeForLaunch(this.rigRepo.db, nodeId);
     return choice === undefined ? {} : "unreadable" in choice ? { unreadable: true } : { block: choice };
@@ -166,6 +174,8 @@ export class RigSpecExporter {
       const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.db, node.id) : undefined;
       if (envelope !== undefined) specNode.codexPermissions = envelope;
       if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) specNode.launchWrapper = node.launchWrapper;
+      // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
+      if (node.processLimits) specNode.processLimits = { tasksMax: node.processLimits.tasksMax };
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;
@@ -250,6 +260,8 @@ export class RigSpecExporter {
         if (node.advisor) member.advisor = node.advisor;
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
         if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
+        // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
+        if (node.processLimits) member.processLimits = { tasksMax: node.processLimits.tasksMax };
         // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
         // an export carries the ones its launch passes.
         const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;

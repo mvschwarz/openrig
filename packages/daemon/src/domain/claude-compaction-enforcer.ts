@@ -84,6 +84,27 @@ const PREP_SEND_ATTEMPTS_MAX = 3;
 // timeout the send returns not-ok, the stage does NOT advance, and the SAME stage
 // is retried on the next poll tick. No new scheduler.
 export const POST_COMPACT_SEND_WAIT_MS_DEFAULT = 10_000;
+/** #3389: Claude Code holds a `/compact` the seat accepted behind the turn it is running, while the three post-compaction
+ *  messages join that turn. The steps therefore wait for the seat's own report of its compaction (SessionStart, source
+ *  `compact`). How long before they go ahead without it (fail open, as before this wait): long enough for a long turn,
+ *  short enough that a seat whose hooks never report is not left unrestored. Operational, not measured. */
+export const COMPACT_SIGNAL_WAIT_MS_DEFAULT = 10 * 60_000;
+/** After the steps went ahead without the signal, how long a late signal still owes the sequence once more. Operational,
+ *  not measured: the same age a held map retires at. */
+export const LATE_COMPACT_SIGNAL_WATCH_MS_DEFAULT = 2 * 60 * 60_000;
+
+/** The seat's own report of a compaction: a SessionStart hook with source `compact`, as the daemon recorded it. */
+export interface CompactSignal {
+  /** When the hook fired (epoch ms), from the hook's own timestamp. */
+  observedAt: number;
+  /** The occupant generation the emitting hook carried: the one asked for, or an earlier one of the same live process
+   *  (an adoption mints a new generation, the process's hooks keep the one it launched with). */
+  generation: string;
+}
+/** The earliest report of a compaction recorded for the seat at or after `sinceMs` that came from the occupant of this
+ *  generation, or null. Who counts as that occupant is the reader's to say, and part of the question, not a check on its
+ *  answer: a report with no generation or from a retired occupant must not stand in front of a later report from this one. */
+export type CompactSignalSince = (sessionName: string, sinceMs: number, generation: string) => CompactSignal | null;
 
 export interface EnforcerInput {
   nodeId?: string;
@@ -161,7 +182,10 @@ export type EnforcerSkipReason =
   /** A completed map is held until a window opens (#2682): no /compact now, and no new preparation request. */
   | "prepared_awaiting_window"
   | "pane_unknown_protected"
-  | "input_box_not_empty";
+  | "input_box_not_empty"
+  /** The /compact write was accepted, but the seat has not yet reported its compaction (SessionStart, source compact):
+   *  the post-compaction steps wait, up to a bound, and then go ahead as they always did (#3389). */
+  | "awaiting_compact_signal";
 
 /** Out-of-contract thresholds (0, 101, NaN, a non-integer) are treated as disabled. */
 export function isValidThresholdPercent(value: unknown): boolean {
@@ -527,6 +551,8 @@ interface PreparationAttempt extends PreparationState {
   belowSince?: number;
   /** The /compact write has begun and its result isn't back: the attempt is never held then, only stopped as before. */
   compactInFlight?: boolean;
+  /** #3389: when the /compact write began (this.now()), the earliest time the seat's compaction report can belong to it. */
+  compactWriteAt?: number;
   /** The seat's native conversation when the attempt began, when known. */
   sessionId?: string | null;
   /** An automatic attempt begun after an ended one (#2682), with when that one ended: its request goes only to a seat its
@@ -540,6 +566,16 @@ interface PreparationAttempt extends PreparationState {
 /** What the restore request must carry because the /compact command could not. With --skip-map the attempt
  *  path and marker are kept so the restore can name a map the seat completed anyway, or say none was required. */
 interface RestoreCarry { mapPath: string | null; compactInstruction: string | null; skipMap?: { mapPath: string; marker: string } }
+
+/** #3389: an accepted /compact whose compaction the seat has not reported yet. */
+interface CompactSignalWait { attemptId: string; writeAt: number; generation: string | null }
+/** #3389: the steps went ahead without a report; one that arrives before `until` owes the sequence once more, with what
+ *  the first sequence carried (the restore map's path) and the record it was written under. */
+interface LateCompactSignalWatch extends CompactSignalWait {
+  until: number;
+  carry: RestoreCarry | undefined;
+  record: { file: string; record: CompactionRecord } | undefined;
+}
 
 /** Under --skip-map, a map the seat completed at the attempt path anyway, or null. Nothing publishes the .tmp under
  *  --skip-map, so the final path is checked first, then the .tmp, and whichever ends with the marker is named. */
@@ -623,6 +659,15 @@ interface CompactionRecord {
   /** The ended attempt's conversation, null when unknown. A record without it (an older daemon's) reads as unknown. */
   afterEndedSessionId?: string | null;
   lastDelivery?: RestoreDeliveryAttempt;
+  /** #3389: when this daemon began writing the /compact (before the write, so a compaction that ran at once is not older
+   *  than it). The seat's compaction report counts only from here. */
+  compactWriteAt?: number;
+  /** The seat's compaction report arrived (its hook time), and the post-compaction steps were released by it. */
+  compactSignalSeenAt?: number;
+  /** The bound passed with no report and the steps went ahead anyway (fail open). */
+  compactSignalFellBackAt?: number;
+  /** A late report still owes the sequence once more, until this time; cleared when it does. */
+  lateSignalWatchUntil?: number;
   updatedAt: number;
 }
 
@@ -655,6 +700,10 @@ function readCompactionRecord(file: string): CompactionRecord | null {
       && (r.sessionId === undefined || text(r.sessionId)) && (r.endedAt === undefined || Number.isFinite(r.endedAt))
       && (r.afterEnded === undefined || Number.isFinite(r.afterEnded))
       && (r.afterEndedSessionId === undefined || textOrNull(r.afterEndedSessionId))
+      && (r.compactWriteAt === undefined || Number.isFinite(r.compactWriteAt))
+      && (r.compactSignalSeenAt === undefined || Number.isFinite(r.compactSignalSeenAt))
+      && (r.compactSignalFellBackAt === undefined || Number.isFinite(r.compactSignalFellBackAt))
+      && (r.lateSignalWatchUntil === undefined || Number.isFinite(r.lateSignalWatchUntil))
       && (carry === undefined || (typeof carry === "object" && carry !== null && textOrNull(carry.mapPath) && textOrNull(carry.compactInstruction)
         && (carry.skipMap === undefined || (text(carry.skipMap?.mapPath) && text(carry.skipMap?.marker)))));
     return valid ? r : null;
@@ -704,6 +753,13 @@ export class ClaudeCompactionEnforcer {
   private readonly stranded = new Map<string, CompactionRecord>();
   /** Seats whose owed restore steps follow a /compact whose outcome is unknown; never replay that command. */
   private readonly afterUncertainCompact = new Set<string>();
+  /** #3389: seats whose /compact write was accepted and whose compaction report has not come yet: the turn boundary waits. */
+  private readonly awaitingCompactSignal = new Map<string, CompactSignalWait>();
+  /** #3389: seats whose steps went ahead without the report: a report that comes late owes the sequence once more. */
+  private readonly lateCompactSignal = new Map<string, LateCompactSignalWatch>();
+  private readonly compactSignalSince?: CompactSignalSince;
+  private readonly compactSignalWaitMs: number;
+  private readonly lateCompactSignalWatchMs: number;
   private readonly lastInputBox = new Map<string, string>();
   private readonly restartRecoveryWindowMs: number;
   private readonly daemonInstance: string;
@@ -739,6 +795,11 @@ export class ClaudeCompactionEnforcer {
       /** Which daemon process this is (default: this process). Records another process wrote can be recovered. */
       daemonInstance?: string;
       resolveOccupantGeneration?: (sessionName: string) => string | null;
+      /** #3389: where the seat's own report of its compaction (SessionStart, source compact) is read. Without it the
+       *  post-compaction steps follow the accepted /compact at once, as before. */
+      compactSignalSince?: CompactSignalSince;
+      compactSignalWaitMs?: number;
+      lateCompactSignalWatchMs?: number;
       onPostRestoreComplete?: (receipt: {
         sessionName: string;
         occupantGeneration: string | null;
@@ -765,6 +826,9 @@ export class ClaudeCompactionEnforcer {
     this.restartRecoveryWindowMs = opts?.restartRecoveryWindowMs ?? RESTART_RECOVERY_WINDOW_MS_DEFAULT;
     this.daemonInstance = opts?.daemonInstance ?? DAEMON_PROCESS_ID;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
+    this.compactSignalSince = opts?.compactSignalSince;
+    this.compactSignalWaitMs = opts?.compactSignalWaitMs ?? COMPACT_SIGNAL_WAIT_MS_DEFAULT;
+    this.lateCompactSignalWatchMs = opts?.lateCompactSignalWatchMs ?? LATE_COMPACT_SIGNAL_WATCH_MS_DEFAULT;
     this.onPostRestoreComplete = opts?.onPostRestoreComplete;
   }
 
@@ -895,6 +959,10 @@ export class ClaudeCompactionEnforcer {
       : ` ${failed ? "Last delivery" : "waiting: seat busy"} at ${lastDelivery.at}: ${[lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass, lastDelivery.noticeErrorClass && `owner notice failed (${lastDelivery.noticeErrorClass})`].filter(Boolean).join("; ")}. OpenRig will retry on its existing polls.${lastDelivery.unreadable
         ? " The operator’s draft-protection settings still apply." : ""}`;
     const step = steps[stage];
+    const waiting = stage === "turn_boundary" ? this.awaitingCompactSignal.get(sessionName) : undefined;
+    if (waiting) {
+      return { stage, held: false, ...last, detail: `OpenRig owes this seat its ${step} once the seat reports its compaction (a SessionStart hook with source compact, from this occupant, after this /compact was written). Without that report it goes ahead anyway ${Math.round(this.compactSignalWaitMs / 60_000)} minutes after the write, at ${new Date(waiting.writeAt + this.compactSignalWaitMs).toISOString()}.` };
+    }
     if (!this.afterUncertainCompact.has(sessionName)) {
       return { stage, held: failed, ...last, detail: `OpenRig owes this seat its ${step} next, sent once the pane is idle or after two consecutive polls cannot determine its activity.${failure}` };
     }
@@ -944,6 +1012,8 @@ export class ClaudeCompactionEnforcer {
     const unsampled = { ...rest, usedPercentage: null };
     this.recoverSeat(input);
     this.reconcilePreparations();
+    // #3389: this runs every poll for a seat with no fresh sample, the one that owes a late report's sequence.
+    if (input.runtime === "claude-code") this.reseedIfOwed(input.sessionName);
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
     if (input.runtime !== "claude-code" || attempt?.mode !== "automatic" || attempt.status !== "waiting"
       || attempt.delivery === "pending") return { triggered: false, reason: "no_pending_stage" };
@@ -1006,7 +1076,8 @@ export class ClaudeCompactionEnforcer {
       const outcome = guard && input.runtime === "claude-code"
         ? await guard.lifecycle([guard.target(input.sessionName).nodeId], runIfCurrent) : await runIfCurrent();
       // Refusals before send (policy, guard, observation) must be visible too. A send has already recorded its full result.
-      if (!outcome.triggered && record?.record.lastDelivery === previous) {
+      // Waiting for the seat's report of its compaction is no delivery: nothing was attempted, so nothing failed.
+      if (!outcome.triggered && outcome.reason !== "awaiting_compact_signal" && record?.record.lastDelivery === previous) {
         this.recordRestoreFailure(input.sessionName, stage, record, { ok: false, reason: outcome.reason });
       }
       return outcome;
@@ -1089,6 +1160,7 @@ export class ClaudeCompactionEnforcer {
     input: EnforcerInput,
     policy: ClaudeCompactionPolicy,
   ): Promise<EnforcerOutcome | null> {
+    this.reseedIfOwed(input.sessionName);
     // A missing or still-high sample need not show that /compact has finished. The newest idle
     // hook can predate it: require live readiness, then admit only unknown after two consecutive owed-stage polls.
     const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
@@ -1134,6 +1206,10 @@ export class ClaudeCompactionEnforcer {
         this.invalidateOccupant(input.sessionName); // drop the retired-generation ghost stage
         return { triggered: false, reason: "stale_generation" };
       }
+    }
+    // #3389: an accepted /compact is not a compaction. The first step waits for the seat's own report of it, up to a bound.
+    if (pendingStage === "turn_boundary" && this.compactSignalPending(input.sessionName)) {
+      return { triggered: false, reason: "awaiting_compact_signal" };
     }
     if (pendingStage === "turn_boundary" && this.afterUncertainCompact.has(input.sessionName)) {
       // Only this attempt's possible /compact write is outstanding. A later Enter must not submit it.
@@ -1708,7 +1784,12 @@ export class ClaudeCompactionEnforcer {
     // restore request needs (the carried map and instruction, and a manual request's authority).
     const beforeWrite = () => {
       check();
-      if (!marked) { marked = true; attempt.compactInFlight = true; this.persist(input.sessionName, attempt.attemptId, { compactSending: true, restoreCarry: carry, operatorInitiated }); }
+      if (!marked) {
+        marked = true; attempt.compactInFlight = true;
+        // #3389: the write's start, before it: a seat that compacts at once reports a time no earlier than this.
+        attempt.compactWriteAt = this.now();
+        this.persist(input.sessionName, attempt.attemptId, { compactSending: true, compactWriteAt: attempt.compactWriteAt, restoreCarry: carry, operatorInitiated });
+      }
     };
     const send = async () => {
       check();
@@ -1785,7 +1866,114 @@ export class ClaudeCompactionEnforcer {
     attempt.status = "compact-sent";
     this.owePostCompactRestore(input.sessionName, attempt, carry);
     this.persist(input.sessionName, attempt.attemptId, { phase: "turn_boundary", restoreCarry: carry, operatorInitiated });
+    // #3389: the write was accepted, which says nothing about the seat having compacted: Claude Code holds a /compact
+    // behind the turn it is running. The first step waits for the seat's own report of its compaction.
+    if (this.compactSignalSince && attempt.compactWriteAt !== undefined) {
+      this.lateCompactSignal.delete(input.sessionName);
+      this.awaitingCompactSignal.set(input.sessionName,
+        { attemptId: attempt.attemptId, writeAt: attempt.compactWriteAt, generation: attempt.occupantGeneration });
+    }
     return { ok: true };
+  }
+
+  /** #3389: does the first post-compaction step still wait for the seat's report of its compaction? Releases it when the
+   *  report is there (a SessionStart with source compact, from this occupant, at or after this attempt's /compact write),
+   *  and after the bound goes ahead without it (fail open) while keeping a watch for a late report. */
+  private compactSignalPending(session: string): boolean {
+    const wait = this.awaitingCompactSignal.get(session);
+    if (!wait || !this.compactSignalSince) return false;
+    const signal = this.matchingCompactSignal(session, wait);
+    if (signal) {
+      this.awaitingCompactSignal.delete(session);
+      this.persistStageFields(session, { compactSignalSeenAt: signal.observedAt });
+      return false;
+    }
+    if (this.now() - wait.writeAt < this.compactSignalWaitMs) return true;
+    this.awaitingCompactSignal.delete(session);
+    const until = wait.writeAt + this.lateCompactSignalWatchMs;
+    this.lateCompactSignal.set(session, { ...wait, until, carry: this.restoreCarry.get(session), record: this.records.get(session) });
+    this.persistStageFields(session, { compactSignalFellBackAt: this.now(), lateSignalWatchUntil: until });
+    return false;
+  }
+
+  /** The report that belongs to this wait: from the same occupant generation the /compact went to (a report with no
+   *  generation, or another one, proves nothing here), and not older than the write. */
+  private matchingCompactSignal(session: string, wait: CompactSignalWait): CompactSignal | null {
+    // An attempt that names no occupant has nothing to match a report against.
+    if (wait.generation === null) return null;
+    let signal: CompactSignal | null = null;
+    try { signal = this.compactSignalSince?.(session, wait.writeAt, wait.generation) ?? null; } catch { return null; }
+    // The reader answers for this occupant; a report with no generation, or older than the write, is no answer.
+    if (!signal || !signal.generation || !(signal.observedAt >= wait.writeAt)) return null;
+    return signal;
+  }
+
+  /** #3389: a report that comes after the steps went ahead without it owes the sequence once more, once: the watch ends
+   *  with that, so the same report seen again (the managed and the plugin hook both post it, a poll reads it twice) owes
+   *  nothing more. Held until the first sequence has finished, so the two never overlap. */
+  private reseedFromLateCompactSignal(session: string): void {
+    const watch = this.lateCompactSignal.get(session);
+    if (!watch) return;
+    const live = this.liveGeneration(session);
+    if (this.now() >= watch.until || watch.generation === null || (live !== null && live !== watch.generation)) {
+      this.lateCompactSignal.delete(session);
+      return;
+    }
+    if (this.pendingPostCompactRestore.has(session) || this.pendingPreCompactPrep.has(session)) return;
+    const signal = this.matchingCompactSignal(session, watch);
+    if (!signal) return;
+    this.lateCompactSignal.delete(session);
+    if (watch.carry) this.restoreCarry.set(session, watch.carry); else this.restoreCarry.delete(session);
+    if (watch.record) this.records.set(session, watch.record);
+    this.lastAutoCompactAt.set(session, this.now());
+    this.triggeredAboveThreshold.add(session);
+    this.pendingPostCompactRestore.set(session, "turn_boundary");
+    this.pendingStageGeneration.set(session, watch.generation);
+    this.persistStageFields(session, { phase: "turn_boundary", compactSignalSeenAt: signal.observedAt, lateSignalWatchUntil: undefined });
+  }
+
+  /** A restarted daemon picks the wait for the seat's report up from the record, with the write time the record kept, so a
+   *  restart neither starts the bound over nor lets the steps go early. Only for an /compact the seat accepted: one whose
+   *  outcome was lost keeps the steps it always owed. */
+  private recoverCompactSignal(session: string, holder: { file: string; record: CompactionRecord }, phase: CompactionRecord["phase"], uncertain: boolean): void {
+    const record = holder.record;
+    if (!this.compactSignalSince || record.compactWriteAt === undefined || record.compactSignalSeenAt !== undefined) return;
+    const base = { attemptId: record.attemptId, writeAt: record.compactWriteAt, generation: record.occupantGeneration };
+    if (record.compactSignalFellBackAt !== undefined) {
+      if (record.lateSignalWatchUntil !== undefined) {
+        this.lateCompactSignal.set(session, { ...base, until: record.lateSignalWatchUntil, carry: record.restoreCarry, record: holder });
+      }
+    } else if (phase === "turn_boundary" && !uncertain) {
+      this.awaitingCompactSignal.set(session, base);
+    }
+  }
+
+  /** The late-report check, under the same rule as any owed stage: only for a seat whose compaction is enabled, or an
+   *  operator's own request (a disabled system drains nothing: the ghost-stage rule). */
+  private reseedIfOwed(session: string): void {
+    if (!this.lateCompactSignal.has(session)) return;
+    let enabled = false;
+    try { enabled = this.settingsStore.resolveClaudeCompactionPolicy().enabled; } catch { /* unreadable policy: owes nothing now */ }
+    if (enabled || this.manualCompactionState.get(session)?.operatorInitiated === true) this.reseedFromLateCompactSignal(session);
+  }
+
+  /** A cancel ends the late-report watch, and the record it was kept under says so, so a restart does not bring it back. */
+  private endLateCompactSignalWatch(session: string): void {
+    const watch = this.lateCompactSignal.get(session);
+    this.awaitingCompactSignal.delete(session);
+    this.lateCompactSignal.delete(session);
+    if (!watch?.record) return;
+    const held = this.records.get(session);
+    this.records.set(session, watch.record);
+    this.persistStage(session, "ended", "compaction_cancelled");
+    this.persistStageFields(session, { lateSignalWatchUntil: undefined });
+    if (held) this.records.set(session, held); else this.records.delete(session);
+  }
+
+  /** Write fields onto the seat's current record, when it has one. */
+  private persistStageFields(session: string, patch: Partial<CompactionRecord>): void {
+    const current = this.records.get(session);
+    if (current) this.persist(session, current.record.attemptId, patch);
   }
 
   /** Reconcile this attempt's possible write using the existing capture path. Unknown is not a resolved write. */
@@ -1949,8 +2137,18 @@ export class ClaudeCompactionEnforcer {
     if (!newest) return;
     const { record } = newest;
     // This process's own record (another enforcer in it) is live state, not a predecessor's.
-    if (record.daemon === this.daemonInstance || record.phase === "done") return;
+    if (record.daemon === this.daemonInstance) return;
     const live = this.resolveOccupantGeneration?.(session) ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
+    if (record.phase === "done") {
+      // #3389: a sequence that went ahead without the seat's report still owes one more if the report comes late.
+      if (record.occupantGeneration !== null && live === record.occupantGeneration) {
+        this.recoverCompactSignal(session, newest, "done", false);
+        // An operator's own request keeps its authority while its watch is kept, as an owed stage does, or a late report
+        // would owe nothing when automatic compaction is off.
+        if (record.mode === "manual" && this.lateCompactSignal.has(session)) this.setManualStage(session, "audit-sent", undefined, record.operatorInitiated);
+      }
+      return;
+    }
     if (record.phase === "ended") {
       if (record.occupantGeneration !== null && live === record.occupantGeneration
         && this.now() - (record.endedAt ?? record.updatedAt) < this.restartRecoveryWindowMs) this.records.set(session, newest);
@@ -2023,6 +2221,8 @@ export class ClaudeCompactionEnforcer {
       this.persist(session, record.attemptId, { uncertainCompact: true });
     }
     if (record.restoreCarry) this.restoreCarry.set(session, record.restoreCarry);
+    // #3389: the first step still waits for the seat's report, measured from the write this record kept, not from now.
+    this.recoverCompactSignal(session, newest, phase, inFlight || record.uncertainCompact === true);
     // As after a /compact this daemon sent: no new automatic compaction until the owed stages finish.
     this.lastAutoCompactAt.set(session, this.now());
     this.triggeredAboveThreshold.add(session);
@@ -2090,6 +2290,7 @@ export class ClaudeCompactionEnforcer {
     const record = this.records.get(session)?.record;
     if (record) this.persist(session, record.attemptId, { preparationFailures: undefined,
       ...(!attempt && record.phase === "ended" ? { reason: "preparation_cancelled" } : {}) });
+    this.endLateCompactSignalWatch(session);
     if (attempt?.status === "compact-sent" || this.pendingPostCompactRestore.has(session)) {
       // Abandon management, not the provider command: keep its unconfirmed receipt and map.
       // Do not clear automatic dedup/re-arm state or send any input. A later explicit retry
@@ -2100,6 +2301,8 @@ export class ClaudeCompactionEnforcer {
         attempt.controller.abort();
       }
       this.persistStage(session, "ended", "compaction_cancelled");
+      this.awaitingCompactSignal.delete(session);
+      this.lateCompactSignal.delete(session);
       this.pendingPostCompactRestore.delete(session);
       this.pendingStageGeneration.delete(session);
       this.restoreCarry.delete(session);
@@ -2153,6 +2356,8 @@ export class ClaudeCompactionEnforcer {
     this.triggeredAboveThreshold.delete(sessionName);
     this.pendingPreCompactPrep.delete(sessionName);
     this.pendingPostCompactRestore.delete(sessionName);
+    this.awaitingCompactSignal.delete(sessionName);
+    this.lateCompactSignal.delete(sessionName);
     this.restoreCarry.delete(sessionName);
     this.manualCompactionState.delete(sessionName);
     this.pendingStageGeneration.delete(sessionName); // GHOST-STAGE (b): drop the captured queue-time gen

@@ -110,6 +110,30 @@ describe("Archive / Unarchive CLI (OPR.0.3.3.19)", () => {
     return prog;
   }
 
+  it.each([["archive", archiveCommand], ["unarchive", unarchiveCommand]] as const)(
+    "%s --json emits a structured error when the daemon is unavailable",
+    async (name, makeCommand) => {
+      const clientFactory = vi.fn();
+      const command = new Command();
+      command.addCommand(makeCommand({
+        lifecycleDeps: mockLifecycleDeps({
+          fetch: vi.fn(async () => {
+            throw new Error("connection refused");
+          }),
+        }),
+        clientFactory,
+      }));
+      const { logs, exitCode } = await captureLogs(async () => {
+        await command.parseAsync(["node", "rig", name, "rig-1", "--json"]);
+      });
+      expect(exitCode).toBe(1);
+      expect(clientFactory).not.toHaveBeenCalled();
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({
+        error: { fact: expect.any(String), consequence: expect.any(String), action: expect.any(String) },
+      });
+    },
+  );
+
   it("archive success prints reversible note and exits 0", async () => {
     archiveResponse = { status: 200, body: { ok: true, rigId: "rig-1", archived: true } };
     const { logs, exitCode } = await captureLogs(async () => {

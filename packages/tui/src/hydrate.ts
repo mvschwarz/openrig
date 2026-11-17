@@ -460,10 +460,12 @@ export async function hydrateSnapshot(
   // FLEET PROJECTS (#3093): one GET of the daemon's view across registered hosts, plus — when a fleet slice is open —
   // that slice's detail from its ORIGIN host through the read-through. Both are bounded reads; the pane never writes.
   if (viewContext?.section === "fleet") {
-    const status = await client.fleetScopes();
-    if (!("view" in status)) readErrors.push(`fleet projects: ${status.error}`);
     const sel = viewContext.fleetSelected;
-    const detail = sel ? await client.fleetSliceDetail(sel.hostId, sel.mission, sel.slice) : null;
+    const [status, detail] = await Promise.all([
+      client.fleetScopes(),
+      sel ? client.fleetSliceDetail(sel.hostId, sel.mission, sel.slice) : null,
+    ]);
+    if (!("view" in status)) readErrors.push(`fleet projects: ${status.error}`);
     if (detail && "error" in detail) readErrors.push(`fleet slice detail (${sel!.hostId}): ${detail.error}`);
     return { ...emptySnapshot(), fleetScopes: { status }, fleetSliceDetail: detail, readErrors, hydratedAt: new Date().toISOString() };
   }

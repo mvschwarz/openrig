@@ -10,7 +10,7 @@ import { RigSpecCodec } from "../domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
 import { RigSpecSchema } from "../domain/rigspec-schema.js";
 import { rigPreflight } from "../domain/rigspec-preflight.js";
-import { RigNotFoundError } from "../domain/errors.js";
+import { ExportRefusedError, RigNotFoundError } from "../domain/errors.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
 import { execRuntimeProbe } from "../adapters/runtime-probe-exec.js";
 import { RigSpecParseError, validateRigSpecImport } from "../domain/spec-validation-service.js";
@@ -33,6 +33,7 @@ function exportWarnings(exporter: RigSpecExporter, rigId: string, podAware: bool
   const warnings: Array<{ logicalId: string; reason: string }> = [
     ...(podAware ? exporter.memberStartupNotCarried(rigId) : []),
     ...exporter.claudeAutoModeNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "claude_auto_mode can't be read; not carried" })),
+    ...exporter.processLimitsNotCarried(rigId).map((logicalId) => ({ logicalId, reason: "process_limits can't be read; not carried" })),
   ];
   return warnings.length ? { "X-OpenRig-Export-Warnings": encodeURIComponent(JSON.stringify(warnings)) } : {};
 }
@@ -56,6 +57,10 @@ export function handleExportYaml(c: Context): Response {
       .map((seat) => `# Not carried: ${seat}'s claude_mcp: none; add it again if this exported copy is switched back to Claude.\n`));
     notCarried.push(...exporter.claudeAutoModeNotCarried(rigId)
       .map((seat) => `# Not carried: ${seat}'s claude_auto_mode, because the saved block can't be read; set it again with rig seat set-permissions --auto-mode.\n`));
+    notCarried.push(...exporter.processLimitsNotCarried(rigId)
+      .map((seat) => `# Not carried: ${seat}'s process_limits, because the saved value can't be read; it stays stored as it is. Fix it by ` +
+        "re-applying the spec with process_limits: { tasks_max: <N> }, or clear it with process_limits: {} (an ordinary re-apply: a " +
+        "first-start retry keeps an unreadable value as stored).\n"));
     const memberStartupOmissions = isPodAware ? exporter.memberStartupNotCarried(rigId)
       .map(({ logicalId, reason }) => `# Member startup not carried for ${JSON.stringify(logicalId)} (${reason}); inspect the source before importing.\n`) : [];
     const yaml = notCarried.join("") + memberStartupOmissions.join("") + serialized;
@@ -72,6 +77,9 @@ export function handleExportYaml(c: Context): Response {
     if (err instanceof RigNotFoundError) {
       return c.json({ error: err.message }, 404);
     }
+    if (err instanceof ExportRefusedError) {
+      return c.json({ error: err.message, code: "export_refused" }, 409);
+    }
     return c.json({ error: "Export failed" }, 500);
   }
 }
@@ -87,6 +95,9 @@ export function handleExportJson(c: Context): Response {
   } catch (err) {
     if (err instanceof RigNotFoundError) {
       return c.json({ error: err.message }, 404);
+    }
+    if (err instanceof ExportRefusedError) {
+      return c.json({ error: err.message, code: "export_refused" }, 409);
     }
     return c.json({ error: "Export failed" }, 500);
   }

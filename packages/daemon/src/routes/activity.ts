@@ -1,5 +1,6 @@
 import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
+import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
@@ -215,7 +216,7 @@ activityRoutes.get("/runner-channel", c => {
 /** A seat activity grant's post, bound to the grant. A post that names another seat, or claims a generation the grant
  *  wasn't issued for, is refused; so is a grant whose occupant was replaced (stale) or hasn't registered yet (pending).
  *  A refusal records nothing, so a missing event stays unknown. Otherwise the seat and generation come from the grant. */
-function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
+export function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
   { body: Record<string, unknown> } | { refused: Response } {
   const refuse = (status: 401 | 403 | 409 | 503, code: string, error: string) => ({ refused: c.json({ ok: false, code, error }, status) });
   // Read the grant again: it may have been revoked or reissued while the body arrived. Nothing is awaited from here to the
@@ -297,7 +298,7 @@ async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegis
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;
   const grantStore = new ActivityGrantStore(sessionRegistry.db);
   const grant = grantStore.authenticate(bearerToken) ?? grantStore.authenticate(headerToken);
-  if (bearerToken !== expectedToken && headerToken !== expectedToken && !grant?.runId) {
+  if (!constantTimeEqual(bearerToken ?? "", expectedToken) && !constantTimeEqual(headerToken ?? "", expectedToken) && !grant?.runId) {
     return { error: c.json({ ok: false, code: "activity_hook_unauthorized", error: `${what} require the configured local hook token.` }, 401) };
   }
   let body: Record<string, unknown>;
@@ -368,11 +369,11 @@ activityRoutes.post("/pi-usage-charges", async (c) => {
 /** Who is posting, before anything the request claims is read. The install-wide token speaks for every seat (`grant`
  *  null); a seat activity grant speaks only for its own seat and launch generation, which bindToGrant checks once the
  *  body has arrived. Without `expectedToken` (the guest router), only a grant is accepted. */
-function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
+export function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;
-  if (expectedToken && (bearerToken === expectedToken || headerToken === expectedToken)) return { grant: null };
+  if (expectedToken && (constantTimeEqual(bearerToken ?? "", expectedToken) || constantTimeEqual(headerToken ?? "", expectedToken))) return { grant: null };
   const grants = new ActivityGrantStore(store.db);
   const grant = grants.authenticate(bearerToken) ?? grants.authenticate(headerToken);
   if (!grant) {
@@ -1137,8 +1138,9 @@ activityRoutes.get("/parked", (c) => {
   const { diagnoseSeatParked, diagnoseRigParked, PARKED_OBLIGATION_LIMIT } = parkedQuery;
   const deps = {
     getSeatState: (id: string) => nodeExecutorConfirmedStopped(rigRepo.db, id) ? null : oracle.getSeatState(id),
-    // The obligation face only: the same rows, order and limit as a full list() of this destination's open states,
-    // without the per-row projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
+    // The obligation face only: the same order and limit as a full list() of this destination's open states, and the same
+    // rows less an unheld wake escalation about the seat's own prompt (listOpenObligations), without the per-row
+    // projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
     listOpenObligations: (destination: string, limit: number) => ({
       rows: queueRepo.listOpenObligations(destination, limit),
       limit,

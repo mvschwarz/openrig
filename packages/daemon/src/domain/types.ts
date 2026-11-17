@@ -43,6 +43,10 @@ export interface Node {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; null/absent = none. */
   launchWrapper?: string[] | null;
+  /** The seat's own process limits (spec `process_limits`, #3253): applied to its new launches; null/absent = none. */
+  processLimits?: import("./process-limits.js").ProcessLimits | null;
+  /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
+  processLimitsError?: string;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -228,6 +232,14 @@ export type RigEvent =
       wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
       /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
       outcome: ReturnType<typeof readSendOutcome> }
+  /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
+   *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
+   *  queued messages were handed back to typed delivery because the bridge had no live arm. */
+  | { type: "transport.hook_bridge_armed"; nodeId: string; sessionName: string; armId: string; hookEvent: string; generation: string | null }
+  | { type: "transport.hook_bridge_wake"; nodeId: string; sessionName: string; armId: string; outboxIds: string[]; hookEvent: string }
+  | { type: "transport.hook_bridge_expired"; nodeId: string; sessionName: string; armId: string }
+  | { type: "transport.hook_bridge_fallback"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
+  | { type: "transport.hook_bridge_uncertain"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
@@ -585,6 +597,8 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** Saved intended seat when this attempt launched a recreated node; nodeId names the registered current node. */
+  intendedNodeId?: string;
   /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
   stage?: "harness_not_started";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
@@ -639,6 +653,9 @@ export interface RestoreNodeResult {
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
+  /** #3253: the seat was launched without its requested process limit (the request stays stored; a fresh launch
+   *  applies it). */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
 }
 
 export type RestoreOutcome =
@@ -1237,6 +1254,8 @@ export interface LegacyRigSpecNode {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1365,6 +1384,8 @@ export interface RigSpecPodMember {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;

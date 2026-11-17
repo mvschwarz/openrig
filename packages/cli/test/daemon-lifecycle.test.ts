@@ -133,7 +133,8 @@ describe("Daemon Lifecycle", () => {
   });
 
   // A started child whose own endpoint names its PID and reports `hosts`; `probe` scripts each later
-  // request: "ok" answers, any other value throws with that error code.
+  // request: "ok" answers, "hang" never answers (as a Mac's connection to its own Tailscale address times out),
+  // any other value throws with that error code.
   function listenerStart(hosts: string[], probe: (url: string) => string) {
     const release = vi.fn();
     let spawned = false;
@@ -142,6 +143,7 @@ describe("Daemon Lifecycle", () => {
       fetch: vi.fn(async (url) => {
         if (!spawned) throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
         const outcome = probe(String(url));
+        if (outcome === "hang") return new Promise<never>(() => {});
         if (outcome !== "ok") throw Object.assign(new Error("listener probe failed"), { code: outcome });
         return { ok: true, json: async () => ({ pid: 12345, bind: { mode: "default", hosts, tailscaleDetected: true } }) };
       }),
@@ -168,6 +170,68 @@ describe("Daemon Lifecycle", () => {
       const warning = errors.mock.calls.map((args) => args.join(" ")).find((line) => line.includes("100.64.0.9"));
       expect(warning).toMatch(/could not be verified/);
       expect(warning).not.toMatch(/127\.0\.0\.1/);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  // A secondary listener whose check never answers (a Mac's own Tailscale address) gets a short grace, not the whole
+  // readiness budget, which is for a slow primary.
+  it("starts promptly with the warning when a secondary listener's check never answers", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const startedAt = Date.now();
+      const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) => url.includes("100.64.0.9") ? "hang" : "ok");
+      const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+      await vi.runAllTimersAsync();
+      const outcome = await result;
+      expect(outcome instanceof Error ? outcome.message : "started").toBe("started");
+      expect(Date.now() - startedAt).toBeLessThan(15_000);
+      expect(writtenState(deps)).toMatchObject({ pid: 12345, port: 7433 });
+      expect(deps.kill).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledWith(false);
+      expect(errors.mock.calls.map((args) => args.join(" ")).find((line) => line.includes("100.64.0.9"))).toMatch(/could not be verified/);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("a secondary listener refused after its check didn't answer still fails the start", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    let secondaryChecks = 0;
+    const { deps, release } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) =>
+      url.includes("100.64.0.9") ? (++secondaryChecks === 1 ? "hang" : "ECONNREFUSED") : "ok");
+    const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error instanceof Error ? error.message : "started").toContain("FAILED the listener adoption gate");
+    expect((error as Error).message).toContain("100.64.0.9");
+    expect(deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+    expect(release).toHaveBeenCalledWith(false);
+    expect(stateWritten(deps)).toBe(false);
+  });
+
+  it("a slow primary still gets the readiness budget, and a secondary that never answers then starts with the warning", async () => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const startedAt = Date.now();
+      // The primary listener isn't up for its first 100 seconds, far past the secondary's grace.
+      const { deps } = listenerStart(["127.0.0.1", "100.64.0.9"], (url) =>
+        url.includes("100.64.0.9") ? "hang" : Date.now() - startedAt < 100_000 ? "ECONNREFUSED" : "ok");
+      const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+      await vi.runAllTimersAsync();
+      const outcome = await result;
+      expect(outcome instanceof Error ? outcome.message : "started").toBe("started");
+      const elapsed = Date.now() - startedAt;
+      expect(elapsed).toBeGreaterThanOrEqual(100_000);
+      expect(elapsed).toBeLessThan(115_000);
+      expect(writtenState(deps)).toMatchObject({ pid: 12345 });
+      expect(errors.mock.calls.map((args) => args.join(" ")).find((line) => line.includes("100.64.0.9"))).toMatch(/could not be verified/);
     } finally {
       errors.mockRestore();
     }

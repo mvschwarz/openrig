@@ -177,7 +177,7 @@ it.each([80, 119, 120, 174])("opens the measured %i-column welcome in an owned v
   const expected = columns >= 120 ? [["dashboard", "operator"], ["advisor"]] : names.map(name => [name]);
   expect(result, JSON.stringify(result)).toMatchObject({ ok: true, opened: expected.flat(), pages: expected.length });
   expect(desktop).toHaveBeenCalledTimes(1);
-  expect(get).toHaveBeenCalledWith(`/api/terminal/preview?view=saved%3Akernel&provider=herdr&viewportColumns=${columns}`);
+  expect(get).toHaveBeenCalledWith(`/api/terminal/preview?view=saved%3Akernel&provider=herdr&viewportColumns=${columns}`, { headers: {} });
   const session = `openrig-view-${id}`;
   expect(tmux(viewer, ["list-windows", "-t", `=${session}`, "-F", "#{window_name}|#{window_active}"]).trim().split("\n"))
     .toEqual(expected.map((_page, i) => `view-${i + 1}|${i === 0 ? 1 : 0}`));
