@@ -113,14 +113,25 @@ jobs:
 
   package-tests:
     if: ${{ github.event_name != 'push' }}
-    # macOS, the platform OpenRig runs on: several daemon and cli tests read macOS ps columns,
-    # file-inode behaviour and release tags.
-    runs-on: macos-latest
+    # daemon and cli run on macOS, the platform OpenRig runs on: several of their tests read macOS
+    # ps columns, file-inode behaviour and release tags. tui and ui run on Ubuntu under the
+    # linux-seat-environment confinement; that is its own confinement, not the macOS sandbox.
+    # The explicit name keeps each check as `package-tests (<package>)`.
+    name: package-tests (${{ matrix.package }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.package == 'daemon' && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:
-        package: [daemon, cli, tui, ui]
+        include:
+          - package: daemon
+            os: macos-latest
+          - package: cli
+            os: macos-latest
+          - package: tui
+            os: ubuntu-latest
+          - package: ui
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -130,11 +141,33 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: brew install tmux
+      - if: runner.os == 'macOS'
+        run: brew install tmux
+      - if: runner.os == 'Linux'
+        name: Install the real terminal
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
       - run: npm ci
       - name: Build the packages the tests import
         run: npm run build
-      - name: Run the suite without ambient credentials or external network
+      - if: runner.os == 'Linux'
+        name: Run the suite without ambient credentials or external network (Linux)
+        run: |
+          set -euo pipefail
+          suite_root=$(mktemp -d "$RUNNER_TEMP/opr-test.XXXXXX")
+          mkdir -p "$suite_root/home"
+          # Only loopback exists in this namespace. Drop back to the runner user
+          # before the suite starts. Pathname Unix sockets are not confined by it.
+          sudo unshare --net -- /bin/bash -s -- "$(id -un)" "$suite_root" "$PATH" "${{ matrix.package }}" <<'SUITE'
+          set -euo pipefail
+          ip link set lo up
+          exec runuser -u "$1" -- env -i HOME="$2/home" PATH="$3" TMPDIR="$2" TMUX_TMPDIR="$2" \
+            CI=true TERM=xterm-256color \
+            npm run test -w "packages/$4"
+          SUITE
+      - if: runner.os == 'macOS'
+        name: Run the suite without ambient credentials or external network
         run: |
           suite_root=$(mktemp -d "$RUNNER_TEMP/opr-test.XXXXXX")
           suite_root=$(cd "$suite_root" && pwd -P)
