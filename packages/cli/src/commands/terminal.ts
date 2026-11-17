@@ -226,9 +226,16 @@ function printOpenAll(json: boolean, r: OpenAllResult, status: number): void {
     lines.push(r.error
       ? r.error
       : `Bulk terminal open (${r.provider}): ${active} rig(s) opened/reused out of ${rigs.length}.`);
+    // A rig by its name; its view (rig:<id>) too when another rig in this result has the same name.
+    const named = (rig: OpenAllRigResult) => typeof rig.rig === "string" && rig.rig ? rig.rig : null;
+    const label = (rig: OpenAllRigResult) => {
+      const name = named(rig);
+      if (!name) return rig.view;
+      return rigs.filter(other => named(other) === name).length > 1 ? `${name} (${rig.view})` : name;
+    };
     for (const rig of rigs) {
       const openedCount = Array.isArray(rig.opened) ? rig.opened.length : 0;
-      lines.push(`  [${rig.outcome}] ${rig.view}${openedCount ? ` (${openedCount} tiles)` : ""}${rig.error ? `: ${rig.error}` : ""}`);
+      lines.push(`  [${rig.outcome}] ${label(rig)}${openedCount ? ` (${openedCount} tiles)` : ""}${rig.error ? `: ${rig.error}` : ""}`);
       for (const a of Array.isArray(rig.absent) ? rig.absent : []) lines.push(`    ○ ${a.seat} — absent: ${a.reason}`);
       for (const d of Array.isArray(rig.degraded) ? rig.degraded : []) lines.push(`    ▲ ${d.seat} — ${d.code === "pane_unconfirmed" ? "unconfirmed" : "skipped"} (${d.host}): ${d.reason}`);
       for (const s of Array.isArray(rig.skipped) ? rig.skipped : []) lines.push(`    skipped ${s.seat}: ${s.reason}`);

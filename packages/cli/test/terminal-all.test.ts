@@ -354,9 +354,28 @@ describe("#3081 rig terminal open/close --all CLI", () => {
       } else {
         const text = logs.join("\n");
         expect(text).toMatch(/did not confirm selected Herdr session/);
-        expect(text).toContain("[opened] rig:demo-a");
-        expect(text).toContain("[reused] rig:demo-b");
+        expect(text).toContain("[opened] demo-a");
+        expect(text).toContain("[reused] demo-b");
       }
+    });
+
+    it("the human summary names each rig, and adds its view only where two rigs share a name", async () => {
+      const rigs = [
+        { rig: "alpha", rigId: "01ALPHA1", view: "rig:01ALPHA1", outcome: "opened", opened: ["w@alpha"], absent: [], degraded: [], skipped: [], workspaceId: "w1" },
+        { rig: "alpha", rigId: "01ALPHA2", view: "rig:01ALPHA2", outcome: "opened", opened: ["w@alpha"], absent: [], degraded: [], skipped: [], workspaceId: "w2" },
+        { rig: "beta", rigId: "01BETA", view: "rig:01BETA", outcome: "reused", opened: ["w@beta"], absent: [], degraded: [], skipped: [], workspaceId: "w3" },
+      ];
+      const { deps } = makeDeps({
+        routes: {
+          "GET /api/terminal/status?provider=herdr&session=work": workStatus,
+          "POST /api/terminal/open-all": { status: 200, data: { ok: true, provider: "herdr", session: "work", rigs } },
+        },
+        windowDeps,
+      });
+      const program = createProgram({ terminalDeps: deps });
+      await program.parseAsync(["node", "rig", "terminal", "open", "--all", "--window", "--session", "work"]);
+      const rows = logs.join("\n").split("\n").filter(line => /^ {2}\[/.test(line));
+      expect(rows).toEqual(["  [opened] alpha (rig:01ALPHA1) (1 tiles)", "  [opened] alpha (rig:01ALPHA2) (1 tiles)", "  [reused] beta (1 tiles)"]);
     });
 
     it("keeps a confirmed partial success (some rigs opened, one absent, endpoint confirmed) at exit 0", async () => {
