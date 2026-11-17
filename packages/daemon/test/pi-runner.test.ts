@@ -1493,21 +1493,61 @@ describe("managed Pi input and attributed wake", () => {
     expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
     expect(f.rpc.filter(command => command.type === "clear_queue")).toEqual([]);
   });
-  it.each(["withdrawal", "preflight", "ACK"] as const)("positive target end retires unsubmitted %s immediately and stale continuation cannot abort successor", async phase => {
-    let release!: () => void;
-    const f = managed(phase === "ACK" ? body => body.type === "ack" && body.requestId === "waiting-E" ? new Promise<boolean>(resolve => { release = () => resolve(true); }) : true : undefined,
-      phase === "withdrawal" ? () => new Promise(resolve => { release = () => resolve({ confirmed: true }); }) : async () => ({ confirmed: true }),
-      phase === "preflight" ? resume => { release = resume; } : undefined);
-    f.core.handleUserBlock("E"); const first = f.rpc.find(command => command.message === "E")!;
-    f.event("response", { id: first.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
-    const pending = f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "waiting-E", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+  it.each([false, true])("bare settlement releases submitted cancellation without inventing aborted evidence (prior proof=%s)", async priorProof => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false);
+    f.core.handleUserBlock("E"); f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "bare-E", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
     await new Promise(resolve => setImmediate(resolve));
-    await f.core.acceptRunnerRequest(f.frame("managed F", 2, "input")); f.event("agent_end"); await new Promise(resolve => setImmediate(resolve));
-    expect(f.rpc.filter(command => command.message === "managed F")).toHaveLength(1);
-    if (phase === "ACK") expect(f.posts.filter(post => post.requestId === "waiting-E" && post.type === "result")).toEqual([]);
-    release(); await pending; await new Promise(resolve => setImmediate(resolve));
+    f.event("message_end", { message: { role: "assistant", stopReason: priorProof ? "aborted" : "stop" } }); f.event("agent_end"); f.core.handleUserBlock("person F");
+    expect(f.rpc.filter(command => command.message === "person F")).toEqual([]);
+    f.event("agent_settled"); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "bare-E", result: expect.objectContaining({ outcome: priorProof ? "cancelled" : "requested", confirmed: priorProof }) }));
+    f.event("agent_settled"); expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1); expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+  });
+  it.each((["withdrawal", "preflight", "ACK"] as const).flatMap(phase => ["before", "after"].flatMap(timing => [true, false].map(success => [phase, timing, success] as const))))
+    ("prewrite %s callback %s bare settlement (success=%s) never releases person input early or aborts F", async (phase, timing, success) => {
+    let release!: () => void, failPreflight!: () => void; let withdrawals = 0;
+    const f = managed(phase === "ACK" ? body => body.type === "ack" && body.requestId === "waiting-E" ? new Promise<boolean>(resolve => { release = () => resolve(success); }) : true : undefined,
+      phase === "withdrawal" ? () => { withdrawals++; return new Promise(resolve => { release = () => resolve(success ? { confirmed: true } : null); }); }
+        : async () => { withdrawals++; return { confirmed: true }; },
+      phase === "preflight" ? resume => { release = success ? resume : () => failPreflight(); } : undefined, true, false);
+    failPreflight = () => f.event("response", { id: "openrig-cancel-preflight-waiting-E", success: false });
+    f.core.handleUserBlock("E"); f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    const target = { runId: "run", nativeTurnId: "pi-invocation-1" };
+    const pending = f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "waiting-E", sequence: 1, kind: "cancel", payload: { target } });
+    await new Promise(resolve => setImmediate(resolve)); await f.core.acceptRunnerRequest(f.frame("managed F", 2, "input"));
+    f.event("agent_end"); f.core.handleUserBlock("person F");
+    expect(f.rpc.filter(command => command.message === "person F" || command.message === "managed F")).toEqual([]);
+    expect(f.core.recheckNativeCancellation(target)).toBe(true);
+    if (timing === "before") { release(); await pending; await new Promise(resolve => setImmediate(resolve)); }
+    expect(f.rpc.filter(command => command.message === "person F")).toEqual([]);
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "waiting-E")).toEqual([]);
+    f.event("agent_settled"); if (timing === "after") release(); await pending; await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    const results = f.posts.filter(post => post.type === "result" && post.requestId === "waiting-E");
+    if (phase === "ACK" && !success) expect(results).toEqual([]);
+    else { expect(results).toHaveLength(1); expect(results[0]).toMatchObject({ result: { outcome: "not-this-turn", confirmed: false } }); }
+    expect(withdrawals).toBe(phase === "ACK" ? 0 : 1);
+    f.event("response", { id: f.rpc.find(command => command.message === "person F")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await new Promise(resolve => setImmediate(resolve)); expect(f.rpc.filter(command => command.message === "managed F")).toHaveLength(1);
     expect(f.rpc.filter(command => command.type === "abort")).toEqual([]);
-    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "waiting-E", result: expect.objectContaining({ outcome: "not-this-turn", confirmed: false }) }));
+  });
+  it.each(["rejected withdrawal", "retry loop", "new opening"])("ended preparation keeps its settlement boundary across %s", async mode => {
+    let reject!: (error: Error) => void, resolve!: (value: { confirmed: boolean }) => void; let calls = 0;
+    const f = managed(undefined, () => { calls++; return mode === "retry loop" ? Promise.resolve({ confirmed: false }) : new Promise((done, fail) => { resolve = done; reject = fail; }); }, undefined, true, false);
+    f.core.handleUserBlock("E"); f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "late-prepare", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(done => setImmediate(done)); f.event("agent_end"); f.core.handleUserBlock("person F");
+    if (mode === "rejected withdrawal") reject(new Error("late transport failure"));
+    if (mode === "retry loop") await new Promise(done => setTimeout(done, 300));
+    await new Promise(done => setImmediate(done)); expect(f.rpc.filter(command => command.message === "person F")).toEqual([]); expect(calls).toBe(1);
+    if (mode === "new opening") { f.event("agent_start"); resolve({ confirmed: true }); }
+    else f.event("agent_settled");
+    await new Promise(done => setImmediate(done));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "late-prepare", result: expect.objectContaining({ outcome: "not-this-turn", confirmed: false }) }));
+    if (mode !== "new opening") expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toEqual([]);
   });
   it("failed local preparation is rejected as not applied without disabling managed capability", async () => {
     const f = managed(undefined, async () => null); f.core.handleUserBlock("E"); f.event("agent_start");
