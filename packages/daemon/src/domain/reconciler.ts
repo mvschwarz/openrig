@@ -133,7 +133,7 @@ export class Reconciler {
 export async function recordedProcessStillRunning(
   db: Database.Database,
   session: { nodeId: string; sessionName: string },
-  processes: () => Promise<ProcessTableRow[] | null>,
+  processes: () => Promise<Array<Pick<ProcessTableRow, "pid" | "ppid" | "command" | "startedAt">> | null>,
 ): Promise<{ pid: number; parent: { pid: number; command: string } | null } | null> {
   const evidence = new SeatIdentityStore(db).getProcessEvidence(session.nodeId);
   if (!evidence || evidence.sessionName !== session.sessionName) return null;

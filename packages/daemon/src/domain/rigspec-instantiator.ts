@@ -28,8 +28,9 @@ import { markRigBuilding, unmarkRigBuilding } from "./rigs-being-built.js";
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 
 /** Two process-limit values are the same request: none, `{}` and undefined all mean no limit. */
-function sameProcessLimits(a: { tasksMax?: number } | null | undefined, b: { tasksMax?: number } | null | undefined): boolean {
-  return (a?.tasksMax ?? null) === (b?.tasksMax ?? null);
+function sameProcessLimits(a: { tasksMax?: number; memoryMax?: number } | null | undefined,
+  b: { tasksMax?: number; memoryMax?: number } | null | undefined): boolean {
+  return (a?.tasksMax ?? null) === (b?.tasksMax ?? null) && (a?.memoryMax ?? null) === (b?.memoryMax ?? null);
 }
 
 interface RigInstantiatorDeps {
@@ -957,7 +958,7 @@ export class PodRigInstantiator {
           launchWrapper: isLaunchWrapperRuntime(live.runtime) ? (live.launchWrapper ?? []) : undefined,
           // #3253: a stored value that can't be read is left as stored (undefined keeps it), never cleared ({}): the
           // launch then says it's invalid instead of starting the seat without it.
-          processLimits: live.processLimitsError ? undefined : live.processLimits ? { tasksMax: live.processLimits.tasksMax } : {},
+          processLimits: live.processLimitsError ? undefined : live.processLimits ? { ...live.processLimits } : {},
           codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
           permissionPolicy: undefined },
@@ -2288,7 +2289,7 @@ export class PodRigInstantiator {
       ...recipeMember,
       launchWrapper: isLaunchWrapperRuntime(node.runtime) ? (node.launchWrapper ?? []) : undefined,
       // #3253: an unreadable stored value stays as stored (undefined keeps it, {} would clear it).
-      processLimits: node.processLimitsError ? undefined : node.processLimits ? { tasksMax: node.processLimits.tasksMax } : {},
+      processLimits: node.processLimitsError ? undefined : node.processLimits ? { ...node.processLimits } : {},
       claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
       ...(node.model !== null ? { model: node.model } : {}),
       ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),

@@ -272,6 +272,20 @@ describe("RigSpecExporter", () => {
     expect(db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(node.id)).toEqual({ process_limits: "{not json" });
   });
 
+  it("#3253: exports a legacy node's memory_max in bytes, alone and beside tasks_max, and reads it back exactly", () => {
+    const rig = rigRepo.createRig("legacy-memory-export");
+    rigRepo.addNode(rig.id, "memory", { runtime: "codex", cwd: "/repo", processLimits: { memoryMax: 4294967296 } });
+    rigRepo.addNode(rig.id, "both", { runtime: "codex", cwd: "/repo", processLimits: { tasksMax: 512, memoryMax: 1073741824 } });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "memory")?.processLimits).toEqual({ memoryMax: 4294967296 });
+    expect(exported.nodes.find((n) => n.id === "both")?.processLimits).toEqual({ tasksMax: 512, memoryMax: 1073741824 });
+    const yaml = RigSpecCodec.serialize(exported);
+    expect(yaml).toContain("memory_max: 4294967296");
+    const parsed = RigSpecCodec.parse(yaml);
+    expect(RigSpecSchema.validate(parsed).valid).toBe(true);
+    expect(exporter.processLimitsNotCarried(rig.id)).toEqual([]);
+  });
+
   it("exports launch_wrapper on legacy flat pi, codex and claude-code nodes, omits cleared/absent, and round-trips through codec/schema/reimport", () => {
     const rig = rigRepo.createRig("legacy-wrapper-export");
     const piArgv = ["mtn", "sandbox", "exec", "", "--pi-seat", "alpha", "--"];
@@ -627,6 +641,22 @@ describe("RigSpecExporter (pod-aware)", () => {
     expect(PodRigSpecSchema.validate(PodRigSpecCodec.parse(PodRigSpecCodec.serialize(damaged))).valid).toBe(true);
     expect(exporter.processLimitsNotCarried(rig.id)).toEqual(["dev.qa"]);
     expect(db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(n2.id)).toEqual({ process_limits: "{not json" });
+  });
+
+  it("#3253: round-trips a pod member's memory_max through export, serialize, parse and validate, in bytes", () => {
+    const { rig, n2 } = seedPodRig();
+    rigRepo.setNodeProcessLimits(n2.id, { tasksMax: 512, memoryMax: 4294967296 });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(exported.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "qa")?.processLimits)
+      .toEqual({ tasksMax: 512, memoryMax: 4294967296 });
+    const yaml = PodRigSpecCodec.serialize(exported);
+    expect(yaml).toContain("tasks_max: 512");
+    expect(yaml).toContain("memory_max: 4294967296");
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "qa")?.processLimits)
+      .toEqual({ tasksMax: 512, memoryMax: 4294967296 });
   });
 
   it("exports selected launch_wrapper array for pi and codex pod members only and round-trips through codec/schema", () => {

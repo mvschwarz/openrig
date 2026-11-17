@@ -643,6 +643,8 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
       "Process limits: tasks_max 256: unknown (unverified: the scope start was not confirmed; this may be temporary); whether the restarted " +
       "seat runs under the limit can't be told, and nothing was run a second time.");
     expect(await restart(report("restarted_account_unverified"))).not.toContain("Process limits");
+    expect(await restart({ ...report("restarted_account_unverified"), processLimits: { ...notApplied, requested: { memoryMax: 1073741824 } } }))
+      .toContain("Process limits: memory_max 1G: requested, not applied; the restart went on without it (setup:");
   });
 
   it("requires a reason before contacting the daemon, and refuses --plan with --verify", async () => {

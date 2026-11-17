@@ -208,8 +208,8 @@ seatRoutes.get("/status/:seatRef", async (c) => {
           ? tmux ? { ...(await tmux.readSeatProcessLimits(readTarget, limits, nodeId)),
             // A guest seat's report is not read from its pane at all.
             ...(nodeId && tmux.seatInEnvironmentGuest?.(nodeId) ? {} : { readFrom }) }
-            : { state: "unknown", requested: { tasksMax: limits.tasksMax }, reason: "this daemon has no terminal adapter to read the seat's process" }
-          : { state: "not_applied", requested: { tasksMax: limits.tasksMax }, reason: "the seat is not running; the limit applies at its next fresh launch" }
+            : { state: "unknown", requested: { ...limits }, reason: "this daemon has no terminal adapter to read the seat's process" }
+          : { state: "not_applied", requested: { ...limits }, reason: "the seat is not running; the limit applies at its next fresh launch" }
         // No limit stored: nothing is read, so a seat without process_limits is unchanged.
         : null;
     const channel = c.get("runnerChannel" as never) as RunnerChannel | undefined;

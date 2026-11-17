@@ -1264,7 +1264,7 @@ export interface LegacyRigSpecNode {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
-  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
   /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
   statuslineThrottle?: number;
@@ -1396,7 +1396,7 @@ export interface RigSpecPodMember {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
-  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
   /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
   statuslineThrottle?: number;

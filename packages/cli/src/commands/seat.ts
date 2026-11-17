@@ -42,8 +42,10 @@ interface SeatStatusResponse {
   current_occupant: string | null;
   /** #3253: the seat's process limits, read back from its process (applied; requested, not applied; unsupported; unknown;
    *  or invalid: the stored value can't be read). `readFrom` says which process was read. */
-  processLimits?: { state: "applied" | "not_applied" | "unsupported" | "unknown" | "invalid"; requested?: { tasksMax: number };
-    reason?: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number; scope?: string; readFrom?: string };
+  processLimits?: { state: "applied" | "not_applied" | "unsupported" | "unknown" | "invalid";
+    requested?: { tasksMax?: number; memoryMax?: number };
+    reason?: string; pidsMax?: string; pidsCurrent?: number; limitHits?: number;
+    memoryMax?: string; memoryCurrent?: number; memoryLimitHits?: number; oomKills?: number; scope?: string; readFrom?: string };
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number;
     desiredMode?: string; effectiveMode?: string; desiredLevel?: string; effectiveLevel?: string; };
   terminalPolicy?: {
@@ -283,9 +285,11 @@ function printHuman(status: SeatStatusResponse): void {
   if (status.processLimits) {
     const l = status.processLimits;
     const read = l.pidsMax !== undefined ? ` (pids.max ${l.pidsMax}, current ${l.pidsCurrent ?? "?"}, limit hit ${l.limitHits ?? 0} times)` : "";
+    const readMemory = l.memoryMax !== undefined ? ` (memory.max ${l.memoryMax}, current ${l.memoryCurrent ?? "?"}, at the limit ` +
+      `${l.memoryLimitHits ?? 0} times, OOM kills ${l.oomKills ?? 0})` : "";
     const state = l.state === "not_applied" ? "requested, not applied" : l.state === "invalid" ? "stored value invalid" : l.state;
-    const asked = l.requested ? `tasks_max ${l.requested.tasksMax}` : "process_limits";
-    console.log(`Process limits: ${asked}: ${state}${read}${l.reason ? `; ${l.reason}` : ""}${l.readFrom ? ` (read from ${l.readFrom})` : ""}`);
+    const asked = askedLimits(l.requested);
+    console.log(`Process limits: ${asked}: ${state}${read}${readMemory}${l.reason ? `; ${l.reason}` : ""}${l.readFrom ? ` (read from ${l.readFrom})` : ""}`);
   }
   if (status.runtime_home) {
     const h = status.runtime_home;
@@ -2087,11 +2091,29 @@ function printEffortReport(data: Record<string, unknown>): void {
 
 /** #3253: a restart in place that can't keep or re-apply the seat's process limit says so, by what the restart did. */
 type ProcessLimitsNoticeView = { state?: "not_applied" | "unknown"; kind: string; reason: string;
-  requested?: { tasksMax: number }; ageSeconds?: number; retryable?: boolean };
+  requested?: { tasksMax?: number; memoryMax?: number }; ageSeconds?: number; retryable?: boolean };
+
+/** What a seat's process limits ask for, from the keys present: `tasks_max 512`, `memory_max 4G` (bytes in the largest
+ *  exact K, M, G or T suffix, else bytes), or both, comma-separated; `process_limits` when the request isn't known. */
+function askedLimits(requested: { tasksMax?: number; memoryMax?: number } | undefined): string {
+  const parts = [
+    ...(requested?.tasksMax !== undefined ? [`tasks_max ${requested.tasksMax}`] : []),
+    ...(requested?.memoryMax !== undefined ? [`memory_max ${sizeText(requested.memoryMax)}`] : []),
+  ];
+  return parts.length ? parts.join(", ") : "process_limits";
+}
+
+/** A byte count in the largest K, M, G or T suffix (base 1024) that divides it exactly, else bytes. */
+function sizeText(bytes: number): string {
+  for (const [suffix, size] of [["T", 2 ** 40], ["G", 2 ** 30], ["M", 2 ** 20], ["K", 2 ** 10]] as const) {
+    if (bytes > 0 && bytes % size === 0) return `${bytes / size}${suffix}`;
+  }
+  return String(bytes);
+}
 
 /** The parts every process-limit line shares: what was asked, and why it wasn't applied. */
 function processLimitsAskedWhy(notice: ProcessLimitsNoticeView): { asked: string; why: string } {
-  const asked = notice.requested ? `tasks_max ${notice.requested.tasksMax}` : "process_limits";
+  const asked = askedLimits(notice.requested);
   const why = `${notice.kind}: ${notice.reason}${notice.ageSeconds !== undefined ? `, observed ${notice.ageSeconds}s ago` : ""}` +
     (notice.retryable ? "; this may be temporary" : "");
   return { asked, why };
