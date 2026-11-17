@@ -218,6 +218,21 @@ describe("seat typing guard commands", () => {
     expect(result3.logs.join("\n")).not.toContain("Process limits");
   });
 
+  it("#3253: prints a memory_max request as a size and its readback apart from the pids one", async () => {
+    const status = async (processLimits: Record<string, unknown>) => (await captureLogs(() => makeCommand(makeDeps({ status: 200,
+      data: { ...STATUS, processLimits } }, [])).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined))).logs;
+    expect(await status({ state: "applied", requested: { memoryMax: 4294967296 }, memoryMax: "4294967296", memoryCurrent: 52428800,
+      memoryLimitHits: 4, oomKills: 1, scope: "openrig-seat-worker_test-1a2b3c4d.scope" }))
+      .toContain("Process limits: memory_max 4G: applied (memory.max 4294967296, current 52428800, at the limit 4 times, OOM kills 1)");
+    expect(await status({ state: "applied", requested: { tasksMax: 512, memoryMax: 1610612736 }, pidsMax: "512", pidsCurrent: 37,
+      limitHits: 2, memoryMax: "1610612736", memoryCurrent: 1048576, memoryLimitHits: 0, oomKills: 0 }))
+      .toContain("Process limits: tasks_max 512, memory_max 1536M: applied (pids.max 512, current 37, limit hit 2 times) " +
+        "(memory.max 1610612736, current 1048576, at the limit 0 times, OOM kills 0)");
+    expect(await status({ state: "not_applied", requested: { memoryMax: 16777216 + 2 ** 30 },
+      reason: "the seat is not running; the limit applies at its next fresh launch" }))
+      .toContain("Process limits: memory_max 1040M: requested, not applied; the seat is not running; the limit applies at its next fresh launch");
+  });
+
   it("prints the daemon's managed restore delivery failure", async () => {
     const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
     const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
@@ -851,6 +866,25 @@ describe("rig seat status", () => {
     expect(out).toContain("Handover failed at step");
     expect(out).toContain("Process limits: tasks_max 256: requested, not applied");
     expect(out).toContain("unverified: the user manager timed out");
+  });
+
+  it("#3253: a handover failure names a memory_max request in the process-limit notice", async () => {
+    const deps = makeDeps({
+      status: 500,
+      data: {
+        ok: false,
+        code: "successor_create_failed",
+        message: "Handover failed at step \"create-successor\": harness not interactive",
+        guidance: "The seat's registry binding is unchanged.",
+        processLimits: { state: "not_applied", kind: "unsupported", limit: "memory_max", retryable: false,
+          reason: "a throwaway seat scope has no memory.max: the memory controller is not delegated to the user manager",
+          requested: { tasksMax: 256, memoryMax: 4294967296 } },
+      },
+    }, []);
+    const { errors } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "impl@seat-rig", "--reason", "context-wall"]);
+    });
+    expect(errors.join("\n")).toContain("Process limits: tasks_max 256, memory_max 4G: requested, not applied");
   });
 
   it("handover non-dry-run JSON prints mutation result for discovered source", async () => {

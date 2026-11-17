@@ -175,7 +175,7 @@ export class RigSpecExporter {
       if (envelope !== undefined) specNode.codexPermissions = envelope;
       if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) specNode.launchWrapper = node.launchWrapper;
       // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
-      if (node.processLimits) specNode.processLimits = { tasksMax: node.processLimits.tasksMax };
+      if (node.processLimits) specNode.processLimits = { ...node.processLimits };
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;
@@ -261,7 +261,7 @@ export class RigSpecExporter {
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
         if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
         // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
-        if (node.processLimits) member.processLimits = { tasksMax: node.processLimits.tasksMax };
+        if (node.processLimits) member.processLimits = { ...node.processLimits };
         // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
         // an export carries the ones its launch passes.
         const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;

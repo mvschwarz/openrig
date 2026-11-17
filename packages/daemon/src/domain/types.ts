@@ -1254,7 +1254,7 @@ export interface LegacyRigSpecNode {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
-  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
   cwd?: string;
   surfaceHint?: string;
@@ -1384,7 +1384,7 @@ export interface RigSpecPodMember {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
-  /** The seat's own process limits (`process_limits: { tasks_max }`, #3253); `{}` explicitly clears. */
+  /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */

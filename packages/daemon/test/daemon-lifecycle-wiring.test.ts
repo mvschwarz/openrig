@@ -31,6 +31,11 @@ describe("#3253 wiring pin: the tmux adapter reads each seat's stored process_li
       // Not cached: a re-applied spec reaches the next launch.
       deps.rigRepo.setNodeProcessLimits(capped.id, { tasksMax: 128 });
       expect(deps.tmuxAdapter.seatProcessLimits?.(capped.id)).toEqual({ tasksMax: 128 });
+      // memory_max reaches the adapter alone and beside tasks_max, in bytes.
+      deps.rigRepo.setNodeProcessLimits(capped.id, { memoryMax: 4294967296 });
+      expect(deps.tmuxAdapter.seatProcessLimits?.(capped.id)).toEqual({ memoryMax: 4294967296 });
+      deps.rigRepo.setNodeProcessLimits(capped.id, { tasksMax: 128, memoryMax: 1073741824 });
+      expect(deps.tmuxAdapter.seatProcessLimits?.(capped.id)).toEqual({ tasksMax: 128, memoryMax: 1073741824 });
       // A value that can't be read is this seat's `invalid`, decided before any check of the host.
       db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{", plain.id);
       expect(await deps.tmuxAdapter.seatProcessLimitsRecoveryPlan(plain.id)).toMatchObject({ state: "not_applied", kind: "invalid" });

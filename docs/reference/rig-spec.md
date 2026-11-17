@@ -937,7 +937,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `advisor` | string | no | — | Claude-only Advisor model for this seat. Overrides the AgentSpec profile/default; blank or non-string values are ignored with an advisory. |
 | `claude_mcp` | `none` | no | normal loading | Claude members only. Disable MCP server loading for this agent on every launch and resume. Omit the field to keep Claude's normal configuration; see [Claude MCP loading](#claude-mcp-loading-runtime-claude-code). |
 | `launch_wrapper` | string[] | no | — | Local `pi`, `codex`, `claude-code` and community-harness members; runner presets must declare wrapper support. Literal argument prefix applied to the native executable and its arguments on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
-| `process_limits` | map | no | — | Linux/systemd hosts only, opt-in for this seat. `{ tasks_max: N }` (an integer from 1 to 4194304) puts the seat's own processes in a systemd user scope of their own with `TasksMax=N`; the other seats, the daemon and the terminal server stay outside it. Applies to the seat's new launches; a fresh launch the host can't cap is not started, and a recovery goes ahead with a warning. Any other key (a memory or CPU limit) is refused. `{}` clears a stored limit when re-applying an authored spec; omitting the key leaves it unchanged. Valid on terminal members too. See [Process limits](#process-limits-linuxsystemd). |
+| `process_limits` | map | no | — | Linux/systemd hosts only, opt-in for this seat, each key on its own. `{ tasks_max: N }` (an integer from 1 to 4194304) and `{ memory_max: <size> }` (an integer number of bytes, or `<n>K`, `M`, `G` or `T`, base 1024; a whole number of MiB from 16M to 2^53 − 2^20 bytes) put the seat's own processes in a systemd user scope of their own with `TasksMax=N` and `MemoryMax=<bytes>`; both keys together share that one scope. The other seats, the daemon and the terminal server stay outside it. Applies to the seat's new launches; a fresh launch the host can't cap is not started, and a recovery goes ahead with a warning. Any other key (a CPU limit) is refused. `{}` clears the stored limits when re-applying an authored spec, a mapping replaces them whole, and omitting the key leaves them unchanged. Valid on terminal members too. See [Process limits](#process-limits-linuxsystemd). |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
 | `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
@@ -1102,7 +1102,8 @@ members:
 ### Process limits (Linux/systemd)
 
 Set `process_limits` on a member to cap how many tasks (processes and threads) that seat's own processes may hold at
-once, so a seat that forks without end hits its own limit instead of the host's:
+once, how much memory they may be charged, or both, so a seat that forks or allocates without end hits its own limit
+instead of the host's:
 
 ```yaml
 members:
@@ -1113,13 +1114,16 @@ members:
     cwd: .
     process_limits:
       tasks_max: 512
+      memory_max: 4G
 ```
 
-- **Opt-in, per seat, no default:** Only a member with `process_limits.tasks_max` gets a limit. Without the key, a seat
-  launches exactly as before. `tasks_max` is the only supported key; any other key, such as a memory or CPU limit, is
-  refused by name rather than accepted and ignored.
+- **Opt-in, per seat and per key, no default:** Only a member with `process_limits.tasks_max` or
+  `process_limits.memory_max` gets a limit, and only the keys it sets. Without the map, a seat launches exactly as
+  before. `tasks_max` and `memory_max` are the only supported keys; any other key, such as a CPU limit, is refused by
+  name rather than accepted and ignored.
 - **The boundary:** The seat's pane command starts in a transient `systemd-run --user --scope` of its own, in
-  `openrigseats.slice`, with `TasksMax=N` as its only limit. The seat's processes leave the terminal server's scope:
+  `openrigseats.slice`, with `TasksMax=N` and/or `MemoryMax=<bytes>` as its only limits (one scope for both). The
+  seat's processes leave the terminal server's scope:
   a limit an operator put on that scope no longer covers this seat. The other seats, the daemon and the terminal server
   stay where they were, outside this seat's limit. Processes the seat itself starts through `systemd-run --user` land
   in units of their own and are not counted against it. The limit guards the host against a seat's runaway forks; it
@@ -1128,6 +1132,13 @@ members:
   seat's scope and its limit. The limit is also cooperative: a process in the seat that reaches the user manager can
   raise its own scope's `TasksMax` with `systemctl --user set-property`. The short-lived terminal OpenRig opens to
   check that a Claude conversation can be resumed runs without the seat's identity, outside any seat scope.
+- **What `memory_max` counts:** the memory charged to the seat's scope (`memory.max`): its processes' RAM and the page
+  cache their file reads and writes bring in. Swap is not limited (no `MemorySwapMax=` is set): on a host with swap, a
+  seat at its limit is reclaimed and may swap, which shows as a limit hit, not as an OOM kill. When reclaim can't keep
+  it under the limit, the kernel's OOM killer kills a process in the seat's scope. With `OOMPolicy=continue` (systemd
+  253 or later, set when the host takes it) the rest of the scope goes on; on an older systemd, that first OOM kill
+  stops the seat's whole scope, so the whole seat ends. Pages a process was charged before it entered the scope stay
+  charged where they were. The panes the terminal server forks (above) are outside this limit too.
 - **A fresh launch that can't get the limit is not started:** A fresh launch (first launch by `rig up`, `rig seat launch
   --fresh`, and a relaunch without a snapshot; a first start through the restore path, such as a never-occupied seat's
   start or auto-rehydrate, is a recovery, below) says it couldn't apply the limit instead of starting the seat without
@@ -1135,14 +1146,17 @@ members:
   - `process_limits_unsupported` for a positive inability of the host: not Linux, `systemd-run` or `systemctl` not on
     the daemon's `PATH`, a systemd too old for seat scopes (it needs 236 or later), no user manager running for the
     user (no socket to reach it), or a throwaway scope with no cgroup v2 path, no `pids.max`, or a `pids.max` that is
-    not the value (the pids controller is not delegated);
+    not the value (the pids controller is not delegated), no `memory.max`, or a `memory.max` that is not the value (the
+    memory controller is not delegated), or a `MemoryMax=` systemd refused. The seat has one scope, so a host that
+    supports only one of the requested keys refuses the whole seat; `processLimits.limit` (`tasks_max` or
+    `memory_max`) names the one it can't give when it is known;
   - `process_limits_setup` when this setup can't use a scope, with the way out: no `XDG_RUNTIME_DIR` and no
     `/run/user/<uid>` (start the daemon with `XDG_RUNTIME_DIR` set, or as a systemd user service), coreutils' `timeout`
     not on the daemon's `PATH`, `terminal.inherit_tmux_environment` on (a seat with a limit needs the scoped launch
     environment: set it to false), a daemon that gives seats no launch environment, or a seat placed in an environment
     guest (its agent runs in the guest, and a scope on this host would hold only the local viewer);
   - `process_limits_unverified` (retryable) when it isn't known either way: the user manager timed out or its socket
-    refused the connection (starting or restarting), the probe read nothing or output it could not understand, an error not recognized, a launch setting
+    refused the connection (starting or restarting), the probe read nothing (no `pids.max` or `memory.max` it asked for) or output it could not understand, an error not recognized, a launch setting
     that couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
     didn't see in time (its new session is removed, by the identity tmux printed when it made it, and the seat is never
     started again without the limit; when it can't be removed, the refusal says the session may still be running and
@@ -1159,7 +1173,7 @@ members:
   - `process_limits_invalid` when the seat's stored value can't be read: only this seat is affected, and the value is
     kept until a re-applied spec replaces or clears it.
   Over HTTP, `process_limits_unverified` answers 409 and the other three 422, with `retryable` and `processLimits` (the
-  kind, the reason and the requested value). A daemon that is not itself a systemd user service is no reason: the probe
+  kind, the reason, the requested values and, when known, the `limit`). A daemon that is not itself a systemd user service is no reason: the probe
   decides. To launch an existing seat as before, re-apply its spec with `process_limits: {}`: with the key just
   removed, the stored limit stays (see "Persistence and clear").
 - **A recovery goes ahead without it, and says so:** A handover, a runtime switch and a restart in place choose their
@@ -1181,23 +1195,33 @@ members:
   relaunches nothing, so running seats keep the scope they started in.
 - **Status:** `rig seat status <seat>` reads the limit back from the seat's running process, never from the spec
   alone. It reads the seat's own pane or, when no pane is recorded for the seat, its session's active pane, and says
-  which (`readFrom`). The states: `applied` (its process is in a seat scope whose `pids.max` is the value), "requested,
-  not applied" (known not under it: not running, launched before the key or by a recovery without it, another
-  `pids.max`, or placed in an environment guest, whose pane holds only a local viewer, with the reason), `unsupported`
+  which (`readFrom`). The states: `applied` (its process is in a seat scope whose `pids.max` and `memory.max` are the
+  values, each one requested), "requested, not applied" (known not under it: not running, launched before the key or by
+  a recovery without it, another `pids.max` or `memory.max`, the reason naming which, or placed in an environment guest, whose pane holds only a local viewer, with the reason), `unsupported`
   (not under it, and the host positively can't make the scope), `unknown` (the readback failed), "stored value invalid"
   (the stored request can't be read; only this seat is affected, and the value is kept). A seat with no limit stored
   shows nothing and is not read at all, so a seat whose limit was cleared while it ran stays in its launch's scope,
-  unreported, until its next fresh launch starts it without one. It also shows `pids.current` and how many times a fork hit the limit (`pids.events` `max`). Never
+  unreported, until its next fresh launch starts it without one. With `tasks_max`, it also shows `pids.current` and how many times a fork hit the limit (`pids.events` `max`). With `memory_max`, apart from those, it shows `memory.current`, how many times the seat's usage hit the limit and was reclaimed (`memory.events` `max`), and how many of its processes the limit's OOM killer killed (`memory.events` `oom_kill`). Never
   stop a seat's scope by hand: that kills every process in it; use `rig seat stop`. Stopping a seat ends its session,
   not its scope: a process the seat left running detached stays in that old scope, under its limit, until it exits,
   and the status, which reads only the running seat's pane, doesn't show it.
 - **Values:** `tasks_max` takes any count from 1 (systemd's own minimum) to 4194304 (the kernel's `PID_MAX_LIMIT`). No
   floor is imposed for every runtime: how many tasks a harness needs is the operator's choice, and a fork past the
-  limit fails visibly as a limit hit.
+  limit fails visibly as a limit hit. `memory_max` takes an integer number of bytes or a string `<n>K`, `<n>M`, `<n>G`
+  or `<n>T` (base 1024, as systemd reads it; `512M` and `536870912` are the same value), and it must be a whole number
+  of MiB: the kernel keeps `memory.max` in pages and reads back the page multiple below, so only a MiB multiple reads
+  back exactly as asked on every page size. Its floor is 16M (16777216 bytes), a margin for the throwaway `/bin/sh`
+  that proves the limit inside a scope with it, not a measured minimum; its top is 2^53 − 2^20 bytes
+  (9007199253692416), the largest MiB multiple the daemon keeps exactly. As for `tasks_max`, no floor is imposed for
+  every runtime, and the OOM kills show in the status. A percentage, `infinity`, 0, a negative or fractional value, a
+  lowercase or unknown suffix, an empty string, a number of bytes written as a string, a value that isn't a whole
+  number of MiB or one out of that range is refused by name.
 - **Persistence and clear:** On new seats, absent or `process_limits: {}` stores no limit. Applying an authored spec to
-  an existing seat retains the stored limit when the key is absent, clears it with `process_limits: {}`, and replaces it
-  otherwise; the new value is stored before that launch. First-start retry refuses a changed limit, and keeps a stored
-  value it can't read as it is (that launch reports `process_limits_invalid`). Export includes the configured value. A
+  an existing seat retains the stored limits when the key is absent, clears both with `process_limits: {}`, and
+  replaces them whole otherwise (`{ tasks_max: 8 }` over a stored `{ tasks_max: 8, memory_max: 4G }` clears the memory
+  limit); the new value is stored before that launch. First-start retry refuses a changed limit, and keeps a stored
+  value it can't read as it is (that launch reports `process_limits_invalid`). Export includes the configured value,
+  with `memory_max` in bytes. A
   seat whose stored value can't be read is exported without `process_limits`, and the rest of the rig exports as usual.
   The stored value stays as it is, and the export names the seat: a `# Not carried:` line at the top of the YAML (which
   `rig export` prints) with how to fix or clear it, and the `X-OpenRig-Export-Warnings` header on YAML and JSON (which
