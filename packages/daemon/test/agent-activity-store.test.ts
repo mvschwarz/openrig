@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -789,6 +789,41 @@ describe("AgentActivityStore.findCompactSessionStart", () => {
     // A generation the registry does not know is never the same process.
     const unregistered = new AgentActivityStore({ db, eventBus, now: () => NOW, isRegisteredOccupantGeneration: () => false, isOccupantContinuedByAdoption: () => true });
     expect(unregistered.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation: "gen-adopted" })).toBeNull();
+  });
+
+  it("the scan stops at the write: events recorded before it are not read, and the query rides the index range", () => {
+    const { sessionName } = seedSession("claude-code");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    const record = (hookEvent: string, subtype: string | undefined, occurredAt: string) =>
+      store.recordHookEvent({ runtime: "claude-code", sessionName, hookEvent, ...(subtype ? { subtype } : {}), generation: "gen-1", occurredAt });
+    // Old history, recorded a minute before the write: a lot of ordinary activity, and one compact report whose hook time
+    // reads as after the write (a hook clock ahead of the daemon's). It cannot be the report of a compaction not yet asked for.
+    for (let i = 0; i < 150; i++) record("UserPromptSubmit", undefined, at(-60_000 + i));
+    record("SessionStart", "compact", at(5));
+    db.prepare("UPDATE events SET created_at = '2026-04-24 11:59:00'").run();
+    const afterWrite = record("SessionStart", "compact", at(2_000));
+    expect(afterWrite.ok).toBe(true);
+
+    // The test database leaves out the events index migration (047); the daemon has it.
+    db.exec("CREATE INDEX IF NOT EXISTS idx_events_node_type_seq ON events(node_id, type, seq)");
+    const real = db.prepare.bind(db);
+    const seen: Array<{ sql: string; args: unknown[] }> = [];
+    vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      const statement = real(sql);
+      if (sql.includes("rawSubtype")) {
+        const all = statement.all.bind(statement);
+        statement.all = ((...args: unknown[]) => { seen.push({ sql, args }); return all(...args); }) as typeof statement.all;
+      }
+      return statement;
+    }) as typeof db.prepare);
+    expect(store.findCompactSessionStart({ sessionName, sinceMs: NOW.getTime(), generation: "gen-1" }))
+      .toEqual({ observedAt: NOW.getTime() + 2_000, generation: "gen-1" });
+    expect(seen).toHaveLength(1);
+    const plan = (real(`EXPLAIN QUERY PLAN ${seen[0]!.sql}`).all(...seen[0]!.args) as Array<{ detail: string }>).map((row) => row.detail);
+    expect(plan).toEqual(expect.arrayContaining([expect.stringMatching(/idx_events_node_type_seq \(node_id=\? AND type=\? AND seq>\?\)/)]));
+    expect(plan.filter((detail) => /^SCAN events\b/.test(detail))).toEqual([]);
+    // Taking the bound is itself a walk down from the newest record, which ends at the first one recorded before the write.
+    expect(plan).toEqual(expect.arrayContaining([expect.stringMatching(/idx_events_node_type_seq \(node_id=\? AND type=\?\)/)]));
   });
 
   it("finds nothing for an unknown seat, and survives a new store over the same events", () => {

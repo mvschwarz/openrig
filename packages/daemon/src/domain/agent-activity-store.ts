@@ -308,19 +308,27 @@ export class AgentActivityStore {
    *  have followed: an adoption mints a new generation for the same live process, whose hooks keep the one it launched
    *  with (#2796, as the activity read and the session-identity route treat it). A report with no generation, or one
    *  from an occupant a later launch replaced, is stored as such and is never returned, so it cannot stand in front of
-   *  a later report from this occupant. The generation it carried is returned. */
+   *  a later report from this occupant. The generation it carried is returned.
+   *
+   *  The read is bounded at the write, not by how much the seat has recorded: a report is recorded after it is made, so
+   *  one recorded before the second the write started cannot be the report asked for, and the scan starts after the
+   *  newest such record. `events.created_at` has whole-second precision, so the bound is the second before the write's
+   *  second. The hook's own `eventAt` is still checked on every row that is read. */
   findCompactSessionStart(input: { sessionName: string; sinceMs: number; generation: string }): { observedAt: number; generation: string } | null {
     if (!input.generation || !Number.isFinite(input.sinceMs)) return null;
     const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
     if (!nodeId) return null;
+    const recordedBefore = new Date(Math.floor(input.sinceMs / 1000) * 1000 - 1000).toISOString().slice(0, 19).replace("T", " ");
     const rows = this.db.prepare(`
       SELECT payload FROM events
       WHERE node_id = ? AND type = 'agent.activity'
+        AND seq > COALESCE((SELECT seq FROM events WHERE node_id = ? AND type = 'agent.activity' AND created_at < ?
+                            ORDER BY seq DESC LIMIT 1), 0)
         AND json_extract(payload, '$.activity.rawEvent') = 'SessionStart'
         AND json_extract(payload, '$.activity.rawSubtype') = 'compact'
         AND json_extract(payload, '$.activity.generation') IS NOT NULL
         AND json_extract(payload, '$.activity.eventAt') >= ?
-      ORDER BY seq DESC LIMIT 200`).all(nodeId, new Date(input.sinceMs).toISOString()) as EventPayloadRow[];
+      ORDER BY seq DESC LIMIT 200`).all(nodeId, nodeId, recordedBefore, new Date(input.sinceMs).toISOString()) as EventPayloadRow[];
     const same = new Map<string, boolean>();
     const fromThisOccupant = (generation: string): boolean => {
       if (generation === input.generation) return true;
