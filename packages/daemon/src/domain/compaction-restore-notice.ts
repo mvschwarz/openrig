@@ -49,7 +49,7 @@ function recoveryRecipient(db: Database.Database, queue: QueueRepository, sessio
 }
 
 /** One existing diagnostic queue item per compaction attempt, also across restarts. */
-export async function reportRestoreDeliveryFailure(db: Database.Database, queue: QueueRepository, failure: RestoreDeliveryFailure): Promise<void> {
+export async function reportRestoreDeliveryFailure(db: Database.Database, queue: QueueRepository, failure: RestoreDeliveryFailure, options?: { completed: boolean }): Promise<void> {
   const { sessionName, attemptId, lastDelivery } = failure;
   const qitemId = `qitem-compaction-restore-${attemptId}`;
   const reason = [lastDelivery.reason, lastDelivery.activity?.reason, lastDelivery.errorClass].filter(Boolean).join("; ");
@@ -59,8 +59,19 @@ export async function reportRestoreDeliveryFailure(db: Database.Database, queue:
     : "";
   const existing = queue.getById(qitemId);
   if (existing) {
-    // An owner's closed disposition stands. Changed evidence updates the same row without another wake.
-    if (["pending", "in-progress", "blocked"].includes(existing.state) && existing.summary !== summary) {
+    // An owner's closed disposition stands. Only completion of all owed stages retires this attempt's notice.
+    if (!["pending", "in-progress", "blocked"].includes(existing.state)) return;
+    if (options?.completed && lastDelivery.ok && lastDelivery.stage === "compliance_prompt") {
+      const caveat = lastDelivery.reason === "delivered_over_unreadable_pane" ? " over an unreadable pane"
+        : lastDelivery.reason === "delivered_over_unreadable_input_box" ? " over an unreadable input box" : "";
+      const completed = `Managed restore for ${sessionName}: ${lastDelivery.stage} delivered at ${lastDelivery.at}${caveat}; all owed stages delivered`;
+      const note = `${completed}. This records delivery, not proof the seat read it. Previous notice: ${existing.summary ?? "restore delivery was owed"}`;
+      queue.update({ qitemId, actorSession: "system:compaction", state: "done", closureReason: "no-follow-on",
+        summary: completed, resolution: note, transitionNote: note });
+      return;
+    }
+    // Changed evidence updates the same row without another wake.
+    if (existing.summary !== summary) {
       queue.update({ qitemId, actorSession: "system:compaction", summary, transitionNote: `${summary}. ${possibleWriteHold}`.trim() });
     }
     return;

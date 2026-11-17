@@ -14,6 +14,14 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vites
 import { ClaudeCompactionEnforcer as ActualEnforcer, MANUAL_SEAT_READ_INTERVAL_MS, buildPostCompactRestorePrompt } from "../src/domain/claude-compaction-enforcer.js";
 import { CAPTURE_READABLE_BUDGET_MS, SEND_READINESS_FRESHNESS_MS, type SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { reportRestoreDeliveryFailure } from "../src/domain/compaction-restore-notice.js";
+import type { RestoreDeliveryFailure } from "../src/domain/claude-compaction-enforcer.js";
+
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -280,6 +288,35 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(fourth).toEqual({ triggered: true });
 
     expect(send).toHaveBeenCalledTimes(6);
+  });
+
+  it.each([false, true])("resolves the same restore notice only after all owed stages, even without a usage sample (cancel=%s)", async (cancel) => {
+    const db = createDb(); migrate(db, ALL_MIGRATIONS);
+    try {
+      const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+      const { transport } = makeSessionTransport();
+      const completion = vi.fn(async (receipt: RestoreDeliveryFailure) => reportRestoreDeliveryFailure(db, queue, receipt, { completed: true }));
+      const width = vi.fn();
+      const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+        postCompactRestoreCooldownMs: 0, onRestoreDeliveryComplete: completion, onPostRestoreComplete: width,
+      } as never);
+      const seat = "claude-seat@rig";
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 });
+      const attemptId = enforcer.getPreparationState(seat)!.attemptId;
+      const id = `qitem-compaction-restore-${attemptId}`;
+      await queue.create({ qitemId: id, sourceSession: seat, destinationSession: "owner@rig", body: "restore owed", nudge: false });
+      await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 91 });
+      for (let i = 0; i < 2; i++) await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      expect(completion).not.toHaveBeenCalled();
+      expect(queue.getById(id)?.state).toBe("pending");
+      if (cancel) enforcer.cancelPreparation(seat);
+      await enforcer.drainPendingPostCompactStage({ sessionName: seat, runtime: "claude-code" });
+      expect(queue.getById(id)?.state).toBe(cancel ? "pending" : "done");
+      expect(completion).toHaveBeenCalledTimes(cancel ? 0 : 1);
+      if (!cancel) expect(completion).toHaveBeenCalledWith(expect.objectContaining({ sessionName: seat, attemptId,
+        lastDelivery: expect.objectContaining({ stage: "compliance_prompt", ok: true }) }));
+      expect(width).not.toHaveBeenCalled();
+    } finally { db.close(); }
   });
 
   it("publishes one target-generation-keyed width receipt callback after restore compliance", async () => {
