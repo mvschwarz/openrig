@@ -21,7 +21,7 @@ import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "
 import { formatRuntimeModel } from "../lib/runtime-brand.js";
 import { postOpenCmux } from "../hooks/useCmuxLaunch.js";
 import { ToolMark } from "./graphics/RuntimeMark.js";
-import { ContextBar, SeatEngine, UnitLabel } from "./SeatEngine.js";
+import { ContextBar, SeatEngine } from "./SeatEngine.js";
 
 interface RigNodeData {
   logicalId: string;
@@ -258,34 +258,28 @@ export function RigNode({ data }: { data: RigNodeData }) {
         {/* Context usage — prominent big number */}
         <div className="flex items-end justify-between gap-3 pt-0.5">
           {data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number" ? (
-            <div className="flex items-baseline">
-              <div
-                className={`font-mono text-base font-bold leading-none ${
-                  data.contextUsedPercentage >= 80 ? "text-red-600" :
-                  data.contextUsedPercentage >= 60 ? "text-amber-600" :
-                  "text-green-700"
-                }${!data.contextFresh ? " opacity-50" : ""}`}
-                data-testid="context-badge"
-                title={data.contextFresh ? "Context usage (fresh)" : "Context usage (stale sample)"}
-              >
-                {data.contextUsedPercentage}%
-              </div>
-              <UnitLabel>CTX</UnitLabel>
+            <div
+              className={`font-mono text-base font-bold leading-none ${
+                data.contextUsedPercentage >= 80 ? "text-red-600" :
+                data.contextUsedPercentage >= 60 ? "text-amber-600" :
+                "text-green-700"
+              }${!data.contextFresh ? " opacity-50" : ""}`}
+              data-testid="context-badge"
+              title={data.contextFresh ? "Context usage (fresh)" : "Context usage (stale sample)"}
+            >
+              {data.contextUsedPercentage}%
             </div>
           ) : (
             <div className="font-mono text-xs text-on-surface-variant" data-testid="context-badge-unknown">
               ?
             </div>
           )}
-          <div className="flex items-baseline">
-            <div
-              className="font-mono text-base font-bold leading-none tracking-[0.02em] text-on-surface-variant"
-              data-testid="token-total"
-              title={tokenTitle ?? "Token sample unavailable"}
-            >
-              {tokenLabel ?? "--"}
-            </div>
-            {tokenLabel ? <UnitLabel>TOK</UnitLabel> : null}
+          <div
+            className="font-mono text-base font-bold leading-none tracking-[0.02em] text-on-surface-variant"
+            data-testid="token-total"
+            title={tokenTitle ?? "Token sample unavailable"}
+          >
+            {tokenLabel ?? "--"}
           </div>
         </div>
 

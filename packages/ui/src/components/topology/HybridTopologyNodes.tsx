@@ -19,7 +19,7 @@ import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 import { formatRuntimeModel } from "../../lib/runtime-brand.js";
 import { ToolMark } from "../graphics/RuntimeMark.js";
-import { ContextBar, SeatEngine, UnitLabel } from "../SeatEngine.js";
+import { ContextBar, SeatEngine } from "../SeatEngine.js";
 import { useSelectedHostId } from "../../hooks/useHosts.js";
 import { LOCAL_HOST_ID } from "../../lib/host-param.js";
 
@@ -263,24 +263,18 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           fresh={data.contextFresh}
         />
         <div className="flex items-end justify-between gap-2 pt-0.5">
-          <div className="flex items-baseline">
-            <div
-              className={cn("font-mono text-[14px] font-bold leading-none", contextClass(data.contextUsedPercentage, data.contextFresh))}
-              data-testid="hybrid-context-badge"
-            >
-              {contextKnown ? `${data.contextUsedPercentage}%` : "--"}
-            </div>
-            {contextKnown ? <UnitLabel>CTX</UnitLabel> : null}
+          <div
+            className={cn("font-mono text-[14px] font-bold leading-none", contextClass(data.contextUsedPercentage, data.contextFresh))}
+            data-testid="hybrid-context-badge"
+          >
+            {contextKnown ? `${data.contextUsedPercentage}%` : "--"}
           </div>
-          <div className="flex items-baseline">
-            <div
-              className="font-mono text-[13px] font-bold leading-none tracking-[0.02em] text-on-surface-variant"
-              data-testid="hybrid-token-total"
-              title={tokenTitle ?? "Token sample unavailable"}
-            >
-              {tokenLabel ?? "--"}
-            </div>
-            {tokenLabel ? <UnitLabel>TOK</UnitLabel> : null}
+          <div
+            className="font-mono text-[13px] font-bold leading-none tracking-[0.02em] text-on-surface-variant"
+            data-testid="hybrid-token-total"
+            title={tokenTitle ?? "Token sample unavailable"}
+          >
+            {tokenLabel ?? "--"}
           </div>
         </div>
       </div>

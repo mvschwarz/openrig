@@ -1,6 +1,6 @@
 /**
  * Shared seat card pieces for the rig graph and topology cards: the runtime and provider line,
- * the model line, a thin context bar, and the small unit label next to a card number.
+ * the model line, and a thin context bar.
  */
 import { runtimeBrand } from "../lib/runtime-brand.js";
 import { cn } from "../lib/utils.js";
@@ -109,12 +109,5 @@ export function ContextBar({
         />
       ) : null}
     </div>
-  );
-}
-
-/** Small "CTX" or "TOK" label next to a card number; kept outside the number so its text stays the number alone. */
-export function UnitLabel({ children }: { children: string }) {
-  return (
-    <span className="ml-0.5 font-mono text-[8px] font-normal tracking-[0.06em] text-on-surface-variant">{children}</span>
   );
 }
