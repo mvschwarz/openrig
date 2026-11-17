@@ -10,10 +10,12 @@
 >   runner is qualified beyond that.
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
-> - **Current source:** per-launch credentials for hosted Pi, Pi-RPC presets and declared community runners (section 4).
+> - **Current source:** per-launch credentials for managed Pi/OMP, Pi-RPC presets and declared community runners (section 4).
 >   Optional run-bound observations retain receipts and project current runner-reported context/community model facts.
 >   Credentials and reports do not qualify new native input, cancellation or independently verified program identity.
-> - **Unchanged:** plain community presets and the other built-in runtimes (Claude Code, Codex, OMP, terminal).
+>   Managed OMP and hosted Pi-RPC additionally implement optional input-only channel delivery; their wake/cancel remain unavailable.
+> - **Unchanged:** Claude Code/Codex raw TUI and historical headless wakes, plain preset interaction, terminal typing,
+>   OMP approval/provider/state policy, and contained execution's legacy activity/lifecycle boundaries.
 >
 > **What has run natively, in 0.7.8's release testing, against a Claude Haiku model:**
 > - **dsh-seat 0.3.0**, an outside runner for dsh 0.2.1-rc.2 over ACP: launch and first input, useful queue work, a
@@ -130,7 +132,7 @@ immediately before the preset's native command, after OpenRig's launcher assignm
 
 ## 4. Activity: report turn boundaries
 
-Managed hosted Pi, Pi-RPC presets and declared community runners can receive an actual-launch credential in
+Managed hosted Pi and OMP, Pi-RPC presets and declared community runners can receive an actual-launch credential in
 `OPENRIG_ACTIVITY_HOOK_TOKEN`, with their attempt in `OPENRIG_RUN_ID`. Keep this credential in the runner's own
 process; remove it from the native agent and tool environment. It is delivered through tmux's private environment,
 never as a literal launch argument or launch-result field. A report that supplies `runId` requires this bound
@@ -142,6 +144,8 @@ that path adds no new run-authority claim and is not attributed to a selected ru
 refused: it is never silently retried with the install token. If native dispatch already occurred before activation
 failed, Core preserves the dispatched outcome and does not replay input; cleanup addresses only that launch's grant.
 Unreadable observations cannot revoke a grant. Confirmed exit/replacement or intentional lifecycle cleanup still can.
+For builtin Pi/OMP, a foreground shell proves exit only after a current-attempt runner sidecar is ready or exited.
+Missing, unreadable, stale or pending launch evidence retains the grant; this limits cleanup, not launch or report admission.
 
 Core activates a pending credential after dispatch against its selected session, pane and recorded runner. A staged
 successor waits for the existing binding cutover; pending posts receive `activity_grant_pending` and must retry.
@@ -327,7 +331,29 @@ permission or input handling in existing built-in runtimes or require every poss
 
 The optional native-channel implementation uses the launch's `OPENRIG_RUN_ID` and private `OPENRIG_ACTIVITY_HOOK_TOKEN` grant. The runner retains them; its native child and tools do not receive the credential. `GET /api/activity/runner-channel` is run-filtered SSE, and one `POST` resource at that same path carries hello, acceptance, submitted and result messages. There is no command file or global event-feed subscription.
 
-Hello supplies `{type:"hello", version:1, runId, retained, capabilities:{input,wake,cancel}}`. Capabilities are explicit booleans intersected with the recorded runner kind and Core implementation availability. They describe this live implementation, not native identity or program qualification. Core implements managed built-in Pi and declared preset contract families; a live runner must explicitly declare its supported operations. Hosted Pi-RPC remains a separate adoption. Built-in managed Pi and the dsh example have independently authored consumers. Other programs, including Pi-compatible forks and OMP, require their own adoption and evidence.
+Hello supplies `{type:"hello", version:1, runId, retained, capabilities:{input,wake,cancel}}`. Capabilities are explicit booleans intersected with the recorded runner kind and Core implementation availability. They describe this live implementation, not native identity or program qualification. Core selects generic recorded runner kinds, never a community app-name whitelist. Builtin Pi/OMP remain kind0, preset-owned runners kind1, and OpenRig-hosted Pi-RPC kind2. A shared protocol or wrapper does not qualify a program or confer another runtime's invocation mapping.
+
+#### Runtime coverage and qualification
+
+| Runtime class | Existing behavior and optional native-channel limits |
+|---|---|
+| Builtin managed Pi | Existing input/wake/named-cancel implementation and its own invocation mapping; each live capability still requires current authority and implementation evidence. |
+| Builtin OMP | Input-only shared RPC implementation with its own tests. Keeps `omp_session_file`, OMP approval/provider/HOME/state and protocol-v2 behavior; wake/cancel remain false without a proven OMP invocation mapping. |
+| Hosted Pi-RPC community programs | Input-only shared RPC implementation, recorded kind2 and `community:<runtime>` reference. Each executable must satisfy the declared protocol; no inherited Pi qualification or wake/cancel capability. |
+| Preset-owned runner (`runner: true`) | Its actual implemented and declared operations intersect with Core support. The independent dsh consumer has its own mapping; another ACP or stream-JSON program does not inherit it. |
+| Claude Code | Typed interaction and saved-session bounded headless wake remain. The separate opt-in launch-owned hook bridge supports live ordinary delivery and wake through its existing lease; it is not this structured runner channel or named cancellation. |
+| Codex raw TUI | Existing typed interaction and saved-session bounded headless wake remain. Those headless commands are not this live native input/wake/cancel channel. |
+| Cursor / Hermes / Pi TUI | Maintained TUI launchers have no live native consumer; new native operations are unavailable. Pi TUI is distinct from managed Pi RPC. |
+| OpenClaw local / gateway | Same TUI limit. Client exit does not prove native turn cancellation, stopped gateway work or gateway custody. |
+| OpenShell owned / attached | Existing scoped guest activity/work and operation/resource/native identity remain. They do not provide the hosted pane/PID run binding; no new native channel is advertised. |
+| Terminal / stub | Existing shell or scripted-test interaction remains. No native program capability is inferred from builtin kind0 or a stub fixture. |
+| Other external consumers | Generic contract eligibility is program-independent; actual consumer implementation and separate evidence are required for each operation. |
+
+All classes retain typed default. Unsupported native requests refuse before a native or typed effect; absence of an active consumer is not permission to fall back after uncertainty. OMP/hosted2 input acceptance uses the correlated prompt response and does not fabricate a native invocation ID or model-work result. Optional observations remain `runner_reported`; neither reported session/model/context nor a common ABI independently verifies native identity. No new telemetry collector is installed.
+
+The maintained TUI launchers and bounded headless wake child remove the run-ID/hook-token pair when a run ID is present, while legacy hook-only environments and required identity/provider metadata remain unchanged. The caller retains its authority; native children receive none of the new run credential. These controls do not add a native consumer to a TUI launcher.
+
+#### Native delivery and named commands
 
 Every seat still defaults to `typed`. `rig seat set-input-route <seat> --route native --reason ...` saves the native input preference even without a connected runner, and reports live input/wake capability separately. Saving the preference does not launch a runner, deliver or replay input, or establish a capability; native sends and wakes remain not offered while no capable runner is available. Native requests retain the existing sender, original-conversation constraint and interruption/held policy. The saved request ID's route is immutable: a preference change applies to a new ID. A native refusal or uncertain effect never types a fallback, and `--verify` never invokes a terminal-pane verifier for a native receipt.
 

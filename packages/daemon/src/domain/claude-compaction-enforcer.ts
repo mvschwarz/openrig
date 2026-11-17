@@ -773,6 +773,7 @@ export class ClaudeCompactionEnforcer {
 
   private readonly onPreparationFailure?: (failure: PreparationFailure) => Promise<void>;
   private readonly onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
+  private readonly onRestoreDeliveryComplete?: (receipt: RestoreDeliveryFailure) => Promise<void>;
   private readonly terminalPolicies?: TerminalPolicyStore;
 
   constructor(
@@ -781,6 +782,8 @@ export class ClaudeCompactionEnforcer {
     opts?: {
       onPreparationFailure?: (failure: PreparationFailure) => Promise<void>;
       onRestoreDeliveryFailure?: (failure: RestoreDeliveryFailure) => Promise<void>;
+      /** All owed stages landed; independent of the optional post-restore usage sample. */
+      onRestoreDeliveryComplete?: (receipt: RestoreDeliveryFailure) => Promise<void>;
       terminalPolicies?: TerminalPolicyStore;
       dedupWindowMs?: number;
       openrigHome?: string;
@@ -809,6 +812,7 @@ export class ClaudeCompactionEnforcer {
     },
   ) {
     this.onRestoreDeliveryFailure = opts?.onRestoreDeliveryFailure;
+    this.onRestoreDeliveryComplete = opts?.onRestoreDeliveryComplete;
     this.onPreparationFailure = opts?.onPreparationFailure;
     this.terminalPolicies = opts?.terminalPolicies;
     this.settingsStore = settingsStore;
@@ -1091,6 +1095,17 @@ export class ClaudeCompactionEnforcer {
     } finally {
       // The awaited lifecycle has settled: notice work must not inherit its active lease.
       const lastDelivery = record?.record.lastDelivery;
+      if (record?.record.phase === "done") {
+        // Bookkeeping is best-effort: a storage failure cannot turn delivered input into a failed drain.
+        try {
+          await this.onRestoreDeliveryComplete?.({ sessionName: input.sessionName, attemptId: record.record.attemptId,
+            mapPath: record.record.mapPath, lastDelivery: lastDelivery ?? { stage: "compliance_prompt", ok: true,
+              at: new Date(record.record.updatedAt).toISOString(), reason: "delivered", failures: 0 } });
+        } catch (error) {
+          console.warn("[compaction] restore completion notice failed", { sessionName: input.sessionName,
+            attemptId: record.record.attemptId, errorClass: error instanceof Error ? error.name : typeof error });
+        }
+      }
       const deliveredUnreadable = lastDelivery?.reason === "delivered_over_unreadable_pane";
       // Unknown readiness from an attempt without #2818's bounded fallback waits for that fallback to be tried. It opens after
       // two consecutive unknown polls of this stage, and the busy, prompt, draft, typing and beforeWrite guards still apply.

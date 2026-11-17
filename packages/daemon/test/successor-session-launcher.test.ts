@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SuccessorSessionLauncher } from "../src/domain/successor-session-launcher.js";
+import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxOptionDefaultsApplier } from "../src/domain/tmux-option-defaults.js";
@@ -63,6 +64,46 @@ describe("SuccessorSessionLauncher", () => {
       tmuxOptionDefaults,
     });
   }
+
+  it("uses the seat identity for guarded cutover when a detached binding shares the pane", async () => {
+    db.exec(`INSERT INTO rigs (id,name) VALUES ('rig-1','rig');
+      INSERT INTO nodes (id,rig_id,logical_id,runtime) VALUES ('live','rig-1','dev.live','codex'), ('old','rig-1','dev.old','codex');
+      INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('b1','live','dev-live@rig','%7'), ('b2','old','dev-old@rig','%7');
+      INSERT INTO sessions (id,node_id,session_name,status) VALUES ('s1','live','dev-live@rig','running'), ('s2','old','dev-old@rig','detached');`);
+    expect(resolveGuardTarget(db, "%7")).toBeNull();
+    expect(resolveGuardTarget(db, "live")).toMatchObject({ nodeId: "live", pane: "%7" });
+    const resolveWrite = (target: string) => resolveGuardTarget(db, target)?.nodeId === "live"
+      ? { ok: true } : { ok: false, code: "guard_target_unknown", message: "ambiguous target" };
+    signalPaneProcess.mockImplementation(async (target: string) => resolveWrite(target));
+    respawnPane.mockImplementation(async (target: string) => resolveWrite(target));
+    isPaneDead.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+    const tmux = { deliveryGuard: { maybeTarget: (name: string) => resolveGuardTarget(db, name) }, createSession, listPanes, killSession, respawnPane, setRemainOnExit,
+      signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG",
+      runtimeAdapters: { codex: fakeAdapter("codex") }, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5 });
+    const result = await subject.createSuccessor({ node: { id: "live", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-live@rig" });
+    expect(result.ok).toBe(true);
+    expect(signalPaneProcess).toHaveBeenCalledWith("live", "TERM");
+    expect(signalPaneProcess).toHaveBeenCalledWith("live", "KILL");
+    expect(respawnPane).toHaveBeenCalledWith("live", "/bin/zsh", expect.anything());
+    expect(isPaneDead).toHaveBeenCalledWith("%7");
+    expect(db.prepare("SELECT node_id, tmux_session, tmux_pane FROM bindings WHERE id = ?").get("b2"))
+      .toEqual({ node_id: "old", tmux_session: "dev-old@rig", tmux_pane: "%7" });
+    expect(db.prepare("SELECT node_id, session_name, status FROM sessions WHERE id = ?").get("s2"))
+      .toEqual({ node_id: "old", session_name: "dev-old@rig", status: "detached" });
+  });
+
+  it("does not cut over when the selected pane disagrees with the managed binding", async () => {
+    const tmux = { deliveryGuard: { maybeTarget: () => ({ session: "dev-live@rig", pane: "%8" }) }, listPanes,
+      respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, { runtimeAdapters: { codex: fakeAdapter("codex") } });
+    const result = await subject.createSuccessor({ node: { id: "live", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-live@rig" });
+    expect(result).toMatchObject({ ok: false, code: "pane_unresolved", replacementStarted: false });
+    expect(setRemainOnExit).not.toHaveBeenCalled();
+    expect(signalPaneProcess).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled();
+  });
 
   it.each([false, true])("leaves the predecessor untouched when launch preflight refuses or throws (throws: %s)", async throws => {
     const preflightLaunch = vi.fn(async () => {
