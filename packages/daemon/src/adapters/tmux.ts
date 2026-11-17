@@ -998,14 +998,14 @@ export class TmuxAdapter {
         const stderr = execStderrText(error);
         if (opts.literal && NO_EXPAND_ENVIRONMENT.test(stderr)) { opts.literal = false; continue; }
         if (opts.oomPolicy && NO_OOM_POLICY.test(stderr)) { opts.oomPolicy = false; continue; }
-        // The probe's shell killed (SIGKILL, directly or as timeout's 128+9) under a memory limit: most likely the OOM
-        // killer at that MemoryMax=, but the host's OOM killer, systemd-oomd or a manual kill send the same signal, and
-        // the scope that could tell (its memory.events `oom`) is collected with the shell. So it says what was seen,
-        // names the limit and stays retryable (unverified); it never calls the value too small on the signal alone.
+        // The probe command ended with SIGKILL (the signal, or exit 137 from timeout or a shell) under a memory limit.
+        // That does not say which process died nor why (the OOM killer at that MemoryMax=, the host's OOM killer,
+        // systemd-oomd, a manual kill, or before the scope was entered), and the scope that could tell (its memory.events
+        // `oom`) is collected with it. So it says only what was seen, names the limit and stays retryable (unverified).
         if (limits.memoryMax !== undefined && killedBySigkill(error)) {
           return { ok: false, problem: { kind: "unverified", limit: "memory_max",
-            reason: `the throwaway scope's /bin/sh was killed (SIGKILL) inside a scope with MemoryMax=${limits.memoryMax}, ` +
-              "most likely by the OOM killer at that limit; a larger memory_max may help" } };
+            reason: `the probe command ended with SIGKILL (exit 137) under the requested MemoryMax=${limits.memoryMax}; ` +
+              "the process and the cause aren't confirmed; a larger memory_max may help" } };
         }
         return { ok: false, problem: classifyScopeFailure(error, "a throwaway seat scope") };
       }

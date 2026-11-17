@@ -1111,16 +1111,16 @@ describe("a seat with memory_max (alone or beside tasks_max)", () => {
     }
   });
 
-  it("a probe killed by SIGKILL under memory_max says what was seen, names the limit and stays retryable", async () => {
+  it("a probe ended by SIGKILL under memory_max (the limit's OOM kill or any other) says only what was seen, retryable", async () => {
     const M = 1048576;
     const killed = [Object.assign(new Error("Command failed"), { signal: "SIGKILL", code: null }),
       Object.assign(new Error("Command failed"), { code: 137 })];
     for (const scope of killed) {
       const h = makeAdapter({ limits: { "node-a": { memoryMax: M } }, probe: { scope } });
       const r = await freshRefused(h, "process_limits_unverified");
-      expect(r.message).toMatch(new RegExp(`/bin/sh was killed \\(SIGKILL\\) inside a scope with MemoryMax=${M}, most ` +
-        "likely by the OOM killer at that limit; a larger memory_max may help"));
-      expect(r.message).not.toMatch(/too small/);
+      expect(r.message).toMatch(new RegExp(`the probe command ended with SIGKILL \\(exit 137\\) under the requested ` +
+        `MemoryMax=${M}; the process and the cause aren't confirmed; a larger memory_max may help`));
+      expect(r.processLimits?.reason ?? "").not.toMatch(/OOM|\/bin\/sh was killed|too small/);
       expect(r).toMatchObject({ retryable: true, processLimits: { kind: "unverified", limit: "memory_max", requested: { memoryMax: M } } });
     }
     // A tasks-only probe killed the same way says nothing of a memory value: unverified, with no limit named.
