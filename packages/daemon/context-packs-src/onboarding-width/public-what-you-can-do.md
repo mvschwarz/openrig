@@ -632,7 +632,8 @@ disagree, or a relay that couldn't be made) keep their existing path. It arrives
 conversation's next turn: nothing wakes an idle conversation, arrival isn't guaranteed, and a prompt
 can still change between its capture and the key. In two measured Claude first-user runs the return
 route was NOT MET: one agent set no route, and the other set it and finished reviewed, committed work
-but read the prompt relays only after the prompts had been answered. Without `--return-route`
+but read the prompt relays only after the prompts had been answered and approved later prompts beyond
+the person's one-time consent. Neither run met all first-user criteria. Without `--return-route`
 nothing changes. The skill also follows a task handed on to another
 host with `rig queue show <id> --host <host>`.
 
