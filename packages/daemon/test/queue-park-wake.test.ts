@@ -1525,15 +1525,23 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     const job = jobs.register({ policy: "periodic-reminder", specYaml: "policy: periodic-reminder\nmessage: resume\n",
       targetSession: "worker@rig", intervalSeconds: 600, registeredBySession: "operator@rig" });
     const row = await item();
+    const held = () => diagnoseSeatParked({
+      getSeatState: () => ({ activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "test", changedAt: null }) as never,
+      listOpenObligations: () => ({ rows: [{ qitemId: row.qitemId, state: "blocked" }], limit: 500 }),
+      getParkWake: (id) => repo.getParkWakeStatus(id),
+    }, { seatNodeId: "seat", sessionName: "worker@rig" }).obligations.held[0];
     repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
       blockedOn: "external:cooldown", wakeWatchdogId: job.jobId, transitionNote: "first park" });
     expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ kind: "watchdog", ref: job.jobId, phase: "armed", live: true });
+    expect(held()?.healthy).toBe(true);
     repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "resumed" });
     repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
       blockedOn: "external:vendor", transitionNote: "parked again with no wake" });
     expect(wakes(row.qitemId)).toEqual([expect.objectContaining({ phase: "armed", wake_kind: "watchdog", wake_ref: job.jobId })]);
     expect(jobs.getById(job.jobId)!.state).toBe("active");
     expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
+    // What a person sees: the new, wakeless park is not reported as healthy.
+    expect(held()).toMatchObject({ wake: null, healthy: false });
   });
 
   it("uses the current live blocker when a repark has no wake receipt", async () => {
