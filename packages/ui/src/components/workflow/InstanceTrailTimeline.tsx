@@ -19,6 +19,7 @@ const EXIT_GLYPH: Record<string, { glyph: string; cls: string }> = {
   waiting: { glyph: "◐", cls: "text-on-surface-variant" },
   done: { glyph: "○", cls: "text-on-surface-variant" },
   failed: { glyph: "▲", cls: "text-red-700" },
+  resumed: { glyph: "↻", cls: "text-on-surface-variant" },
 };
 
 function fmtTime(iso: string): string {

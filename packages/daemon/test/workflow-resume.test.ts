@@ -208,8 +208,8 @@ describe("WF-5 FR-4: resume (redrive)", () => {
     expect(inst.currentFrontier).toEqual([r.newPacketId]);
     expect(inst.resumeCount).toBe(1);
     // trail preserved + extended NEVER rewritten: the failure row stands,
-    // no rows were re-run/rewritten by resume itself.
-    expect(trailCount(instanceId)).toBe(trailBefore);
+    // no rows were re-run/rewritten by resume itself; it adds one resume line.
+    expect(trailCount(instanceId)).toBe(trailBefore + 1);
     // decision durability: the redrive packet carries the instruction.
     const packet = db
       .prepare(`SELECT body, chain_of_record FROM queue_items WHERE qitem_id = ?`)
@@ -318,6 +318,95 @@ describe("WF-5 FR-4: resume (redrive)", () => {
     expect(replay).toMatchObject({ absorbedReplay: true, newPacketId: r.newPacketId });
     await expect(runtime.resume({ instanceId, occurrenceId: left.packetId, ownerSession: "left@rig", actorSession: "orch-lead@rig" }))
       .rejects.toMatchObject({ code: "failure_occurrence_replay_conflict" });
+  });
+
+  it("an occurrence replay with a blank --owner is absorbed with no new packet and does not claim the owner was resolved", async () => {
+    build();
+    const inst = await runtime.instantiate({ specPath: seed(PARALLEL_SPEC, "parallel.yaml"), rootObjective: "fan", createdBySession: "ops@rig" });
+    const instanceId = inst.instance.instanceId;
+    await runtime.project({ instanceId, currentPacketId: inst.entryQitemId, exit: "done", actorSession: "root@rig" });
+    const left = runtime.inspect(instanceId).frontier.find((p) => p.stepId === "left")!;
+    await runtime.project({ instanceId, currentPacketId: left.packetId, exit: "failed", actorSession: "left@rig" });
+
+    const r = await runtime.resume({ instanceId, occurrenceId: left.packetId, ownerSession: "left-slot-2@rig", actorSession: "orch-lead@rig" });
+    const countPackets = () => (db.prepare(`SELECT COUNT(*) AS n FROM queue_items`).get() as { n: number }).n;
+    const countResumed = () => (db.prepare(`SELECT COUNT(*) AS n FROM events WHERE type = 'workflow.resumed'`).get() as { n: number }).n;
+    const packetsBefore = countPackets();
+    const resumedBefore = countResumed();
+
+    const replay = await runtime.resume({ instanceId, occurrenceId: left.packetId, ownerSession: "  ", actorSession: "orch-lead@rig" });
+    expect(replay).toMatchObject({
+      absorbedReplay: true,
+      newPacketId: r.newPacketId,
+      ownerSession: "left-slot-2@rig",
+      ownerNote: "--owner was empty; replay absorbed, already resumed to left-slot-2@rig",
+    });
+    expect(replay.ownerNote).not.toContain("the owner was resolved");
+    expect(countPackets()).toBe(packetsBefore);
+    expect(countResumed()).toBe(resumedBefore);
+  });
+
+  it("a replay compares --owner with the owner the occurrence was resumed to, not the packet's owner after a fallback reroute", async () => {
+    build();
+    const inst = await runtime.instantiate({ specPath: seed(PARALLEL_SPEC, "parallel.yaml"), rootObjective: "fan", createdBySession: "ops@rig" });
+    const instanceId = inst.instance.instanceId;
+    await runtime.project({ instanceId, currentPacketId: inst.entryQitemId, exit: "done", actorSession: "root@rig" });
+    const left = runtime.inspect(instanceId).frontier.find((p) => p.stepId === "left")!;
+    await runtime.project({ instanceId, currentPacketId: left.packetId, exit: "failed", actorSession: "left@rig" });
+    const r = await runtime.resume({ instanceId, occurrenceId: left.packetId, ownerSession: "left-slot-2@rig", actorSession: "orch-lead@rig" });
+    queueRepo.routeToFallback(r.newPacketId, "left-slot-3@rig", "seat removed");
+
+    const rows = () => ({
+      packets: (db.prepare(`SELECT COUNT(*) AS n FROM queue_items`).get() as { n: number }).n,
+      events: (db.prepare(`SELECT COUNT(*) AS n FROM events`).get() as { n: number }).n,
+      outbox: (db.prepare(`SELECT COUNT(*) AS n FROM outbox_entries`).get() as { n: number }).n,
+    });
+    const before = rows();
+    const replay = await runtime.resume({ instanceId, occurrenceId: left.packetId, ownerSession: "left-slot-2@rig", actorSession: "orch-lead@rig" });
+    expect(replay).toMatchObject({ absorbedReplay: true, newPacketId: r.newPacketId, ownerSession: "left-slot-2@rig", currentOwnerSession: "left-slot-3@rig" });
+    expect(rows()).toEqual(before);
+    expect(db.prepare(`SELECT destination_session FROM queue_items WHERE qitem_id = ?`).get(r.newPacketId))
+      .toEqual({ destination_session: "left-slot-3@rig" });
+
+    await expect(runtime.resume({ instanceId, occurrenceId: left.packetId, ownerSession: "left-slot-3@rig", actorSession: "orch-lead@rig" }))
+      .rejects.toMatchObject({ code: "failure_occurrence_replay_conflict", details: { expectedOwner: "left-slot-2@rig", currentOwner: "left-slot-3@rig" } });
+    expect(rows()).toEqual(before);
+  });
+
+  it.each(["instance", "occurrence"] as const)("%s redrive writes a resume line to the step trail with the owner and whether it was named or resolved", async (path) => {
+    build();
+    const trail = (instanceId: string) => db
+      .prepare(`SELECT step_id, closure_reason, closure_evidence_json, prior_qitem_id, next_qitem_id FROM workflow_step_trails WHERE instance_id = ? AND closure_reason = 'resumed' ORDER BY rowid`)
+      .all(instanceId) as Array<{ step_id: string; closure_reason: string; closure_evidence_json: string; prior_qitem_id: string; next_qitem_id: string }>;
+    if (path === "instance") {
+      const named = await instantiateAndFail(seed(SPEC));
+      const r = await runtime.resume({ instanceId: named.instanceId, ownerSession: "producer-slot-2@rig", actorSession: "orch-lead@rig" });
+      const [row] = trail(named.instanceId);
+      expect(row).toMatchObject({ step_id: "produce", next_qitem_id: r.newPacketId });
+      expect(JSON.parse(row!.closure_evidence_json)).toEqual({ resume: { ownerSession: "producer-slot-2@rig", ownerSource: "named", actorSession: "orch-lead@rig", decision: null } });
+
+      const resolved = await instantiateAndFail(seed(SPEC, "again.yaml"));
+      await runtime.resume({ instanceId: resolved.instanceId, actorSession: "orch-lead@rig" });
+      expect(JSON.parse(trail(resolved.instanceId)[0]!.closure_evidence_json)).toMatchObject({ resume: { ownerSession: "producer@rig", ownerSource: "resolved" } });
+      return;
+    }
+    const inst = await runtime.instantiate({ specPath: seed(PARALLEL_SPEC, "parallel.yaml"), rootObjective: "fan", createdBySession: "ops@rig" });
+    const instanceId = inst.instance.instanceId;
+    await runtime.project({ instanceId, currentPacketId: inst.entryQitemId, exit: "done", actorSession: "root@rig" });
+    const left = runtime.inspect(instanceId).frontier.find((p) => p.stepId === "left")!;
+    // Handed off by the queue first, so the failed exit is recorded as a projection on an already-closed row.
+    await queueRepo.handoff({ qitemId: left.packetId, fromSession: "left@rig", toSession: "reviewer2@rig" });
+    await runtime.project({ instanceId, currentPacketId: left.packetId, exit: "failed", actorSession: "left@rig" });
+    const r = await runtime.resume({ instanceId, occurrenceId: left.packetId, ownerSession: "left-slot-2@rig", actorSession: "orch-lead@rig" });
+    const rows = trail(instanceId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ step_id: "left", prior_qitem_id: left.packetId, next_qitem_id: r.newPacketId });
+    expect(JSON.parse(rows[0]!.closure_evidence_json)).toEqual({ resume: { ownerSession: "left-slot-2@rig", ownerSource: "named", actorSession: "orch-lead@rig", decision: null, occurrenceId: left.packetId } });
+    // The resume line is not a projection record: a repeat of the failure projection is still absorbed.
+    await expect(runtime.project({ instanceId, currentPacketId: left.packetId, exit: "failed", actorSession: "left@rig" }))
+      .resolves.toMatchObject({ absorbedReplay: true });
+    // The redriven step is not counted as completed: the redrive packet still closes normally.
+    await runtime.project({ instanceId, currentPacketId: r.newPacketId, exit: "done", actorSession: "left-slot-2@rig" });
   });
 
   // A named owner gets the same checks as an explicit --next-owner: a bad one is

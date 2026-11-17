@@ -155,6 +155,28 @@ describe("workflow-follow (WF3 FR-1)", () => {
     expect(planRows).toHaveLength(1);
   });
 
+  it("a resume row in the trail renders as ↻ with the owner and whether it was named or resolved", async () => {
+    const resumeRow = (ownerSource: string) => ({
+      stepId: "build", closureReason: "resumed", actorSession: "orch@r", nextQitemId: "Q3", priorQitemId: "Q2",
+      closureEvidence: { resume: { ownerSession: "builder-slot-2@r", ownerSource } },
+    });
+    for (const ownerSource of ["named", "resolved"]) {
+      const snapshot = {
+        status: 200,
+        data: { ...ACTIVE_SNAPSHOT.data, trail: [...ACTIVE_SNAPSHOT.data.trail, resumeRow(ownerSource)] },
+      };
+      const h = makeHarness({
+        traceResponses: [snapshot],
+        streams: [sseStream([{ type: "workflow.completed", instanceId: "WF1" }])],
+      });
+      await followInstance(h.client, "WF1", { json: false, io: h.io });
+      const row = h.outLines.find((l) => l.includes("build") && l.includes("resumed"));
+      expect(row).toContain("↻ build");
+      expect(row).not.toContain("✔");
+      expect(row).toContain(`owner builder-slot-2@r (${ownerSource})`);
+    }
+  });
+
   it("filters events from other instances", async () => {
     const h = makeHarness({
       traceResponses: [ACTIVE_SNAPSHOT],

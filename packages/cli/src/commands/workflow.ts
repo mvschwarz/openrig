@@ -1026,8 +1026,12 @@ Examples:
           stepId?: string;
           newPacketId?: string;
           ownerSession?: string;
+          ownerSource?: "named" | "resolved";
+          ownerNote?: string;
+          currentOwnerSession?: string;
           resumeCount?: number;
           exceptionItemsClosed?: number;
+          absorbedReplay?: boolean;
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/resume`, {
           actorSession: opts.actorSession,
           occurrenceId: opts.occurrence,
@@ -1036,8 +1040,10 @@ Examples:
         });
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
+        const owner = `${body.ownerSession ?? "?"}${body.ownerSource ? ` (${body.ownerSource})` : ""}`
+          + (body.currentOwnerSession && body.currentOwnerSession !== body.ownerSession ? `, now owned by ${body.currentOwnerSession}` : "");
         printOutcomeSummary(opts.json ?? false, res.status, {
-          what: `Redrove instance ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${body.ownerSession ?? "?"}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)`,
+          what: `${body.absorbedReplay ? "Replay absorbed, nothing redriven: instance" : "Redrove instance"} ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${owner}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)${body.ownerNote ? `; ${body.ownerNote}` : ""}`,
           state: `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
           next: `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
         });

@@ -41,6 +41,7 @@ export interface FollowTrailRow {
   stepRole?: string;
   closedAt?: string;
   closureReason: string;
+  closureEvidence?: Record<string, unknown> | null;
   actorSession: string;
   nextQitemId?: string | null;
   priorQitemId: string;
@@ -105,9 +106,13 @@ function glyphFor(status: string): string {
 }
 
 function renderTrailRow(row: FollowTrailRow): string {
-  const exitGlyph = row.closureReason === "failed" ? "✖" : "✔";
+  const exitGlyph = row.closureReason === "failed" ? "✖" : row.closureReason === "resumed" ? "↻" : "✔";
   const next = row.nextQitemId ? ` → ${row.nextQitemId}` : "";
-  return `  ${exitGlyph} ${row.stepId}  ${row.closureReason}  by ${row.actorSession}${next}`;
+  const resume = row.closureEvidence?.["resume"] as { ownerSession?: unknown; ownerSource?: unknown } | undefined;
+  const owner = row.closureReason === "resumed" && typeof resume?.ownerSession === "string"
+    ? `  owner ${resume.ownerSession} (${resume.ownerSource === "named" ? "named" : "resolved"})`
+    : "";
+  return `  ${exitGlyph} ${row.stepId}  ${row.closureReason}  by ${row.actorSession}${owner}${next}`;
 }
 
 function renderEvent(event: WorkflowEvent): string | null {
