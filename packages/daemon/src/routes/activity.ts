@@ -216,7 +216,7 @@ activityRoutes.get("/runner-channel", c => {
 /** A seat activity grant's post, bound to the grant. A post that names another seat, or claims a generation the grant
  *  wasn't issued for, is refused; so is a grant whose occupant was replaced (stale) or hasn't registered yet (pending).
  *  A refusal records nothing, so a missing event stays unknown. Otherwise the seat and generation come from the grant. */
-function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
+export function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
   { body: Record<string, unknown> } | { refused: Response } {
   const refuse = (status: 401 | 403 | 409 | 503, code: string, error: string) => ({ refused: c.json({ ok: false, code, error }, status) });
   // Read the grant again: it may have been revoked or reissued while the body arrived. Nothing is awaited from here to the
@@ -369,7 +369,7 @@ activityRoutes.post("/pi-usage-charges", async (c) => {
 /** Who is posting, before anything the request claims is read. The install-wide token speaks for every seat (`grant`
  *  null); a seat activity grant speaks only for its own seat and launch generation, which bindToGrant checks once the
  *  body has arrived. Without `expectedToken` (the guest router), only a grant is accepted. */
-function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
+export function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;
