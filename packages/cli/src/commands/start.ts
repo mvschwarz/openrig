@@ -400,12 +400,7 @@ back with rig up kernel --existing.
         }
       }
 
-      if (candidates.length === 0) {
-        if (opts.fresh?.length) {
-          console.error("No selected restore candidates contain the requested --fresh seats; no rigs were restored.");
-          process.exitCode = 1;
-          return;
-        }
+      if (candidates.length === 0 && !opts.fresh?.length) {
         if (opts.json) {
           console.log(JSON.stringify({
             status: previewErrors.length > 0 ? "started_with_errors" : "started",
@@ -490,12 +485,7 @@ back with rig up kernel --existing.
         }
       }
 
-      if (selectedCandidates.length === 0) {
-        if (opts.fresh?.length) {
-          console.error("No selected rigs contain the requested --fresh seats; no rigs were restored.");
-          process.exitCode = 1;
-          return;
-        }
+      if (selectedCandidates.length === 0 && !opts.fresh?.length) {
         if (!opts.json) console.log("No rigs selected for restore.");
         else if (lastOnly) {
           console.log(JSON.stringify({
@@ -515,31 +505,58 @@ back with rig up kernel --existing.
       // Resolve every explicit seat before the first restore. A logical ID may repeat across rigs,
       // and duplicate rig names must not silently fresh-prime more than the person selected.
       const freshByRig = new Map<string, string[]>();
+      const skippedFresh: Array<{ rigId: string; rigName: string; logicalId: string; reason: string }> = [];
+      const refuseFresh = (message: string) => {
+        const error = `${message} No selected rigs were restored.`;
+        console.error(error);
+        if (opts.json) console.log(JSON.stringify({ status: "started_with_errors", error, restoredRigs: [], previewErrors, kernelRestore,
+          kernelStatus: { state: kernelResult.kernelState, detail: kernelResult.detail } }));
+        process.exitCode = 1;
+      };
       for (const ref of opts.fresh ?? []) {
         const separator = ref.lastIndexOf("@");
         const logicalId = ref.slice(0, separator), rigName = ref.slice(separator + 1);
-        const matches = selectedCandidates.filter(candidate => candidate.rigName === rigName);
-        if (separator <= 0 || !rigName || matches.length !== 1) {
-          console.error(`--fresh seat '${ref}' must name one selected rig as logical-id@rig; no rigs were restored.`);
-          process.exitCode = 1;
+        if (separator <= 0 || !rigName || logicalId.includes("@")) { refuseFresh(`Invalid --fresh seat '${ref}'; use logical-id@rig.`); return; }
+        const scope = lastOnly ? allSummaries.filter(rig => rig.name !== "kernel")
+          : allSummaries.filter(rig => selectedCandidates.some(candidate => candidate.rigId === rig.id) || previewErrors.some(error => error.rigId === rig.id));
+        const byId = scope.filter(rig => rig.id === rigName);
+        const matches = byId.length ? byId : scope.filter(rig => rig.name === rigName);
+        if (matches.length !== 1) {
+          refuseFresh(matches.length ? `--fresh rig '${rigName}' is ambiguous: ${matches.map(r => `${r.name} (${r.id})`).join(", ")}. Use a rig id.`
+            : `--fresh seat '${ref}' does not name a known selected rig.`);
           return;
         }
-        const candidate = matches[0]!;
+        const rig = matches[0]!;
+        const previewError = previewErrors.find(error => error.rigId === rig.id);
+        if (previewError) { refuseFresh(`--fresh preview for ${rig.name} (${rig.id}) failed: ${previewError.message} (${previewError.code}).`); return; }
+        const candidate = candidates.find(c => c.rigId === rig.id);
+        if (!candidate && lastOnly && (rig.restoreLifecycleState ?? rig.lifecycleState) === "running") {
+          try {
+            const nodes = await client.get<Array<{ logicalId: string }>>(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
+            if (nodes.status !== 200 || !Array.isArray(nodes.data)) throw new Error(`HTTP ${nodes.status}`);
+            if (nodes.data.filter(node => node.logicalId === logicalId).length !== 1) { refuseFresh(`--fresh seat '${ref}' is not a unique seat in ${rig.name}.`); return; }
+          } catch (err) { refuseFresh(`Could not read seats for ${rig.name} (${rig.id}): ${err instanceof Error ? err.message : String(err)}.`); return; }
+          if (!skippedFresh.some(s => s.rigId === rig.id && s.logicalId === logicalId)) skippedFresh.push({ rigId: rig.id, rigName: rig.name, logicalId, reason: "rig already running" });
+          continue;
+        }
+        if (!candidate) { refuseFresh(`--fresh preview for ${rig.name} (${rig.id}) was unavailable.`); return; }
         const nodes = candidate.preview?.nodes.filter(node => node.logicalId === logicalId) ?? [];
-        if (nodes.length !== 1 || nodes[0]!.intendedAction === "leave-attached") {
-          console.error(`--fresh seat '${ref}' is not a unique restorable seat in the selected rig; no rigs were restored.`);
-          process.exitCode = 1;
-          return;
+        if (nodes.length !== 1) { refuseFresh(`--fresh seat '${ref}' is not a unique seat in the selected rig.`); return; }
+        if (lastOnly && candidate.lastStop === "down") {
+          if (!skippedFresh.some(s => s.rigId === rig.id && s.logicalId === logicalId)) skippedFresh.push({ rigId: rig.id, rigName: rig.name, logicalId, reason: "rig stopped on purpose" });
+          continue;
         }
+        if (!selectedCandidates.some(c => c.rigId === rig.id)) { refuseFresh(`--fresh seat '${ref}' does not name a selected rig.`); return; }
         const seats = freshByRig.get(candidate.rigId) ?? [];
         if (!seats.includes(logicalId)) seats.push(logicalId);
         freshByRig.set(candidate.rigId, seats);
       }
+      if (!opts.json) for (const item of skippedFresh) console.log(`  ${item.logicalId}@${item.rigName}: fresh requested, not applied (${item.reason}).`);
 
       // ---- PHASE 5: restore each selected rig via id-based route (compose slice-02 path) ----
       if (!opts.json) console.log(`\nRestoring ${selectedCandidates.length} rig(s)...\n`);
 
-      const results: Array<{ rigName: string; status: string; nodes: Array<{ logicalId: string; status: string; error?: string }> }> = [];
+      const results: Array<{ rigName: string; status: string; nodes: Array<{ logicalId: string; status: string; error?: string }>; warnings?: string[]; freshRequestedNotApplied?: string[] }> = [];
 
       for (const candidate of selectedCandidates) {
         const rigName = candidate.rigName;
@@ -551,7 +568,9 @@ back with rig up kernel --existing.
           const current = (freshSummary.data ?? []).find((r) => r.id === rigId);
           if ((current?.restoreLifecycleState ?? current?.lifecycleState) === "running") {
             if (!opts.json) console.log(`  ${rigName}: already running (skipping)`);
-            results.push({ rigName, status: "already_running", nodes: [] });
+            const notApplied = freshByRig.get(rigId) ?? [];
+            if (!opts.json) for (const id of notApplied) console.log(`    ${id}: fresh requested, not applied (rig already running).`);
+            results.push({ rigName, status: "already_running", nodes: [], ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}) });
             continue;
           }
         } catch { /* proceed with restore attempt */ }
@@ -581,13 +600,20 @@ back with rig up kernel --existing.
             } else {
               console.error(`  ${rigName}: ${errorText} (${code ?? `HTTP ${res.status}`})`);
             }
-            results.push({ rigName, status: code ?? "error", nodes: [] });
+            const notApplied = freshByRig.get(rigId) ?? [];
+            const restoreWarnings = (res.data["warnings"] as string[] | undefined) ?? [];
+            if (!opts.json) for (const id of notApplied) console.log(`    ${id}: fresh requested, not applied.`);
+            if (!opts.json) for (const warning of restoreWarnings) console.log(`    Warning: ${warning}`);
+            results.push({ rigName, status: code ?? "error", nodes: [], ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}),
+              ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}) });
             continue;
           }
 
           const resStatus = res.data["status"] as string;
           const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string }>) ?? [];
           const rigResult = res.data["rigResult"] as string | undefined;
+          const restoreWarnings = (res.data["warnings"] as string[] | undefined) ?? [];
+          const notApplied = (freshByRig.get(rigId) ?? []).filter(id => !nodes.some(node => node.logicalId === id && node.status === "fresh-primed"));
 
           if (!opts.json) {
             console.log(`  ${rigName}: ${rigResult ?? resStatus}`);
@@ -598,6 +624,8 @@ back with rig up kernel --existing.
                 console.log(`    ${n.logicalId}: ${n.status}`);
               }
             }
+            for (const id of notApplied) console.log(`    ${id}: fresh requested, not applied.`);
+            for (const warning of restoreWarnings) console.log(`    Warning: ${warning}`);
           }
 
           // Handle the awaiting-decision ASK (compose the slice-02 TTY flow).
@@ -633,14 +661,17 @@ back with rig up kernel --existing.
             }
           }
 
-          results.push({ rigName, status: rigResult ?? resStatus, nodes });
+          results.push({ rigName, status: rigResult ?? resStatus, nodes, ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}),
+            ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}) });
         } catch (err) {
+          const requested = freshByRig.get(rigId) ?? [];
           if (err instanceof DaemonConnectionError) {
             console.error(`  ${rigName}: timed out; the daemon may still be processing. Verify with: rig ps`);
             results.push({ rigName, status: "timeout", nodes: [] });
           } else {
             const msg = err instanceof Error ? err.message : String(err);
             console.error(`  ${rigName}: ${msg}`);
+            if (!opts.json) for (const id of requested) console.error(`    ${id}: fresh outcome unknown; inspect the rig before retrying.`);
             results.push({ rigName, status: "error", nodes: [] });
           }
         }
@@ -656,6 +687,7 @@ back with rig up kernel --existing.
           previewErrors: previewErrors.length > 0 ? previewErrors : undefined,
           kernelRestore,
           warnings: warnings.length > 0 ? warnings : undefined,
+          skippedFresh: skippedFresh.length ? skippedFresh : undefined,
         }));
       }
 
