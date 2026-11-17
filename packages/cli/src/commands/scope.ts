@@ -279,7 +279,8 @@ function buildSliceShowCommand(): Command {
           .map((e) => ({ name: e.name, kind: e.isDirectory() ? "dir" : "file" as const }));
         // FR-5: derive read-time trust from (stage x verified) — NEVER stored.
         const trust = deriveScopeTrust(slice.frontmatter);
-        const scopeNodes = readParentScope(missionsRoot);
+        const parentWarnings: string[] = [];
+        const scopeNodes = readParentScope(missionsRoot, { onInvalid: (message) => parentWarnings.push(message) });
         const childMissions = slice.id && scopeNodes.filter((node) => node.id === slice.id).length === 1 ? scopeNodes.filter((node) => node.kind === "mission" && node.parent === slice.id) : [];
         const payload = {
           ok: true,
@@ -294,6 +295,7 @@ function buildSliceShowCommand(): Command {
             readme,
             children,
             childMissions,
+            parentWarnings,
           },
         };
         if (json) {
@@ -305,6 +307,7 @@ function buildSliceShowCommand(): Command {
           out.write(formatTrustLine(trust));
           out.write(`  path: ${slice.absPath}\n`);
           out.write(`  children: ${children.length}\n`);
+          for (const warning of parentWarnings) out.write(`  warning: ${warning}\n`);
           if (childMissions.length) out.write(`  child missions: ${childMissions.map((node) => node.name).join(", ")}\n`);
           if (readme) {
             out.write("\n--- README ---\n");
@@ -1104,9 +1107,11 @@ function buildMissionParentCommand(): Command {
           const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
           if (match) {
             const doc = YAML.parseDocument(match[1]!);
-            if (doc.errors.length) throw doc.errors[0];
-            doc.delete("parent");
-            fs.writeFileSync(mission.readmePath!, `---\n${doc.toString()}---${original.slice(match[0].length)}`, "utf8");
+            if (doc.errors.length) updateFrontmatter(mission.readmePath!, { parent: null });
+            else {
+              doc.delete("parent");
+              fs.writeFileSync(mission.readmePath!, `---\n${doc.toString()}---${original.slice(match[0].length)}`, "utf8");
+            }
           }
         }
         emit(out, { ok: true, mission: mission.name, parent: parent ?? null, warnings }, json, [`Mission ${mission.name} parent: ${parent ?? "(none)"}`, ...warnings.map((message) => `Warning: ${message}`)]);

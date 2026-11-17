@@ -108,7 +108,8 @@ def may_have_parent(node, spec_text, timeout):
     manifest = read(node / "mission.yaml")
     if manifest is None and (node / "mission.yaml").exists():
         return None
-    text = manifest if manifest is not None else spec_text.partition("---")[2].partition("---")[0]
+    frontmatter = re.match(r"\A---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)", spec_text)
+    text = manifest if manifest is not None else (frontmatter.group(1) if frontmatter else "")
     if not re.search(r"parent|\\|\*|<<|\?", text, re.IGNORECASE):
         return False
     if timeout <= 0:

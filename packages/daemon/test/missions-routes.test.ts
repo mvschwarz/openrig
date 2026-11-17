@@ -117,6 +117,16 @@ describe("GET /api/missions/:missionId", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ parentId: "M.1", parent: { id: "M.1" } });
   });
+  it("returns partial parent relationships with scan warnings", async () => {
+    writeMissionReadme(missionsRoot, "parent", { id: "M.1" });
+    writeMissionReadme(missionsRoot, "child", { id: "M.2", parent: "M.1" });
+    writeMissionReadme(missionsRoot, "broken", { id: "[bad" });
+    const res = await app.request("/api/missions/child");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { parentId: string; parentWarnings: string[] };
+    expect(body.parentId).toBe("M.1");
+    expect(body.parentWarnings.join(" ")).toContain("broken");
+  });
   it("returns 200 with missionPath + slices filtered to the requested mission", async () => {
     writeSliceInMission(missionsRoot, "getting-started", "first-slice", { status: "active" });
     writeSliceInMission(missionsRoot, "getting-started", "second-slice", { status: "done" });

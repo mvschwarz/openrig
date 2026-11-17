@@ -2,7 +2,7 @@
 // backfill, driven end-to-end through the commander tree against a tmp
 // substrate fixture.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -253,6 +253,8 @@ describe("mission parent links", () => {
     const withDirectoryGap = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
     expect(withDirectoryGap.id).toBe(childId);
     expect(withDirectoryGap.parentWarnings.join(" ")).toContain("bad-directory");
+    const sliceWithGap = JSON.parse((await run(["slice", "show", slice, "--json"], env.missionsRoot)).stdout).slice;
+    expect(sliceWithGap.parentWarnings.join(" ")).toContain("bad-directory");
     const tolerantWrite = await run(["mission", "parent", "child", sliceId, "--json"], env.missionsRoot);
     expect(tolerantWrite.exitCode).toBe(0);
     expect(JSON.parse(tolerantWrite.stdout).warnings.join(" ")).toContain("broken");
@@ -275,6 +277,14 @@ describe("mission parent links", () => {
     expect(fs.existsSync(path.join(env.missionsRoot, "different-name"))).toBe(true);
     const ambiguous = JSON.parse((await run(["mission", "show", "child", "--json"], env.missionsRoot)).stdout).mission;
     expect(ambiguous.parentGap).toContain("does not resolve uniquely");
+    const malformed = path.join(env.missionsRoot, "malformed-legacy");
+    writeFile(path.join(malformed, "SPEC.md"), "---\nid: [bad\nparent: OPR.0.4.0\n---\n# Legacy\n");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const malformedClear = await run(["mission", "parent", "malformed-legacy", "--clear", "--json"], env.missionsRoot);
+    expect(malformedClear.exitCode).toBe(0);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("frontmatter isn't valid YAML"));
+    warning.mockRestore();
+    expect(fs.readFileSync(path.join(malformed, "SPEC.md"), "utf8")).toContain("parent: null");
   });
 });
 

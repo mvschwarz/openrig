@@ -104,10 +104,11 @@ export function slicesRoutes(): Hono {
       });
       const authored = deps.indexer.missionAuthoredStatuses();
       const parentRoots = new Map<string, ParentScopeNode[]>();
+      const parentWarnings: string[] = [];
       for (const slice of filtered) {
         if (!slice.missionId) continue;
         const root = path.resolve(slice.slicePath, "..", "..", "..");
-        if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root));
+        if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
       }
       const childMissions = (slicePath: string, missionId: string | null) => {
         if (!missionId) return [];
@@ -125,6 +126,7 @@ export function slicesRoutes(): Hono {
         totalCount: filtered.length,
         filter,
         boundToWorkflow: boundDiagnostic,
+        parentWarnings,
         // VM-005 (release-0.4.7): additive authored mission-status sidecar so
         // chip surfaces can honor authored-wins precedence without a second
         // round-trip. The `slices` array itself is byte-untouched.

@@ -235,6 +235,17 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       const body = await res.json() as { slices: Array<{ name: string; childMissions: Array<{ id: string }> }> };
       expect(body.slices.find((slice) => slice.name === "01-work")?.childMissions).toMatchObject([{ id: "M.2" }]);
     });
+    it("reports scan gaps alongside partial child missions", async () => {
+      writeSlice(slicesRoot, "parent", { "SPEC.md": "---\nid: M.1\n---\n" });
+      writeSlice(slicesRoot, "parent/slices/01-work", { "SPEC.md": "---\nid: M.1.1\nstatus: active\n---\n" });
+      writeSlice(slicesRoot, "child", { "SPEC.md": "---\nid: M.2\nparent: M.1.1\n---\n" });
+      writeSlice(slicesRoot, "broken", { "SPEC.md": "---\nid: [bad\n---\n" });
+      const res = await app.request("/api/slices?filter=all");
+      expect(res.status).toBe(200);
+      const body = await res.json() as { parentWarnings: string[]; slices: Array<{ name: string; childMissions: Array<{ id: string }> }> };
+      expect(body.parentWarnings.join(" ")).toContain("broken");
+      expect(body.slices.find((slice) => slice.name === "01-work")?.childMissions).toMatchObject([{ id: "M.2" }]);
+    });
     it("returns 503 with config-hint when slicesRoot is not configured", async () => {
       const emptyIndexer = new SliceIndexer({ slicesRoot: "", dogfoodEvidenceRoot: null, db });
       const emptyProjector = new SliceDetailProjector({ db, indexer: emptyIndexer });

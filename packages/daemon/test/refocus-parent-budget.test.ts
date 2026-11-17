@@ -49,11 +49,15 @@ with tempfile.TemporaryDirectory() as tmp:
     legacy = root / 'custom-root' / 'legacy'
     legacy.mkdir(parents=True)
     (root / 'project.yaml').write_text('missions:\n  root: custom-root\n')
-    (legacy / 'SPEC.md').write_text('---\nid: M.3\nparent: M.1\n---\n')
+    (legacy / 'SPEC.md').write_text('---\nid: M.3\nintent: a---b\nparent: M.1\n---\nBody\n---\nparent: M.9\n')
     trace.render_work(legacy, root, 'light', [])
     assert len(calls) == 1
     assert calls[0][0][4:6] == ('--workspace', str(root))
     calls.clear()
+    trace.TRACE_STARTED = trace.time.monotonic()
+    (legacy / 'SPEC.md').write_text('---\nid: M.3\nintent: a---b\n---\nBody\n---\nparent: M.9\n')
+    trace.render_work(legacy, root, 'light', [])
+    assert not calls
     trace.TRACE_STARTED = trace.time.monotonic()
     (mission / 'mission.yaml').write_text('metadata: { "parent": M.1 }\n')
     result = trace.render_work(mission, root, 'light', failures)

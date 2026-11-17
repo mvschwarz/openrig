@@ -67,7 +67,9 @@ export function missionsRoutes(): Hono {
     const allSlices = indexer.list();
     const slices = allSlices.filter((s) => s.missionId === missionId);
     const fallbackPath = path.resolve(indexer.slicesRoot, missionId);
-    const legacyLinked = slices.length === 0 && path.dirname(fallbackPath) === path.resolve(indexer.slicesRoot) && !fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && readParentScope(indexer.slicesRoot).some((node) => node.kind === "mission" && node.path === fallbackPath && node.parent !== null);
+    const parentWarnings: string[] = [];
+    let legacyNodes: ReturnType<typeof readParentScope> | undefined;
+    const legacyLinked = slices.length === 0 && path.dirname(fallbackPath) === path.resolve(indexer.slicesRoot) && !fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && (legacyNodes = readParentScope(indexer.slicesRoot, { onInvalid: (message) => parentWarnings.push(message) })).some((node) => node.kind === "mission" && node.path === fallbackPath && node.parent !== null);
     if (slices.length === 0 && (path.dirname(fallbackPath) !== path.resolve(indexer.slicesRoot) || !resolveNodeFile(fallbackPath) || (!fs.existsSync(path.join(fallbackPath, "mission.yaml")) && !fs.existsSync(path.join(fallbackPath, "slices")) && !legacyLinked))) {
       return c.json({ error: "mission_not_found", missionId }, 404);
     }
@@ -79,7 +81,7 @@ export function missionsRoutes(): Hono {
     );
     const readiness = readMissionReadiness(missionPath);
     const status = readiness.historicalStatus ?? readMissionStatus(missionPath);
-    const parentNodes = readParentScope(path.resolve(missionPath, ".."));
+    const parentNodes = legacyNodes ?? readParentScope(path.resolve(missionPath, ".."), { onInvalid: (message) => parentWarnings.push(message) });
     const missionNode = parentNodes.find((node) => node.kind === "mission" && node.path === missionPath);
     const parentMatches = missionNode?.parent ? parentNodes.filter((node) => node.id === missionNode.parent) : [];
     return c.json({
@@ -92,6 +94,7 @@ export function missionsRoutes(): Hono {
       status,
       parentId: missionNode?.parent ?? null,
       parent: parentMatches.length === 1 ? parentMatches[0] : null,
+      parentWarnings,
       childMissions: missionNode?.id && parentNodes.filter((node) => node.id === missionNode.id).length === 1 ? parentNodes.filter((node) => node.kind === "mission" && node.parent === missionNode.id) : [],
     });
   });
