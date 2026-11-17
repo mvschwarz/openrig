@@ -6989,22 +6989,22 @@ describe("RestoreOrchestrator", () => {
     });
   });
 
-  it.each([
+  it.each((["pi", "omp"] as const).flatMap(runtime => [
     "Run-bound reporting unavailable; using existing unbound install-token reporting.",
     "Native command dispatched; run-bound reporting could not be confirmed. Cleanup of its grant was attempted; nothing was replayed.",
-  ])("surfaces direct Pi restore limitation warnings without repeating resume: %s", async warning => {
-    const rig = rigRepo.createRig("pi-warning");
-    const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi", cwd: "/repo/pi" });
-    const session = sessionRegistry.registerSession(node.id, "r99-pi-warning");
+  ].map(warning => ({ runtime, warning }))))("surfaces direct $runtime restore limitation warnings without repeating resume: $warning", async ({ runtime, warning }) => {
+    const rig = rigRepo.createRig(`${runtime}-warning`);
+    const node = rigRepo.addNode(rig.id, "worker", { runtime, cwd: `/repo/${runtime}` });
+    const session = sessionRegistry.registerSession(node.id, `r99-${runtime}-warning`);
     db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
-      .run("pi_session_file", "/tmp/pi-warning.jsonl", "resume_if_possible", session.id);
+      .run(`${runtime}_session_file`, `/tmp/${runtime}-warning.jsonl`, "resume_if_possible", session.id);
     sessionRegistry.updateStatus(session.id, "running");
     const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
     sessionRegistry.updateStatus(session.id, "exited");
     const resume = vi.fn(async (_session: string) => ({ ok: true as const, warnings: [warning] }));
-    const orch = createOrchestrator({ pi: {
-      canResume: vi.fn((type: string | null) => type === "pi_session_file"), resume,
-    } as unknown as PiResumeAdapter });
+    const adapter = { canResume: vi.fn((type: string | null) => type === `${runtime}_session_file`), resume };
+    const orch = runtime === "pi" ? createOrchestrator({ pi: adapter as unknown as PiResumeAdapter })
+      : createOrchestrator({ omp: adapter as unknown as OmpResumeAdapter });
 
     const result = await orch.restore(snap.id);
     expect(result.ok).toBe(true);

@@ -138,7 +138,7 @@ describe("PodRigInstantiator", () => {
     expect(done.edges.outgoing).toMatchObject([{ kind: "delegates_to", to: { logicalId: "dev.qa" } }]);
   });
 
-  it.each(["pi", "claude-code", "codex", "stub"])("limits Core-observed pane forwarding to grant-owning runtimes: %s", async runtime => {
+  it.each(["pi", "omp", "claude-code", "codex", "stub"])("limits Core-observed pane forwarding to grant-owning runtimes: %s", async runtime => {
     const adapter = mockAdapter(runtime);
     const { db, inst, tmux, sessionRegistry } = setup(undefined, { [runtime]: adapter });
     try {
@@ -148,16 +148,16 @@ describe("PodRigInstantiator", () => {
       expect(result.ok).toBe(true);
       const binding = vi.mocked(adapter.launchHarness!).mock.calls[0]?.[0];
       expect(binding).toBeDefined();
-      expect(binding!.tmuxPane).toBe(runtime === "pi" ? "%47" : null);
+      expect(binding!.tmuxPane).toBe(runtime === "pi" || runtime === "omp" ? "%47" : null);
       expect(sessionRegistry.getBindingForNode(binding!.nodeId)?.tmuxPane).toBe("%47");
     } finally { db.close(); }
   });
 
-  it("does not invent an unresolved launch pane for a grant-owning runtime", async () => {
-    const adapter = mockAdapter("pi");
-    const { db, inst } = setup(undefined, { pi: adapter });
+  it.each(["pi", "omp"])("does not invent an unresolved launch pane for grant-owning %s", async runtime => {
+    const adapter = mockAdapter(runtime);
+    const { db, inst } = setup(undefined, { [runtime]: adapter });
     try {
-      const spec = makeRigSpec(); spec.pods[0]!.members[0]!.runtime = "pi";
+      const spec = makeRigSpec(); spec.pods[0]!.members[0]!.runtime = runtime;
       expect((await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT)).ok).toBe(true);
       expect(vi.mocked(adapter.launchHarness!).mock.calls[0]?.[0].tmuxPane).toBeNull();
     } finally { db.close(); }

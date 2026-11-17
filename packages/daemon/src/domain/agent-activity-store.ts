@@ -251,10 +251,10 @@ export class AgentActivityStore {
           { session_name: string; resume_token: string | null };
         // Known Core references are never replaced or re-verified by a runner claim, including matching repeats.
         const runtime = grant.binding!.runtime;
-        const sessionFile = runtime === "pi" || grant.binding!.runner === AGENT_RUNNER_HOSTED_PI_RPC;
+        const sessionFile = runtime === "pi" || runtime === "omp" || grant.binding!.runner === AGENT_RUNNER_HOSTED_PI_RPC;
         // Reporting a path is not authority to persist a token the owning adapter cannot resume.
         if (!row.resume_token && (!sessionFile || validateSessionFileFormat(observations.session.nativeRef).ok)) {
-          const resumeType = runtime === "pi" ? "pi_session_file" : `community:${runtime}`;
+          const resumeType = runtime === "pi" || runtime === "omp" ? `${runtime}_session_file` : `community:${runtime}`;
           new SessionRegistry(this.db).recordLauncherReportedToken(session.sessionId, resumeType, observations.session.nativeRef);
           register(this.eventBus.persistWithinTransaction({ type: "agent.session_identity", rigId: session.rigId,
             nodeId: grant.nodeId, sessionName: row.session_name, runtime, sessionId: observations.session.nativeRef, provenance: "launcher" }));
@@ -735,8 +735,8 @@ function normalizeRunnerObservations(raw: unknown, grant: ActivityGrant): Runner
   if (raw.session !== undefined) {
     if (!object(raw.session) || !only(raw.session, ["nativeRef"])) return null;
     const ref = raw.session.nativeRef;
-    if (grant.binding?.runtime === "pi" || grant.binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) {
-      const valid = validateSessionFileFormat(ref, "Pi", { allowFormatCharacters: true });
+    if (grant.binding?.runtime === "pi" || grant.binding?.runtime === "omp" || grant.binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) {
+      const valid = validateSessionFileFormat(ref, grant.binding?.runtime, { allowFormatCharacters: true });
       if (!valid.ok) return null;
       out.session = { nativeRef: valid.token };
     } else {
