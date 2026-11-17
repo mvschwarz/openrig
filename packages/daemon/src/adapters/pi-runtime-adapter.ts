@@ -141,7 +141,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   /** Resolve canonical identity and isolated state for a staged or committed occupant. */
   private runnerLocation(binding: NodeBinding): { sessionName: string; stateRoot: string } {
-    const staged = this.runtime === "pi" && binding.runtimeSwitchFrom;
+    const staged = (this.runtime === "pi" || this.runtime === "omp") && binding.runtimeSwitchFrom;
     const sessionName = staged ? staged.session : binding.tmuxSession!;
     return { sessionName, stateRoot: staged && binding.launchGeneration
       ? piAccountSwitchStateRoot(this.stateRoot, binding.launchGeneration) : this.stateRootForSession(sessionName) };

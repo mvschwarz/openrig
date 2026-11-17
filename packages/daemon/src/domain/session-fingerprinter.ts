@@ -28,8 +28,8 @@ function processNameIs(command: string, name: string): boolean {
   return command === name || ((command.length === 15 || command.length === 16) && name.startsWith(command));
 }
 // Only the OpenRig-managed runner's READY marker is evidence of resumable OMP
-// state; a bare `omp` executable could use the default, unisolated user home.
-// No Layer-1 OMP signal: tmux reports the runner as `node`, never its argv.
+// state. Native process detection below identifies the runtime only, not its home or resume token.
+// Retain the marker for seats still running the legacy RPC host.
 const OMP_READY_PATTERN = /^\s*\[omp-runner\] READY(?:\s|$)/;
 
 const CLAUDE_PANE_PATTERNS = [
@@ -109,6 +109,12 @@ export class SessionFingerprinter {
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "codex", confidence: "high", evidence };
         }
+      }
+
+      if (processNameIs(cmd, "omp") || processNameIs(cmd, "omp.exe")) {
+        evidence.layerUsed = 1;
+        evidence.processSignal = { command: pane.activeCommand, matched: "omp-tui" };
+        return { runtimeHint: "omp-tui", confidence: "high", evidence };
       }
 
       if (SHELL_NAMES.has(cmd)) {

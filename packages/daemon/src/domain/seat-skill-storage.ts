@@ -55,7 +55,7 @@ export function seatSkillPaths(key: SeatSkillKey, openrigHome: string = getOpenR
     pluginDir,
     pluginManifestPath: nodePath.join(pluginDir, ".claude-plugin", "plugin.json"),
     // Claude reads skills through the generated plugin; a Codex seat's trees sit beside its catalog (no plugin).
-    skillsRoot: key.runtime === "codex" ? nodePath.join(root, "skills") : nodePath.join(pluginDir, "skills"),
+    skillsRoot: (key.runtime === "codex" || key.runtime === "omp-tui") ? nodePath.join(root, "skills") : nodePath.join(pluginDir, "skills"),
     manifestPath: nodePath.join(root, "skill-loadout.json"),
     projectionsPath: nodePath.join(root, "skill-projections.json"),
     catalogPath: nodePath.join(root, "catalog.md"),
@@ -70,7 +70,7 @@ export function seatSkillName(skillId: string): string {
 /** Where the skill loadout reconciler keeps this seat's skills, and the name each is recorded with. */
 export function seatSkillLocation(paths: SeatSkillPaths, runtime: string = "claude-code"): SkillLoadoutLocation {
   // A Codex seat reads its skills by path from its catalog, so they keep their own names.
-  return { targetRoot: paths.skillsRoot, manifestPath: paths.manifestPath, qualifiedName: runtime === "codex" ? (id) => id : seatSkillName,
+  return { targetRoot: paths.skillsRoot, manifestPath: paths.manifestPath, qualifiedName: (runtime === "codex" || runtime === "omp-tui") ? (id) => id : seatSkillName,
     // The reconciler stages beside the skills folder and writes its manifest at the seat's root, both on the skills
     // folder's anchored path, so this one check covers every write and removal it makes there.
     refuseMutation: () => anchored(seatsAnchor(paths.root), paths.skillsRoot, "folder") && anchored(seatsAnchor(paths.root), paths.manifestPath, "file")
@@ -306,8 +306,9 @@ export function seatSkillPathsForNode(
   try {
     const row = db.prepare("SELECT rig_id, logical_id, runtime FROM nodes WHERE id = ?").get(nodeId) as
       { rig_id: string; logical_id: string; runtime: string | null } | undefined;
-    if (!row || (row.runtime !== "claude-code" && row.runtime !== "codex")) return undefined;
+    if (!row || (row.runtime !== "claude-code" && row.runtime !== "codex" && row.runtime !== "omp-tui")) return undefined;
     const paths = seatSkillPaths({ rigId: row.rig_id, logicalId: row.logical_id, runtime: row.runtime });
+    if (row.runtime === "omp-tui") return paths;
     // A Claude seat uses its storage once its plugin exists; a Codex seat once its catalog does.
     return fs.existsSync(row.runtime === "codex" ? paths.catalogPath : paths.pluginManifestPath) ? paths : undefined;
   } catch {
@@ -329,8 +330,12 @@ export function refusedSeatSkillsRootForNode(
   try {
     const row = db.prepare("SELECT rig_id, logical_id, runtime FROM nodes WHERE id = ?").get(nodeId) as
       { rig_id: string; logical_id: string; runtime: string | null } | undefined;
-    if (!row || (row.runtime !== "claude-code" && row.runtime !== "codex")) return undefined;
+    if (!row || (row.runtime !== "claude-code" && row.runtime !== "codex" && row.runtime !== "omp-tui")) return undefined;
     const paths = seatSkillPaths({ rigId: row.rig_id, logicalId: row.logical_id, runtime: row.runtime });
+    if (row.runtime === "omp-tui") {
+      const reason = seatSkillLocation(paths, "omp-tui").refuseMutation?.();
+      return reason ? { skillsRoot: paths.skillsRoot, reason } : undefined;
+    }
     const marker = row.runtime === "codex" ? paths.catalogPath : paths.pluginManifestPath;
     if (fs.existsSync(marker)) return undefined; // the storage is found the ordinary way
     // The same paths the writers refuse: the Claude manifest; the Codex catalog and its projection record.

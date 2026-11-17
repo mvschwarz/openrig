@@ -1762,7 +1762,7 @@ export type ContextUnknownReason =
 export interface ContextUsage {
   availability: ContextAvailability;
   reason: ContextUnknownReason | null;
-  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | null;
+  source: "claude_statusline_json" | "codex_token_count_jsonl" | "runner_reported" | "omp_extension_json" | null;
   usedPercentage: number | null;
   remainingPercentage: number | null;
   contextWindowSize: number | null;

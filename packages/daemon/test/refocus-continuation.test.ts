@@ -9,7 +9,7 @@ const boundary = "OpenRig post-compaction turn boundary. Please acknowledge this
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-function fixture(nodeRig = false) {
+function fixture(nodeRig = false, runtime = "claude") {
   const root = mkdtempSync(join(tmpdir(), "refocus-continuation-"));
   roots.push(root);
   const bin = join(root, "bin");
@@ -31,7 +31,7 @@ process.stdout.write("{}");
   chmodSync(trace, 0o755);
   chmodSync(rig, 0o755);
   const run = (event: string, prompt = "continue", good = true, extra: NodeJS.ProcessEnv = {}, identity = "occupant", timeout = 10_000) => {
-    const result = spawnSync(process.execPath, [hook, "--runtime", "claude"], {
+    const result = spawnSync(process.execPath, [hook, "--runtime", runtime], {
       input: JSON.stringify({ hook_event_name: event, session_id: identity, prompt, transcript_path: transcript }),
       encoding: "utf8", timeout, killSignal: "SIGKILL",
       env: { ...process.env, PATH: nodeRig ? bin : `${bin}:${process.env.PATH}`, OPENRIG_HOME: root,
@@ -49,6 +49,16 @@ process.stdout.write("{}");
 }
 
 describe("refocus continuation", () => {
+  it("OMP ignores growth thresholds and does not unwrap Claude pasted content", () => {
+    const f = fixture(false, "omp");
+    expect(f.run("UserPromptSubmit")).toBe("");
+    writeFileSync(f.transcript, "x".repeat(2_000_000));
+    expect(f.run("UserPromptSubmit")).toBe("");
+    expect(f.run("PostCompact")).toBe("");
+    expect(f.run("UserPromptSubmit", `<pasted_content id="fixture">${boundary}</pasted_content id="fixture">`)).toContain("just compacted");
+    expect(f.state().pendingOn).toBeUndefined();
+    expect(f.run("UserPromptSubmit")).toBe("");
+  });
   it.each(["missing close", "trailing text"])("finishes a long pasted prompt with %s within the parsing bound", (ending) => {
     const f = fixture();
     const prompt = `<pasted_content id="fixture">${" ".repeat(64_000)}tail`

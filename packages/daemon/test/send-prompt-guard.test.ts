@@ -15,6 +15,7 @@ import { RunnerCore } from "../src/adapters/pi-runner.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import type { PreparedInput } from "../src/domain/runtime-adapter.js";
 
 // The open ship-authorizing AskUserQuestion from the 2026-06-20 incident (highlighted default first).
 const SHIP_PROMPT = [
@@ -106,9 +107,11 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     withBus?: boolean;
     now?: () => Date;
     activityEndpointFile?: () => { baseUrl: string; token: string } | null;
+    prepareInput?: (session: string, text: string) => PreparedInput;
   }) {
     return new SessionTransport({
       db, rigRepo, sessionRegistry, tmuxAdapter: tmux, agentActivityStore,
+      runtimeAdapters: { "omp-tui": { prepareInput: opts?.prepareInput ?? (() => async () => {}) } },
       ...(opts?.withBus === false ? {} : { eventBus }),
       ...(opts?.now ? { now: opts.now } : {}),
       ...(opts?.activityEndpointFile ? { activityEndpointFile: opts.activityEndpointFile } : {}),
@@ -125,6 +128,60 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const rows = db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override' ORDER BY seq").all() as Array<{ payload: string }>;
     return rows.map((r) => JSON.parse(r.payload) as Record<string, unknown>);
   }
+
+  function seedOmp() {
+    const seat = "omp-input@my-rig";
+    const node = rigRepo.addNode(rigId, "omp.input", { role: "worker", runtime: "omp-tui" });
+    const session = sessionRegistry.registerSession(node.id, seat);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat });
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Stop", subtype: "end_turn" });
+    return seat;
+  }
+
+  it("waits for OMP ingestion beyond the old delay before submitting a message", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    let acknowledge!: () => void;
+    const receipt = new Promise<void>(resolve => { acknowledge = resolve; });
+    const prepareInput = vi.fn(() => async () => receipt);
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }), { prepareInput });
+    const delivered = transport.send(seat, "slow message\nsecond line");
+    await vi.waitFor(() => expect(sendText).toHaveBeenCalledTimes(1));
+    await new Promise(resolve => setTimeout(resolve, 350));
+    expect(sendKeys).not.toHaveBeenCalled();
+    expect(prepareInput).toHaveBeenCalledWith(seat, "slow message\nsecond line");
+    acknowledge();
+    expect((await delivered).ok).toBe(true);
+    expect(sendKeys).toHaveBeenCalledExactlyOnceWith(seat, ["Enter"]);
+  });
+
+  it("reports a staged OMP paste on receipt failure without Enter or duplicate delivery", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }), {
+      prepareInput: () => async () => { throw new Error("OMP paste was not acknowledged"); },
+    });
+    expect(await transport.send(seat, "queued work")).toMatchObject({
+      ok: false, sent: true, inputPhase: "written", reason: "submit_failed",
+    });
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("disarms the OMP request when paste fails", async () => {
+    const seat = seedOmp();
+    const cancel = vi.fn();
+    const receipt = Object.assign(vi.fn(async () => {}), { cancel });
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({ sendText: async () => ({ ok: false, message: "pane gone" }), sendKeys }), {
+      prepareInput: () => receipt,
+    });
+    expect((await transport.send(seat, "text")).ok).toBe(false);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(receipt).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
 
   // Real runner -> real hook normalization/store -> real ordinary-send guard.
   it.each([

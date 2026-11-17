@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { SkillResource } from "./types.js";
 
-export type SkillRuntime = "claude-code" | "codex" | "pi";
+export type SkillRuntime = "claude-code" | "codex" | "pi" | "omp-tui";
 
 export interface SkillDiscoveryPaths {
   runtime: SkillRuntime;
@@ -255,9 +255,9 @@ export function findNamedSkillsForRuntime(paths: SkillDiscoveryPaths, ids: Itera
  *  cross-runtime one. */
 function listScanRoots(paths: SkillDiscoveryPaths): string[] {
   const { runtime, homedir, cwd, specInstallDir } = paths;
-  // Managed Pi uses a seat-specific agent dir. Only discover the portable
+  // Managed Pi and OMP use seat-specific agent dirs. Only discover the portable
   // bundle pool here; never borrow a sibling runtime's project/user skills.
-  if (runtime === "pi") return specInstallDir ? [join(specInstallDir, "skills")] : [];
+  if (runtime === "pi" || runtime === "omp-tui") return specInstallDir ? [join(specInstallDir, "skills")] : [];
   const runtimeDir = runtime === "claude-code" ? ".claude" : ".agents";
   const roots: string[] = [];
 
@@ -280,7 +280,7 @@ function listScanRoots(paths: SkillDiscoveryPaths): string[] {
 }
 
 function rootToSourceKind(root: string, paths: SkillDiscoveryPaths): SourceKind {
-  if (paths.runtime === "pi") return "spec_install";
+  if (paths.runtime === "pi" || paths.runtime === "omp-tui") return "spec_install";
   const runtimeDir = paths.runtime === "claude-code" ? ".claude" : ".agents";
   const rigBundled = join(paths.cwd, runtimeDir, "skills");
   if (root === rigBundled) return "rig_bundled";

@@ -1077,7 +1077,7 @@ identity remains unverified; a version number alone cannot clear it.
   cmd
     .command("set-effort")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high; Pi also accepts off, minimal, xhigh, max)")
+    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high; Pi and OMP also accept off, minimal, xhigh, max)")
     .option("--clear", "Remove this seat's explicit choice and go back to its authored or default effort")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.effort_changed event")
     .option("--operator <address>", "Operator recorded on the audit event")
@@ -1087,7 +1087,7 @@ identity remains unverified; a version number alone cannot clear it.
 Only this seat changes; its peers, model and account don't. The running process
 keeps its current effort until the seat's next managed continuation. Whether the
 native session then uses the level is a separate fact this command can't see.
-Works on Claude Code, Codex and Pi seats; Pi gets it as --thinking <level>. Levels
+Works on Claude Code, Codex, Pi and OMP seats; Pi and OMP get --thinking <level>. Levels
 are the runtime's own and are not translated; an unfamiliar one is saved with a warning.
 Examples:
   rig seat set-effort dev-impl@my-rig --effort high --reason "long refactor"
@@ -1350,7 +1350,7 @@ resume/successor launch reads it at call time. Examples:
   cmd
     .command("set-runtime")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--runtime <runtime>", "codex, claude-code or pi")
+    .option("--runtime <runtime>", "codex, claude-code, pi, omp or omp-tui")
     .option("--reason <text>", "Why the seat moves; recorded with the switch")
     .option("--model <id>", "Target model; otherwise the seat's agent spec for the target, else the target's default")
     .option("--effort <level>", "Target effort, the target runtime's own level (not translated)")

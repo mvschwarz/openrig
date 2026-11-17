@@ -379,7 +379,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     db.close();
   });
 
-  it.each(["pi", "codex", "claude-code", "synth"])("persists non-empty launchWrapper on %s seat and omits when absent or []", (runtime) => {
+  it.each(["pi", "omp-tui", "codex", "claude-code", "synth"])("persists non-empty launchWrapper on %s seat and omits when absent or []", (runtime) => {
     const rig = repo.createRig("wrapper-rig");
     const wrapped = repo.addNode(rig.id, `wrapped-${runtime}`, {
       runtime,
@@ -423,7 +423,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     expect(readSeatLaunchWrapper(db, node.id)).toBeUndefined();
   });
 
-  it.each(["omp", "terminal", "stub", "openshell-claude"])("rejects launchWrapper on %s at addNode and setNodeLaunchWrapper", (runtime) => {
+  it.each(["terminal", "stub", "openshell-claude"])("rejects launchWrapper on %s at addNode and setNodeLaunchWrapper", (runtime) => {
     const rig = repo.createRig("bad-runtime-rig");
     expect(() => repo.addNode(rig.id, "bad-nonempty", { runtime, launchWrapper: ["mtn"] })).toThrow(/pi|codex/i);
     expect(() => repo.addNode(rig.id, "bad-empty", { runtime, launchWrapper: [] })).toThrow(/pi|codex/i);
@@ -453,7 +453,7 @@ describe("RigRepository launch_wrapper persistence (#2328)", () => {
     }
   });
 
-  it.each(["pi", "codex", "claude-code", "synth"].flatMap(runtime => [
+  it.each(["pi", "omp-tui", "codex", "claude-code", "synth"].flatMap(runtime => [
     "[]",
     "corrupt-json",
     '{"cmd":"mtn"}',

@@ -493,7 +493,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     // session file that matches the seat's runner sidecar. Every refusal
     // reports tokenPersisted: false so the OMP runner keeps re-announcing.
     // Pi, Claude, Codex and terminal seats keep the paths below unchanged.
-    if (runtime === "omp" || resolved.runtime === "omp") {
+    if (runtime === "omp" || runtime === "omp-tui" || resolved.runtime === "omp" || resolved.runtime === "omp-tui") {
       if (sessionName !== resolved.sessionName) {
         return c.json({ ok: false, code: "session_not_found", tokenPersisted: false, error: "Session identity does not match the managed seat." }, 404);
       }
@@ -521,11 +521,11 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
           error: "OMP session identity ignored: emitter is not the registered current occupant.",
         }, 409);
       }
-      const validation = validateResumeToken("omp", stringOrNull(body.sessionFile));
+      const validation = validateResumeToken(runtime!, stringOrNull(body.sessionFile));
       // OMP reports a path before its first turn is written. Persist only
       // materialized history; the runner can re-announce identity later.
       const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
-      const omp = adapters?.["omp"] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
+      const omp = adapters?.[runtime!] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
       const ownFile = typeof omp?.readSessionFile === "function" ? omp.readSessionFile(resolved.sessionName) : null;
       const tokenPersisted = validation.ok && ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)
         ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
@@ -536,11 +536,11 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
         rigId: resolved.rigId,
         nodeId: resolved.nodeId,
         sessionName: resolved.sessionName,
-        runtime: "omp",
+        runtime: runtime!,
         sessionId,
-        provenance: "rpc",
+        provenance: runtime === "omp-tui" ? "hook" : "rpc",
       });
-      return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
+      return c.json({ ok: true, sessionId, provenance: runtime === "omp-tui" ? "hook" : "rpc", tokenPersisted });
     }
 
 /** The seat speaks Pi's RPC protocol through OpenRig's hosted runner: its launch recorded the protocol (agent_runner 2),

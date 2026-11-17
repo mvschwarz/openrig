@@ -53,7 +53,7 @@ import { isShellForeground } from "./shell-classifier.js";
 import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
-import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptions, type ReadinessResult } from "./runtime-adapter.js";
+import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessOptions, type ReadinessResult, type PreparedInput } from "./runtime-adapter.js";
 import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 import { resolveSeatKind, seatInboundTransport } from "./seat-kinds.js";
 import type { HookBridge } from "./hook-bridge.js";
@@ -2308,6 +2308,7 @@ export interface BroadcastResult {
 
 export interface TransportReadinessChecker {
   checkReady?(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult>;
+  prepareInput?(sessionName: string, text: string): PreparedInput;
 }
 
 interface SessionTransportDeps {
@@ -4054,6 +4055,16 @@ export class SessionTransport {
       if (writeIssued && error && typeof error === "object") (error as { inputAttempted?: boolean }).inputAttempted = true;
       throw error;
     };
+    let inputReceived: PreparedInput | undefined;
+    if (runtime === "omp-tui" && !promptOverride) {
+      try {
+        const adapter = this.runtimeAdapters["omp-tui"];
+        if (!adapter?.prepareInput) throw new Error("OMP input acknowledgement unavailable; no text was sent.");
+        inputReceived = adapter.prepareInput(sessionName, text);
+      } catch (error) {
+        return observe({ ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "send_failed", outcome: "failed", error: (error as Error).message });
+      }
+    }
     const textResult = await this.runStage(
       "session_transport.send_text",
       () => {
@@ -4068,7 +4079,8 @@ export class SessionTransport {
         return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
-    ).catch(tagIssued);
+    ).catch(error => { inputReceived?.cancel?.(); return tagIssued(error); });
+    if (!textResult.ok) inputReceived?.cancel?.();
     if (!textResult.ok && textResult.code === CALLER_CANCELLED && cancel?.aborted) {
       return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     }
@@ -4096,8 +4108,12 @@ export class SessionTransport {
     let submitResult;
     let enterIssued = false; // set as the Enter key is handed to the adapter
     try {
-      // 4. Wait 200ms (spike-proven delay)
-      await this.sleep(200);
+      // Native OMP acknowledges complete paste dispatch; a fixed delay races slow terminal ingestion.
+      if (inputReceived) {
+        try { await inputReceived(); } catch (error) {
+          return observe({ ok: false, sessionName, sent: true, inputPhase: "written", reason: "submit_failed", outcome: "failed", error: (error as Error).message });
+        }
+      } else await this.sleep(200);
 
       // With transport.verify_input_box on, one bounded read of the input box and its pane process before
       // Enter (a 500 ms budget after the 200 ms wait). It only reports: nothing here decides whether Enter is sent.

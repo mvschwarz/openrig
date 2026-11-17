@@ -121,6 +121,7 @@ interface ClaimServiceDeps {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   };
   ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
+  ompTuiStateStore?: ResumeTokenCaptureDeps["ompTuiStateStore"];
 }
 
 interface BindOptions {
@@ -157,6 +158,7 @@ export class ClaimService {
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
   private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
+  private ompTuiStateStore: ClaimServiceDeps["ompTuiStateStore"] | null;
   /** Delivers the claim hint the way the startup retry is delivered (startup-orchestrator.ts builds the same transport). */
   private sessionTransport: SessionTransport | null;
 
@@ -179,6 +181,7 @@ export class ClaimService {
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
     this.ompRunnerStateStore = deps.ompRunnerStateStore ?? null;
+    this.ompTuiStateStore = deps.ompTuiStateStore ?? null;
     this.sessionTransport = this.tmuxAdapter ? new SessionTransport({
       db: deps.db, rigRepo: deps.rigRepo, sessionRegistry: deps.sessionRegistry, tmuxAdapter: this.tmuxAdapter, eventBus: deps.eventBus,
     }) : null;
@@ -299,7 +302,7 @@ export class ClaimService {
         ? (this.db.prepare("SELECT cwd FROM nodes WHERE id=?").get(input.nodeId) as { cwd: string | null } | undefined)?.cwd ?? undefined : undefined;
       const derived = await deriveResumeToken(
         { runtime: input.runtime, sessionName: input.sessionName, nodeId: input.nodeId, cwd },
-        { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
+        { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore, ompTuiStateStore: this.ompTuiStateStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return { outcome: derived.outcome };
       const runtime = input.runtime as string; // non-null past exempt

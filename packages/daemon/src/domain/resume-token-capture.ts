@@ -36,6 +36,7 @@ export interface ResumeTokenCaptureDeps {
   piRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   } | null;
+  ompTuiStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
   /** Reads the separately rooted OMP runner sidecar; never reads Pi seat state. */
   ompRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
@@ -120,8 +121,8 @@ export async function deriveResumeToken(
       return { outcome: "skipped", reason: "process_unreadable" };
     }
     if (!token) return { outcome: "skipped", reason: "probe_timeout" };
-  } else if (runtime === "pi" || runtime === "omp") {
-    const stateStore = runtime === "pi" ? deps.piRunnerStateStore : deps.ompRunnerStateStore;
+  } else if (runtime === "pi" || runtime === "omp" || runtime === "omp-tui") {
+    const stateStore = runtime === "pi" ? deps.piRunnerStateStore : runtime === "omp-tui" ? deps.ompTuiStateStore : deps.ompRunnerStateStore;
     if (!stateStore) return { outcome: "noop" }; // dep absent — silent no-op
     const state = stateStore.readSessionFile(input.sessionName);
     if (!state.ok) {

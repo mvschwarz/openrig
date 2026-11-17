@@ -129,8 +129,8 @@ export class RuntimeVerifier {
   }
 
   /** OMP is an independent executable; do not inherit Pi's Node engine check. */
-  async verifyOmp(): Promise<RuntimeVerification> {
-    const result = await this.verifyVersionOrHelp("omp", "omp");
+  async verifyOmp(runtime: "omp" | "omp-tui" = "omp"): Promise<RuntimeVerification> {
+    const result = await this.verifyVersionOrHelp(runtime, "omp");
     this.persist(result);
     return result;
   }
@@ -148,7 +148,7 @@ export class RuntimeVerifier {
         case "claude-code": results.push(await this.verifyClaude()); break;
         case "codex": results.push(await this.verifyCodex()); break;
         case "pi": results.push(await this.verifyPi()); break;
-        case "omp": results.push(await this.verifyOmp()); break;
+        case "omp": case "omp-tui": results.push(await this.verifyOmp(runtime)); break;
         default: {
           const v = this.buildVerification(runtime, "not_found", null, null, `unknown runtime: ${runtime}`);
           this.persist(v);

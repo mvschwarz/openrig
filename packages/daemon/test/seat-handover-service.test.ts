@@ -26,7 +26,7 @@ import { makeIdleGateQitemPolicy } from "../src/domain/policies/idle-gate-qitem.
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
-import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import type { PreparedInput, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -120,7 +120,7 @@ describe("SeatHandoverService", () => {
     return { runtime: "codex", launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }, runtime = "codex"): SeatHandoverService {
+  function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }, runtime = "codex", prepareInput?: RuntimeAdapter["prepareInput"]): SeatHandoverService {
     return new SeatHandoverService({
       codexPermissions: { currentCodexPermissions },
       db,
@@ -131,7 +131,7 @@ describe("SeatHandoverService", () => {
       tmuxAdapter: adapter,
       now: () => new Date("2026-04-24T18:30:00.000Z"),
       newSuccessorId: () => "01SUCCID0",
-      runtimeAdapters: { [runtime]: { ...codexAdapter(), runtime } },
+      runtimeAdapters: { [runtime]: { ...codexAdapter(), runtime, ...(prepareInput ? { prepareInput } : {}) } },
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId, captureClaudeSessionId } as never,
       ...(claudeProcessStartedAt ? { claudeProcessStartedAt } : {}),
@@ -1108,6 +1108,105 @@ describe("SeatHandoverService", () => {
     expect(settleIdx).toBeGreaterThan(sendIdx);
     expect(submitIdx).toBeGreaterThan(settleIdx);
     expect(sleeps).toContain(200);
+  });
+
+  describe("OMP native input acknowledgement", () => {
+    function ompSeat(prepareInput?: RuntimeAdapter["prepareInput"]) {
+      const { node } = seedSeat({ runtime: "omp-tui" });
+      launchHarness.mockResolvedValue({ ok: true, resumeToken: "/tmp/omp-successor.jsonl", resumeType: "omp_session" });
+      service = newService(tmux(), { invalidateRetiringOccupant }, "omp-tui", prepareInput);
+      db.exec(outboxEntriesSchema.sql);
+      db.exec(seatDeliveryGuardSchema.sql);
+      const outbox = new OutboxHandler(db);
+      outbox.retain({ outboxId: "held-omp", senderSession: "orch-lead@seat-rig",
+        destinationSession: "dev-impl@seat-rig", body: "Retain this work without replaying it." },
+      { nodeId: node.id, session: "dev-impl@seat-rig", occupant: null, pane: null });
+      return { node, outbox, heldBefore: outbox.getById("held-omp") };
+    }
+
+    it.each(["fresh", "rebuild"] as const)("waits for native receipts before submitting a %s packet and its held-message notice", async source => {
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const calls: string[] = [];
+      const waits: Array<ReturnType<typeof vi.fn>> = [];
+      const cancels: Array<ReturnType<typeof vi.fn>> = [];
+      const prepareInput = vi.fn((_session: string, _text: string): PreparedInput => {
+        calls.push("prepare");
+        const first = waits.length === 0;
+        const wait = vi.fn(async () => { calls.push("receive"); if (first) await gate; });
+        const cancel = vi.fn();
+        waits.push(wait); cancels.push(cancel);
+        return Object.assign(wait, { cancel });
+      });
+      const { outbox, heldBefore } = ompSeat(prepareInput);
+      sendText.mockImplementation(async () => { calls.push("paste"); return { ok: true }; });
+      sendKeys.mockImplementation(async () => { calls.push("enter"); return { ok: true }; });
+      const pending = service.handover({ seatRef: "dev-impl@seat-rig", reason: "rotate occupant", source });
+      await vi.waitFor(() => expect(waits[0]).toHaveBeenCalledOnce());
+      expect(calls).toEqual(["prepare", "paste", "receive"]);
+      expect(sendKeys).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT 1 FROM events WHERE type = 'seat.handover_completed'").get()).toBeUndefined();
+      release();
+      const result = await pending;
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: true }, warnings: [expect.stringContaining("1 held message")] } });
+      expect(calls).toEqual(["prepare", "paste", "receive", "enter", "prepare", "paste", "receive", "enter"]);
+      expect(prepareInput.mock.calls).toEqual(sendText.mock.calls);
+      expect(sendText.mock.calls[1]![1]).toContain("1 held message");
+      for (const cancel of cancels) expect(cancel).toHaveBeenCalledOnce();
+      expect(outbox.getById("held-omp")).toEqual(heldBefore);
+    });
+
+    it.each(["fresh", "rebuild"] as const)("records an uncertain %s packet without submitting it or typing the held-message notice", async source => {
+      const cancel = vi.fn();
+      const received = Object.assign(vi.fn(async () => { throw new Error("native receipt timed out"); }), { cancel });
+      const prepareInput = vi.fn(() => received);
+      const { outbox, heldBefore } = ompSeat(prepareInput);
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "rotate occupant", source });
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: false },
+        restorePacket: { status: "unconfirmed", reason: expect.stringContaining("native receipt timed out") },
+        warnings: [expect.stringContaining("1 held message")] } });
+      expect(sendText).toHaveBeenCalledOnce();
+      expect(sendKeys).not.toHaveBeenCalled();
+      expect(prepareInput).toHaveBeenCalledOnce();
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(outbox.getById("held-omp")).toEqual(heldBefore);
+      const completed = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed'").get() as { payload: string };
+      expect(JSON.parse(completed.payload)).toMatchObject({ restorePacket: { status: "unconfirmed" } });
+    });
+
+    it.each(["receipt", "enter-throw"] as const)("reports an uncertain held-message notice after a %s failure without undoing the committed handover", async failure => {
+      let prepared = 0;
+      const cancels: Array<ReturnType<typeof vi.fn>> = [];
+      const prepareInput = vi.fn((): PreparedInput => {
+        const isNotice = ++prepared === 2;
+        const cancel = vi.fn(); cancels.push(cancel);
+        return Object.assign(async () => { if (isNotice && failure === "receipt") throw new Error("notice receipt timed out"); }, { cancel });
+      });
+      const { outbox, heldBefore } = ompSeat(prepareInput);
+      if (failure === "enter-throw") sendKeys.mockResolvedValueOnce({ ok: true }).mockRejectedValueOnce(new Error("notice submit failed"));
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "rotate occupant", source: "fresh" });
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: true },
+        warnings: [expect.stringContaining("1 held message"), expect.stringContaining("Held-message notice submission unconfirmed")] } });
+      expect(sendText).toHaveBeenCalledTimes(2);
+      expect(sendKeys).toHaveBeenCalledTimes(failure === "receipt" ? 1 : 2);
+      for (const cancel of cancels) expect(cancel).toHaveBeenCalledOnce();
+      expect(outbox.getById("held-omp")).toEqual(heldBefore);
+    });
+
+    it.each(["paste-throw", "enter-throw", "missing-receipt"] as const)("does not type held messages when packet delivery fails at %s", async failure => {
+      const cancel = vi.fn();
+      const receipt = Object.assign(vi.fn(async () => {}), { cancel });
+      ompSeat(failure === "missing-receipt" ? undefined : vi.fn(() => receipt));
+      if (failure === "paste-throw") sendText.mockRejectedValueOnce(new Error("partial paste"));
+      if (failure === "enter-throw") sendKeys.mockRejectedValueOnce(new Error("partial submit"));
+      expect(await service.handover({ seatRef: "dev-impl@seat-rig", reason: "rotate occupant", source: "fresh" }))
+        .toMatchObject({ ok: false, code: "context_delivery_failed" });
+      expect(sendText).toHaveBeenCalledTimes(failure === "missing-receipt" ? 0 : 1);
+      expect(sendKeys).toHaveBeenCalledTimes(failure === "enter-throw" ? 1 : 0);
+      expect(cancel).toHaveBeenCalledTimes(failure === "missing-receipt" ? 0 : 1);
+      expect(killSession).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT 1 FROM events WHERE type = 'seat.handover_completed'").get()).toBeUndefined();
+    });
   });
 
   it.each([

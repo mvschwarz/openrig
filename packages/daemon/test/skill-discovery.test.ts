@@ -23,6 +23,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   discoverSkillsForRuntime,
+  findNamedSkillsForRuntime,
+  discoverSkillsWithProvenance,
   parseSkillFrontmatter,
   type SkillDiscoveryPaths,
 } from "../src/domain/skill-discovery.js";
@@ -248,4 +250,15 @@ describe("seat-material skill roots", () => {
     const sources = discoverSkillsForRuntime({ ...pathsFor("claude-code"), seatSkillRoots: [seatA, seatB] });
     expect(sources.skills.map((s) => s.path)).toEqual([join(homedir, ".claude", "skills", "review")]);
   });
+});
+
+// OMP resolves portable bundled skills without importing another runtime's personal skill library.
+it("discovers named and audited OMP bundle skills with consistent provenance", async () => {
+  writeSkill(join(specInstallDir, "skills/shared"), { name: "shared", description: "Portable skill" });
+  writeSkill(join(homedir, ".claude/skills/foreign"), { name: "foreign", description: "Claude skill" });
+  writeSkill(join(homedir, ".agents/skills/foreign"), { name: "foreign", description: "Codex skill" });
+  const paths: SkillDiscoveryPaths = { runtime: "omp-tui", homedir, cwd, specInstallDir };
+  expect(discoverSkillsForRuntime(paths).skills.map(s => s.id)).toEqual(["shared"]);
+  expect(findNamedSkillsForRuntime(paths, ["shared", "foreign"]).map(s => s.id)).toEqual(["shared"]);
+  expect((await discoverSkillsWithProvenance(paths)).skills.map(s => [s.id, s.sourceKind])).toEqual([["shared", "spec_install"]]);
 });

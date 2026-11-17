@@ -59,9 +59,12 @@ function liveDelivery(claim) {
   return false;
 }
 
+// "omp" is Oh My Pi, whose plugin entry (omp/index.js) runs this script at OMP's own events. Like Codex it has an exact
+// post-compaction event, so it never uses Claude's transcript-growth threshold or Claude's pasted-content envelope.
 function runtime() {
   const index = process.argv.indexOf("--runtime");
-  return index >= 0 && process.argv[index + 1] === "codex" ? "codex" : "claude";
+  const value = index >= 0 ? process.argv[index + 1] : null;
+  return value === "codex" || value === "omp" ? value : "claude";
 }
 
 function enabled(value, fallback = true) {
@@ -148,7 +151,7 @@ function readConfiguredContent(home) {
 // runtime's default below applies. A runtime defaults on only once a native run has shown the packet
 // reaching the agent and leading to the right next action; neither has yet. With it off, every path
 // below is unchanged.
-const WORK_PACKET_DEFAULT = { claude: false, codex: false };
+const WORK_PACKET_DEFAULT = { claude: false, codex: false, omp: false };
 function workPacketEnabled() {
   return enabled(process.env.OPENRIG_REFOCUS_WORK_PACKET, WORK_PACKET_DEFAULT[runtime()] === true);
 }

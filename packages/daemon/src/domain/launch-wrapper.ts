@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
 
-export const LAUNCH_WRAPPER_RUNTIMES: ReadonlySet<string> = new Set(["pi", "codex", "claude-code"]);
+export const LAUNCH_WRAPPER_RUNTIMES: ReadonlySet<string> = new Set(["pi", "omp-tui", "codex", "claude-code"]);
 
 export function isLaunchWrapperRuntime(runtime: unknown): runtime is string {
   return typeof runtime === "string" && (LAUNCH_WRAPPER_RUNTIMES.has(runtime) || (isCommunityHarnessRuntime(runtime) && runtime !== "openshell-claude"));
@@ -85,7 +85,7 @@ export function readSeatLaunchWrapper(db: Database.Database, nodeId: string): st
     | undefined;
   const parsed = parseStoredLaunchWrapper(row?.launch_wrapper, `Seat ${nodeId} launch_wrapper`);
   if (parsed && row?.runtime !== undefined && row?.runtime !== null && !isLaunchWrapperRuntime(row.runtime)) {
-    throw new Error(`Seat ${nodeId} launch_wrapper: only valid when runtime is "pi", "codex", "claude-code" or a supported community harness`);
+    throw new Error(`Seat ${nodeId} launch_wrapper: only valid when runtime is "pi", "omp-tui", "codex", "claude-code" or a supported community harness`);
   }
   return parsed;
 }
