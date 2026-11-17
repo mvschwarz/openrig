@@ -10,12 +10,10 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ## [0.7.18]
 
-OpenRig 0.7.18 can bring a team's seat prompts back to the conversation you
-handed the work over from, when you hand it over with a return route. Restore
-and recovery say more truthfully what they left running, and three settings can
-now be chosen per seat: native input, Claude's auto mode and, on Linux, a task
-limit. There are fixes across the queue, Slack, terminals and connected
-assistants, including many contributions from people using OpenRig.
+OpenRig 0.7.18 can send a team's seat prompts to the conversation you handed
+the work over from, restore says more truthfully what it left running, and
+three settings can be chosen per seat: native input, Claude's auto mode and, on
+Linux, a task limit. Many fixes come from people using OpenRig.
 
 ### Before you upgrade
 
@@ -50,111 +48,101 @@ assistants, including many contributions from people using OpenRig.
   Keep the backup, and its `-wal` file, until 0.7.18 is running well.
 
 - **Four migrations run before the daemon listens** (two numbered 171, then 172
-  and 173). Each adds columns or indexes. Going back to 0.7.17 after them isn't
-  established; keep the backup. ([#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3318](https://github.com/mvschwarz/openrig/pull/3318), [#3332](https://github.com/mvschwarz/openrig/pull/3332))
+  and 173), each adding columns or indexes. Going back to 0.7.17 after them
+  isn't established; keep the backup. ([#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3318](https://github.com/mvschwarz/openrig/pull/3318), [#3332](https://github.com/mvschwarz/openrig/pull/3332))
 - **The plugins:** `openrig` carries 0.7.18, and openrig-core moves to 0.1.32
   because its skills and refocus hook changed.
 
 ### Your team's questions, in your own conversation
 
 - **Hand a goal over with a return route:** `rig queue create --return-route
-  auto` gives your conversation an address, and every handoff carries it. When
-  routed work is held at a seat's prompt, or waits on it, that prompt comes back
-  to your conversation as a task. A session that joined the team uses
-  `--return-route self`. The `rigs` skill teaches this for handing over a goal
-  from your own conversation. Without `--return-route`, nothing changes.
-  ([#3318](https://github.com/mvschwarz/openrig/pull/3318))
-- **The kernel operator is instructed to answer a registered person where they
-  wrote,** without waiting for the terminal user's leave. This is guidance, not
-  proof that an answer is delivered. ([#3370](https://github.com/mvschwarz/openrig/pull/3370))
-- **The `messaging-the-human` skill** tells an agent to send what changed,
-  which replies answer an ask, and how to close the ask an answer settles. ([#3305](https://github.com/mvschwarz/openrig/pull/3305))
-- **Slack:** a button answer keeps each option's history and who gave it, and
-  a click that fails to record isn't lost. Settled cards drop the raw closure
-  code ("Denied" for a refusal) and show "(recommended)" once. The opt-in
-  `rig slack manifest --private-channel` sets the app up for a private channel. ([#3353](https://github.com/mvschwarz/openrig/pull/3353), [#3359](https://github.com/mvschwarz/openrig/pull/3359), [#3324](https://github.com/mvschwarz/openrig/pull/3324), [#3344](https://github.com/mvschwarz/openrig/pull/3344))
-- **An answer given through MCP's `rig_question_answer`** is accepted when the
-  daemon requires an operator token. ([#3257](https://github.com/mvschwarz/openrig/pull/3257))
+  auto` gives your conversation an address, and every handoff carries it
+  (`--return-route self` from a session that joined the team). When routed work
+  is held at a seat's prompt, or waits on it, a prompt that isn't a choice
+  dialog is sent to that address as a task. Choice prompts, a prompt already
+  with the gateway, and a route that can't be used (another host's, two that
+  disagree, or a relay that couldn't be made) keep their existing path. The
+  `rigs` skill teaches this; without `--return-route`, nothing changes. ([#3318](https://github.com/mvschwarz/openrig/pull/3318))
+- **Guidance:** the kernel operator is instructed to answer a registered person
+  where they wrote, without the terminal user's leave (guidance, not proof an
+  answer is delivered), and `messaging-the-human` says how to close the ask an
+  answer settles. ([#3370](https://github.com/mvschwarz/openrig/pull/3370), [#3305](https://github.com/mvschwarz/openrig/pull/3305))
+- **Slack:** a button answer keeps each option's history and who gave it; a
+  click that fails to record enters the existing retry path, which fills only a
+  still-unanswered question. Settled cards drop the raw closure code ("Denied"
+  for a refusal), and the opt-in `rig slack manifest --private-channel` sets up
+  a private channel. An answer through MCP's `rig_question_answer` is accepted
+  when the daemon requires an operator token. ([#3353](https://github.com/mvschwarz/openrig/pull/3353), [#3359](https://github.com/mvschwarz/openrig/pull/3359), [#3324](https://github.com/mvschwarz/openrig/pull/3324), [#3344](https://github.com/mvschwarz/openrig/pull/3344), [#3257](https://github.com/mvschwarz/openrig/pull/3257))
 
 ### Recovering the same work
 
 - **A seat restore leaves as a bare shell no longer counts as running** in
-  `rig ps`, including a seat restore recreated. A seat with a delegation parent
-  or escalation destination gets that owner one queue item per restore, listing
-  its shells, each cause and the next step. ([#3185](https://github.com/mvschwarz/openrig/pull/3185), [#3216](https://github.com/mvschwarz/openrig/pull/3216), [#3366](https://github.com/mvschwarz/openrig/pull/3366), [#3344](https://github.com/mvschwarz/openrig/pull/3344))
-- **Launching over a live session** says the seat wasn't relaunched and its
-  agent isn't proven running, instead of "Already running", and
-  `rig ps --nodes --summary` adds a roll call. ([#3215](https://github.com/mvschwarz/openrig/pull/3215))
+  `rig ps`, including a recreated seat, and a seat with a delegation parent or
+  escalation destination gets that owner one queue item per restore listing
+  each cause and the next step. Launching over a live session no longer says
+  "Already running". ([#3185](https://github.com/mvschwarz/openrig/pull/3185), [#3216](https://github.com/mvschwarz/openrig/pull/3216), [#3366](https://github.com/mvschwarz/openrig/pull/3366), [#3215](https://github.com/mvschwarz/openrig/pull/3215))
 - **Restoring after OpenRig's home moved:** `rig up --existing --cwd` honors
   `--cwd`, names a missing saved folder and leaves a folder with a declared
-  project unscaffolded. Claude seats keep OpenRig's core plugin, and OpenRig's
-  own startup files follow the running install. ([#3347](https://github.com/mvschwarz/openrig/pull/3347), [#3352](https://github.com/mvschwarz/openrig/pull/3352))
+  project unscaffolded, and Claude seats keep OpenRig's core plugin. ([#3347](https://github.com/mvschwarz/openrig/pull/3347), [#3352](https://github.com/mvschwarz/openrig/pull/3352))
 - **Restore and `restore-check` name agents that share a recorded
-  conversation** and leave the choice to you, and `--plan` shows each seat's
-  restore permission and where it comes from. ([#3250](https://github.com/mvschwarz/openrig/pull/3250), [#3186](https://github.com/mvschwarz/openrig/pull/3186))
+  conversation** and leave the choice to you; `--plan` shows each seat's
+  restore permission and its source. ([#3250](https://github.com/mvschwarz/openrig/pull/3250), [#3186](https://github.com/mvschwarz/openrig/pull/3186))
 - **`rig seat handover --recover`** reads an interrupted Claude handover more
-  truthfully and accepts a successor that is alone in its session's current
-  window, as the launch does. ([#3246](https://github.com/mvschwarz/openrig/pull/3246), [#3369](https://github.com/mvschwarz/openrig/pull/3369))
-- **Also:** a later `rig down` names a released session instead of exiting 2;
-  a Codex seat resumed on 0.167.1 or 0.167.2 reads its real activity; a Codex
-  seat clears "resume could not be proven" once the same proof passes later; an
-  adopted, still-running seat's hooks read as its own; and refocus orients from
-  the seat's selected project when no task is in progress. ([#3303](https://github.com/mvschwarz/openrig/pull/3303), [#3182](https://github.com/mvschwarz/openrig/pull/3182), [#3189](https://github.com/mvschwarz/openrig/pull/3189), [#3365](https://github.com/mvschwarz/openrig/pull/3365), [#3351](https://github.com/mvschwarz/openrig/pull/3351))
+  truthfully and accepts a successor alone in its session's current window. ([#3246](https://github.com/mvschwarz/openrig/pull/3246), [#3369](https://github.com/mvschwarz/openrig/pull/3369))
+- **Also:** a later `rig down` no longer exits 2 over a released session's kept
+  skills (a plain `down` of a stopped rig still exits 1); Codex 0.167.1 and
+  0.167.2 seats read their real activity; an adopted, still-running seat's
+  hooks read as its own; and refocus orients from the seat's selected project. ([#3303](https://github.com/mvschwarz/openrig/pull/3303), [#3182](https://github.com/mvschwarz/openrig/pull/3182), [#3365](https://github.com/mvschwarz/openrig/pull/3365), [#3351](https://github.com/mvschwarz/openrig/pull/3351))
 
 ### Queue, delivery and settings
 
 - **Per-seat choices, all opt-in:** native input instead of terminal typing
   (`rig seat set-input-route <seat> --route native --reason <text>`); Claude's
   `autoMode` block (`claude_auto_mode`, or `rig seat set-permissions
-  --auto-mode`); and, on Linux with systemd, a task limit
-  (`process_limits: { tasks_max: N }`), carried through launch, restart,
-  handover and restore. An export names a stored limit it can't read instead
-  of refusing the rig. ([#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3332](https://github.com/mvschwarz/openrig/pull/3332), [#3390](https://github.com/mvschwarz/openrig/pull/3390))
+  --auto-mode`); and, on Linux with systemd, a requested task limit
+  (`process_limits: { tasks_max: N }`). A fresh start whose limit isn't seen to
+  take effect is refused; a recovery that can't apply it starts without it,
+  with a warning; and a start that can't be told reads unknown. An export names
+  a stored limit it can't read instead of refusing the rig. ([#3339](https://github.com/mvschwarz/openrig/pull/3339), [#3286](https://github.com/mvschwarz/openrig/pull/3286), [#3332](https://github.com/mvschwarz/openrig/pull/3332), [#3390](https://github.com/mvschwarz/openrig/pull/3390))
 - **`rig compact` on a Pi seat** requests Pi's own compaction, and `--state`
   reports the attempt. ([#3013](https://github.com/mvschwarz/openrig/pull/3013))
-- **Queue:** `rig queue tag` adds tags to an existing row; `rig queue list`
-  names a handed-off row's successors; a handoff advises when a mission or
-  slice tag resolves to nothing; a hold blocked on a custom-ID row no longer
-  reads wakeless; a wake that failed before any input reached the seat gets one
-  retry on the same seat; and the stuck check's findings have readable titles. ([#3281](https://github.com/mvschwarz/openrig/pull/3281), [#3302](https://github.com/mvschwarz/openrig/pull/3302), [#3178](https://github.com/mvschwarz/openrig/pull/3178), [#3152](https://github.com/mvschwarz/openrig/pull/3152), [#3243](https://github.com/mvschwarz/openrig/pull/3243), [#3311](https://github.com/mvschwarz/openrig/pull/3311), [#3349](https://github.com/mvschwarz/openrig/pull/3349))
-- **Workflows and assistants:** `rig workflow route` adopts a second handoff to
-  the same target; assistants connected to a network learn the retry rule and
-  honest pickup timing; and the network connector doesn't send
-  handoff-and-complete's default note as the hub's answer. ([#3363](https://github.com/mvschwarz/openrig/pull/3363), [#3329](https://github.com/mvschwarz/openrig/pull/3329), [#3346](https://github.com/mvschwarz/openrig/pull/3346), [#3367](https://github.com/mvschwarz/openrig/pull/3367))
-- **Terminals:** CLI terminal reads send the configured terminal bearer; a
-  custom `TMUX_TMPDIR` is named in the attach command; a herdr-app cell no pane
-  shows no longer resizes the seat; `rig acp run`'s log keeps multibyte
-  characters split across reads; and tmux credential cleanup can't fall back
-  to a server-wide value. ([#3360](https://github.com/mvschwarz/openrig/pull/3360), [#3165](https://github.com/mvschwarz/openrig/pull/3165), [#3358](https://github.com/mvschwarz/openrig/pull/3358), [#3343](https://github.com/mvschwarz/openrig/pull/3343), [#3342](https://github.com/mvschwarz/openrig/pull/3342))
-- **Also:** runner-reported context and model stay bound to their run; queue
-  recent transitions honour a limit up to 1,000; a context-usage watch keeps
-  its named file across an occupant change; and the stuck sweep looks up
-  linked rows with fewer reads. This release makes no speed claim. ([#3150](https://github.com/mvschwarz/openrig/pull/3150), [#3211](https://github.com/mvschwarz/openrig/pull/3211), [#3309](https://github.com/mvschwarz/openrig/pull/3309), [#3301](https://github.com/mvschwarz/openrig/pull/3301), [#3340](https://github.com/mvschwarz/openrig/pull/3340))
+- **Queue and workflows:** `rig queue tag` adds tags to an existing row;
+  `rig queue list` names a handed-off row's successors; a handoff advises on a
+  mission or slice tag that resolves to nothing; a hold blocked on a custom-ID
+  row records its wake; a wake that failed before any input gets one retry on
+  the same seat; and `rig workflow route` adopts a second handoff to the same
+  target. ([#3281](https://github.com/mvschwarz/openrig/pull/3281), [#3302](https://github.com/mvschwarz/openrig/pull/3302), [#3178](https://github.com/mvschwarz/openrig/pull/3178), [#3152](https://github.com/mvschwarz/openrig/pull/3152), [#3243](https://github.com/mvschwarz/openrig/pull/3243), [#3311](https://github.com/mvschwarz/openrig/pull/3311), [#3363](https://github.com/mvschwarz/openrig/pull/3363))
+- **Terminals and assistants:** CLI terminal reads send the configured terminal
+  bearer; a custom `TMUX_TMPDIR` is named in the attach command; with tmux 3.2
+  or later, a herdr-app cell at herdr's default hidden size (200x120) no longer
+  resizes the seat; tmux credential cleanup can't fall back to a server-wide
+  value; `rig acp run`'s log keeps multibyte characters split across reads; and
+  network assistants learn the retry rule and pickup timing. ([#3360](https://github.com/mvschwarz/openrig/pull/3360), [#3165](https://github.com/mvschwarz/openrig/pull/3165), [#3358](https://github.com/mvschwarz/openrig/pull/3358), [#3342](https://github.com/mvschwarz/openrig/pull/3342), [#3343](https://github.com/mvschwarz/openrig/pull/3343), [#3329](https://github.com/mvschwarz/openrig/pull/3329))
+- **Also:** runner reports stay bound to their run, recent transitions honour a
+  limit up to 1,000, and the stuck sweep makes fewer reads. This release makes
+  no speed claim. ([#3150](https://github.com/mvschwarz/openrig/pull/3150), [#3211](https://github.com/mvschwarz/openrig/pull/3211), [#3301](https://github.com/mvschwarz/openrig/pull/3301), [#3340](https://github.com/mvschwarz/openrig/pull/3340))
 
 ### Behaviour that changed
 
 - **Each restored seat's checkpoint is its own file,**
-  `.rigged-checkpoint-<session>-<digest>.md`, so seats restored into one
-  folder keep their own. Anything that reads `.rigged-checkpoint.md` won't find
-  it. ([#3347](https://github.com/mvschwarz/openrig/pull/3347))
+  `.rigged-checkpoint-<session>-<digest>.md`; anything that reads
+  `.rigged-checkpoint.md` won't find it. ([#3347](https://github.com/mvschwarz/openrig/pull/3347))
 
 ### Known limits
 
-- **Prompts in your own conversation wait for you:** a returned prompt arrives
-  on that conversation's next turn, and nothing wakes an idle one. A prompt that
-  no routed work is held at or waiting on still has no path, and a route on
-  another host is carried but not delivered there. No end-to-end result with a
-  person is claimed yet.
+- **Prompts in your own conversation wait for you:** a routed prompt arrives on
+  that conversation's next turn, nothing wakes an idle one, and arrival isn't
+  guaranteed. A prompt can still change between OpenRig reading it and sending
+  your key. No end-to-end result with a person is claimed yet.
 - **Restore:** a seat isn't told where its checkpoint file is, and a written
   checkpoint isn't proof it was read. After a `--cwd` restore, `rig down`
   doesn't clean OpenRig's Claude settings, hooks and collector from that
-  folder. When a full restore recreates a seat, its result can still list that
-  seat as not started, and the attempt's record can miss its actual outcome.
+  folder. When a full restore recreates a seat, its result can still list it
+  as not started, and the attempt's record can miss its actual outcome.
 - **Native input route:** withdrawing a permission doesn't cancel a native
   seat's work in progress.
-- **Queue help:** `rig queue update --blocked-on` and `rig queue block --on`
-  say a human seat such as `human@host` asks no one. That holds only for an
-  unregistered one; a seat naming a registered person does ask them.
+- **Queue help** says a human seat such as `human@host` asks no one; that holds
+  only for an unregistered one.
 - **Linked Codex config files:** when a Codex seat's `config.toml` or
   `hooks.json` is a symbolic link, OpenRig records its hook trust under the
   link's target, as in 0.7.14. A change to key it by the file's own name isn't
@@ -163,9 +151,8 @@ assistants, including many contributions from people using OpenRig.
   turns OpenRig's hooks off, and set those hooks up anyway when it moves them
   into `hooks.json`. ([#3078](https://github.com/mvschwarz/openrig/issues/3078))
 - **From 0.7.17:** [its known limits](https://github.com/mvschwarz/openrig/releases/tag/v0.7.17)
-  still apply unless this release changes them. It changes the bare-shell
-  count, the second `rig down`'s error and Codex 0.167.1 and 0.167.2's
-  `unknown` ([#3185](https://github.com/mvschwarz/openrig/pull/3185), [#3303](https://github.com/mvschwarz/openrig/pull/3303), [#3182](https://github.com/mvschwarz/openrig/pull/3182)).
+  still apply, except the bare-shell count, the second `rig down`'s exit 2 and
+  Codex 0.167.1 and 0.167.2's `unknown` ([#3185](https://github.com/mvschwarz/openrig/pull/3185), [#3303](https://github.com/mvschwarz/openrig/pull/3303), [#3182](https://github.com/mvschwarz/openrig/pull/3182)).
 
 ### Credits
 

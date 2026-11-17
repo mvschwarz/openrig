@@ -626,10 +626,11 @@ commit; this guidance doesn't reliably complete that journey, and a second trial
 Since 0.7.18, `rig queue create --return-route auto` hands the goal over and gives the person's
 conversation an address (`--return-route self` for a session that joined the team, or another
 conversation's address). Every handoff carries the route, and when routed work is held at a seat's
-prompt or waits on it, that prompt goes to the route as a task. It arrives on the conversation's next
-turn: nothing wakes an idle conversation, a prompt no routed work is held at or waiting on has no
-path, and a route on another host is carried but not delivered by this daemon. No end-to-end result
-with a person is claimed for it yet. Without `--return-route` nothing changes. The
+prompt or waits on it, a prompt that isn't a choice dialog is sent to the route as a task. Choice
+prompts, a prompt already with the gateway, and a route that can't be used (another host's, two that
+disagree, or a relay that couldn't be made) keep their existing path. It arrives on the
+conversation's next turn: nothing wakes an idle conversation, arrival isn't guaranteed, and a prompt
+can still change between its capture and the key. No end-to-end result with a person is claimed yet. Without `--return-route` nothing changes. The
 skill also follows a task handed on to another
 host with `rig queue show <id> --host <host>`.
 
@@ -1057,8 +1058,10 @@ version, from checking the environment to a useful report to the OpenRig team.
 - **Per-seat choices since 0.7.18, all opt-in:** `rig seat set-input-route <seat> --route native
   --reason <text>` gives a seat with a capable live runner native input instead of terminal typing
   (typed stays the default; a native seat's work isn't cancelled when a permission is withdrawn).
-  On Linux/systemd hosts, `process_limits: { tasks_max: N }` on a member caps the tasks its own
-  processes may hold, carried through launch, restart, handover and restore (`docs/reference/rig-spec.md`).
+  On Linux/systemd hosts, `process_limits: { tasks_max: N }` on a member requests a cap on the tasks
+  its own processes may hold (`docs/reference/rig-spec.md`): a fresh start whose limit isn't seen to
+  take effect is refused, a recovery that can't apply it starts without it with a warning, and a start
+  that can't be told reads unknown, never retried. An export names a stored limit it can't read.
 - **`rig seat set-permissions <seat> --mode <mode> --reason <text>`** — select one seat's native
   permission mode for its future managed launches; it relaunches nothing, and `inherit` clears the
   selection. `rig seat status` reports the selection, but a status read does not prove the
