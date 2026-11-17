@@ -104,8 +104,8 @@ export function realDeps(): LifecycleDeps {
       return lock;
     },
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
-    fetch: async (url) => {
-      const res = await fetchWithTimeout(globalThis.fetch, url, {}, {
+    fetch: async (url, init) => {
+      const res = await fetchWithTimeout(globalThis.fetch, url, init?.signal ? { signal: init.signal } : {}, {
         timeoutMs: 1_500,
         timeoutMessage: `Daemon health probe timed out for ${url}`,
       });

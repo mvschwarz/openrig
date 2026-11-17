@@ -175,9 +175,11 @@ function archiveIfBeforeBoot(file: string, stale: StaleLockCheck): string | unde
   return target;
 }
 
-/** #3315 — a token that names one process for as long as it lives and never a later one with the same PID: on Linux
- *  its start time in clock ticks since boot (/proc/<pid>/stat field 22, which no wall-clock step moves); elsewhere the
- *  `ps lstart` string (LC_ALL=C). Undefined when it can't be read. Compare tokens only for equality, within one boot. */
+/** #3315 — a token that names one process for as long as it lives: on Linux its start time in clock ticks since boot
+ *  (/proc/<pid>/stat field 22, which no wall-clock step moves); elsewhere the `ps lstart` string (LC_ALL=C, to the
+ *  second). A later process with the same PID gets a different token unless it started within that resolution (one
+ *  clock tick, or the same second), and a userspace read is not atomic with a later kill(2). Undefined when it can't be
+ *  read. Compare tokens only for equality, within one boot. */
 export function processStartToken(pid: number): string | undefined {
   try {
     if (process.platform === "linux") {
@@ -223,11 +225,16 @@ export function archiveSpentReservation(file: string, expected: string): string 
   } catch {
     return undefined;
   }
-  const linked = fs.statSync(target);
-  if (linked.dev !== inspected.dev || linked.ino !== inspected.ino) {
-    fs.unlinkSync(target);
+  try {
+    const linked = fs.statSync(target);
+    if (linked.dev !== inspected.dev || linked.ino !== inspected.ino) {
+      fs.unlinkSync(target);
+      return undefined;
+    }
+    fs.unlinkSync(file);
+  } catch {
+    // Left for the operator; the caller warns that the reservation was not released.
     return undefined;
   }
-  fs.unlinkSync(file);
   return target;
 }

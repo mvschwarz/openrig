@@ -2242,7 +2242,7 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
   const header = (extra: Record<string, unknown> = { bootId: "boot-A" }) =>
     JSON.stringify({ launcherPid: LAUNCHER, startedAt: STARTED_AT, ...extra }) + "\n";
   const childRecord = (extra: Record<string, unknown> = {}) =>
-    JSON.stringify({ childPid: CHILD, startToken: "linux:777", host: "127.0.0.1", port: 7433, ...extra }) + "\n";
+    JSON.stringify({ childPid: CHILD, startToken: "linux:777", pidNamespace: "host", host: "127.0.0.1", port: 7433, ...extra }) + "\n";
   const validLock = () => header() + childRecord();
 
   function reservedDeps(opts: {
@@ -2251,9 +2251,9 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     liveness?: Record<number, "alive" | "dead" | "unknown">;
     bootId?: string;
     token?: string | null;
-    pidNamespace?: string;
+    pidNamespace?: string | null;
     /** Before the signal: the listener's answer; default, it hangs (the wedge). After it: refused. */
-    probe?: () => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+    probe?: (init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
     exits?: boolean;
     /** The receipt the child writes as it exits, made at signal time; null = none. */
     receipt?: ((pid: number) => string) | null;
@@ -2277,7 +2277,7 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
       bootId: () => opts.bootId ?? "boot-A",
       processStartToken: vi.fn((pid: number) =>
         pid === CHILD && opts.token !== null ? opts.token ?? "linux:777" : undefined),
-      pidNamespace: () => opts.pidNamespace ?? "host",
+      pidNamespace: () => (opts.pidNamespace === null ? undefined : opts.pidNamespace ?? "host"),
       releaseStartReservation: vi.fn(archiveSpentReservation),
       sleep: async () => {},
       kill: vi.fn((pid: number) => {
@@ -2288,9 +2288,9 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
         }
         return true;
       }),
-      fetch: vi.fn(async () => {
+      fetch: vi.fn(async (_url: string, init?: { signal?: AbortSignal }) => {
         if (signalled) throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
-        return opts.probe ? opts.probe() : neverFetch();
+        return opts.probe ? opts.probe(init) : neverFetch();
       }),
     });
   }
@@ -2400,6 +2400,46 @@ describe("#3315 — stop: unpublished start-reservation child", () => {
     await expectRefused(reservedDeps({ unreadableState: true }), /daemon\.json is present but unreadable/);
   });
 
+  it("re-reads the child's liveness and start token right before the signal: a change during the listener check refuses", async () => {
+    let token = "linux:777";
+    // Only the check's own listener read carries a signal; the stop's earlier listener probe does not.
+    const changed = reservedDeps({ probe: (init) => { if (init?.signal) token = "linux:888"; return neverFetch(); } });
+    changed.processStartToken = vi.fn((pid: number) => (pid === CHILD ? token : undefined));
+    await expectRefused(changed, /PID 5151 is now another process than the reserved child \(start linux:888, reserved linux:777\) after the listener check/);
+    fresh();
+    let exited = false;
+    const gone = reservedDeps({ probe: (init) => { if (init?.signal) exited = true; return neverFetch(); } });
+    gone.processLiveness = vi.fn((pid: number) => (pid === CHILD && !exited ? "alive" : "dead"));
+    await expectRefused(gone, /child PID 5151 is absent after the listener check/);
+  });
+
+  it("an unknown pid namespace is no evidence of the host's: a record without one, or an unreadable own one, refuses", async () => {
+    const { pidNamespace: _omitted, ...withoutNamespace } = JSON.parse(childRecord()) as Record<string, unknown>;
+    await expectRefused(reservedDeps({ lock: header() + JSON.stringify(withoutNamespace) + "\n" }), /records no pid namespace for its child/);
+    fresh();
+    await expectRefused(reservedDeps({ pidNamespace: null }), /this shell's pid namespace is unknown/);
+  });
+
+  it("aborts its own listener request and body at the check's deadline, and still reads the timeout as the wedge", async () => {
+    let seen: AbortSignal | undefined;
+    let abortedBeforeSignal: boolean | undefined;
+    const deps = reservedDeps({
+      probe: async (init) => {
+        seen = init?.signal;
+        // Headers arrive, then the body stays open until something aborts it.
+        return { ok: true, json: () => new Promise((_, reject) => seen?.addEventListener("abort", () => reject(seen?.reason))) };
+      },
+    });
+    const kill = deps.kill as ReturnType<typeof vi.fn>;
+    const realKill = kill.getMockImplementation()!;
+    kill.mockImplementation((pid: number, signal: string) => { abortedBeforeSignal = seen?.aborted; return realKill(pid, signal); });
+    expect(await stop(deps)).toBe("stopped");
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(true);
+    expect(abortedBeforeSignal).toBe(true);
+    expect(deps.kill).toHaveBeenCalledWith(CHILD, "SIGTERM");
+  });
+
   it("refuses from another pid namespace than the reservation's", async () => {
     await expectRefused(reservedDeps({ pidNamespace: "pid:[4026532999]" }), /another pid namespace/);
     fresh();
@@ -2474,5 +2514,26 @@ describe("#3315 — archiveSpentReservation", () => {
     expect(archiveSpentReservation(file, "a\nb\n")).toBe(`${file}.stopped-${ino}`);
     expect(fs.existsSync(file)).toBe(false);
     expect(archiveSpentReservation(file, "a\nb\n")).toBeUndefined();
+  });
+});
+
+describe("#3315 — realDeps fetch forwards the caller's abort signal", () => {
+  it("aborting the signal cancels the underlying request", async () => {
+    const seen: AbortSignal[] = [];
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) => new Promise((_, reject) => {
+      const signal = (init as RequestInit).signal!;
+      seen.push(signal);
+      signal.addEventListener("abort", () => reject(signal.reason));
+    }));
+    try {
+      const controller = new AbortController();
+      const pending = realDeps().fetch("http://127.0.0.1:1/healthz", { signal: controller.signal });
+      controller.abort(new Error("check deadline"));
+      await expect(pending).rejects.toThrow("check deadline");
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.aborted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

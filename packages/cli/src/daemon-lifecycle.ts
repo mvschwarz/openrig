@@ -248,7 +248,7 @@ export interface LifecycleDeps {
   // OPR.0.4.3.21 — optional `json` lets getDaemonStatus read the enriched
   // /healthz body (event-loop evidence). Optional so existing mocks that
   // return `{ ok }` are unchanged; production (realDeps) supplies it.
-  fetch: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  fetch: (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
   /** Exclusive bind check used only after a no-state health probe times out. */
   isPortOccupied?: (host: string, port: number) => Promise<boolean>;
   kill: (pid: number, signal: string) => boolean;
@@ -273,7 +273,8 @@ export interface LifecycleDeps {
   pidNamespace?: () => string | undefined;
   /** #3315 — this boot's ID (production: currentBootId). Absent = stop never acts on a start reservation. */
   bootId?: () => string | undefined;
-  /** #3315 — a token naming one live process, never a later one with its PID (production: processStartToken). */
+  /** #3315 — a token naming one live process (production: processStartToken); a later process with its PID matches
+   *  only within the OS start-time resolution. */
   processStartToken?: (pid: number) => string | undefined;
   /** #3315 — release a spent start reservation still holding exactly `raw` (production: archiveSpentReservation);
    *  returns where it went, or undefined when it was left in place. Absent = stop never releases one. */
@@ -928,7 +929,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       assertChild();
       if (deps.isProcessAlive(pid!)) {
         assertChild();
-        throw new StartupChildPendingError(`Daemon startup is pending after the readiness deadline (child PID ${pid}). Readiness is not confirmed; child left running and startup reservation retained. Last probe: ${lastProbe}. Launch endpoint: ${healthzUrl}. Inspect that URL and ${LOG_FILE}; this check does not publish readiness, adopt the child or release the reservation. To restart manually, stop child PID ${pid} and wait for exit; inspect ${path.join(OPENRIG_DIR, "daemon-start.lock")}, and only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'. Once this launcher has exited and the child listens, 'rig daemon stop' can stop it, confirmed by this reservation, and release the reservation; until then another start remains blocked by it.`);
+        throw new StartupChildPendingError(`Daemon startup is pending after the readiness deadline (child PID ${pid}). Readiness is not confirmed; child left running and startup reservation retained. Last probe: ${lastProbe}. Launch endpoint: ${healthzUrl}. Inspect that URL and ${LOG_FILE}; this check does not publish readiness, adopt the child or release the reservation. To restart manually, stop child PID ${pid} and wait for exit; inspect ${path.join(OPENRIG_DIR, "daemon-start.lock")}, and only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'. Once this launcher has exited, 'rig daemon stop' can check this child against this reservation (when its start token and pid namespace were recorded) and, if it is confirmed, stop it and release the reservation; until then another start remains blocked by it.`);
       }
       throw new Error(`${summarizeDaemonStartFailure(healthzUrl, deps.readFile(resolveLifecycleFile(deps, "daemon.log")))}. Last probe: ${lastProbe}`);
     }
@@ -1055,8 +1056,9 @@ function readStartReservation(deps: LifecycleDeps, file: string): StartReservati
 /** #3315 — with no recorded state, a start that ended pending (StartupChildPendingError) leaves its child running and
  *  its reservation naming it. Stop acts on that child only after confirming the reservation still names it: the same
  *  boot, the child's pid namespace, the launcher gone (startup can no longer publish), the endpoint stop checks being
- *  the child's own, the child's start token unchanged (a reused PID never matches) and a listener that either answers
- *  with the child's PID or does not answer in time (the wedge). Then the normal stop: one SIGTERM, the bounded wait, a
+ *  the child's own, the child's start token unchanged (a reused PID matches only within the OS start-time resolution)
+ *  and a listener that either answers with the child's PID or does not answer in time (the wedge); liveness and the
+ *  token are read again right before the signal. These are userspace checks, not atomic with kill(2). Then the normal stop: one SIGTERM, the bounded wait, a
  *  refused listener and a matching clean receipt. Returns undefined without a reservation, a refusal (no signal sent)
  *  or "stopped"; failures after the signal throw. */
 async function stopReservedChild(deps: LifecycleDeps, ctx: {
@@ -1071,17 +1073,19 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   if (deps.exists(resolveLifecycleFile(deps, "daemon.json"))) {
     return refuse("a daemon.json is present but unreadable, and nothing ties it to the reserved child");
   }
-  if (!r.startToken || !r.endpoint) return refuse("it records no child identity (written by an older CLI)");
+  if (!r.startToken || !r.endpoint) {
+    return refuse("it records no child identity (an older CLI's reservation, or one whose start could not identify the child)");
+  }
   if (new URL(ctx.target).origin !== r.endpoint) {
     return refuse(`its child was launched to listen at ${r.endpoint}, not at the checked ${ctx.check} (set OPENRIG_URL=${r.endpoint} to check it)`);
   }
   const ownBoot = deps.bootId?.();
   if (!r.bootId || !ownBoot || r.bootId !== ownBoot) return refuse("its boot ID is not this boot's");
-  if (deps.pidNamespace) {
-    const own = deps.pidNamespace();
-    const same = r.pidNamespace ? own === r.pidNamespace : own === "host" || own === INITIAL_PID_NAMESPACE;
-    if (!same) return refuse("its PIDs are numbered in another pid namespace than this shell's");
-  }
+  // An unknown namespace is no evidence of the host's: the record must name one, and this shell must read the same.
+  if (!r.pidNamespace) return refuse("it records no pid namespace for its child");
+  const ownNamespace = deps.pidNamespace?.();
+  if (!ownNamespace) return refuse("this shell's pid namespace is unknown");
+  if (ownNamespace !== r.pidNamespace) return refuse("its PIDs are numbered in another pid namespace than this shell's");
   const liveness = (pid: number): ProcessLiveness => deps.processLiveness
     ? deps.processLiveness(pid)
     : deps.isProcessAlive(pid) ? "alive" : "dead";
@@ -1089,23 +1093,33 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
   if (launcher !== "dead") {
     return refuse(`launcher PID ${r.launcherPid} is ${launcher === "alive" ? "alive; startup may still be in progress" : "of unknown liveness"}`);
   }
-  const child = liveness(r.childPid);
-  if (child !== "alive") return refuse(`child PID ${r.childPid} is ${child === "dead" ? "absent" : "of unknown liveness"}`);
-  const token = deps.processStartToken?.(r.childPid);
-  if (token !== r.startToken) {
-    return refuse(token === undefined
-      ? `child PID ${r.childPid} start identity is unavailable`
-      : `PID ${r.childPid} is now another process than the reserved child (start ${token}, reserved ${r.startToken})`);
-  }
+  const childIdentity = (when: string): string | undefined => {
+    const child = liveness(r.childPid);
+    if (child !== "alive") return `child PID ${r.childPid} is ${child === "dead" ? "absent" : "of unknown liveness"}${when}`;
+    const token = deps.processStartToken?.(r.childPid);
+    if (token === r.startToken) return undefined;
+    return token === undefined
+      ? `child PID ${r.childPid} start identity is unavailable${when}`
+      : `PID ${r.childPid} is now another process than the reserved child (start ${token}, reserved ${r.startToken})${when}`;
+  };
+  const before = childIdentity("");
+  if (before) return refuse(before);
   // The whole identity read is bounded, the body included: an answer with no readable PID in time is no identity.
+  // At the deadline this check's own request and body are aborted, so nothing it opened outlives the decision.
+  const probe = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const pid = await Promise.race([
       (async () => {
-        const res = await deps.fetch(ctx.check);
+        const res = await deps.fetch(ctx.check, { signal: probe.signal });
         try { return ((await res.json?.()) as { pid?: unknown } | undefined)?.pid; } catch { return undefined; }
       })(),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new HealthProbeTimeoutError(ctx.check)), HEALTHZ_PROBE_TIMEOUT_MS); }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          probe.abort(new HealthProbeTimeoutError(ctx.check));
+          reject(new HealthProbeTimeoutError(ctx.check));
+        }, HEALTHZ_PROBE_TIMEOUT_MS);
+      }),
     ]);
     if (pid !== r.childPid) {
       return refuse(`the listener at ${ctx.check} names ${typeof pid === "number" ? `PID ${pid}` : "no PID"}, not child PID ${r.childPid}`);
@@ -1114,10 +1128,14 @@ async function stopReservedChild(deps: LifecycleDeps, ctx: {
     if (!(error instanceof HealthProbeTimeoutError)) {
       return refuse(`the listener at ${ctx.check} ${isRefusedError(error) ? "now refuses" : `failed (${error instanceof Error ? error.message : String(error)})`}`);
     }
-    // No answer in time: the wedge. The child's identity rests on the checks above.
+    // No answer in time: the wedge. The child's identity rests on the checks above and the re-check below.
   } finally {
     if (timer) clearTimeout(timer);
+    if (!probe.signal.aborted) probe.abort();
   }
+  // The listener read may have waited: read liveness and the token again right before the signal.
+  const after = childIdentity(" after the listener check");
+  if (after) return refuse(after);
 
   const notBefore = Date.now();
   deps.kill(r.childPid, "SIGTERM");

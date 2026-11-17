@@ -499,7 +499,7 @@ it.each(["missing", "stale"] as const)("keeps a slow child discoverable with %s 
     expect(message).toContain("stop child PID 12345 and wait for exit");
     expect(message).toContain(path.join(path.dirname(STATE_FILE), "daemon-start.lock"));
     expect(message).toContain("only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'");
-    expect(message).toContain("Once this launcher has exited and the child listens, 'rig daemon stop' can stop it");
+    expect(message).toContain("Once this launcher has exited, 'rig daemon stop' can check this child against this reservation");
     expect(Date.now() - began).toBeLessThanOrEqual(180_000);
     expect(f.deps.kill).not.toHaveBeenCalled();
     expect(f.child.exitCode).toBeNull();
