@@ -1137,8 +1137,9 @@ activityRoutes.get("/parked", (c) => {
   const { diagnoseSeatParked, diagnoseRigParked, PARKED_OBLIGATION_LIMIT } = parkedQuery;
   const deps = {
     getSeatState: (id: string) => nodeExecutorConfirmedStopped(rigRepo.db, id) ? null : oracle.getSeatState(id),
-    // The obligation face only: the same rows, order and limit as a full list() of this destination's open states,
-    // without the per-row projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
+    // The obligation face only: the same order and limit as a full list() of this destination's open states, and the same
+    // rows less an unheld wake escalation about the seat's own prompt (listOpenObligations), without the per-row
+    // projections (pickup, waiting view, delivery ledger) the diagnosis never reads.
     listOpenObligations: (destination: string, limit: number) => ({
       rows: queueRepo.listOpenObligations(destination, limit),
       limit,

@@ -5058,8 +5058,10 @@ export class QueueRepository {
 
   /** The parked query's obligation face: open rows to one destination, newest first, without the per-row
    *  projections list() derives (pickup, waiting view, delivery ledger), which this read never uses. A wake escalation
-   *  about this seat's own prompt is left out: with no operator seat to carry it, the alert falls back to the seat
-   *  itself, and the escalation is the wake, not the content, so it is never that seat's work. */
+   *  about this seat's own prompt that nobody holds is left out: with no operator seat to carry it, the alert falls back
+   *  to the seat itself, and the escalation is the wake, not the content, so it is never that seat's work. One its owner
+   *  explicitly holds (blocked) stays, so that hold and its wake are diagnosed as before; so does a row whose tags aren't
+   *  a JSON array. */
   listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }> {
     const addresses = this.resolveSessionAddresses(destinationSession);
     const slots = addresses.map(() => "?").join(",");
@@ -5067,10 +5069,10 @@ export class QueueRepository {
     const rows = this.db.prepare(
       `SELECT qitem_id, state${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
         WHERE destination_session IN (${slots}) AND state IN ('pending', 'in-progress', 'blocked')
-          AND NOT CASE WHEN json_valid(tags) THEN
+          AND NOT CASE WHEN state != 'blocked' AND json_valid(tags) THEN CASE WHEN json_type(tags) = 'array' THEN
             EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
             AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value IN (${ownPrompt.map(() => "?").join(",")}))
-          ELSE 0 END
+          ELSE 0 END ELSE 0 END
         ORDER BY ts_created DESC LIMIT ?`,
     ).all(...addresses, WAKE_ESCALATION_TAG, ...ownPrompt, limit) as Array<{ qitem_id: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null }>;
     return rows.map((r) => ({ qitemId: r.qitem_id, state: r.state, summary: r.summary ?? null }));

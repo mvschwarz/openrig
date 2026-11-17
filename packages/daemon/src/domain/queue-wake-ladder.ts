@@ -1891,10 +1891,13 @@ async function ensureEscalationRow(
     await refreshEscalationRowIfExists(deps, dest, members, dedupTag);
     return { qitemId: existing.qitem_id };
   }
-  // The summary counts what the alert is about, routed goals waiting on the seat included; a count of none is left out
+  // The summary counts what the alert is about, routed goals waiting on the seat included, each row once: a routed goal
+  // whose wake was also refused counts as a routed goal (the body still lists it under both). A count of none is left out
   // (a routed goal alone used to read "0 baton(s) stuck").
+  const routed = new Set(waiting.map(w => w.qitemId));
+  const batons = members.filter(m => !routed.has(m.row.qitemId)).length;
   const stuck = [
-    ...(members.length ? [`${members.length} baton(s)`] : []),
+    ...(batons ? [`${batons} baton(s)`] : []),
     ...(jobs.size ? [`${jobs.size} watchdog reminder(s)`] : []),
   ].join(" and ");
   const counted = [

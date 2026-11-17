@@ -945,9 +945,13 @@ describe("a wake escalation about the seat's own prompt is not that seat's work"
     // A row whose tags aren't JSON is read as before, not dropped and not a failed read.
     const unreadable = await alert(SEAT, ["work"]);
     db.prepare("UPDATE queue_items SET tags = 'not json' WHERE qitem_id = ?").run(unreadable);
+    // Valid JSON that isn't an array isn't a tag list any writer stores: the row is read as before, never hidden by its values.
+    const objectTags = await alert(SEAT, ["work"]);
+    db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
+      .run(JSON.stringify({ a: "wake-escalation", b: `prompt-destination:${SEAT}` }), objectTags);
 
     const ids = repo.listOpenObligations(SEAT, 500).map((r) => r.qitemId).sort();
-    expect(ids).toEqual([other, plain, unreadable].sort());
+    expect(ids).toEqual([other, plain, unreadable, objectTags].sort());
     expect(ids).not.toContain(own);
     expect(ids).not.toContain(ownChoice);
   });
@@ -956,12 +960,26 @@ describe("a wake escalation about the seat's own prompt is not that seat's work"
     await alert(SEAT, ["wake-escalation", "wake-prompt-refusal", `prompt-destination:${SEAT}`]);
     const first = await evaluate();
     expect(first.diagnosis.seats[0]!.parked).toBe(false);
-    expect(first.diagnosis.seats[0]!.obligations.scope).toContain("excluding=own-prompt-alerts");
+    expect(first.diagnosis.seats[0]!.obligations.scope).toContain("excluding=unheld-own-prompt-alerts");
     expect(first.evaluation.action).toBe("skip");
 
     const work = (await repo.create({ sourceSession: "sender@r", destinationSession: SEAT, body: "obligation", nudge: false })).qitemId;
     const second = await evaluate();
     expect(second.evaluation.action).toBe("send");
     expect((second.evaluation as { notes?: { obligations?: string[] } }).notes?.obligations).toEqual([work]);
+  });
+
+  // An alert its owner explicitly holds keeps that hold and its wake (the ladder retains both when the prompt clears), so a
+  // hold whose wake is gone still shows and still reads parked, as any held row does.
+  it("a self-alert its owner holds stays in the obligations, so a hold with no live wake still reads parked", async () => {
+    const held = await alert(SEAT, ["wake-escalation", "wake-prompt-refusal", `prompt-destination:${SEAT}`]);
+    db.prepare("UPDATE queue_items SET state = 'blocked' WHERE qitem_id = ?").run(held);
+    expect(repo.listOpenObligations(SEAT, 500).map((r) => r.qitemId)).toEqual([held]);
+
+    const { diagnosis } = await evaluate();
+    const seat = diagnosis.seats[0]!;
+    expect(seat.parked).toBe(true);
+    expect(seat.obligations.held.map((r) => r.qitemId)).toEqual([held]);
+    expect(seat.obligations.unhealthyHeldCount).toBe(1);
   });
 });
