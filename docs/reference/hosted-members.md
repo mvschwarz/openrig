@@ -187,7 +187,8 @@ and nothing else is offered:
   is exactly that seat.
 - **What it reaches:**
   - It hands work to its rigs' other seats, never to a person or another host's seat.
-  - It reads the items it sent and the items addressed to it from those seats, never the team's internal items.
+  - It reads the items it sent and the items addressed to it from those seats or from a person, never the team's internal
+    items or a person's items to another seat.
   - With `queue`/`claim` and `queue`/`update`, it claims and closes only items addressed to its own seat that it can read,
     and waits (blocked) only on an item it names and can read. Its answers hide what reading the item hides.
 - **A first task without a seat address:** with `--task-destination <member@rig>` on the same `rig mcp serve`, a
