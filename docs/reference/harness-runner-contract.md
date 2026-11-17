@@ -341,7 +341,8 @@ Hello supplies `{type:"hello", version:1, runId, retained, capabilities:{input,w
 | Builtin OMP | Input-only shared RPC implementation with its own tests. Keeps `omp_session_file`, OMP approval/provider/HOME/state and protocol-v2 behavior; wake/cancel remain false without a proven OMP invocation mapping. |
 | Hosted Pi-RPC community programs | Input-only shared RPC implementation, recorded kind2 and `community:<runtime>` reference. Each executable must satisfy the declared protocol; no inherited Pi qualification or wake/cancel capability. |
 | Preset-owned runner (`runner: true`) | Its actual implemented and declared operations intersect with Core support. The independent dsh consumer has its own mapping; another ACP or stream-JSON program does not inherit it. |
-| Claude Code / Codex raw TUI | Existing typed interaction and saved-session bounded headless wake remain. Those headless commands are not this live native input/wake/cancel channel. |
+| Claude Code | Typed interaction and saved-session bounded headless wake remain. The separate opt-in launch-owned hook bridge supports live ordinary delivery and wake through its existing lease; it is not this structured runner channel or named cancellation. |
+| Codex raw TUI | Existing typed interaction and saved-session bounded headless wake remain. Those headless commands are not this live native input/wake/cancel channel. |
 | Cursor / Hermes / Pi TUI | Maintained TUI launchers have no live native consumer; new native operations are unavailable. Pi TUI is distinct from managed Pi RPC. |
 | OpenClaw local / gateway | Same TUI limit. Client exit does not prove native turn cancellation, stopped gateway work or gateway custody. |
 | OpenShell owned / attached | Existing scoped guest activity/work and operation/resource/native identity remain. They do not provide the hosted pane/PID run binding; no new native channel is advertised. |

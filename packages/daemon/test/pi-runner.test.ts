@@ -344,6 +344,26 @@ describe("streaming heartbeat", () => {
     expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
   });
 
+  it.each([false, true])("accepts custom hosted person input exactly once with a bound channel=%s", bound => {
+    const f = fakeIo(), posts: Record<string, unknown>[] = [];
+    f.io.postActivity = payload => { f.activity.push(payload); };
+    if (bound) f.io.postRunner = async body => { posts.push(body); return true; };
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", runId: "custom-run" }, { runtime: "omo" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", data: { sessionFile: SESSION_FILE } }));
+    const turns = () => f.activity.filter(a => a.hookEvent === "UserPromptSubmit").map(a => a.turnId);
+    core.handleUserBlock("idle words");
+    expect(turns()).toEqual([]);
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    expect(turns()).toEqual(["1"]);
+    core.handleUserBlock("busy words");
+    core.handleUserBlock("/followup later words");
+    expect(turns()).toEqual(["1", "2", "3"]);
+    expect(f.rpc.filter(r => r.type === "prompt" || r.type === "follow_up").map(r => r.message))
+      .toEqual(["idle words", "busy words", "later words"]);
+    expect(posts.some(p => p.type === "turn" || p.nativeTurnId !== undefined || p.acceptedTurnId !== undefined)).toBe(false);
+  });
+
   it("opens no turn for a prompt Pi handles without a run, so the idle beat goes on", () => {
     const c = clocked();
     ready(c.core);

@@ -193,7 +193,7 @@ one at a time and in order, without making the agent wait. It finds the address 
 - **A runner's full duties** (liveness, input, cancellation and permissions) are in the draft
   [harness and runner contract](harness-runner-contract.md).
 
-A runner declaration is not a native-input or wake declaration. The optional [run-bound channel](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1) advertises implemented operations through an authenticated live hello; Core supports the declared preset contract family, while hosted Pi-RPC adoption remains separate. The dsh example implements input and dedicated wake, with cancellation false. Typed remains every program's default, native selection is explicit per seat, and a Pi-compatible wrapper does not qualify or adopt another program's native operations.
+A runner declaration is not a native-input or wake declaration. The optional [run-bound channel](harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1) advertises implemented operations through an authenticated live hello; Core supports preset-owned consumers plus input-only managed OMP and hosted Pi-RPC consumers. The dsh example implements input, dedicated wake and named cancellation using its own invocation mapping. Typed remains every program's default, native selection is explicit per seat, and a Pi-compatible wrapper does not qualify or adopt another program's native operations.
 
 ## Pi-compatible RPC harnesses (`protocol: pi-rpc`)
 

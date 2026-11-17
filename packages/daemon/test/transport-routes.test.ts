@@ -107,9 +107,10 @@ describe("transport routes", () => {
       for (const kind of ["input", "wake"] as const) expect(() => channel.admit(node.id, { outboxId: kind, senderSession: "sender", destinationSession: "worker@matrix",
         body: "never offered", kind, inputRoute: "native", payload: kind === "wake" ? { question: "never offered" } : { text: "never offered" } })).toThrow(/capable/);
       expect(outbox.runnerReceipts(node.id, "invented-run")).toEqual([]);
-      expect(channel.cancel(node.id, { requestId: "cancel-refusal", sender: "sender", destination: "worker@matrix",
+      expect(() => channel.cancel(node.id, { requestId: "cancel-refusal", sender: "sender", destination: "worker@matrix",
         target: { runId: "absent-hosted-run", nativeTurnId: "absent-invocation" } }))
-        .toMatchObject({ stage: "completed", result: { kind: "cancel", outcome: "not-this-turn", confirmed: false } });
+        .toThrow(expect.objectContaining({ code: "runner_unavailable", status: 409 }));
+      expect(outbox.runnerReceipt("cancel-refusal")).toBeNull();
       db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(node.id);
       const result = await transport.send("worker@matrix", "never typed", { deliveryId: "native-refusal", actorSession: "sender" });
       expect(result.ok).toBe(false);

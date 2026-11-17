@@ -68,9 +68,10 @@ describe("owned and attached environment effects", () => {
     for (const kind of ["input", "wake", "cancel"] as const) expect(channel.capable(f.node.id, kind)).toBe(false);
     for (const kind of ["input", "wake"] as const) expect(() => channel.admit(f.node.id, { outboxId: kind, senderSession: "sender", destinationSession: "worker@lifecycle",
       body: "never offered", kind, inputRoute: "native", payload: kind === "wake" ? { question: "never offered" } : { text: "never offered" } })).toThrow(/capable/);
-    expect(channel.cancel(f.node.id, { requestId: "cancel-refusal", sender: "sender", destination: "worker@lifecycle",
+    expect(() => channel.cancel(f.node.id, { requestId: "cancel-refusal", sender: "sender", destination: "worker@lifecycle",
       target: { runId: "absent-hosted-run", nativeTurnId: "absent-invocation" } }))
-      .toMatchObject({ stage: "completed", result: { outcome: "not-this-turn", confirmed: false } });
+      .toThrow(expect.objectContaining({ code: "runner_unavailable", status: 409 }));
+    expect(channel.outbox.runnerReceipt("cancel-refusal")).toBeNull();
     expect(f.counts()).toEqual(counts);
   });
   async function failedProjection(attached = false) {

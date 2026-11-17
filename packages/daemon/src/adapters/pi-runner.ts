@@ -1379,7 +1379,7 @@ export class RunnerCore {
       const message = block.slice("/followup ".length);
       this.personPrompt({ type: "follow_up", message });
       this.io.mirrorLine(`${this.style.commit("you (follow-up) ▸")} ${message}`);
-      if (!this.io.postRunner) this.acceptIntoOpenRun();
+      if (this.runtime !== "pi" || !this.io.postRunner) this.acceptIntoOpenRun();
       return;
     }
     // The runtime decides, not the runner: with streamingBehavior "steer", Pi and OMP run the prompt when idle and,
@@ -1388,7 +1388,7 @@ export class RunnerCore {
     // when a prompt was consumed locally and started none. It labels the mirror line only.
     this.personPrompt({ type: "prompt", message: block, streamingBehavior: "steer" });
     this.io.mirrorLine(this.streaming ? `${this.style.commit("you (steer) ▸")} ${block}` : `${this.style.commit("you ▸")} ${block}`);
-    if (!this.io.postRunner) this.acceptIntoOpenRun();
+    if (this.runtime !== "pi" || !this.io.postRunner) this.acceptIntoOpenRun();
   }
 
   /** A working beat counts only for the latest accepted turn, and each prompt the runner gives the agent is accepted with
