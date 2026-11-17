@@ -166,8 +166,8 @@ export const CASES = [
     id: "C7-3339-withdrawal",
     title: "#3339 native-route permission withdrawal while native work is in flight (item 1)",
     programs: ["claude", "codex"],
-    notRun: "no runner in this kit can take #3339's native route: at 8d94c0009, runner-channel.ts:6-10 gives a native kind only to a managed-Pi, "
-      + "preset or hosted-Pi-RPC binding, and RunnerChannel implements managed-pi and preset (:24); a Claude Code or Codex seat gets none, so admission "
+    notRun: "no runner in this kit can take #3339's native route: on main (26598a18), runner-channel.ts:7-11 gives a native kind only to a managed-Pi "
+      + "(pi or omp), preset or hosted-Pi-RPC binding, and RunnerChannel implements those three (:25); a Claude Code or Codex seat gets none, so admission "
       + "throws runner_unavailable (\"No current capable native runner; input was not offered\") and no native work can be in flight. Capability gap: "
       + "a managed-Pi or preset (dsh) runner install and launch in a cell",
     script: () => ({ rules: [ACK] }),
@@ -263,7 +263,7 @@ export const CASES = [
   },
   {
     id: "C7-3176-send",
-    title: "#3176 pre-Enter gap: a draft typed after an ordinary send's paste and before the read that precedes its Enter (item 4)",
+    title: "post-paste refusal (not #3176's fix): a draft typed after an ordinary send's paste and before the read that precedes its Enter keeps Enter from being pressed (item 4)",
     programs: ["claude", "codex"],
     script: () => ({ rules: [{ say: "got it" }] }),
     async run(ctx) {
@@ -281,7 +281,7 @@ export const CASES = [
   },
   {
     id: "C7-3176-notice",
-    title: "#3176 pre-Enter gap: a draft typed after a watchdog notice's paste and before the read that precedes its Enter (item 4)",
+    title: "post-paste refusal (not #3176's fix): a draft typed after a watchdog notice's paste and before the read that precedes its Enter keeps Enter from being pressed (item 4)",
     programs: ["claude", "codex"],
     script: () => ({ rules: [{ say: "got it" }] }),
     async run(ctx) {
@@ -298,6 +298,18 @@ export const CASES = [
         await ctx.stopWatchdog(jobId);
       }
     },
+  },
+  {
+    id: "C7-3176-conditional",
+    title: "#3176's fix itself: a conditional send's own check before Enter, then the input read, so a draft typed during that check isn't submitted (item 4)",
+    programs: ["claude", "codex"],
+    notRun: "not built this round: 795dcc853 only moves the guard's input read after the caller's beforeKeys (tmux.ts:1237-1244), and beforeKeys exists "
+      + "only for a conditional send with expectedIdentity (session-transport.ts:3458), so an ordinary send and a watchdog notice keep the same order "
+      + "with or without the fix. The discriminating leg sends through /send-expected (routes/transport.ts:59) and types the draft when its check "
+      + "reads the pane pid (tmux display-message \"#{pane_pid}\", expected-conversation.ts:63) after the armed paste: before the fix Enter submits "
+      + "the draft, after it the send is draft_input_changed. Capability gap: a wrapper trigger at that call and the seat's expected identity in the case",
+    script: () => ({ rules: [ACK] }),
+    async run() { throw new NotRun(this.notRun); },
   },
   {
     id: "C7-AUQ",
@@ -356,10 +368,11 @@ export const C7_0719_ITEMS = [
   { item: 1, name: "#3339 native-route permission withdrawal", source: "8d94c0009", cases: ["C7-3339-withdrawal"] },
   { item: 2, name: "#3311 current-binding wake retry", source: "04e0c6c9e", cases: ["C7-3311-current-binding"] },
   { item: 3, name: "#3243 same-binding retry and wake attribution", source: "f6dac8030", cases: ["C7-3243-same-binding"] },
-  { item: 4, name: "#3176 pre-Enter gap", source: "795dcc853", cases: ["C7-3176-send", "C7-3176-notice"] },
-  { item: 5, name: "native Claude AskUserQuestion (#3256)", source: "afd88f2ef", cases: ["C7-AUQ"] },
+  { item: 4, name: "#3176 pre-Enter gap: its fix's own leg (a conditional send, NOT RUN) and the post-paste refusal it doesn't change", source: "795dcc853",
+    cases: ["C7-3176-conditional", "C7-3176-send", "C7-3176-notice"] },
+  { item: 5, name: "Claude's own AskUserQuestion dialog (#3256; native-standin)", source: "afd88f2ef", cases: ["C7-AUQ"] },
   { item: 6, name: "D12 managed compaction followed by a restore", source: "Builder A's D12 (cf1554ac4, carried)", casesFrom: "d12.mjs" },
-  { item: 7, name: "D18 priority cells: automatic outcome reasons", source: "d18.mjs", cases: ["D18-urgent-only", "D18-sends-only", "D18-hold"] },
-  { item: 8, name: "D15 multi-line", source: "s2.mjs", cases: ["D15"] },
+  { item: 7, name: "D18 priority cells: automatic outcome reasons", source: "d18.mjs", cases: ["D18-urgent-only", "D18-sends-only", "D18-hold", "D18-queue-only"] },
+  { item: 8, name: "D15 multi-line, and its #2800 unreadable-input control", source: "s2.mjs", cases: ["D15", "D15-2800-unreadable"] },
   { item: 9, name: "older tmux beside 3.6", source: "run.mjs --tmux", runOption: "--tmux" },
 ];

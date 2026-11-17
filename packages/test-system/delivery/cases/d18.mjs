@@ -13,7 +13,9 @@
 import { NotRun } from "../harness/case-context.mjs";
 import { bodyIntact, deliveredOnce } from "./s2.mjs";
 
-const MODES = ["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold"];
+const MODES = ["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold", "queue-only"];
+/** A mode registered before the oracle names its expected outcome: recorded NOT RUN with why, never judged. */
+const NOT_YET = { "queue-only": "no expected outcome in the oracle yet: #3418 (d13eddff) added the queue-only typing-guard mode, and QA's oracle names none" };
 // The dialog runs last: where a version types into it, the program's state (a model chosen, a sub-dialog open) is no
 // longer the one the later states assume.
 const STATES = ["idle", "draft", "copy_mode", "busy", "dialog"];
@@ -389,8 +391,10 @@ function modeCase(mode) {
     id: `D18-${mode}`,
     title: `typing guard ${mode}: every state × every sender`,
     programs: ["claude", "codex"],
+    ...(NOT_YET[mode] ? { notRun: NOT_YET[mode] } : {}),
     script: () => ({ rules: [{ when: "DLV-D18-[^ ]*-busy-", gate: "{{marker}}", say: "the slow turn is done" }, { say: "ack {{marker}}" }] }),
     async run(ctx) {
+      if (NOT_YET[mode]) throw new NotRun(NOT_YET[mode]);
       const { verdict } = ctx;
       await ctx.settle();
       const set = await ctx.setGuard(mode);

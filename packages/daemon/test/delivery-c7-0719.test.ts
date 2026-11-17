@@ -40,12 +40,34 @@ describe("0.7.19 D5: the nine C7 entries", () => {
 
   it("records item 1 NOT RUN with its source reason and opens no cell for it", async () => {
     const c = registered.find((x) => x.id === "C7-3339-withdrawal")!;
-    expect(c.notRun).toMatch(/runner-channel\.ts:6-10/);
+    expect(c.notRun).toMatch(/on main \(26598a18\), runner-channel\.ts:7-11/);
     expect(c.notRun).toMatch(/runner_unavailable/);
     expect(readFileSync(join(DELIVERY, "run.mjs"), "utf8")).toMatch(/if \(c\.notRun\) \{ cells\.push\(\{ \.\.\.base, result: "NOT RUN", reason: c\.notRun \}\); continue; \}/);
     await expect(c.run.call(c, {})).rejects.toMatchObject({ notRun: true });
-    // No other C7 case is short-circuited.
-    expect(registered.filter((x) => x.id.startsWith("C7-") && x.notRun).map((x) => x.id)).toEqual(["C7-3339-withdrawal"]);
+    // No other C7 case is short-circuited but #3176's conditional leg (round 1, F1).
+    expect(registered.filter((x) => x.id.startsWith("C7-") && x.notRun).map((x) => x.id)).toEqual(["C7-3339-withdrawal", "C7-3176-conditional"]);
+  });
+
+  // Round 1 (#3453): each control the oracle names but no cell can run yet is its own NOT RUN case, inside its item.
+  it("registers #3176's conditional leg, D15's #2800 control and D18's queue-only mode as NOT RUN cases of their own, with why", async () => {
+    const item = (n: number) => C7_0719_ITEMS.find((i) => i.item === n)!;
+    const expectations: Array<[string, number, RegExp]> = [
+      ["C7-3176-conditional", 4, /beforeKeys exists only for a conditional send with expectedIdentity/],
+      ["D15-2800-unreadable", 8, /can't produce an unreadable input box/],
+      ["D18-queue-only", 7, /no expected outcome in the oracle yet/],
+    ];
+    for (const [id, n, why] of expectations) {
+      const c = registered.find((x) => x.id === id)!;
+      expect(c, id).toBeDefined();
+      expect(c.notRun).toMatch(why);
+      expect(item(n).cases).toContain(id);
+      expect(c.programs).toEqual(["claude", "codex"]);
+      await expect(c.run.call(c, {})).rejects.toMatchObject({ notRun: true });
+    }
+    // The cells #3176's fix doesn't change are named for what they prove, and D15 itself still runs.
+    for (const id of ["C7-3176-send", "C7-3176-notice"]) expect(registered.find((x) => x.id === id)!.title).toMatch(/^post-paste refusal \(not #3176's fix\)/);
+    expect(registered.find((x) => x.id === "D15")!.notRun).toBeUndefined();
+    expect(item(5).name).toMatch(/native-standin/);
   });
 
   it("keeps the watchdog's own record of an automatic notice's outcome, and invents no reason code", () => {
