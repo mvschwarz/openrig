@@ -1016,6 +1016,21 @@ describe("#2985 recover: adopt the running successor of a failed handover", () =
           if (!result.ok || !("result" in result)) throw new Error("expected a committed recovery");
           expect(result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: PARENT, forkId: "none" });
           expect((result.result.sourceOutcome as { limit: string }).limit).not.toContain("its process could not be read");
+          expect((result.result.sourceOutcome as { limit: string }).limit).toContain("its telemetry names another conversation than its process");
+        });
+
+        it.each(["stale renamed file", "malformed file"])("does not read a fork parent's %s", async (kind) => {
+          await failedFork();
+          parentRecords(parentToken, Q);
+          parentRuns(Q);
+          const file = path.join(configDir, "sessions", "202.json");
+          writeFileSync(file, kind === "malformed file" ? "{" : JSON.stringify({ name: "Renamed conversation", sessionId: Q }));
+          const mtime = new Date(Date.parse(startedAt) + (kind === "malformed file" ? 60_000 : -86_400_000));
+          utimesSync(file, mtime, mtime);
+          pidFile({ name: SEAT, sessionId: Q });
+          const result = await service().recover({ seatRef: SEAT, reason: "adopt" });
+          if (!result.ok || !("result" in result)) throw new Error("expected a committed recovery");
+          expect((result.result.sourceOutcome as { limit: string }).limit).toContain("its process could not be read");
         });
 
         it.each(["before", "after"])("treats the parent process as unread when its pane moves %s the read", async (when) => {
