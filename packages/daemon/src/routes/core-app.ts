@@ -73,7 +73,7 @@ export function coreAppRoutes(opts: { access?: CoreAppAccess; operatorToken?: st
       let overflow = false, revoked = false, stopped = false, wake: (() => void) | undefined;
       const signal = () => { wake?.(); wake = undefined; };
       const unsubscribe = source.bus.subscribe(event => {
-        if (event.transient || !["queue.created", "queue.updated", "mission_control.action_executed"].includes(event.type)) return;
+        if (event.transient || !["queue.created", "queue.updated", "queue.answer_recorded", "mission_control.action_executed"].includes(event.type)) return;
         try { opts.access!.authenticate(auth); } catch { revoked = true; signal(); return; }
         if (buffer.length >= 500) overflow = true; else buffer.push(event.seq);
         signal();

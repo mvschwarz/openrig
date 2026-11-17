@@ -44,7 +44,7 @@ export class CoreAppJob {
       while (replayAfter < head) {
         const page = this.bus.replayPage(replayAfter, head, 500);
         for (const event of page) {
-          if (event.type === "queue.created" || event.type === "queue.updated" || event.type === "mission_control.action_executed") {
+          if (event.type === "queue.created" || event.type === "queue.updated" || event.type === "queue.answer_recorded" || event.type === "mission_control.action_executed") {
             sequences.push(event.seq);
             if (sequences.length > 500) return null;
           }
@@ -66,10 +66,14 @@ export class CoreAppJob {
     const path = `/api/apps/v1/requests/${encodeURIComponent(requestId)}`, query = `?actor=${encodeURIComponent(actor)}`;
     return { self: path + query, result: `${path}/result${query}` };
   }
-  /** Missing or unreadable live evidence is unknown, never positive replacement. */
-  private occupantGeneration(nodeId: string): string | undefined {
-    try { return new SessionRegistry(this.access.db).currentOccupantTenure(nodeId)?.generationUuid; }
-    catch { return undefined; }
+  /** Missing or unreadable live evidence is unknown (undefined), never positive replacement. Only a successful lookup
+   *  that finds the node itself gone is positive absence (null): its asks can never be answered. */
+  private occupantGeneration(nodeId: string): string | null | undefined {
+    try {
+      const generation = new SessionRegistry(this.access.db).currentOccupantTenure(nodeId)?.generationUuid;
+      if (generation) return generation;
+      return this.access.db.prepare("SELECT 1 FROM nodes WHERE id = ?").get(nodeId) ? undefined : null;
+    } catch { return undefined; }
   }
   private unsupported(item: QueueItem): string | null {
     const reason = appAskUnsupported(this.queue, item);
@@ -77,7 +81,7 @@ export class CoreAppJob {
     const origin = runnerPermissionOrigin(item);
     if (origin) {
       const generation = this.occupantGeneration(origin.nodeId);
-      if (!generation) throw new CoreAppError("app_job_unavailable", 503, { retrySameSubmission: true });
+      if (generation === undefined) throw new CoreAppError("app_job_unavailable", 503, { retrySameSubmission: true });
       if (generation !== origin.generation) return "request_stale";
     }
     return null;
@@ -99,9 +103,15 @@ export class CoreAppJob {
       try {
       const { current, partial } = humanAskAttention(this.queue);
       const view = feedPerspective(this.queue, actor);
-      return { version: 1, sources: [{ source: "queue", state: partial ? "partial" : "available" }],
-        requests: current.filter(item => view.inView(item.destinationSession) && !this.unsupported(item))
-          .map(item => this.request(credential, item.qitemId, actor)) };
+      // One ask's unknown permission tenure omits only that ask; healthy asks stay, and coverage says so.
+      let unknown = 0;
+      const requests = current.filter(item => {
+        if (!view.inView(item.destinationSession)) return false;
+        try { return !this.unsupported(item); }
+        catch (error) { if (error instanceof CoreAppError && error.code === "app_job_unavailable") { unknown++; return false; } throw error; }
+      }).map(item => this.request(credential, item.qitemId, actor));
+      const detail = unknown ? `${unknown} request(s) omitted: their permission authority is unknown; absence does not establish resolution.` : undefined;
+      return { version: 1, sources: [{ source: "queue", state: partial || unknown ? "partial" : "available", ...(detail ? { detail } : {}) }], requests };
       } catch { return { version: 1, sources: [{ source: "queue", state: "unavailable", detail: "Queue source unavailable; absence does not establish resolution." }], requests: [] }; }
     });
   }
@@ -310,8 +320,9 @@ export class CoreAppJob {
     const binding = this.binding(credential, value), hash = appHash(JSON.stringify(binding));
     const key = `${credential.appId}:${answerId}`;
     const existing = this.row(credential.appId, answerId);
-    if (existing && existing.binding_hash !== hash) throw new CoreAppError("answer_id_conflict", 409);
+    // An erased tombstone answers the same for any payload: the kept hash must not confirm a guessed answer.
     if (existing?.erased_at) throw new CoreAppError("source_unavailable", 409, { answerId, retrySameSubmission: false });
+    if (existing && existing.binding_hash !== hash) throw new CoreAppError("answer_id_conflict", 409);
     if (this.inFlight.has(key)) return { ...await this.inFlight.get(key)!, replayed: true };
     const promise = this.perform(credential, answerId, binding, hash);
     this.inFlight.set(key, promise);

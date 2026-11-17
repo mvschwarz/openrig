@@ -80,7 +80,8 @@ scope return 403. Needs-me excludes FYIs, resolve-only blockers, unstructured as
 pairing, stale permission requests and nonpending items. A direct unsupported
 request has `answer:null` and `unsupportedReason`; no questions are inferred from
 text. Source failure is explicitly unavailable/partial, so disappearance never
-means resolution. A direct ask has a null episode; creation notification IDs are
+means resolution. A runner-permission ask whose permission authority is unknown is omitted from needs-me and
+the queue source reports `partial`; healthy asks stay listed. A direct ask has a null episode; creation notification IDs are
 not new decision episodes.
 
 Before POST, durably save a random opaque answer ID (8–128 ASCII letters, digits,
@@ -126,12 +127,12 @@ permits identical repair only while original own-effect evidence/current decisio
 allow it. Missing or unreadable current-occupant evidence is temporary `503 app_job_unavailable`
 with `retrySameSubmission:true`, not proof of replacement. Retain the same submission ID and retry
 after recovery; committed receipts remain readable without repeating effects. A positively replaced
-occupant remains stale. `state:conflict` includes `conflictCode`, current revision and links, with
+occupant, or a node positively absent from a successful lookup, remains stale. `state:conflict` includes `conflictCode`, current revision and links, with
 `retrySameSubmission:false`; obtain a new human decision instead of looping or
 automatically minting a replacement ID. Missing scoped IDs return 404. Authorized
 source erasure removes binding/checkpoint/receipt text and leaves an opaque hash
-and ID tombstone: status becomes `source_unavailable`, retries cannot reexecute,
-and conflicting ID reuse still fails. Existing queue audit erasure applies too.
+and ID tombstone: status becomes `source_unavailable`, and any retry of that ID,
+whatever its payload, returns the same `source_unavailable` without reexecuting. Existing queue audit erasure applies too.
 
 ## Follow recorded facts
 

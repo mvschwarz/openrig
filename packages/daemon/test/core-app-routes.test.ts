@@ -306,8 +306,9 @@ describe("follow actual results and erase retained submissions", () => {
     const changes = f.db.prepare("SELECT total_changes() n").get();
     expect(await (await f.send(`/v1/answers/answer_erase?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json()).toMatchObject({ submission: { state: "source_unavailable" }, retrySameSubmission: false });
     const replay = await f.send("/v1/answers/answer_erase", binding, f.token); expect(replay.status).toBe(409);
-    expect(await replay.json()).toMatchObject({ error: "source_unavailable", retrySameSubmission: false });
-    expect((await f.send("/v1/answers/answer_erase", { ...binding, answer: { kind: "typed-reply", text: "replacement" } }, f.token)).status).toBe(409);
+    const replayBody = await replay.json(); expect(replayBody).toMatchObject({ error: "source_unavailable", retrySameSubmission: false });
+    const guess = await f.send("/v1/answers/answer_erase", { ...binding, answer: { kind: "typed-reply", text: "replacement" } }, f.token);
+    expect(guess.status).toBe(409); expect(await guess.json()).toEqual(replayBody);
     expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
   });
 });
@@ -345,6 +346,16 @@ describe("authenticated invalidation refresh", () => {
       f.bus.emit({ type: "test.internal" } as any);
     }
     expect(f.job.eventReplay(cursor)).toEqual(matches > 500 ? null : { head: f.bus.maxSeq(), sequences });
+  });
+  it("invalidates live and replayed streams for a partial answer recorded outside the app", async () => {
+    const f = await jobFixture(true), cursor = f.job.cursor();
+    const live = await appStream(f, f.token); expect((await live.next()).kind).toBe("heartbeat");
+    const recorded = f.repo.recordHumanAnswer({ qitemId: f.ask.qitemId, actorSession: PERSON, questionId: "q1", optionId: "yes" });
+    expect(recorded.status).toBe("recorded");
+    expect((await live.next()).kind).toBe("invalidate");
+    expect(f.job.eventReplay(cursor)).toMatchObject({ sequences: [expect.any(Number)] });
+    const replayed = await appStream(f, f.token, cursor);
+    expect((await replayed.next()).kind).toBe("invalidate");
   });
   it("resets replay after real pruning while queue-backed request reads and later replay remain available", async () => {
     const f = await jobFixture(), cursor = f.job.cursor();
@@ -637,6 +648,36 @@ it("retains an unfinished permission submission's own choice/checkpoint while en
   expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
 });
 
+
+it("treats a permission ask whose node was positively deleted as stale, not an outage", async () => {
+  const f = await permissionFixture();
+  f.db.prepare("DELETE FROM nodes WHERE id = ?").run(f.node.id);
+  expect(f.db.prepare("SELECT COUNT(*) n FROM occupant_tenures WHERE node_id = ?").get(f.node.id)).toEqual({ n: 0 });
+  const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+  const response = await f.send(`/v1/requests/${f.askId}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ requestId: f.askId, answer: null, unsupportedReason: "request_stale" });
+  const needs = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+  expect(needs.sources).toEqual([{ source: "queue", state: "available" }]); expect(needs.requests).toEqual([]);
+  expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+});
+
+it("keeps healthy asks usable when one permission ask has unknown tenure, with truthful partial coverage", async () => {
+  const f = await permissionFixture();
+  const ordinary = await f.repo.create({ sourceSession: "builder@test", destinationSession: PERSON, body: "Ordinary ask", humanIntent: "decision",
+    humanQuestions: [questions[0]!], nudge: false });
+  const fault = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockReturnValue(null);
+  try {
+    const response = await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.requests.map((r: any) => r.requestId)).toEqual([ordinary.qitemId]);
+    expect(body.sources).toEqual([{ source: "queue", state: "partial", detail: expect.stringContaining("unknown") }]);
+  } finally { fault.mockRestore(); }
+  const healthy = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+  expect(healthy.requests.map((r: any) => r.requestId).sort()).toEqual([f.askId, ordinary.qitemId].sort());
+  expect(healthy.sources).toEqual([{ source: "queue", state: "available" }]);
+});
 
 it.each(["missing", "failed"] as const)("retains an unfinished permission answer through a %s tenure read and recovers its original submission", async cause => {
   const f = await permissionFixture(), ask = f.repo.getById(f.askId)!;
