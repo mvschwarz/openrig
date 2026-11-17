@@ -10,6 +10,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -39,9 +40,12 @@ function buildApp(opts: {
   settingsStore?: { resolveOne: (key: string) => { value: unknown } };
   /** The configured missions root, for routes that resolve work nodes. */
   slicesRoot?: string;
+  /** The topology database, for routes that read a seat's recorded node. */
+  db?: Database.Database;
 }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
+    if (opts.db) c.set("db" as never, opts.db as never);
     if (opts.slicesRoot) c.set("settingsStore" as never, { resolveOne: () => ({ value: opts.slicesRoot }) } as never);
     c.set("eventBus" as never, opts.eventBus);
     c.set("queueRepo" as never, opts.queueRepo);
@@ -2745,6 +2749,54 @@ describe("queue routes", () => {
       expect((candidateBody.workCandidates as { missionsRoot: string }).missionsRoot)
         .toBe(path.join(temporaryWorkspace, "beta", "work-items"));
       expect((candidateBody.workCandidates as { missionsOnHost: string[] }).missionsOnHost).toEqual(["release"]);
+    });
+
+    it("selects the seat's project as work-install does, or says why none was selected (#3320)", async () => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-work-project-")));
+      const catalog = path.join(temporaryWorkspace, "workspace.yaml");
+      for (const project of ["alpha", "beta"]) fs.mkdirSync(path.join(temporaryWorkspace, project));
+      app = buildApp({
+        eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox,
+        settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? catalog : temporaryWorkspace }) },
+      });
+      const workProject = async (session: string) =>
+        ((await (await app.request(`/api/queue/whoami?session=${session}`)).json()) as { workProject?: unknown }).workProject;
+
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n    rigs: [r]\n  - id: beta\n    root: beta\n    rigs: [other]\n");
+      expect(await workProject("bob@r")).toEqual({ id: "alpha", root: path.join(temporaryWorkspace, "alpha"), selectedBy: "rig" });
+
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+      expect(await workProject("bob@r")).toEqual({ error: "multiple projects are declared; select one with --project (candidates: alpha, beta)" });
+
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n");
+      expect(await workProject("bob@r")).toEqual({ id: "alpha", root: path.join(temporaryWorkspace, "alpha"), selectedBy: "single" });
+
+      // An unreadable catalog selects nothing, and says why instead of going quiet.
+      fs.writeFileSync(catalog, "projects: alpha\n");
+      expect(await workProject("bob@r")).toEqual({ error: `${catalog} projects must each declare string id and root values` });
+    });
+
+    it("selects the seat's project from its recorded working folder (#3320)", async () => {
+      temporaryWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-whoami-work-cwd-")));
+      const catalog = path.join(temporaryWorkspace, "workspace.yaml");
+      for (const project of ["alpha", "beta"]) fs.mkdirSync(path.join(temporaryWorkspace, project, "src"), { recursive: true });
+      fs.writeFileSync(catalog, "projects:\n  - id: alpha\n    root: alpha\n  - id: beta\n    root: beta\n");
+      const seats = createDb();
+      migrate(seats, ALL_MIGRATIONS);
+      seats.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'r')").run();
+      seats.prepare("INSERT INTO nodes (id, rig_id, logical_id, cwd) VALUES ('node-1', 'rig-1', 'bob', ?)")
+        .run(path.join(temporaryWorkspace, "beta", "src"));
+      seats.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s-1', 'node-1', 'bob@r', 'running')").run();
+      try {
+        app = buildApp({
+          eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox, db: seats,
+          settingsStore: { resolveOne: (key) => ({ value: key === "workspace.catalog_path" ? catalog : temporaryWorkspace }) },
+        });
+        const body = (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as { workProject?: unknown };
+        expect(body.workProject).toEqual({ id: "beta", root: path.join(temporaryWorkspace, "beta"), selectedBy: "cwd" });
+      } finally {
+        seats.close();
+      }
     });
 
     it.each([

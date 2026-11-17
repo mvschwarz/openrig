@@ -1740,6 +1740,17 @@ describe("GET /api/slices observed queue counts", () => {
     expect(await invalid.json()).toMatchObject({ error: "filter_invalid" });
   });
 
+  it("#2727 separates in-place non-delivery closed slices (?filter=closed) from ?filter=done and ?filter=active", async () => {
+    addSlice("alpha", "shipping", "delivered", "done");
+    addSlice("alpha", "shipping", "deferred", "closed-deferred");
+    addSlice("alpha", "shipping", "superseded", "closed-superseded");
+    addSlice("alpha", "shipping", "live", "active");
+    const { app } = route();
+    expect((await list(app, "?filter=done")).map((s) => s.name)).toEqual(["delivered"]);
+    expect((await list(app, "?filter=active")).map((s) => s.name)).toEqual(["live"]);
+    expect((await list(app, "?filter=closed")).map((s) => s.name).sort()).toEqual(["deferred", "superseded"]);
+  });
+
   it.each([false, true])("counts all eight states only in the exact project/mission (explicit projectId=%s)", async explicit => {
     const dir = addSlice("alpha", "shipping", "shared", "shipped");
     addSlice("beta", "shipping", "shared");

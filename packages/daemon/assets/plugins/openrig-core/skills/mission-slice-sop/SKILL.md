@@ -117,6 +117,6 @@ is likely a harness suggestion or typed, from where the cursor is and whether th
 ## Moment-of-truth checklist
 
 - **Starting a slice?** → do you know what it's for and what done looks like? mockups attached (UI slices)? **Are you on the light path?** (You are, unless the mission owner assigned the overlay.)
-- **Finishing a slice?** → does `PROOF.md` say what you actually verified, by effect, including what is NOT covered? `PROGRESS.md` updated? mission `NOTES.md` refreshed? handed off via `rig queue handoff`?
+- **Finishing a slice?** → does `PROOF.md` say what you actually verified, by effect, including what is NOT covered? `PROGRESS.md` updated? mission `NOTES.md` refreshed? To close a delivered slice in place without moving the slice or its `proof/` directory (accepted judgments still require unchanged item text, policy, and cited evidence bytes), run `rig scope slice close <slice> --in-place --reason delivered` (moving to `closed/` remains the default when `--in-place` is omitted). Handed off via `rig queue handoff`?
 - **Compacting?** → file your state in mission `NOTES.md`; on restore, read it plus the active slice's `SPEC.md`, `PROGRESS.md`, and `PROOF.md`.
 - **Starting on a mission?** → read mission `SPEC.md`, `NOTES.md`, and the conventions SSOT.

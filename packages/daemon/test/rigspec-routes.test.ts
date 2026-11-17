@@ -74,6 +74,19 @@ describe("Rigspec export routes", () => {
       .toEqual([{ logicalId: "dev.old", reason: "source unavailable" }]);
   });
 
+  it("names an unreadable claude_auto_mode in the export warnings header of both formats, and exports without it", async () => {
+    const rig = rigRepo.createRig("auto-mode-export");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    db.prepare("UPDATE nodes SET claude_auto_mode_json='broken' WHERE id=?").run(node.id);
+    const warning = [{ logicalId: "worker", reason: "claude_auto_mode can't be read; not carried" }];
+    for (const path of ["spec", "spec.json"]) {
+      const response = await app.request(`/api/rigs/${rig.id}/${path}`);
+      expect(response.status).toBe(200);
+      expect(JSON.parse(decodeURIComponent(response.headers.get("X-OpenRig-Export-Warnings")!))).toEqual(warning);
+      expect(await response.text()).not.toMatch(/claude_auto_mode:|"claudeAutoMode"/);
+    }
+  });
+
   it("GET /api/rigs/:rigId/spec -> 200 + YAML content-type", async () => {
     const rig = rigRepo.createRig("r99");
     rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
@@ -241,6 +254,39 @@ describe("Rigspec export routes", () => {
 
     const res = await app.request(`/api/rigs/${rig.id}/spec`);
     expect(res.status).toBe(500);
+  });
+
+  it("#3253: a seat's unreadable process_limits exports the rest of the rig and names the seat, on YAML and JSON, flat and pod-aware", async () => {
+    const flat = rigRepo.createRig("limits-flat");
+    const flatBad = rigRepo.addNode(flat.id, "worker", { runtime: "codex", cwd: ".", processLimits: { tasksMax: 512 } });
+    rigRepo.addNode(flat.id, "capped", { runtime: "codex", cwd: ".", processLimits: { tasksMax: 64 } });
+    const podded = rigRepo.createRig("limits-pod");
+    const pod = new PodRepository(db).createPod(podded.id, "dev", "Dev");
+    const podBad = rigRepo.addNode(podded.id, "dev.impl", { runtime: "codex", podId: pod.id, agentRef: "local:agents/impl", profile: "default",
+      cwd: ".", processLimits: { tasksMax: 512 } });
+    rigRepo.addNode(podded.id, "dev.qa", { runtime: "codex", podId: pod.id, agentRef: "local:agents/qa", profile: "default",
+      cwd: ".", processLimits: { tasksMax: 64 } });
+    for (const [rig, bad, seat] of [[flat, flatBad, "worker"], [podded, podBad, "dev.impl"]] as const) {
+      db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", bad.id);
+      const warning = [{ logicalId: seat, reason: "process_limits can't be read; not carried" }];
+      // these fixture seats have no recorded source, so the pod-aware rig also names their member startup
+      const limitWarnings = (res: Response) => (JSON.parse(decodeURIComponent(res.headers.get("X-OpenRig-Export-Warnings")!)) as
+        Array<{ logicalId: string; reason: string }>).filter((w) => w.reason.startsWith("process_limits"));
+      const yamlRes = await app.request(`/api/rigs/${rig.id}/spec`);
+      expect(yamlRes.status, seat).toBe(200);
+      expect(limitWarnings(yamlRes)).toEqual(warning);
+      const yaml = await yamlRes.text();
+      expect(yaml).toContain(`# Not carried: ${seat}'s process_limits, because the saved value can't be read; it stays stored as it is. ` +
+        "Fix it by re-applying the spec with process_limits: { tasks_max: <N> }, or clear it with process_limits: {}");
+      // the other seat's valid limit still exports; the unreadable one isn't invented or emptied
+      expect(yaml.split("\n").filter((line) => !line.startsWith("#") && line.includes("tasks_max:")).map((line) => line.trim()))
+        .toEqual(["tasks_max: 64"]);
+      const jsonRes = await app.request(`/api/rigs/${rig.id}/spec.json`);
+      expect(jsonRes.status, seat).toBe(200);
+      expect(limitWarnings(jsonRes)).toEqual(warning);
+      expect((await jsonRes.text()).match(/"tasksMax":\d+/g)).toEqual(['"tasksMax":64']);
+      expect(db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(bad.id)).toEqual({ process_limits: "{not json" });
+    }
   });
 });
 

@@ -183,6 +183,12 @@ With `needs-me.read` supported:
   read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
   about the open rows blocked on it (the newest 100, with `aboutTruncated: true` when there are more). An empty `about`
   isn't proof that it's about nothing: a request that names it only in its text isn't counted.
+- **Only the asks, for a badge you poll:** add `kind=action`
+  (`GET /api/attention?view=<person-id>&kind=action`). It reads only the queue's asks and parks, the items with
+  `kind: "action"`, and gives exactly the ones the full read gives for that view, with the same `revision` and `about`.
+  It skips the updates, proof judgments, mission outcomes and health the full read also builds, and `sources` says so
+  with a `kind` entry marked `partial`. `kind=update` reads the rest. A `view` naming no registered person returns its
+  `perspective` with no items, without reading anything else.
 - **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
   `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
   already reflected in it. A click that records or changes an answer emits `queue.answer_recorded` even while the set
@@ -252,8 +258,8 @@ What reads these declarations:
   seats, newest first; `?senderSession=<session>` still returns one sender's. One of the two is required; with
   both, `senderSession` is used and `rig` is ignored. `limit` defaults to 100. No event is sent when a message is delivered, so read this list to see delivery
   states.
-- **`GET /api/queue/recent-transitions`** returns at most 20 rows. A positive `limit` above 20 is capped at 20;
-  a missing, zero, negative or unparseable `limit` means 20.
+- **`GET /api/queue/recent-transitions`** returns at most 1,000 rows. A positive `limit` above 1,000 is capped at 1,000;
+  a missing, zero, negative or unparseable `limit` defaults to 20.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
   marked it from the sender identity, not from the body.
 - **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body

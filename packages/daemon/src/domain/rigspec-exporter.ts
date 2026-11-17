@@ -1,4 +1,5 @@
 import { readClaudePermissionRules } from "./claude-permission-rules.js";
+import { readClaudeAutoModeForLaunch } from "./claude-auto-mode.js";
 import { readCodexMemberPermissions } from "./codex-member-permissions.js";
 import { isLaunchWrapperRuntime } from "./launch-wrapper.js";
 import type { RigRepository } from "./rig-repository.js";
@@ -95,6 +96,26 @@ export class RigSpecExporter {
       .map((node) => node.logicalId).sort();
   }
 
+  /** Claude seats whose saved claude_auto_mode can't be read; the export leaves the block out. */
+  claudeAutoModeNotCarried(rigId: string): string[] {
+    return (this.rigRepo.getRig(rigId)?.nodes ?? [])
+      .filter((node) => node.runtime === "claude-code" && this.savedAutoMode(node.id).unreadable)
+      .map((node) => node.logicalId).sort();
+  }
+
+  /** #3253: seats whose stored process_limits can't be read. The export leaves the field out of that seat, exports the
+   *  rest of the rig, and keeps the stored value as it is. */
+  processLimitsNotCarried(rigId: string): string[] {
+    return (this.rigRepo.getRig(rigId)?.nodes ?? [])
+      .filter((node) => node.processLimitsError !== undefined)
+      .map((node) => node.logicalId).sort();
+  }
+
+  private savedAutoMode(nodeId: string): { block?: import("./claude-auto-mode.js").ClaudeAutoMode; unreadable?: boolean } {
+    const choice = readClaudeAutoModeForLaunch(this.rigRepo.db, nodeId);
+    return choice === undefined ? {} : "unreadable" in choice ? { unreadable: true } : { block: choice };
+  }
+
   exportRig(rigId: string): LegacyRigSpec | RigSpec {
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) {
@@ -147,10 +168,14 @@ export class RigSpecExporter {
       if (node.runtime === "claude-code" && node.claudeMcp) specNode.claudeMcp = node.claudeMcp;
       const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.db, node.id) : undefined;
       if (rules !== undefined) specNode.claudePermissions = rules;
+      const autoMode = node.runtime === "claude-code" ? this.savedAutoMode(node.id).block : undefined;
+      if (autoMode !== undefined) specNode.claudeAutoMode = autoMode;
       if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") specNode.claudeTokenRef = node.claudeTokenRef;
       const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.db, node.id) : undefined;
       if (envelope !== undefined) specNode.codexPermissions = envelope;
       if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) specNode.launchWrapper = node.launchWrapper;
+      // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
+      if (node.processLimits) specNode.processLimits = { tasksMax: node.processLimits.tasksMax };
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;
@@ -235,6 +260,8 @@ export class RigSpecExporter {
         if (node.advisor) member.advisor = node.advisor;
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
         if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
+        // An unreadable stored limit has no processLimits here; processLimitsNotCarried names it.
+        if (node.processLimits) member.processLimits = { tasksMax: node.processLimits.tasksMax };
         // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
         // an export carries the ones its launch passes.
         const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;
@@ -247,6 +274,8 @@ export class RigSpecExporter {
         if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
         const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.rigRepo.db, node.id) : undefined;
         if (rules !== undefined) member.claudePermissions = rules;
+        const autoMode = node.runtime === "claude-code" ? this.savedAutoMode(node.id).block : undefined;
+        if (autoMode !== undefined) member.claudeAutoMode = autoMode;
         if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") member.claudeTokenRef = node.claudeTokenRef;
         const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.rigRepo.db, node.id) : undefined;
         if (envelope !== undefined) member.codexPermissions = envelope;

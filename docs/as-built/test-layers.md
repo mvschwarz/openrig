@@ -54,6 +54,10 @@ Some package tests are gated. `OPENRIG_E2E_REAL_CODEX=1` runs two daemon e2e tes
 real Codex (they also need tmux, `codex` and `~/.codex/auth.json`, and they use provider
 credits). `OPENRIG_REAL_CLAUDE_INTEGRATION=1` enables only a placeholder: it requires
 `OPENRIG_PARENT_NATIVE_ID` and checks its format, and no real-Claude fork test exists yet.
+`OPENRIG_REAL_CLAUDE_BIN=<path to claude>` runs `claude-auto-mode-native.test.ts`. It passes a
+seat's composed `--settings` to the real `claude auto-mode config` with a fixture
+`CLAUDE_CONFIG_DIR`. It needs no login and uses no credits. Managed settings on the machine can
+add entries.
 Without tmux, some tmux tests skip and others (such as `transcript-seat-env-native.test.ts`)
 fail. The CLI's release-tag tests skip without local tags unless `CI=true`, so a green local
 run without tags has skipped them. CI installs tmux and fetches full history.
@@ -108,7 +112,7 @@ credentials are supplied.
 | `build-and-package` | ubuntu | `npm ci` and `npm run build`. Then `npm pack --dry-run` for cli, daemon and tui, with each file list uploaded as the `pack-lists` artifact. The job only records the lists; reviewers read them. |
 | `typecheck` | ubuntu | `npm run lint` |
 | `repo-checks` | ubuntu | `npm run test:repo` |
-| `package-tests` | macOS, matrix `daemon`, `cli`, `tui`, `ui` (fail-fast off) | Installs tmux, runs `npm ci` and `npm run build`. Then runs `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR` and a `sandbox-exec` profile that blocks outbound network except localhost and the job's own socket directory. `scripts/ci-macos-process-probe.mjs` runs first. |
+| `package-tests` | matrix (fail-fast off): `daemon`, `cli` on macOS; `tui`, `ui` on ubuntu | Installs tmux, runs `npm ci` and `npm run build`, then `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. On macOS, a `sandbox-exec` profile blocks outbound network except localhost and the job's own socket directory, and `scripts/ci-macos-process-probe.mjs` runs first. On ubuntu, the suite runs as the unprivileged runner user in a network namespace with loopback only, as in `linux-seat-environment`. A network namespace does not confine pathname Unix sockets, so this is not the macOS sandbox. Each leg reports as `package-tests (<pkg>)`. |
 | `linux-seat-environment` | ubuntu | Builds all packages, then runs `seat-env-parent-session.integration.test.ts` with real CLI, daemon, tmux and stub seats. A network namespace has loopback only; tests run as the unprivileged runner user under `env -i` with scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. Runs on pull requests and manual dispatch, like `package-tests`. |
 | `installed-scenario` | ubuntu | `bash scripts/run-pr-scenarios.sh` (fifteen container runs, described below). Uploads `dist/pr-scenarios/` as `installed-scenario-evidence`, including on failure. |
 

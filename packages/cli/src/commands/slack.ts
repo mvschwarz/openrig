@@ -344,6 +344,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       "Creates nothing: open the --url link yourself in a browser signed in to your Slack workspace.",
       "If Slack shows an empty manifest or parsing error with --url, paste the plain YAML output of",
       "`rig slack manifest` into the YAML tab in Slack's \"Create an app from an app manifest\" dialog.",
+      "If you chose --private-channel, keep it when printing the YAML.",
       "The app is private to that workspace (Socket Mode; OpenRig hosts nothing and publishes nothing).",
       "--private-channel is opt-in; without it the manifest remains public-channel-only.",
       "--json lists every requested scope and why. `rig slack verify` checks only the baseline scopes,",
