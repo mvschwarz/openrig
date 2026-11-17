@@ -280,7 +280,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     expect(fs.dirs.has(piSeatPaths(STATE_ROOT, SESSION).sessionsDir)).toBe(true);
   });
 
-  it("passes the seat's effort as --thinking for Pi; no effort => no flag; OMP never", async () => {
+  it("passes the seat's effort as --thinking for Pi and OMP only when selected", async () => {
     const run = async (Adapter: typeof PiRuntimeAdapter, effort?: string) => {
       const fs = memFs();
       const sendShellCommand = vi.fn(async (_t: string, text: string) => {
@@ -293,7 +293,8 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     };
     expect(await run(PiRuntimeAdapter, "high")).toContain("--model 'zai/glm-5.2' --thinking 'high'");
     expect(await run(PiRuntimeAdapter)).not.toContain("--thinking");
-    expect(await run(OmpRuntimeAdapter as never, "high")).not.toContain("--thinking");
+    expect(await run(OmpRuntimeAdapter as never, "medium")).toContain("--thinking 'medium'");
+    expect(await run(OmpRuntimeAdapter as never)).not.toContain("--thinking");
   });
 
   it("OPR.0.7.0.2: --usage-facts only while usage.pi_cost_facts is on, read at each launch; off by default", async () => {
@@ -515,7 +516,7 @@ describe("PiResumeAdapter", () => {
     expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
   });
 
-  it("resume passes effort as --thinking for Pi; none without; OMP never", async () => {
+  it("resume passes effort as --thinking for Pi and OMP only when selected", async () => {
     const run = async (make: (fs: ReturnType<typeof memFs>, tmux: TmuxAdapter) => PiResumeAdapter, type: string, effort?: string | null) => {
       const fs = memFs({ [SESSION_FILE]: "jsonl" });
       const sendShellCommand = vi.fn(async (_t: string, text: string) => {
@@ -531,7 +532,8 @@ describe("PiResumeAdapter", () => {
     expect(await run(resumeAdapter, "pi_session_file", "high")).toContain("--model 'zai/glm' --thinking 'high' --session");
     expect(await run(resumeAdapter, "pi_session_file")).not.toContain("--thinking");
     expect(await run(resumeAdapter, "pi_session_file", null)).not.toContain("--thinking");
-    expect(await run(omp, "omp_session_file", "high")).not.toContain("--thinking");
+    expect(await run(omp, "omp_session_file", "medium")).toContain("--thinking 'medium' --session");
+    expect(await run(omp, "omp_session_file")).not.toContain("--thinking");
   });
 
   it("fails honestly when the runner reports a DIFFERENT session file than requested", async () => {

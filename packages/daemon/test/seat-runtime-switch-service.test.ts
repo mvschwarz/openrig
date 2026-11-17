@@ -714,6 +714,7 @@ describe("live seat runtime switch", () => {
       { setting: "codex config profile", value: "fast" }, { setting: "native permission choice", value: "codex:full_bypass" }]));
     expect(plan.costs.join(" ")).toMatch(/new conversation.*isn't converted/);
     expect(plan.costs.join(" ")).toMatch(/deferred change_runtime/);
+    expect(plan.costs.join(" ")).toContain("OMP RPC (omp) and the native OMP UI (omp-tui)");
     expect(openSwitch()).toBeUndefined();
     expect(fakeTmux.createSession).not.toHaveBeenCalled();
     expect(nodeRow().runtime).toBe("codex");

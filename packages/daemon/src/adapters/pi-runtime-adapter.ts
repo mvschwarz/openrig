@@ -381,8 +381,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         stateRoot: location.stateRoot,
         cwd: binding.cwd,
         model: binding.model,
-        // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
-        thinking: this.runtime === "omp" ? undefined : binding.effort,
+        // Both Pi and OMP accept the seat's resolved effort through --thinking.
+        thinking: binding.effort,
         // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
         // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
         trust,

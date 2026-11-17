@@ -744,7 +744,7 @@ When switching into Pi with `--clear-account-home`, OpenRig restores the seat's 
 
 Pi account changes work with or without `launch_wrapper`. The wrapper receives the successor's managed Pi directory;
 it must preserve the selected credentials if you want OpenRig's account choice to apply.
-Use `rig seat set-runtime <seat> --runtime <runtime> --reason "Change provider"` with `pi`, `codex` or `claude-code` for cross-runtime switches.
+Use `rig seat set-runtime <seat> --runtime <runtime> --reason "Change provider"` with `pi`, `codex`, `claude-code`, `omp` or `omp-tui` for cross-runtime switches.
 Those resolve the target's settings afresh rather than keeping the source model or effort;
 see [runtime switching](getting-started.md#move-a-seat-to-the-other-runtime).
 
@@ -1269,6 +1269,29 @@ and the exact session file. It acknowledges a managed paste in its composer befo
 OpenRig sends Enter. Approval dialogs appear in the pane. Both OMP modes use the
 permission defaults described above. The TUI loads selected skills and hooks at
 launch. See [plugin hooks in OMP](omp-plugin-hooks.md).
+
+Both OMP modes pass an explicit seat effort to the child as `--thinking` on
+launch, runtime switch and resume. This previews a switch to RPC. Use
+`--runtime omp-tui` to preview a switch to the native terminal.
+
+```sh
+rig seat set-runtime editor@team --runtime omp --model openrouter/z-ai/glm-5.3 --effort medium --reason "Review OMP settings" --dry-run
+```
+
+At a native OMP approval menu, this Bash or Zsh command sends Down once.
+Inspect the highlighted choice before confirming it in the terminal.
+
+```sh
+rig send editor@team $'\e[B' --dangerously-interact --reason "Inspect the next choice"
+```
+
+`rig ps` shows the model in the current RPC occupant's latest successful
+assistant response, or the current native UI's selected model. A fresh UI can
+report its selection before any provider has answered.
+`rig seat history --rig <rig-id> --node-id <node-id>` also lists recorded OMP session identities
+for inspection, including before a compatible snapshot exists. Recorded
+identities describe the seat's registry entries. A captured resume choice is
+listed separately and requires a compatible snapshot.
 
 ### Terminal Nodes
 

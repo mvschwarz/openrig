@@ -162,7 +162,7 @@ const COSTS = [
   "A second process runs on the target's account until cutover.",
   "Messages sent to the seat while it switches are held, not typed; rig send says the seat is switching and until when, and they need sending again afterwards.",
   "A failed switch can leave the target runtime's prepared files (its seat storage and projections).",
-  "Codex, Claude Code and Pi runtime switches; single-pane seats only.",
+  "Single-pane seats support Codex, Claude Code, Pi, OMP RPC (omp) and the native OMP UI (omp-tui).",
 ];
 
 const PI_ACCOUNT_COSTS = [

@@ -1547,7 +1547,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     codexRollout: (threadId, sessionName, reporting) => reporting
       ? contextUsageStore.readCodexTranscriptPath(threadId)
       : contextUsageStore.readCodexAndNormalize({ threadId, sessionName }).transcriptPath,
-    piRunner: (sessionName) => piAdapter.readRunnerSidecar(sessionName),
+    piRunner: (sessionName, runtime) => (runtime === "omp" ? ompAdapter : piAdapter).readRunnerSidecar(sessionName),
+    ompTuiState: sessionName => ompTuiAdapter.readSeatState(sessionName),
   });
   const { HealthProjectionService, LiveContextHealthSource } = await import("./domain/health-detectors.js");
   const healthSettingsStore = new ContextPackSettingsStore();

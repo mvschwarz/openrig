@@ -571,7 +571,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
     .option("--snapshot-id <id>", "Validate a reference returned by this list")
     .option("--history-session-id <id>", "Validate a reference returned by this list")
     .option("--json", "Print the daemon response as JSON")
-    .description("List or validate captured histories eligible for a resume attempt (read-only)")
+    .description("List captured resume choices and recorded OMP sessions, or validate a captured choice (read-only)")
     .action(async (opts: { rig: string; nodeId: string; snapshotId?: string; historySessionId?: string; json?: boolean }) => {
       if (!!opts.snapshotId !== !!opts.historySessionId) {
         console.error("Supply both --snapshot-id and --history-session-id to validate a history.");
@@ -587,10 +587,11 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
         : await client.get<Record<string, unknown>>(path, { headers: terminalAuthHeaders() });
       if (opts.json || response.status >= 400) console.log(JSON.stringify(response.data, null, 2));
       else {
-        const body = response.data as { snapshotId?: string; history?: { historySessionId: string; resumeType: string; tokenState: string }; histories?: Array<{ historySessionId: string; resumeType: string; tokenState: string }> };
+        const body = response.data as { snapshotId?: string | null; history?: { historySessionId: string; resumeType: string; tokenState: string }; histories?: Array<{ historySessionId: string; resumeType: string; tokenState: string }>; recordedHistories?: Array<{ historySessionId: string; resumeType: string }> };
         console.log(`Current snapshot: ${body.snapshotId ?? "none"}`);
         for (const item of body.history ? [body.history] : body.histories ?? []) console.log(`${item.historySessionId}  ${item.resumeType}  token: ${item.tokenState}`);
         if (!body.history && !body.histories?.length) console.log("No eligible captured histories.");
+        for (const item of body.recordedHistories ?? []) console.log(`${item.historySessionId}  ${item.resumeType}  recorded session (inspection only)`);
       }
       if (response.status >= 400) process.exitCode = response.status >= 500 ? 2 : 1;
     });
@@ -1366,7 +1367,7 @@ resume/successor launch reads it at call time. Examples:
     .option("--note <text>", "With --confirm: what you'll do first")
     .option("--recover", "Finish an interrupted switch from its record")
     .option("--json", "JSON output for agents")
-    .description("Move a live Codex, Claude Code or Pi seat to another runtime, successor first")
+    .description("Move a live Codex, Claude Code, Pi or OMP seat to another runtime, successor first")
     .addHelpText("after", `
 The seat keeps its address, connections, queue rows and claims. Its successor
 starts on the target runtime beside the current occupant, reads a handover, and
@@ -1380,7 +1381,8 @@ later converge reports a deferred change_runtime); the source runtime's model,
 effort, Codex profile and native permission choice are cleared, not mapped; two
 processes run until cutover; messages sent to the seat during the switch are
 held, not typed, and need sending again afterwards.
-Codex, Claude Code and Pi, single-pane seats only. --dry-run lists the details.
+Single-pane seats support Codex, Claude Code, Pi, OMP RPC (omp) and the native OMP UI (omp-tui).
+--dry-run lists the details.
 A seat that has never started has no pane to switch: declare the other runtime for it in its rig spec and bring the team
 up again from that spec. That's a new generation of the seat, without this seat's edges, settings or queued work.
 --clear-account-home returns to configured member/rig/daemon/native selection; it does not restore historical credentials.

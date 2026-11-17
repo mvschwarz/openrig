@@ -2986,7 +2986,7 @@ export class RestoreOrchestrator {
     if (ompResume?.canResume(resumeType, resumeToken)) {
       const result = ompResume === this.ompTuiResume
         ? await this.ompTuiResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort, launchWrapper)
-        : await ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
+        : await ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort);
       if (result.ok) {
         for (const note of result.warnings ?? []) warnings?.push(`${sessionName}: ${note}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);

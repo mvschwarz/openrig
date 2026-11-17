@@ -139,6 +139,45 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     return seat;
   }
 
+  it.each([["\x1b[B", "Down"], ["\x1bOA", "Up"]])("sends the named OMP menu key for %j once without pasting or submitting", async (sequence, key) => {
+    const seat = seedOmp();
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification", subtype: "permission_prompt" });
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }));
+    const result = await transport.send(seat, sequence, { dangerouslyInteract: true, verify: true, reason: "Inspect the next menu choice" });
+    expect(result).toMatchObject({ ok: true, sent: true, verified: false, promptInteraction: "unverified" });
+    expect(overrideEvents()).toHaveLength(1);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys.mock.calls).toHaveLength(1);
+    expect(sendKeys).toHaveBeenCalledWith(seat, [key], expect.any(Function), expect.any(Object));
+  });
+
+  it("recognizes the OMP approval choices when the activity hook has aged out", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    const menu = ["│ ❯ Approve │", "│   Approve bash for this session │", "│   Deny │",
+      "│ ↑/↓ choose · enter select · ctrl+y approve · esc deny · type to deny and steer │"].join("\n");
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => menu, sendText, sendKeys }),
+      { now: () => new Date(Date.now() + 600_000) });
+    expect(await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" }))
+      .toMatchObject({ ok: true, promptInteraction: "unverified" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps OMP navigation out of ordinary sends, non-menu prompts and combined input", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ sendText, sendKeys }));
+    const opts = { dangerouslyInteract: true, reason: "Inspect a menu choice" };
+    expect(await transport.send(seat, "\x1b[B", opts)).toMatchObject({ ok: false, sent: false });
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification", subtype: "permission_prompt" });
+    expect(await transport.send(seat, "\x1b[B")).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(await transport.send(seat, "\x1b[B\r", opts)).toMatchObject({ ok: false, sent: false });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("waits for OMP ingestion beyond the old delay before submitting a message", async () => {
     const seat = seedOmp();
     const { sendText, sendKeys } = spies();

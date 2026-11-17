@@ -141,6 +141,8 @@ export function createSeatReporter(options) {
       writeFile(seat.statePath, JSON.stringify({
         ready: !exited,
         launchId: seat.launchId ?? undefined,
+        nodeId: seat.nodeId ?? undefined,
+        generation: seat.generation ?? undefined,
         sessionFile: session.file ?? undefined,
         sessionId: session.id ?? undefined,
         protocol: SEAT_PROTOCOL,

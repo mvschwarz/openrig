@@ -89,7 +89,7 @@ describe("OMP seat extension: what the daemon reads from a seat", () => {
     const { reporter, posts, files, state } = harness();
     reporter.sessionStart(ompContext());
     await reporter.settled();
-    expect(state()).toMatchObject({ ready: true, launchId: "attempt-1", sessionFile, sessionId: "s1", auth: "ok", model: "anthropic/claude-example", pid: 4242, capabilities: { approvalDecisions: false, subagentStop: false, hookTimeoutMs: 25000, shutdownHookTimeoutMs: 1500 } });
+    expect(state()).toMatchObject({ ready: true, launchId: "attempt-1", nodeId: seat.nodeId, generation: seat.generation, sessionFile, sessionId: "s1", auth: "ok", model: "anthropic/claude-example", pid: 4242, capabilities: { approvalDecisions: false, subagentStop: false, hookTimeoutMs: 25000, shutdownHookTimeoutMs: 1500 } });
     expect(posts.find((post) => post.hookEvent)).toMatchObject({
       hookEvent: "Stop", subtype: "idle_heartbeat", livenessSeconds: IDLE_LIVENESS_SECONDS,
       sessionName: "dev-omp@rig", nodeId: "node-1", generation: "gen-1", runtime: "omp-tui", sequence: 1,

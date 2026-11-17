@@ -24,14 +24,14 @@ function lifecycleDeps(): LifecycleDeps {
 
 describe("rig seat history", () => {
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = 0; });
-  async function run(args: string[], client: { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> }, lifecycle = lifecycleDeps()) {
+  async function run(args: string[], client: { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> }, lifecycle = lifecycleDeps(), json = true) {
     vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", "test-terminal-token");
     const deps: StatusDeps = { lifecycleDeps: lifecycle, clientFactory: () => client as unknown as DaemonClient };
     const lines: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...parts: unknown[]) => { lines.push(parts.join(" ")); });
     vi.spyOn(console, "error").mockImplementation(() => {});
     const program = new Command(); program.exitOverride(); program.addCommand(seatCommand(deps));
-    await program.parseAsync(["node", "rig", "seat", "history", "--rig", rigId, "--node-id", nodeId, "--json", ...args]);
+    await program.parseAsync(["node", "rig", "seat", "history", "--rig", rigId, "--node-id", nodeId, ...(json ? ["--json"] : []), ...args]);
     return lines;
   }
 
@@ -42,6 +42,14 @@ describe("rig seat history", () => {
     expect(client.get).toHaveBeenCalledWith(`/api/startup/${rigId}/nodes/${nodeId}/history`, { headers: { Authorization: "Bearer test-terminal-token" } });
     expect(client.post).not.toHaveBeenCalled();
     expect(JSON.parse(lines.join("\n"))).toEqual(body);
+  });
+
+  it("shows a recorded OMP session as inspection-only before a compatible snapshot exists", async () => {
+    const data = { ok: true, snapshotId: null, histories: [], recordedHistories: [{ historySessionId, resumeType: "omp_tui_session_file" }] };
+    const client = { get: vi.fn(async () => ({ status: 200, data })), post: vi.fn() };
+    expect(await run([], client, lifecycleDeps(), false)).toEqual(["Current snapshot: none", "No eligible captured histories.",
+      `${historySessionId}  omp_tui_session_file  recorded session (inspection only)`]);
+    expect(client.post).not.toHaveBeenCalled();
   });
 
   it("sends both exact references back for server validation", async () => {

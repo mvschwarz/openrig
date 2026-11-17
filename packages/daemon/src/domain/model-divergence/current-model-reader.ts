@@ -5,6 +5,7 @@ import { realpathSync, statSync } from "node:fs";
 import type { SessionRegistry } from "../session-registry.js";
 import type { SeatIdentityStore } from "../seat-identity-store.js";
 import type { ContextUsageStore } from "../context-usage-store.js";
+import type { OmpSeatState } from "../../adapters/omp-seat-protocol.js";
 import { parseSqliteUtcMs } from "../sqlite-time.js";
 import { ProcessCensus } from "../process-census.js";
 import {
@@ -21,7 +22,7 @@ import type { EffectiveModelRead, PinnedSeat } from "./model-divergence-monitor.
 export interface ModelObservation {
   status: "observed" | "unknown";
   model: string | null;
-  source: NativeModelObservation["source"] | "runner_reported" | null;
+  source: NativeModelObservation["source"] | "omp-tui-selection" | "omp-assistant-response" | "runner_reported" | null;
   observedAt: string | null;
   generation: string | null;
   reason: string | null;
@@ -39,7 +40,8 @@ interface Deps {
   identities: Pick<SeatIdentityStore, "getForNode">;
   context: Pick<ContextUsageStore, "readSidecar">;
   codexRollout: (threadId: string, sessionName: string, reporting: boolean) => string | null;
-  piRunner: (sessionName: string) => PiOccupantRecordInput["runner"];
+  piRunner: (sessionName: string, runtime?: "pi" | "omp") => PiOccupantRecordInput["runner"];
+  ompTuiState?: (sessionName: string) => OmpSeatState | null;
   native: CurrentGenerationDeps;
   census: ProcessCensus;
   readAllPaneProcesses?: () => Promise<Map<string, { pid: number | null }> | null>;
@@ -79,7 +81,7 @@ export class CurrentModelReader {
         identity: this.deps.identities.getForNode(seat.nodeId), sidecar: sidecar.ok ? sidecar.data : null,
       }, native, (path) => { try { return statSync(path).isFile(); } catch { return false; } });
     }
-    if (seat.runtime === "pi") return this.selectPi(seat, native);
+    if (seat.runtime === "pi" || (reporting && seat.runtime === "omp")) return this.selectPi(seat, native);
     return { ok: false, reason: "runtime has no supported native model reader" };
   }
 
@@ -93,7 +95,8 @@ export class CurrentModelReader {
   }
 
   private selectPi(seat: Seat, native: CurrentGenerationDeps): Promise<PiRecordSelection> {
-    return resolveIdentityVerifiedPiRecord({ ...this.occupant(seat), runner: this.deps.piRunner(seat.sessionName) }, native,
+    const runtime = seat.runtime === "omp" ? "omp" : "pi";
+    return resolveIdentityVerifiedPiRecord({ ...this.occupant(seat), runtime, runner: this.deps.piRunner(seat.sessionName, runtime) }, native,
       (path) => { try { return realpathSync(path); } catch { return null; } });
   }
 
@@ -189,7 +192,7 @@ export class CurrentModelReader {
     const listProcesses = this.processCensus.cycleLister();
     if (!this.deps.readAllPaneProcesses) {
       // Native readers keep their existing per-seat checks; report callbacks finish after every peer's await.
-      const observations = await Promise.all(nodes.map(n => ["claude-code", "codex", "pi"].includes(n.runtime ?? "")
+      const observations = await Promise.all(nodes.map(n => ["claude-code", "codex", "pi", "omp", "omp-tui"].includes(n.runtime ?? "")
         ? this.observe(n, listProcesses) : this.prepare(n, { ...this.deps.native, listProcesses })));
       return observations.map(p => "finish" in p ? p.finish(null) : p);
     }
@@ -221,8 +224,8 @@ export class CurrentModelReader {
     const unknown = (reason: string) => unknownModelObservation(reason, generation);
     if (node.sessionStatus !== "running" || !node.canonicalSessionName) return unknown("seat-not-running");
     const sessionName = node.canonicalSessionName;
-    if (!["claude-code", "codex", "pi"].includes(node.runtime ?? "")) {
-      if (!node.runtime || ["omp", "stub", "terminal"].includes(node.runtime) || !this.deps.runnerObservations) return unknown("unsupported-runtime");
+    if (!["claude-code", "codex", "pi", "omp", "omp-tui"].includes(node.runtime ?? "")) {
+      if (!node.runtime || ["stub", "terminal"].includes(node.runtime) || !this.deps.runnerObservations) return unknown("unsupported-runtime");
       const policy = { freshnessMs: FRESHNESS_THRESHOLD_MS, runtime: node.runtime };
       const initial = this.deps.runnerObservations.getRunnerObservation(node.nodeId, "model", policy);
       if (!initial.report) return unknown(initial.reason?.replaceAll("_", "-") ?? "no-data");
@@ -243,6 +246,26 @@ export class CurrentModelReader {
     try {
       const pid = await native.getPanePid(binding.tmuxPane);
       if (!pid) return unknown("pane-unavailable");
+      if (node.runtime === "omp-tui") {
+        const read = () => this.deps.ompTuiState?.(sessionName);
+        const state = read();
+        if (!state?.ready || state.exited || !state.launchId || !state.pid || state.nodeId !== node.nodeId || state.generation !== generation)
+          return unknown("record-identity-missing-or-ambiguous");
+        const process = (await native.listProcesses()).find(row => row.pid === state.pid && (row.pid === pid || row.ppid === pid));
+        const started = Date.parse(process?.startedAt ?? "");
+        if (!Number.isFinite(started)) return unknown("record-identity-missing-or-ambiguous");
+        return { pane: binding.tmuxPane, finish: (finalPid, unavailableReason = "pane-unavailable") => {
+          if (!this.occupantUnchanged(node.nodeId, sessionName, generation, binding, pid, finalPid)) return unknown("occupant-changed-during-read");
+          if (!finalPid) return unknown(unavailableReason);
+          const latest = read();
+          if (!latest?.ready || latest.exited || latest.pid !== state.pid || latest.launchId !== state.launchId ||
+              latest.nodeId !== node.nodeId || latest.generation !== generation) return unknown("occupant-changed-during-read");
+          if (typeof latest.model !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+\-]{0,199}$/.test(latest.model)) return unknown("model-identifier-unreadable");
+          const at = Date.parse(latest.updatedAt), now = (this.deps.now ?? Date.now)();
+          if (!Number.isFinite(at) || at < Math.max(boot, started) || at > now || now - at >= FRESHNESS_THRESHOLD_MS) return unknown("model-sample-not-current");
+          return { status: "observed", model: latest.model, source: "omp-tui-selection", observedAt: latest.updatedAt, generation, reason: null };
+        } };
+      }
       // Codex uses the exact registered pane rather than a same-name target. Claude/Pi additionally
       // apply their existing identity/sidecar checks inside select().
       const reportingNative = { ...native,
@@ -265,7 +288,7 @@ export class CurrentModelReader {
         const at = Date.parse(fact.observedAt);
         if (at <= boot) return unknown("record-predates-current-occupant");
         if (at > (this.deps.now ?? Date.now)()) return unknown("record-time-in-future");
-        return { status: "observed", model: fact.model, source: fact.source, observedAt: fact.observedAt, generation, reason: null };
+        return { status: "observed", model: fact.model, source: node.runtime === "omp" ? "omp-assistant-response" : fact.source, observedAt: fact.observedAt, generation, reason: null };
       } };
     } catch { return unknown("native-read-unavailable"); }
   }

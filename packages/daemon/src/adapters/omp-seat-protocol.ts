@@ -47,6 +47,8 @@ export function ompSeatPaths(stateRoot: string, sessionName: string): OmpSeatPat
 /** What the seat extension writes. The first fields are the ones every reader of a Pi-family sidecar already
  *  understands (ready, launchId, sessionFile, sessionId, exited); the rest are OMP's own. */
 export interface OmpSeatState extends PiRunnerState {
+  nodeId?: string;
+  generation?: string;
   capabilities?: { approvalDecisions: boolean; subagentStop: boolean; hookTimeoutMs: number; shutdownHookTimeoutMs: number };
   inputProtocol?: number;
   inputReceipt?: { sequence: number; requestId: string; sha256: string };

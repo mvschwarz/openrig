@@ -810,6 +810,18 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     return { state: "unknown", reason: "empty_capture", evidence: null };
   }
 
+  if (options.runtime === "omp-tui") {
+    // A permission can outlast the hook freshness window. OMP draws its choices directly above its
+    // navigation footer. The draft/steering footer has different keys and cannot navigate this list.
+    const rows = lastNonBlank.slice(-20);
+    const footer = rows.map(row => /\bchoose · [^·]+ select · [^·]+ approve · [^·]+ deny\b/u.test(row)).lastIndexOf(true);
+    const choiceLabel = (row: string) => row.replace(/^[^\p{L}\p{N}]+|[\s│┃║]+$/gu, "");
+    if (footer >= 2 && choiceLabel(rows[footer - 1]!) === "Deny" &&
+        rows.slice(Math.max(0, footer - 12), footer - 1).some(row => /^Approve(?: Once)?$/.test(choiceLabel(row)))) {
+      return { state: "attention", reason: "permission_prompt", evidence: "OMP approval menu" };
+    }
+  }
+
   const piConfirmation = findCurrentPiDialog(paneContent);
   if (piConfirmation) return { state: "attention", reason: "selection_prompt", evidence: piConfirmation };
 
@@ -3859,6 +3871,10 @@ export class SessionTransport {
     let draftAdvised = false;
     // Broadcast can carry wait + override: after waiting, it still uses the same deliberate-input boundary.
     const promptOverride = Boolean(opts?.dangerouslyInteract);
+    // An OMP menu distinguishes a terminal arrow key from its escape bytes pasted into the editor.
+    const ompArrow = runtime === "omp-tui" && promptOverride && /\x1b(?:\[|O)[AB]/.test(text);
+    const arrowKey = ompArrow && text.length === 3
+      ? (text.endsWith("A") ? "Up" : "Down") : undefined;
     // Positive evidence of an interactive prompt: there an Enter after a consumed answer lands in the next prompt.
     let overrideAtPrompt = false;
     if (waitForIdleMs === undefined || promptOverride) {
@@ -3873,6 +3889,10 @@ export class SessionTransport {
       // Only bypassing a positive picker requires a successful audit; other states already sent.
       if (opts?.dangerouslyInteract) {
         overrideAtPrompt = readiness.state === "needs_input";
+        if (ompArrow && (!arrowKey || !overrideAtPrompt || !["permission_prompt", "permission_request", "selection_prompt"].includes(readiness.reason))) {
+          return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "omp_menu_navigation_unavailable",
+            error: "OMP menu navigation requires a visible interactive prompt and one Up or Down key per send. Inspect the native terminal." };
+        }
         if (readiness.state === "needs_input" && (!opts.reason || opts.reason.trim().length === 0)) {
           return {
             ok: false,
@@ -4070,6 +4090,10 @@ export class SessionTransport {
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
+        if (arrowKey) return this.tmuxAdapter.sendKeys(sessionName, [arrowKey], () => {
+          if (checkOriginal) originalCheck?.assertCurrent();
+          beforePaste?.();
+        }, { beforeKeys: async () => { await checkOriginal?.(); await preserveInput?.(); } });
         if (checkOriginal) return this.tmuxAdapter.sendText(sessionName, text, () => { beforeOriginalInput(); beforePaste?.(); }, {
           ...(promptOverride ? { bracketed: false } : {}), beforePaste: async () => { await overrideBeforePaste?.(); await checkOriginal(); if (preserveInput) await preserveInput(); },
         });
@@ -4096,10 +4120,13 @@ export class SessionTransport {
         // The adapter's draft checks run before the paste (only file/buffer preparation precedes them), and its
         // after-paste observation cannot fail the write, so a draft_* receipt proves the target input was never reached.
         inputPhase: policyRefusal ? "not_reached" as const : "attempted" as const,
-        error: `Failed to send text to '${sessionName}': ${textResult.message}`,
+        error: `Failed to send ${arrowKey ?? "text"} to '${sessionName}': ${textResult.message}`,
         ...(waitMode || policyRefusal ? { sent: false, ...waitEvidence } : {}),
       });
     }
+    if (arrowKey) return observe({ ok: true, sessionName, sent: true, verified: false,
+      outcome: "rendered-unconfirmed", promptInteraction: "unverified",
+      warning: `Sent the ${arrowKey} key once. Inspect the highlighted OMP choice in the terminal. No Enter was sent.` });
     try { opts?.onInputEffect?.("pasted", { text }); } catch { /* Observation cannot change a completed paste. */ }
 
     // From the successful paste to Enter the text may sit in the seat's input. Any throw in this span is
