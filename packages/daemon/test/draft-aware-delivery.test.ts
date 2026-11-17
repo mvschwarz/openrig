@@ -1532,6 +1532,21 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
     expect(f.bodies.a).toBe("");
   });
 
+  // The label carries only its paste ID, so one drawn after notePasted's read could be a person's replacement single
+  // line: it is held, as on main, while a counted label drawn late is still recognized (the delayed-label test above).
+  it("holds a count-less label first drawn after notePasted's read, with no Enter", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `reminder: ${"x".repeat(1190)}`;
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      frame(f.bodies.a === text ? (readsAfterPaste++ === 0 ? "" : "[Pasted text #1]") : f.bodies.a ?? ""));
+    const result = await f.send("late-count-less", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe(text);
+  });
+
   it.each([["a single-line label for a multi-line paste", "one\ntwo\nthree", "[Pasted text #1]"],
     ["a counted label for a single-line paste", `reminder: ${"x".repeat(1190)}`, "[Pasted text #1 +2 lines]"]])(
     "does not submit %s", async (_case, text, label) => {
