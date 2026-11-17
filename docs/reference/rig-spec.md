@@ -1251,9 +1251,12 @@ members:
 
 - A short POSIX shell check reads the status line input before Node. It skips the collector, printing nothing (the
   collector prints nothing either), for an update that comes fewer than N seconds after the last collection, in the same
-  conversation, with the context not lower than then, and only when that collection wrote its reading. A drop in the
-  context (a compaction) or a new conversation collects at once. No throttle is the default, and an unthrottled seat
-  launches exactly as before.
+  conversation, with the context not below the last collected reading, and only when that collection wrote its reading
+  for this conversation. A reading below the last collected one (a compaction) or a new conversation collects at once;
+  so does an update whose session id or `context_window.used_percentage` the check can't read. The comparison is with
+  the last collected reading, not the last one seen: after a skipped rise, a compaction that lands above the last
+  collected reading waits for the interval, and until then the reading kept is the lower, earlier one. No throttle is
+  the default, and an unthrottled seat launches exactly as before.
 - The reading keeps its real sample time. Nothing rewrites it on a skipped run, so `rig ps`, the context watch and
   managed compaction see its true age, and the compaction request names the time of the sample it acted on.
 - What it costs: while the seat works, the kept reading (and the provider rate limits recorded with it) can be up to N
@@ -1268,7 +1271,9 @@ members:
 - It takes effect at the seat's next launch, resume or restore. A relaunch that reuses the running process's own
   launch settings (a provider or account switch that keeps them) keeps its throttle as it was. `rig seat
   set-statusline-throttle <seat> --seconds N` (or `--clear`) changes it without editing the spec; `rig export` carries
-  the stored value.
+  the stored value. A launch rebuilt from the spec (a persisted fresh launch, or the fresh branch of a restore) writes
+  the spec's `statusline_throttle` again over a later `rig seat set-statusline-throttle`, as it does for
+  `process_limits`; change the spec too to keep the new value there.
 
 ### Pi (`runtime: pi`)
 

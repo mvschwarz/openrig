@@ -632,7 +632,10 @@ seatRoutes.post("/set-effort/node/:nodeId", setEffortHandler);
 
 // #3416 (3): save (or, with clear: true, remove) a Claude seat's status line throttle for its next launch.
 const setStatuslineThrottleHandler = async (c: Context) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  // A body that isn't a JSON object (null, an array, a number) reads as an empty one: the check below answers 400.
+  const parsed: unknown = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown> : {};
   const clear = body["clear"] === true;
   if (clear === (body["seconds"] !== undefined)) {
     return c.json({ ok: false, code: "invalid_statusline_throttle", message: "Pass seconds or clear, exactly one." }, 400);

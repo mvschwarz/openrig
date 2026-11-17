@@ -1117,9 +1117,10 @@ Claude Code runs the seat's status line on each update of the conversation, and
 each run starts Node for OpenRig's context collector. With a throttle, a short
 shell check reads the update first and skips the collector when the last
 collection was under <n> seconds ago in the same conversation and the context
-hasn't dropped since; a compaction or a new conversation collects at once. No
-throttle is the default. The spec key is statusline_throttle (0 clears it on a
-re-apply).
+isn't below that collection's reading; a reading below the last collected one
+(a compaction), a new conversation, or an update the check can't read collects
+at once. No throttle is the default. The spec key is statusline_throttle (0
+clears it on a re-apply).
 
 What a throttle costs: while the seat works, the context reading OpenRig keeps
 can be up to <n> seconds behind, so managed compaction can see the seat cross its
@@ -1133,7 +1134,10 @@ The throttle goes into the seat's own launch settings, never into the folder's
 .claude/settings.local.json; a status line command of your own there wins, and the
 launch says the throttle wasn't applied. It takes effect at the seat's next launch,
 resume or restore; the running process is unchanged, and so is a relaunch that
-reuses its launch settings (a provider or account switch that keeps them).
+reuses its launch settings (a provider or account switch that keeps them). A
+launch rebuilt from the spec (a persisted fresh launch, or a restore's fresh
+branch) writes the spec's statusline_throttle again over this value, as it does
+for process limits: change the spec too to keep it.
 Examples:
   rig seat set-statusline-throttle dev-impl@my-rig --seconds 30 --reason "90 seats on one host"
   rig seat set-statusline-throttle dev.impl --clear --reason "watching context closely" --json`)

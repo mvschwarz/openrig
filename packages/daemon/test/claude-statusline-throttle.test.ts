@@ -28,7 +28,9 @@ function seat(sessionName = "dev-impl@team") {
   const collector = path.join(root, "collector.cjs");
   fs.writeFileSync(collector, `const fs = require("node:fs"); let input = ""; process.stdin.on("data", c => { input += c; });
 process.stdin.on("end", () => { fs.appendFileSync(${JSON.stringify(runs)}, JSON.stringify(input) + "\\n");
-  if (!input.includes("no-write")) fs.writeFileSync(${JSON.stringify(base + ".json")}, "{}"); });`);
+  const id = /"session_id":"([^"]*)"/.exec(input), used = /"used_percentage":([0-9.]+)/.exec(input);
+  if (!input.includes("no-write")) fs.writeFileSync(${JSON.stringify(base + ".json")},
+    JSON.stringify({ context_window: { used_percentage: used ? Number(used[1]) : null }, session_id: id ? id[1] : null })); });`);
   const command = (seconds: number) => throttledCollectorCommand({
     collectorCommand: managedClaudeNodeCommand(process.execPath, collector, contextDir, path.join(root, "provider-usage")),
     contextDir, sessionName, seconds,
@@ -36,17 +38,18 @@ process.stdin.on("end", () => { fs.appendFileSync(${JSON.stringify(runs)}, JSON.
   const payload = (sessionId: string, used: number | null, extra = "") =>
     `{"session_id":"${sessionId}","session_name":"x","context_window":{"context_window_size":200000,"used_percentage":${used}},`
     + `"rate_limits":{"five_hour":{"used_percentage":12}}${extra}}`;
-  const run = (seconds: number, input = payload("conv-1", 37.4)) => {
-    const r = spawnSync("/bin/sh", ["-c", command(seconds)], { encoding: "utf8", timeout: 10_000, input,
+  const run = (seconds: number, input = payload("conv-1", 37.4), shell: string[] = ["/bin/sh"]) => {
+    const r = spawnSync(shell[0]!, [...shell.slice(1), "-c", command(seconds)], { encoding: "utf8", timeout: 10_000, input,
       env: { PATH: path.dirname(process.execPath) + ":/usr/bin:/bin" } });
     return { status: r.status, stdout: r.stdout, stderr: r.stderr };
   };
   const inputs = () => (fs.existsSync(runs) ? fs.readFileSync(runs, "utf8").trim().split("\n").map(line => JSON.parse(line) as string) : []);
   const now = () => Math.floor(Date.now() / 1000);
-  /** An earlier collection: the stamp, then the sidecar it wrote (not older than the stamp). */
+  /** An earlier collection: the stamp, then the sidecar it wrote (not older than the stamp, naming its conversation as
+   *  the collector's does). */
   const collectedBefore = (secondsAgo: number, sessionId = "conv-1", used = "37") => {
     fs.writeFileSync(`${base}.throttle`, `${now() - secondsAgo} s=${sessionId} u=${used}\n`);
-    fs.writeFileSync(`${base}.json`, "{}");
+    fs.writeFileSync(`${base}.json`, JSON.stringify({ context_window: { used_percentage: Number(used) }, session_id: sessionId }));
   };
   return { root, contextDir, base, run, inputs, now, command, payload, collectedBefore };
 }
@@ -87,6 +90,87 @@ describe("the throttled status line check (#3416 item 3)", () => {
     const payload = input(s);
     expect(s.run(30, payload)).toEqual(QUIET);
     expect(s.inputs()).toEqual([payload]);
+  });
+
+  it.each([
+    ["no session id", `{"context_window":{"used_percentage":37}}`],
+    ["a session id written with a space after the colon", `{"session_id": "conv-1","context_window":{"used_percentage":37}}`],
+    ["an empty session id", `{"session_id":"","context_window":{"used_percentage":37}}`],
+  ])("collects on two successive inputs with %s (two unreadable inputs never match each other)", (_label, input) => {
+    const s = seat();
+    expect(s.run(30, input)).toEqual(QUIET);
+    expect(s.run(30, input)).toEqual(QUIET);
+    expect(s.inputs()).toEqual([input, input]);
+  });
+
+  it.each([
+    ["only outside context_window (rate_limits)",
+      `{"session_id":"conv-1","context_window":{"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":40}}}`],
+    ["outside context_window, with no context_window at all", `{"session_id":"conv-1","rate_limits":{"five_hour":{"used_percentage":40}}}`],
+    ["twice inside context_window", `{"session_id":"conv-1","context_window":{"used_percentage":40,"current_usage":{"used_percentage":41}}}`],
+    ["in a context_window that never closes", `{"session_id":"conv-1","context_window":{"used_percentage":40`],
+  ])("collects, within the interval, when used_percentage is %s", (_label, input) => {
+    const s = seat();
+    s.collectedBefore(5);
+    expect(s.run(30, input)).toEqual(QUIET);
+    expect(s.inputs()).toEqual([input]);
+  });
+
+  it("reads used_percentage from context_window around its nested current_usage, and skips", () => {
+    const s = seat();
+    s.collectedBefore(5);
+    const input = `{"session_id":"conv-1","context_window":{"current_usage":{"input_tokens":2,"cache_read_input_tokens":9},`
+      + `"used_percentage":38,"remaining_percentage":62},"rate_limits":{"five_hour":{"used_percentage":90}}}`;
+    expect(s.run(30, input)).toEqual(QUIET);
+    expect(s.inputs()).toEqual([]);
+  });
+
+  it("collects when the sidecar is another conversation's, however its time compares with the stamp", () => {
+    // Where `-nt` compares whole seconds (BusyBox): conversation A wrote its reading, and in the same second the new
+    // conversation B stamped and its collector failed. B's next update must not be skipped over A's reading.
+    const s = seat();
+    s.collectedBefore(5, "conv-2");
+    fs.writeFileSync(`${s.base}.json`, JSON.stringify({ context_window: { used_percentage: 50 }, session_id: "conv-1" }));
+    const same = new Date(Math.floor(Date.now() / 1000) * 1000 - 5000);
+    fs.utimesSync(`${s.base}.throttle`, same, same);
+    fs.utimesSync(`${s.base}.json`, same, same);
+    expect(s.run(30, s.payload("conv-2", 37))).toEqual(QUIET);
+    expect(s.inputs()).toEqual([s.payload("conv-2", 37)]);
+  });
+
+  it("collects when the stamped collection never wrote and the sidecar still holds the reading before it (same second)", () => {
+    // Where `-nt` compares whole seconds: a collection at 40 wrote; in the same second a compaction to 20 stamped u=20
+    // and its collector was cancelled. The next update at 21 must not be skipped over the reading of 40.
+    const s = seat();
+    s.collectedBefore(5, "conv-1", "20");
+    fs.writeFileSync(`${s.base}.json`, JSON.stringify({ context_window: { used_percentage: 40 }, session_id: "conv-1" }));
+    const same = new Date(Math.floor(Date.now() / 1000) * 1000 - 5000);
+    fs.utimesSync(`${s.base}.throttle`, same, same);
+    fs.utimesSync(`${s.base}.json`, same, same);
+    expect(s.run(30, s.payload("conv-1", 21))).toEqual(QUIET);
+    expect(s.inputs()).toEqual([s.payload("conv-1", 21)]);
+  });
+
+  const zsh = ["/usr/bin/zsh", "/bin/zsh"].find(candidate => fs.existsSync(candidate));
+  it.skipIf(!zsh)("parses and behaves the same in native zsh: skips in the same conversation, collects on a drop", () => {
+    const s = seat();
+    s.collectedBefore(5);
+    expect(s.run(30, s.payload("conv-1", 38), [zsh!, "-f"])).toEqual(QUIET);
+    expect(s.inputs()).toEqual([]);
+    expect(s.run(30, s.payload("conv-1", 9), [zsh!, "-f"])).toEqual(QUIET);
+    expect(s.inputs()).toEqual([s.payload("conv-1", 9)]);
+  });
+
+  const busybox = ["/usr/bin/busybox", "/bin/busybox"].find(candidate => fs.existsSync(candidate));
+  it.skipIf(!busybox)("behaves the same in BusyBox sh: skips in the same conversation, collects over another's sidecar", () => {
+    const s = seat();
+    s.collectedBefore(5);
+    expect(s.run(30, s.payload("conv-1", 38), [busybox!, "sh"])).toEqual(QUIET);
+    expect(s.inputs()).toEqual([]);
+    s.collectedBefore(5, "conv-2");
+    fs.writeFileSync(`${s.base}.json`, JSON.stringify({ session_id: "conv-1" }));
+    expect(s.run(30, s.payload("conv-2", 38), [busybox!, "sh"])).toEqual(QUIET);
+    expect(s.inputs()).toEqual([s.payload("conv-2", 38)]);
   });
 
   it("collects again once the interval has passed", () => {

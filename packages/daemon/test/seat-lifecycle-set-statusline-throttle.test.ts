@@ -8,6 +8,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { seatRoutes } from "../src/routes/seat.js";
 
 function eventsOfType(db: Database.Database, type: string): Array<Record<string, unknown>> {
   return (db.prepare("SELECT payload FROM events WHERE type = ? ORDER BY seq").all(type) as Array<{ payload: string }>)
@@ -80,5 +81,15 @@ describe("SeatLifecycleService.setStatuslineThrottle", () => {
     db.prepare("UPDATE nodes SET statusline_throttle_seconds = 900 WHERE id = ?").run(node.id);
     expect(rigRepo.getNodeStatuslineThrottle(node.id)).toBeNull();
     expect(rigRepo.getRig(node.rigId)?.nodes.find(n => n.id === node.id)?.statuslineThrottle).toBeUndefined();
+  });
+});
+
+describe("POST /set-statusline-throttle with a body that isn't an object", () => {
+  it.each(["null", "[]", "42", "not json"])("answers 400, not 500, for %s", async (body) => {
+    const response = await seatRoutes.request("/set-statusline-throttle/dev.impl", {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ ok: false, code: "invalid_statusline_throttle" });
   });
 });

@@ -1,9 +1,11 @@
 // #3416 (3): an opt-in per-seat throttle for the Claude status line that OpenRig's context collector runs. Claude Code
 // runs the status line command on each update of the conversation (debounced at 300 ms), and each run starts Node. A
 // throttled seat runs a short POSIX shell check first. It skips Node for an update that comes less than the interval
-// after the last collection, in the same conversation, with the context not lower than then, and only when that last
-// collection actually wrote its reading. A drop in the context (a compaction) or a new conversation collects at once,
-// so a decision about a compaction or a new occupant never rests on a reading taken before it.
+// after the last collection, in the same conversation, with the context not below the last COLLECTED reading, and only
+// when that last collection actually wrote its reading. A reading below the last collected one (a compaction) or a new
+// conversation collects at once, so a decision about a compaction or a new occupant never rests on a reading taken
+// before it. The comparison is with the last collected reading, not the last one seen: after a skipped rise (collect at
+// 40, skip at 80) a compaction to 50 is skipped too, which costs lag only (the reading kept, 40, is the lower one).
 //
 // The check never touches what the collector writes: the context-usage sidecar keeps the `sampled_at` of the last real
 // collection, so every reader still sees the reading's true age and a throttled reading never reads as current. The
@@ -64,13 +66,20 @@ export interface ThrottledCollectorInput {
  * The throttled status line command: one line of POSIX shell (dash, bash, zsh and BusyBox sh) in front of the collector.
  * `<f>` is the seat's sidecar path without `.json`; `<f>.throttle` holds `<epoch> s=<session id> u=<whole percent>` of the
  * last collection started. The status line input is read once (`p=$(cat)`); the session id and the whole percent of
- * `context_window.used_percentage` are cut out of it with parameter expansion, without starting anything.
- * - It leaves (exit 0, printing nothing, as the collector prints nothing) only when the seat's sidecar exists and is not
- *   older than the stamp (a collection that started and never wrote doesn't count), the stamp names the same session id,
- *   both percents are whole numbers from 0 to 100 and the new one is not lower, and the stamp's time is exactly ten
- *   digits, not in the future and less than the interval old.
- * - Anything else, a missing or unreadable field included, collects: the input goes to the collector unchanged.
- * - The stamp is written through a temporary file and a rename, never into a directory left in its place.
+ * `context_window.used_percentage` are cut out of it with parameter expansion, without starting anything, and only
+ * when they match positively (`o=1`):
+ * - `"session_id":"` is in the input and the id after it is not empty;
+ * - `"context_window":{` is in the input, its object is taken whole by counting braces, and `"used_percentage":`
+ *   appears in that object exactly once (never one of another object later in the input, such as `rate_limits`).
+ * It leaves (exit 0, printing nothing, as the collector prints nothing) only when both matched, the seat's sidecar
+ * exists, is not older than the stamp, names the same session id and holds the stamp's whole percent (a collection that
+ * started and never wrote doesn't count, also where `-nt` compares whole seconds, as BusyBox's does: the sidecar must
+ * be this conversation's and carry this collection's reading), the stamp names the same session id, both percents are
+ * whole numbers from 0 to 100 and the new one is not below the last collected one, and the stamp's time is exactly ten
+ * digits, not in the future and less than the interval old. Both braces in the brace count are escaped, so native zsh
+ * (not only zsh as sh) parses the line too.
+ * Anything else, a missing or unreadable field included, collects: the input goes to the collector unchanged.
+ * The stamp is written through a temporary file and a rename, never into a directory left in its place.
  */
 export function throttledCollectorCommand(input: ThrottledCollectorInput): string {
   const seconds = validateStatuslineThrottle(input.seconds, "statusline throttle");
@@ -78,13 +87,24 @@ export function throttledCollectorCommand(input: ThrottledCollectorInput): strin
   return [
     "f=" + base,
     "p=$(cat)",
-    "s=${p#*'\"session_id\":\"'}",
-    "s=${s%%'\"'*}",
-    "u=${p#*'\"context_window\":'}",
-    "u=${u#*'\"used_percentage\":'}",
-    "u=${u%%[!0-9]*}",
-    "if [ -f \"$f.json\" ] && [ ! \"$f.throttle\" -nt \"$f.json\" ] && { read -r t ts tu < \"$f.throttle\"; } 2>/dev/null"
-      + " && [ \"x$ts\" = \"xs=$s\" ]; then v=${tu#u=};"
+    "o=1; s=; u=",
+    "case $p in *'\"session_id\":\"'*) s=${p#*'\"session_id\":\"'}; s=${s%%'\"'*};; *) o=0;; esac",
+    "[ -n \"$s\" ] || o=0",
+    // The context_window object, whole: from its `{` to the `}` that closes it, counting the braces in between (its
+    // values are numbers and a nested object, never a string with a brace).
+    "case $p in *'\"context_window\":{'*) w=${p#*'\"context_window\":{'}; d=1; c=;"
+      + " while [ \"$d\" -gt 0 ]; do r=${w#*[\\{\\}]}; if [ \"$r\" = \"$w\" ]; then d=-1; break; fi; h=${w%\"$r\"}; c=$c$h;"
+      + " case $h in *'{') d=$((d + 1));; *) d=$((d - 1));; esac; w=$r; done;"
+      + " if [ \"$d\" = 0 ]; then case $c in *'\"used_percentage\":'*'\"used_percentage\":'*) o=0;;"
+      + " *'\"used_percentage\":'*) u=${c#*'\"used_percentage\":'}; u=${u%%[!0-9]*};; *) o=0;; esac; else o=0; fi;;"
+      + " *) o=0;; esac",
+    "if [ \"$o\" = 1 ] && [ -f \"$f.json\" ] && [ ! \"$f.throttle\" -nt \"$f.json\" ]"
+      + " && { read -r t ts tu < \"$f.throttle\"; } 2>/dev/null && [ \"x$ts\" = \"xs=$s\" ]"
+      + " && { IFS= read -r j || [ -n \"$j\" ]; } < \"$f.json\" 2>/dev/null"
+      + " && case $j in *'\"session_id\":\"'\"$s\"'\"'*) true;; *) false;; esac"
+      // The sidecar holds the stamped collection's own reading: its first used_percentage (the collector writes
+      // context_window first) has the stamp's whole percent. A collection that never wrote leaves the earlier one.
+      + " && x=${j#*'\"used_percentage\":'} && x=${x%%[!0-9]*} && [ \"x$x\" = \"x${tu#u=}\" ]; then v=${tu#u=};"
       + " case $u in [0-9]|[1-9][0-9]|100) case $v in [0-9]|[1-9][0-9]|100) if [ \"$u\" -ge \"$v\" ]; then"
       + " case $t in [1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) a=$(( $(date +%s) - t ));"
       + ` if [ "$a" -ge 0 ] && [ "$a" -lt ${seconds} ]; then exit 0; fi;; esac; fi;; esac;; esac; fi`,
