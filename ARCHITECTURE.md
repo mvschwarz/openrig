@@ -310,8 +310,12 @@ packages.
   `allowed_context_substrings`, this does not exempt a line with added or substituted text;
   internal-path checks and the substance gate's human-review dispositions still apply.
 - **Hosted CI** (`.github/workflows/tests.yml`): `build-and-package`, `typecheck`, `repo-checks`,
-  `package-tests` (daemon and CLI suites on macOS, TUI and UI suites on Ubuntu, with no
-  credentials and no external network), `linux-seat-environment` and `installed-scenario`.
+  `package-tests` (daemon and CLI suites on macOS, TUI and UI suites on Ubuntu; each suite
+  runs with a scrubbed environment and no provider credentials, and its external network is
+  blocked: by a `sandbox-exec` profile on macOS, and on Ubuntu by a private network namespace
+  with loopback only. On Ubuntu, the filesystem, pathname Unix sockets, and the runner user's
+  processes and `/proc` stay shared; see `docs/as-built/test-layers.md`),
+  `linux-seat-environment` and `installed-scenario`.
 
 ## Pointers
 
