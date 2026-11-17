@@ -22,6 +22,7 @@ function makeHarness(opts?: {
   isSenderSendable?: (sender: string) => boolean;
   canRecordDestination?: (sessionRef: string) => boolean;
   loadHumanRegistry?: () => LoadResult;
+  participantsReadable?: () => boolean;
 }) {
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
@@ -129,6 +130,7 @@ describe("queue wake nudge carries the stored summary", () => {
     const h = makeHarness({
       canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry, sharedChannels: () => [] })),
       loadHumanRegistry: registry,
+      participantsReadable: () => true,
     });
     try {
       const row = await h.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
@@ -143,6 +145,79 @@ describe("queue wake nudge carries the stored summary", () => {
       const registered = await h.repo.create({ sourceSession: "alex@external", destinationSession: "dev@rig", body: "hi" });
       await vi.waitFor(() => expect(h.calls).toHaveLength(2));
       expect(h.calls[1]!.text.split("\n").at(-1)).toBe(`↩ Reply if needed: rig queue create --destination alex@external --human-intent update --reply-to ${registered.qitemId} --summary "<one line>" --body "..." --verify`);
+    } finally { await settle(); h.db.close(); }
+  });
+
+  const replyHint = (to: string, qitemId: string) =>
+    `↩ Reply if needed: rig queue create --destination ${to} --human-intent update --reply-to ${qitemId} --summary "<one line>" --body "..." --verify`;
+
+  it("#3268: a registry that can't be read isn't proof of absence, so the sender keeps today's reply line", async () => {
+    const broken = (): LoadResult => ({ ok: false, error: "registry projection HAND-EDITED" });
+    const unreadableRegistry = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: broken, sharedChannels: () => [] })),
+      loadHumanRegistry: broken,
+      participantsReadable: () => true,
+    });
+    try {
+      const row = await unreadableRegistry.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(unreadableRegistry.calls).toHaveLength(1));
+      expect(unreadableRegistry.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("some-team@external", row.qitemId));
+    } finally { await settle(); unreadableRegistry.db.close(); }
+  });
+
+  it("#3268: a participant file that can't be read isn't proof of absence either", async () => {
+    const registry = (): LoadResult => ({ ok: true, entities: [] });
+    const unreadableParticipants = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry, sharedChannels: () => [] })),
+      loadHumanRegistry: registry,
+      participantsReadable: () => false,
+    });
+    try {
+      const row = await unreadableParticipants.repo.create({ sourceSession: "ops@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(unreadableParticipants.calls).toHaveLength(1));
+      expect(unreadableParticipants.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("ops@external", row.qitemId));
+    } finally { await settle(); unreadableParticipants.db.close(); }
+  });
+
+  it("#3268: a registered shared channel keeps its reply hint", async () => {
+    const registry = (): LoadResult => ({ ok: true, entities: [] });
+    const h = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry,
+        sharedChannels: () => [{ entityId: "ops", address: "ops@external" }] })),
+      loadHumanRegistry: registry,
+      participantsReadable: () => true,
+    });
+    try {
+      const row = await h.repo.create({ sourceSession: "ops@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("ops@external", row.qitemId));
+    } finally { await settle(); h.db.close(); }
+  });
+
+  // The destination checks the queue runs first succeed; only the sender lookup the reply line adds throws.
+  const throwingLookup = () => makeHarness({
+    canRecordDestination: (ref) => { if (ref === "some-team@external") throw new Error("registry read failed"); return true; },
+    loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    participantsReadable: () => true,
+  });
+
+  it("#3268: if the reply-line lookup throws, a new item still delivers its notification with today's reply line", async () => {
+    const h = throwingLookup();
+    try {
+      const row = await h.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("some-team@external", row.qitemId));
+    } finally { await settle(); h.db.close(); }
+  });
+
+  it("#3268: if the reply-line lookup throws, a handoff still goes through and delivers with today's reply line", async () => {
+    const h = throwingLookup();
+    try {
+      const row = await h.repo.create({ sourceSession: "lead@rig", destinationSession: "dev@rig", body: "work", nudge: false });
+      const { created } = await h.repo.handoff({ qitemId: row.qitemId, fromSession: "some-team@external", toSession: "reviewer@rig", body: "next" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.session).toBe("reviewer@rig");
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("some-team@external", created.qitemId));
     } finally { await settle(); h.db.close(); }
   });
 

@@ -10,7 +10,7 @@ import { loadRelayProfiles, type LoadRelayProfilesResult } from "./gateway/relay
 import { relayStatePaths, validateRelayOutboundEnvelope, type RelayPayloadCarry } from "./gateway/relay-outbound.js";
 import { SeenStore } from "./gateway/slack/state-store.js";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { sharedChannelAddresses } from "./gateway/participants.js";
+import { readParticipantsFile, sharedChannelAddresses } from "./gateway/participants.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
 import {
@@ -1121,6 +1121,7 @@ export class QueueRepository {
   private readonly loadHumanRegistryFn: () => LoadResult;
   /** Registered shared channels (0.7.3): `<id>@external` participants whose rows post to their Slack channel. */
   private readonly sharedChannelsFn: () => ReadonlyArray<{ address: string }>;
+  private readonly participantsReadableFn: () => boolean;
   /** A hosted member's trigger, from the authored rosters on this host. */
   private readonly hostedWakeFn: (destination: string) => RosterWake | null;
   /** Whether the rosters list an address as a hosted member, trigger or not. */
@@ -1179,6 +1180,8 @@ export class QueueRepository {
       hasPendingPostCompactStage?: (sessionName: string) => boolean;
       loadHumanRegistry?: () => LoadResult;
       sharedChannels?: () => ReadonlyArray<{ address: string }>;
+      /** #3268: whether the participant file (shared channels) reads. Absent ⇒ read it from the OpenRig home. */
+      participantsReadable?: () => boolean;
       hostedWake?: (destination: string) => RosterWake | null;
       isHostedMember?: (destination: string) => boolean;
       hostedMembers?: () => RosterMember[];
@@ -1204,6 +1207,7 @@ export class QueueRepository {
     this.hasPendingPostCompactStage = opts?.hasPendingPostCompactStage;
     this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
     this.sharedChannelsFn = opts?.sharedChannels ?? (() => sharedChannelAddresses());
+    this.participantsReadableFn = opts?.participantsReadable ?? (() => readParticipantsFile().ok);
     this.hostedWakeFn = opts?.hostedWake ?? defaultHostedWake;
     this.hostedMemberFn = opts?.isHostedMember ?? defaultIsHostedMember;
     this.hostedMembersFn = opts?.hostedMembers ?? defaultHostedMembers;
@@ -1476,8 +1480,20 @@ export class QueueRepository {
   /** #2895 (a): the envelope meta for a sender `rig send` can't reach; empty (today's bytes) otherwise or when unwired. */
   private senderReach(sender: string | undefined): { senderReachable?: false; senderRegistered?: false } {
     // #3268: an @external sender's reply is a queue row to it, so name that command only when the queue would accept it.
-    if (sender?.endsWith("@external") && !this.canRecordDestination(sender)) return { senderRegistered: false };
+    if (sender?.endsWith("@external") && this.knownUnregistered(sender)) return { senderRegistered: false };
     return sender && this.isSenderSendable && !this.isSenderSendable(sender) ? { senderReachable: false } : {};
+  }
+
+  /** #3268: true only when the person registry and the participant file were both read and the queue still refuses
+   *  this @external address. A read that fails or throws proves nothing, so the caller keeps today's reply line and
+   *  the notification still goes out. */
+  private knownUnregistered(sender: string): boolean {
+    try {
+      if (registeredPeople(this.loadHumanRegistryFn()) === null || !this.participantsReadableFn()) return false;
+      return !this.canRecordDestination(sender);
+    } catch {
+      return false;
+    }
   }
 
   private recordWakeIntent(input: {
