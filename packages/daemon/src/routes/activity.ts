@@ -1,3 +1,5 @@
+import { reportNativeContinuation } from "../domain/native-continuation-notice.js";
+import type { RunnerReceipt } from "../domain/outbox-handler.js";
 import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
 import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
@@ -159,7 +161,7 @@ function channelToken(c: Context): string | undefined {
 }
 function channelFailure(c: Context, error: unknown): Response {
   return error instanceof RunnerChannelError ? c.json({ error: error.message, code: error.code,
-    ...(error.code === "runner_grant_unverified" ? { retryable: true } : {}) }, error.status)
+    ...(error.retryable || error.code === "runner_grant_unverified" ? { retryable: true } : {}) }, error.status)
     : c.json({ error: "Runner channel unavailable.", code: "runner_channel_unavailable" }, 503);
 }
 activityRoutes.post("/runner-channel", async c => {
@@ -167,7 +169,17 @@ activityRoutes.post("/runner-channel", async c => {
     const channel = channelService(c), token = channelToken(c);
     channel.authenticate(token);
     const body = await c.req.json().catch(() => null);
-    return c.json(channel.post(token, body));
+    if (body && typeof body === "object" && (body as Record<string, unknown>).type === "cancel-prepare") {
+      const ctx = permissionContext(c, false);
+      if ("refused" in ctx) return ctx.refused;
+      return c.json(channel.prepareCancellation(token, body as Record<string, unknown>, (grant, target) => ctx.permissions.withdrawTurn(
+        { nodeId: grant.nodeId, sessionName: ctx.store.resolveSession({ nodeId: grant.nodeId })?.sessionName ?? "", generation: grant.generation }, target)));
+    }
+    const result = channel.post(token, body);
+    const receipt = result.receipt as RunnerReceipt | undefined;
+    const continuation = receipt?.kind === "cancel" && (body as Record<string, unknown>)?.type === "result"
+      ? await reportNativeContinuation(channel.outbox, c.get("queueRepo" as never) as QueueRepository | undefined, receipt) : undefined;
+    return c.json({ ...result, ...(continuation ? { continuation } : {}) });
   } catch (error) { return channelFailure(c, error); }
 });
 activityRoutes.get("/runner-channel", c => {
@@ -254,7 +266,8 @@ export function bindToGrant(c: Context, store: AgentActivityStore, grant: Activi
  *  the same launch. `outcome` says what the refusal left undone. */
 function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string, revoked = false): Response | null {
   if (grant.runId) {
-    const standing = new ActivityGrantStore(store.db).standing(grant.grantId);
+    let standing: ReturnType<ActivityGrantStore["standing"]> = "unverified";
+    try { standing = new ActivityGrantStore(store.db).standing(grant.grantId); } catch { /* Unreadable authority is not a revoked run. */ }
     if (standing === "current") return null;
     if (standing === "unverified") {
       return c.json({ ok: false, code: "activity_grant_unverified", retryable: true,
@@ -1022,17 +1035,35 @@ async function submitPermission(c: Context, installTokenAccepted: boolean): Prom
   }
   const parsed = parseRunnerPermissionRequest(body);
   if (!parsed.ok) return c.json({ ok: false, code: "invalid_permission_request", error: parsed.message }, 400);
+  let correlationUnverified = false;
+  if (parsed.request.runId) {
+    let current: ReturnType<RunnerChannel["currentTurn"]> = null;
+    if (ctx.grant?.runId && ctx.grant.runId === parsed.request.runId) {
+      const refused = grantStandingRefusal(c, ctx.store, ctx.grant, "nothing was asked.");
+      if (refused) return refused;
+      try { current = (c.get("runnerChannel" as never) as RunnerChannel | undefined)?.currentTurn(seat.nodeId, true) ?? null; }
+      catch (error) {
+        if (!(error instanceof RunnerChannelError) || error.code !== "runner_unavailable") return channelFailure(c, error);
+      }
+    }
+    if (!ctx.grant?.runId || ctx.grant.runId !== parsed.request.runId)
+      return c.json({ ok: false, code: "runner_turn_unbound", error: "Permission metadata names another run." }, 409);
+    correlationUnverified = current?.runId !== parsed.request.runId || current.nativeTurnId !== parsed.request.nativeTurnId
+      || !current.acceptedTurnIds.includes(parsed.request.turnId);
+  }
+  // Claimed tags remain deny-only withdrawal hints, never positive native-turn authority.
+  const correlation = correlationUnverified ? { correlation: "unverified", warning: "Native turn correlation is unavailable; this ask is uncorrelated." } : {};
   const result = await ctx.permissions.submit(seat, parsed.request);
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, PERMISSION_REFUSAL_STATUS[result.code] ?? 409);
   // No one to ask: permitted at once with the agent's own allow. Nothing waits on a person, so nothing reads needs input.
-  if ("state" in result) return c.json(result);
+  if ("state" in result) return c.json({ ...result, ...correlation });
   // The seat now waits on a person, as when a runner refuses and holds attention. A grant revoked meanwhile records nothing more.
   if (result.created && (!ctx.grant || !("refused" in bindToGrant(c, ctx.store, ctx.grant, body, true)))) {
     recordHookActivity(c, ctx.store, { runtime: ctx.store.resolveSession({ nodeId: seat.nodeId })?.runtime ?? stringOrNull(body.runtime),
       sessionName: seat.sessionName, nodeId: seat.nodeId, generation: seat.generation, hookEvent: "Notification",
       subtype: "permission_prompt", turnId: parsed.request.turnId, occurredAt: stringOrNull(body.occurredAt) ?? new Date().toISOString() });
   }
-  return c.json({ ok: true, askId: result.askId, created: result.created });
+  return c.json({ ok: true, askId: result.askId, created: result.created, ...correlation });
 }
 
 /** Read the one answer for this seat's own request, waiting up to 25 seconds for it to change. A grant reads only its

@@ -195,7 +195,9 @@ describe("SeatHandoverService", () => {
     expect(sessionRegistry.getSessionsForRig(rig.id).find(session => session.id === sessionId)?.status).toBe("superseded");
     const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
     expect(JSON.parse(event.payload)).toMatchObject({ nodeId: node.id, previousOccupant: "dev-impl@seat-rig", currentOccupant: "dev-impl@seat-rig", source });
-    expect(db.prepare("SELECT origin FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id)).toEqual({ origin: "launched" });
+    // #3409: it records the folder it was launched in (the seat's saved folder), so rig down doesn't name it as unrecorded.
+    expect(db.prepare("SELECT origin, launched_cwd FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id))
+      .toEqual({ origin: "launched", launched_cwd: "/project" });
   });
 
   // #875: a Codex seat whose launch carried its guidance as developer instructions left none in the repository AGENTS.md,

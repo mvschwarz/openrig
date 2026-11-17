@@ -1939,6 +1939,8 @@ export class SeatHandoverService {
       // Keep the handover tenure/ready registration; only discovered successors are adopted.
       if (input.reportedSource.mode !== "discovered") {
         this.db.prepare("UPDATE sessions SET origin = 'launched' WHERE id = ?").run(newSession.id);
+        // It was launched in the seat's saved folder (the successor launch's node.cwd).
+        this.sessionRegistry.recordLaunchedCwd(newSession.id, input.node.cwd);
       }
       // The receipt's lineage record: that mint is best-effort (a failure is logged and swallowed), so read it back.
       const tenure = this.readOccupantTenure(input.node.id);

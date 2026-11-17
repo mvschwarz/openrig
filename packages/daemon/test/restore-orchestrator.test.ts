@@ -31,7 +31,7 @@ import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator, rollupRestoreRigResult, snapshotLaunchOutcome } from "../src/domain/restore-orchestrator.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
-import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
+import { noticeLine, TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../src/adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
@@ -4490,6 +4490,112 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "fresh-primed" });
       expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
     }
+  });
+
+  it("#3253: a provisional shell replaced by a fresh launch leaves one process-limits line, the replacement's", async () => {
+    const rig = rigRepo.createRig("limits-replace-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-limits-replace", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-limits-replace" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@limits-replace-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const notice = { state: "not_applied" as const, kind: "setup" as const, retryable: false, requested: { tasksMax: 256 },
+      reason: "terminal.inherit_tmux_environment is on" };
+    const tmux = mockTmux();
+    // the provisional shell and the replacement hit the same problem: the same line, from each launch
+    (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true as const, processLimits: notice,
+      warnings: [noticeLine(notice)] });
+    const freshLaunch = vi.fn(async () => ({ status: "launched" as const, processLimits: notice,
+      warnings: [noticeLine(notice), "an unrelated replacement warning"] }));
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const result = await createOrchestrator({ tmux, freshLaunch }).restore(snap.id, {
+      adapters: { "claude-code": mockAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(freshLaunch).toHaveBeenCalled();
+    expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "fresh-primed", processLimits: notice });
+    expect(result.result.warnings.filter((line) => line === noticeLine(notice))).toHaveLength(1);
+    expect(result.result.warnings).toContain("an unrelated replacement warning");
+  });
+
+  it("#3253: a fresh replacement that applies the limit leaves no stale not-applied line from the provisional shell", async () => {
+    const rig = rigRepo.createRig("limits-applied-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-limits-applied", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-limits-applied" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@limits-applied-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const notice = { state: "not_applied" as const, kind: "unverified" as const, retryable: true, requested: { tasksMax: 256 },
+      reason: "the user manager timed out" };
+    const tmux = mockTmux();
+    (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true as const, processLimits: notice,
+      warnings: [noticeLine(notice)] });
+    const freshLaunch = vi.fn(async () => ({ status: "launched" as const }));
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const result = await createOrchestrator({ tmux, freshLaunch }).restore(snap.id, {
+      adapters: { "claude-code": mockAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "fresh-primed" });
+    expect(result.result.nodes[0]).not.toHaveProperty("processLimits", notice);
+    expect(result.result.warnings).not.toContain(noticeLine(notice));
+  });
+
+  it("#3253: a fresh replacement that throws leaves no process-limits line from the retired provisional shell", async () => {
+    const rig = rigRepo.createRig("limits-throw-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-limits-throw", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-limits-throw" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@limits-throw-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const notice = { state: "not_applied" as const, kind: "setup" as const, retryable: false, requested: { tasksMax: 256 },
+      reason: "terminal.inherit_tmux_environment is on" };
+    const tmux = mockTmux();
+    (tmux.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true as const, processLimits: notice,
+      warnings: [noticeLine(notice)] });
+    const freshLaunch = vi.fn(async () => { throw new Error("recipe vanished"); });
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const result = await createOrchestrator({ tmux, freshLaunch }).restore(snap.id, {
+      adapters: { "claude-code": mockAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+    expect(freshLaunch).toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "failed" });
+    expect(result.result.nodes[0].processLimits).toBeUndefined();
+    expect(result.result.warnings).not.toContain(noticeLine(notice));
   });
 
   // The provisional shell launched in this run's --cwd, so the recipe launch that replaces it does too; the saved folder

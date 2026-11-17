@@ -460,6 +460,8 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
       if (printed === "") h.adapter.probeSession = async () => ({ state: "present" as const });
       const result = await h.adapter.createSession("impl-a@demo", "/work", A);
       expect(result).toMatchObject({ ok: false, code: "process_limits_unverified", retryable: false, processLimits: { possiblyRunning: true } });
+      // no pane to watch (nothing printed): whether the command started can't be told
+      if (printed === "") expect(result).toMatchObject({ processLimits: { commandStarted: "unknown" } });
       expect(h.tmuxCalls("kill-session")).toEqual([]);
       expect((result as { message: string }).message).toContain(`Its session "impl-a@demo" may still be running`);
     }
@@ -491,6 +493,44 @@ describe("a fresh launch with a limit counts only once its scope is seen to star
     const marker = /: > "\$0" && exec "\$@"'? '?(\/tmp\/synthetic-seat-env-\d+)/.exec(created)?.[1];
     expect(marker).toMatch(SYNTHETIC);
     expect(removed).toContain(marker);
+  });
+
+  it("a capped new-session that fails, or prints no pane and returns unconfirmed or not created, still removes its marker", async () => {
+    const cases = [
+      { mode: "recovery" as const, probe: async () => { throw new Error("no server running on /tmp/tmux-1000/default"); },
+        code: "session_unconfirmed" },
+      { mode: undefined, probe: async () => ({ state: "absent" as const }), code: "session_not_created" },
+      { mode: "recovery" as const, probe: async () => ({ state: "absent" as const }), code: "session_not_created" },
+      // the new-session itself fails
+      { mode: undefined, probe: undefined, code: undefined, fail: true },
+    ];
+    for (const c of cases) {
+      const h = makeAdapter({ limits: { "node-a": 256 }, printed: "",
+        ...(c.fail ? { failTmux: (args: string[]) => args.includes("new-session") || args.includes("source-file") } : {}) });
+      if (c.probe) h.adapter.probeSession = c.probe as never;
+      const removed: string[] = [];
+      const files = (h.adapter as unknown as { fileOps: { unlink: (p: string) => Promise<void> } }).fileOps;
+      files.unlink = async (p: string) => { removed.push(p); };
+      const result = await h.adapter.createSession("impl-a@demo", "/work", A, c.mode ? { processLimitsMode: c.mode } : undefined);
+      expect(result).toMatchObject({ ok: false, ...(c.code ? { code: c.code } : {}) });
+      const marker = /: > "\$0" && exec "\$@"'? '?(\/tmp\/synthetic-seat-env-\d+)/.exec(h.newSessions()[0]!)?.[1];
+      expect(marker).toMatch(SYNTHETIC);
+      expect(removed).toContain(marker);
+    }
+  });
+
+  it("a capped respawn whose respawn-pane fails still removes its marker", async () => {
+    for (const mode of [undefined, "recovery" as const]) {
+      const h = makeAdapter({ limits: { "node-a": 256 }, failTmux: (args) => args.includes("respawn-pane") || args.includes("source-file") });
+      const removed: string[] = [];
+      const files = (h.adapter as unknown as { fileOps: { unlink: (p: string) => Promise<void> } }).fileOps;
+      files.unlink = async (p: string) => { removed.push(p); };
+      const result = await h.adapter.respawnPane("%1", "/bin/bash", { env: A, ...(mode ? { processLimitsMode: mode } : {}) });
+      expect(result.ok).toBe(false);
+      const marker = /: > "\$0" && exec "\$@"'? '?(\/tmp\/synthetic-seat-env-\d+)/.exec(h.tmuxCalls("respawn-pane")[0]!)?.[1];
+      expect(marker).toMatch(SYNTHETIC);
+      expect(removed).toContain(marker);
+    }
   });
 });
 
@@ -688,8 +728,9 @@ describe("a recovery goes ahead without the limit, with a structured warning; th
 
   // The capped launch's start, seen from the pane and its marker: "pending" (alive, the command not yet in the scope),
   // "seat" (alive, the command started in the seat scope), "dead-before" (died with the marker pending), "dead-after"
-  // (died after the command started in the scope), "unreadable" (alive, the marker can't be read).
-  type Step = "pending" | "seat" | "dead-before" | "dead-after" | "unreadable";
+  // (died after the command started in the scope), "unreadable" (alive, the marker can't be read), "ran" (alive, the
+  // marker emptied, but the pane's process not seen in the seat scope).
+  type Step = "pending" | "seat" | "dead-before" | "dead-after" | "unreadable" | "ran";
   function startSeen(h: ReturnType<typeof makeAdapter>, steps: Step[]) {
     let i = 0;
     const at = () => steps[Math.min(i, steps.length - 1)]!;
@@ -699,7 +740,7 @@ describe("a recovery goes ahead without the limit, with a structured warning; th
     h.adapter.procRead = async (p: string) => {
       if (SYNTHETIC.test(p)) {
         if (at() === "unreadable") throw new Error(`EACCES: ${p}`);
-        return at() === "seat" || at() === "dead-after" ? "" : "pending\n";
+        return at() === "seat" || at() === "dead-after" || at() === "ran" ? "" : "pending\n";
       }
       if (p !== "/proc/4321/cgroup") throw new Error(`ENOENT: ${p}`);
       return at() === "seat" ? SEAT_CG : SERVER_CG;
@@ -735,9 +776,18 @@ describe("a recovery goes ahead without the limit, with a structured warning; th
     startSeen(h, ["pending", "dead-after"]);
     const result = await h.adapter.respawnPane("%1", "/bin/bash", { env: A, processLimitsMode: "recovery" });
     expect(result).toMatchObject({ ok: true, processLimits: { state: "unknown", kind: "unverified", retryable: true,
-      requested: { tasksMax: 256 }, reason: expect.stringMatching(/started in its scope and ended.*not run again/) } });
+      commandStarted: true, requested: { tasksMax: 256 }, reason: expect.stringMatching(/started in its scope and ended.*not run again/) } });
     expect(h.tmuxCalls("respawn-pane")).toHaveLength(1);
     expect(result.ok && result.warnings?.join(" ")).not.toMatch(/went on without/);
+  });
+
+  it("a capped recovery whose command started but was not seen in the seat scope in time is not run again", async () => {
+    const h = makeAdapter({ limits: { "node-a": 256 } });
+    startSeen(h, ["pending", "ran"]);
+    const result = await h.adapter.respawnPane("%1", "/bin/bash", { env: A, processLimitsMode: "recovery" });
+    expect(result).toMatchObject({ ok: true, processLimits: { state: "unknown", kind: "unverified", commandStarted: true,
+      reason: expect.stringMatching(/not seen in the seat's scope in time; it was not run again/) } });
+    expect(h.tmuxCalls("respawn-pane")).toHaveLength(1);
   });
 
   it("a capped recovery respawn is kept once its command started in the seat scope", async () => {
@@ -753,7 +803,7 @@ describe("a recovery goes ahead without the limit, with a structured warning; th
       const h = makeAdapter({ limits: { "node-a": 256 } });
       const dead = startSeen(h, [step]);
       const result = await h.adapter.respawnPane("%1", "/bin/bash", { env: A, processLimitsMode: "recovery" });
-      expect(result).toMatchObject({ ok: true, processLimits: { state: "unknown", kind: "unverified",
+      expect(result).toMatchObject({ ok: true, processLimits: { state: "unknown", kind: "unverified", commandStarted: "unknown",
         reason: expect.stringMatching(/not confirmed in time/) }, warnings: [expect.stringMatching(/whether the seat runs under the limit is unknown/)] });
       expect(h.tmuxCalls("respawn-pane")).toHaveLength(1);
       expect(dead).toHaveBeenCalledTimes(120);

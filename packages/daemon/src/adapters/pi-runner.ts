@@ -810,6 +810,7 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
 export interface RunnerIo {
   /** Retries transport failures; false means permanent authority/receipt refusal. */
   postRunner?(payload: Record<string, unknown>): Promise<boolean>;
+  withdrawNativeTurn?(payload: Record<string, unknown>): Promise<{ confirmed: boolean; notThisTurn?: boolean; pendingSubmissions?: number } | null>;
   /** Write one JSONL command to pi stdin. */
   sendRpc(cmd: Record<string, unknown>): void;
   /** Print a full line to the pane. */
@@ -928,6 +929,7 @@ interface PiManagedEntry {
   frame: PiManagedRequest; acceptance?: Promise<void>; state: "accepting" | "queued" | "writing" | "submitted" | "terminal" | "unavailable";
   reports: Promise<unknown>; nativeAccepted?: boolean; terminalResult?: Record<string, unknown>; wakeOpened?: boolean; contaminated?: boolean; answer?: string[]; stopReason?: string;
   disposition?: string; preDispositionEvents?: boolean; nativeTerminal?: boolean;
+  acceptedTurnId?: string; nativeTurnId?: string;
 }
 
 export class RunnerCore {
@@ -958,6 +960,17 @@ export class RunnerCore {
   private paneError = false;
   /** A runtime-reported automatic retry is in flight; the row says retrying until it ends. */
   private paneRetrying = false;
+  private nativeEpoch = 0;
+  private nativeTurn: { id: string; accepted: string[]; owned: boolean } | null = null;
+  private nativeTurnSequence = 0;
+  private nativeTurnPosts: Promise<unknown> = Promise.resolve();
+  private cancellationFence: string | null = null;
+  private cancellation: { entry: PiManagedEntry; target: { runId: string; nativeTurnId: string }; submitted: boolean; acknowledged: boolean; ended: boolean; aborted: boolean; revision: number; pendingMessages?: number } | null = null;
+  private nativeQueues: { steering: string[]; followUp: string[] } | null = null;
+  private readonly epochSteers = new Set<string>();
+  private readonly personSteers = new Set<string>();
+  private readonly heldPersonPrompts: Record<string, unknown>[] = [];
+  private readonly pendingNativeInputs = new Set<PiManagedEntry>();
   /** Pi runs this runner has opened, each posted as an accepted turn (contract section 4): the working beat names it. */
   private turn = 0;
   private sessionFile: string | undefined;
@@ -1025,9 +1038,44 @@ export class RunnerCore {
   /** Runner readiness is the sidecar's acknowledged get_state, not RPC transport ready. */
   isReady(): boolean { return this.ready; }
   /** A permanent reporting-authority refusal fences new managed dispatch, not person input or native work already in flight. */
-  quarantineManagedChannel(): void { this.managedQuarantined = true; }
+  quarantineManagedChannel(): void {
+    this.managedQuarantined = true;
+    if (this.cancellation && !this.cancellation.submitted)
+      this.rejectNativeCancellation(this.cancellation.entry, "runner_reporting_authority_lost");
+  }
 
-  nativeChannelCapabilities() { return { input: this.ready && !this.managedQuarantined && this.runtime === "pi", wake: this.ready && !this.managedQuarantined && this.nativeQueueStateAvailable && this.runtime === "pi", cancel: false }; }
+  nativeChannelCapabilities() { return { input: this.ready && !this.managedQuarantined && this.runtime === "pi", wake: this.ready && !this.managedQuarantined && this.nativeQueueStateAvailable && this.runtime === "pi", cancel: this.ready && !this.managedQuarantined && this.runtime === "pi" && !!this.io.withdrawNativeTurn }; }
+
+  /** Install the local preparation fence; this method alone submits no native operation. */
+  prepareNativeCancellation(target: { runId: string; nativeTurnId: string }): boolean {
+    if (this.runtime !== "pi" || !this.ready || this.managedQuarantined || !this.nativeTurn
+      || !this.nativeTurn.owned || target.runId !== this.identity.runId || target.nativeTurnId !== this.nativeTurn.id
+      || this.cancellationFence && this.cancellationFence !== target.nativeTurnId) return false;
+    this.cancellationFence = target.nativeTurnId;
+    return true;
+  }
+
+  /** After withdrawal, retain E's fence if still live; release only a pre-submit mismatch. */
+  recheckNativeCancellation(target: { runId: string; nativeTurnId: string }): boolean {
+    if (target.runId !== this.identity.runId || this.cancellationFence !== target.nativeTurnId) return false;
+    if (this.cancellation?.ended || this.nativeTurn?.id === target.nativeTurnId) return true;
+    this.cancellationFence = null;
+    this.pumpPersonPrompts(); this.pumpManaged();
+    return false;
+  }
+
+  private reportNativeTurn(state: "opened" | "closed"): void {
+    if (!this.nativeTurn || !this.identity.runId || !this.io.postRunner || this.runtime !== "pi") return;
+    const body = { type: "turn", runId: this.identity.runId, sequence: ++this.nativeTurnSequence,
+      nativeTurnId: this.nativeTurn.id, state, acceptedTurnIds: [...this.nativeTurn.accepted] };
+    this.nativeTurnPosts = this.nativeTurnPosts.then(() => this.io.postRunner!(body)).catch(() => {});
+  }
+
+  private pumpPersonPrompts(): void {
+    if (this.streaming || this.pendingManagedStart || !this.ready || this.cancellation?.submitted || this.cancellation?.ended) return;
+    const command = this.heldPersonPrompts.shift();
+    if (command) this.personPrompt(command.type === "follow_up" ? { type: "prompt", message: command.message, streamingBehavior: "steer" } : command);
+  }
 
   /** Kick off identity capture. Called once pi's RPC stream is up; for OMP, with its `ready` frame. */
   start(ready?: Record<string, unknown>): void {
@@ -1115,9 +1163,11 @@ export class RunnerCore {
   async acceptRunnerRequest(frame: PiManagedRequest): Promise<void> {
     if (!this.ready || this.runtime !== "pi" || !this.io.postRunner || frame.version !== 1 || frame.runId !== this.identity.runId
       || !Number.isSafeInteger(frame.sequence) || frame.sequence < 1 || typeof frame.requestId !== "string"
-      || !["input", "wake"].includes(frame.kind) || typeof (frame.kind === "wake" ? frame.payload?.question : frame.payload?.text) !== "string") return;
+      || !["input", "wake", "cancel"].includes(frame.kind)
+      || (frame.kind === "cancel" ? !frame.payload?.target || frame.payload.target.runId !== frame.runId || typeof frame.payload.target.nativeTurnId !== "string"
+        : typeof (frame.kind === "wake" ? frame.payload?.question : frame.payload?.text) !== "string")) return;
     frame = { version: 1, runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, kind: frame.kind,
-      payload: frame.kind === "wake" ? { question: frame.payload.question! } : { text: frame.payload.text! } };
+      payload: frame.kind === "cancel" ? { target: { ...frame.payload.target! } } : frame.kind === "wake" ? { question: frame.payload.question! } : { text: frame.payload.text! } };
     if ([...this.managed.values()].some(entry => entry.frame.sequence === frame.sequence && entry.frame.requestId !== frame.requestId)) throw new Error("Conflicting native sequence");
     const old = this.managed.get(frame.requestId);
     if (old) {
@@ -1126,9 +1176,35 @@ export class RunnerCore {
     }
     const entry: PiManagedEntry = { frame, state: "accepting", reports: Promise.resolve() };
     this.managed.set(frame.requestId, entry);
+    const named = frame.kind === "cancel" ? frame.payload.target! : null;
+    const prepared = named && !this.cancellation && this.prepareNativeCancellation(named);
+    const operation = prepared ? { entry, target: named!, submitted: false, acknowledged: false, ended: false, aborted: false, revision: this.promptRevision } : null;
+    if (operation) this.cancellation = operation;
     entry.acceptance = (async () => {
       const accepted = await this.io.postRunner!({ type: "ack", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence, state: "accepted" });
-      if (!accepted) { entry.state = "unavailable"; this.pumpManaged(); return; }
+      if (!accepted) {
+        entry.state = "unavailable";
+        if (operation && this.cancellation === operation && !operation.submitted && !operation.ended) {
+          this.cancellation = null;
+          if (this.cancellationFence === operation.target.nativeTurnId) this.cancellationFence = null;
+          this.pumpPersonPrompts();
+        }
+        this.pumpManaged(); return;
+      }
+      if (operation && this.cancellation !== operation) return;
+      if (named) {
+        entry.state = "queued";
+        if (!prepared) {
+          if (this.cancellation) this.rejectNativeCancellation(entry, "cancellation_in_progress");
+          else if (this.nativeTurn && this.nativeTurn.id !== named.nativeTurnId) {
+            entry.state = "terminal"; this.reportManaged(entry, "result", { kind: "cancel", outcome: "not-this-turn", confirmed: false });
+          } else this.rejectNativeCancellation(entry, "native_turn_ownership_unknown");
+        }
+        else void this.performNativeCancellation(operation!).catch(() => {
+          if (this.cancellation === operation && !operation!.submitted) this.rejectNativeCancellation(entry, "preparation_failed");
+        });
+        return;
+      }
       entry.state = "queued"; this.managedQueue.push(entry); this.managedQueue.sort((a, b) => a.frame.sequence - b.frame.sequence); this.pumpManaged();
     })();
     await entry.acceptance;
@@ -1137,12 +1213,87 @@ export class RunnerCore {
   private reportManaged(entry: PiManagedEntry, type: "submitted" | "result" | "rejected", result?: Record<string, unknown>): void {
     const f = entry.frame;
     if (type !== "submitted" && result) entry.terminalResult = result;
-    entry.reports = entry.reports.then(() => this.io.postRunner?.({ type, runId: f.runId, requestId: f.requestId, sequence: f.sequence,
-      ...(f.kind === "wake" ? { nativeTurnId: `pi-wake-${f.requestId}` } : {}), ...(result ? { result } : {}) })).catch(() => {});
+    entry.reports = entry.reports.then(async () => {
+      await entry.acceptance;
+      if (entry.state === "unavailable") return;
+      return this.io.postRunner?.({ type, runId: f.runId, requestId: f.requestId, sequence: f.sequence,
+      ...(entry.nativeTurnId ? { nativeTurnId: entry.nativeTurnId } : {}),
+      ...(entry.acceptedTurnId ? { acceptedTurnId: entry.acceptedTurnId } : {}), ...(result ? { result } : {}) });
+    }).catch(() => {});
+  }
+
+  private async performNativeCancellation(operation: NonNullable<RunnerCore["cancellation"]>): Promise<void> {
+    const { entry, target } = operation;
+    if (this.cancellation !== operation || operation.ended) return;
+    if (!this.io.withdrawNativeTurn) { this.finishNativeCancellation("not-supported"); return; }
+    for (;;) {
+      if (this.cancellation !== operation || operation.ended) return;
+      const withdrawal = await this.io.withdrawNativeTurn({ type: "cancel-prepare", runId: entry.frame.runId, requestId: entry.frame.requestId, sequence: entry.frame.sequence });
+      if (this.cancellation !== operation || operation.ended) return;
+      if (!withdrawal) { this.rejectNativeCancellation(entry, "preparation_failed"); return; }
+      if (operation.revision !== this.promptRevision) { this.rejectNativeCancellation(entry, "person_input_after_preparation"); return; }
+      if (!this.nativeTurn || this.nativeTurn.id !== target.nativeTurnId || withdrawal.notThisTurn) { this.finishNativeCancellation("not-this-turn"); return; }
+      if (withdrawal?.confirmed) break;
+      if (!this.ready || this.cancellation !== operation) return;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (!this.ready || this.nativeTurn?.id !== target.nativeTurnId) { this.finishNativeCancellation("not-this-turn"); return; }
+    if (!this.nativeTurn.owned || this.managedQuarantined || !this.ownsNativeCancellationQueue()) {
+      this.rejectNativeCancellation(entry, "native_queue_ownership_unknown"); return;
+    }
+    // The state reply is correlated to this captured preparation. E is rechecked again after the await.
+    this.io.sendRpc({ type: "get_state", id: `openrig-cancel-preflight-${entry.frame.requestId}` });
+  }
+
+  private ownsNativeCancellationQueue(pending?: number): boolean {
+    if (this.nativeQueues && (this.nativeQueues.followUp.length > 0 || this.nativeQueues.steering.some(text => this.personSteers.has(text) || !this.epochSteers.has(text)))) return false;
+    if (pending === undefined) return true;
+    if (!Number.isSafeInteger(pending) || pending < 0) return false;
+    return pending === 0 ? !this.nativeQueues || this.nativeQueues.steering.length === 0
+      : !!this.nativeQueues && this.nativeQueues.steering.length === pending;
+  }
+
+  /** Only this local owner can establish that no native cancel was written. */
+  private rejectNativeCancellation(entry: PiManagedEntry, reason: string): void {
+    if (this.cancellation?.entry === entry) {
+      if (this.cancellation.submitted || this.cancellation.ended) return;
+      this.cancellation = null; this.cancellationFence = null;
+    }
+    entry.state = "terminal";
+    this.diag(`Cancellation ${JSON.stringify(entry.frame.requestId)} was not applied (${reason}); withdrawn approvals stay withdrawn. Person input remains available.`);
+    this.reportManaged(entry, "rejected", { kind: "cancel", reason, applied: false });
+    this.pumpPersonPrompts(); this.pumpManaged();
+  }
+
+  private finishNativeCancellation(outcome: "cancelled" | "requested" | "not-this-turn" | "not-supported", detail?: string): void {
+    const operation = this.cancellation; if (!operation) return;
+    const unavailable = operation.entry.state === "unavailable";
+    if (!unavailable) operation.entry.state = "terminal";
+    const words = this.nativeQueues ? [...this.nativeQueues.steering, ...this.nativeQueues.followUp] : [];
+    const inputRequestIds: string[] = []; let unmatchedCount = this.nativeQueues ? 0 : operation.pendingMessages ?? 0;
+    for (const text of words) {
+      const matches = [...this.managed.values()].filter(entry => entry.frame.kind === "input" && entry.nativeTurnId === operation.target.nativeTurnId && entry.frame.payload.text === text);
+      if (matches.length === 1 && matches[0]!.frame.requestId.length > 0 && matches[0]!.frame.requestId.length <= 1024 && inputRequestIds.length < 100 && !inputRequestIds.includes(matches[0]!.frame.requestId)) inputRequestIds.push(matches[0]!.frame.requestId);
+      else unmatchedCount++;
+    }
+    if (!unavailable) this.reportManaged(operation.entry, "result", { kind: "cancel", outcome, confirmed: outcome === "cancelled", operationAccepted: operation.acknowledged, ...(detail ? { detail } : {}),
+      ...(operation.submitted && (words.length || unmatchedCount) ? { continuation: { inputRequestIds, pendingRequestIds: this.managedQueue.map(entry => entry.frame.requestId).filter(id => id.length > 0 && id.length <= 1024).slice(0, 100), unmatchedCount } } : {}) });
+    this.cancellation = null; this.cancellationFence = null;
+    this.pumpPersonPrompts(); this.pumpManaged();
+  }
+
+  private finishEndedNativeCancellation(settled = false): void {
+    const operation = this.cancellation;
+    if (!operation?.ended || !settled) return;
+    if (!operation.submitted) { this.finishNativeCancellation("not-this-turn"); return; }
+    const queueEmpty = operation.pendingMessages === 0 && (!this.nativeQueues
+      || this.nativeQueues.steering.length === 0 && this.nativeQueues.followUp.length === 0);
+    const confirmed = operation.aborted && queueEmpty && operation.revision === this.promptRevision;
+    this.finishNativeCancellation(confirmed ? "cancelled" : "requested", confirmed ? undefined : "native_end_without_cancellation_proof");
   }
 
   private pumpManaged(): void {
-    if (!this.ready || this.managedQuarantined || this.managedWake || this.pendingManagedStart && !this.streaming) return;
+    if (!this.ready || this.cancellationFence || this.managedQuarantined || this.managedWake || this.pendingManagedStart && !this.streaming) return;
     const entry = this.managedQueue[0];
     if (!entry || this.personPreflights.size || [...this.managed.values()].some(prior => prior.state === "accepting" && prior.frame.sequence < entry.frame.sequence)
       || entry.frame.kind === "wake" && (this.streaming || this.pendingManagedStart)) return;
@@ -1159,8 +1310,11 @@ export class RunnerCore {
     if (!this.streaming) this.pendingManagedStart = true;
     const id = `openrig-native-${entry.frame.requestId}`;
     this.managedRpc.set(id, entry);
+    if (this.streaming && entry.frame.kind === "input") this.epochSteers.add(entry.frame.payload.text!);
     this.io.sendRpc({ id, type: "prompt", message: entry.frame.kind === "wake" ? entry.frame.payload.question! : entry.frame.payload.text!, streamingBehavior: "steer" });
     this.acceptIntoOpenRun();
+    if (this.nativeTurn) { entry.nativeTurnId = this.nativeTurn.id; entry.acceptedTurnId = String(this.turn); }
+    else this.pendingNativeInputs.add(entry);
     // Ordinary busy messages may steer; the next queued wake waits for agent_end, not this RPC response.
     this.pumpManaged();
   }
@@ -1174,7 +1328,7 @@ export class RunnerCore {
     const completion = ownershipUnknown || forced && !entry.nativeAccepted ? "unknown" : forced ?? (entry.contaminated || !entry.wakeOpened ? "unknown"
       : entry.stopReason === "stop" && entry.answer?.some(text => text.length > 0) ? "completed" : entry.stopReason === "aborted" ? "interrupted" : entry.stopReason === "error" ? "failed" : "unknown");
     entry.state = "terminal";
-    entry.terminalResult = { kind: "wake", nativeTurnId: `pi-wake-${entry.frame.requestId}`,
+    entry.terminalResult = { kind: "wake", ...(entry.nativeTurnId ? { nativeTurnId: entry.nativeTurnId } : {}),
       completion, answer: completion === "completed" ? entry.answer?.join("\n") ?? "" : null,
       ...(ownershipUnknown ? { ownershipUnknown: true } : {}),
       ...(forced && !entry.nativeAccepted ? { submissionUnknown: true } : {}) };
@@ -1184,14 +1338,20 @@ export class RunnerCore {
 
   private personPrompt(command: Record<string, unknown>): void {
     if (this.runtime !== "pi" || !this.io.postRunner) { this.io.sendRpc(command); return; }
+    if (this.cancellation?.submitted || this.cancellation?.ended || command.type === "follow_up" && (this.streaming || this.pendingManagedStart)) {
+      this.heldPersonPrompts.push(command); return;
+    }
     const id = `openrig-person-${++this.promptRevision}`;
     this.personPreflights.add(id);
     if (!this.streaming) this.pendingManagedStart = true;
+    if (this.streaming && typeof command.message === "string") this.personSteers.add(command.message);
     this.io.sendRpc({ ...command, id });
+    this.acceptIntoOpenRun();
   }
 
   /** One aggregated paste block from pane stdin. */
   handleUserBlock(block: string): void {
+    if (this.cancellation && !this.cancellation.submitted && !this.cancellation.ended) this.rejectNativeCancellation(this.cancellation.entry, "person_input_after_preparation");
     const compact = /^\/openrig-compact ([\w-]+)$/.exec(block);
     if (this.runtime === "pi" && compact) {
       const attemptId = compact[1]!;
@@ -1217,7 +1377,7 @@ export class RunnerCore {
       const message = block.slice("/followup ".length);
       this.personPrompt({ type: "follow_up", message });
       this.io.mirrorLine(`${this.style.commit("you (follow-up) ▸")} ${message}`);
-      this.acceptIntoOpenRun();
+      if (!this.io.postRunner) this.acceptIntoOpenRun();
       return;
     }
     // The runtime decides, not the runner: with streamingBehavior "steer", Pi and OMP run the prompt when idle and,
@@ -1226,7 +1386,7 @@ export class RunnerCore {
     // when a prompt was consumed locally and started none. It labels the mirror line only.
     this.personPrompt({ type: "prompt", message: block, streamingBehavior: "steer" });
     this.io.mirrorLine(this.streaming ? `${this.style.commit("you (steer) ▸")} ${block}` : `${this.style.commit("you ▸")} ${block}`);
-    this.acceptIntoOpenRun();
+    if (!this.io.postRunner) this.acceptIntoOpenRun();
   }
 
   /** A working beat counts only for the latest accepted turn, and each prompt the runner gives the agent is accepted with
@@ -1236,6 +1396,7 @@ export class RunnerCore {
   private acceptIntoOpenRun(): void {
     if (this.runtime === "omp" || !this.streaming) return;
     this.turn += 1;
+    if (this.nativeTurn) { this.nativeTurn.accepted.push(String(this.turn)); this.reportNativeTurn("opened"); }
     this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
   }
 
@@ -1243,6 +1404,7 @@ export class RunnerCore {
   handlePiExit(code: number | null): void {
     this.ready = false;
     this.paneExited = true;
+    if (this.cancellation) this.finishNativeCancellation(this.cancellation.submitted ? "requested" : "not-this-turn", "native_process_exited");
     if (this.managedWake) this.finishManagedWake(this.managedWake, "failed");
     this.reportDroppedFrame(this.frameDecoder?.incomplete());
     this.io.mirrorLine(`[${this.runtime}-runner] EXITED ${this.runtime} exited (code ${code ?? "unknown"})`);
@@ -1252,6 +1414,30 @@ export class RunnerCore {
   }
 
   private handleResponse(record: Record<string, unknown>): void {
+    const cancellation = this.cancellation;
+    if (cancellation && !cancellation.submitted && record.id === `openrig-cancel-preflight-${cancellation.entry.frame.requestId}`) {
+      if (cancellation.ended) return;
+      const state = record.data as { isStreaming?: boolean; pendingMessageCount?: number } | undefined;
+      if (!this.ready || this.nativeTurn?.id !== cancellation.target.nativeTurnId || state?.isStreaming === false) {
+        this.finishNativeCancellation("not-this-turn"); return;
+      }
+      if (cancellation.revision !== this.promptRevision) { this.rejectNativeCancellation(cancellation.entry, "person_input_after_preparation"); return; }
+      if (record.success !== true || state?.isStreaming !== true || typeof state.pendingMessageCount !== "number"
+        || !this.nativeTurn.owned || this.managedQuarantined || !this.ownsNativeCancellationQueue(state.pendingMessageCount)) {
+        this.rejectNativeCancellation(cancellation.entry, "native_queue_ownership_unknown"); return;
+      }
+      cancellation.pendingMessages = state.pendingMessageCount;
+      cancellation.submitted = true; cancellation.entry.state = "submitted";
+      this.io.sendRpc({ type: "abort", id: `openrig-cancel-${cancellation.entry.frame.requestId}` });
+      this.reportManaged(cancellation.entry, "submitted", { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
+      this.diag(`Cancellation ${JSON.stringify(cancellation.entry.frame.requestId)} for ${JSON.stringify(cancellation.target.nativeTurnId)} is requested, not confirmed. Managed inputs ${JSON.stringify(this.managedQueue.map(entry => entry.frame.requestId))} remain recorded for ${this.identity.sessionName}. Inspect rig seat status ${this.identity.sessionName} --json. The named invocation settling releases the cancellation hold; a wake still waits for native idle and an empty queue. Continue with a new plain prompt in this pane, without resending retained words. This is distinct from /abort or stopping the seat; continuation is not cancellation proof and never restores withdrawn approvals. Person's /abort remains available, or explicitly choose rig seat stop ${this.identity.sessionName} --reason <reason>. Nothing restarts or replays automatically.`);
+      return;
+    }
+    if (cancellation && record.id === `openrig-cancel-${cancellation.entry.frame.requestId}`) {
+      if (record.success === true) cancellation.acknowledged = true;
+      return;
+    }
+
     if (this.idleQuery && record.id === this.idleQuery.id) {
       const query = this.idleQuery; this.idleQuery = null;
       const data = record.data as { isStreaming?: boolean; pendingMessageCount?: number } | undefined;
@@ -1268,7 +1454,7 @@ export class RunnerCore {
     }
     if (typeof record.id === "string" && this.personPreflights.delete(record.id)) {
       if (record.success !== true || (record.data as { disposition?: string } | undefined)?.disposition === "handled") this.pendingManagedStart = false;
-      this.pumpManaged();
+      this.pumpPersonPrompts(); this.pumpManaged();
       if (record.success !== false && record.error == null) return;
     }
     const managed = typeof record.id === "string" ? this.managedRpc.get(record.id) : undefined;
@@ -1276,24 +1462,34 @@ export class RunnerCore {
       this.managedRpc.delete(String(record.id));
       if (record.success === true) {
         managed.nativeAccepted = true; managed.state = "submitted"; this.reportManaged(managed, "submitted");
+        const inputData = record.data as { disposition?: unknown; agentInvoked?: boolean } | undefined;
         if (managed.frame.kind === "wake") {
-          const disposition = (record.data as { disposition?: unknown } | undefined)?.disposition;
+          const disposition = inputData?.disposition;
           managed.disposition = typeof disposition === "string" ? disposition : "unknown";
           if (!["started", "handled"].includes(managed.disposition) || managed.preDispositionEvents) this.managedQuarantined = true;
           if (managed.nativeTerminal || managed.disposition !== "started" && !this.streaming) this.finishManagedWake(managed);
           else if (managed.terminalResult) this.reportManaged(managed, "result", managed.terminalResult);
-          if (this.managedWake !== managed && !this.streaming) { this.pendingManagedStart = false; this.pumpManaged(); }
+          if (this.managedWake !== managed && !this.streaming) { this.pendingManagedStart = false; this.pumpPersonPrompts(); this.pumpManaged(); }
         } else {
-          managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true });
-          if ((record.data as { disposition?: string } | undefined)?.disposition === "handled") {
-            this.pendingManagedStart = false; this.pumpManaged();
+          managed.disposition = inputData?.agentInvoked === false ? "handled" : typeof inputData?.disposition === "string" ? inputData.disposition : "unknown";
+          if (managed.disposition === "handled") {
+            this.pendingNativeInputs.delete(managed);
+            delete managed.nativeTurnId; delete managed.acceptedTurnId;
+            if (!this.streaming) this.pendingManagedStart = false;
           }
+          // A started prompt's acknowledgement precedes agent_start. Wait for that actual scope before
+          // committing its immutable terminal receipt; a handled local command has no native epoch.
+          if (managed.disposition !== "started" || managed.nativeTurnId) {
+            managed.state = "terminal"; this.reportManaged(managed, "result", { kind: "input", accepted: true });
+          }
+          if (managed.disposition === "handled") { this.pumpPersonPrompts(); this.pumpManaged(); }
         }
       } else {
+        this.pendingNativeInputs.delete(managed);
         managed.state = "terminal"; this.pendingManagedStart = false;
         this.reportManaged(managed, "rejected", { kind: managed.frame.kind, reason: "native_prompt_rejected" });
         if (this.managedWake === managed) this.managedWake = null;
-        this.pumpManaged();
+        this.pumpPersonPrompts(); this.pumpManaged();
       }
       return;
     }
@@ -1630,6 +1826,23 @@ export class RunnerCore {
       }
       this.writeSidecar({});
     }
+    if (event.type === "queue_update") {
+      if (this.cancellation?.submitted && (!Array.isArray(event.steering) || !event.steering.every(text => typeof text === "string") || !Array.isArray(event.followUp) || !event.followUp.every(text => typeof text === "string") || event.steering.length > 0 || event.followUp.length > 0))
+        this.cancellation.pendingMessages = Math.max(1, this.cancellation.pendingMessages ?? 0);
+      this.nativeQueues = Array.isArray(event.steering) && event.steering.every(text => typeof text === "string")
+        && Array.isArray(event.followUp) && event.followUp.every(text => typeof text === "string")
+        ? { steering: event.steering as string[], followUp: event.followUp as string[] } : null;
+    }
+    if (event.type === "agent_settled" && this.cancellation?.ended) {
+      if (typeof event.aborted === "boolean") this.cancellation.aborted = event.aborted;
+      this.finishEndedNativeCancellation(true);
+    }
+    if (this.cancellation && this.nativeTurn?.id === this.cancellation.target.nativeTurnId) {
+      const message = event.message as { role?: string; stopReason?: string } | undefined;
+      if (event.type === "message_end" && message?.role === "assistant" && message.stopReason === "aborted") this.cancellation.aborted = true;
+      if (event.type === "agent_end") this.cancellation.ended = true;
+    }
+
     if (event.type === "extension_ui_request") {
       const method = event.method;
       const dialog = method === "select" || method === "confirm" || method === "input" || method === "editor";
@@ -1730,15 +1943,28 @@ export class RunnerCore {
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
     // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
     // into an open run is accepted as it's sent (acceptIntoOpenRun).
+    if (this.runtime === "pi" && event.type === "agent_start" && this.nativeTurn) this.managedQuarantined = true;
     const opening = this.runtime !== "omp" && mapped.streaming === true && !this.streaming;
     if (mapped.streaming !== undefined) {
       const changed = this.streaming !== mapped.streaming;
       this.streaming = mapped.streaming;
       if (changed) this.refreshPaneStatus();
     }
+    if (this.cancellation && (this.cancellation.submitted || this.cancellation.ended) && (event.type === "agent_start" || opening))
+      this.finishNativeCancellation(this.cancellation.submitted ? "requested" : "not-this-turn", "native_settlement_superseded");
     if (opening) {
       setImmediate(() => this.pumpManaged());
       this.turn += 1;
+      this.epochSteers.clear(); this.personSteers.clear(); this.nativeQueues = null;
+      this.nativeTurn = { id: `pi-invocation-${++this.nativeEpoch}`, accepted: [String(this.turn)], owned: this.pendingManagedStart };
+      this.reportNativeTurn("opened");
+      for (const entry of this.pendingNativeInputs) {
+        entry.nativeTurnId = this.nativeTurn.id; entry.acceptedTurnId = String(this.turn);
+        if (entry.frame.kind === "input" && entry.nativeAccepted && entry.disposition === "started") {
+          entry.state = "terminal"; this.reportManaged(entry, "result", { kind: "input", accepted: true });
+        }
+      }
+      this.pendingNativeInputs.clear();
       this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
     }
     // OMP writes its JSONL lazily; re-announce identity after each turn until
@@ -1752,8 +1978,10 @@ export class RunnerCore {
       }
       this.idleRevision = -1;
       this.pendingManagedStart = false;
+      this.reportNativeTurn("closed"); this.nativeTurn = null;
+      this.finishEndedNativeCancellation();
       if (wake) { wake.nativeTerminal = true; this.finishManagedWake(wake); }
-      setImmediate(() => this.pumpManaged());
+      setImmediate(() => { this.pumpPersonPrompts(); this.pumpManaged(); });
       // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every
@@ -2232,12 +2460,18 @@ export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseU
   }
 }
 
-async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string }, body: Record<string, unknown>, signal: AbortSignal, onPermanentRunRefusal: () => void): Promise<boolean> {
+async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string }, body: Record<string, unknown>, signal: AbortSignal, onPermanentRunRefusal: () => void, onContinuation?: (line: string) => void): Promise<boolean> {
   while (!signal.aborted) {
     try {
       const response = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { method: "POST",
         signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]), headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
-      if (response.ok) return true;
+      if (response.ok) {
+        if ((body.result as Record<string, unknown> | undefined)?.continuation) {
+          const reply = await response.json().catch(() => null) as { continuation?: Record<string, unknown> } | null;
+          if (reply?.continuation) onContinuation?.(`Native continuation: ${JSON.stringify(reply.continuation)}`);
+        }
+        return true;
+      }
       const failure = await response.json().catch(() => null) as { code?: string } | null;
       if ([401, 403, 404, 409, 410].includes(response.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(failure?.code ?? "")) {
         if (isPermanentPiRunRefusal(response.status, failure?.code)) onPermanentRunRefusal();
@@ -2434,7 +2668,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   child.once("exit", () => { nativeStream.abort(); setTimeout(() => nativePosts.abort(), 2000).unref(); });
   child.once("error", () => { nativeStream.abort(); nativePosts.abort(); });
   const io: RunnerIo = {
-    ...(runtime === "pi" && endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal, () => core.quarantineManagedChannel()) } : {}),
+    ...(runtime === "pi" && endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal, () => core.quarantineManagedChannel(), paneDiag),
+      withdrawNativeTurn: async (body: Record<string, unknown>) => {
+        try {
+          const response = await fetch(`${endpoint.baseUrl}/api/activity/runner-channel`, { method: "POST", signal: AbortSignal.timeout(3000),
+            headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+          if (!response.ok) {
+            const failure = await response.json().catch(() => null) as { code?: string } | null;
+            if (isPermanentPiRunRefusal(response.status, failure?.code)) core.quarantineManagedChannel();
+            return null;
+          }
+          return (await response.json() as { withdrawal?: { confirmed: boolean; notThisTurn?: boolean } }).withdrawal ?? null;
+        } catch { return null; }
+      } } : {}),
+
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
     },
