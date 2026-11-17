@@ -497,7 +497,9 @@ export interface SeatProcessLimitsProblem {
   possiblyRunning?: true;
   /** A refused fresh launch whose command started inside the seat's scope before the refusal (its marker was emptied:
    *  `true`) or may have (the marker couldn't be read: "unknown"). It may have done work, so it is not a failure before
-   *  the command, and a retry isn't suggested; whether its terminal was removed is said apart. */
+   *  the command, and a retry isn't suggested; whether its terminal was removed is said apart. A recovery's `unknown`
+   *  notice carries it too, for the same reading: there nothing is refused or run again, and its `retryable` only says
+   *  the limit check may pass at the next fresh launch. */
   commandStarted?: true | "unknown";
 }
 
@@ -1223,7 +1225,8 @@ export class TmuxAdapter {
       return { refuse: { kind: "unverified", ...requested, reason: failedBefore } };
     }
     if (start === "failed_before_command") return { retryUncapped: { kind: "unverified", reason: failedBefore } };
-    const notice = unknownNotice({ kind: "unverified", ...requested,
+    // As in the fresh refusal: what was seen of the command, apart from the limit (nothing here is run again).
+    const notice = unknownNotice({ kind: "unverified", ...requested, commandStarted: start === "unknown" ? "unknown" : true,
       reason: start === "ran_and_ended"
         ? "the seat's command started in its scope and ended before it was seen running; it was not run again"
         : start === "ran_unconfirmed"
@@ -1787,6 +1790,7 @@ export class TmuxAdapter {
     try {
       printed = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
     } catch (err) {
+      if (notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
       return classifyWriteError(err);
     }
     // A capped launch reads its pane and identity from the same, first, printed line (a hook may print more after it).
@@ -1808,7 +1812,11 @@ export class TmuxAdapter {
           reason: `tmux printed no pane for the launch and its session couldn't be read back (${unconfirmed.message})` }),
           await this.removeRefusedSession(name, null));
       }
-      if (unconfirmed) return { ok: false, ...unconfirmed };
+      if (unconfirmed) {
+        // the scope start is never checked on this way out: its marker would be left pending in the temp dir
+        if (notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
+        return { ok: false, ...unconfirmed };
+      }
     }
     // #3253: a capped launch counts only once its scope is seen to start. A fresh one that isn't is refused and the
     // session it made is removed (never a retry without the limit). A recovery (a provider switch's staged successor)
@@ -2339,6 +2347,7 @@ export class TmuxAdapter {
       }
       return this.launched(warnings, notices);
     } catch (err) {
+      if (notices.marker) await this.fileOps.unlink(notices.marker).catch(() => {});
       return classifyWriteError(err);
     }
   }

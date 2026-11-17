@@ -25,7 +25,7 @@ import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { CheckpointStore } from "./checkpoint-store.js";
 import { NO_TERMINAL_LAUNCH_CODES, NOTHING_STOPPED_LAUNCH_CODES, type NodeLauncher } from "./node-launcher.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { noticeLine, type TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import { seatRuntimeHome } from "./seat-runtime-home.js";
@@ -1949,7 +1949,8 @@ export class RestoreOrchestrator {
     rigId: string,
     data: SnapshotData,
     sessionName: string,
-    launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
+    launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding;
+      processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice },
     opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
@@ -2355,6 +2356,12 @@ export class RestoreOrchestrator {
           warnings?.push(`Restore: ${retired.error}`);
           return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: retired.error };
         }
+        // The retired provisional shell's process-limits line no longer describes the seat: the replacement reports its
+        // own (or none, when it applied the limit), and a replacement that fails to launch runs nothing, so the line
+        // goes before the launch is awaited and the same notice is never printed twice.
+        const staleLimits = launchResult.processLimits ? noticeLine(launchResult.processLimits) : undefined;
+        const stale = staleLimits && warnings ? warnings.lastIndexOf(staleLimits) : -1;
+        if (stale >= 0) warnings!.splice(stale, 1);
         const replacementExists = () => this.sessionRegistry.getSessionsForRig(rigId)
           .some((candidate) => candidate.nodeId === node.id
             && candidate.status === "running"

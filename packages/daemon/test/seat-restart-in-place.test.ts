@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { defaultTmuxFileOps, isStagedSendScriptPath, TmuxAdapter as RealTmuxAdapter } from "../src/adapters/tmux.js";
+import { defaultTmuxFileOps, isStagedSendScriptPath, noticeLine, TmuxAdapter as RealTmuxAdapter } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -54,6 +54,8 @@ interface WorldOptions {
   /** #3253: the adapter's plan for a bare respawn (seatProcessLimitsKeepPlan), and the notice its respawn returns. */
   processLimitsKeep?: { keep: true } | { keep: false; notice: SeatProcessLimitsNotice };
   respawnProcessLimits?: SeatProcessLimitsNotice;
+  /** Other warning lines the respawn returns (the adapter also returns its process-limits notice as a warning line). */
+  respawnWarnings?: string[];
   runningArgs?: string;
   runningArgv?: string[];
   savedModel?: string | null;
@@ -238,7 +240,11 @@ function world(options: WorldOptions = {}) {
     },
     respawnPane: async (_pane: string, command?: string, opts?: Record<string, unknown>): Promise<TmuxResult> => {
       calls.push(`respawn ${command}`); respawnOpts.push(opts); maybeThrow("respawnPane"); relaunch();
-      return { ok: true, ...(options.respawnProcessLimits ? { processLimits: options.respawnProcessLimits } : {}) };
+      // As the adapter does: a respawn's process-limits notice comes both as processLimits and as a warning line.
+      const warnings = [...(options.respawnWarnings ?? []),
+        ...(options.respawnProcessLimits ? [noticeLine(options.respawnProcessLimits)] : [])];
+      return { ok: true, ...(warnings.length ? { warnings } : {}),
+        ...(options.respawnProcessLimits ? { processLimits: options.respawnProcessLimits } : {}) };
     },
     capturePaneHistory: async () => paneLines.join("\n"),
     capturePaneHistoryParts: async () => {
@@ -1320,6 +1326,24 @@ describe("#3253: a seat with process limits: a restart in place never stops for 
       respawnProcessLimits: unknown });
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     expect(result).toMatchObject({ processLimits: unknown });
+  });
+
+  it("a respawn's process-limits notice reaches the report once: as processLimits, not also as a warning line", async () => {
+    const notices = [
+      { state: "unknown" as const, kind: "unverified" as const, retryable: true, requested: { tasksMax: 256 },
+        reason: "the seat's scope start was not confirmed in time; the seat was not started again" },
+      { state: "not_applied" as const, kind: "unverified" as const, retryable: true, requested: { tasksMax: 256 },
+        reason: "the kept scope's launch could not be prepared: Default shell unavailable" },
+    ];
+    for (const notice of notices) {
+      const w = world({ shape: "direct_native", remainOnExit: "off", processLimited: true, processLimitsKeep: { keep: true },
+        respawnProcessLimits: notice, respawnWarnings: ["an unrelated respawn warning"] });
+      const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+      expect(result).toMatchObject({ processLimits: notice });
+      expect(result.warnings).toEqual(expect.arrayContaining(["an unrelated respawn warning"]));
+      expect(result.warnings).not.toContain(noticeLine(notice));
+      expect(result.warnings.filter((line) => /process_limits requested/.test(line))).toEqual([]);
+    }
   });
 
   it("a bare pane not under its limit goes on without it, with the plan's warning, and no scope is asked for", async () => {
