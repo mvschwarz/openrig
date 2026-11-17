@@ -21,6 +21,7 @@ import { realDeps } from "./daemon.js";
 import {
   CLOSE_REASONS,
   MISSION_TEMPLATE_KINDS,
+  NON_DELIVERY_CLOSE_REASONS,
   SLICE_TEMPLATE_KINDS,
   STAGE_VALUES,
   ScopeCliError,
@@ -45,6 +46,8 @@ import {
   ensureMissionId,
   ensureMissionIdPersisted,
   findMission,
+  indexerReadsStatusIn,
+  readIndexerSliceStatus,
   resolveNodeFile,
   findSlice,
   listMissions,
@@ -88,6 +91,7 @@ import {
   nextMissionMembershipOrder,
   planMissionMembershipAdd,
   planMissionMembershipRemove,
+  planMissionMembershipSetActive,
   type MissionCompositionEdit,
 } from "../lib/scope/mission-composition.js";
 
@@ -556,11 +560,25 @@ function buildSliceShipCommand(): Command {
 // rig scope slice close
 // ---------------------------------------------------------------------
 
+/** How many judgment files the slice records, or `null` when the judgments folder cannot be read (unknown, not zero).
+ *  A folder that does not exist records none. */
+function countRecordedSliceJudgments(sliceAbsPath: string): number | null {
+  const judgmentsDir = path.join(sliceAbsPath, "proof", "judgments");
+  try {
+    return fs.readdirSync(judgmentsDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
+      .length;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? 0 : null;
+  }
+}
+
 function buildSliceCloseCommand(): Command {
   return new Command("close")
-    .description("Close a slice (move to <mission>/closed/, update status)")
+    .description("Close a slice (move to <mission>/closed/ by default, or update status in place with --in-place)")
     .argument("<slice-path>", "Slice path (absolute, relative, or NN-slug)")
     .requiredOption("--reason <reason>", `Closure reason: ${CLOSE_REASONS.join(" | ")}`)
+    .option("--in-place", "Keep the slice under <mission>/slices/ instead of moving to <mission>/closed/")
     .option("--note <text>", "Optional closure note")
     .option("--mission <name>", "Hint mission when slice-path is just NN-slug")
     .option("--json", "Machine-readable output")
@@ -568,6 +586,7 @@ function buildSliceCloseCommand(): Command {
       const out = makeStdout();
       const json = Boolean(opts.json);
       try {
+        const inPlace = Boolean(opts.inPlace);
         const reason = opts.reason as CloseReason;
         if (!CLOSE_REASONS.includes(reason)) {
           throw new ScopeCliError({
@@ -576,10 +595,170 @@ function buildSliceCloseCommand(): Command {
             action: `Pick one of: ${CLOSE_REASONS.join(", ")}.`,
           });
         }
+        if (!inPlace && reason === "delivered") {
+          throw new ScopeCliError({
+            fact: `--reason "delivered" requires --in-place.`,
+            consequence: "Slice not closed; moving to closed/ is reserved for non-delivery closures.",
+            action: `Pass --in-place with --reason delivered, or use rig scope slice ship, or pick a non-delivery reason (${NON_DELIVERY_CLOSE_REASONS.join(", ")}).`,
+          });
+        }
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const mission = findMission(missionsRoot, slice.missionName);
         const closedDir = path.join(mission.absPath, "closed");
+        const judgmentCount = countRecordedSliceJudgments(slice.absPath);
+
+        if (inPlace) {
+          const resolvedSliceAbs = path.resolve(slice.absPath);
+          const resolvedClosedDir = path.resolve(closedDir);
+          if (resolvedSliceAbs === resolvedClosedDir || resolvedSliceAbs.startsWith(`${resolvedClosedDir}${path.sep}`)) {
+            throw new ScopeCliError({
+              fact: `Slice "${slice.name}" is already under ${slice.missionName}/closed/.`,
+              consequence: "Slice not closed in place.",
+              action: "Inspect the slice under closed/, or move it back under slices/ before updating in place.",
+            });
+          }
+          if (!slice.readmePath) {
+            throw new ScopeCliError({
+              fact: `Slice "${slice.name}" at ${slice.absPath} has no SPEC.md or README.md.`,
+              consequence: "Cannot record in-place closure status without a slice node file.",
+              action: "Repair or add SPEC.md before closing --in-place.",
+            });
+          }
+          const targetStatus = reason === "delivered" ? "done" : `closed-${reason}`;
+          const compositionEdit = planMissionMembershipSetActive(
+            mission.absPath,
+            sliceManifestRef(mission.absPath, slice.absPath),
+            reason === "delivered",
+          );
+          const edits = compositionEdit ? [compositionEdit] : [];
+          const nodePath = slice.readmePath;
+          const originalNode = fs.readFileSync(nodePath, "utf8");
+          const progressPath = path.join(slice.absPath, "PROGRESS.md");
+          let originalProgress: string | null = null;
+          try {
+            originalProgress = fs.readFileSync(progressPath, "utf8");
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          }
+          // The slice indexer lets PROGRESS.md override the node file, so a status it reads there is reconciled too.
+          const shouldReconcileProgressStatus = originalProgress !== null && indexerReadsStatusIn(originalProgress);
+
+          applyMissionCompositionEdits(edits);
+          let attemptedProgressWrite = false;
+          let readBackMismatch: ScopeCliError | null = null;
+          try {
+            const updates: Record<string, unknown> = {
+              status: targetStatus,
+              "closed-on": todayDateISO(),
+            };
+            if (opts.note) updates["closure-note"] = opts.note;
+            updateFrontmatter(nodePath, updates);
+            if (shouldReconcileProgressStatus) {
+              attemptedProgressWrite = true;
+              updateFrontmatter(progressPath, { status: targetStatus });
+            }
+            // Read the status back the way the slice indexer does; a shape that reads differently rolls everything back.
+            const readBack = readIndexerSliceStatus(slice.absPath);
+            if (readBack.status !== targetStatus) {
+              const readFile = readBack.file ?? nodePath;
+              readBackMismatch = new ScopeCliError({
+                fact: `After writing status "${targetStatus}", the slice indexer reads ${readBack.status === null ? "no status" : `"${readBack.status}"`} from ${readFile}.`,
+                consequence: "In-place closure refused.",
+                action: `Give ${path.basename(readFile)} one top-level scalar "status:" line, with no inline "#" comment and no duplicate or nested "status:" entry, or close without --in-place, then retry.`,
+              });
+              throw readBackMismatch;
+            }
+          } catch (error) {
+            const rollbackFailures: string[] = [];
+            try {
+              fs.writeFileSync(nodePath, originalNode, "utf8");
+            } catch (rbErr) {
+              rollbackFailures.push(
+                `restore ${nodePath}: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
+              );
+            }
+            if (attemptedProgressWrite && originalProgress !== null) {
+              try {
+                fs.writeFileSync(progressPath, originalProgress, "utf8");
+              } catch (rbErr) {
+                rollbackFailures.push(
+                  `restore ${progressPath}: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
+                );
+              }
+            }
+            if (edits.length > 0) {
+              try {
+                rollbackComposition(edits);
+              } catch (rbErr) {
+                rollbackFailures.push(
+                  `rollback mission composition: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
+                );
+              }
+            }
+            if (rollbackFailures.length > 0) {
+              if (error instanceof ScopeCliError) {
+                // Never promise restoration here: the slice may be left partly changed, and the failures below say where.
+                const stateKnown = error === readBackMismatch
+                  ? ` Rollback did NOT complete (${rollbackFailures.join("; ")}). The slice's files and ${path.join(mission.absPath, "mission.yaml")} may be partly changed and their current state is unknown.`
+                  : ` (rollback failure(s): ${rollbackFailures.join("; ")})`;
+                throw new ScopeCliError({
+                  fact: error.fact,
+                  consequence: `${error.consequence}${stateKnown}`,
+                  action: error === readBackMismatch
+                    ? `Inspect ${nodePath}, ${progressPath} and ${path.join(mission.absPath, "mission.yaml")} and repair any leftover change before closing this slice again. ${error.action}`
+                    : error.action,
+                });
+              }
+              const origMessage = error instanceof Error ? error.message : String(error);
+              throw new Error(
+                `${origMessage} (rollback failure(s): ${rollbackFailures.join("; ")})`,
+                { cause: error },
+              );
+            }
+            if (error instanceof ScopeCliError && error === readBackMismatch) {
+              throw new ScopeCliError({
+                fact: error.fact,
+                consequence: "In-place closure rolled back: every file it changed was restored, so readers cannot disagree about this slice's status.",
+                action: error.action,
+              });
+            }
+            throw error;
+          }
+          emit(out, {
+            ok: true,
+            closed: {
+              mission: slice.missionName,
+              name: slice.name,
+              id: slice.id,
+              reason,
+              status: targetStatus,
+              inPlace: true,
+              note: opts.note ?? null,
+              path: slice.absPath,
+              git: { usedGit: false, repoRoot: null },
+              proofApplicability: {
+                evaluated: false,
+                changed: null,
+                pathPreserved: true,
+                receiptFilesPreserved: true,
+                judgmentCount,
+              },
+            },
+          }, json, [
+            `Closed ${slice.missionName}/${slice.name} in place (${targetStatus})`,
+            `  reason: ${reason}`,
+            `  status: ${targetStatus}`,
+            `  path: ${slice.absPath}`,
+            ...(judgmentCount === null
+              ? ["  proof: judgment folder could not be read (judgment count unknown; applicability not evaluated; run rig proof show to check current readiness)"]
+              : judgmentCount > 0
+                ? [`  proof: ${judgmentCount} recorded judgment file(s) kept in place (applicability not evaluated; run rig proof show to check current readiness)`]
+                : []),
+          ]);
+          return;
+        }
+
         const destName = slice.name;
         const destAbs = path.join(closedDir, destName);
         const compositionEdit = planMissionMembershipRemove(
@@ -598,10 +777,11 @@ function buildSliceCloseCommand(): Command {
         }
         const { usedGit, repoRoot } = moveResult;
         const newReadme = resolveNodeFile(destAbs);
+        const targetStatus = `closed-${reason}`;
         try {
           if (newReadme) {
             const updates: Record<string, unknown> = {
-              status: `closed-${reason}`,
+              status: targetStatus,
               "closed-on": todayDateISO(),
             };
             if (opts.note) updates["closure-note"] = opts.note;
@@ -620,14 +800,28 @@ function buildSliceCloseCommand(): Command {
             name: destName,
             id: slice.id,
             reason,
+            status: targetStatus,
+            inPlace: false,
             note: opts.note ?? null,
             path: destAbs,
             git: { usedGit, repoRoot },
+            proofApplicability: {
+              evaluated: false,
+              changed: judgmentCount === null ? null : judgmentCount > 0,
+              pathPreserved: false,
+              receiptFilesPreserved: true,
+              judgmentCount,
+            },
           },
         }, json, [
           `Closed ${slice.missionName}/${slice.name} → ${slice.missionName}/closed/${destName}`,
           `  reason: ${reason}`,
           `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
+          ...(judgmentCount === null
+            ? ["  proof: judgment folder could not be read, so recorded judgments (if any) now read unknown after path move (use --in-place to keep slice path in place; accepted proof still requires unchanged item, policy, and cited evidence)"]
+            : judgmentCount > 0
+              ? [`  proof: ${judgmentCount} recorded judgment(s) now read unknown after path move (use --in-place to keep slice path in place; accepted proof still requires unchanged item, policy, and cited evidence)`]
+              : []),
         ]);
       } catch (err) {
         fail(err, json, out);

@@ -288,6 +288,7 @@ export class WatchdogJobsRepository {
           WHERE session.session_name = ?
             AND usage.session_name = ?
             AND usage.availability = 'known'
+            AND COALESCE(usage.source, '') != 'runner_reported'
             AND usage.sampled_at IS NOT NULL
             AND julianday(usage.sampled_at) >= julianday(tenure.boot_at)
           ORDER BY session.id DESC

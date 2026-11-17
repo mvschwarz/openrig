@@ -30,13 +30,19 @@ export function resolveAuthoredCwd(
   return exists(literal) ? literal : place(expandCwd(authored, env, home));
 }
 
+/** A run-only `--cwd` as every launch reads it: a non-blank value, resolved on the daemon; a blank one is no override. */
+export function normalizeCwdOverride(cwdOverride: string | null | undefined): string | undefined {
+  return cwdOverride && cwdOverride.trim().length > 0 ? nodePath.resolve(cwdOverride) : undefined;
+}
+
 export function resolveLaunchCwd(
   authoredCwd: string | null | undefined,
   specRoot: string,
   cwdOverride?: string | null,
 ): string {
-  if (cwdOverride && cwdOverride.trim().length > 0) {
-    return nodePath.resolve(cwdOverride);
+  const override = normalizeCwdOverride(cwdOverride);
+  if (override) {
+    return override;
   }
   if (!authoredCwd || authoredCwd.trim().length === 0) {
     return nodePath.resolve(specRoot);

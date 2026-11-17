@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -13,11 +14,33 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { hostedWakeFor, isHostedMemberAt, parseRoster, type RosterWake } from "../src/domain/rosters.js";
-import { ringHostedWake } from "../src/domain/hosted-wake.js";
+import { ringHostedWake, standardWebhookKey, standardWebhookSignature } from "../src/domain/hosted-wake.js";
 import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG } from "../src/domain/queue-stuck-sweep.js";
 
-type Received = { path: string; headers: IncomingMessage["headers"]; body: Record<string, unknown>; status: number };
+type Received = { path: string; headers: IncomingMessage["headers"]; raw: Buffer; body: Record<string, unknown>; status: number };
+
+// The receiver's key: `whsec_` and base64 decodes to those bytes; any other value is its raw UTF-8 bytes (the reference
+// library's raw format, and how the receiver that asked for signing reads a secret without the prefix).
+const receiverKey = (secret: string): Buffer => secret.startsWith("whsec_")
+  ? Buffer.from(secret.slice("whsec_".length), "base64") : Buffer.from(secret, "utf8");
+
+// A port of the Standard Webhooks JavaScript reference's verify() (libraries/javascript/src/index.ts at commit 36afae79):
+// a five-minute timestamp window, HMAC-SHA256 over `<id>.<timestamp>.` and the raw body bytes, and a constant-time match
+// against any of the space-separated `v1,` signatures. Written apart from the sender's own code; the sender is also
+// pinned to the reference's known-answer vector below.
+function referenceVerify(key: Buffer, raw: Buffer, headers: IncomingMessage["headers"], nowSeconds = Math.floor(Date.now() / 1000)): void {
+  const [id, stamp, signature] = ["webhook-id", "webhook-timestamp", "webhook-signature"].map((name) => headers[name]);
+  if (typeof id !== "string" || typeof stamp !== "string" || typeof signature !== "string") throw new Error("Missing required headers");
+  const timestamp = parseInt(stamp, 10);
+  if (Number.isNaN(timestamp)) throw new Error("Invalid Signature Headers");
+  if (nowSeconds - timestamp > 5 * 60) throw new Error("Message timestamp too old");
+  if (timestamp > nowSeconds + 5 * 60) throw new Error("Message timestamp too new");
+  const expected = Buffer.from(`v1,${createHmac("sha256", key).update(Buffer.concat([Buffer.from(`${id}.${timestamp}.`), raw])).digest("base64")}`);
+  if (!signature.split(" ").some((passed) => { const bytes = Buffer.from(passed); return bytes.length === expected.length && timingSafeEqual(bytes, expected); })) {
+    throw new Error("No matching signature found");
+  }
+}
 type Reply = { status: number; headers?: Record<string, string> } | "hang";
 
 describe("a hosted member with a webhook trigger is rung when work lands for it", () => {
@@ -32,10 +55,12 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     reply = { status: 202 };
     dir = mkdtempSync(join(tmpdir(), "hosted-wake-"));
     server = createServer((req, res) => {
-      let data = "";
-      req.on("data", (chunk) => { data += chunk; });
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
       req.on("end", () => {
-        received.push({ path: req.url ?? "", headers: req.headers, body: data ? JSON.parse(data) as Record<string, unknown> : {}, status: reply === "hang" ? 0 : reply.status });
+        const raw = Buffer.concat(chunks);
+        const data = raw.toString("utf8");
+        received.push({ path: req.url ?? "", headers: req.headers, raw, body: data ? JSON.parse(data) as Record<string, unknown> : {}, status: reply === "hang" ? 0 : reply.status });
         if (reply === "hang") return;
         res.writeHead(reply.status, reply.headers);
         res.end();
@@ -77,6 +102,73 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     expect((await ringHostedWake(ring, wake, { env: { GROK_WAKE_URL: url } })).nudgeResult)
       .toBe("failed:webhook (GROK_WAKE_URL) not rung: its Authorization value (GROK_WAKE_AUTH) isn't set");
     expect(received).toHaveLength(2);
+  });
+
+  // Optional Standard Webhooks signing, for a trigger that verifies its rings. Test-only secrets throughout.
+  const testSecret = `whsec_${Buffer.alloc(32, 7).toString("base64")}`;
+  const signedWake: RosterWake = { webhook: { url_ref: "GROK_WAKE_URL", authorization_ref: "GROK_WAKE_AUTH", signing_secret_ref: "GROK_WAKE_SIGNING" } };
+  const signedEnv = () => ({ ...env(), GROK_WAKE_SIGNING: testSecret });
+
+  it("signs as the Standard Webhooks reference does: the reference's own known-answer vector", () => {
+    // libraries/javascript/src/webhook.test.ts at 36afae79, "sign function works"
+    expect(standardWebhookSignature(standardWebhookKey("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")!, "msg_p5jXN8AQM9LWM0D4loKWxJek",
+      1614265330, Buffer.from('{"test": 2432232314}'))).toBe("v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=");
+    // A value without whsec_ is its raw UTF-8 bytes, even one that looks like base64. After whsec_, base64 is read
+    // strictly: nothing, other characters or missing padding isn't a key.
+    expect(standardWebhookKey("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")).toEqual(Buffer.from("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", "utf8"));
+    for (const bad of ["whsec_", "whsec_not base64!", "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaS", "whsec_YQ", ""]) expect(standardWebhookKey(bad)).toBeNull();
+  });
+
+  it("a signed ring verifies over the bytes it arrived as; a wrong secret, a changed body or an expired timestamp don't", async () => {
+    const outcome = await ringHostedWake(ring, signedWake, { env: signedEnv() });
+    expect(outcome).toEqual({ classified: "indeterminate", nudgeResult: "wake-accepted:webhook (GROK_WAKE_URL) answered 202; pickup is the member's claim on this row" });
+    const got = received[0]!;
+    expect(got.headers.authorization).toBe("Bearer test-only-value");
+    expect(got.headers["webhook-id"]).toMatch(/^msg_[0-9a-f]{32}$/);
+    expect(got.headers["webhook-signature"]).toMatch(/^v1,[A-Za-z0-9+/]+={0,2}$/);
+    expect(() => referenceVerify(receiverKey(testSecret), got.raw, got.headers)).not.toThrow();
+    expect(() => referenceVerify(receiverKey(`whsec_${Buffer.alloc(32, 8).toString("base64")}`), got.raw, got.headers)).toThrow("No matching signature found");
+    expect(() => referenceVerify(receiverKey(testSecret), Buffer.from(got.raw.toString("utf8").replace("qitem-1", "qitem-2")), got.headers))
+      .toThrow("No matching signature found");
+    // Signed six minutes ago: outside the reference's five-minute window.
+    await ringHostedWake(ring, signedWake, { env: signedEnv(), now: () => Date.now() - 6 * 60_000 });
+    expect(() => referenceVerify(receiverKey(testSecret), received[1]!.raw, received[1]!.headers)).toThrow("Message timestamp too old");
+    // Each ring is its own message, and the secret reaches neither the result nor the body.
+    expect(received[1]!.headers["webhook-id"]).not.toBe(got.headers["webhook-id"]);
+    expect(outcome.nudgeResult).not.toContain(testSecret);
+    expect(got.raw.toString("utf8")).not.toContain(testSecret);
+  });
+
+  // r1: a receiver uses a secret without whsec_ as its raw bytes, so the ring is signed with exactly those bytes.
+  it.each([
+    { kind: "with punctuation", value: "test-only raw:secret/with+punctuation!" },
+    { kind: "that looks like base64", value: "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw" },
+  ])("a raw signing secret $kind is sent, signed with its UTF-8 bytes as the receiver reads them", async ({ value }) => {
+    const outcome = await ringHostedWake(ring, signedWake, { env: { ...env(), GROK_WAKE_SIGNING: value } });
+    expect(outcome.classified).toBe("indeterminate");
+    const got = received[0]!;
+    expect(() => referenceVerify(Buffer.from(value, "utf8"), got.raw, got.headers)).not.toThrow();
+    // Not its base64 decoding: that key doesn't verify the ring.
+    expect(() => referenceVerify(Buffer.from(value, "base64"), got.raw, got.headers)).toThrow("No matching signature found");
+    expect(outcome.nudgeResult).not.toContain(value);
+  });
+
+  it("a trigger with no signing secret (bearer only) is rung as before, with no signature headers", async () => {
+    await ringHostedWake(ring, wake, { env: { ...env(), GROK_WAKE_SIGNING: testSecret } });
+    expect(received[0]!.headers.authorization).toBe("Bearer test-only-value");
+    expect(Object.keys(received[0]!.headers).filter((name) => name.startsWith("webhook-"))).toEqual([]);
+  });
+
+  it("a signing secret that's named but isn't set, or is whsec_ without valid base64, means no ring, never an unsigned one", async () => {
+    expect(await ringHostedWake(ring, signedWake, { env: env() })).toEqual({ classified: "failed",
+      nudgeResult: "failed:webhook (GROK_WAKE_URL) not rung: its signing secret (GROK_WAKE_SIGNING) isn't set, and the ring isn't sent unsigned" });
+    for (const unusable of ["whsec_not base64 at all", "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaS"]) {
+      const outcome = await ringHostedWake(ring, signedWake, { env: { ...env(), GROK_WAKE_SIGNING: unusable } });
+      expect(outcome).toEqual({ classified: "failed", nudgeResult: "failed:webhook (GROK_WAKE_URL) not rung: its signing secret (GROK_WAKE_SIGNING) "
+        + "starts with whsec_ but isn't followed by valid base64, and the ring isn't sent unsigned" });
+      expect(outcome.nudgeResult).not.toContain(unusable);
+    }
+    expect(received).toHaveLength(0);
   });
 
   // The ring reached a trigger that then didn't answer in time, so it may have started a run: unknown, like an unconfirmed
@@ -121,8 +213,11 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     // teaching too: it says how the member gets work, not to fix the address or register a person.
     trigger = null;
     const noTrigger = repo.classifyDestinationOf("grok@lab");
-    expect(noTrigger).toEqual({ class: "unroutable", teaching: "unroutable: 'grok@lab' is a hosted member with no wake trigger, "
-      + "so nothing can push work to it. It picks up its work when its person asks it to, or on a schedule they set." });
+    // A requester's assistant repeats it, so it says the work waits, and never "unroutable".
+    expect(noTrigger).toEqual({ class: "unroutable", teaching: "awaiting-pickup: 'grok@lab' is a hosted member with no wake trigger, "
+      + "so no wake is sent. The work waits in its queue until the member reads it: when its person asks it to, on a schedule "
+      + "they set, or through a local seat connected to it." });
+    expect(noTrigger.class === "unroutable" && noTrigger.teaching).not.toMatch(/unroutable/);
     // An address no roster lists keeps the general teaching.
     expect(repo.classifyDestinationOf("nobody@lab")).toMatchObject({ class: "unroutable",
       teaching: expect.stringContaining("Fix the address, or register the human with `rig gateway human add`.") });
@@ -351,5 +446,11 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     expect(isHostedMemberAt("other@lab", dir, "h1")).toBe(false);
     expect(() => parseRoster({ ...roster, members: [{ ...roster.members[0], wake: { webhook: { url: "https://example.invalid" } } }] }))
       .toThrow("A member's wake needs webhook.url_ref");
+    // A signing secret is named the same way, never given as a value.
+    const signed = { webhook: { url_ref: "GROK_WAKE_URL", signing_secret_ref: "GROK_WAKE_SIGNING" } };
+    writeFileSync(join(dir, "lab.json"), JSON.stringify({ ...roster, members: [{ ...roster.members[0], wake: signed }, roster.members[1]] }));
+    expect(hostedWakeFor("grok@lab", dir, "h1")).toEqual(signed);
+    expect(() => parseRoster({ ...roster, members: [{ ...roster.members[0], wake: { webhook: { url_ref: "GROK_WAKE_URL", signing_secret_ref: 42 } } }] }))
+      .toThrow("optional authorization_ref, signing_secret_ref and secrets_env_file");
   });
 });

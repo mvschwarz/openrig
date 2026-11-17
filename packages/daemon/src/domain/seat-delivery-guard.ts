@@ -220,6 +220,12 @@ export class SeatDeliveryGuard {
     return a.nodeId === b.nodeId && a.session === b.session && a.occupant === b.occupant && a.pane === b.pane;
   }
 
+  /** Runs `fn` under the seat's delivery lease, after every send already waiting for it: the same owner typed sends take,
+   *  with no admission of its own. The hook bridge's poll claims messages under it (#3270). */
+  exclusive<T>(nodeId: string, fn: () => T | Promise<T>): Promise<T> {
+    return this.serial(nodeId, async () => fn());
+  }
+
   private async serial<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
     const before = this.tails.get(nodeId) ?? Promise.resolve();
     let release!: () => void;
@@ -368,11 +374,15 @@ export class SeatDeliveryGuard {
   }
 
   /** Multi-seat restore takes leases in stable order before any rig mutation.
-   * Nested per-seat launch joins these leases; it must not reacquire them. */
-  async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>): Promise<T> {
-    const ids = [...new Set(nodeIds)].sort();
+   * Nested per-seat launch joins these leases; it must not reacquire them.
+   * `custodyIds` are seats the operation only records (metadata, never input): they get a custody lease in the same sorted
+   * pass, so a paused or draft-aware seat isn't refused and its mode, draft and binding stay as they are. */
+  async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>, custodyIds: readonly string[] = []): Promise<T> {
+    const writing = new Set(nodeIds);
+    const ids = [...new Set([...nodeIds, ...custodyIds])].sort();
     const acquire = async (index: number): Promise<T> => {
       const id = ids[index]; if (!id) return fn();
+      if (!writing.has(id)) return this.custodyInPass(id, () => acquire(index + 1));
       if (this.ownsLifecycle(id)) return acquire(index + 1);
       return this.operation(id, async () => {
         const lease = this.scope.getStore()!.get(id)!;
@@ -388,6 +398,28 @@ export class SeatDeliveryGuard {
       });
     };
     return acquire(0);
+  }
+
+  /** One custody lease taken inside lifecycle's sorted pass. Its target is read when the pass reaches this seat, as
+   *  lifecycle's own leases are, not up front the way custody() reads every target before waiting. A target that changed
+   *  while waiting on this seat refuses the whole operation before any effect, as a lifecycle lease's would. */
+  private async custodyInPass<T>(id: string, next: () => Promise<T>): Promise<T> {
+    if (this.ownsCustody(id)) return next();
+    const target = this.target(id);
+    const inherited = this.scope.getStore()?.get(id);
+    const run = async () => {
+      const lease: Lease = { target, active: true, origin: "custody", humanEpoch: this.humanEpochs.get(id) ?? 0 };
+      lease.serialOwner = inherited?.active && inherited.serialOwner?.active ? inherited.serialOwner : lease;
+      try { return await this.scope.run(new Map([...(this.scope.getStore() ?? []), [id, lease]]), next); }
+      finally { lease.active = false; }
+    };
+    const current = () => {
+      if (!this.same(target, this.target(id))) {
+        throw new DeliveryGuardError("guard_target_changed", "Custody target changed while waiting; no cleanup performed for this seat.");
+      }
+    };
+    if (inherited?.active && inherited.serialOwner?.active) { this.assertCurrent(id, inherited); current(); return run(); }
+    return this.serial(id, async () => { current(); return run(); });
   }
 
   /** Called only after an intentional lifecycle binding change, under its lease.
@@ -523,7 +555,9 @@ export class SeatDeliveryGuard {
     const quiet = async () => {
       if (!this.inputActivity) return;
       const last = await this.inputActivity(target).then(at => ({ at }), () => null);
-      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read the recent activity of the seat's terminal clients. Automatic delivery is held; nothing was pasted.");
+      // Its own diagnostic: a caller keeps the last one it was given, which would otherwise be an earlier refusal's.
+      if (!last) throw new DeliveryGuardError("draft_input_unknown", "OpenRig couldn't read the recent activity of the seat's terminal clients. Automatic delivery is held; nothing was pasted.",
+        inputReadDiagnostic("draft-aware", null, "client_activity_unavailable"));
       // tmux reports whole seconds: activity at N.999 s reads as N, so the quiet window counts from the end of that second.
       if (last.at !== null && Date.now() - (last.at + CLIENT_ACTIVITY_PRECISION_MS) < INPUT_QUIET_MS) {
         throw new DeliveryGuardError("draft_input_busy", "A writable client of this seat had recent activity. Automatic delivery is held; nothing was pasted.");

@@ -84,6 +84,10 @@ describe("explicit prompt answer delivery", () => {
     expect(result.promptInteraction).toBe("unverified");
     expect(result.warning).toContain("submission unverified");
     expect(db.prepare("SELECT count(*) AS n FROM events WHERE type = 'transport.prompt_override'").get()).toEqual({ n: 1 });
+    // Its delivery record: the answer typed with no Enter, so whether the prompt took it is unknown, never accepted.
+    const recorded = (db.prepare("SELECT payload FROM events WHERE type = 'transport.delivery_evidence'").all() as Array<{ payload: string }>)
+      .map((row) => JSON.parse(row.payload));
+    expect(recorded).toEqual([expect.objectContaining({ written: "text_only", outcome: { fact: "unknown", reporter: "openrig-observed", route: "typed" } })]);
   });
 
   it.each(["claude-code", "codex"] as const)("uses a pending permission to deliver an explicit still-staged text answer for %s", async runtime => {

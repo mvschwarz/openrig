@@ -9,6 +9,12 @@
 # that differs, so such flags fail even on a new name. Other arguments go only to a new session, never to a resume.
 set -eu
 
+# Managed run authority belongs to the parent runner, never this native TUI or its probes.
+# Keep legacy hook-only environments unchanged.
+if [ "${OPENRIG_RUN_ID+x}" = x ]; then
+  unset OPENRIG_RUN_ID OPENRIG_ACTIVITY_HOOK_TOKEN
+fi
+
 hermes="${OPENRIG_HERMES:-hermes}"
 
 # Each seat gets its own Hermes home, so seats don't share sessions or a gateway, and a seat's stop concerns only its own.

@@ -5,10 +5,12 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { openHandoverAttempt } from "../src/domain/seat-handover-attempts.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { SEAT_HANDOVER_SOURCE_CAPABILITIES } from "../src/domain/seat-handover-planner.js";
+import { ROUTE_DECLARATIONS } from "../src/domain/connection-contract.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
@@ -701,6 +703,22 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(discoveryRepo.getDiscoveredSession(row.id)?.claimedNodeId).toBe(other.id);
   });
 
+  it("a Codex seat's finalization refusal records no attempt and offers no --recover, which adopts Claude only (#2861 item 2)", async () => {
+    const { rig, node } = seedSeat();
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex" });
+    const exited = sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+    sessionRegistry.updateStatus(exited.id, "exited");
+    const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    discoveryRepo.markClaimed(row.id, other.id);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.guidance).not.toContain("--recover");
+    expect(openHandoverAttempt(db, node.id)).toBeNull();
+  });
+
   it("discovered-source adoption does not reclaim an archived owner's pane (#2861)", async () => {
     const previous = seedForeignPaneClaim({ archived: true, status: "exited" });
     const { node, sessionId } = seedSeat();
@@ -744,6 +762,30 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
     expect(liveSessionId(node.id)).toBe(sessionId);
     expect(discoveryRepo.getDiscoveredSession(previous.discovered.id)?.claimedNodeId).toBe(other.id);
+  });
+
+  it.each(["fresh", "rebuild"])("%s on a runtime whose input box isn't read reports its packet accepted, not seen consumed", async (source) => {
+    const { node } = seedSeat({ resumeToken: "native-abc" });
+    expect((db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(node.id) as { runtime: string }).runtime).toBe("codex");
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source });
+
+    expect(result).toMatchObject({ ok: true, result: { mutated: true,
+      restorePacket: { status: "accepted", reason: "codex's input box isn't read, so the packet was typed and submitted but not seen consumed" },
+      // Kept for existing readers: typed and submitted is what it has always meant.
+      sideEffects: { startupContextDelivered: true } } });
+  });
+
+  it("reads the packet back only with Claude Code's reader: a runtime declared to support it otherwise still reports accepted", async () => {
+    const codex = ROUTE_DECLARATIONS.find((d) => d.route === "typed")!.capabilities.codex!;
+    codex.continuity.restorePacketConfirmation = "supported";
+    try {
+      seedSeat({ resumeToken: "native-abc" });
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+      expect(result).toMatchObject({ ok: true, result: { restorePacket: { status: "accepted" } } });
+    } finally {
+      codex.continuity.restorePacketConfirmation = "not-supported";
+    }
   });
 
   it.each(["fresh", "rebuild"])("%s hands the invalidator the handed-over seat's own generation, not a newer same-name row's", async (source) => {

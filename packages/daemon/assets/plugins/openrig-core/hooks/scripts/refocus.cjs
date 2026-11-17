@@ -306,6 +306,11 @@ function renderTrace() {
     for (const workRoot of whoami?.answer?.workRoots ?? []) {
       if (typeof workRoot === "string" && workRoot) args.push("--work-root", workRoot);
     }
+    // The project the daemon selected for this seat, as work-install selects it, or why none
+    // was: the broad orientation when no typed baton names the work (#3320).
+    const workProject = whoami?.answer?.workProject;
+    if (typeof workProject?.root === "string" && workProject.root) args.push("--work-project", workProject.root);
+    else if (typeof workProject?.error === "string" && workProject.error) args.push("--work-project-unknown", workProject.error);
   }
   const env = traceEnv(trees);
   const timeout = lookupTimeout(contentReserveMs());

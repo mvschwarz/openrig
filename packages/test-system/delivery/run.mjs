@@ -15,7 +15,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { containedArgv, probeContainment } from "./harness/contain.mjs";
@@ -33,7 +33,32 @@ function args(argv) {
   return out;
 }
 const list = (value) => (typeof value === "string" ? value.split(",").map((v) => v.trim()).filter(Boolean) : []);
-const sha256File = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+// Files are hashed through one 1 MiB buffer, so a native payload of hundreds of MB is never held whole in memory. The
+// digest is the same as hashing the whole file at once.
+const READ_BUFFER = Buffer.allocUnsafe(1 << 20);
+function sha256File(path) {
+  const hash = createHash("sha256");
+  const fd = openSync(path, "r");
+  try { for (let n; (n = readSync(fd, READ_BUFFER, 0, READ_BUFFER.length, null)) > 0;) hash.update(READ_BUFFER.subarray(0, n)); }
+  finally { closeSync(fd); }
+  return hash.digest("hex");
+}
+
+/** Whether a file starts with the ELF magic, reading only its first 4 bytes. A read may return fewer bytes than asked
+ *  for before the end of the file, so the head is filled until it has 4 bytes or a read returns none. */
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+function isElf(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const head = Buffer.alloc(4);
+    let filled = 0;
+    for (let n; filled < 4 && (n = readSync(fd, head, filled, 4 - filled, filled)) > 0;) filled += n;
+    return filled === 4 && head.equals(ELF_MAGIC);
+  }
+  catch { return false; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
 
 /** Where a pinned install keeps its entry point. */
 function installEntry(installs, kind, version) {
@@ -66,6 +91,15 @@ function treeDigest(dir) {
   return { files: lines.length, sha256: createHash("sha256").update(lines.join("")).digest("hex") };
 }
 
+/** The suite a run ran: its git commit and whether the tree was clean, where git can say, and a digest of the case,
+ *  harness and stand-in files, which holds either way. */
+function suitePin() {
+  const git = (args) => { const r = spawnSync("git", args, { cwd: HERE, encoding: "utf8" }); return r.status === 0 ? r.stdout.trim() : null; };
+  const status = git(["status", "--porcelain", "--", "."]);
+  return { commit: git(["rev-parse", "HEAD"]), clean: status === null ? null : status === "",
+    files: Object.fromEntries(["cases", "harness", "stand-ins"].map((d) => [d, treeDigest(join(HERE, d))])) };
+}
+
 /** The exact program a cell runs, read when the run starts, before any cell:
  *  - its version as it reports itself;
  *  - entryPointSha256: the file on PATH (a launcher for Codex and OpenRig, so this alone doesn't pin what runs);
@@ -87,7 +121,7 @@ function pin(kind, entry) {
     const scope = pkgName.split("/")[0];
     out.payloads = existsSync(join(modules, scope)) ? readdirSync(join(modules, scope), { recursive: true, withFileTypes: true })
       .filter((d) => d.isFile()).map((d) => join(d.parentPath ?? d.path, d.name))
-      .filter((path) => { try { return readFileSync(path).subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])); } catch { return false; } })
+      .filter(isElf)
       .map((path) => ({ path: path.slice(modules.length + 1), sha256: sha256File(path) })) : [];
   }
   return out;
@@ -115,7 +149,7 @@ async function runSuite(opts) {
   for (const id of wanted) if (!CASES.some((c) => c.id === id)) throw new Error(`no case ${id} in this suite yet`);
 
   const expectedPath = join(HERE, "cases", "expected.yaml");
-  const pins = { level: LEVEL, host: hostPins(), openrig: pin("openrig", openrigEntry), expected: { path: "cases/expected.yaml", sha256: sha256File(expectedPath) }, programs: {} };
+  const pins = { level: LEVEL, host: hostPins(), openrig: pin("openrig", openrigEntry), expected: { path: "cases/expected.yaml", sha256: sha256File(expectedPath) }, suite: suitePin(), programs: {} };
   const containment = opts["no-contain"] ? { ok: false, reason: "--no-contain given" } : probeContainment();
   pins.containment = containment;
 
@@ -244,7 +278,7 @@ async function cellMain(specPath) {
   });
   try {
     cell = await openCell({ dir: join(spec.dir, "world"), arm: spec.arm, program: { kind: spec.kind, bin: spec.programEntry }, openrig: spec.openrigEntry,
-      realTmux: spec.realTmux, script: c.script(spec.kind), claudeSettings: c.claudeSettings ?? null });
+      realTmux: spec.realTmux, script: c.script(spec.kind), claudeSettings: c.claudeSettings ?? null, claudeEnv: c.claudeEnv ?? null });
   } catch (error) {
     outcome = { result: "NOT RUN", reason: `the seat didn't open: ${String(error.message ?? error).split("\n")[0]}`, detail: String(error.stack ?? error).slice(0, 4000) };
   }
@@ -294,6 +328,7 @@ function resultMarkdown({ generatedAt, pins, cells }) {
     ...programs,
     `- tmux ${pins.host.tmux}, node ${pins.host.node}, ${pins.host.os} (${pins.host.kernel})`,
     `- Expected results: ${pins.expected.path}, sha256 ${pins.expected.sha256}`,
+    `- Suite: ${pins.suite?.commit ?? "commit unknown"}${pins.suite?.clean === false ? " (with uncommitted changes)" : ""}; ${Object.entries(pins.suite?.files ?? {}).map(([d, t]) => `${d} ${t.sha256.slice(0, 16)}…`).join(", ")}`,
     `- Containment: ${pins.containment.ok ? "loopback-only network namespace per cell" : `none (${pins.containment.reason})`}`,
     "",
     "| Case | Title | Program | Result | Level | Why |",

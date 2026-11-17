@@ -81,6 +81,25 @@ describe("NodeLauncher", () => {
     return { rig, node };
   }
 
+  it("records the folder each launch starts the seat in: a run's own folder, else the saved one", async () => {
+    const rig = rigRepo.createRig("r01");
+    const saved = "/saved/folder", run = "/run/folder";
+    const moved = rigRepo.addNode(rig.id, "dev1-impl", { runtime: "claude-code", cwd: saved });
+    const stays = rigRepo.addNode(rig.id, "dev2-impl", { runtime: "claude-code", cwd: saved });
+    const createSpy = vi.fn<(name: string, cwd?: string) => Promise<TmuxResult>>().mockResolvedValue({ ok: true });
+    const launcher = createLauncher(mockTmuxAdapter({ createSession: createSpy }));
+
+    expect((await launcher.launchNode(rig.id, "dev1-impl", { cwd: run })).ok).toBe(true);
+    expect((await launcher.launchNode(rig.id, "dev2-impl")).ok).toBe(true);
+
+    const launchedIn = (nodeId: string) => (db.prepare("SELECT launched_cwd FROM sessions WHERE node_id = ?").get(nodeId) as { launched_cwd: string | null }).launched_cwd;
+    expect(launchedIn(moved.id)).toBe(run);
+    expect(launchedIn(stays.id)).toBe(saved);
+    // The run's folder is this launch's only: the seat's saved folder is unchanged.
+    expect(rigRepo.getRig(rig.id)!.nodes.find((n) => n.id === moved.id)!.cwd).toBe(saved);
+    expect(createSpy.mock.calls.map((call) => call[1])).toEqual([run, saved]);
+  });
+
   it("a missing pane at registration immediately projects attention", async () => {
     const { rig } = seedRigWithNode();
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -304,6 +323,38 @@ describe("NodeLauncher", () => {
     if (!result.ok) {
       expect(result.code).toBe("already_bound");
     }
+  });
+
+  it("#3253: processLimitsMode is passed through to createSession, and its absence keeps the fresh default", async () => {
+    const { rig } = seedRigWithNode();
+    const createSpy = vi.fn(async (..._args: unknown[]) => ({ ok: true as const }));
+    const tmux = mockTmuxAdapter({ createSession: createSpy as never });
+    await createLauncher(tmux).launchNode(rig.id, "dev1-impl", { processLimitsMode: "recovery" });
+    expect(createSpy.mock.calls[0]![3]).toEqual({ processLimitsMode: "recovery" });
+
+    const other = rigRepo.createRig("r02");
+    rigRepo.addNode(other.id, "dev1-impl", { role: "worker", runtime: "claude-code" });
+    await createLauncher(tmux).launchNode(other.id, "dev1-impl");
+    expect(createSpy.mock.calls[1]![3]).toBeUndefined();
+  });
+
+  it("#3253: a launch that went on without the limit carries the notice", async () => {
+    const { rig } = seedRigWithNode();
+    const notice = { state: "not_applied" as const, kind: "unverified" as const, retryable: true,
+      reason: "the user manager timed out", requested: { tasksMax: 256 } };
+    const launcher = createLauncher(mockTmuxAdapter({ createSession: async () => ({ ok: true as const, processLimits: notice }) }));
+    const result = await launcher.launchNode(rig.id, "dev1-impl", { processLimitsMode: "recovery" });
+    expect(result).toMatchObject({ ok: true, processLimits: notice });
+  });
+
+  it("#3253: a refused fresh launch keeps code, retryable and processLimits", async () => {
+    const { rig } = seedRigWithNode();
+    const problem = { kind: "unverified" as const, reason: "the user manager timed out", requested: { tasksMax: 256 } };
+    const launcher = createLauncher(mockTmuxAdapter({ createSession: async () => ({ ok: false as const,
+      code: "process_limits_unverified", message: "not started", retryable: true, processLimits: problem }) }));
+    const result = await launcher.launchNode(rig.id, "dev1-impl");
+    expect(result).toEqual({ ok: false, code: "process_limits_unverified", message: "not started", retryable: true, processLimits: problem });
+    expect(sessionRegistry.getSessionsForRig(rig.id)).toHaveLength(0);
   });
 
   it("tmux createSession fails -> no DB rows", async () => {

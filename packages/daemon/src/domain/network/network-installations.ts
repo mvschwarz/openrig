@@ -163,10 +163,11 @@ export class NetworkInstallationStore {
   }
 
   /** The new key goes in beside the old one and takes its place, then the row and the old installation's active bindings
-   *  change in one transaction. A failure before that commits puts the old key back (with no old key, it removes the new
-   *  one), so nothing here changes, though the account has already made the new installation and nothing here holds its
-   *  key. After the commit the replace has happened: the ended bindings' names are returned, since the old installation
-   *  may still list them and this key can't drop them, with any cleanup that didn't finish. */
+   *  change in one transaction. A failure before that commits leaves the row and bindings as they were and puts the old
+   *  key back (with no old key, it removes the new one), though the account has already made the new installation.
+   *  Moving key files happens outside the transaction, so a put-back or cleanup that also fails is named in the error,
+   *  with where each key is. After the commit the replace has happened: the ended bindings' names are returned, since
+   *  the old installation may still list them and this key can't drop them, with any cleanup that didn't finish. */
   private replace(bindings: NetworkBindingStore, old: NetworkInstallation, next: { id: string; name: string | null }, key: string, allowHttp: number): EnrollResult {
     const file = networkInstallationKeyFile(this.home, old.id);
     const staged = `${file}.next`;
@@ -175,19 +176,40 @@ export class NetworkInstallationStore {
     rmSync(staged, { force: true });
     const cleanup = writePrivateToken(staged, key);
     const hadKey = existsSync(file);
+    let movedOld = false;
+    let movedNew = false;
     try {
-      if (hadKey) renameSync(file, kept);
+      if (hadKey) { renameSync(file, kept); movedOld = true; }
       renameSync(staged, file);
+      movedNew = true;
       this.db.transaction(() => {
         this.db.prepare("UPDATE network_installations SET installation_id = ?, name = ?, allow_http = ? WHERE id = ?").run(next.id, next.name, allowHttp, old.id);
         bindings.markDisconnected(ending.map((b) => b.id), REPLACED_REASON);
       })();
     } catch (error) {
-      if (!hadKey) rmSync(file, { force: true });
-      else if (existsSync(kept)) renameSync(kept, file);
-      cleanup();
-      throw new NetworkBindingError("replace_failed",
-        `The account accepted the new code, but this daemon couldn't switch to it (${(error as Error).message.slice(0, 200)}), so nothing here changed. The account now has a new installation whose key nothing here holds: remove it on the account page, then enroll again with a new code.`, 500);
+      // Putting a key back or removing the staged one can fail too (a full or read-only disk). Then say where each key
+      // is, from the moves that finished, and say the new key is held nowhere only when that's established.
+      const byHand: string[] = [];
+      const newKeyAt: string[] = [];
+      try {
+        if (!hadKey) rmSync(file, { force: true });
+        else if (movedOld) renameSync(kept, file);
+      } catch (restore) {
+        const why = (restore as Error).message.slice(0, 200);
+        if (movedNew) newKeyAt.push(file);
+        byHand.push(hadKey
+          ? `The earlier key couldn't be put back (${why}); it's at ${kept}${movedNew ? `, and ${file} holds the new installation's key` : ""}. Move ${kept} back to ${file} before you go on.`
+          : `The new key couldn't be removed (${why}): delete ${file} by hand.`);
+      }
+      try { cleanup(); } catch (left) {
+        if (!movedNew) newKeyAt.push(staged);
+        byHand.push(`The staged new key couldn't be removed (${(left as Error).message.slice(0, 200)}): delete ${staged} by hand.`);
+      }
+      const failed = `The account accepted the new code, but this daemon couldn't switch to it (${(error as Error).message.slice(0, 200)})`;
+      const held = newKeyAt.length === 0 ? "whose key nothing here holds" : `whose key is in ${newKeyAt.join(" and ")} until then`;
+      throw new NetworkBindingError("replace_failed", byHand.length === 0
+        ? `${failed}, so nothing here changed. The account now has a new installation ${held}: remove it on the account page, then enroll again with a new code.`
+        : `${failed}. Its record and bindings here are unchanged, but its key files need a step by hand. ${byHand.join(" ")} The account now has a new installation ${held}: remove it on the account page, then enroll again with a new code.`, 500);
     }
     const problems: string[] = [];
     try {

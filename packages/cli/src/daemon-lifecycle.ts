@@ -307,6 +307,10 @@ const DEFAULT_DB = "openrig.sqlite";
 // DAEMON_STOP_WAIT_MS of owned-child cleanup.
 const STARTUP_PROGRESS_INTERVAL_MS = 20_000;
 const HEALTHZ_DELAY_MS = 250;
+/** How long a listener other than the one this start probes first may stay uncertain, while that one answers with the
+ *  child's own PID, before the start goes ahead with #1743's warning. A Mac's connection to its own Tailscale address times
+ *  out instead of being refused, so waiting longer gets no answer; the readiness budget is for a slow first listener. */
+const STARTUP_SECONDARY_GRACE_MS = 5_000;
 // OPR.0.4.7 slice-05 item-4: the WHOLE status health probe stays within ONE normal
 // CLI request window (~5s, matching DaemonClient's timeoutMs) — immediate connection
 // errors may retry INSIDE this deadline, but it is NEVER re-allocated per retry. So a
@@ -339,6 +343,7 @@ function lifecycleInitializationFs(deps: LifecycleDeps): InitializationFsOps {
     }),
     mkdirp: deps.mkdirp,
     writeFile: deps.writeFile,
+    readFile: (candidate) => deps.readFile(candidate),
   };
 }
 
@@ -861,6 +866,8 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     const readinessStartedAt = Date.now();
     deadline = readinessStartedAt + STARTUP_READINESS_DEADLINE_MS;
     let nextProgressAt = readinessStartedAt + STARTUP_PROGRESS_INTERVAL_MS;
+    // Since when only listeners other than the probed one have been uncertain, round after round.
+    let secondaryOnlySince: number | null = null;
     while (remaining() > 0) {
       unverified = null;
       try {
@@ -892,6 +899,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
         if (error instanceof StartupIdentityError) throw error;
         lastProbe = error instanceof Error ? error.message : String(error);
       }
+      // A clear answer may still come in the next few rounds; past the grace, start and say which is unverified.
+      if (unverified === null || unverified.some((host) => formatDaemonHostForUrl(host) === formatDaemonHostForUrl(probeHost))) secondaryOnlySince = null;
+      else if (Date.now() - (secondaryOnlySince ??= Date.now()) >= STARTUP_SECONDARY_GRACE_MS) break;
       if (remaining() > 0 && Date.now() >= nextProgressAt) {
         console.error(`Waiting for daemon child ${pid} readiness (${Math.floor((Date.now() - readinessStartedAt) / 1000)}s elapsed; ${STARTUP_READINESS_DEADLINE_MS / 1000}s limit). This start has not published readiness.`);
         nextProgressAt = Date.now() + STARTUP_PROGRESS_INTERVAL_MS;
