@@ -44,6 +44,38 @@ describe("machine names on the Slack delivery path", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("posts with the durable host ID when a fitting label would overflow the complete message", async () => {
+    // The label fits the sender line (well under its 2000-unit budget) but it
+    // pushes the COMPLETE fallback past the text cap: the durable host ID is
+    // tried before anything refuses, so an ordinary notice still posts.
+    const home = mkdtempSync(path.join(tmpdir(), "slack-machine-overflow-"));
+    const posts: unknown[] = [];
+    try {
+      const deliver = subsystemSlackDeliver({
+        botToken: "xoxb-EXAMPLE-fake", channel: "C-TEST", sourceLabel: "vm",
+        machine: () => selfMachineLabel(configured("x".repeat(1500)), "host-4a409197"),
+        machineFallback: "host-4a409197",
+        delivered: new SeenStore(path.join(home, "delivered.jsonl")),
+        attempted: new SeenStore(path.join(home, "attempted.jsonl")),
+        outboundSeen: new SeenStore(path.join(home, "seen.jsonl")),
+        fetchImpl: async (_url, init) => {
+          posts.push(JSON.parse(String(init?.body)));
+          return new Response(JSON.stringify({ ok: true, ts: "100.1" }), { status: 200 });
+        },
+      });
+      const result = await deliver({
+        kind: "outbound_decision", decisionId: "machine-overflow", op: OUTBOUND_OP, entityBindingRef: "person@external",
+        payload: { qitemId: "q-overflow", sourceSession: "lead@team", summary: "Decide X", body: "b".repeat(2450) },
+      });
+      expect(result.ok).toBe(true);
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).toMatchObject({ text: expect.stringMatching(/^From lead@team on host-4a409197\n/) });
+      expect(posts[0]).toMatchObject({ text: expect.not.stringMatching(/x{100}/) });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("selfMachineLabel (Slack sender-line machine label)", () => {
