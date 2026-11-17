@@ -28,6 +28,7 @@ import { SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros } from "./
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
 import { SlackAskSettlement } from "./settled-asks.js";
+import { SlackNoticeContentDedup } from "./notice-content-dedup.js";
 import { abortableSleep, POSSIBLY_POSTED_CLASS, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, SLACK_THREAD_ROOT_TAG, handleEnvelope, type SocketEnvelope, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
@@ -620,6 +621,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   // Late-bound so deliver can release the driver's in-flight guard (built after the wire).
   let releaseRef: (qitemId: string) => void = () => {};
+  const noticeDedup = new SlackNoticeContentDedup({ queue: opts.queueRepo, token: bot ?? "", fetchImpl: opts.fetchImpl,
+    signal: runCtl.signal, log, seen: (key) => { outboundSeen.mark(key, "marked-identical-content"); releaseRef(key); } });
   // The wire's own dispatcher, bound once the wire exists: a delivery step that must mint a new durable decision.
   let selfDispatch: (decisionId: string, payload: unknown) => { ok: boolean; error?: string } = () => ({ ok: false, error: "wire not built" });
 
@@ -768,6 +771,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         },
         onTransportFailed: recordTransportFailed,
         onPosted: (p, messageTs, threadTs) => {
+          const root = threadMap.resolveByConversation(p.qitemId);
+          if (root) noticeDedup.posted(p, messageTs, root.channel, threadTs);
           // v3 digest branch: transport truth first — every member receipt is
           // stamped HERE, after the real post, digest-tokened and episode-keyed.
           const digest = (p as unknown as { deliveryDigestPost?: boolean; digestId?: string; memberReceipts?: Array<{ qitemId: string; notificationKey: string; level: string; kind: string }> });
@@ -897,7 +902,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   };
 
   const targetDeliverFor = (decision: Parameters<SubsystemDeliverFn>[0], p: OutboundPostPayload): SubsystemDeliverFn => {
-    if (!isRelayDecision(decision, p)) return deliver;
+    if (!isRelayDecision(decision, p)) return (d) => noticeDedup.deliver(p, () => deliver(d));
     return (d) => {
       const carry = (d.payload ?? {}) as RelayPayloadCarry;
       const readyDecision = carry.relayConnectorRef && carry.relayEnvelope ? d : prepareDecision(d);
