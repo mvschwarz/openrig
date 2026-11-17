@@ -1677,7 +1677,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--closure-target <target>", "Required for handed_off_to, escalation, and superseded; blocked_on park records use state=blocked with --blocked-on")
     .option("--closure-required-at <iso>", "Accept a revised closure deadline on an in-progress item; keeps the claim and records the old/new time and accepting actor")
     .option("--resolution <text>", "The outcome, stored on the row and shown by rig queue show. Needs --state done, canceled, denied, failed or handed-off, and non-blank text. Stored when the update closes an open row, after anything the row already has (a fallback line, an earlier outcome); a row that is already closed keeps what it has")
-    .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
+    .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'. To wait on a person, ask them with a row to their registered address (rig gateway human list) and block on that row, which their answer resolves; an unregistered human seat such as human@host asks no one and doesn't close by itself")
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--summary <text>", "Summary persisted onto the item, with or without a state change (a blank one isn't stored)")
@@ -1817,7 +1817,7 @@ For a new cross-host transfer, prefer rig queue handoff --host <registered-host>
   cmd
     .command("block <qitemId>")
     .description("Park a qitem as HELD with a continuation and wake. Requires --on <blocker>. Choose --wake-watchdog, --wake-after, or a live blocker qitem for the wake.")
-    .requiredOption("--on <blocker>", "The blocker: a live blocker qitem, typed gate, or human-seat session")
+    .requiredOption("--on <blocker>", "The blocker: a live blocker qitem, typed gate, or human-seat session. To wait on a person, block on a row you sent to their registered address (rig gateway human list), which their answer resolves; an unregistered human seat such as human@host asks no one")
     .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); the park writes via the same P21 I3 header-deriving update route")
     .option("--summary <text>", "Plain-language summary of the decision owed (required for human-seat parks unless already on the item)")
     .option("--evidence-ref <path>", "Durable artifact the human judges (required for human-seat parks unless already on the item)")

@@ -118,6 +118,14 @@ says whether it takes requests isn't known, and the write goes ahead. A `takes_r
 or a note that breaks the label rule or comes without `takes_requests: false`, doesn't stop the roster loading:
 `takes_requests_problem` says why, and an unusable note leaves the flag in place.
 
+A member can also carry `app`, which client the participant uses (such as `chatgpt`, `claude`, `claude-code`, `codex`,
+`hermes`, `openrig` or `studio`), and `kind`, what kind of participant it is (`persistent` or `shared`), as the service
+that issued its access recorded them. Each is a short lowercase token: a letter, then up to 31 lowercase letters, digits
+or hyphens. OpenRig passes the value through as recorded and doesn't keep its own list: the issuing service owns the
+values. `rig_team` shows them as `participant: { app, kind }` on that member's entry, apart from a seat's own `kind`
+(its node kind). Absent or empty is unknown; neither is inferred from a name or label. A value that isn't a token is
+dropped on its own, `participant_problem` (`participantProblem` in `rig_team`) says why, and the roster still loads.
+
 The roster at `rosters/network-<rig>.json` names that rig's team. Without that file, the roster whose `id` is the
 rig's name does (the `<rig>.json` the starter and factory leads write; the first by file name if several do). For an
 external caller, `rig_team` reports its `name` as `rig.displayName`, beside the rig's own name. The name follows the

@@ -1200,9 +1200,11 @@ members:
 - **Persistence and clear:** On new seats, absent or `process_limits: {}` stores no limit. Applying an authored spec to
   an existing seat retains the stored limit when the key is absent, clears it with `process_limits: {}`, and replaces it
   otherwise; the new value is stored before that launch. First-start retry refuses a changed limit, and keeps a stored
-  value it can't read as it is (that launch reports `process_limits_invalid`). Export includes the configured value; a
-  seat whose stored value can't be read stops the export (HTTP 409, `export_refused`), naming the seat and how to fix
-  or clear it, rather than dropping the request.
+  value it can't read as it is (that launch reports `process_limits_invalid`). Export includes the configured value. A
+  seat whose stored value can't be read is exported without `process_limits`, and the rest of the rig exports as usual.
+  The stored value stays as it is, and the export names the seat: a `# Not carried:` line at the top of the YAML (which
+  `rig export` prints) with how to fix or clear it, and the `X-OpenRig-Export-Warnings` header on YAML and JSON (which
+  `rig spec show --json` prints as a warning).
 
 ### Pi (`runtime: pi`)
 

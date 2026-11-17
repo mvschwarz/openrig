@@ -23,14 +23,31 @@ including contributions from people using OpenRig.
 
 - **Stop the daemon, back up the database, install 0.7.17, then start the
   daemon.** Your agents keep running through a daemon restart; don't use
-  `rig down`, which ends them.
+  `rig down`, which ends them. Each step runs only if the one before it
+  succeeded. The backup goes to a new, dated file, with its `-wal` file beside
+  it when there is one, so running the block again never overwrites an earlier
+  backup. If you installed OpenRig another way, use that in place of the
+  `npm install` line.
+
+  If you started the daemon with `--db`, set `DB` to that same path instead of using `rig config get db.path`, and pass that path with `--db` to each `rig daemon start` below, including recovery.
 
   ```sh
-  rig daemon stop
-  cp "$(rig config get db.path)" "$(rig config get db.path).before-0.7.17"
-  npm install -g @openrig/cli@0.7.17   # or your existing installation method
+  rig daemon stop &&
+  DB="$(rig config get db.path)" &&
+  BACKUP="$DB.before-0.7.17-$(date -u +%Y%m%dT%H%M%SZ)" &&
+  { [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists and is kept; run the block again." >&2; false; }; } &&
+  cp "$DB" "$BACKUP" &&
+  { [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
+  echo "Database backed up to $BACKUP" &&
+  npm install -g @openrig/cli@0.7.17 &&
   rig daemon start
   ```
+
+  If a step fails, nothing after it runs: fix what it reports, then run the
+  whole block again. If `rig daemon stop` fails and `rig daemon status` then
+  says "Daemon stopped", run the block from the `DB=` line. If it says
+  "Daemon PID is absent", run `rig daemon start`, then the whole block again.
+  Keep the backup, and its `-wal` file, until 0.7.17 is running well.
 
 - **Two migrations run before the daemon listens** (168 and 170). Going back to
   0.7.16 after them isn't established; keep the backup. ([#3260](https://github.com/mvschwarz/openrig/pull/3260))

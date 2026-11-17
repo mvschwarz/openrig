@@ -1,4 +1,5 @@
 import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -562,11 +563,8 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
         && typeof start?.snapshotId === "string"
         && event?.snapshotId === start.snapshotId && result?.snapshotId === start.snapshotId
         && Array.isArray(result?.nodes) && Array.isArray(roster)) {
-        const intended = new Set(roster.map((node: any) => node?.nodeId));
-        for (const node of result.nodes) {
-          if (typeof node?.nodeId === "string" && intended.has(node.nodeId)) {
-            attempt.outcomes.set(node.nodeId, node.status);
-          }
+        for (const node of restoreOutcomesByIntendedNode(roster, result.nodes).values()) {
+          attempt.outcomes.set(node.nodeId, node.status);
         }
       }
     }

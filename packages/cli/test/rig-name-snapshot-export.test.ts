@@ -133,6 +133,19 @@ describe("rig snapshot, rig export and rig restore --rig", () => {
     expect(out).toContain("Exported to out.yaml");
   });
 
+  it("#3253: an export leaving out a seat's unreadable process_limits writes the file and prints the not-carried line", async () => {
+    const d = fakeDaemon();
+    const yaml = "# Not carried: dev.impl's process_limits, because the saved value can't be read; it stays stored as it is.\nname: solo\n";
+    const client = d.deps.clientFactory("") as unknown as { getText: ReturnType<typeof vi.fn> };
+    client.getText.mockResolvedValueOnce({ status: 200, data: yaml });
+    const writeFile = vi.fn();
+    const { out, exitCode } = await run(exportCommand({ ...d.deps, writeFile } as ExportDeps), ["export", "solo", "-o", "out.yaml"]);
+    expect(writeFile).toHaveBeenCalledWith("out.yaml", yaml);
+    expect(out).toContain("Exported to out.yaml");
+    expect(out).toContain("Not carried: dev.impl's process_limits, because the saved value can't be read; it stays stored as it is.");
+    expect(exitCode).toBeUndefined();
+  });
+
   it("#3253: a refused export prints the daemon's error, not its raw JSON, and writes nothing", async () => {
     const d = fakeDaemon();
     const error = "Cannot export seat 'dev.impl': Seat n1 process_limits: stored value is not valid JSON. Fix it by re-applying the spec " +

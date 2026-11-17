@@ -1045,9 +1045,9 @@ export class SeatHandoverService {
   }
 
   /** #2985: the pane's one foreground Claude is the attempt's launch: it names exactly the session id the daemon
-   *  generated for it, the same process in two samples, in the seat session's only pane, with an unchanged PID (as
-   *  `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt, never from the
-   *  process. Reads only. */
+   *  generated for it, the same process in two samples, in the only pane of the seat session's current window, with an
+   *  unchanged PID (as `rig seat clear-attention` proves a resumed occupant). The expected id comes from the attempt,
+   *  never from the process. Reads only. */
   private async proveAttemptSuccessor(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string; currentUnread?: true; onLaunchConversation?: true } | { ok: false; message: string; unprovable?: true }> {
     const first = await this.proveAttemptSuccessorOnce(attempt, cwd);
     if (first.ok || !first.unprovable) return first;
@@ -1068,10 +1068,19 @@ export class SeatHandoverService {
   private async proveAttemptSuccessorOnce(attempt: SeatHandoverAttempt, cwd: string | null): Promise<{ ok: true; currentToken?: string; launchForkParent?: string; currentUnread?: true; onLaunchConversation?: true } | { ok: false; message: string; unprovable?: undefined } | { ok: false; message: string; unprovable: true; foreground: string }> {
     const token = attempt.resumeToken?.trim();
     if (!token) return { ok: false, message: "The failed handover did not capture its successor's session id, so the pane's process can't be proven to be that successor." };
+    // The launch's own rule: the successor is the only pane of the session's current window (tmux list-panes without -s),
+    // the window a send to the session's name reaches and the readiness check reads. Other windows don't count.
     const onlyPane = async () => {
-      // Every window of the session (tmux list-panes -s): a pane in another window is a second pane too.
-      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession, true);
+      const panes = await this.tmuxAdapter.listPanes(attempt.canonicalSession);
       return panes.length === 1 && panes[0]?.id === attempt.pane;
+    };
+    // Why not: a successor alone in a window that isn't the current one is still there, and selecting it is the person's.
+    const notOnlyPane = async () => {
+      const inSession = (await this.tmuxAdapter.listPanes(attempt.canonicalSession, true)).some((pane) => pane.id === attempt.pane);
+      const ownWindow = inSession ? await this.tmuxAdapter.listPanes(attempt.pane) : [];
+      return ownWindow.length === 1 && ownWindow[0]?.id === attempt.pane
+        ? `Pane "${attempt.pane}" of ${attempt.canonicalSession} is alone in its window, but that window isn't the session's current window, where sends to the seat and the readiness check go. In tmux, select the successor's window, then run the recovery again.`
+        : `Pane "${attempt.pane}" is no longer the only pane of ${attempt.canonicalSession}'s current window, where the failed handover launched its successor.`;
     };
     // #3044 review S1: proven as the adapter's readiness proves the launch (claude-code-adapter assessManagedProbe): with
     // its frozen executable and, for a #! wrapper that starts Claude without exec (#2341), as the script's child.
@@ -1081,9 +1090,7 @@ export class SeatHandoverService {
       ?? (() => listNativeProcesses({ claudeLaunchPaths: scriptLaunch, frozenExecutable: selectedExecutable }));
     const proofInput = { target: attempt.pane, tmux: this.tmuxAdapter, listProcesses: list, expectedToken: token, selectedExecutable, scriptLaunch };
     try {
-      if (!await onlyPane()) {
-        return { ok: false, message: `Pane "${attempt.pane}" is no longer the only pane of ${attempt.canonicalSession}, where the failed handover launched its successor.` };
-      }
+      if (!await onlyPane()) return { ok: false, message: await notOnlyPane() };
       const native = await verifyClaudePaneProcess(proofInput);
       if (!native) {
         const panePid = await this.tmuxAdapter.getPanePid(attempt.pane);

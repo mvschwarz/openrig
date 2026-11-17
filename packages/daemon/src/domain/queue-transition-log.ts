@@ -218,8 +218,8 @@ export interface QueueTransition {
   /** P21 §4 era-stamp: how actorSession was established. `transport:v1` = derived from the
    *  transport chokepoint; null/absent = claimed-era (pre-verification), never re-labeled. */
   identityProvenance: string | null;
-  /** With `principal:v1`: the caller the local MCP adapter checked a grant for (JSON: source, id, and for a
-   *  grant-service grant its id and version). Null on every other row. */
+  /** With `principal:v1`, the checked MCP caller (JSON: source, id and optional grant/version).
+   *  With `gateway:slack:v1`, the registered person's entity id mapped from Slack. Otherwise null. */
   identityPrincipal: string | null;
   ownerNotificationKind: string | null;
   ownerNotificationLevel: OwnerNotificationLevel;
@@ -235,7 +235,7 @@ export interface QueueTransitionInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` when actorSession came from the transport
    *  header chokepoint; omit (null) for system/claimed-era transitions — absence is the marker. */
   identityProvenance?: string | null;
-  /** Recorded only with identityProvenance `principal:v1` (resolveRecordedIdentity). */
+  /** The MCP principal (`principal:v1`) or registered person (`gateway:slack:v1`) that made this change. */
   identityPrincipal?: string | null;
   ownerNotificationKind?: string | null;
   ownerNotificationLevel?: OwnerNotificationLevel | null;
@@ -424,8 +424,9 @@ export class QueueTransitionLog {
       input.closureReason ?? null,
       input.closureTarget ?? null,
     ];
-    // A principal is kept only beside principal:v1; a schema without the column records today's stamp instead.
-    const principal = input.identityProvenance === "principal:v1" && this.hasIdentityPrincipalColumn ? input.identityPrincipal ?? null : null;
+    // Preserve the recorded caller or mapped Slack person; this attribution grants no permission.
+    const principal = (input.identityProvenance === "principal:v1" || input.identityProvenance === "gateway:slack:v1")
+      && this.hasIdentityPrincipalColumn ? input.identityPrincipal ?? null : null;
     if (this.hasIdentityProvenanceColumn) {
       columns.push("identity_provenance");
       values.push(input.identityProvenance === "principal:v1" && !principal ? "transport:v1" : input.identityProvenance ?? null);
