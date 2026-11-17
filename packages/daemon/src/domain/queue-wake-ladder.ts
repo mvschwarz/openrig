@@ -1132,7 +1132,8 @@ export function makePermissionPromptReader(deps: {
       let hook: AgentActivity | null | undefined;
       try { hook = deps.getLatestHook(destination, runtime); }
       catch (error) { (deps.log ?? console.error)(`[wake-ladder] permission hook unreadable for ${JSON.stringify(destination)}: ${String(error)}`); }
-      const current = hook?.evidenceSource === "runtime_hook" && hook.generationProvenance === "resolved";
+      const current = hook?.evidenceSource === "runtime_hook" && hook.generationProvenance === "resolved"
+        && (hook.stale !== true || hook.reason === "stale_runtime_hook");
       const retainedState = current ? latestHookState(hook, runtime) : "unknown";
       const permission = hook?.rawSubtype === "permission_prompt" || hook?.rawEvent === "PermissionPromptConfirmed";
       const state = !current ? "unknown"

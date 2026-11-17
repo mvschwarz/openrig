@@ -575,3 +575,28 @@ it("a failed hook-only send-boundary re-read is contained and named", async () =
   const alert = repo.list({ limit: 100 })[0]!;
   expect(repo.listTransitions(alert.qitemId).some(t => t.transitionNote?.includes("operator rung resolved"))).toBe(false);
 });
+
+
+it.each(["open", "closed"])("a mismatched hook-only clear preserves a %s alert without moving its boundary", async disposition => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("Notification", "permission_prompt", 0);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    const alert = repo.listAttention()[0]!;
+    expect(alert).toBeDefined();
+    if (disposition === "closed") repo.update({ qitemId: alert.qitemId, actorSession: "human@kernel", state: "done", closureReason: "no-follow-on" });
+    const state = repo.getById(alert.qitemId)!.state;
+    f.clock.value = new Date(f.clock.value.getTime() + 1000);
+    await f.hook("PermissionPromptCleared", null, 0);
+    f.changeGeneration("different-generation");
+    expect(f.store.getLatestForNode({ sessionName: f.name })).toMatchObject({
+      state: "unknown", reason: "generation_mismatch", generationProvenance: "resolved", stale: true,
+    });
+    await scheduler.runTickNow();
+    expect(repo.getById(alert.qitemId)?.state).toBe(state);
+    expect(repo.listTransitions(alert.qitemId).some(t => t.actorSession === "wake-ladder@system"
+      && t.transitionNote === "prompt escalation: the seat's prompt read clear")).toBe(false);
+    expect(repo.list({ limit: 100 })).toHaveLength(1);
+  } finally { await scheduler.stop(); }
+});
