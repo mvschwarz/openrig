@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readProcessTable, readProcessTableNow, readProcTable, readProcessTableCensus, readProcCensus } from "../src/domain/process-table.js";
+import { readProcessTable, readProcessTableCensusNow, readProcTable, readProcessTableCensus, readProcCensus } from "../src/domain/process-table.js";
 import { claudeCommandSessionToken, listNativeProcesses, processArgv, verifyCodexPaneProcess, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 import { defaultListProcessesStrict } from "../src/domain/resume-metadata-refresher.js";
 import { restoreProc, serveProcRoot, writeFakeProc, readPermissionHiddenProc } from "./helpers/fake-proc.js";
@@ -190,15 +190,16 @@ describe("readProcessTable", () => {
     await second;
   });
 
-  it("a read for evidence begins its own census, joining none in flight", async () => {
-    const shared = readProcessTable();
-    const now = readProcessTableNow(), again = readProcessTableNow();
+  it("a census for evidence begins its own read, joining none in flight, and keeps its hidden pids", async () => {
+    const shared = readProcessTableCensus();
+    const now = readProcessTableCensusNow(), again = readProcessTableCensusNow();
     expect(now).not.toBe(shared);
     expect(again).not.toBe(now);
-    expect(readProcessTable()).toBe(shared);
-    const [sharedRows, nowRows] = await Promise.all([shared, now, again]);
-    expect(nowRows).not.toBe(sharedRows);
-    expect(nowRows.some((row) => row.pid === process.pid)).toBe(true);
+    expect(readProcessTableCensus()).toBe(shared);
+    const [sharedCensus, nowCensus] = await Promise.all([shared, now, again]);
+    expect(nowCensus.rows).not.toBe(sharedCensus.rows);
+    expect(nowCensus.rows.some((row) => row.pid === process.pid)).toBe(true);
+    expect(Array.isArray(nowCensus.permissionHiddenPids)).toBe(true);
   });
 
   it("clears both shared accessors after a failed census so a later read can recover", async () => {

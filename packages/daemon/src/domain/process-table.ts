@@ -50,10 +50,12 @@ export function readProcessTableCensus(): Promise<ProcessTableCensus> {
   return censusInFlight;
 }
 
-/** A read of the table that begins now and is shared with no other caller, for evidence that must be newer than this
- *  moment: a shared read still in flight may have listed its processes before a process started. */
-export function readProcessTableNow(): Promise<ProcessTableRow[]> {
-  return process.platform === "linux" ? readProcTable(procRoot) : readPsTable();
+/** A census of the table that begins now and is shared with no other caller, for evidence that must be newer than this
+ *  moment: a shared read still in flight may have listed its processes before a process started. Its permission-hidden
+ *  pids are kept, so a caller using absence as evidence can tell it couldn't see every process. */
+export function readProcessTableCensusNow(): Promise<ProcessTableCensus> {
+  return process.platform === "linux" ? readProcCensus(procRoot)
+    : readPsTable().then(rows => ({ rows, permissionHiddenPids: [] }));
 }
 
 /** Points the Linux read at a /proc of a test's own, so a scenario's processes reach the observers through it; no

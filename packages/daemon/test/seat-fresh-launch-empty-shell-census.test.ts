@@ -14,13 +14,15 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { ProcessTableRow } from "../src/domain/process-table.js";
 
-// The process table as the daemon's own observers see it. `live` is the table now. The shared read models another
-// observer's census still in flight: it listed the processes once, when it began, and every caller asking meanwhile
-// joins it. A read that begins now sees `live`.
-const table = vi.hoisted(() => ({ live: [] as ProcessTableRow[], shared: null as ProcessTableRow[] | null }));
+// The process table as the daemon's own observers see it. `live` is the table now, and `hidden` the pids whose stat this
+// user can't read (Linux hidepid). The shared read models another observer's census still in flight: it listed the
+// processes once, when it began, and every caller asking meanwhile joins it. A census that begins now sees `live`.
+// (`readProcessTableNow` is round 3's rows-only read, kept so that round's code can run against these cells.)
+const table = vi.hoisted(() => ({ live: [] as ProcessTableRow[], shared: null as ProcessTableRow[] | null, hidden: [] as number[] }));
 vi.mock("../src/domain/process-table.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/domain/process-table.js")>()),
   readProcessTable: async () => (table.shared ??= [...table.live]),
+  readProcessTableCensusNow: async () => ({ rows: [...table.live], permissionHiddenPids: [...table.hidden] }),
   readProcessTableNow: async () => [...table.live],
 }));
 
@@ -51,6 +53,7 @@ describe("a fresh launch without --stop, with the daemon's own process reads", (
     commands = [];
     table.live = [shell];
     table.shared = null;
+    table.hidden = [];
     named = undefined;
     onIdentity = undefined;
     const adapter = new TmuxAdapter(async command => {
@@ -113,6 +116,17 @@ describe("a fresh launch without --stop, with the daemon's own process reads", (
     const result = await service.launchFresh({ seatRef: seat.name, fresh: true, reason: "replace the shell" });
     expect(killIssued()).toBe(false);
     expect(result).toMatchObject({ ok: false, code: "selection_changed", stopPhase: "none" });
+    expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(seat.session.id) as { status: string }).status).toBe("running");
+  });
+
+  // #3392 r4: a child running as another user is hidden from this user's /proc (hidepid). The census names the hidden pid
+  // but not its parent, so the proof can't say the shell is empty, and the launch keeps --stop.
+  it("keeps --stop when some process is hidden from this user, though the shell shows no child", async () => {
+    const seat = failedStartSeat();
+    table.hidden = [6000];
+    const result = await service.launchFresh({ seatRef: seat.name, fresh: true, reason: "replace the shell" });
+    expect(killIssued()).toBe(false);
+    expect(result).toMatchObject({ ok: false, code: "session_live" });
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(seat.session.id) as { status: string }).status).toBe("running");
   });
 
