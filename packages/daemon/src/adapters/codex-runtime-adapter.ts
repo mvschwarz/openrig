@@ -27,6 +27,7 @@ import type { CodexProfileProbeResult } from "../domain/codex-profile-preflight.
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { observeCodexSandbox, type AppliedLaunchObservation } from "../domain/permission-drift.js";
+import { insideMissingFolder } from "../domain/cwd-resolution.js";
 import {
   defaultResolveHomeDirByPid,
   CodexThreadIdResolver,
@@ -133,6 +134,9 @@ export interface CodexAdapterFsOps {
   /** Apply permission bits to a file (for mode-preserving projection). Optional: no-op if absent. */
   chmod?(path: string, mode: number): void;
   homedir?: string;
+  /** Whether a folder is there (cwd-resolution's folderPresent), to leave a missing seat folder uncreated. Optional: a
+   *  folder reads as present if absent. */
+  folderPresent?(path: string): boolean;
 }
 
 /** #1524 (b): what Codex's own records say about one process's conversation: its thread id, or why none was read
@@ -880,6 +884,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
             // OPR.0.7.0.13: never write through a link out of the seat's storage.
             const refusal = binding.seatSkillsRoot ? binding.seatSkillsRefused ?? seatSkillWriteRefusal(binding.seatSkillsRoot, skillTarget) : undefined;
             if (refusal) { warnings.push(`skill_install: ${refusal}`); continue; }
+            if (insideMissingFolder(targetDir, binding.cwd, this.folderPresent)) { warnings.push(`${file.path}: not written, because ${binding.cwd} doesn't exist on this machine`); continue; }
             this.fs.mkdirp(targetDir);
             this.fs.writeFile(skillTarget, content);
             if (binding.seatSkillsRoot) recordSeatSkillWrite(binding.seatSkillsRoot, skillTarget, file.absolutePath, content);
@@ -1457,6 +1462,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   /** Copy one selected resource, preserving source modes and recording owned seat-skill files after writing. */
+  /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
+  private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
+
   private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string,
     home?: string, binding?: NodeBinding): boolean {
     if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, home)) {
@@ -1490,6 +1498,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? (dest: string, src: string, content: string) => recordSeatSkillWrite(seatSkillsRoot, dest, src, content)
       : () => {};
 
+    if (insideMissingFolder(targetDir, cwd, this.folderPresent)) {
+      warnings.push(`${entry.effectiveId}: not written, because ${cwd} doesn't exist on this machine`);
+      return false;
+    }
     this.fs.mkdirp(targetDir);
     let isDir = false;
     if (this.fs.listFiles) {
@@ -1631,6 +1643,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const targetPath = nodePath.join(cwd, "AGENTS.md");
     const queued = binding?.guidanceLaunchInstructions && binding.tmuxSession ? this.launchInstructions.get(binding.tmuxSession) : undefined;
     if (!queued || blockId === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID || isPerSeatRoleGuidance(blockId, sourcePath)) {
+      // A seat folder this machine doesn't have isn't recreated to hold it (insideMissingFolder). Guidance queued for the
+      // launch below still goes with it.
+      if (insideMissingFolder(targetPath, cwd, this.folderPresent)) {
+        warnings.push(`${blockId}: not written, because ${cwd} doesn't exist on this machine`);
+        return false;
+      }
       return this.mergeGuidance(targetPath, blockId, content, warnings, sourcePath);
     }
     if (blockId === "openrig-start.md") queued.delete("using-openrig.md");
