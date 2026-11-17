@@ -1601,11 +1601,12 @@ function truncateSegs(
   for (const s of segs) {
     if (used >= width) break;
     const room = width - used;
-    if (s.text.length <= room) {
+    const w = columns(s.text);
+    if (w <= room) {
       out.push(s);
-      used += s.text.length;
+      used += w;
     } else {
-      out.push({ ...s, text: s.text.slice(0, room) });
+      out.push({ ...s, text: s.text.slice(0, columnIndex(s.text, room)) });
       break;
     }
   }
@@ -1743,8 +1744,10 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
     // the per-cell bg on the segs (mock affordance), so the content marker slot
     // stays blank — no "›" chevron (the native affordance the mock overrides).
     const citem = visiblePulse[i];
-    const contentText = (citem?.text ?? "").slice(0, contentWidth);
-    lines.push(pad(`${left}┃ ${contentText}`, cols));
+    const fullText = citem?.text ?? "";
+    const contentText = fullText.slice(0, columnIndex(fullText, contentWidth));
+    const line = `${left}┃ ${contentText}${" ".repeat(Math.max(contentWidth - columns(contentText), 0))}`;
+    lines.push(columns(line) > cols ? pad(line, cols) : line);
     if (row) {
       pushExplorerTargets(hitMap, row, explorerDisplay[explorerIndex] ?? row.label, y, explW);
       explorerRows.push({ ...row, y });
@@ -1868,9 +1871,11 @@ function crashCartShell(
     const y = lines.length + 1;
     const left = pad(leftRows[i] ?? "", explW);
     const citem = content[scroll + i];
-    const contentText = (citem?.text ?? "").slice(0, contentWidth);
+    const fullText = citem?.text ?? "";
+    const contentText = fullText.slice(0, columnIndex(fullText, contentWidth));
     if (citem?.action) hitMap.push({ y, x1: explW + 2, x2: cols, action: citem.action });
-    lines.push(pad(`${left}┃ ${contentText}`, cols));
+    const line = `${left}┃ ${contentText}${" ".repeat(Math.max(contentWidth - columns(contentText), 0))}`;
+    lines.push(columns(line) > cols ? pad(line, cols) : line);
     if (citem?.segs) segRows[y] = truncateSegs(citem.segs, contentWidth);
   }
   lines.push(paneRule(cols, explW, "bottom"));
