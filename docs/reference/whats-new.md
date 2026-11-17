@@ -72,7 +72,9 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   `reviewAt` holds its queue wakes, watchdog delivery and stuck-sweep findings;
   `POST /api/rigs/<rigId>/delivery-drain/end` ends it. A review deadline prompts
   the owner and never ends the drain. Direct sends and native starts aren't
-  held, and unknown delivery isn't replayed.
+  held, and unknown delivery isn't replayed. If the drain record can't be
+  read, delivery isn't held: the daemon log says
+  `control read unavailable; allowing automatic delivery` and delivery goes on.
 - **A restore that can't confirm it stopped a blank session** keeps that
   session's record and binding: the seat reads `attention_required` and says the
   session may still be running. Check with `rig capture`, stop it with
@@ -204,10 +206,11 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 
 ### After the upgrade
 
-- **Stop, back up, install, then start.** `rig daemon stop` (seats keep running,
-  so don't use `rig down`), copy the database file (`rig config get db.path`
-  shows it), install 0.7.16 with the existing installation method, then
-  `rig daemon start`.
+- **Stop, back up, install, then start.** These were the steps for upgrading to
+  0.7.16; for a later version, follow the steps in that version's note.
+  `rig daemon stop` (seats keep running, so don't use `rig down`), copy the
+  database file (`rig config get db.path` shows it), install 0.7.16 with the
+  existing installation method, then `rig daemon start`.
 - **Two migrations run before the daemon listens.** Migration 167 adds
   `seat_handover_attempts` and migration 169 adds `seat_runtime_home_records`.
   Going back to 0.7.15 after them isn't established; keep the backup.
@@ -977,7 +980,9 @@ service keeps its seats when its unit restarts. It adds five database
 migrations. On OpenShell 0.1.6 the worker's maintained cleanup now works, but
 the worker still isn't end to end. If you upgraded
 from 0.7.9 or earlier, also read "What changed in OpenRig 0.7.10" below, and
-from 0.7.8 or earlier, "What changed in OpenRig 0.7.9" too. For the full
+from 0.7.8 or earlier, the
+[0.7.9 release notes](https://github.com/mvschwarz/openrig/releases/tag/v0.7.9)
+too. For the full
 capability map, read `rig context get onboarding-width/public-what-you-can-do.md`.
 After the upgraded daemon starts, `rig context get reference/whats-new.md`
 describes this version. Without a running daemon, read the packaged
@@ -1402,13 +1407,16 @@ daemon's main API port (normally 7433)."
   memory for five minutes and lost on a daemon restart.
 - **Agent spec advisories** don't show for a native resume that continues a
   saved conversation.
-- **The other 0.7.9 limits below still apply:** open updates for a person, Slack,
+- **The other limits in the
+  [0.7.9 release notes](https://github.com/mvschwarz/openrig/releases/tag/v0.7.9)
+  still apply:** open updates for a person, Slack,
   SSH host status, shared asks, permit records, existing seats, Codex hooks, and
   grant-service assistants not being woken. 0.7.9's limits on a restore request
   held after compaction, `rig broadcast`'s `FAILED`, what has run under the
   runner contract, and Codex seats' `rig: command not found` are fixed or
-  changed. The 0.7.8 limits below that 0.7.9
-  didn't fix or change, and the
+  changed. The limits in the
+  [0.7.8 release notes](https://github.com/mvschwarz/openrig/releases/tag/v0.7.8)
+  that 0.7.9 didn't fix or change, and the
   [0.7.7](https://github.com/mvschwarz/openrig/releases/tag/v0.7.7) and
   [0.7.6](https://github.com/mvschwarz/openrig/releases/tag/v0.7.6) limits, still
   apply.
