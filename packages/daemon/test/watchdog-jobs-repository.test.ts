@@ -550,3 +550,84 @@ describe("WatchdogJobsRepository — W2c exact-tuple auto-registration", () => {
     }
   });
 });
+
+// #3437 — stop-then-register left two nonterminal rows for an auto-registered tuple, and the next
+// daemon start threw auto_registration_ambiguous and exited.
+describe("WatchdogJobsRepository — duplicate auto-registration rows (#3437)", () => {
+  let db: Database.Database;
+  let repo: WatchdogJobsRepository;
+  let clock: number;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    clock = Date.parse("2026-11-01T00:00:00.000Z");
+    repo = new WatchdogJobsRepository(db, () => new Date((clock += 1000)));
+  });
+  afterEach(() => db.close());
+
+  const job = (registeredBySession: string) => ({
+    policy: "parked-owner-consumer",
+    targetSession: "parked-owner-consumer@demo",
+    registeredBySession,
+    intervalSeconds: 120,
+    activeWakeIntervalSeconds: null,
+    scanIntervalSeconds: null,
+    specYaml: "policy: parked-owner-consumer\ntarget:\n  session: parked-owner-consumer@demo\ncontext:\n  rig: demo\n",
+  });
+  const nonterminal = () => repo.listAll().filter((row) => row.state !== "terminal");
+
+  it("register over a stopped auto-registered row replaces it, so the next start finds one row", () => {
+    const first = repo.ensureAutoRegistration(job("daemon@kernel"));
+    repo.stop(first.jobId);
+    const { job: again, replaced } = repo.registerReplacing(job("operator@demo"));
+    expect(replaced).toEqual([{ jobId: first.jobId, state: "stopped" }]);
+    expect(repo.getById(first.jobId)).toMatchObject({ state: "terminal", terminalReason: expect.stringContaining(again.jobId) });
+    expect(repo.ensureAutoRegistration(job("daemon@kernel")).jobId).toBe(again.jobId);
+    expect(nonterminal()).toHaveLength(1);
+  });
+
+  it("register leaves other policies' rows for the same target alone", () => {
+    const reminder = { ...job("operator@demo"), policy: "periodic-reminder", specYaml: "policy: periodic-reminder\n" };
+    const first = repo.register(reminder);
+    const { replaced } = repo.registerReplacing(reminder);
+    expect(replaced).toEqual([]);
+    expect(repo.getById(first.jobId)?.state).toBe("active");
+    expect(nonterminal()).toHaveLength(2);
+  });
+
+  it("startup keeps the newest stopped row, retires the rest, warns, and does not throw", () => {
+    const stoppedOld = repo.register(job("daemon@kernel"));
+    repo.stop(stoppedOld.jobId);
+    const stoppedNew = repo.register(job("operator@demo"));
+    repo.stop(stoppedNew.jobId);
+    const active = repo.register(job("operator@demo"));
+    const warnings: string[] = [];
+    const kept = repo.ensureAutoRegistrationResolvingDuplicates(job("daemon@kernel"), (m) => warnings.push(m));
+    expect(kept).toMatchObject({ jobId: stoppedNew.jobId, state: "stopped" });
+    expect(repo.getById(stoppedOld.jobId)?.state).toBe("terminal");
+    expect(repo.getById(active.jobId)?.state).toBe("terminal");
+    expect(nonterminal()).toHaveLength(1);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(stoppedNew.jobId);
+    expect(warnings[0]).toContain(stoppedOld.jobId);
+    expect(warnings[0]).toContain(active.jobId);
+    expect(warnings[0]).toContain("rig watchdog register");
+  });
+
+  it("startup keeps the newest row when none is stopped", () => {
+    const older = repo.register(job("daemon@kernel"));
+    const newer = repo.register(job("operator@demo"));
+    const warnings: string[] = [];
+    const kept = repo.ensureAutoRegistrationResolvingDuplicates(job("daemon@kernel"), (m) => warnings.push(m));
+    expect(kept).toMatchObject({ jobId: newer.jobId, state: "active" });
+    expect(repo.getById(older.jobId)?.state).toBe("terminal");
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("startup with one row does not warn", () => {
+    const first = repo.register(job("daemon@kernel"));
+    const warnings: string[] = [];
+    expect(repo.ensureAutoRegistrationResolvingDuplicates(job("daemon@kernel"), (m) => warnings.push(m)).jobId).toBe(first.jobId);
+    expect(warnings).toEqual([]);
+  });
+});

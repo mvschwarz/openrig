@@ -2686,7 +2686,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const ensureParkedOwnerJob = (rigName: string) => {
         const anchor = makeRigAnchor(rigName);
-        watchdogJobsRepoInstance.ensureAutoRegistration({
+        watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates({
           policy: PARKED_OWNER_POLICY_NAME,
           targetSession: anchor,
           registeredBySession: "daemon@kernel",
@@ -2694,7 +2694,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
           specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
-        });
+        }, (message) => console.warn(message));
       };
       const rigRows = db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>;
       for (const r of rigRows) ensureParkedOwnerJob(r.name);
@@ -2709,7 +2709,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // SQLite schedule; a daemon down across a window flushes on the next tick).
     {
       const ensureDigestJob = (window: "4h" | "daily", intervalSeconds: number) => {
-        watchdogJobsRepoInstance.ensureAutoRegistration({
+        watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates({
           policy: "delivery-digest-flush",
           targetSession: `delivery-digest-${window}@kernel`,
           registeredBySession: "daemon@kernel",
@@ -2717,7 +2717,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
           specYaml: `policy: delivery-digest-flush\ntarget:\n  session: delivery-digest-${window}@kernel\ncontext:\n  window: ${window}\n`,
-        });
+        }, (message) => console.warn(message));
       };
       ensureDigestJob("4h", 4 * 60 * 60);
       ensureDigestJob("daily", 24 * 60 * 60);

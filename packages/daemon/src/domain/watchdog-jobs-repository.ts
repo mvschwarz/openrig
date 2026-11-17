@@ -47,6 +47,13 @@ export const PHASE_D_POLICIES = [
   "mode-scheduled-end",
 ] as const;
 
+/** Policies the daemon ensures exactly one active-or-stopped row for per target (`ensureAutoRegistration`). */
+export const AUTO_REGISTERED_POLICIES: readonly string[] = [
+  "idle-gate-qitem",
+  "parked-owner-consumer",
+  "delivery-digest-flush",
+];
+
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */
 export const PHASE_C_POLICIES = PHASE_D_POLICIES;
 
@@ -536,6 +543,64 @@ export class WatchdogJobsRepository {
       return this.getByIdOrThrow(existing.jobId);
     }
     return this.register(input);
+  }
+
+  /**
+   * `ensureAutoRegistration` for daemon start (#3437): when the tuple already holds more than one
+   * active/stopped row, keep one (a stopped row wins, as an operator opt-out; otherwise the newest),
+   * retire the rest as terminal, warn with every job id, and ensure again. Startup never aborts on it.
+   */
+  ensureAutoRegistrationResolvingDuplicates(
+    input: EnsureAutoRegistrationInput,
+    warn: (message: string) => void,
+  ): WatchdogJob {
+    try {
+      return this.ensureAutoRegistration(input);
+    } catch (error) {
+      if (!(error instanceof WatchdogJobsError) || error.code !== "auto_registration_ambiguous") throw error;
+    }
+    const targetGenerationUuid = input.targetGenerationUuid ?? null;
+    const rows = this.listExactTuple(input.policy, input.targetSession, targetGenerationUuid)
+      .filter((row) => row.state === "active" || row.state === "stopped");
+    const kept = [...rows].reverse().find((row) => row.state === "stopped") ?? rows[rows.length - 1]!;
+    const retired = rows.filter((row) => row.jobId !== kept.jobId);
+    this.db.transaction(() => {
+      for (const row of retired) {
+        this.markTerminal(
+          row.jobId,
+          `superseded: duplicate of ${kept.jobId}, retired at daemon start (auto_registration_ambiguous); was ${row.state}`,
+        );
+      }
+    })();
+    warn(
+      `[watchdog] ${input.policy}/${input.targetSession} had ${rows.length} active/stopped jobs; ` +
+      `kept ${kept.jobId} (${kept.state}) and retired ${retired.map((row) => `${row.jobId} (${row.state})`).join(", ")} as terminal. ` +
+      (kept.state === "stopped"
+        ? `To turn it back on, run 'rig watchdog register' for the same policy and target; it now replaces the stopped job.`
+        : `No action needed.`),
+    );
+    return this.ensureAutoRegistration(input);
+  }
+
+  /**
+   * Register a job. For an auto-registered policy, an existing active/stopped row for the same
+   * policy and target is replaced (marked terminal) in the same transaction, so stop-then-register
+   * never leaves two rows for the daemon's next `ensureAutoRegistration` to refuse (#3437).
+   */
+  registerReplacing(input: RegisterWatchdogJobInput): {
+    job: WatchdogJob;
+    replaced: Array<{ jobId: string; state: WatchdogJobState }>;
+  } {
+    if (!AUTO_REGISTERED_POLICIES.includes(input.policy)) return { job: this.register(input), replaced: [] };
+    return this.db.transaction(() => {
+      const prior = this.listExactTuple(input.policy, input.targetSession, input.targetGenerationUuid ?? null)
+        .filter((row) => row.state === "active" || row.state === "stopped");
+      const job = this.register(input);
+      for (const row of prior) {
+        this.markTerminal(row.jobId, `replaced by ${job.jobId} (watchdog register); was ${row.state}`);
+      }
+      return { job, replaced: prior.map((row) => ({ jobId: row.jobId, state: row.state })) };
+    })();
   }
 
   /**
