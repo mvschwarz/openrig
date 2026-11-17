@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { probeShowsNoServer, type TmuxAdapter } from "../adapters/tmux.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { readProcessTable, type ProcessTableRow } from "./process-table.js";
 import { lstartToMinTs } from "./codex-thread-id.js";
@@ -19,6 +19,9 @@ export interface ReconcileResult {
    *  relaunches them. `parent` is that process's immediate parent when the process table shows it; it may be the tmux
    *  server, or a shell or wrapper in between. */
   unseen: { sessionId: string; sessionName: string; pid: number; parent: { pid: number; command: string } | null }[];
+  /** #2940, with `absenceProof: "positive"` only: sessions whose probe proved neither presence nor absence (tmux's
+   *  socket unreachable, say). Left as they were. */
+  undetermined?: { sessionId: string; sessionName: string; cause: string }[];
   errors: { sessionId: string; error: string }[];
 }
 
@@ -58,14 +61,24 @@ export class Reconciler {
     this.readProcesses = deps.readProcesses ?? readProcessTable;
   }
 
-  async reconcile(rigId: string): Promise<ReconcileResult> {
-    const sessions = this.sessionRegistry.getSessionsForRig(rigId);
+  /** `nodeIds` (#2940): reconcile only these seats' sessions, leaving the rest of the rig as it is; the keep_alive
+   *  supervisor uses it at runtime for its own seats. Without it, every session of the rig is reconciled, as at boot.
+   *  `absenceProof: "positive"` (#2940): a session counts as gone only when tmux says it's absent or that no server is
+   *  running; an unreachable socket proves nothing, so that row stays as it is and is reported undetermined. Without
+   *  it, an unreachable tmux counts as gone, as at boot. */
+  async reconcile(
+    rigId: string,
+    opts?: { nodeIds?: readonly string[]; absenceProof?: "positive" },
+  ): Promise<ReconcileResult> {
+    const only = opts?.nodeIds ? new Set(opts.nodeIds) : null;
+    const sessions = this.sessionRegistry.getSessionsForRig(rigId).filter((session) => !only || only.has(session.nodeId));
 
     let checked = 0;
     let detached = 0;
     const detachedSessionIds: string[] = [];
     const stopsConfirmed: string[] = [];
     const unseen: ReconcileResult["unseen"] = [];
+    const undetermined: NonNullable<ReconcileResult["undetermined"]> = [];
     const errors: { sessionId: string; error: string }[] = [];
     let table: Promise<ProcessTableRow[] | null> | null = null;
     const processes = () => (table ??= this.readProcesses().catch(() => null));
@@ -75,11 +88,15 @@ export class Reconciler {
     for (const session of sessions) {
       // #2940: a stop request still pending on a live or detached row is confirmed once the session is gone.
       const requested = (stopRequested.get(session.id) as { flag: number } | undefined)?.flag === 1;
-      if (SKIP_STATUSES.has(session.status) && !(requested && session.status === "detached")) {
+      // With positive proof asked for, a detached row is probed again too: its status may be stale (a boot reconcile
+      // that couldn't reach tmux detached it), and the caller acts on it only when it is proven gone now.
+      const recheckDetached = session.status === "detached" && (requested || opts?.absenceProof === "positive");
+      if (SKIP_STATUSES.has(session.status) && !recheckDetached) {
         continue;
       }
 
       let alive: boolean;
+      let provenAbsent: boolean;
       try {
         // Boot-time reconciliation against a dead tmux server must still
         // detach stale rows: transport-absence is treated as detachable HERE,
@@ -87,7 +104,20 @@ export class Reconciler {
         // adapter no longer collapses that decision for its callers).
         const probe = await this.tmuxAdapter.probeSession(session.sessionName);
         alive = probe.state === "present";
+        provenAbsent = probe.state === "absent" || probeShowsNoServer(probe);
         checked++;
+        // A pending stop is confirmed only on proof that the session is gone, at boot too; and so is any fall when the
+        // caller asked for positive proof. An unreachable socket proves nothing: the row stays as it is.
+        if (!alive && !provenAbsent && (requested || opts?.absenceProof === "positive")) {
+          undetermined.push({ sessionId: session.id, sessionName: session.sessionName,
+            cause: probe.state === "transport_unavailable" ? probe.cause : probe.state });
+          continue;
+        }
+        if (alive && session.status === "detached" && !requested) {
+          // A detached row whose session tmux shows present isn't a fall; it is left as it is, reported undetermined.
+          undetermined.push({ sessionId: session.id, sessionName: session.sessionName, cause: "the session is present in tmux" });
+          continue;
+        }
       } catch (err) {
         errors.push({
           sessionId: session.id,
@@ -155,7 +185,10 @@ export class Reconciler {
       }
     }
 
-    return { checked, detached, detachedSessionIds, ...(stopsConfirmed.length ? { stopsConfirmed } : {}), unseen, errors };
+    return {
+      checked, detached, detachedSessionIds, ...(stopsConfirmed.length ? { stopsConfirmed } : {}), unseen,
+      ...(opts?.absenceProof === "positive" || undetermined.length ? { undetermined } : {}), errors,
+    };
   }
 }
 

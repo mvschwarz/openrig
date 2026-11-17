@@ -741,6 +741,24 @@ describe("RigTeardownOrchestrator", () => {
     expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
   });
 
+  it("#2940: keeps guidance while a detached seat's stop is only requested, until tmux proves it absent", async () => {
+    const { rigId } = seedRigWithNode({ runtime: "codex", cwd: tmpDir });
+    const fell = rigRepo.addNode(rigId, "fell", { runtime: "codex", cwd: tmpDir });
+    const fellSession = sessionRegistry.registerSession(fell.id, "fell@test-rig");
+    sessionRegistry.markDetached(fellSession.id);
+    const guidance = path.join(tmpDir, "AGENTS.md");
+    const content = "<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nworking guidance\n<!-- END OpenRig MANAGED BLOCK: role -->\n";
+    fs.writeFileSync(guidance, content);
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async (name: string) => name === "fell@test-rig"
+      ? { state: "transport_unavailable", cause: "socket unavailable" } : { state: "present" });
+    await buildTeardown(tmux).teardown(rigId);
+    // The down recorded the request on the detached seat, but nothing proved it gone: it may still use the file.
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(fellSession.id))
+      .toEqual({ status: "detached", intentionally_stopped: 1 });
+    expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
+  });
+
   describe("#2940: down records every selected seat's stop before the first kill", () => {
     function rigOfThree() {
       const rig = rigRepo.createRig("down-race");
@@ -780,6 +798,65 @@ describe("RigTeardownOrchestrator", () => {
       await buildTeardown(tmux).teardown(rigId);
       expect(row(ids[2]!.sessionId)).toEqual({ status: "exited", intentionally_stopped: 1 });
       expect(getNodeInventory(db, rigId).find((entry) => entry.nodeId === ids[2]!.nodeId)).toMatchObject({ intentionallyStopped: true });
+    });
+
+    it("keeps a keep_alive seat mid-incident down: its latest superseded attempt is requested before the first kill", async () => {
+      const { rigId } = rigOfThree();
+      const node = rigRepo.addNode(rigId, "dev.kept", { runtime: "claude-code", cwd: tmpDir, keepAlive: true });
+      const fell = sessionRegistry.registerSession(node.id, "kept@down-race");
+      const attempt = sessionRegistry.registerSession(node.id, "kept@down-race");
+      db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-01-01 00:00:00", fell.id);
+      db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-01-01 00:00:01", attempt.id);
+      // A failed relaunch's compensation: the attempt is superseded, the fallen session back to detached.
+      sessionRegistry.markDetached(fell.id);
+      sessionRegistry.markSuperseded(attempt.id);
+      const tmux = mockTmux();
+      tmux.killSession = vi.fn(async () => { throw new Error("daemon lost here"); }) as TmuxAdapter["killSession"];
+      await expect(buildTeardown(tmux).teardown(rigId)).rejects.toThrow("daemon lost here");
+      expect(row(attempt.id)).toEqual({ status: "superseded", intentionally_stopped: 1 });
+    });
+
+    it("with nothing live to kill, requests a keep_alive seat's stop even when the probe proves nothing", async () => {
+      const rig = rigRepo.createRig("down-idle");
+      const seed = (name: string, keepAlive: boolean) => {
+        const node = rigRepo.addNode(rig.id, `dev.${name}`, { runtime: "claude-code", cwd: tmpDir, keepAlive });
+        const session = sessionRegistry.registerSession(node.id, `${name}@down-idle`);
+        sessionRegistry.markSuperseded(session.id);
+        return session.id;
+      };
+      const kept = seed("kept", true);
+      const plain = seed("plain", false);
+      const tmux = mockTmux();
+      tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause: "socket unavailable" })) as TmuxAdapter["probeSession"];
+      tmux.startServer = vi.fn(async () => ({ ok: false })) as TmuxAdapter["startServer"];
+      expect(await buildTeardown(tmux).teardown(rig.id)).toMatchObject({ alreadyStopped: true });
+      expect(row(kept)).toEqual({ status: "superseded", intentionally_stopped: 1 });
+      expect(row(plain)).toEqual({ status: "superseded", intentionally_stopped: 0 });
+    });
+
+    it("keeps a keep_alive seat whose latest launched session exited without a stop down too; a seat without keep_alive waits for the probe", async () => {
+      const { rigId, ids } = rigOfThree();
+      sessionRegistry.updateStatus(ids[2]!.sessionId, "exited");
+      const kept = rigRepo.addNode(rigId, "dev.kept-exited", { runtime: "claude-code", cwd: tmpDir, keepAlive: true });
+      const keptSession = sessionRegistry.registerSession(kept.id, "kept-exited@down-race");
+      sessionRegistry.updateStatus(keptSession.id, "exited");
+      const tmux = mockTmux();
+      tmux.killSession = vi.fn(async () => { throw new Error("daemon lost here"); }) as TmuxAdapter["killSession"];
+      await expect(buildTeardown(tmux).teardown(rigId)).rejects.toThrow("daemon lost here");
+      expect(row(keptSession.id)).toEqual({ status: "exited", intentionally_stopped: 1 });
+      // No proof of absence was taken before the crash, and nothing relaunches a seat without keep_alive behind the down.
+      expect(row(ids[2]!.sessionId)).toEqual({ status: "exited", intentionally_stopped: 0 });
+    });
+
+    it("stops nothing when the stop request can't be recorded before the kills", async () => {
+      const { rigId, ids } = rigOfThree();
+      vi.spyOn(sessionRegistry, "requestStop").mockImplementation(() => { throw new Error("database is locked"); });
+      const tmux = mockTmux();
+      const result = await buildTeardown(tmux).teardown(rigId);
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      expect(result.sessionsKilled).toBe(0);
+      expect(result.errors).toEqual([expect.stringContaining("so nothing was stopped: database is locked")]);
+      for (const id of ids) expect(row(id.sessionId)).toEqual({ status: "running", intentionally_stopped: 0 });
     });
 
     it("leaves external and claimed sessions out of the request", async () => {

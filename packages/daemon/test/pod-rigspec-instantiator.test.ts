@@ -2428,6 +2428,126 @@ state: 2-named
     });
   });
 
+  describe("keep_alive resolution and retention (#2940)", () => {
+    const keptAgentYaml = (name: string) =>
+      `name: ${name}\nversion: "1.0.0"\ndefaults:\n  lifecycle:\n    keep_alive: true\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`;
+    const keepOf = (db: ReturnType<typeof createFullTestDb>, nodeId: string) =>
+      (db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(nodeId) as { keep_alive: number }).keep_alive;
+
+    it("stores the resolved value at every creation site: agent defaults, a member override and a terminal's own", async () => {
+      const { db, rigRepo, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: keptAgentYaml("impl"),
+        [`${RIG_ROOT}/agents/qa/agent.yaml`]: keptAgentYaml("qa"),
+        [`${RIG_ROOT}/agents/plain/agent.yaml`]: agentYaml("plain"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const members = [
+          { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." },
+          { id: "qa", agentRef: "local:agents/qa", profile: "default", runtime: "codex" as const, cwd: ".", keepAlive: false },
+          { id: "plain", agentRef: "local:agents/plain", profile: "default", runtime: "codex" as const, cwd: "." },
+          { id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: ".", keepAlive: true },
+        ];
+        const yaml = RigSpecCodec.serialize(makeRigSpec({ pods: [{ id: "dev", label: "Dev", members, edges: [] }] }));
+        const expected = { "dev.impl": 1, "dev.qa": 0, "dev.plain": 0, "dev.server": 1 };
+
+        const made = await inst.instantiate(yaml, RIG_ROOT);
+        expect(made.ok, JSON.stringify(made)).toBe(true);
+        if (!made.ok) return;
+        const upNodes = rigRepo.getRig(made.result.rigId)!.nodes;
+        expect(Object.fromEntries(upNodes.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual(expected);
+
+        // materialize creates the nodes through createMemberNode, before any launch
+        const mat = await inst.materialize(RigSpecCodec.serialize(makeRigSpec({ name: "kept-mat", pods: [{ id: "dev", label: "Dev", members, edges: [] }] })), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const matNodes = rigRepo.getRig(mat.result.rigId)!.nodes;
+        expect(Object.fromEntries(matNodes.map((n) => [n.logicalId, keepOf(db, n.id)]))).toEqual(expected);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a re-applied spec writes the newly resolved value; a fresh launch from the recipe keeps the stored one", async () => {
+      const { db, rigRepo, sessionRegistry, inst, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+      });
+      try {
+        tmux.startServer = vi.fn(async () => {});
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+        const memberBase = { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex" as const, cwd: "." };
+        const spec = (keepAlive?: boolean) => RigSpecCodec.serialize(makeRigSpec({
+          pods: [{ id: "dev", label: "Dev", members: [{ ...memberBase, ...(keepAlive === undefined ? {} : { keepAlive }) }], edges: [] }],
+        }));
+        const clearOccupancy = (rigId: string) => {
+          for (const s of sessionRegistry.getSessionsForRig(rigId)) {
+            sessionRegistry.markDetached(s.id);
+            sessionRegistry.clearBinding(s.nodeId);
+          }
+        };
+
+        const mat = await inst.materialize(spec(true), RIG_ROOT);
+        expect(mat.ok, JSON.stringify(mat)).toBe(true);
+        if (!mat.ok) return;
+        const rigId = mat.result.rigId;
+        const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
+        expect(keepOf(db, nodeId)).toBe(1);
+
+        const launched = await inst.launchMaterialized(spec(true), RIG_ROOT, rigId);
+        expect(launched.ok, JSON.stringify(launched)).toBe(true);
+        expect(keepOf(db, nodeId)).toBe(1);
+
+        clearOccupancy(rigId);
+        const turnedOff = await inst.launchMaterialized(spec(), RIG_ROOT, rigId);
+        expect(turnedOff.ok, JSON.stringify(turnedOff)).toBe(true);
+        expect(keepOf(db, nodeId)).toBe(0);
+
+        rigRepo.setNodeKeepAlive(nodeId, true);
+        clearOccupancy(rigId);
+        await inst.launchPersistedFresh(rigId, nodeId);
+        expect(keepOf(db, nodeId)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    it("a first-start retry whose keep_alive differs from the failed first start is refused, and the stored value stays", async () => {
+      const { db, rigRepo, sessionRegistry, inst, codexAdapter, tmux } = setup({
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+        [`${RIG_ROOT}/agents/worker/agent.yaml`]: agentYaml("worker"),
+      });
+      try {
+        const start = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+        expect(start.ok, JSON.stringify(start)).toBe(true);
+        if (!start.ok) return;
+        const rigId = start.result.rigId;
+        vi.spyOn(codexAdapter, "project").mockResolvedValueOnce({ projected: [], skipped: [],
+          failed: [{ effectiveId: "fixture", error: "EACCES: projection ancestor" }] });
+        const memberRaw = { id: "worker", agent_ref: "local:agents/worker", profile: "default", runtime: "codex", cwd: ".", keep_alive: true };
+        expect(await inst.addMemberToPod(rigId, "dev", memberRaw, RIG_ROOT)).toMatchObject({ ok: true, result: { node: { status: "failed" } } });
+        const worker = rigRepo.getRig(rigId)!.nodes.find((n) => n.logicalId === "dev.worker")!;
+        expect(keepOf(db, worker.id)).toBe(1);
+        const session = sessionRegistry.getSessionsForRig(rigId).find((s) => s.nodeId === worker.id)!;
+        sessionRegistry.updateStatus(session.id, "exited");
+        sessionRegistry.clearBinding(worker.id);
+        tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+
+        const { keep_alive: _dropped, ...withoutKeepAlive } = memberRaw;
+        const refused = await inst.retryFirstStart(rigId, worker.id, withoutKeepAlive, RIG_ROOT);
+        expect(refused, JSON.stringify(refused)).toMatchObject({ ok: false });
+        expect(JSON.stringify(refused)).toContain("keep_alive differs");
+        expect(keepOf(db, worker.id)).toBe(1);
+
+        const retried = await inst.retryFirstStart(rigId, worker.id, memberRaw, RIG_ROOT);
+        expect(retried, JSON.stringify(retried)).toMatchObject({ ok: true, status: "launched" });
+        expect(keepOf(db, worker.id)).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   describe("launch_wrapper lifecycle and retention", () => {
     it("persists launch_wrapper on new creation (instantiate and materialize) and passes it to launchHarness", async () => {
       const piAdapter = mockAdapter("pi");

@@ -197,6 +197,7 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
         && (entry.permissionPolicy === undefined || typeof entry.permissionPolicy === "string")
         && (entry.env === undefined || isStringRecord(entry.env))
         && (entry.restorePolicy === undefined || typeof entry.restorePolicy === "string")
+        && (entry.keepAlive === undefined || typeof entry.keepAlive === "boolean")
         && (entry.compactionStrategy === undefined || typeof entry.compactionStrategy === "string")
         && (entry.mechanic === undefined || typeof entry.mechanic === "string")
         && (entry.startup === undefined || isStoredStartupBlock(entry.startup))
@@ -339,6 +340,8 @@ interface NodeOptions {
   launchWrapper?: readonly string[] | null;
   /** The seat's own process limits (spec `process_limits`); null/absent = none. */
   processLimits?: ProcessLimits | null;
+  /** #2940: the seat's resolved keep_alive; absent = off. */
+  keepAlive?: boolean;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -667,6 +670,8 @@ export class RigRepository {
       // Written atomically with creation: a seat never exists without the limit it was created with.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    // #2940: likewise, a seat never exists without the keep_alive it was declared with.
+    if (opts?.keepAlive && !this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       validateClaudePermissionRules(opts.claudePermissions);
@@ -823,6 +828,7 @@ export class RigRepository {
       this.setNodeLaunchWrapper(id, opts.launchWrapper);
     }
     if (opts?.processLimits) this.setNodeProcessLimits(id, opts.processLimits);
+    if (opts?.keepAlive) this.setNodeKeepAlive(id, true);
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -982,6 +988,16 @@ export class RigRepository {
     const row = this.db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(nodeId) as
       { process_limits: string | null } | undefined;
     return parseStoredProcessLimits(row?.process_limits, `Seat ${nodeId} process_limits`);
+  }
+
+  /** Persist a seat's resolved keep_alive (#2940). Off needs no column: a database without it already treats every seat
+   *  as off; turning it on there throws instead of being dropped. */
+  setNodeKeepAlive(nodeId: string, value: boolean): boolean {
+    if (!this.hasNodeColumn("keep_alive")) {
+      if (value) throw new Error("Cannot persist keep_alive: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET keep_alive = ? WHERE id = ?").run(value ? 1 : 0, nodeId).changes > 0;
   }
 
   setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
@@ -1256,6 +1272,7 @@ export class RigRepository {
       ...(launchWrapper ? { launchWrapper } : {}),
       ...(processLimits ? { processLimits } : {}),
       ...(processLimitsError ? { processLimitsError } : {}),
+      ...(row.keep_alive === 1 ? { keepAlive: true } : {}),
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
@@ -1355,6 +1372,7 @@ interface NodeRow {
   claude_mcp?: ClaudeMcp | null;
   launch_wrapper?: string | null;
   process_limits?: string | null;
+  keep_alive?: number;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   claude_token_ref?: string | null;

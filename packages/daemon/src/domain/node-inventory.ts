@@ -77,6 +77,11 @@ interface InventoryRow {
   rig_non_interruptive: number | null;
   claude_mcp: ClaudeMcp | null;
   launch_wrapper: string | null;
+  keep_alive: number | null;
+  keep_alive_attempts: number | null;
+  keep_alive_exhausted_at: string | null;
+  keep_alive_last_error: string | null;
+  keep_alive_last_attempt_at: string | null;
   agent_ref: string | null;
   profile: string | null;
   cwd: string | null;
@@ -861,6 +866,9 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
     .map((row) => (row as { name?: string }).name));
   const rigColumnOrNull = (name: string) => rigColumns.has(name) ? `r.${name}` : "NULL";
   const codexConfigProfileSelect = nodeColumnOrNull("codex_config_profile");
+  // #2940: a keep_alive seat's recovery incident, on a database that has the budget table.
+  const keepAliveBudget = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'node_keep_alive_budget'").get();
+  const keepAliveColumn = (name: string) => keepAliveBudget ? `kb.${name}` : "NULL";
   const stmt = db.prepare(`
     SELECT
       n.id as node_id,
@@ -889,6 +897,11 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${rigColumnOrNull("non_interruptive")} as rig_non_interruptive,
       ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
       ${nodeColumnOrNull("launch_wrapper")} as launch_wrapper,
+      ${nodeColumnOrNull("keep_alive")} as keep_alive,
+      ${keepAliveColumn("attempts")} as keep_alive_attempts,
+      ${keepAliveColumn("exhausted_at")} as keep_alive_exhausted_at,
+      ${keepAliveColumn("last_error")} as keep_alive_last_error,
+      ${keepAliveColumn("last_attempt_at")} as keep_alive_last_attempt_at,
       n.agent_ref,
       n.profile,
       n.cwd,
@@ -922,6 +935,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
     LEFT JOIN sessions s ON s.node_id = n.id
       AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
     LEFT JOIN bindings b ON b.node_id = n.id
+    ${keepAliveBudget ? "LEFT JOIN node_keep_alive_budget kb ON kb.node_id = n.id" : ""}
     ${whereClause}
     ORDER BY ${orderClause}
   `);
@@ -1046,7 +1060,13 @@ function buildInventoryItem(
     : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
   const startupStatus = paneExited || (sessionStatus === "running" && identityVerdictDownranksRunning(identityVerdict?.verdict))
     ? "attention_required" : row.startup_status as NodeInventoryEntry["startupStatus"];
-  const lifecycleState = deriveNodeLifecycleState({
+  // #2940: a keep_alive seat whose recovery ran out waits for a person while it isn't running. A stop (requested or
+  // confirmed) is that person's answer: the incident no longer shows, even before the supervisor ends it.
+  const keepAliveIncident = row.keep_alive === 1 && row.keep_alive_attempts !== null && row.intentionally_stopped !== 1
+    ? { attempts: row.keep_alive_attempts, exhausted: row.keep_alive_exhausted_at !== null,
+      lastError: row.keep_alive_last_error, lastAttemptAt: row.keep_alive_last_attempt_at }
+    : null;
+  const lifecycleState = keepAliveIncident?.exhausted && sessionStatus !== "running" ? "attention_required" : deriveNodeLifecycleState({
     sessionStatus,
     startupStatus,
     restoreOutcome,
@@ -1080,6 +1100,9 @@ function buildInventoryItem(
     ...(row.intentionally_stopped === 1
       && !((row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null)
       ? { stopRequested: true } : {}),
+    // #2940: the seat declares keep_alive (absent = off, so other seats' output is unchanged).
+    ...(row.keep_alive === 1 ? { keepAlive: true } : {}),
+    ...(keepAliveIncident ? { keepAliveIncident } : {}),
     // Match the graph's current-status projection without rewriting the startup
     // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],

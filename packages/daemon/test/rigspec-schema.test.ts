@@ -1077,3 +1077,50 @@ describe("member process_limits (#3253)", () => {
     expect(refused.errors.some((e) => e.includes("process_limits.cpu_quota: not supported"))).toBe(true);
   });
 });
+
+describe("member keep_alive (#2940)", () => {
+  const withMember = (fields: Record<string, unknown>, runtime = "codex") => ({
+    version: "0.2",
+    name: "keep-rig",
+    pods: [{
+      id: "dev",
+      label: "Dev",
+      members: [{ id: "worker", runtime, cwd: ".",
+        ...(runtime === "terminal" ? { agent_ref: "builtin:terminal", profile: "none" }
+          : { agent_ref: "local:agents/worker", profile: "default" }),
+        ...fields }],
+      edges: [],
+    }],
+    edges: [],
+  });
+
+  it.each(["codex", "claude-code", "pi", "terminal"])("accepts keep_alive true and false on %s and normalizes it", (runtime) => {
+    for (const value of [true, false]) {
+      const spec = withMember({ keep_alive: value }, runtime);
+      expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+      expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.keepAlive).toBe(value);
+    }
+  });
+
+  it("keeps an absent key undefined, so the agent spec's lifecycle can decide", () => {
+    const member = RigSpecSchema.normalize(withMember({})).pods[0]!.members[0]!;
+    expect(member.keepAlive).toBeUndefined();
+    expect("keepAlive" in member).toBe(false);
+  });
+
+  it.each([["yes"], [1], [0], [null], [{ enabled: true }]])("refuses %j by name", (value) => {
+    const result = RigSpecSchema.validate(withMember({ keep_alive: value }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("keep_alive: must be true or false")), result.errors.join("; ")).toBe(true);
+  });
+
+  it("round-trips through the codec: true and false as written, absent stays absent", () => {
+    for (const value of [true, false]) {
+      const spec = RigSpecSchema.normalize(withMember({ keep_alive: value }));
+      const yaml = RigSpecCodec.serialize(spec);
+      expect(yaml).toContain(`keep_alive: ${value}`);
+      expect(RigSpecSchema.normalize(RigSpecCodec.parse(yaml) as Record<string, unknown>).pods[0]!.members[0]!.keepAlive).toBe(value);
+    }
+    expect(RigSpecCodec.serialize(RigSpecSchema.normalize(withMember({})))).not.toContain("keep_alive");
+  });
+});

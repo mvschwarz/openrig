@@ -281,7 +281,9 @@ export type SetEffortResult =
   | SeatRefusal;
 
 export type StopSeatResult =
-  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string; paneOnly?: boolean }
+  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string; paneOnly?: boolean;
+    /** #2940: a keep_alive seat whose session was already gone; the stop is recorded so it stays down. */
+    alreadyDown?: true; message?: string }
   | (SeatRefusal & { partialEffect?: boolean; stopPhase?: StopPhase });
 
 /** The narrow identity reviewed before an optional checked stop. */
@@ -1237,6 +1239,9 @@ export class SeatLifecycleService {
     const probed = await this.probeLiveness(session.session_name, "stop refuses rather than kill blind");
     if ("code" in probed) return probed;
     if (probed.state === "absent") {
+      if (this.holdsKeepAliveSeatDown(resolved.nodeId, session)) {
+        return this.recordKeepAliveSeatDown(resolved, session, input.reason, input.operator);
+      }
       return {
         ok: false,
         code: "session_not_live",
@@ -1279,7 +1284,12 @@ export class SeatLifecycleService {
         const afterProbe = selection();
         if (afterProbe) return afterProbe;
         guard.checkInput(resolved.nodeId);
-        if (probed.state === "absent") return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to stop.`, guidance: "A dead seat with stale records is returned to launchable with: rig seat clean" };
+        if (probed.state === "absent") {
+          if (this.holdsKeepAliveSeatDown(resolved.nodeId, session)) {
+            return this.recordKeepAliveSeatDown(resolved, session, input.reason, input.operator, selection);
+          }
+          return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to stop.`, guidance: "A dead seat with stale records is returned to launchable with: rig seat clean" };
+        }
         return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true, { selection, guard });
       });
     } catch (error) {
@@ -2182,7 +2192,11 @@ export class SeatLifecycleService {
     const kill = checked
       ? await this.tmuxAdapter.killSession(session.session_name, beforeEffect)
       : await this.tmuxAdapter.killSession(session.session_name);
-    if (checked && !kill.ok) {
+    // #2940: a keep_alive seat whose session ended before the kill reached it is gone either way. Its stop is confirmed,
+    // not undone, so keep-alive leaves it down as the person asked.
+    const goneBeforeKill = !kill.ok && kill.code === "session_not_found" && recordStopIntent && request !== null
+      && this.holdsKeepAliveSeatDown(resolved.nodeId, session);
+    if (checked && !kill.ok && !goneBeforeKill) {
       const partialEffect = kill.stopPhase !== undefined && kill.stopPhase !== "none";
       if (kill.code === "selection_changed" || kill.code === "guard_target_changed" || kill.code === "guard_target_unknown") {
         if (!partialEffect) undoRequest();
@@ -2196,7 +2210,7 @@ export class SeatLifecycleService {
     }
     // The session ended on its own before this stop reached it: the stop had no effect, so its request goes back and
     // the exit stays an unexplained one.
-    if (kill && !kill.ok && kill.code === "session_not_found") undoRequest();
+    if (kill && !kill.ok && kill.code === "session_not_found" && !goneBeforeKill) undoRequest();
     if (kill && !kill.ok && kill.code !== "session_not_found") {
       // A timeout or a partial effect is no proof that nothing stopped: the request stays and the result says so.
       const partialEffect = kill.stopPhase !== undefined && kill.stopPhase !== "none";
@@ -2216,7 +2230,7 @@ export class SeatLifecycleService {
         if (changed) return changed;
         checked.guard.checkInput(resolved.nodeId);
       }
-      if (recordStopIntent && kill?.ok) {
+      if (recordStopIntent && (kill?.ok || goneBeforeKill)) {
         this.sessionRegistry.markIntentionallyStopped(session.id);
       } else {
         // An internal replacement stop or an unconfirmed kill must still affect health.
@@ -2250,6 +2264,61 @@ export class SeatLifecycleService {
     }
     return { ok: true, seat, sessionName: session.session_name, sessionId: session.id,
       ...(communityHarnessOf(session.community_harness, (this.db.prepare("SELECT runtime FROM nodes WHERE id=?").get(resolved.nodeId) as { runtime: string | null } | undefined)?.runtime) ? { paneOnly: true } : {}) };
+  }
+
+  /** #2940: a seat that declares keep_alive, whose latest session OpenRig launched (not claimed, not attached from
+   *  outside). When its session is already gone, a stop is recorded instead of refused: `rig seat stop` means stay down,
+   *  and without the record the supervisor would bring the seat back. Other seats keep the refusal. */
+  private holdsKeepAliveSeatDown(nodeId: string, session: LatestSessionRow): boolean {
+    if (session.origin === "claimed") return false;
+    const binding = this.sessionRegistry.getBindingForNode(nodeId);
+    if (seatProcessOwner(resolveSeatKind(binding?.attachmentType)) === "external") return false;
+    // Another session of the seat may still be live (an older one under an earlier name), or the binding points
+    // elsewhere: that is not a seat that is simply down, so the refusal and its `rig seat clean` guidance stand.
+    if (binding?.attachmentType === "tmux" && binding.tmuxSession && binding.tmuxSession !== session.session_name) return false;
+    if (this.nonTerminalSessions(nodeId).some((row) => row.id !== session.id)) return false;
+    const hasColumn = this.db.prepare("PRAGMA table_info(nodes)").all().some((row) => (row as { name?: string }).name === "keep_alive");
+    if (!hasColumn) return false;
+    return (this.db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(nodeId) as { keep_alive: number | null } | undefined)
+      ?.keep_alive === 1;
+  }
+
+  /** #2940: record the stop of a keep_alive seat whose session tmux already shows absent, under the lifecycle lease. A
+   *  fallen or exited row is confirmed stopped; a failed relaunch's superseded row keeps its status (restore reads it as
+   *  occupant history) and gets the request. The binding is cleared as on any confirmed stop. */
+  private recordKeepAliveSeatDown(
+    resolved: ResolvedSeat,
+    session: LatestSessionRow,
+    reason: string,
+    operator: string | null | undefined,
+    selection?: () => SeatRefusal | null,
+  ): StopSeatResult {
+    const seat = this.describe(resolved);
+    let persisted: PersistedEvent | null = null;
+    const changed = this.db.transaction((): SeatRefusal | null => {
+      const stale = selection?.();
+      if (stale) return stale;
+      if (session.status === "superseded") this.sessionRegistry.requestStop(session.id, randomUUID());
+      else this.sessionRegistry.markIntentionallyStopped(session.id);
+      this.sessionRegistry.clearBinding(resolved.nodeId);
+      persisted = this.eventBus.persistWithinTransaction({
+        type: "session.stopped",
+        rigId: seat.rigId,
+        nodeId: seat.nodeId,
+        sessionName: session.session_name,
+        reason: reason.trim(),
+        operator: operator ?? null,
+      });
+      return null;
+    })();
+    if (changed) return changed;
+    this.tmuxAdapter.deliveryGuard?.rebindLifecycle(resolved.nodeId);
+    if (persisted) this.eventBus.notifySubscribers(persisted);
+    return {
+      ok: true, seat, sessionName: session.session_name, sessionId: session.id, alreadyDown: true,
+      message: `Session "${session.session_name}" was already gone (checked: tmux has-session, POSITIVE absence evidence). `
+        + "The seat declares keep_alive, so the stop is recorded and the seat is now held down until it is started again.",
+    };
   }
 
   private nonTerminalSessions(nodeId: string): LatestSessionRow[] {

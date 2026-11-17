@@ -108,13 +108,14 @@ describe("SeatLifecycleService", () => {
   });
 
   /** One live managed seat: node + running session + binding + live tmux. */
-  function seatFixture(rigName: string, logicalId: string, opts?: { model?: string; origin?: "claimed" }) {
+  function seatFixture(rigName: string, logicalId: string, opts?: { model?: string; origin?: "claimed"; keepAlive?: boolean }) {
     const existing = rigRepo.findRigsByName(rigName)[0] ?? rigRepo.createRig(rigName);
     const sessionName = `${logicalId.replace(".", "-")}@${rigName}`;
     const node = rigRepo.addNode(existing.id, logicalId, {
       runtime: "claude-code",
       cwd: "/project",
       model: opts?.model ?? "fable",
+      ...(opts?.keepAlive ? { keepAlive: true } : {}),
     });
     const session = opts?.origin === "claimed"
       ? sessionRegistry.registerClaimedSession(node.id, sessionName)
@@ -348,6 +349,9 @@ describe("SeatLifecycleService", () => {
       expect(summary(stopped.rig.id).lifecycleState).toBe("running");
 
       sessionRegistry.updateStatus(stopped.session.id, "exited");
+      // Every status write is an observation, a running one included (a compensation writes earlier statuses back).
+      sessionRegistry.updateStatus(stopped.session.id, "running");
+      expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(stopped.session.id)).toEqual({ intentionally_stopped: 1 });
       sessionRegistry.markDetached(stopped.session.id);
       sessionRegistry.updateStatus(stopped.session.id, "exited");
       expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(stopped.session.id)).toEqual({ intentionally_stopped: 1 });
@@ -464,6 +468,93 @@ describe("SeatLifecycleService", () => {
       const replacement = sessionRegistry.registerSession(stopped.node.id, stopped.sessionName);
       sessionRegistry.updateStatus(replacement.id, "running");
       expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(replacement.id)).toEqual({ intentionally_stopped: 0 });
+    });
+  });
+
+  // #2940: `rig seat stop` means stay down. A keep_alive seat that already fell is held down rather than refused, so the
+  // supervisor doesn't bring back a seat the person just stopped. Other seats keep today's refusal.
+  describe("#2940: stopping a keep_alive seat that is already down", () => {
+    const flags = (id: string) => db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(id);
+
+    it.each([
+      ["detached", (id: string) => sessionRegistry.markDetached(id)],
+      ["running (not reconciled yet)", (_id: string) => {}],
+      ["exited without a stop", (id: string) => sessionRegistry.updateStatus(id, "exited")],
+    ] as const)("records a confirmed stop on a keep_alive seat whose %s session is gone", async (_label, setStatus) => {
+      const fell = seatFixture("hold-down", "dev.qa", { keepAlive: true });
+      seatFixture("hold-down", "dev.impl");
+      setStatus(fell.session.id);
+      tmux.setAlive(fell.sessionName, false);
+
+      const result = await service.stopSeat({ seatRef: fell.sessionName, reason: "keep it down" });
+
+      expect(result).toMatchObject({ ok: true, alreadyDown: true, sessionId: fell.session.id });
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.message).toContain("held down");
+      expect(tmux.killed).toEqual([]);
+      expect(flags(fell.session.id)).toEqual({ status: "exited", intentionally_stopped: 1 });
+      expect(sessionRegistry.getBindingForNode(fell.node.id)).toBeNull();
+      expect(getNodeInventory(db, fell.rig.id).find((entry) => entry.nodeId === fell.node.id)).toMatchObject({ intentionallyStopped: true });
+      expect(eventsOfType(db, "session.stopped")).toEqual([expect.objectContaining({ nodeId: fell.node.id, reason: "keep it down" })]);
+    });
+
+    it("records the stop on a failed relaunch's superseded session, keeping its status", async () => {
+      const fell = seatFixture("hold-superseded", "dev.qa", { keepAlive: true });
+      sessionRegistry.markDetached(fell.session.id);
+      const attempt = sessionRegistry.registerSession(fell.node.id, fell.sessionName);
+      sessionRegistry.markSuperseded(attempt.id);
+      tmux.setAlive(fell.sessionName, false);
+
+      expect(await service.stopSeat({ seatRef: fell.sessionName, reason: "keep it down" })).toMatchObject({ ok: true, alreadyDown: true, sessionId: attempt.id });
+      expect(flags(attempt.id)).toEqual({ status: "superseded", intentionally_stopped: 1 });
+      expect(sessionRegistry.getBindingForNode(fell.node.id)).toBeNull();
+      expect(getNodeInventory(db, fell.rig.id).find((entry) => entry.nodeId === fell.node.id)).toMatchObject({ intentionallyStopped: true });
+    });
+
+    it("refuses, with no mutation, a keep_alive seat whose fallen latest session has an older one still live", async () => {
+      const fell = seatFixture("hold-older-live", "dev.qa", { keepAlive: true });
+      const latest = sessionRegistry.registerSession(fell.node.id, "dev-qa-renamed@hold-older-live");
+      sessionRegistry.markDetached(latest.id);
+      tmux.setAlive(fell.sessionName, true);
+      tmux.setAlive("dev-qa-renamed@hold-older-live", false);
+
+      expect(await service.stopSeat({ seatRef: fell.sessionName, reason: "keep it down" })).toMatchObject({ ok: false, code: "session_not_live" });
+      expect(flags(latest.id)).toEqual({ status: "detached", intentionally_stopped: 0 });
+      expect(flags(fell.session.id)).toEqual({ status: "running", intentionally_stopped: 0 });
+      expect(sessionRegistry.getBindingForNode(fell.node.id)).not.toBeNull();
+      expect(tmux.killed).toEqual([]);
+    });
+
+    it("still refuses a seat without keep_alive whose session is gone, with no mutation", async () => {
+      const fell = seatFixture("no-hold", "dev.qa");
+      sessionRegistry.markDetached(fell.session.id);
+      tmux.setAlive(fell.sessionName, false);
+      expect(await service.stopSeat({ seatRef: fell.sessionName, reason: "keep it down" })).toMatchObject({ ok: false, code: "session_not_live" });
+      expect(flags(fell.session.id)).toEqual({ status: "detached", intentionally_stopped: 0 });
+      expect(sessionRegistry.getBindingForNode(fell.node.id)).not.toBeNull();
+    });
+
+    it("keeps an external seat out: its missing tmux session is refused as before", async () => {
+      const ext = seatFixture("hold-external", "dev.qa", { keepAlive: true });
+      sessionRegistry.updateBinding(ext.node.id, { attachmentType: "external_cli", externalSessionName: "ext" });
+      tmux.setAlive(ext.sessionName, false);
+      expect(await service.stopSeat({ seatRef: ext.sessionName, reason: "keep it down" })).toMatchObject({ ok: false });
+      expect(flags(ext.session.id)).toEqual({ status: "running", intentionally_stopped: 0 });
+    });
+
+    it("confirms the stop when a keep_alive seat's session exits between the probe and the kill", async () => {
+      const stopped = seatFixture("hold-race", "dev.qa", { keepAlive: true });
+      seatFixture("hold-race", "dev.impl");
+      vi.spyOn(tmux.adapter, "killSession").mockImplementationOnce(async () => {
+        tmux.setAlive(stopped.sessionName, false);
+        return { ok: false, code: "session_not_found", message: "session exited before kill" };
+      });
+      expect(await service.stopSeat({ seatRef: stopped.sessionName, reason: "keep it down" })).toMatchObject({ ok: true });
+      expect(flags(stopped.session.id)).toEqual({ status: "exited", intentionally_stopped: 1 });
+      expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)).toMatchObject({
+        sessionStatus: "exited", intentionallyStopped: true,
+      });
+      expect(sessionRegistry.getBindingForNode(stopped.node.id)).toBeNull();
     });
   });
 

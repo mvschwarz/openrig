@@ -136,6 +136,12 @@ export async function settleAutomaticRestore(db: Database.Database, rigId: strin
   if (attempt && !attempt.settled) await attempt.outcome.catch(() => undefined);
 }
 
+/** Whether daemon start's restore of this rig is still running (#2940: the keep_alive supervisor leaves the rig to it). */
+export function automaticRestoreInProgress(db: Database.Database, rigId: string): boolean {
+  const attempt = automaticRestore(db, rigId);
+  return !!attempt && !attempt.settled;
+}
+
 /** Exact startup-owned occupant and operator target captured for one explicit replacement. */
 export type AutomaticSeatReplacement = {
   nodeId: string; sessionId: string; resumeType: string | null; resumeToken: string | null;

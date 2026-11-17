@@ -60,9 +60,9 @@ describe("seat-stop.v1 checked stop", () => {
   });
   afterEach(() => db.close());
 
-  function seat(logicalId: string) {
+  function seat(logicalId: string, opts?: { keepAlive?: boolean }) {
     const rig = repo.findRigsByName("checked")[0] ?? repo.createRig("checked");
-    const node = repo.addNode(rig.id, logicalId, { runtime: "claude-code", cwd: "/project" });
+    const node = repo.addNode(rig.id, logicalId, { runtime: "claude-code", cwd: "/project", ...(opts?.keepAlive ? { keepAlive: true } : {}) });
     const name = `${logicalId.replaceAll(".", "-")}@checked`;
     const session = registry.registerSession(node.id, name);
     registry.updateStatus(session.id, "running");
@@ -202,6 +202,29 @@ describe("seat-stop.v1 checked stop", () => {
     expect(await stop(a.name, selected)).toMatchObject({ ok: false, code: "selection_changed", partialEffect: true });
     expect(registry.getBindingForNode(a.node.id)?.tmuxPane).toBe("%2");
     expect(status(a.session.id)).toBe("running");
+  });
+
+  // #2940: `rig seat stop` means stay down; a keep_alive seat that is already gone is held down on the checked path too.
+  it("holds down a keep_alive seat whose session is already gone; a seat without keep_alive is still refused", async () => {
+    const kept = seat("dev.kept", { keepAlive: true }); const plain = seat("dev.plain");
+    const flags = (id: string) => db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(id);
+    registry.markDetached(kept.session.id); registry.markDetached(plain.session.id);
+    onProbe = () => { throw new Error("can't find session: gone"); };
+    expect(await stop(kept.name, expected(kept.name))).toMatchObject({ ok: true, alreadyDown: true, sessionId: kept.session.id });
+    expect(flags(kept.session.id)).toEqual({ status: "exited", intentionally_stopped: 1 });
+    expect(registry.getBindingForNode(kept.node.id)).toBeNull();
+    expect(await stop(plain.name, expected(plain.name))).toMatchObject({ ok: false, code: "session_not_live" });
+    expect(flags(plain.session.id)).toEqual({ status: "detached", intentionally_stopped: 0 });
+    expect(commands.some(command => command.includes("kill-session"))).toBe(false);
+  });
+
+  it("confirms a keep_alive seat's stop when its session is gone by the kill", async () => {
+    const kept = seat("dev.kept", { keepAlive: true });
+    killError = new Error(`can't find session: ${kept.name}`);
+    expect(await stop(kept.name, expected(kept.name))).toMatchObject({ ok: true, sessionId: kept.session.id });
+    expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(kept.session.id))
+      .toEqual({ status: "exited", intentionally_stopped: 1 });
+    expect(registry.getBindingForNode(kept.node.id)).toBeNull();
   });
 
   it("reports kill and persistence failures as uncertain after external effects", async () => {

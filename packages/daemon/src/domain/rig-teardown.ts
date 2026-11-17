@@ -144,7 +144,11 @@ export class RigTeardownOrchestrator {
 
     // 3. Check if already stopped
     if (liveSessions.length === 0) {
-      // Additional intent is best-effort; keep down's existing result if it cannot be recorded.
+      // Additional intent is best-effort; keep down's existing result if it cannot be recorded. A keep_alive seat's
+      // request can't wait for the probe below, which may prove nothing: the supervisor would bring it back.
+      try {
+        this.db.transaction(() => this.requestDownedSeatsStop(rigId, randomUUID(), { keepAliveOnly: true }))();
+      } catch {}
       await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
       this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets(), result);
       this.cleanupClaudeCwds(rigId, result);
@@ -197,9 +201,9 @@ export class RigTeardownOrchestrator {
 
     // #2940: `rig down` means stay down, also for a seat it selected but hasn't reached yet, or if the daemon is lost
     // midway. Before the first kill, one transaction records the stop request on every launched session it selected,
-    // and on each seat's latest detached session (a seat that fell stays down too). External and claimed sessions are
-    // their owners' and are left out. A kill that doesn't complete keeps the request; the next down, or the startup
-    // reconcile once the session is gone, confirms it.
+    // and on each seat that is already down (requestDownedSeatsStop). External and claimed sessions are their owners'
+    // and are left out. A kill that doesn't complete keeps the request; the next down, or the startup reconcile once
+    // the session is gone, confirms it.
     const downAttempt = randomUUID();
     try {
       this.db.transaction(() => {
@@ -208,16 +212,12 @@ export class RigTeardownOrchestrator {
           if (seatProcessOwner(resolveSeatKind(this.deps.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType)) === "external") continue;
           this.deps.sessionRegistry.requestStop(session.sessionId, downAttempt);
         }
-        const fallen = this.db.prepare(`
-          SELECT s.id FROM sessions s JOIN nodes n ON n.id = s.node_id
-          WHERE n.rig_id = ? AND s.status = 'detached' AND s.origin = 'launched' AND s.intentionally_stopped = 0
-            AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
-              ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
-        `).all(rigId) as Array<{ id: string }>;
-        for (const row of fallen) this.deps.sessionRegistry.requestStop(row.id, downAttempt);
+        this.requestDownedSeatsStop(rigId, downAttempt);
       })();
     } catch (err) {
-      result.errors.push(`Stop request could not be recorded before the kills: ${(err as Error).message}`);
+      // Without the request recorded, a kill followed by a lost daemon would read as a fall: nothing is stopped.
+      result.errors.push(`Stop request could not be recorded before the kills, so nothing was stopped: ${(err as Error).message}`);
+      return result;
     }
 
     // 5. Kill each live session
@@ -411,15 +411,46 @@ export class RigTeardownOrchestrator {
     tx();
   }
 
+  /** #2940: a seat that is already down stays down too. Its latest launched session (detached when it fell, superseded
+   * when a relaunch attempt was rolled back, or exited without a stop) gets the request, keeping its status, before
+   * anything else, so neither a daemon lost midway nor a probe that proves nothing lets keep_alive bring it back.
+   * Claimed and external sessions are their owners'. recordAlreadyStoppedIntent confirms the stop later. With
+   * keepAliveOnly (a down with nothing live to kill), only keep_alive seats get it ahead of the probe; the others keep
+   * waiting for the probe's proof, as before. */
+  private requestDownedSeatsStop(rigId: string, attemptId: string, opts?: { keepAliveOnly?: boolean }): void {
+    const downed = this.db.prepare(`
+      SELECT s.id, s.node_id, s.status, ${this.hasKeepAliveColumn() ? "n.keep_alive" : "0"} AS keep_alive
+      FROM sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE n.rig_id = ? AND s.status IN ('detached', 'superseded', 'exited') AND s.origin = 'launched'
+        AND s.intentionally_stopped = 0
+        AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+    `).all(rigId) as Array<{ id: string; node_id: string; status: string; keep_alive: number | null }>;
+    for (const row of downed) {
+      if (opts?.keepAliveOnly && row.keep_alive !== 1) continue;
+      // A seat without keep_alive can't be relaunched behind the down, so only its detached row is requested here; its
+      // exited or superseded row keeps waiting for the probe's proof of absence (recordAlreadyStoppedIntent), as before.
+      if (row.keep_alive !== 1 && row.status !== "detached") continue;
+      if (seatProcessOwner(resolveSeatKind(this.deps.sessionRegistry.getBindingForNode(row.node_id)?.attachmentType)) === "external") continue;
+      this.deps.sessionRegistry.requestStop(row.id, attemptId);
+    }
+  }
+
+  private hasKeepAliveColumn(): boolean {
+    return this.db.prepare("PRAGMA table_info(nodes)").all().some((row) => (row as { name?: string }).name === "keep_alive");
+  }
+
   /** An explicit down also covers already-detached seats, and a failed start's rolled-back (superseded) session,
-   * but neither a stale row nor an unavailable probe proves that its session is absent. */
+   * but neither a stale row nor an unavailable probe proves that its session is absent. A requested stop that isn't
+   * confirmed yet (its status still detached, or its binding still there) is checked again. */
   private async recordAlreadyStoppedIntent(rigId: string): Promise<void> {
     const probe = this.deps.tmuxAdapter.probeSession;
     if (!probe) return;
     const eligible = this.db.prepare(`
       SELECT s.id, s.node_id, s.session_name, s.status FROM sessions s JOIN nodes n ON n.id = s.node_id
       WHERE n.rig_id = ? AND s.status IN ('exited', 'detached', 'superseded')
-        AND (s.intentionally_stopped = 0 OR s.status = 'detached')
+        AND (s.intentionally_stopped = 0 OR s.status = 'detached'
+          OR EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = n.id))
         AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
           ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
     `);
@@ -500,16 +531,17 @@ export class RigTeardownOrchestrator {
   }
 
   /** This rig's seats whose files may still be in use: each live session, each released one, and each seat whose latest
-   *  session reads detached without a recorded stop. A released session (claimed, then detached by rig unclaim or down)
+   *  session reads detached, with or without a stop request (#2940: a request isn't a confirmed stop). A released session (claimed, then detached by rig unclaim or down)
    *  is its owner's and may still be running, whether or not it's still its seat's latest. A detached latest session may
    *  still be running too (this server didn't show it), as settledSkillSeats also holds. Either's folders stay in use
    *  until recordAlreadyStoppedIntent sees tmux report it absent and records the stop. */
   private seatsInUse(rigId: string): Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd"> & { launchedCwd: string | null }> {
     const released = this.db.prepare(`
       SELECT n.id AS nodeId, n.runtime, n.cwd, s.id AS sessionId FROM nodes n JOIN sessions s ON s.node_id = n.id
-      WHERE n.rig_id = ? AND s.status = 'detached' AND s.intentionally_stopped = 0
-        AND (s.origin = 'claimed' OR s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
-          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1))
+      WHERE n.rig_id = ? AND s.status = 'detached'
+        AND ((s.origin = 'claimed' AND s.intentionally_stopped = 0)
+          OR s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+            ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1))
     `).all(rigId) as Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd" | "sessionId">>;
     return [...this.getLatestLiveSessions(rigId), ...released]
       .map((session) => ({ ...session, launchedCwd: this.launchedCwdOf(session.sessionId) }));

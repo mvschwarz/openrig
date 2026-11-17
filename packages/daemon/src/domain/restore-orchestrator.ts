@@ -719,12 +719,23 @@ export class RestoreOrchestrator {
     };
   }
 
+  /** Whether a whole-rig restore of this rig is running in this daemon (#2940: the keep_alive supervisor waits for it). */
+  restoreInProgress(rigId: string): boolean {
+    return this.activeRestores.has(rigId);
+  }
+
   /** `keepPane`: the seat is running and is relaunched in its own pane (its process ended in place, the pane and scrollback
    *  kept) instead of a new session; nothing checks whether it is live first, since that is the point. `keepEffort`, with
    *  `keepPane`: launch with that effort (the running process's own, kept by a provider switch) in place of the seat's
    *  saved one, unless the seat has an explicit choice when the launch reads it; it isn't saved as the seat's choice.
    *  `keepClaudeLaunch`, for a token-only provider switch, captures current arguments/environment before stopping.
-   *  `onLaunchEffort`, with `keepPane`, hears the effort the launch selected and why, whether or not one was kept. */
+   *  `onLaunchEffort`, with `keepPane`, hears the effort the launch selected and why, whether or not one was kept.
+   *  `keepAlive` (#2940): the keep_alive supervisor's relaunch of a fallen seat. Under the seat's lifecycle lease and
+   *  before any effect, it refuses with `stop_requested` when the seat's latest session carries a stop request or the
+   *  seat no longer declares keep_alive, so a seat stop or a rig down racing the relaunch wins. With `shouldContinue`,
+   *  also read there, a false answer (the daemon began shutting down while the launch waited for the lease) refuses with
+   *  `shutting_down`, so no recovery starts once shutdown has begun. It asks for nothing fresh: the seat comes back as
+   *  any launch would bring it back. */
   async launchSingleNode(rigId: string, logicalId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
@@ -734,6 +745,7 @@ export class RestoreOrchestrator {
     keepEffort?: string;
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
+    keepAlive?: boolean | { shouldContinue?: () => boolean };
   }): Promise<NarrowLaunchResult> {
     return this.launchNodeTargets(rigId, [logicalId], { ...opts, namedAgent: true, nonTargetMode: "unchanged" });
   }
@@ -749,6 +761,7 @@ export class RestoreOrchestrator {
     onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
     namedAgent?: boolean;
+    keepAlive?: boolean | { shouldContinue?: () => boolean };
     nonTargetMode: "unchanged" | "detach_and_hold";
   }): Promise<NarrowLaunchResult> {
     const rig = this.rigRepo.getRig(rigId);
@@ -789,6 +802,16 @@ export class RestoreOrchestrator {
     const recordedIds = nonTargetNodes.map(node => node.id);
     if (guard && (targetIds.some(id => !guard.ownsLifecycle(id)) || recordedIds.some(id => !guard.ownsCustody(id)))) {
       return guard.lifecycle(targetIds, () => this.launchNodeTargets(rigId, logicalIds, opts), recordedIds);
+    }
+    if (opts.keepAlive) {
+      const shouldContinue = typeof opts.keepAlive === "object" ? opts.keepAlive.shouldContinue : undefined;
+      if (shouldContinue && !shouldContinue()) {
+        return { ok: false, code: "shutting_down", message: "The daemon is shutting down; the seat wasn't relaunched." };
+      }
+      for (const node of targetNodes) {
+        const refusal = this.keepAliveRefusal(node.id, node.logicalId);
+        if (refusal) return { ok: false, code: "stop_requested", message: refusal };
+      }
     }
 
     // Per-target tmux-liveness classification (runtime truth, fail-closed)
@@ -985,6 +1008,20 @@ export class RestoreOrchestrator {
         affected: held,
       },
     };
+  }
+
+  /** Why a keep_alive relaunch of this seat must not happen now (#2940), read under its lifecycle lease: the latest session
+   *  records a stop request (a seat stop or a rig down, pending or confirmed), or the seat no longer declares keep_alive.
+   *  Null when the relaunch may go on. */
+  private keepAliveRefusal(nodeId: string, logicalId: string): string | null {
+    const declared = (this.db.prepare("SELECT keep_alive FROM nodes WHERE id = ?").get(nodeId) as { keep_alive: number } | undefined)
+      ?.keep_alive === 1;
+    if (!declared) return `'${logicalId}' no longer declares keep_alive; it wasn't relaunched.`;
+    const latest = this.db.prepare(
+      "SELECT intentionally_stopped AS flag FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { flag: number } | undefined;
+    if (latest?.flag === 1) return `'${logicalId}' was asked to stop; it wasn't relaunched.`;
+    return null;
   }
 
   private captureNodeState(nodeId: string, rigId: string): { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] } {

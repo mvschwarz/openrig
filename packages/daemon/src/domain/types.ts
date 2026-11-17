@@ -47,6 +47,8 @@ export interface Node {
   processLimits?: import("./process-limits.js").ProcessLimits | null;
   /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
   processLimitsError?: string;
+  /** #2940: the seat declares keep_alive (resolved member > profile > agent defaults); present only when on. */
+  keepAlive?: boolean;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -198,6 +200,11 @@ export type RigEvent =
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
   | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
+  // #2940: the keep_alive supervisor's recovery of a fallen seat. `attempted` is persisted with the attempt's count before
+  // its launch starts; `exhausted` once per incident, when the attempts ran out or a launch outcome needs a person.
+  | { type: "seat.keep_alive.attempted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number }
+  | { type: "seat.keep_alive.recovered"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status: string }
+  | { type: "seat.keep_alive.exhausted"; rigId: string; nodeId: string; logicalId: string; incidentId: string; attempts: number; status?: string; lastError?: string }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
   | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }
@@ -875,6 +882,12 @@ export interface NodeInventoryEntry {
   intentionallyStopped?: boolean;
   /** #2940: a supported stop was requested and is not confirmed yet; the seat is not reported as exited. */
   stopRequested?: boolean;
+  /** #2940: the seat declares keep_alive, so the daemon relaunches it when it falls; absent = off. */
+  keepAlive?: boolean;
+  /** #2940: the keep_alive seat's current recovery incident, when it has one: the attempts spent, whether they ran out
+   *  (the seat then waits for a person, as lifecycle `attention_required` while it isn't running), the last error and
+   *  when the last attempt started. */
+  keepAliveIncident?: { attempts: number; exhausted: boolean; lastError: string | null; lastAttemptAt: string | null };
   // Current projection: an applicable identity failure down-ranks a running
   // session to attention_required; the stored startup result stays unchanged.
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -1174,6 +1187,9 @@ export interface LifecycleDefaults {
    *  is a materialization-time refusal for apprentice-handover. */
   mechanic?: string;
   restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
+  /** #2940: relaunch the seat when it falls while the daemon runs (not when it is stopped on purpose). Absent at every
+   *  level = off; unlike the fields above, the defaults level doesn't materialize it. */
+  keepAlive?: boolean;
 }
 
 /** What a restore that keeps a seat's conversation does with this skill's copy in the seat's storage: keep the saved
@@ -1411,6 +1427,8 @@ export interface RigSpecPodMember {
   env?: Record<string, string>;
   cwd: string;
   restorePolicy?: string;
+  /** #2940: spec `keep_alive`; overrides the agent spec's lifecycle.keep_alive (most-specific-wins). Absent = inherit. */
+  keepAlive?: boolean;
   /** OPR.0.5.6.20 — per-member continuity override (most-specific-wins; canonical or
    *  deprecated-alias spelling, normalized at resolution). Absent = inherit. */
   compactionStrategy?: string;

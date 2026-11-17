@@ -8,6 +8,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS, trackHttpServerResponses } from "../src/daemon-shutdown.js";
+import { KeepAliveSupervisor } from "../src/domain/keep-alive-supervisor.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 const dirs: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const p of dirs.splice(0)) fs.rmSync(p, { recursive: true, force: true }); });
@@ -222,3 +227,43 @@ it("enforces the whole-shutdown deadline with no other referenced handles", asyn
   expect(result.code).toBe(1);
   expect(JSON.parse(fs.readFileSync(receiptPath, "utf8"))).toMatchObject({ outcome: "timed-out", phase: "health-diagnosis" });
 }, 7000);
+
+// #2940: the keep-alive supervisor stops first, so no relaunch starts while the rest of the daemon goes down, and a
+// shutdown never reads as a seat falling.
+it("stops the keep-alive supervisor as the first phase, after it was started once the daemon listens", () => {
+  const source = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  expect(source).toMatch(/phases: \[\s*(?:\/\/[^\n]*\n\s*)*\["keep-alive", \(\) => deps\.keepAliveSupervisor\?\.stop\(\)\],/);
+  expect(source).toMatch(/const srv = serve\([\s\S]*?if \(!monitorsStarted\) \{[\s\S]*?deps\.keepAliveSupervisor\?\.start\(\);[\s\S]*?\n {4}\}\);/);
+});
+
+it("the keep-alive phase prevents any new attempt and waits for a tick in flight only a bounded time", async () => {
+  vi.useFakeTimers();
+  const db = createFullTestDb();
+  try {
+    const rigRepo = new RigRepository(db);
+    const sessions = new SessionRegistry(db);
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "dev.driver", { runtime: "terminal" });
+    db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run(node.id);
+    sessions.updateStatus(sessions.registerSession(node.id, "dev-driver@r01").id, "detached");
+    // A tick whose reconcile never returns: shutdown must not wait for it past the supervisor's own bound.
+    const launch = vi.fn();
+    const supervisor = new KeepAliveSupervisor({ db, eventBus: new EventBus(db),
+      reconciler: { reconcile: () => new Promise(() => {}) }, restoreOrchestrator: { launchSingleNode: launch } });
+    supervisor.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+    const order: string[] = [];
+    const f = fixture([["keep-alive", async () => { await supervisor.stop(); order.push("keep-alive"); }],
+      ["recorder", () => { order.push("recorder"); }]]);
+    f.shutdown("SIGTERM");
+    await vi.runAllTimersAsync();
+    expect(order).toEqual(["keep-alive", "recorder"]);
+    expect(f.exit).toHaveBeenCalledWith(0);
+    expect(f.receipt()).toMatchObject({ outcome: "clean" });
+    expect(Date.parse(f.receipt().completedAt) - Date.parse(f.receipt().startedAt)).toBeLessThan(DAEMON_SHUTDOWN_TIMEOUT_MS);
+    expect(supervisor.isRunning()).toBe(false);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(launch).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status, intentionally_stopped AS flag FROM sessions").get()).toEqual({ status: "detached", flag: 0 });
+  } finally { db.close(); }
+});

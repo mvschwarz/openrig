@@ -214,6 +214,120 @@ describe("Reconciler", () => {
     expect(impl!.status).toBe("running");
   });
 
+  // #2940: the keep_alive supervisor reconciles only its own seats at runtime; the rest of the rig is left as it is.
+  it("nodeIds: only the named nodes' sessions are probed and detached; the other seats stay as they were", async () => {
+    const { rig, nodes } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
+      { logicalId: "dev1-qa", sessionName: "r01-dev1-qa", status: "running" },
+    ]);
+    const probed: string[] = [];
+    const tmux = mockTmuxAdapter({});
+    const probe = tmux.probeSession.bind(tmux);
+    tmux.probeSession = async (name: string) => { probed.push(name); return probe(name); };
+
+    const result = await createReconciler(tmux).reconcile(rig.id, { nodeIds: [nodes[1]!.id] });
+
+    expect(probed).toEqual(["r01-dev1-qa"]);
+    expect(result).toMatchObject({ checked: 1, detached: 1, unseen: [], errors: [] });
+    const qa = sessionRegistry.getSessionsForRig(rig.id).find((s) => s.sessionName === "r01-dev1-qa")!;
+    expect(result.detachedSessionIds).toEqual([qa.id]);
+    expect(qa.status).toBe("detached");
+    // Both are gone from tmux, but only the named node was reconciled.
+    expect(sessionRegistry.getSessionsForRig(rig.id).find((s) => s.sessionName === "r01-dev1-impl")!.status).toBe("running");
+    expect(db.prepare("SELECT node_id FROM events WHERE type = 'session.detached'").all()).toEqual([{ node_id: nodes[1]!.id }]);
+  });
+
+  it("nodeIds: an empty list reconciles nothing; without the option every seat is reconciled as before", async () => {
+    const { rig } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
+      { logicalId: "dev1-qa", sessionName: "r01-dev1-qa", status: "running" },
+    ]);
+    const reconciler = createReconciler(mockTmuxAdapter({}));
+    expect(await reconciler.reconcile(rig.id, { nodeIds: [] })).toMatchObject({ checked: 0, detached: 0 });
+    expect(await reconciler.reconcile(rig.id)).toMatchObject({ checked: 2, detached: 2 });
+  });
+
+  // #2940: the keep_alive supervisor acts only on a seat that is actually gone. A socket it can't reach doesn't say so.
+  it("absenceProof positive: an unreachable tmux leaves the row as it is and reports it undetermined", async () => {
+    const { rig } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
+      { logicalId: "dev1-qa", sessionName: "r01-dev1-qa", status: "running" },
+      { logicalId: "dev1-ops", sessionName: "r01-dev1-ops", status: "running" },
+    ]);
+    const tmux = mockTmuxAdapter({});
+    const cause = "error connecting to /tmp/tmux-1000/default (No such file or directory)";
+    tmux.probeSession = async (name: string) => name === "r01-dev1-impl"
+      ? { state: "transport_unavailable" as const, cause }
+      : name === "r01-dev1-qa"
+        ? { state: "transport_unavailable" as const, cause: "no server running on /tmp/tmux-1000/default" }
+        : { state: "absent" as const };
+    const reconciler = createReconciler(tmux);
+
+    const result = await reconciler.reconcile(rig.id, { absenceProof: "positive" });
+
+    const byName = (name: string) => sessionRegistry.getSessionsForRig(rig.id).find((s) => s.sessionName === name)!;
+    expect(byName("r01-dev1-impl").status).toBe("running");
+    expect(result.undetermined).toEqual([{ sessionId: byName("r01-dev1-impl").id, sessionName: "r01-dev1-impl", cause }]);
+    // No server, or a positive absence, is proof.
+    expect(byName("r01-dev1-qa").status).toBe("detached");
+    expect(byName("r01-dev1-ops").status).toBe("detached");
+    expect(result).toMatchObject({ detached: 2, errors: [] });
+  });
+
+  it("without absenceProof an unreachable tmux still detaches, as at boot", async () => {
+    const { rig } = seedRigWithSessions([{ logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" }]);
+    const tmux = mockTmuxAdapter({});
+    tmux.probeSession = async () => ({ state: "transport_unavailable" as const, cause: "error connecting to /tmp/tmux-1000/default (Connection refused)" });
+    const result = await createReconciler(tmux).reconcile(rig.id);
+    expect(result).toMatchObject({ detached: 1 });
+    expect(result.undetermined).toBeUndefined();
+  });
+
+  it("#2940: a pending stop is confirmed only on proof the session is gone, at boot too", async () => {
+    const { rig } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
+      { logicalId: "dev1-qa", sessionName: "r01-dev1-qa", status: "running" },
+    ]);
+    const byName = (name: string) => sessionRegistry.getSessionsForRig(rig.id).find((s) => s.sessionName === name)!;
+    for (const name of ["r01-dev1-impl", "r01-dev1-qa"]) sessionRegistry.requestStop(byName(name).id, `attempt-${name}`);
+    const tmux = mockTmuxAdapter({});
+    const cause = "error connecting to /tmp/tmux-1000/default (Connection refused)";
+    tmux.probeSession = async (name: string) => name === "r01-dev1-impl"
+      ? { state: "transport_unavailable" as const, cause }
+      : { state: "transport_unavailable" as const, cause: "no server running on /tmp/tmux-1000/default" };
+
+    const result = await createReconciler(tmux).reconcile(rig.id);
+
+    const flagged = (name: string) => db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(byName(name).id);
+    // An unreachable socket proves nothing: the request stays pending on a row left as it was.
+    expect(flagged("r01-dev1-impl")).toEqual({ status: "running", intentionally_stopped: 1 });
+    expect(result.undetermined).toEqual([{ sessionId: byName("r01-dev1-impl").id, sessionName: "r01-dev1-impl", cause }]);
+    // No server running is proof: that stop is confirmed.
+    expect(flagged("r01-dev1-qa")).toEqual({ status: "exited", intentionally_stopped: 1 });
+    expect(result.stopsConfirmed).toEqual([byName("r01-dev1-qa").id]);
+    expect(result.detachedSessionIds).toEqual([]);
+  });
+
+  it("#2940: with positive proof asked for, a detached row is probed again and a session tmux shows is no fall", async () => {
+    const { rig } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "detached" },
+      { logicalId: "dev1-qa", sessionName: "r01-dev1-qa", status: "detached" },
+    ]);
+    const byName = (name: string) => sessionRegistry.getSessionsForRig(rig.id).find((s) => s.sessionName === name)!;
+    const tmux = mockTmuxAdapter({ "r01-dev1-impl": true });
+
+    const result = await createReconciler(tmux).reconcile(rig.id, { absenceProof: "positive" });
+
+    expect(result.undetermined).toEqual([
+      { sessionId: byName("r01-dev1-impl").id, sessionName: "r01-dev1-impl", cause: "the session is present in tmux" },
+    ]);
+    expect(byName("r01-dev1-impl").status).toBe("detached");
+    expect(byName("r01-dev1-qa").status).toBe("detached");
+    expect(result).toMatchObject({ detached: 0, errors: [] });
+    // Without the option a detached row is still skipped, as at boot.
+    expect((await createReconciler(tmux).reconcile(rig.id)).undetermined).toBeUndefined();
+  });
+
   it("idempotent: reconcile twice with same state -> no duplicate events", async () => {
     const { rig } = seedRigWithSessions([
       { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },

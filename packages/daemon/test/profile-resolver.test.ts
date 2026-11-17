@@ -1033,3 +1033,41 @@ describe("selected plugin skills", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
+
+describe("keepAlive resolution — most-specific-wins (#2940)", () => {
+  const ingress = (defaultsLine: string, profileLine: string) => normalizeAgentSpec(parseAgentSpec(`
+version: "0.2"
+name: keep-alive-precedence
+defaults:
+  runtime: claude-code
+  lifecycle:
+    execution_mode: interactive_resident
+${defaultsLine}
+profiles:
+  default:
+    lifecycle:
+      execution_mode: interactive_resident
+${profileLine}
+`));
+  const resolve = (spec: AgentSpec, member?: Partial<RigSpecPodMember>) => {
+    const result = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec), member: makeMember(member) }));
+    expect(result.ok).toBe(true);
+    return result.ok ? result.config.keepAlive : undefined;
+  };
+
+  it("is off when no level declares it", () => {
+    expect(resolve(ingress("", ""))).toBe(false);
+    expect(resolve(makeSpec())).toBe(false);
+  });
+
+  it("the agent defaults turn it on; a profile that doesn't declare it doesn't participate", () => {
+    expect(resolve(ingress("    keep_alive: true", ""))).toBe(true);
+  });
+
+  it("the profile overrides the defaults, and the member overrides both, in either direction", () => {
+    expect(resolve(ingress("    keep_alive: true", "      keep_alive: false"))).toBe(false);
+    expect(resolve(ingress("", "      keep_alive: true"))).toBe(true);
+    expect(resolve(ingress("    keep_alive: true", "      keep_alive: true"), { keepAlive: false })).toBe(false);
+    expect(resolve(ingress("    keep_alive: false", "      keep_alive: false"), { keepAlive: true })).toBe(true);
+  });
+});
