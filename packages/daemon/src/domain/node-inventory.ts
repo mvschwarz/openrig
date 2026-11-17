@@ -1635,6 +1635,11 @@ export function attachTerminalActivityAndWork(
           }
         : null;
     }
+    // A seat whose tmux this sweep couldn't reach may be gone: an idle at its prompt is the last thing it said, as
+    // attachAgentActivity reads it. Working and waiting readings stay.
+    if (activityState && unseenByTmux(entry) && activityState.activity === "idle-at-prompt" && activityState.needsInput.count === 0) {
+      activityState = { ...activityState, activity: "unknown", display: "unknown" };
+    }
     const work = countAssignedWorkForEntry(entry, assignedByDest);
     const arbitratedNeedsInput = arbitratedNeedsInputSignal(arb);
     const hook = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
@@ -1859,7 +1864,7 @@ export async function attachAgentActivity(
 ): Promise<NodeInventoryEntry[]> {
   const sampledAt = deps.now ?? new Date();
   const captureFallback = deps.captureFallback ?? false;
-  return Promise.all(entries.map(async (entry) => {
+  const attached = await Promise.all(entries.map(async (entry): Promise<NodeInventoryEntry> => {
     // A cached hook, pane sample or motion cannot revive a confirmed absent executor.
     // Preserve the applicable missing-session or exited-pane observation without probing.
     if (identityVerdictConfirmsExecutorStopped(entry.identityVerdict)) {
@@ -2033,4 +2038,18 @@ export async function attachAgentActivity(
     })),
     };
   }));
+  return attached.map(unseenIdleIsUnknown);
+}
+
+/** This sweep couldn't reach the seat's tmux, so whether it still runs is unknown. */
+function unseenByTmux(entry: NodeInventoryEntry): boolean {
+  return entry.identityVerdict?.reason === "tmux_unavailable";
+}
+
+/** A seat whose tmux this sweep couldn't reach may be gone: an idle reading is the last thing it said, not what it is
+ *  now, so it reads unknown. Working and waiting readings stay, as the agent's own report of work. */
+function unseenIdleIsUnknown(entry: NodeInventoryEntry): NodeInventoryEntry {
+  if (!unseenByTmux(entry) || entry.agentActivity?.state !== "idle") return entry;
+  return { ...entry, agentActivity: { ...entry.agentActivity, state: "unknown", reason: "tmux_unavailable",
+    evidenceSource: "tmux_session", sampledAt: entry.identityVerdict?.observedAt ?? entry.agentActivity.sampledAt } };
 }
