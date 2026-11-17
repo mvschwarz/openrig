@@ -416,11 +416,17 @@ export class RunnerPermissions {
     const asked = this.deps.queueRepo.getById(askId)!;
     const live = this.liveEnd(asked);
     if (!live) return now; // handed somewhere this host can't follow: nothing here to decide on
+    // An explicit decision on a closed row is final: a read that waited on unproven authority must not let a later,
+    // luckier authority check overwrite it.
+    if ((live.state === "done" || live.state === "failed") && this.explicitlyDecided(live)) return now;
     // A decision isn't recorded on authority that can't be proven: it would wait as an unread decision. Decide again once the seat reads.
     const origin = runnerPermissionOrigin(asked);
-    if (origin && this.seatAuthority(origin).unknown) {
+    const authority = origin ? this.seatAuthority(origin) : null;
+    if (authority?.unknown) {
       return { ok: false, code: "not_recorded", message: `${askId}'s seat can't be read right now, so its request can't be confirmed current. Nothing was decided. Decide again shortly.` };
     }
+    // The same check proved a successor holds the seat since the read: the ask is stale, and nothing is written.
+    if (authority && !authority.current) return { ok: true, state: "stale" };
     const question = this.deps.queueRepo.permissionQuestionsFor(live)?.find((q) => q.id === QUESTION_ID);
     if (!question?.options.some((option) => option.id === optionId)) {
       return { ok: false, code: "invalid_option", message: `${optionId} isn't one of the options the agent offered: ${(question?.options ?? []).map((o) => o.id).join(", ") || "none recorded"}. Nothing was decided.` };

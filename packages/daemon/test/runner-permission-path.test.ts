@@ -1306,6 +1306,60 @@ describe("a seat whose live tenure can't be proven", () => {
     expect(await f.decide(askId, "allow")).toMatchObject({ status: 200, body: { state: "answered", optionId: "allow" } });
   });
 
+  it.each(["done", "failed"] as const)("an explicit reject on a row closed as %s is never overwritten by a decision after a first failed, second successful tenure check", async (closed) => {
+    // The guard answers before any further authority check, so a successor can't appear mid-decide here.
+    for (const second of ["current"] as const) {
+      const f = fixture({ decider: null });
+      const askId = String((await f.submit()).body.askId);
+      await f.answer(askId, { optionId: "allow" });
+      await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: closed, ...(closed === "done" ? { closureReason: "no-follow-on" as const } : {}) });
+      expect(await f.decide(askId, "reject")).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+      const before = JSON.stringify([f.queueRepo.getById(askId)?.humanAnswers, f.queueRepo.listTransitions(askId).length]);
+      const events: unknown[] = []; const unsubscribe = f.bus.subscribe((event) => events.push(event));
+      // The first tenure check (the read's callback) throws and the helper reads the seat current, so the read waits;
+      // the second check (decide's) then succeeds: still current, or after a successor replaced the seat.
+      const real = SessionRegistry.prototype.currentOccupantTenure;
+      let calls = 0;
+      const flaky = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(function (this: SessionRegistry, nodeId: string) {
+        if (calls++ === 0) throw new Error("fixture tenure read unavailable");
+        return real.call(this, nodeId);
+      });
+      try {
+        const decided = await f.decide(askId, "allow");
+        expect([second, decided.body.optionId]).not.toEqual([second, "allow"]);
+      } finally { flaky.mockRestore(); unsubscribe(); }
+      expect([second, JSON.stringify([f.queueRepo.getById(askId)?.humanAnswers, f.queueRepo.listTransitions(askId).length])]).toEqual([second, before]);
+      expect(events).toHaveLength(0);
+      expect(f.permits()).toHaveLength(0);
+      expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+    }
+  });
+
+  it.each(["done", "failed"] as const)("an undecided kept answer on a row closed as %s is not decided when the seat is replaced between the read and the decision's own tenure check", async (closed) => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { optionId: "allow" });
+    await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: closed, ...(closed === "done" ? { closureReason: "no-follow-on" as const } : {}) });
+    const snapshot = () => JSON.stringify([f.queueRepo.getById(askId)?.humanAnswers, f.queueRepo.listTransitions(askId).length]);
+    const before = snapshot();
+    const events: unknown[] = []; const unsubscribe = f.bus.subscribe((event) => events.push(event));
+    const real = SessionRegistry.prototype.currentOccupantTenure;
+    let calls = 0, relaunched = false;
+    const flaky = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(function (this: SessionRegistry, nodeId: string) {
+      calls++;
+      if (calls === 1) throw new Error("fixture tenure read unavailable");
+      if (calls === 3 && !relaunched) { relaunched = true; flaky.mockRestore(); f.relaunch(); }
+      return real.call(this, nodeId);
+    });
+    try {
+      expect(await f.decide(askId, "allow")).toMatchObject({ body: { state: "stale" } });
+    } finally { flaky.mockRestore(); unsubscribe(); }
+    expect(relaunched).toBe(true);
+    expect(snapshot()).toEqual(before);
+    expect(events).toHaveLength(0);
+    expect(f.permits()).toHaveLength(0);
+  });
+
   it.each(["missing", "throws"] as const)("positive absence of the node reads stale through a callback that %s, and positive replacement closes the ask", async (cause) => {
     const gone = fixture({ decider: DECIDER });
     const goneAsk = String((await gone.submit()).body.askId);

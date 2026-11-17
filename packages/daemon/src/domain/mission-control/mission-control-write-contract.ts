@@ -686,14 +686,18 @@ export class MissionControlWriteContract {
           }, null, undefined, register);
         });
       }
-      const record = this.db.transaction(() => {
-        input.appSubmission?.verify();
-        const result = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+      // Only an app submission verifies, checkpoints and commits under one transaction and envelope; the ordinary
+      // path records directly, so the queue notifies after its own commit, as before.
+      const recorded = input.appSubmission
+        ? this.eventBus.withNotifyEnvelope(this.db.transaction(() => {
+          input.appSubmission!.verify();
+          const result = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
+            questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
+          if (result.status === "recorded") input.appSubmission!.checkpoint(this.queueRepo.getById(input.qitemId)!);
+          return result;
+        }))
+        : this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
           questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
-        if (result.status === "recorded") input.appSubmission?.checkpoint(this.queueRepo.getById(input.qitemId)!);
-        return result;
-      });
-      const recorded = input.appSubmission ? this.eventBus.withNotifyEnvelope(record) : record();
       if (recorded.status !== "recorded") {
         throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`,
           { qitemId: input.qitemId, reason: recorded.reason });

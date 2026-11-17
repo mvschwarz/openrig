@@ -68,7 +68,7 @@ async function fixture() {
     return text.split("\n").filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5)) as Record<string, unknown>);
   };
   const recorded = async (watermark: number) => (await eventsAfter(watermark)).filter((event) => event.type === "queue.answer_recorded");
-  return { bus, repo, ask, steering, recorded, eventsAfter };
+  return { db, bus, repo, ask, steering, recorded, eventsAfter };
 }
 
 describe("queue.answer_recorded: a person's click on an ask with questions", () => {
@@ -111,6 +111,18 @@ describe("queue.answer_recorded: a person's click on an ask with questions", () 
     const events = await f.eventsAfter(watermark);
     expect(events.some((event) => event.type === "queue.updated" && event.qitemId === qitemId)).toBe(true);
     expect(events.filter((event) => event.type === "queue.answer_recorded")).toEqual([]);
+  });
+
+  it("an ordinary click that completes the set notifies subscribers after the answer's own commit, outside any transaction", async () => {
+    const f = await fixture();
+    const qitemId = await f.ask();
+    const seen: Array<{ type: string; inTransaction: boolean }> = [];
+    const unsubscribe = f.bus.subscribe((event) => { if (event.type === "queue.answer_recorded") seen.push({ type: event.type, inTransaction: f.db.inTransaction }); });
+    try {
+      expect((await f.steering({ qitemId, questionId: "ship", optionId: "yes" })).status).toBe(200);
+      expect((await f.steering({ qitemId, questionId: "when", optionId: "today" })).status).toBe(200);
+    } finally { unsubscribe(); }
+    expect(seen).toEqual([{ type: "queue.answer_recorded", inTransaction: false }, { type: "queue.answer_recorded", inTransaction: false }]);
   });
 
   it("fails open: a click whose event can't be recorded is still on the ask, and its answer goes back", async () => {
