@@ -87,8 +87,15 @@ export function ContextBar({
   fresh: boolean | undefined;
 }) {
   const known = availability === "known" && typeof percent === "number";
+  const state = !known ? "unknown" : fresh ? "fresh" : "stale";
+  // Unknown context draws a dashed outline instead of an empty track, so it never reads as 0% used.
   return (
-    <div className="h-[3px] bg-on-surface/10" data-testid="context-bar">
+    <div
+      className={cn("h-[3px]", known ? "bg-on-surface/10" : "border border-dashed border-outline-variant")}
+      data-testid="context-bar"
+      data-state={state}
+      title={state === "unknown" ? "Context usage unknown" : state === "stale" ? "Context usage (stale sample)" : "Context usage (fresh)"}
+    >
       {known ? (
         <div
           className={cn(

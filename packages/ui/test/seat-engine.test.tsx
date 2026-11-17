@@ -44,7 +44,30 @@ describe("seat card engine block", () => {
     const fill = screen.getByTestId("context-bar").firstElementChild as HTMLElement;
     expect(fill.style.width).toBe("64%");
     expect(fill.className).toContain("bg-amber-600");
+    expect(screen.getByTestId("context-bar").getAttribute("data-state")).toBe("fresh");
     rerender(<ContextBar percent={null} availability="unknown" fresh={false} />);
     expect(screen.getByTestId("context-bar").firstElementChild).toBeNull();
+  });
+
+  it("draws unknown context as a dashed outline, not as an empty 0% track", () => {
+    render(<ContextBar percent={null} availability="unknown" fresh={false} />);
+    const bar = screen.getByTestId("context-bar");
+    expect(bar.getAttribute("data-state")).toBe("unknown");
+    expect(bar.className).toContain("border-dashed");
+    expect(bar.getAttribute("title")).toBe("Context usage unknown");
+  });
+
+  it("dims a stale sample so it reads differently from a current one", () => {
+    render(<ContextBar percent={40} availability="known" fresh={false} />);
+    const bar = screen.getByTestId("context-bar");
+    expect(bar.getAttribute("data-state")).toBe("stale");
+    expect((bar.firstElementChild as HTMLElement).className).toContain("opacity-50");
+  });
+
+  it("names a community harness runtime instead of saying Unknown", () => {
+    render(<SeatEngine runtime="opencode" model="zai/glm-5.3" />);
+    expect(screen.getByText("opencode")).toBeTruthy();
+    expect(screen.queryByText("Unknown")).toBeNull();
+    expect(screen.getByRole("img", { name: "opencode" })).toBeTruthy();
   });
 });

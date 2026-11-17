@@ -31,6 +31,23 @@ describe("graphics runtime package", () => {
     expect(toolBrand("proof").label).toBe("Proof");
   });
 
+  it("labels a runtime that is not built in with its own name, and a missing one as Unknown", () => {
+    expect(normalizeRuntimeBrandId("opencode")).toBe("unknown");
+    expect(runtimeBrand("opencode").label).toBe("opencode");
+    expect(runtimeBrand("opencode").shortLabel).toBe("opencode");
+    expect(runtimeBrand(null).label).toBe("Unknown");
+    expect(runtimeBrand("  ").label).toBe("Unknown");
+  });
+
+  it("uses the generic glyph, not the question mark, for a named community runtime", () => {
+    const { container: named } = render(<RuntimeMark runtime="opencode" />);
+    const { container: missing } = render(<RuntimeMark runtime={null} />);
+    // The question mark is the only <path> in the unknown glyph; the generic chip draws none.
+    expect(missing.querySelector("path")).toBeTruthy();
+    expect(named.querySelector("path")).toBeNull();
+    expect(screen.getByRole("img", { name: "opencode" })).toBeTruthy();
+  });
+
   it("renders compact runtime badges with graphics and short labels", () => {
     render(<RuntimeBadge runtime="claude-code" model="claude-sonnet" compact />);
     expect(screen.getByText("Claude")).toBeTruthy();
