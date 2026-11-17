@@ -152,11 +152,11 @@ busy=true;send({type:'agent_start'});setTimeout(()=>{busy=false;send({type:'agen
       const rig = deps.rigRepo.createRig("adoption-input"), node = deps.rigRepo.addNode(rig.id, "worker", { runtime, cwd: root });
       const row = deps.sessionRegistry.registerSession(node.id, seat);
       db.prepare("INSERT INTO bindings (id,node_id,tmux_session,tmux_pane) VALUES ('input-binding',?,?,'%1')").run(node.id, seat);
-      const privateEnv = new Map<string, string>();
+      const privateEnv = new Map<string, string>(), issuedTokens: string[] = [];
       vi.spyOn(deps.tmuxAdapter, "getPanePid").mockResolvedValue(101);
       vi.spyOn(deps.tmuxAdapter, "getPaneCommand").mockResolvedValue("node");
       vi.spyOn(deps.tmuxAdapter, "getSessionEnv").mockImplementation(async (_seat, key) => ({ OPENRIG_NODE_ID: node.id, OPENRIG_SESSION_NAME: seat, OPENRIG_RUNTIME: runtime, OPENRIG_URL: url }[key]));
-      vi.spyOn(deps.tmuxAdapter, "setSessionEnv").mockImplementation(async (_seat, key, value) => { privateEnv.set(key, value); });
+      vi.spyOn(deps.tmuxAdapter, "setSessionEnv").mockImplementation(async (_seat, key, value) => { privateEnv.set(key, value); if (key.startsWith("OPENRIG_RUN_GRANT_")) issuedTokens.push(value); });
       vi.spyOn(deps.tmuxAdapter, "unsetSessionEnv").mockImplementation(async (_seat, key) => { privateEnv.delete(key); });
       vi.spyOn(deps.tmuxAdapter, "sendShellCommand").mockImplementation(async (_seat, command) => {
         const [key, token] = [...privateEnv][0]!;
@@ -193,7 +193,9 @@ busy=true;send({type:'agent_start'});setTimeout(()=>{busy=false;send({type:'agen
       const native = JSON.parse(fs.readFileSync(log, "utf8").split("\n")[0]!);
       expect(native).toMatchObject({ childToken: false, childRun: false, childTransfer: false, provider: runtime === "omp" ? "fixture-omp-provider" : "fixture-rpc-provider", providerCount: 1, node: node.id, url });
       if (runtime === "omp") expect(native.args).toContain("--approval-mode");
-      for (const token of privateEnv.values()) expect(output + fs.readFileSync(log, "utf8")).not.toContain(token);
+      expect(issuedTokens.length).toBeGreaterThan(0);
+      const observedOutput = output + fs.readFileSync(log, "utf8");
+      for (const token of issuedTokens) expect(observedOutput.includes(token)).toBe(false);
     } finally {
       for (const child of children) if (child.exitCode === null && child.signalCode === null) {
         await new Promise(resolve => { child.once("exit", resolve); child.kill("SIGKILL"); });
