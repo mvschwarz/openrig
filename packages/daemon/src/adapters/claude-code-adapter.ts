@@ -24,8 +24,9 @@ import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_B
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
-import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
+import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, managedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
+import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { claudeStrictTrustRoot } from "../domain/claude-git-trust-root.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
@@ -117,6 +118,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private stateDir: string | null;
   private restoreReadPolicy: (() => RestoreReadPolicy | null) | null;
   private hookBridgeLaunch: ((nodeId: string, executable?: string) => boolean | Promise<boolean>) | null;
+  private statuslineThrottleLaunch: ((nodeId: string) => number | null | Promise<number | null>) | null;
   private collectorAssetPath: string | null;
   private nodeExecutable: string;
   private autoDriveProviderPrompts: boolean;
@@ -144,6 +146,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** Slice 13: whether this launch adds a seat's hook bridge (opted in, on a Claude with asyncRewake), read at each
      *  launch; absent, no launch adds it. */
     hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
+    /** #3416 (3): the seat's status line throttle in seconds, or null when it has none; read at each launch. */
+    statuslineThrottleLaunch?: (nodeId: string) => number | null | Promise<number | null>;
     collectorAssetPath?: string;
     /** Interpreter used to write generated Claude commands; defaults to this daemon runtime. */
     nodeExecutable?: string;
@@ -172,6 +176,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.stateDir = deps.stateDir ?? null;
     this.restoreReadPolicy = deps.restoreReadPolicy ?? null;
     this.hookBridgeLaunch = deps.hookBridgeLaunch ?? null;
+    this.statuslineThrottleLaunch = deps.statuslineThrottleLaunch ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.nodeExecutable = deps.nodeExecutable ?? process.execPath;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
@@ -417,7 +422,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       ({ ...observeClaudePermission(posture), claudeAutoMode });
     const appliedLaunch = appliedWith(autoMode.block ?? null);
     const hookBridge = (await this.hookBridgeLaunch?.(binding.nodeId, binding.claudeExecutable ?? undefined)) === true;
-    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge }), {
+    const statusLine = await this.throttledStatusLine(binding.nodeId, binding.cwd, opts.name, tokenWarnings);
+    const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, { ...binding, hookBridge, ...(statusLine ? { statusLine } : {}) }), {
       openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
     });
     const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");
@@ -1265,6 +1271,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    *   cache for that seat is retained.
    * The read-modify-write below is not safe against a concurrent writer of the same file.
    */
+  /** #3416 (3): the throttled status line for this launch's --settings, when the seat opted in and its folder's own
+   *  status line is OpenRig's collector or absent; otherwise undefined, with a note when the folder's settings win. */
+  private async throttledStatusLine(nodeId: string, cwd: string | null | undefined, sessionName: string,
+    notes: string[]): Promise<Record<string, unknown> | undefined> {
+    const seconds = await this.statuslineThrottleLaunch?.(nodeId) ?? null;
+    if (seconds === null || !this.stateDir || !cwd) return undefined;
+    const result = throttledStatusLineForLaunch({ readFile: (p: string) => this.fs.readFile(p), exists: (p: string) => this.fs.exists(p), cwd,
+      stateDir: this.stateDir, nodeExecutable: this.nodeExecutable, sessionName, seconds });
+    if ("note" in result) { notes.push(result.note); return undefined; }
+    return result.statusLine;
+  }
+
   private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
     const contextDir = contextUsageDirectory(this.stateDir);
@@ -1420,14 +1438,6 @@ interface ActivityHookOutcome {
   manifestUnavailable: boolean;
   /** Fail-closed: an unparseable settings file was preserved untouched. */
   settingsUnparseable: boolean;
-}
-
-function managedClaudeNodeCommand(executable: string, ...args: string[]): string {
-  const quotedArgs = args.map(shellQuote).join(" ");
-  const pinned = `${shellQuote(executable)} ${quotedArgs}`;
-  // Keep legacy PATH resolution if this runtime's name is outside our ownership grammar. `exec` lets `sh -c` become
-  // Node instead of waiting on it (dash keeps the shell otherwise, #3416); the matchers still own the shape without it.
-  return `exec ${parseManagedClaudeNodeCommand(pinned) ? pinned : `node ${quotedArgs}`}`;
 }
 
 function hashContent(content: string): string {

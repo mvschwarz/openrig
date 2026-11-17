@@ -6,6 +6,8 @@ import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import { setTimeout as sleep } from "node:timers/promises";
+import fs from "node:fs";
+import { throttledStatusLineForLaunch } from "../domain/claude-statusline-throttle.js";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { shellQuote } from "./shell-quote.js";
@@ -41,6 +43,8 @@ interface ClaudeResumeOptions {
   restoreReadPolicy?: () => RestoreReadPolicy | null;
   /** Slice 13: whether this restore adds a seat's hook bridge (opted in, on a Claude with asyncRewake). */
   hookBridgeLaunch?: (nodeId: string, executable?: string) => boolean | Promise<boolean>;
+  /** #3416 (3): the seat's status line throttle in seconds, or null when it has none; read at each restore. */
+  statuslineThrottleLaunch?: (nodeId: string) => number | null | Promise<number | null>;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;
@@ -59,6 +63,17 @@ export class ClaudeResumeAdapter {
     if (!isClaudeResumeType(resumeType)) return false;
     if (!resumeToken) return false;
     return true;
+  }
+
+  /** #3416 (3): the throttled status line for this restore's --settings, as on a fresh launch (claude-code-adapter.ts). */
+  private async throttledStatusLine(nodeId: string | null | undefined, cwd: string, sessionName: string,
+    notes: string[]): Promise<{ statusLine?: Record<string, unknown> }> {
+    const seconds = nodeId ? await this.options.statuslineThrottleLaunch?.(nodeId) ?? null : null;
+    if (seconds === null || !this.options.openrigHome || !cwd) return {};
+    const result = throttledStatusLineForLaunch({ readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p), cwd,
+      stateDir: this.options.openrigHome, nodeExecutable: process.execPath, sessionName, seconds });
+    if ("note" in result) { notes.push(result.note); return {}; }
+    return { statusLine: result.statusLine };
   }
 
   async resume(
@@ -124,7 +139,8 @@ export class ClaudeResumeAdapter {
     if (seatToken) tokenWarnings.push(...(await this.options.claudeManagedLaunch?.tokenPrecedenceWarnings?.(nodeId!, seatToken.ref) ?? []));
     const choice = { claudePermissions, claudeAutoMode, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode,
       // The version gate reads the Claude this resume runs, not PATH's.
-      hookBridge: nodeId ? (await this.options.hookBridgeLaunch?.(nodeId, executable ?? undefined)) === true : false };
+      hookBridge: nodeId ? (await this.options.hookBridgeLaunch?.(nodeId, executable ?? undefined)) === true : false,
+      ...await this.throttledStatusLine(nodeId, cwd, tmuxSessionName, tokenWarnings) };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const autoMode = claudeAutoModeForLaunch(claudeAutoMode);
     if (autoMode.warning) tokenWarnings.push(autoMode.warning);

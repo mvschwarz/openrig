@@ -1,4 +1,5 @@
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
+import { nodeStatuslineThrottleSchema } from "./migrations/175_node_statusline_throttle.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
@@ -355,4 +356,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeProcessLimitsSchema,
   seatHookBridgeSchema,
   sessionLaunchedCwdSchema,
+  nodeStatuslineThrottleSchema,
 ];

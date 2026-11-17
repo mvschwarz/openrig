@@ -109,6 +109,31 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
     }
   });
 
+  it("175_node_statusline_throttle adds a nullable column and guards pre-175 databases (#3416 item 3)", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "175_node_statusline_throttle.sql")).toBe(true);
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "175_node_statusline_throttle.sql"));
+      const repo = new RigRepository(db);
+      const rig = repo.createRig("pre-175");
+      const legacyNode = repo.addNode(rig.id, "legacy", { runtime: "claude-code" });
+      expect(repo.getNodeStatuslineThrottle(legacyNode.id)).toBeNull();
+      expect(repo.setNodeStatuslineThrottle(legacyNode.id, null)).toBe(false);
+      expect(() => repo.setNodeStatuslineThrottle(legacyNode.id, 30)).toThrow(/migration/i);
+      expect(() => repo.addNode(rig.id, "unmigrated-throttled", { runtime: "claude-code", statuslineThrottle: 30 })).toThrow(/migration/i);
+      expect(db.prepare("SELECT id FROM nodes WHERE logical_id = 'unmigrated-throttled'").get()).toBeUndefined();
+
+      migrate(db, ALL_MIGRATIONS);
+      const col = (db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string; notnull: number }>)
+        .find((c) => c.name === "statusline_throttle_seconds");
+      expect(col?.notnull).toBe(0);
+      const throttled = repo.addNode(rig.id, "throttled", { runtime: "claude-code", statuslineThrottle: 30 });
+      expect(repo.getNodeStatuslineThrottle(throttled.id)).toBe(30);
+    } finally {
+      db.close();
+    }
+  });
+
   it("173_node_process_limits adds a nullable process_limits column and guards pre-173 databases", () => {
     expect(ALL_MIGRATIONS.some((m) => m.name === "173_node_process_limits.sql")).toBe(true);
     const db = new Database(":memory:");

@@ -56,6 +56,13 @@ collector stays silent and the renderer supplies the visible status line. This
 POSIX-shell example applies to WSL2's Linux installation; it does not establish
 native Windows support.
 
+## A throttled seat
+
+A seat with `statusline_throttle` (see the rig spec reference) keeps its throttled status line in its own launch
+settings, not in `.claude/settings.local.json`, so the generated command in that file is the same as for any other seat.
+A status line command of your own there, such as the wrapper above, wins over the throttle: the launch skips the
+throttle and says so.
+
 ## Check after an upgrade or instance change
 
 The collector command's paths and arguments are implementation details. OpenRig

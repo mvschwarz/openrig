@@ -137,6 +137,7 @@ export class RigInstantiator {
             codexPermissions: specNode.codexPermissions,
             launchWrapper: specNode.launchWrapper,
             processLimits: effectiveProcessLimits(specNode.processLimits),
+            statuslineThrottle: specNode.statuslineThrottle || null,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -1373,7 +1374,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1748,6 +1749,7 @@ export class PodRigInstantiator {
             codexPermissions: member.codexPermissions,
             launchWrapper: member.launchWrapper,
             processLimits: effectiveProcessLimits(member.processLimits),
+            statuslineThrottle: member.statuslineThrottle || null,
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2147,6 +2149,7 @@ export class PodRigInstantiator {
       codexPermissions: input.member.codexPermissions,
       launchWrapper: input.member.launchWrapper,
       processLimits: effectiveProcessLimits(input.member.processLimits),
+      statuslineThrottle: input.member.statuslineThrottle || null,
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
@@ -2646,6 +2649,10 @@ export class PodRigInstantiator {
     if (input.member.processLimits !== undefined) {
       this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
     }
+    // #3416 (3): the launch reads the throttle, so the authored value is written first; 0 clears; absent keeps.
+    if (input.member.statuslineThrottle !== undefined) {
+      this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
+    }
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, {
       sessionName: canonicalSessionName,
       silenceWindowSeconds: configResult.config.activity?.silenceWindowSeconds,
@@ -3006,6 +3013,10 @@ export class PodRigInstantiator {
     // before this launch (unlike launch_wrapper, read later at the harness command); `{}` clears; absent keeps.
     if (input.member.processLimits !== undefined) {
       this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
+    }
+    // #3416 (3): the launch reads the throttle, so the authored value is written first; 0 clears; absent keeps.
+    if (input.member.statuslineThrottle !== undefined) {
+      this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
     }
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, env: input.envOverride,
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });

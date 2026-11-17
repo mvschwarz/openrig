@@ -241,6 +241,16 @@ describe("RigSpecExporter", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("#3416 (3): exports a Claude seat's status line throttle, and none for a seat without one", () => {
+    const rig = rigRepo.createRig("throttle-export");
+    rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: "/repo", statuslineThrottle: 30 });
+    rigRepo.addNode(rig.id, "other", { runtime: "claude-code", cwd: "/repo" });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "worker")?.statuslineThrottle).toBe(30);
+    expect(exported.nodes.find((n) => n.id === "other")?.statuslineThrottle).toBeUndefined();
+    expect(RigSpecCodec.serialize(exported)).toContain("statusline_throttle: 30");
+  });
+
   it("#3253: exports a seat's process limits; an unreadable stored one is left out of that seat only, named, and kept as stored", () => {
     const rig = rigRepo.createRig("legacy-limits-export");
     const node = rigRepo.addNode(rig.id, "worker", { runtime: "codex", cwd: "/repo", processLimits: { tasksMax: 512 } });

@@ -113,6 +113,9 @@ export interface EnforcerInput {
   cwd?: string | null;
   runtime: string | null;
   usedPercentage: number | null;
+  /** When the context collector took the sample `usedPercentage` comes from (ISO). A throttled status line (#3416)
+   *  samples less often, so the request names the sample's time rather than calling it current. */
+  sampledAt?: string | null;
   transcriptPath?: string | null;
   sessionId?: string | null;
   /** Revalidate a poll's source snapshot after acquiring the delivery lease. */
@@ -251,6 +254,7 @@ export function buildCompactCommand(compactInstruction: string): string {
 
 function buildPreCompactPrepPrompt(input: {
   usedPercentage: number | null;
+  sampledAt?: string | null;
   thresholdPercent: number;
   preCompactInstruction?: string | null;
   /** The policy's compaction instruction when it is too long for the /compact command. */
@@ -265,7 +269,9 @@ function buildPreCompactPrepPrompt(input: {
     ]
     : [
       "OpenRig automatic compaction preparation is now required.",
-      `Current context usage is ${input.usedPercentage ?? "unknown"}%; configured compaction threshold is ${input.thresholdPercent}%.`,
+      input.sampledAt
+        ? `Context usage was ${input.usedPercentage ?? "unknown"}% in the latest sample, taken at ${input.sampledAt}; configured compaction threshold is ${input.thresholdPercent}%.`
+        : `Current context usage is ${input.usedPercentage ?? "unknown"}%; configured compaction threshold is ${input.thresholdPercent}%.`,
       `The ${AUTO_PREP_WAIT_MS_DEFAULT / 60_000}-minute ceiling starts after preparation delivery returns; completing the restore map and becoming idle must fit within it.`,
     ];
   pieces.push(
@@ -1733,7 +1739,7 @@ export class ClaudeCompactionEnforcer {
       const composed = composeManagedCompactCommand({ compactInstruction: attempt.compactInstruction, mapPath: attempt.mapPath });
       prep = await this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
         overflowCompactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
-        usedPercentage: input.usedPercentage ?? null, thresholdPercent: policy.thresholdPercent,
+        usedPercentage: input.usedPercentage ?? null, sampledAt: input.sampledAt ?? null, thresholdPercent: policy.thresholdPercent,
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
       }), { openrigNotice: true, allowDraftWhileIdle: true, ...idleGate, beforeWrite: () => {
         this.reconcilePreparations();

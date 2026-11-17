@@ -173,6 +173,7 @@ export class RigSpecCodec {
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
         if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
         if (m.processLimits !== undefined) member["process_limits"] = processLimitsToSpec(m.processLimits);
+        if (m.statuslineThrottle !== undefined) member["statusline_throttle"] = m.statuslineThrottle;
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;
@@ -260,6 +261,7 @@ export class LegacyRigSpecCodec {
         if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
         if (node.launchWrapper !== undefined) n["launch_wrapper"] = [...node.launchWrapper];
         if (node.processLimits !== undefined) n["process_limits"] = processLimitsToSpec(node.processLimits);
+        if (node.statuslineThrottle !== undefined) n["statusline_throttle"] = node.statuslineThrottle;
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

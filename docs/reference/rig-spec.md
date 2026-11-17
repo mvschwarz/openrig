@@ -938,6 +938,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `claude_mcp` | `none` | no | normal loading | Claude members only. Disable MCP server loading for this agent on every launch and resume. Omit the field to keep Claude's normal configuration; see [Claude MCP loading](#claude-mcp-loading-runtime-claude-code). |
 | `launch_wrapper` | string[] | no | — | Local `pi`, `codex`, `claude-code` and community-harness members; runner presets must declare wrapper support. Literal argument prefix applied to the native executable and its arguments on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
 | `process_limits` | map | no | — | Linux/systemd hosts only, opt-in for this seat. `{ tasks_max: N }` (an integer from 1 to 4194304) puts the seat's own processes in a systemd user scope of their own with `TasksMax=N`; the other seats, the daemon and the terminal server stay outside it. Applies to the seat's new launches; a fresh launch the host can't cap is not started, and a recovery goes ahead with a warning. Any other key (a memory or CPU limit) is refused. `{}` clears a stored limit when re-applying an authored spec; omitting the key leaves it unchanged. Valid on terminal members too. See [Process limits](#process-limits-linuxsystemd). |
+| `statusline_throttle` | integer | no | — | Claude members only, opt-in. Runs OpenRig's context collector from the status line at most once every N seconds (1 to 120); `0` clears a stored throttle when re-applying an authored spec, while omitting the key leaves it unchanged. Also settable with `rig seat set-statusline-throttle`. See [Status line throttle](#status-line-throttle-runtime-claude-code). |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
 | `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
@@ -1205,6 +1206,42 @@ members:
   The stored value stays as it is, and the export names the seat: a `# Not carried:` line at the top of the YAML (which
   `rig export` prints) with how to fix or clear it, and the `X-OpenRig-Export-Warnings` header on YAML and JSON (which
   `rig spec show --json` prints as a warning).
+
+### Status line throttle (`runtime: claude-code`)
+
+Claude Code runs a seat's status line on each update of its conversation, and each run starts Node for OpenRig's
+context collector. On a host with many seats, `statusline_throttle` lets a Claude member start the collector at most
+once every N seconds:
+
+```yaml
+members:
+  - id: impl
+    agent_ref: local:agents/impl
+    profile: default
+    runtime: claude-code
+    statusline_throttle: 30
+```
+
+- A short POSIX shell check reads the status line input before Node. It skips the collector, printing nothing (the
+  collector prints nothing either), for an update that comes fewer than N seconds after the last collection, in the same
+  conversation, with the context not lower than then, and only when that collection wrote its reading. A drop in the
+  context (a compaction) or a new conversation collects at once. No throttle is the default, and an unthrottled seat
+  launches exactly as before.
+- The reading keeps its real sample time. Nothing rewrites it on a skipped run, so `rig ps`, the context watch and
+  managed compaction see its true age, and the compaction request names the time of the sample it acted on.
+- What it costs: while the seat works, the kept reading (and the provider rate limits recorded with it) can be up to N
+  seconds behind the conversation, so managed compaction can see the seat cross its threshold that much later. A seat
+  that goes idle right after a skipped update keeps the earlier reading until its next update, so a threshold crossed
+  in that last moment is seen at its next turn. N is capped at 120 seconds, well inside the 10 minutes after which a
+  reading counts as stale. The check finds the seat's reading by the seat's name; while Claude reports another
+  session name, the check collects on every update.
+- The throttled command goes only into the seat's own launch settings (its `--settings` value), never into the folder's
+  `.claude/settings.local.json`, so seats sharing a folder can choose different intervals and `rig down` has nothing
+  more to take back. A status line command of your own in that file wins: the launch then skips the throttle and says so.
+- It takes effect at the seat's next launch, resume or restore. A relaunch that reuses the running process's own
+  launch settings (a provider or account switch that keeps them) keeps its throttle as it was. `rig seat
+  set-statusline-throttle <seat> --seconds N` (or `--clear`) changes it without editing the spec; `rig export` carries
+  the stored value.
 
 ### Pi (`runtime: pi`)
 
