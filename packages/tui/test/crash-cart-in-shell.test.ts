@@ -1,3 +1,4 @@
+import stringWidth from "string-width";
 import { describe, it, expect } from "vitest";
 import { createViewState, emptySnapshot } from "../src/state.js";
 import { renderScreen } from "../src/render.js";
@@ -58,6 +59,21 @@ describe("renderScreen daemon-down — in-shell split (explorer always present)"
     expect(right).toContain("RESTORE EVERYTHING");
     expect(right).toContain("unavailable — no shutdown record"); // honest-null header slot preserved
     expect(right).toContain("WHERE WORK STOPPED");
+  });
+
+  it("keeps plain and styled combining text aligned at the pane edge", () => {
+    const crashCart = demoCrashCartModel();
+    crashCart.whereWorkStopped[0]!.summary = "e\u0301".repeat(50);
+    const cols = 80;
+    const screen = renderScreen(view.get(), snap, { cols, rows: 32, daemonState: "down", crashCart });
+    const index = screen.lines.findIndex((line) => line.includes("qitem in-progress"));
+    expect(index).toBeGreaterThanOrEqual(0);
+    const plain = screen.lines[index]!;
+    const styled = stylizeLines(screen, createStyle("truecolor"))[index]!;
+
+    expect(stripAnsi(styled)).toBe(plain);
+    expect(stringWidth(plain)).toBe(cols);
+    expect(plain).toMatch(/e\u0301$/);
   });
 
   it("through stylize: strip-invariant holds + the RESTORE accent bg paints (split-pane path)", () => {

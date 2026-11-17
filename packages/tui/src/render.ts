@@ -1867,9 +1867,11 @@ function crashCartShell(
     const y = lines.length + 1;
     const left = pad(leftRows[i] ?? "", explW);
     const citem = content[scroll + i];
-    const contentText = (citem?.text ?? "").slice(0, contentWidth);
+    const fullText = citem?.text ?? "";
+    const contentText = fullText.slice(0, columnIndex(fullText, contentWidth));
     if (citem?.action) hitMap.push({ y, x1: explW + 2, x2: cols, action: citem.action });
-    lines.push(pad(`${left}┃ ${contentText}`, cols));
+    const line = `${left}┃ ${contentText}${" ".repeat(Math.max(contentWidth - columns(contentText), 0))}`;
+    lines.push(columns(line) > cols ? pad(line, cols) : line);
     if (citem?.segs) segRows[y] = truncateSegs(citem.segs, contentWidth);
   }
   lines.push(paneRule(cols, explW, "bottom"));
