@@ -199,8 +199,8 @@ describe("#3253 status processLimits", () => {
   function seat(opts: { tasksMax?: number; memoryMax?: number; status?: string; pane?: string | null }) {
     const rig = app.rigRepo.createRig("one");
     const node = app.rigRepo.addNode(rig.id, "worker", { runtime: "codex", model: "m",
-      ...(opts.tasksMax ? { processLimits: { tasksMax: opts.tasksMax } } : {}),
-      ...(opts.memoryMax ? { processLimits: { memoryMax: opts.memoryMax } } : {}) });
+      ...(opts.tasksMax || opts.memoryMax ? { processLimits: {
+        ...(opts.tasksMax ? { tasksMax: opts.tasksMax } : {}), ...(opts.memoryMax ? { memoryMax: opts.memoryMax } : {}) } } : {}) });
     if (opts.status) {
       const session = app.sessionRegistry.registerSession(node.id, "worker@one");
       app.sessionRegistry.updateStatus(session.id, opts.status);
@@ -226,6 +226,13 @@ describe("#3253 status processLimits", () => {
   it("a stopped seat with only memory_max reads not_applied with that request, without reading tmux", async () => {
     seat({ memoryMax: 4294967296, status: "exited", pane: "%7" });
     expect((await status()).processLimits).toEqual({ state: "not_applied", requested: { memoryMax: 4294967296 },
+      reason: "the seat is not running; the limit applies at its next fresh launch" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("a stopped seat with both limits reads not_applied with both requested, without reading tmux", async () => {
+    seat({ tasksMax: 128, memoryMax: 1073741824, status: "exited", pane: "%7" });
+    expect((await status()).processLimits).toEqual({ state: "not_applied", requested: { tasksMax: 128, memoryMax: 1073741824 },
       reason: "the seat is not running; the limit applies at its next fresh launch" });
     expect(read).not.toHaveBeenCalled();
   });
