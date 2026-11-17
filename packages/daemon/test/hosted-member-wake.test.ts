@@ -20,18 +20,22 @@ import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG } from "
 
 type Received = { path: string; headers: IncomingMessage["headers"]; raw: Buffer; body: Record<string, unknown>; status: number };
 
+// The receiver's key: `whsec_` and base64 decodes to those bytes; any other value is its raw UTF-8 bytes (the reference
+// library's raw format, and how the receiver that asked for signing reads a secret without the prefix).
+const receiverKey = (secret: string): Buffer => secret.startsWith("whsec_")
+  ? Buffer.from(secret.slice("whsec_".length), "base64") : Buffer.from(secret, "utf8");
+
 // A port of the Standard Webhooks JavaScript reference's verify() (libraries/javascript/src/index.ts at commit 36afae79):
-// strip whsec_ and base64-decode the secret, a five-minute timestamp window, HMAC-SHA256 over `<id>.<timestamp>.` and the
-// raw body bytes, and a constant-time match against any of the space-separated `v1,` signatures. Written apart from the
-// sender's own code; the sender is also pinned to the reference's known-answer vector below.
-function referenceVerify(secret: string, raw: Buffer, headers: IncomingMessage["headers"], nowSeconds = Math.floor(Date.now() / 1000)): void {
+// a five-minute timestamp window, HMAC-SHA256 over `<id>.<timestamp>.` and the raw body bytes, and a constant-time match
+// against any of the space-separated `v1,` signatures. Written apart from the sender's own code; the sender is also
+// pinned to the reference's known-answer vector below.
+function referenceVerify(key: Buffer, raw: Buffer, headers: IncomingMessage["headers"], nowSeconds = Math.floor(Date.now() / 1000)): void {
   const [id, stamp, signature] = ["webhook-id", "webhook-timestamp", "webhook-signature"].map((name) => headers[name]);
   if (typeof id !== "string" || typeof stamp !== "string" || typeof signature !== "string") throw new Error("Missing required headers");
   const timestamp = parseInt(stamp, 10);
   if (Number.isNaN(timestamp)) throw new Error("Invalid Signature Headers");
   if (nowSeconds - timestamp > 5 * 60) throw new Error("Message timestamp too old");
   if (timestamp > nowSeconds + 5 * 60) throw new Error("Message timestamp too new");
-  const key = Buffer.from(secret.startsWith("whsec_") ? secret.slice("whsec_".length) : secret, "base64");
   const expected = Buffer.from(`v1,${createHmac("sha256", key).update(Buffer.concat([Buffer.from(`${id}.${timestamp}.`), raw])).digest("base64")}`);
   if (!signature.split(" ").some((passed) => { const bytes = Buffer.from(passed); return bytes.length === expected.length && timingSafeEqual(bytes, expected); })) {
     throw new Error("No matching signature found");
@@ -109,9 +113,10 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     // libraries/javascript/src/webhook.test.ts at 36afae79, "sign function works"
     expect(standardWebhookSignature(standardWebhookKey("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")!, "msg_p5jXN8AQM9LWM0D4loKWxJek",
       1614265330, Buffer.from('{"test": 2432232314}'))).toBe("v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=");
-    // Like the reference, the whsec_ prefix may be left off; an empty or non-base64 secret isn't a key.
-    expect(standardWebhookKey("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")).toEqual(standardWebhookKey("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"));
-    for (const bad of ["whsec_", "", "whsec_not base64!"]) expect(standardWebhookKey(bad)).toBeNull();
+    // A value without whsec_ is its raw UTF-8 bytes, even one that looks like base64. After whsec_, base64 is read
+    // strictly: nothing, other characters or missing padding isn't a key.
+    expect(standardWebhookKey("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")).toEqual(Buffer.from("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", "utf8"));
+    for (const bad of ["whsec_", "whsec_not base64!", "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaS", "whsec_YQ", ""]) expect(standardWebhookKey(bad)).toBeNull();
   });
 
   it("a signed ring verifies over the bytes it arrived as; a wrong secret, a changed body or an expired timestamp don't", async () => {
@@ -121,17 +126,31 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     expect(got.headers.authorization).toBe("Bearer test-only-value");
     expect(got.headers["webhook-id"]).toMatch(/^msg_[0-9a-f]{32}$/);
     expect(got.headers["webhook-signature"]).toMatch(/^v1,[A-Za-z0-9+/]+={0,2}$/);
-    expect(() => referenceVerify(testSecret, got.raw, got.headers)).not.toThrow();
-    expect(() => referenceVerify(`whsec_${Buffer.alloc(32, 8).toString("base64")}`, got.raw, got.headers)).toThrow("No matching signature found");
-    expect(() => referenceVerify(testSecret, Buffer.from(got.raw.toString("utf8").replace("qitem-1", "qitem-2")), got.headers))
+    expect(() => referenceVerify(receiverKey(testSecret), got.raw, got.headers)).not.toThrow();
+    expect(() => referenceVerify(receiverKey(`whsec_${Buffer.alloc(32, 8).toString("base64")}`), got.raw, got.headers)).toThrow("No matching signature found");
+    expect(() => referenceVerify(receiverKey(testSecret), Buffer.from(got.raw.toString("utf8").replace("qitem-1", "qitem-2")), got.headers))
       .toThrow("No matching signature found");
     // Signed six minutes ago: outside the reference's five-minute window.
     await ringHostedWake(ring, signedWake, { env: signedEnv(), now: () => Date.now() - 6 * 60_000 });
-    expect(() => referenceVerify(testSecret, received[1]!.raw, received[1]!.headers)).toThrow("Message timestamp too old");
+    expect(() => referenceVerify(receiverKey(testSecret), received[1]!.raw, received[1]!.headers)).toThrow("Message timestamp too old");
     // Each ring is its own message, and the secret reaches neither the result nor the body.
     expect(received[1]!.headers["webhook-id"]).not.toBe(got.headers["webhook-id"]);
     expect(outcome.nudgeResult).not.toContain(testSecret);
     expect(got.raw.toString("utf8")).not.toContain(testSecret);
+  });
+
+  // r1: a receiver uses a secret without whsec_ as its raw bytes, so the ring is signed with exactly those bytes.
+  it.each([
+    { kind: "with punctuation", value: "test-only raw:secret/with+punctuation!" },
+    { kind: "that looks like base64", value: "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw" },
+  ])("a raw signing secret $kind is sent, signed with its UTF-8 bytes as the receiver reads them", async ({ value }) => {
+    const outcome = await ringHostedWake(ring, signedWake, { env: { ...env(), GROK_WAKE_SIGNING: value } });
+    expect(outcome.classified).toBe("indeterminate");
+    const got = received[0]!;
+    expect(() => referenceVerify(Buffer.from(value, "utf8"), got.raw, got.headers)).not.toThrow();
+    // Not its base64 decoding: that key doesn't verify the ring.
+    expect(() => referenceVerify(Buffer.from(value, "base64"), got.raw, got.headers)).toThrow("No matching signature found");
+    expect(outcome.nudgeResult).not.toContain(value);
   });
 
   it("a trigger with no signing secret (bearer only) is rung as before, with no signature headers", async () => {
@@ -140,14 +159,15 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     expect(Object.keys(received[0]!.headers).filter((name) => name.startsWith("webhook-"))).toEqual([]);
   });
 
-  it("a signing secret that's named but isn't set, or isn't a whsec_ key, means no ring, never an unsigned one", async () => {
+  it("a signing secret that's named but isn't set, or is whsec_ without valid base64, means no ring, never an unsigned one", async () => {
     expect(await ringHostedWake(ring, signedWake, { env: env() })).toEqual({ classified: "failed",
       nudgeResult: "failed:webhook (GROK_WAKE_URL) not rung: its signing secret (GROK_WAKE_SIGNING) isn't set, and the ring isn't sent unsigned" });
-    const unusable = "whsec_not base64 at all";
-    const outcome = await ringHostedWake(ring, signedWake, { env: { ...env(), GROK_WAKE_SIGNING: unusable } });
-    expect(outcome).toEqual({ classified: "failed", nudgeResult: "failed:webhook (GROK_WAKE_URL) not rung: its signing secret (GROK_WAKE_SIGNING) "
-      + "isn't a Standard Webhooks key (whsec_ and base64), and the ring isn't sent unsigned" });
-    expect(outcome.nudgeResult).not.toContain(unusable);
+    for (const unusable of ["whsec_not base64 at all", "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaS"]) {
+      const outcome = await ringHostedWake(ring, signedWake, { env: { ...env(), GROK_WAKE_SIGNING: unusable } });
+      expect(outcome).toEqual({ classified: "failed", nudgeResult: "failed:webhook (GROK_WAKE_URL) not rung: its signing secret (GROK_WAKE_SIGNING) "
+        + "starts with whsec_ but isn't followed by valid base64, and the ring isn't sent unsigned" });
+      expect(outcome.nudgeResult).not.toContain(unusable);
+    }
     expect(received).toHaveLength(0);
   });
 

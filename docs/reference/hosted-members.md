@@ -74,15 +74,20 @@ entry. The entry holds secret names, never values:
     `authorization_ref` is set: then its value is sent, and the URL's credentials are dropped.
   - `signing_secret_ref`, when the trigger verifies signed webhooks, names the secret holding a
     [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md)
-    signing secret (`whsec_` followed by base64). Each ring then carries three headers, alongside any `Authorization`:
-    - `webhook-id`, new for every ring, including a row rung again for a new wake;
-    - `webhook-timestamp`, in seconds;
-    - `webhook-signature`, which is `v1,` and the base64 HMAC-SHA256 of `<webhook-id>.<webhook-timestamp>.` and
-      the body bytes exactly as sent.
-
-    If the secret it names isn't set, or isn't a `whsec_` base64 value, the ring isn't sent: the result is
-    `failed:webhook (<url_ref>) not rung: its signing secret (<name>) …`, never an unsigned ring. A receiver that reads
-    other header names, such as a provider's own prefixed ones, doesn't verify these.
+    signing secret.
+    - **Use the `whsec_` form** (`whsec_` followed by base64): the sender and the receiver both decode it to the same
+      key.
+    - **A value without `whsec_` is used as its raw UTF-8 bytes,** as receivers that accept raw secrets read it.
+    - **The headers:** each ring then carries three, alongside any `Authorization`:
+      - `webhook-id`, new for every ring, including a row rung again for a new wake;
+      - `webhook-timestamp`, in seconds;
+      - `webhook-signature`, which is `v1,` and the base64 HMAC-SHA256 of `<webhook-id>.<webhook-timestamp>.` and
+        the body bytes exactly as sent.
+    - **When the ring isn't sent:** if the secret it names isn't set, or is `whsec_` followed by nothing or by text
+      that isn't valid base64 (with its padding), the ring isn't sent. The result is
+      `failed:webhook (<url_ref>) not rung: its signing secret (<name>) …`, never an unsigned ring.
+    - **Header names:** a receiver that reads other header names, such as a provider's own prefixed ones, doesn't
+      verify these.
   - The daemon reads each from its environment (the name, or `OPENRIG_<NAME>`), else from `secrets_env_file`, an env file kept at mode 0600.
 - **The ring:** when a row lands for the member, the daemon POSTs
   `{"source":"openrig.queue","schema_version":1,"event":"work-waiting","qitem_id":…,"destination":…,"summary":…,"from":…}`.

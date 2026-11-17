@@ -24,13 +24,14 @@ export interface HostedWakeOptions {
   now?: () => number;
 }
 
-/** A Standard Webhooks signing key from its secret: `whsec_` followed by base64 (the prefix may be left off). Null when
- *  the value isn't one, so a ring is never signed with a key it wasn't given. */
+/** A signing key from its secret, read the way receivers read it: `whsec_` followed by base64 is that base64's bytes
+ *  (strict: the alphabet with its padding), and any other value is its own UTF-8 bytes. Null only for a `whsec_` with
+ *  nothing, or not valid base64, after it: a ring is never signed with a key it wasn't given. */
 export function standardWebhookKey(secret: string): Buffer | null {
-  const encoded = secret.startsWith("whsec_") ? secret.slice("whsec_".length) : secret;
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
-  const key = Buffer.from(encoded, "base64");
-  return key.length > 0 ? key : null;
+  if (!secret.startsWith("whsec_")) return secret ? Buffer.from(secret, "utf8") : null;
+  const encoded = secret.slice("whsec_".length);
+  if (!encoded || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) return null;
+  return Buffer.from(encoded, "base64");
 }
 
 /** A Standard Webhooks v1 signature: HMAC-SHA256 over `<webhook-id>.<webhook-timestamp>.` and the body bytes exactly as
@@ -58,7 +59,7 @@ export async function ringHostedWake(
   if (signingRef && !signingSecret) return failed(urlRef, `not rung: its signing secret (${signingRef}) isn't set, and the ring isn't sent unsigned`);
   const signingKey = signingSecret ? standardWebhookKey(signingSecret) : null;
   if (signingRef && !signingKey) {
-    return failed(urlRef, `not rung: its signing secret (${signingRef}) isn't a Standard Webhooks key (whsec_ and base64), and the ring isn't sent unsigned`);
+    return failed(urlRef, `not rung: its signing secret (${signingRef}) starts with whsec_ but isn't followed by valid base64, and the ring isn't sent unsigned`);
   }
   const checked = validateOutboundUrl(url);
   if (!checked.valid) return failed(urlRef, `not rung: the URL is invalid (${checked.reason})`);
