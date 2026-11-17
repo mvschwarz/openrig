@@ -182,15 +182,16 @@ commands; if the two ever differ, this step is right.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Hand it over by where the person will answer the team. Staying here is the default: the pane route needs their
   explicit choice.
-  - **They stay here** (they said so, they haven't said, or they can't see the operator's pane yet): hand the goal over
-    as a task with a return route ("If the person stays with you" below), giving the operator your return address for
-    the team's questions and result. A seat's prompt may still not reach this conversation. Tell them in a line that this goal's route selects
+  - **They stay here** (they said so, or they haven't chosen the pane): hand the goal over as a task with a return
+    route ("If the person stays with you" below), giving the operator your return address for the team's questions and
+    result. A seat's prompt may still not reach this conversation. Tell them in a line that this goal's route selects
     this conversation ahead of a Slack connection they've registered; their other work doesn't change, and they can
     talk to the operator in its pane instead whenever they like. Don't tell the operator they'll answer in its pane.
-  - **They'll talk to the operator in its pane** (only when they chose it and can see it: the view opened where they
-    are, or they attached with the command you gave them; check how `rig terminal open` ended, above, before you offer
-    the pane or take this route): find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its
-    `canonicalSessionName` (never the logical ID or a guessed name) and send:
+  - **They'll talk to the operator in its pane** (when they chose it): offer the pane only once the view opened where
+    they can see it; check how `rig terminal open` ended, above, first. If they chose it and no view can open, give them
+    the connection step above and keep their choice, and say the pane is pending until they open or attach to it.
+    Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName` (never the
+    logical ID or a guessed name) and send:
     `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
   - **Their choice holds:** a later goal goes by the route they chose until they say otherwise. Don't ask where they'll
     answer before the handoff, and don't switch routes on your own.
