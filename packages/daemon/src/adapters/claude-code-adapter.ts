@@ -26,7 +26,7 @@ import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
-import { isFilesystemRoot } from "../domain/cwd-resolution.js";
+import { insideMissingFolder, isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { claudeStrictTrustRoot } from "../domain/claude-git-trust-root.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { claudeAutoModeForLaunch } from "../domain/claude-auto-mode.js";
@@ -51,6 +51,9 @@ export interface ClaudeAdapterFsOps {
   readdir?(dirPath: string): string[];
   /** User home directory (for session file lookup). */
   homedir?: string;
+  /** Whether a folder is there (cwd-resolution's folderPresent), to leave a missing seat folder uncreated. Optional: a
+   *  folder reads as present if absent. */
+  folderPresent?(path: string): boolean;
 }
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -245,6 +248,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // relay source or a fail-closed malformed settings file): demote to skipped so
     // no false projected claim + no dangling hooks are reported as success.
     if (activityEntries.length > 0 && !activityOutcome.delivered) {
+      if (activityOutcome.folderMissing) {
+        for (const e of activityEntries) warnings.push(`${e.effectiveId}: not written, because ${binding.cwd} doesn't exist on this machine`);
+      }
       for (const e of activityEntries) {
         const idx = projected.indexOf(e.effectiveId);
         if (idx >= 0) projected.splice(idx, 1);
@@ -278,6 +284,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         switch (hint) {
           case "guidance_merge": {
             const targetPath = nodePath.join(binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE);
+            // A seat folder this machine doesn't have isn't recreated to hold it (insideMissingFolder).
+            if (insideMissingFolder(targetPath, binding.cwd, this.folderPresent)) { warnings.push(`${file.path}: not written, because ${binding.cwd} doesn't exist on this machine`); continue; }
             const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
@@ -288,6 +296,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
             // OPR.0.7.0.13: never write through a link out of the seat's storage.
             const refusal = binding.seatSkillsRoot ? binding.seatSkillsRefused ?? seatSkillWriteRefusal(binding.seatSkillsRoot, skillTarget) : undefined;
             if (refusal) { warnings.push(`skill_install: ${refusal}`); continue; }
+            if (insideMissingFolder(targetDir, binding.cwd, this.folderPresent)) { warnings.push(`${file.path}: not written, because ${binding.cwd} doesn't exist on this machine`); continue; }
             this.fs.mkdirp(targetDir);
             this.fs.writeFile(skillTarget, content);
             if (binding.seatSkillsRoot) recordSeatSkillWrite(binding.seatSkillsRoot, skillTarget, file.absolutePath, content);
@@ -932,7 +941,20 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** Copy one selected resource, preserving source modes and recording owned seat-skill files after writing. */
+  /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
+  private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
+
   private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[], seatSkillsRoot?: string, seatSkillsRefused?: string): boolean {
+    // A seat folder this machine doesn't have isn't recreated to project into it (insideMissingFolder). A skill in the
+    // seat's own skill storage lies outside it and still goes. Activity hooks are reconciled (and reported) by project().
+    if (!(entry.category === "runtime_resource" && entry.resourceType === "claude_activity_hooks")) {
+      const destination = entry.category === "guidance" ? nodePath.join(cwd, managedBlockFile)
+        : entry.category === "runtime_resource" ? cwd : this.resolveTargetDir(entry, cwd, seatSkillsRoot);
+      if (destination && insideMissingFolder(destination, cwd, this.folderPresent)) {
+        warnings.push(`${entry.effectiveId}: not written, because ${cwd} doesn't exist on this machine`);
+        return false;
+      }
+    }
     // A skipped fragment is reported skipped; it never falls through to the generic extensions copy.
     const handled = entry.category === "runtime_resource" ? this.applyRuntimeResource(entry, cwd, warnings) : false;
     if (handled) return handled === true;
@@ -1267,6 +1289,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    */
   private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
+    // A seat folder this machine doesn't have isn't recreated to hold the collector (insideMissingFolder); this runs on
+    // every context poll, so it says nothing: the restore names the missing folder once.
+    if (insideMissingFolder(binding.cwd, binding.cwd, this.folderPresent)) return;
     const contextDir = contextUsageDirectory(this.stateDir);
     const providerUsageDir = providerUsageDirectory(this.stateDir);
     this.fs.mkdirp(contextDir);
@@ -1329,6 +1354,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * untouched. Not `mergeJsonFragment` (additive union-by-key can't strip on disable).
    */
   private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
+    // A seat folder this machine doesn't have isn't recreated to hold the hooks (insideMissingFolder): nothing is delivered.
+    if (insideMissingFolder(cwd, cwd, this.folderPresent)) {
+      return { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false, folderMissing: true };
+    }
     const relayDest = claudeActivityRelayPath(this.stateDir ?? undefined);
     const ownedCmd = managedClaudeNodeCommand(this.nodeExecutable, relayDest);
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
@@ -1420,6 +1449,8 @@ interface ActivityHookOutcome {
   manifestUnavailable: boolean;
   /** Fail-closed: an unparseable settings file was preserved untouched. */
   settingsUnparseable: boolean;
+  /** The seat's folder isn't on this machine, so nothing was written (warn and skip). */
+  folderMissing?: boolean;
 }
 
 function managedClaudeNodeCommand(executable: string, ...args: string[]): string {

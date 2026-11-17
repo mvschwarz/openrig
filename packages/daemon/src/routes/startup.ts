@@ -614,7 +614,8 @@ startupRoutes.post("/:rigId/:logicalId", async (c) => {
       const member = pod?.members.find((entry) => `${pod.id}.${entry.id}` === node.logicalId);
       if (!pod || !member || member.agentRef !== node.agentRef || member.runtime !== node.runtime) return c.json({ ok: false, message: "This kernel seat differs from the installed definition; its owner must repair the startup source." }, 409);
       const result = await dep<PodRigInstantiator>(c, "podInstantiator").launchBinding({ rigId: rig.rig.id, rigSpec: spec, rigRoot: root, pod,
-        member: { ...member, ...(node.model ? { model: node.model } : {}) }, qualifiedId: node.logicalId, nodeId: node.id, cwdOverride: node.cwd ?? undefined });
+        member: { ...member, ...(node.model ? { model: node.model } : {}) }, qualifiedId: node.logicalId, nodeId: node.id, cwdOverride: node.cwd ?? undefined,
+        createCwd: true }); // a never-occupied kernel seat starts from its installed definition, a spec entry point
       await refreshNativeMetadata(c, rig.rig.id);
       dep<SnapshotCapture>(c, "snapshotCapture").captureSnapshot(rig.rig.id, "auto-rehydrate");
       const after = await observeSeat(c, rig, node);
