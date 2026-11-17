@@ -187,6 +187,16 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(repo.getById(item.qitemId)?.closureReason).toBe("no-follow-on");
   });
 
+  it("keeps a button label literal when it becomes settled history", async () => {
+    const label = "Deploy *literal* _build_id_";
+    const item = await postAsk(undefined, label);
+    expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]!.blocks).toContainEqual({
+      type: "section", text: { type: "plain_text", text: `• ${label} (recommended)\n• Hold` },
+    });
+  });
+
   it("retains a refused private-channel read without claiming the edit, then recovers on restart", async () => {
     const item = await postAsk();
     apiHook = (method) => method === "conversations.history" ? response({ ok: false, error: "missing_scope" }) : undefined;

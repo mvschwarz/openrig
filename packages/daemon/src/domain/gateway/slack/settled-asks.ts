@@ -34,7 +34,7 @@ function handledMessage(message: { text: string; blocks: Block[] }, status: stri
     if (block.type === "actions" && block.block_id?.startsWith(QUESTION_BLOCK_PREFIX)) {
       // The labels remain history after their controls disappear, as in the resolved-notice render.
       const buttons = block.elements as unknown as Array<{ text?: { text?: string }; style?: string }>;
-      return [{ type: "section", text: { type: "mrkdwn", text: buttons.map((b) => `• ${recommendationLabel(b.text?.text ?? "", b.style === "primary")}`).join("\n") } }];
+      return [{ type: "section", text: { type: "plain_text", text: buttons.map((b) => `• ${recommendationLabel(b.text?.text ?? "", b.style === "primary")}`).join("\n") } }];
     }
     const hint = block.type === "context" && block.elements?.length === 1 ? block.elements[0]?.text : undefined;
     if (!hint || !hints.has(hint)) return [block];
