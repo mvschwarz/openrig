@@ -44,7 +44,7 @@ jobs:
               | sort > pack-lists/$p.txt
             echo "$p: $(wc -l < pack-lists/$p.txt) files"
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pack-lists
           path: pack-lists/
@@ -169,7 +169,7 @@ jobs:
       - run: npm ci
       - name: Installed package, daemon restart, and seeded durability failure
         run: bash scripts/run-pr-scenarios.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: installed-scenario-evidence
