@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { migrationsForFullTestDb, migrationsForFullTestDbExclusions } from "./helpers/test-app.js";
 import { assertExplicitSubsetOfAllMigrations } from "./helpers/migration-subset-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { nodeInputRouteSchema } from "../src/db/migrations/171_node_input_route.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { readSeatLaunchWrapper } from "../src/domain/launch-wrapper.js";
@@ -107,4 +108,46 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
       db.close();
     }
   });
+
+  it("173_node_process_limits adds a nullable process_limits column and guards pre-173 databases", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "173_node_process_limits.sql")).toBe(true);
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "173_node_process_limits.sql"));
+      const repo = new RigRepository(db);
+      const rig = repo.createRig("pre-173");
+      const legacyNode = repo.addNode(rig.id, "legacy", { runtime: "codex" });
+      expect("processLimits" in legacyNode).toBe(false);
+      expect(repo.getNodeProcessLimits(legacyNode.id)).toBeUndefined();
+      expect(repo.setNodeProcessLimits(legacyNode.id, null)).toBe(false);
+      expect(() => repo.setNodeProcessLimits(legacyNode.id, { tasksMax: 512 })).toThrow(/migration/i);
+      expect(() => repo.addNode(rig.id, "unmigrated-limited", { runtime: "codex", processLimits: { tasksMax: 512 } })).toThrow(/migration/i);
+      expect(db.prepare("SELECT id FROM nodes WHERE logical_id = 'unmigrated-limited'").get()).toBeUndefined();
+
+      migrate(db, ALL_MIGRATIONS);
+      const col = (db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string; notnull: number }>)
+        .find((c) => c.name === "process_limits");
+      expect(col?.notnull).toBe(0);
+      const limited = repo.addNode(rig.id, "migrated-limited", { runtime: "codex", processLimits: { tasksMax: 512 } });
+      expect(limited.processLimits).toEqual({ tasksMax: 512 });
+    } finally {
+      db.close();
+    }
+  });
+});
+
+
+it("upgrades existing nodes to typed input and constrains explicit native selection", () => {
+  const db = new Database(":memory:");
+  try {
+    migrate(db, ALL_MIGRATIONS.filter(m => m.name !== nodeInputRouteSchema.name));
+    expect((db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string }>).some(column => column.name === "input_route")).toBe(false);
+    const repo = new RigRepository(db), rig = repo.createRig("input-route");
+    const node = repo.addNode(rig.id, "dev", { runtime: "pi" });
+    migrate(db, ALL_MIGRATIONS);
+    expect(repo.getRig(rig.id)?.nodes.find(n => n.id === node.id)?.inputRoute).toBe("typed");
+    expect(repo.setNodeInputRoute(node.id, "native")).toBe(true);
+    expect(repo.getRig(rig.id)?.nodes.find(n => n.id === node.id)?.inputRoute).toBe("native");
+    expect(() => db.prepare("UPDATE nodes SET input_route='auto' WHERE id=?").run(node.id)).toThrow();
+  } finally { db.close(); }
 });

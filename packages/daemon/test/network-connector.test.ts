@@ -126,6 +126,14 @@ describe("network connector", () => {
     // Where it came from is read before the requester's own words.
     expect(local!.body!.split("\n")[0]).toBe("From assistant@team through the network hub https://hub.example/mcp, as alex@team (hub item hub-1).");
     expect(local!.body).toContain("Summarize the release notes");
+    // After the requester's words: what goes back to them, that sharing instructions apply, and how to answer, in that order.
+    const after = local!.body!.split("\n---\n")[1]!.split("\n");
+    expect(after).toEqual([
+      "The requester gets back only this item's progress (queued, picked up, or an outcome that isn't known) and your answer: the resolution you close it with, or without one, your own note on the close. Nothing else from here goes to the hub: no other notes, items or files.",
+      "Put in your answer only what this seat's sharing instructions allow.",
+      `Answer by closing this item with your result: rig queue update ${local!.qitemId} --state done --closure-reason no-follow-on --resolution "<your answer>".`,
+      "OpenRig returns the resolution to the hub item.",
+    ]);
     // The hub claim is custody, not pickup: the item says it's queued and not picked up.
     expect(hub.items.get("hub-1")).toMatchObject({ state: "in-progress" });
     expect(hub.items.get("hub-1")!.notes).toEqual(["Queued for the connected local seat. Not picked up yet."]);
@@ -488,6 +496,43 @@ describe("network connector", () => {
     await pass(b.id);
     expect(hub.items.get("hub-w1")!.resolution).toBe("Closed without a stated result.");
     expect(hub.items.get("hub-w2")!.resolution).toBe("Done; the notes are in the item.");
+  });
+
+  it("a handoff-and-complete close sends the closer's own note, never the note OpenRig writes when it gives none", async () => {
+    const b = bind();
+    hub.add("hub-c1");
+    hub.add("hub-c2");
+    await pass(b.id);
+    const [c1] = runs("hub-c1");
+    const [c2] = runs("hub-c2");
+    // With no note of the closer's, the queue writes "handoff-and-complete to review@lab", which names a local seat.
+    await repo.handoffAndComplete({ qitemId: c1!.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false });
+    await repo.handoffAndComplete({ qitemId: c2!.qitemId, fromSession: "dev-impl@lab", toSession: "review@lab", nudge: false,
+      transitionNote: "Done here; the review is a separate step." });
+    await pass(b.id);
+    expect(hub.items.get("hub-c1")!.resolution).toBe("Closed without a stated result.");
+    expect(hub.items.get("hub-c2")!.resolution).toBe("Done here; the review is a separate step.");
+  });
+
+  it("a cross-host handoff-and-complete close sends the closer's own note, never the cross-host note the queue writes", async () => {
+    const b = bind();
+    for (const id of ["hub-x1", "hub-x2", "hub-x3"]) hub.add(id);
+    await pass(b.id);
+    const local = (id: string) => runs(id)[0]!;
+    // Forwarded to another host and completed here: with no note of the closer's, the queue writes
+    // "cross-host handoff to review@lab", and adds what it overrode when a claim was made while the handoff was forwarded.
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x1").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-1@vps-b", terminalState: "done" });
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x2").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-2@vps-b", terminalState: "done", transitionNote: "Done here; the review runs on the other host." });
+    repo.claim({ qitemId: local("hub-x3").qitemId, destinationSession: "dev-impl@lab" });
+    repo.closeCrossHostHandoffSource({ qitemId: local("hub-x3").qitemId, fromSession: "dev-impl@lab", toSession: "review@lab",
+      closureTarget: "qitem-remote-3@vps-b", terminalState: "done", claimedAtBeforeForward: null });
+    expect(repo.closingTransition(local("hub-x3").qitemId, "done")?.transitionNote).toMatch(/^cross-host handoff to review@lab \(this overrode /);
+    await pass(b.id);
+    expect.soft(hub.items.get("hub-x1")!.resolution, "hub-x1").toBe("Closed without a stated result.");
+    expect.soft(hub.items.get("hub-x2")!.resolution, "hub-x2").toBe("Done here; the review runs on the other host.");
+    expect.soft(hub.items.get("hub-x3")!.resolution, "hub-x3").toBe("Closed without a stated result.");
   });
 
   it("a failure here is recorded as local, not as the hub's", async () => {

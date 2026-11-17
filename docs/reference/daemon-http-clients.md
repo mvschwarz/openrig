@@ -63,8 +63,9 @@ The daemon reads two tokens from its environment at start:
 A route whose token isn't set lets every request through. Send a token as `Authorization: Bearer <token>`; the
 `GET /api/terminal/<name>` routes, the websocket included, also take `?token=<token>`. The CLI sends the terminal token from `OPENRIG_TERMINAL_BEARER_TOKEN`,
 or else from the file `$OPENRIG_HOME/terminal-token`, which the person writes; the daemon doesn't create it. `rig host
-approve|deny` and the TUI's answers to asks send `OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also
-takes `--bearer`), and otherwise the terminal token; refused for want of it, they say what to set.
+approve|deny`, the TUI's answers to asks and the MCP tool `rig_question_answer` (on the answer's writes only) send
+`OPENRIG_AUTH_BEARER_TOKEN` from their environment (`rig host` also takes `--bearer`), and otherwise the terminal token;
+refused for want of it, `rig host` and the TUI say what to set.
 
 A wrong or missing token gets HTTP 401. The routes that check `OPENRIG_AUTH_BEARER_TOKEN`, and `/api/transport`
 and `/api/compaction`, answer `{ "error": "unauthorized", "message", "what_failed", "why_it_matters", "what_to_do" }`.
@@ -251,8 +252,8 @@ What reads these declarations:
   seats, newest first; `?senderSession=<session>` still returns one sender's. One of the two is required; with
   both, `senderSession` is used and `rig` is ignored. `limit` defaults to 100. No event is sent when a message is delivered, so read this list to see delivery
   states.
-- **`GET /api/queue/recent-transitions`** returns at most 20 rows. A positive `limit` above 20 is capped at 20;
-  a missing, zero, negative or unparseable `limit` means 20.
+- **`GET /api/queue/recent-transitions`** returns at most 1,000 rows. A positive `limit` above 1,000 is capped at 1,000;
+  a missing, zero, negative or unparseable `limit` defaults to 20.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
   marked it from the sender identity, not from the body.
 - **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body

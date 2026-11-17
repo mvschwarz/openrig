@@ -14,6 +14,8 @@ export interface AppliedLaunchObservation {
   approvalPolicy?: CodexObservedApprovalPolicy | null;
   /** Codex: true when the launch added --no-daemon, false when the probe found no such option; absent when not probed. */
   daemonOptOut?: boolean;
+  /** Claude: the autoMode block this launch sent in --settings; null when it sent none, absent when not recorded. */
+  claudeAutoMode?: import("./claude-auto-mode.js").AppliedClaudeAutoMode;
 }
 
 export type TransportState = "healthy" | "connect" | "timeout" | "response";

@@ -15,7 +15,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { containedArgv, probeContainment } from "./harness/contain.mjs";
@@ -33,7 +33,32 @@ function args(argv) {
   return out;
 }
 const list = (value) => (typeof value === "string" ? value.split(",").map((v) => v.trim()).filter(Boolean) : []);
-const sha256File = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+// Files are hashed through one 1 MiB buffer, so a native payload of hundreds of MB is never held whole in memory. The
+// digest is the same as hashing the whole file at once.
+const READ_BUFFER = Buffer.allocUnsafe(1 << 20);
+function sha256File(path) {
+  const hash = createHash("sha256");
+  const fd = openSync(path, "r");
+  try { for (let n; (n = readSync(fd, READ_BUFFER, 0, READ_BUFFER.length, null)) > 0;) hash.update(READ_BUFFER.subarray(0, n)); }
+  finally { closeSync(fd); }
+  return hash.digest("hex");
+}
+
+/** Whether a file starts with the ELF magic, reading only its first 4 bytes. A read may return fewer bytes than asked
+ *  for before the end of the file, so the head is filled until it has 4 bytes or a read returns none. */
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+function isElf(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const head = Buffer.alloc(4);
+    let filled = 0;
+    for (let n; filled < 4 && (n = readSync(fd, head, filled, 4 - filled, filled)) > 0;) filled += n;
+    return filled === 4 && head.equals(ELF_MAGIC);
+  }
+  catch { return false; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
 
 /** Where a pinned install keeps its entry point. */
 function installEntry(installs, kind, version) {
@@ -96,7 +121,7 @@ function pin(kind, entry) {
     const scope = pkgName.split("/")[0];
     out.payloads = existsSync(join(modules, scope)) ? readdirSync(join(modules, scope), { recursive: true, withFileTypes: true })
       .filter((d) => d.isFile()).map((d) => join(d.parentPath ?? d.path, d.name))
-      .filter((path) => { try { return readFileSync(path).subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])); } catch { return false; } })
+      .filter(isElf)
       .map((path) => ({ path: path.slice(modules.length + 1), sha256: sha256File(path) })) : [];
   }
   return out;

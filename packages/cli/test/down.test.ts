@@ -664,3 +664,15 @@ describe("Down CLI", () => {
     expect(exitCode).toBe(2);
   });
 });
+
+describe("rig down help", () => {
+  it("says an external CLI seat keeps its claim only without --delete", () => {
+    let out = "";
+    const cmd = downCommand();
+    cmd.configureOutput({ writeOut: (text) => { out += text; } });
+    cmd.outputHelp();
+    const help = out.replace(/\s+/g, " ");
+    expect(help).toContain("A seat joined with rig attach as an external CLI, outside tmux, is never stopped, and rig down lists it as not stopped.");
+    expect(help).toContain("It keeps its claim, unless --delete removes the rig record, and the claim with it.");
+  });
+});

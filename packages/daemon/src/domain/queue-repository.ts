@@ -30,9 +30,13 @@ import {
   type RecentQueueTransitionScope,
   type RelayOwnerNotificationReceipt,
   type RelayOwnerNotificationTransportFailure,
+  DEFAULT_RECENT_TRANSITIONS_LIMIT,
+  MAX_RECENT_TRANSITIONS_LIMIT,
 } from "./queue-transition-log.js";
 
 export {
+  DEFAULT_RECENT_TRANSITIONS_LIMIT,
+  MAX_RECENT_TRANSITIONS_LIMIT,
   RELAY_OWNER_NOTIFICATION_ACCEPTED_PREFIX,
   RELAY_OWNER_NOTIFICATION_TRANSPORT_FAILED_PREFIX,
   formatRelayOwnerNotificationAccepted,
@@ -81,6 +85,7 @@ import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
+import { isEpisodeRelay, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG } from "./return-route.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
 import { parseReplyToChoice, parseArrivalThread, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
@@ -312,6 +317,10 @@ export interface QueueItem {
   /** Set only on a row whose content queue erasure removed (queue-erasure.ts): its body and other content are empty
    *  because they were erased, not because the row was written that way. */
   contentErasedAt?: string;
+  /** Present only on a row with a return route (return-route.ts): the conversation a person chose to answer this goal from,
+   *  which its handoffs carry and its new escalations deliver to, and how it was established. */
+  returnRoute?: string;
+  returnRouteBasis?: string | null;
   /** Present only on compact list rows, which omit these fields entirely so omitted content
    *  can't be mistaken for an empty value. Full reads never carry this marker. */
   fieldsElided?: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
@@ -377,6 +386,8 @@ interface QueueItemRow {
   last_heartbeat: string | null;
   resolution: string | null;
   target_repo: string | null;
+  return_route?: string | null;
+  return_route_basis?: string | null;
 }
 
 /**
@@ -481,6 +492,10 @@ export interface QueueCreateInput {
   identityProvenance?: string | null;
   /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
   identityPrincipal?: string | null;
+  /** The conversation a person chose to answer this goal from, already resolved by the create route (return-route.ts),
+   *  and how it was established. A cancel-and-replace successor (handedOffFrom) without one keeps the original's. */
+  returnRoute?: string | null;
+  returnRouteBasis?: string | null;
 }
 
 /** Tags to add to an existing row (`addTags`). */
@@ -799,7 +814,12 @@ export function hasLinkedSuccessor(
   sourceQitemId: string,
   target: string,
 ): boolean {
-  if (successorScope?.db === db && successorScope.covers(sourceQitemId)) return successorScope.has(sourceQitemId, target);
+  if (successorScope?.db === db && successorScope.covers(sourceQitemId, target)) return successorScope.has(sourceQitemId, target);
+  return queryLinkedSuccessor(db, sourceQitemId, target);
+}
+
+/** hasLinkedSuccessor's own query, for one source and target, through the primary key and the destination index. */
+function queryLinkedSuccessor(db: Database.Database, sourceQitemId: string, target: string): boolean {
   const successor = db
     .prepare(
       `SELECT 1 FROM queue_items s
@@ -817,18 +837,21 @@ export function hasLinkedSuccessor(
 }
 
 /** The linked-successor index lent to hasLinkedSuccessor by createLinkedSuccessorLookup's run(), for one synchronous call. */
-let successorScope: { db: Database.Database; covers: (source: string) => boolean; has: (source: string, target: string) => boolean } | null = null;
+let successorScope: { db: Database.Database; covers: (source: string, target: string) => boolean; has: (source: string, target: string) => boolean } | null = null;
 
 /** hasLinkedSuccessor for a whole set of sources in one read, for a pass that asks it once per row (the stuck sweep's
  *  custody loop, and the handoff advisory of each row it reads). The read keeps the per-row query's own predicates: a
  *  successor is a row whose handed_off_from is the source, or whose chain_of_record is valid JSON with the source among
  *  its json_each values (compared as `value IN (...)` compares, like `value = ?`: a number or a nested value never
  *  equals a text id); has() then checks qitem_id or destination_session against the target and that the successor is
- *  not the source itself. A snapshot from its first has() until invalidate(): the caller invalidates it whenever other
- *  code could have run. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn
- *  for a covered source; any other source keeps the per-row query. builtMs() is how long the build of the index as it
- *  is now took (0 while it is not built), so a caller can tell when rebuilding after each invalidate() costs more than
- *  it saves. */
+ *  not the source itself. The index covers the targets each source's own row names (its closure_target, each
+ *  comma-separated part of it, and its handed_off_to), the ones the sweep and the row's handoff advisory ask about, so the
+ *  chain_of_record arm reads only successors whose id or destination is one of them, through the primary key and the
+ *  destination index, instead of every row's chain. Any other source or target keeps the per-row query, so every answer is
+ *  the per-row query's. For a covered source and target, a snapshot from its first has() until invalidate(): the caller
+ *  invalidates it whenever other code could have run. Any other target is read as it is now. run(fn) lends it, for the synchronous fn only, to the hasLinkedSuccessor calls made inside fn for a
+ *  covered source and target. builtMs() is how long the build of the index as it is now took (0 while it is not built),
+ *  so a caller can tell when rebuilding after each invalidate() costs more than it saves. */
 export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemIds: readonly string[]): {
   has: (sourceQitemId: string, target: string) => boolean;
   run: <T>(fn: () => T) => T;
@@ -836,31 +859,48 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
   builtMs: () => number;
 } {
   const sources = new Set(sourceQitemIds);
-  let bySource: Map<string, Array<{ qitemId: string; destination: string | null }>> | null = null;
+  type Index = { bySource: Map<string, Array<{ qitemId: string; destination: string | null }>>; targetsOf: Map<string, Set<string>> };
+  let index: Index | null = null;
   let buildMs = 0;
-  const build = () => {
+  const build = (): Index => {
     const startedAt = performance.now();
-    const map = new Map<string, Array<{ qitemId: string; destination: string | null }>>();
+    const bySource: Index["bySource"] = new Map();
+    const targetsOf: Index["targetsOf"] = new Map();
     const ids = JSON.stringify([...sources]);
-    const rows = runSyncSite("queue.linked_successors.build", () => db.prepare(
-      `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
-        WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
-       UNION
-       SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
-        WHERE s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
-          AND j.value IN (SELECT value FROM json_each(?))`,
-    ).all(ids, ids)) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
-    for (const r of rows) {
-      const list = map.get(r.source);
-      const entry = { qitemId: r.qitem_id, destination: r.destination_session };
-      if (list) list.push(entry); else map.set(r.source, [entry]);
-    }
+    runSyncSite("queue.linked_successors.build", () => {
+      const named = db.prepare(`SELECT qitem_id, closure_target, handed_off_to FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))`)
+        .all(ids) as Array<{ qitem_id: string; closure_target: string | null; handed_off_to: string | null }>;
+      for (const r of named) {
+        const own = new Set<string>();
+        for (const target of [r.closure_target, ...(r.closure_target ?? "").split(",").map((part) => part.trim()), r.handed_off_to]) if (target) own.add(target);
+        targetsOf.set(r.qitem_id, own);
+      }
+      const targets = JSON.stringify([...new Set([...targetsOf.values()].flatMap((own) => [...own]))]);
+      const rows = db.prepare(
+        `SELECT s.qitem_id, s.destination_session, s.handed_off_from AS source FROM queue_items s
+          WHERE s.handed_off_from IN (SELECT value FROM json_each(?))
+         UNION
+         SELECT s.qitem_id, s.destination_session, j.value AS source FROM queue_items s, json_each(s.chain_of_record) j
+          WHERE (s.qitem_id IN (SELECT value FROM json_each(?)) OR s.destination_session IN (SELECT value FROM json_each(?)))
+            AND s.chain_of_record IS NOT NULL AND json_valid(s.chain_of_record)
+            AND j.value IN (SELECT value FROM json_each(?))`,
+      ).all(ids, targets, targets, ids) as Array<{ qitem_id: string; destination_session: string | null; source: string }>;
+      for (const r of rows) {
+        const list = bySource.get(r.source);
+        const entry = { qitemId: r.qitem_id, destination: r.destination_session };
+        if (list) list.push(entry); else bySource.set(r.source, [entry]);
+      }
+    });
     buildMs = performance.now() - startedAt;
-    return map;
+    return { bySource, targetsOf };
   };
-  const has = (sourceQitemId: string, target: string): boolean => (bySource ??= build()).get(sourceQitemId)?.some(
+  const covers = (sourceQitemId: string, target: string): boolean =>
+    sources.has(sourceQitemId) && ((index ??= build()).targetsOf.get(sourceQitemId)?.has(target) ?? false);
+  const indexed = (sourceQitemId: string, target: string): boolean => (index ??= build()).bySource.get(sourceQitemId)?.some(
     (s) => s.qitemId !== sourceQitemId && (s.qitemId === target || s.destination === target)) ?? false;
-  const own = { db, covers: (source: string) => sources.has(source), has };
+  const has = (sourceQitemId: string, target: string): boolean =>
+    covers(sourceQitemId, target) ? indexed(sourceQitemId, target) : queryLinkedSuccessor(db, sourceQitemId, target);
+  const own = { db, covers, has: indexed };
   return {
     has,
     run: (fn) => {
@@ -869,7 +909,7 @@ export function createLinkedSuccessorLookup(db: Database.Database, sourceQitemId
       successorScope = own;
       try { return fn(); } finally { successorScope = previous; }
     },
-    invalidate: () => { bySource = null; buildMs = 0; },
+    invalidate: () => { index = null; buildMs = 0; },
     builtMs: () => buildMs,
   };
 }
@@ -1131,6 +1171,7 @@ export class QueueRepository {
   private readonly hasSummaryColumn: boolean;
   private readonly hasHumanIntentColumn: boolean;
   private readonly hasReplyToColumn: boolean;
+  private readonly hasReturnRouteColumn: boolean;
   private readonly hasHumanQuestionsColumn: boolean;
   private readonly hasDelegatedDecisionColumn: boolean;
   private readonly hasEvidenceRefColumn: boolean;
@@ -1215,7 +1256,7 @@ export class QueueRepository {
     this.deliveryDrains = new RigDeliveryDrainStore(db);
     this.eventBus = eventBus;
     this.transitionLog = new QueueTransitionLog(db);
-    this.wakeRepo = new QueueWakeRepository(db);
+    this.wakeRepo = new QueueWakeRepository(db, (value) => this.isPersonAddress(value));
     this.validateRig = opts?.validateRig ?? (() => true);
     this.canRecordDestination = opts?.canRecordDestination ?? this.validateRig;
     this.destinationAdvisory = opts?.destinationAdvisory ?? (() => null);
@@ -1236,6 +1277,7 @@ export class QueueRepository {
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
     this.hasReplyToColumn = detectQueueColumn(db, "reply_to");
+    this.hasReturnRouteColumn = detectQueueColumn(db, "return_route");
     this.hasHumanQuestionsColumn = detectQueueColumn(db, "human_questions");
     this.hasDelegatedDecisionColumn = detectQueueColumn(db, "delegated_decision");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
@@ -1930,7 +1972,8 @@ export class QueueRepository {
         JOIN queue_items q ON q.qitem_id = o.audit_pointer AND (q.state = 'pending' OR substr(o.outbox_id, 1, ?) = ?)
           AND q.destination_session = o.destination_session
         WHERE o.rowid > ? AND o.rowid <= ? AND substr(o.outbox_id, 1, ?) = ?
-          AND o.delivery_state IN ('pending','failed','indeterminate') ORDER BY o.rowid LIMIT ?`)
+          AND o.delivery_state IN ('pending','failed','indeterminate')
+          AND json_extract(o.guard_delivery,'$.runner') IS NULL AND json_extract(o.guard_delivery,'$.nativeRequestId') IS NULL ORDER BY o.rowid LIMIT ?`)
         .all(CLAIM_OVERRIDDEN_WAKE_PREFIX.length, CLAIM_OVERRIDDEN_WAKE_PREFIX, cursor, horizon, WAKE_INTENT_PREFIX.length,
           WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;
@@ -2597,6 +2640,9 @@ export class QueueRepository {
     if (humanQuestions) {
       this.db.prepare("UPDATE queue_items SET human_questions = ? WHERE qitem_id = ?").run(JSON.stringify(humanQuestions), id);
     }
+    const replaced = input.returnRoute == null && handedOffFrom ? this.getById(handedOffFrom) : null;
+    this.persistReturnRoute(id, input.returnRoute ?? replaced?.returnRoute ?? null,
+      input.returnRoute ? input.returnRouteBasis ?? null : replaced?.returnRouteBasis ?? null);
     this.persistMintingGeneration(id, input.sourceSession);
     const notification = this.classifyOwnerNotification({
       action: "create",
@@ -2665,6 +2711,7 @@ export class QueueRepository {
   }
 
   isPersonAddress(destination: string): boolean {
+    if (!destination.includes("@")) return false;
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
@@ -2830,6 +2877,8 @@ export class QueueRepository {
 
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
+      // The goal's return route goes with the work, as its body does.
+      this.persistReturnRoute(newId, source.returnRoute ?? null, source.returnRouteBasis ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
       const carried = this.carryPermissionQuestion(source, newId, input.toSession);
 
@@ -3013,6 +3062,8 @@ export class QueueRepository {
 
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
+      // The goal's return route goes with the work, as its body does.
+      this.persistReturnRoute(newId, source.returnRoute ?? null, source.returnRouteBasis ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
       const carried = this.carryPermissionQuestion(source, newId, input.toSession);
 
@@ -3377,6 +3428,8 @@ export class QueueRepository {
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
         identityPrincipal: input.identityPrincipal ?? null,
       });
+
+      this.recordRelayPickup(qitem, input.destinationSession);
 
       // OPR.0.5.8.1 S1b — CLAIM-RESUME. A blocked row is claimable ("only
       // pending/blocked are claimable"), so claiming is a real exit from a park
@@ -3959,7 +4012,8 @@ export class QueueRepository {
       // start explicitly; it also gives the row's wake a real "last check" time.
       jobsRepo.recordEvaluation(job.jobId, job.registeredAt, false);
       parkWake = { kind: "timer", ref: job.jobId };
-    } else if (input.state === "blocked" && effectiveBlockedOn?.startsWith("qitem-")) {
+    } else if (input.state === "blocked" && effectiveBlockedOn && effectiveBlockedOn !== input.qitemId && !isHumanPark && !isTypedGateBlocker(effectiveBlockedOn)
+      && (effectiveBlockedOn.startsWith("qitem-") || isBlockerLive(this.getById(effectiveBlockedOn)?.state ?? ""))) {
       parkWake = { kind: "blocker", ref: effectiveBlockedOn };
     }
 
@@ -4155,6 +4209,8 @@ export class QueueRepository {
     const blockedRows = this.db
       .prepare("SELECT qitem_id, destination_session FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
       .all(input.qitemId) as Array<{ qitem_id: string; destination_session: string }>;
+    // Typed gates and people own their own resolution even when a custom row ID collides.
+    if (blockedRows.length === 0 || isTypedGateBlocker(input.qitemId) || this.isPersonAddress(input.qitemId)) return dependentEvents;
     for (const r of blockedRows) {
       const closed = this.getById(input.qitemId);
       const successors = input.terminalState === "handed-off" ? this.db.prepare(
@@ -4272,7 +4328,7 @@ export class QueueRepository {
   /** Read-only scope-aware RECENT projection. Normalization and its hard cap
    * live with the append-only transition log; the repository owns the public
    * queue-domain door. */
-  listRecentTransitions(scope: RecentQueueTransitionScope | string, limit = 20): ReturnType<QueueTransitionLog["listRecent"]> {
+  listRecentTransitions(scope: RecentQueueTransitionScope | string, limit = DEFAULT_RECENT_TRANSITIONS_LIMIT): ReturnType<QueueTransitionLog["listRecent"]> {
     return this.transitionLog.listRecent(typeof scope === "string" ? { kind: "rig", rig: scope } : scope, limit);
   }
 
@@ -5248,9 +5304,11 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r));
   }
 
-  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for. */
+  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for, and a
+   *  routed row's return route, which isn't elided, so a routed row never lists as unrouted. */
   private compactColumns(): string {
-    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "");
+    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
+      + (this.hasReturnRouteColumn ? ", return_route, return_route_basis" : "");
   }
 
   /**
@@ -6018,6 +6076,30 @@ export class QueueRepository {
     }
   }
 
+  /** A relay task's claim is pickup at its return route. It's recorded on the escalation the task carries, keyed by that
+   *  delivery episode, so the episode resolves. Pickup only: not the person's answer or approval, and nothing about the
+   *  seat's prompt. */
+  private recordRelayPickup(relay: QueueItem, actor: string): void {
+    if (!relay.tags?.includes(RELAY_TAG)) return;
+    const escalationId = relay.tags.find(t => t.startsWith(RELAY_FOR_PREFIX))?.slice(RELAY_FOR_PREFIX.length);
+    const key = relay.tags.find(t => t.startsWith(RELAY_KEY_PREFIX))?.slice(RELAY_KEY_PREFIX.length);
+    // Only the episode's own relay (its id, OpenRig as source, its tags) records pickup; a row that only carries the tags doesn't.
+    if (!escalationId || !key || !isEpisodeRelay(relay, escalationId, key, OPENRIG_SENDER)) return;
+    const escalation = this.getById(escalationId);
+    if (!escalation) return;
+    this.transitionLog.append({
+      qitemId: escalation.qitemId, state: escalation.state, actorSession: "wake-ladder@system",
+      transitionNote: `${RELAY_CLAIMED_PREFIX} notification_key=${key} relay=${relay.qitemId} by=${actor}: picked up at the return route; not the person's answer or approval`,
+      closureTarget: escalation.state === "in-progress" ? this.retainedClaimBlocker(escalation.qitemId) : undefined,
+    });
+  }
+
+  /** A row's return route (return-route.ts), when it has one; a schema without the column keeps the row without it. */
+  private persistReturnRoute(qitemId: string, route: string | null, basis: string | null): void {
+    if (!this.hasReturnRouteColumn || !route) return;
+    this.db.prepare("UPDATE queue_items SET return_route = ?, return_route_basis = ? WHERE qitem_id = ?").run(route, basis, qitemId);
+  }
+
   /** GHOST-STAGE (e/Class-B) — persist the MINTING occupant-generation additively (same degrade
    *  contract as persistSummary; NULL when unresolved/pre-063). Forensic provenance of the creator;
    *  the RELEASE discriminator is claimed_by_generation_uuid (stamped at claim), not this. */
@@ -6286,6 +6368,7 @@ export class QueueRepository {
       // older test fixtures supply legacy rows where target_repo is undefined.
       targetRepo: row.target_repo ?? null,
       ...(row.content_erased_at ? { contentErasedAt: row.content_erased_at } : {}),
+      ...(row.return_route ? { returnRoute: row.return_route, returnRouteBasis: row.return_route_basis ?? null } : {}),
     };
   }
 }

@@ -72,7 +72,7 @@ function startupContextProbe(options?: {
   status?: "ok" | "missing" | "malformed" | "probe_error";
   evidence?: string;
   resolvedStartupFiles?: Array<{ absolutePath: string; required: boolean; path?: string; deliveryHint?: string; ownerRoot?: string }>;
-  projectionEntries?: Array<{ absolutePath: string; effectiveId?: string; category?: string; sourcePath?: string; resourceType?: string }>;
+  projectionEntries?: Array<{ absolutePath: string; effectiveId?: string; category?: string; sourcePath?: string; resourceType?: string; resourcePath?: string }>;
   runtime?: string;
 }) {
   if (options?.status && options.status !== "ok") {
@@ -1280,6 +1280,33 @@ describe("RestoreCheckService", () => {
     expect(hook?.status).toBe(kind === "available" ? "green" : "yellow");
     expect(hook?.evidence).toContain("Saved openrig-core plugin channel is selected");
     expect(hook?.remediation).toBe("");
+  });
+
+  // A workspace restored onto another home: the saved selection names the old home's plugin folder. A plugin selected
+  // under the OpenRig home is read in this instance's home, as restore will launch it, so it still counts as selected.
+  it("reads a saved core plugin selected under the OpenRig home in this instance's home, after the home moved", () => {
+    const dir = "/custom-instance/plugins/openrig-core", cwd = "/fixture-project";
+    const files = new Map([
+      [path.join(dir, ".claude-plugin/plugin.json"), JSON.stringify({ name: "openrig-core", hooks: "./hooks/claude.json" })],
+      [path.join(dir, "hooks/claude.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: "node activity-relay.cjs" }] }] } })],
+      [path.join(dir, "hooks/scripts/activity-relay.cjs"), "// fixture relay"],
+      [path.join(cwd, ".claude/settings.local.json"), JSON.stringify({})],
+    ]);
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{ category: "plugin", resourcePath: "openrig-home:plugins/openrig-core",
+        absolutePath: "/old-home/.openrig/plugins/openrig-core" }] }),
+      getClaudeActivityHookEvents: () => ["Stop", "PermissionRequest"],
+      exists: f => files.has(f) || f.endsWith("host-infra.json"),
+      readFile: f => {
+        if (files.has(f)) return files.get(f)!;
+        if (f.endsWith("host-infra.json")) return VALID_HOST_INFRA_DECLARATION;
+        throw new Error("missing");
+      },
+    }));
+    const hook = service.check({}).checks.find(c => c.check.endsWith(".hooks"));
+    expect(hook?.status).toBe("green");
+    expect(hook?.evidence).toContain("Saved openrig-core plugin channel is selected");
   });
 
   it("keeps projected activity-resource evidence when a selected core plugin is broken", () => {

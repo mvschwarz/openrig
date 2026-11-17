@@ -191,6 +191,33 @@ describe("seat typing guard commands", () => {
     expect(result.logs.join("\n")).not.toContain("the native default");
   });
 
+  it("#3253: prints where the seat's process limits stand, from the readback", async () => {
+    const applied = { state: "applied", requested: { tasksMax: 512 }, pidsMax: "512", pidsCurrent: 37, limitHits: 2,
+      scope: "openrig-seat-worker_test-1a2b3c4d.scope" };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, processLimits: applied } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result.logs).toContain("Process limits: tasks_max 512: applied (pids.max 512, current 37, limit hit 2 times)");
+    const notApplied = { state: "not_applied", requested: { tasksMax: 512 }, reason: "the seat is not running; the limit applies at its next fresh launch" };
+    const deps2 = makeDeps({ status: 200, data: { ...STATUS, processLimits: notApplied } }, []);
+    const result2 = await captureLogs(() => makeCommand(deps2).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result2.logs).toContain("Process limits: tasks_max 512: requested, not applied; the seat is not running; the limit applies at its next fresh launch");
+    // A stored value that can't be read: this seat's line, with no tasks_max to show.
+    const invalid = { state: "invalid", reason: "Seat n process_limits: stored value is not valid JSON; the stored value is kept" };
+    const deps4 = makeDeps({ status: 200, data: { ...STATUS, processLimits: invalid } }, []);
+    const result4 = await captureLogs(() => makeCommand(deps4).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result4.logs).toContain("Process limits: process_limits: stored value invalid; Seat n process_limits: stored value is not valid JSON; the stored value is kept");
+    // Which process the status read.
+    const fallback = { ...applied, readFrom: "the session's active pane (no pane is recorded for the seat)" };
+    const deps6 = makeDeps({ status: 200, data: { ...STATUS, processLimits: fallback } }, []);
+    const result6 = await captureLogs(() => makeCommand(deps6).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result6.logs).toContain("Process limits: tasks_max 512: applied (pids.max 512, current 37, limit hit 2 times) " +
+      "(read from the session's active pane (no pane is recorded for the seat))");
+    // Without limits, no line.
+    const deps3 = makeDeps({ status: 200, data: STATUS }, []);
+    const result3 = await captureLogs(() => makeCommand(deps3).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result3.logs.join("\n")).not.toContain("Process limits");
+  });
+
   it("prints the daemon's managed restore delivery failure", async () => {
     const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
     const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
@@ -443,6 +470,48 @@ describe("rig seat status", () => {
     expect(output).toContain("  Unknown: Whether the harness applies this is unverified until a launch.");
     expect(output).toContain('    rig seat set-permissions dev-impl@seat-rig --mode <mode> --reason "<why>"');
     expect(output).not.toContain("Permission mode for future launches");
+  });
+
+  it("prints the saved auto mode block against the last launch's, with its notes and warnings", async () => {
+    const account = { summary: "Next launch: --permission-mode auto.", overrides: [], unknown: [], openRigAdds: { claudeAllow: [], claudeAsk: [], notes: [] }, controls: [] };
+    const claudeAutoMode = {
+      saved: { state: "recorded", block: { environment: ["$defaults", "x"], soft_deny: ["only"], classifyAllShell: true } },
+      lastLaunch: { state: "unknown" }, matchesLastLaunch: null,
+      notes: ["Claude adds these entries to your user and managed auto mode settings; OpenRig doesn't read or change those."],
+      advisories: ['claude_auto_mode.soft_deny: without "$defaults", this list replaces Claude\'s built-in soft_deny entries'],
+      inspect: "claude --settings '{}' auto-mode config",
+    };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", account, claudeAutoMode } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("  Claude auto mode block (saved): environment 2 (with $defaults), soft_deny 1, classifyAllShell true");
+    expect(output).toContain("  Claude auto mode block (last launch, observed): unknown; unknown whether it matches saved");
+    expect(output).toContain(`  ${claudeAutoMode.notes[0]}`);
+    expect(output).toContain(`  Warning: ${claudeAutoMode.advisories[0]}`);
+    expect(output).toContain("  Effective lists where you run it: claude --settings '{}' auto-mode config");
+  });
+
+  it("prints a saved auto mode block that can't be read as unavailable, with an unknown comparison", async () => {
+    const claudeAutoMode = { saved: { state: "unavailable", error: "Seat n1: the saved claude_auto_mode can't be read" },
+      lastLaunch: { state: "none" }, matchesLastLaunch: null, notes: [], advisories: [] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", claudeAutoMode } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("  Claude auto mode block (saved): unavailable: Seat n1: the saved claude_auto_mode can't be read");
+    expect(output).toContain("  Claude auto mode block (last launch, observed): none; unknown whether it matches saved");
+  });
+
+  it("prints a launch that read --settings from a file as unknown, with nothing saved", async () => {
+    const claudeAutoMode = { saved: { state: "none" }, lastLaunch: { state: "unknown", reason: "settings_file" }, matchesLastLaunch: null, notes: [], advisories: [] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", claudeAutoMode } } }, []);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+    expect(logs.join("\n")).toContain("  Claude auto mode block (last launch, observed): unknown (that launch read --settings from a file OpenRig can't check); unknown whether it matches saved");
   });
 
   it("prints each advisory the account carries, after the summary", async () => {
@@ -738,6 +807,50 @@ describe("rig seat status", () => {
     expect(exitCode).toBe(1);
     expect(errors.join("\n")).toContain("Seat \"missing@seat-rig\" not found");
     expect(errors.join("\n")).toContain("List seats with: rig ps --nodes");
+  });
+
+  it("#3253: a plain handover successor_create_failed names the process-limit notice once", async () => {
+    const deps = makeDeps({
+      status: 500,
+      data: {
+        ok: false,
+        code: "successor_create_failed",
+        message: "Handover failed at step \"create-successor\": harness not interactive",
+        guidance: "The seat's registry binding is unchanged.",
+        processLimits: { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true,
+          requested: { tasksMax: 256 } },
+      },
+    }, []);
+    const { errors } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "impl@seat-rig", "--reason", "context-wall"]);
+    });
+    const out = errors.join("\n");
+    expect(out.match(/the user manager timed out/g)).toHaveLength(1);
+    expect(out).toContain("Process limits: tasks_max 256: requested, not applied");
+  });
+
+  it("#3253: a plain handover failure after a recovery launch without the limit names the process-limit notice", async () => {
+    const deps = makeDeps({
+      status: 500,
+      data: {
+        ok: false,
+        code: "context_delivery_failed",
+        message: "Handover failed at step \"deliver-restore-packet\": the pane did not accept the packet",
+        guidance: "The successor candidate was unwound and the seat's binding is unchanged.",
+        processLimits: { state: "not_applied", kind: "unverified", reason: "the user manager timed out", retryable: true,
+          requested: { tasksMax: 256 } },
+      },
+    }, []);
+
+    const { errors, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "impl@seat-rig", "--reason", "context-wall"]);
+    });
+
+    expect(exitCode).toBeGreaterThan(0);
+    const out = errors.join("\n");
+    expect(out).toContain("Handover failed at step");
+    expect(out).toContain("Process limits: tasks_max 256: requested, not applied");
+    expect(out).toContain("unverified: the user manager timed out");
   });
 
   it("handover non-dry-run JSON prints mutation result for discovered source", async () => {

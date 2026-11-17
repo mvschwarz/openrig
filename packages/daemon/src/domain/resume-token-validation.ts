@@ -64,7 +64,7 @@ function validateIdShapedToken(resumeType: ResumeType, token: string): ResumeTok
   return { ok: true, resumeType, token };
 }
 
-export function validateSessionFileFormat(rawToken: unknown, label = "Pi"): { ok: true; token: string } | { ok: false; error: string } {
+export function validateSessionFileFormat(rawToken: unknown, label = "Pi", options: { allowFormatCharacters?: boolean } = {}): { ok: true; token: string } | { ok: false; error: string } {
   if (typeof rawToken !== "string") {
     return { ok: false, error: `${label} session file must be a string.` };
   }
@@ -78,10 +78,13 @@ export function validateSessionFileFormat(rawToken: unknown, label = "Pi"): { ok
   if (token.split("/").includes("..")) {
     return { ok: false, error: `${label} session-file token must not contain a '..' path segment.` };
   }
-  if (!SESSION_FILE_CHARSET_RE.test(token)) {
+  // Observation-only reports retain the original spelling; ordinary launch/resume callers keep their existing floor.
+  const charset = options.allowFormatCharacters ? /^[A-Za-z0-9._/@\p{Cf}-]+$/u : SESSION_FILE_CHARSET_RE;
+  if (!charset.test(token)) {
     return {
       ok: false,
-      error: `${label} session-file token contains disallowed characters (allowed: letters, digits, '.', '_', '/', '@', '-').`,
+      error: options.allowFormatCharacters ? `${label} observation session-file token contains disallowed characters.`
+        : `${label} session-file token contains disallowed characters (allowed: letters, digits, '.', '_', '/', '@', '-').`,
     };
   }
   if (!token.endsWith(SESSION_FILE_SUFFIX)) {
