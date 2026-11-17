@@ -48,6 +48,10 @@ import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.j
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import type { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { createHash } from "node:crypto";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { noticeHarnessNotStarted } from "../src/domain/harness-not-started-notice.js";
+import { deriveRestoreAttemptReceipt } from "../src/domain/restore-attempt-receipt.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 
@@ -3433,25 +3437,56 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.harnessNotStarted).toEqual(report);
   });
 
-  // #3216's follow-up (CodeRabbit's Major): a full restore launches a seat by its logical id, so a seat recreated since the
-  // snapshot is launched under its live node. The notice reads that node, where the bare shell's session is; the result
-  // keeps the snapshot's node id, the identity its roll call and receipt use.
-  it("hands the notice a recreated seat's live node, where its bare shell was registered", async () => {
-    const { node, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
-    db.prepare("DELETE FROM nodes WHERE id = ?").run(node.id);
-    const live = rigRepo.addNode(node.rigId, "dev.moved", { runtime: "claude-code", podId: "pod-test-rig" });
-    const notice = vi.fn(async () => ({ notices: [], unrouted: [], warnings: [] }));
-    const result = await createOrchestrator({ harnessNotStartedNotice: notice })
+  it("a full restore reports a recreated seat's current session to its owner", async () => {
+    const { node: savedNode, snap, adapter } = seatWithoutStartupContext("claude-code", "00000000-0000-4000-8000-0000000f7e54");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(savedNode.id);
+    const current = rigRepo.addNode(snap.rigId, "dev.moved", { runtime: "claude-code", podId: savedNode.podId! });
+    const lead = rigRepo.addNode(snap.rigId, "lead", { runtime: "claude-code" });
+    sessionRegistry.registerSession(lead.id, "lead@test-rig");
+    rigRepo.addEdge(snap.rigId, lead.id, current.id, "delegates_to");
+    const queue = new QueueRepository(db, eventBus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
+    const result = await createOrchestrator({ harnessNotStartedNotice: input => noticeHarnessNotStarted(db, queue, input) })
       .restore(snap.id, { adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.moved"] });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.result.nodes[0]).toMatchObject({ nodeId: node.id, status: "attention_required", stage: "harness_not_started" });
-    const shell = db.prepare("SELECT node_id FROM sessions WHERE startup_status = 'attention_required'").all() as Array<{ node_id: string }>;
-    expect(shell).toEqual([{ node_id: live.id }]);
-    expect(notice).toHaveBeenCalledWith(expect.objectContaining({
-      seats: [{ nodeId: live.id, logicalId: "dev.moved", cause: "Harness not started: no startup context for dev.moved." }],
-    }));
+    const shell = sessionRegistry.getSessionsForRig(snap.rigId).find(session => session.nodeId === current.id)!;
+    expect(shell).toMatchObject({ nodeId: current.id, startupStatus: "attention_required" });
+    expect(result.result.harnessNotStarted).toMatchObject({
+      notices: [{ owner: "lead@test-rig", seats: [shell.sessionName] }], unrouted: [], warnings: [],
+    });
+    expect(result.result.nodes[0]).toMatchObject({ nodeId: current.id, stage: "harness_not_started" });
+    const failure = db.prepare("SELECT node_id FROM events WHERE type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1")
+      .get() as { node_id: string };
+    expect(failure.node_id).toBe(current.id);
+    const notice = queue.getById(result.result.harnessNotStarted!.notices[0]!.qitemId)!;
+    expect(notice.body).toContain(`- ${shell.sessionName}: Harness not started: no startup context for dev.moved.`);
+    expect(snapshotRepo.getSnapshot(snap.id)!.data.nodes[0]!.id).toBe(savedNode.id);
+    expect(adapter.launchHarness).not.toHaveBeenCalled();
+
+    const attempt = db.prepare("SELECT seq FROM events WHERE type = 'restore.started' AND rig_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(snap.rigId) as { seq: number };
+    const receipt = deriveRestoreAttemptReceipt(db, snap.rigId, attempt.seq);
+    expect(receipt.ok).toBe(true);
+    if (!receipt.ok) return;
+    expect(receipt.currentNodes).toEqual([expect.objectContaining({ nodeId: current.id, status: "attention_required" })]);
+    expect(receipt.intendedRoster).toEqual([{ nodeId: savedNode.id, logicalId: "dev.moved" }]);
+    expect(result.result.nodes[0]).toMatchObject({ intendedNodeId: savedNode.id, nodeId: current.id });
+    expect(receipt.excludedNodes.some(node => node.nodeId === current.id)).toBe(false);
+    expect(result.result.warnings.some(warning => warning.includes("dev.moved was skipped"))).toBe(false);
+
+    const recover = (attemptId: number) => eventBus.emit({ type: "restore.outcome_reconciled", rigId: snap.rigId,
+      nodeId: current.id, attemptId, from: "attention_required", to: "operator_recovered",
+      evidence: { tmux: true, fgProcess: "claude", resumeTokenUsed: true, paneState: "usable" } });
+    recover(attempt.seq + 999);
+    expect(getNodeInventory(db, snap.rigId).find(node => node.nodeId === current.id)?.continuityOutcome).toBeNull();
+    recover(attempt.seq);
+    const recovered = deriveRestoreAttemptReceipt(db, snap.rigId, attempt.seq);
+    expect(recovered.ok && recovered.currentNodes).toEqual([expect.objectContaining({ nodeId: current.id, status: "operator_recovered" })]);
+    expect(recovered.ok && recovered.reconciliations).toHaveLength(1);
+    expect(recovered.ok && recovered.unresolvedIntendedSeats).toEqual([]);
+    expect(getNodeInventory(db, snap.rigId).find(node => node.nodeId === current.id))
+      .toMatchObject({ restoreOutcome: "operator_recovered", continuityOutcome: "resumed" });
   });
 
   // The bare shell's startup failure names the node the launch registered it on, so node inventory gives the live seat
