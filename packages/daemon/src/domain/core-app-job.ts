@@ -287,8 +287,8 @@ export class CoreAppJob {
     // Another surface may have finished closing this exact original return. Its own close/answer fields are excluded
     // only after checking the original question/recipient/episode and the operation-tagged durable return.
     const sameQuestion = original && JSON.stringify([item.body, item.humanIntent, item.humanQuestions, item.destinationSession, item.blockedOn,
-      this.episodeKey(item.qitemId)]) === JSON.stringify([original.body, original.humanIntent, original.humanQuestions,
-      original.destinationSession, original.blockedOn, binding.episodeKey]);
+      this.episodeKey(item.qitemId), item.evidenceRef ?? null]) === JSON.stringify([original.body, original.humanIntent, original.humanQuestions,
+      original.destinationSession, original.blockedOn, binding.episodeKey, original.evidenceRef ?? null]);
     if (ownReply && item.state === "done" && sameQuestion) return { revision: current, retry: true };
     const expected = checkpoint?.revision ?? binding.expectedRevision;
     if (item.state === "pending" && withoutOwnReply === expected) return { revision: current, retry: true };
@@ -410,8 +410,11 @@ export class CoreAppJob {
         },
       } });
     } catch (error) {
-      const fresh = this.row(credential.appId, answerId)!;
-      const recovery = this.recovery(fresh, binding);
+      let recovery: ReturnType<CoreAppJob["recovery"]>;
+      try {
+        const fresh = this.row(credential.appId, answerId)!;
+        recovery = this.recovery(fresh, binding);
+      } catch { throw this.persistenceUnavailable(answerId, "unknown"); }
       if (recovery.receipt) return { ...recovery.receipt, replayed: true };
       const retry = recovery.retry;
       if (error instanceof MissionControlWriteContractError || retry || recovery.code) throw new CoreAppError(retry ? "submission_incomplete" : recovery.code ?? "submission_conflict", retry ? 503 : 409,

@@ -143,7 +143,7 @@ describe("see and answer as self", () => {
     expect(receipt).toMatchObject({ actor: { address: OTHER, assurance: "app-attributed" }, submission: { state: "committed", outcome: "answered" }, replayed: false });
     expect(f.repo.getHumanAnswer(f.ask.qitemId, OTHER)?.sourceSession).toBe(OTHER);
     const originalRevision = receipt.submission.decisionRevisionAfter;
-    f.db.prepare("UPDATE queue_items SET body = 'later changed body' WHERE qitem_id = ?").run(f.ask.qitemId);
+    f.db.prepare("UPDATE queue_items SET body = 'later changed body', evidence_ref = 'artifact:later' WHERE qitem_id = ?").run(f.ask.qitemId);
     const replay = await f.send("/v1/answers/answer_0001", sent, f.token);
     expect(await replay.json()).toMatchObject({ replayed: true, submission: { actionId: receipt.submission.actionId, decisionRevisionAfter: originalRevision } });
     expect((await f.send("/v1/answers/answer_0001", { ...sent, actor: PERSON }, f.token)).status).toBe(409);
@@ -206,7 +206,7 @@ describe("submission interruption and fencing", () => {
     expect(await (await f.send("/v1/answers/answer_complete_atomic", binding, f.token)).json()).toMatchObject({ replayed: true });
     expect({ seq: f.bus.maxSeq(), actions: f.log.countAll(), notifications: observed.length }).toEqual(committed);
   });
-  it.each(["typed-reply", "option"])("recovers an unclosed %s return after restart and nondecision annotations, including uncheckpointed own reply", async kind => {
+  it.each(["typed-reply", "option"].flatMap(kind => ["pending", "closed", "evidence-changed"].map(state => [kind, state])))("recovers a %s return after restart and annotations with %s evidence, including uncheckpointed own reply", async (kind, state) => {
     const f = await jobFixture(), binding = { ...f.binding(), answer: kind === "option" ? { kind, optionId: "yes" } : { kind, text: "Original words" } };
     const resolve = f.repo.resolveDirectHumanReply.bind(f.repo);
     vi.spyOn(f.repo, "resolveDirectHumanReply").mockImplementationOnce(() => { throw new Error("fixture crash before close"); }).mockImplementation(resolve);
@@ -220,7 +220,16 @@ describe("submission interruption and fencing", () => {
     const writes = new MissionControlWriteContract({ db: freshDb, eventBus: bus, queueRepo: repo, actionLog: log });
     const job = new CoreAppJob(access, repo, bus, writes, log), credential = access.authenticate(`Bearer ${f.token}`);
     for (let i = 0; i < 55; i++) await writes.act({ verb: "annotate", qitemId: f.ask.qitemId, actorSession: PERSON, annotation: `note ${i}` });
+    if (state !== "pending") freshDb.prepare("UPDATE queue_items SET state = 'done', evidence_ref = ? WHERE qitem_id = ?").run(state === "evidence-changed" ? "artifact:changed" : null, f.ask.qitemId);
     const seq = bus.maxSeq();
+    if (state === "evidence-changed") {
+      const changes = freshDb.prepare("SELECT total_changes() n").get(), actions = log.countAll();
+      expect(job.readAnswer(credential, "answer_recover", PERSON)).toMatchObject({ submission: { state: "conflict", conflictCode: "recovery_conflict" }, retrySameSubmission: false });
+      await expect(job.submit(credential, "answer_recover", binding)).rejects.toMatchObject({ code: "recovery_conflict", status: 409 });
+      expect(freshDb.prepare("SELECT total_changes() n").get()).toEqual(changes); expect(bus.maxSeq()).toBe(seq); expect(log.countAll()).toBe(actions);
+      expect(freshDb.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId)).toEqual({ n: 1 });
+      return;
+    }
     expect(job.readAnswer(credential, "answer_recover", PERSON)).toMatchObject({ submission: { state: "incomplete" }, retrySameSubmission: true });
     expect(bus.maxSeq()).toBe(seq);
     const receipt = await job.submit(credential, "answer_recover", binding);
@@ -936,18 +945,29 @@ describe("honest 503 persistence status", () => {
     vi.restoreAllMocks();
     expect(await (await f.send(path, sent, f.token)).json()).toEqual({ ...first, replayed: true });
   });
-  it("a Queue write failure after the binding is stored is incomplete, never a recorded answer, and the same ID recovers once", async () => {
+  it.each(["none", "row", "recovery"] as const)("a Queue write failure with %s classification read failure retains the same recoverable ID", async fault => {
     const f = await jobFixture(), sent = body(f), path = "/v1/answers/answer_incomplete01";
-    vi.spyOn(f.repo, "recordHumanAnswer").mockImplementationOnce(() => { throw new Error("fixture queue write failure"); });
+    let readFault: { mockRestore(): void } | undefined;
+    vi.spyOn(f.repo, "recordHumanAnswer").mockImplementationOnce(() => {
+      if (fault !== "none") readFault = vi.spyOn(f.job as any, fault).mockImplementationOnce(() => { throw new Error("fixture classification read failure"); });
+      throw new Error("fixture queue write failure");
+    });
     const failed = await f.send(path, sent, f.token);
     expect(failed.status).toBe(503);
-    expect(await failed.json()).toMatchObject({ error: "submission_incomplete", answerId: "answer_incomplete01", submission: { state: "incomplete" }, retrySameSubmission: true });
+    expect(await failed.json()).toMatchObject({ error: fault === "none" ? "submission_incomplete" : "app_job_unavailable", answerId: "answer_incomplete01", submission: { state: fault === "none" ? "incomplete" : "unknown" }, retrySameSubmission: true });
+    readFault?.mockRestore();
     expect(f.db.prepare("SELECT COUNT(*) n FROM core_app_submissions WHERE binding_json IS NOT NULL").get()).toEqual({ n: 1 });
     expect(f.repo.getById(f.ask.qitemId)?.humanAnswers ?? {}).toEqual({}); expect(f.log.countAll()).toBe(0);
     const status = await (await f.send(`${path}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
     expect(status).toMatchObject({ submission: { state: "incomplete" }, retrySameSubmission: true }); expect(JSON.stringify(status)).not.toContain("recordedAt");
     const retried = await f.send(path, sent, f.token);
-    expect(retried.status).toBe(200); expect(await retried.json()).toMatchObject({ submission: { state: "committed" } }); expect(f.log.countAll()).toBe(1);
+    expect(retried.status).toBe(200); const receipt = await retried.json(); expect(receipt).toMatchObject({ submission: { state: "committed" } });
+    await new Promise(resolve => setImmediate(resolve));
+    const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+    expect(await (await f.send(path, sent, f.token)).json()).toEqual({ ...receipt, replayed: true });
+    expect(f.log.countAll()).toBe(1); expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+    expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE reply_to = ?").get(f.ask.qitemId)).toEqual({ n: 1 });
+    expect(f.db.prepare("SELECT COUNT(*) n FROM core_app_submissions").get()).toEqual({ n: 1 });
   });
 });
 
