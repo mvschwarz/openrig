@@ -89,6 +89,46 @@ describe("the transport's hook-bridge branch (slice 13)", () => {
     expect(s.bridge.queued(s.nodeId)).toHaveLength(1);
   });
 
+  it("keeps an old bridge attempt on its typed fallback after the preference switches to native", async () => {
+    const pendingAtExpiry = async (s: Awaited<ReturnType<typeof seat>>) => {
+      const { armId } = s.optInAndArm();
+      s.bridge.turnStarted(s.nodeId);
+      const queued = await s.transport.send(s.sessionName, "pending before route switch", { actorSession: "peer@team" });
+      expect(queued.outcome).toBe("bridged");
+      const id = queued.outboxIds![0]!;
+      expect(new OutboxHandler(s.db).inputRoute(id)).toBeNull();
+      new RigRepository(s.db).setNodeInputRoute(s.nodeId, "native");
+      s.bridge.expired(s.nodeId, s.sessionName, armId);
+      s.advance(HOOK_BRIDGE_LIVE_BOUND_MS);
+      return id;
+    };
+
+    const s = await seat();
+    const id = await pendingAtExpiry(s);
+    const fallback = await s.transport.sweepHookBridge();
+    expect(fallback.map(r => r.outboxId)).toEqual([id]);
+    expect(fallback[0]!.result.reason).not.toBe("runner_unavailable");
+    expect(fallback[0]!.result).toMatchObject({ ok: true });
+    expect(fallback[0]!.result.runnerReceipt).toBeUndefined();
+    expect(s.writes).toEqual(["paste", "keys"]);
+    expect(new OutboxHandler(s.db).getById(id)?.deliveryState).toBe("delivered");
+    expect(s.bridge.queued(s.nodeId)).toEqual([]);
+
+    // The preference still selects new messages; an ordinary Claude seat has no native runner.
+    const next = await s.transport.send(s.sessionName, "new after route switch", { actorSession: "peer@team" });
+    expect(next).toMatchObject({ ok: false, reason: "runner_unavailable" });
+    expect(s.writes).toEqual(["paste", "keys"]);
+
+    // The original typed fallback still obeys the typing guard.
+    const held = await seat();
+    const heldId = await pendingAtExpiry(held);
+    await held.guard.set(held.nodeId, { mode: "hold" }, "human@team", "quiet");
+    const retained = await held.transport.sweepHookBridge();
+    expect(retained[0]!.result).toMatchObject({ outcome: "retained", reason: "typing_guard_enabled" });
+    expect(new OutboxHandler(held.db).getById(heldId)?.deliveryState).toBe("retained");
+    expect(held.writes).toEqual([]);
+  });
+
   it("types when the bridge has no live arm, and says the bridge wasn't available", async () => {
     const s = await seat();
     s.optInAndArm();

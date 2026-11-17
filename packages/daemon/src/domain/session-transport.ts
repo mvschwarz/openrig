@@ -3048,7 +3048,8 @@ export class SessionTransport {
     // control keeps its existing guarded editor path; ordinary OpenRig notices still select native.
     const typedControl = opts?.dangerouslyInteract === true || opts?.submitOnly === true || opts?.typedExactly === true
       || opts?.openrigNotice === true && /^\/openrig-compact ([\w-]+)$/.test(text) && this.getSessionMeta(sessionName).runtime === "pi";
-    const inputRoute = (nodeId: string): "typed" | "native" => typedControl ? "typed" : this.inputRoute(nodeId);
+    // A bridge handback continues its original typed attempt; a changed preference selects new messages only.
+    const inputRoute = (nodeId: string): "typed" | "native" => typedControl || opts?.hookBridgeFallback ? "typed" : this.inputRoute(nodeId);
     const history = new OutboxHandler(this.db);
     const inputId = opts?.committedOutboxIds?.[0] ?? opts?.deliveryId;
     const primaryId = inputId ? history.runnerPrimary(inputId) : null;
