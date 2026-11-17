@@ -20,6 +20,15 @@ describe("seat card engine block", () => {
     expect(fitModelFontSize("x".repeat(200), 144)).toBe(7);
   });
 
+  it("truncates a name too long for the 7px floor and keeps the full id in the title", () => {
+    const model = `vendor/${"x".repeat(200)}`;
+    render(<SeatEngine runtime="pi" model={model} fitWidthPx={144} />);
+    const line = screen.getByTestId("seat-model");
+    expect(line.style.fontSize).toBe("7px");
+    expect(line.className).toContain("truncate");
+    expect(line.getAttribute("title")).toBe(model);
+  });
+
   it("shows the runtime, the provider and the model on separate elements", () => {
     render(<SeatEngine runtime="pi" model="nvidia/nemotron-3-ultra-550b-a55b" />);
     expect(screen.getByText("Pi")).toBeTruthy();

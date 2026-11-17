@@ -22,7 +22,9 @@ export function splitModelId(model: string | null | undefined): SplitModelId {
 
 /**
  * Font size in px that keeps a model name on one line of `widthPx`: a monospace character is about
- * 0.6em wide. Never larger than 10px (the normal size) or smaller than 7px.
+ * 0.6em wide. Never larger than 10px (the normal size) or smaller than 7px: below that the text stops
+ * being readable, so a name longer than about 34 characters at 144px is cut with an ellipsis instead
+ * and the full id stays in the hover title.
  */
 export function fitModelFontSize(name: string, widthPx: number): number {
   return Math.max(7, Math.min(10, widthPx / (0.6 * Math.max(name.length, 1))));
@@ -30,7 +32,7 @@ export function fitModelFontSize(name: string, widthPx: number): number {
 
 /**
  * Two card lines: the runtime (icon and name) with the provider on the right, then the model alone.
- * With `fitWidthPx`, a long model name shrinks to fit that width instead of being cut off.
+ * With `fitWidthPx`, a long model name shrinks to fit that width, down to the 7px floor.
  */
 export function SeatEngine({
   runtime,
