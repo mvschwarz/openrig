@@ -210,6 +210,18 @@ describe("status notice content dedup", () => {
     expect(repo.listTransitions(member.item.qitemId).some((t) => t.transitionNote?.includes("digest=digest-status"))).toBe(true);
   });
 
+  it("posts normally when the repeat carries a quiet-hours disclosure", async () => {
+    await dispatch((await notice()).payload);
+    // The content matches the last delivered notice, but the gateway couldn't
+    // read the person's quiet hours: the edit path would drop the disclosure
+    // the normal post renders, so the repeat posts.
+    const repeat = await notice();
+    repeat.payload.quietUnreadable = true;
+    await dispatch(repeat.payload);
+    expect(posts).toHaveLength(2);
+    expect(edits).toHaveLength(0);
+  });
+
   it("posts normally when the edit fails", async () => {
     await dispatch((await notice()).payload);
     failEdit = true;

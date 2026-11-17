@@ -54,7 +54,10 @@ export class SlackNoticeContentDedup {
 
   private async mark(key: string, p: OutboundPostPayload): Promise<boolean> {
     const last = this.last.get(key);
-    if (!last || last.payload.qitemId === p.qitemId || last.payload.summary !== p.summary || last.payload.body !== p.body
+    // A disclosure-carrying notice never takes the repeat path: the edit
+    // doesn't render the quiet-hours note, so a matching repeat would hide a
+    // disclosure the normal post shows. Post normally instead.
+    if (!last || p.quietUnreadable || last.payload.qitemId === p.qitemId || last.payload.summary !== p.summary || last.payload.body !== p.body
       || last.payload.humanDetail !== p.humanDetail || last.payload.evidenceRef !== p.evidenceRef
       || (p.evidenceRef && !/^https:\/\//.test(p.evidenceRef))) return false;
     const fetchImpl: FetchImpl = (url, init) => (this.opts.fetchImpl ?? fetch)(url, { ...init,
