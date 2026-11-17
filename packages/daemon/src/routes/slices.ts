@@ -18,7 +18,7 @@ import { inferCatalogProject, ProjectReadError } from "../domain/workspace/proje
 // avoid `/proof-asset` being parsed as a slice-name.
 
 import { Hono, type Context } from "hono";
-import { readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
+import { createProofPolicyRead, readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SliceIndexer, SliceListEntry, SliceStatus } from "../domain/slices/slice-indexer.js";
@@ -61,6 +61,9 @@ export function slicesRoutes(): Hono {
     // operation: the list rebuild, the boundToWorkflow per-slice get loop,
     // and the mission sidecar share ONE membership batch (pre-scope, each
     // uncached get built its own 2-scan batch: 2+2N total queue scans).
+    // One request-local policy reader for every readiness in this response
+    // (the listing and the project readiness below); never across requests.
+    const readPolicy = createProofPolicyRead();
     const listing = deps.indexer.withMembershipBatch(() => {
       const all = deps.indexer.list();
       let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
@@ -106,7 +109,7 @@ export function slicesRoutes(): Hono {
         slices: filtered.map((s) => ({
           ...s,
           queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
-          readiness: readSliceReadiness(s.slicePath),
+          readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
         })),
         totalCount: filtered.length,
         filter,
@@ -119,7 +122,7 @@ export function slicesRoutes(): Hono {
     });
     if (listing instanceof Response) return listing;
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
-    const readiness = await readProjectReadinessAsync(deps.indexer.slicesRoot);
+    const readiness = await readProjectReadinessAsync(deps.indexer.slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
       ...listing.missions[m.name],
       authoredStatus: m.historicalStatus ?? listing.missions[m.name]?.authoredStatus ?? null,

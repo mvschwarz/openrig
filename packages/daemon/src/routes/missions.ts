@@ -26,7 +26,7 @@
 
 import { Hono } from "hono";
 import { parseDocument, isScalar } from "yaml";
-import { readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
+import { createProofPolicyRead, readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -74,13 +74,16 @@ export function missionsRoutes(): Hono {
       workflowSpec,
       c.get("workflowSpecCache" as never) as WorkflowSpecCache | undefined,
     );
-    const readiness = readMissionReadiness(missionPath);
+    // One request-local policy reader: shared proofPolicy manifests are read
+    // once for this response and never carried to the next request.
+    const readPolicy = createProofPolicyRead();
+    const readiness = readMissionReadiness(missionPath, readPolicy);
     const status = readiness.historicalStatus ?? readMissionStatus(missionPath);
     return c.json({
       missionId,
       missionPath,
       readiness,
-      slices: slices.map(s => ({ ...s, readiness: readSliceReadiness(s.slicePath) })),
+      slices: slices.map(s => ({ ...s, readiness: readSliceReadiness(s.slicePath, undefined, readPolicy) })),
       workflow_spec: workflowSpec,
       topology,
       status,
