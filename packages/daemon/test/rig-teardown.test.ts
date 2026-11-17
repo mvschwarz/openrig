@@ -18,10 +18,11 @@ import path from "node:path";
 import { checkRunningNameGuard, makeRunningSessionCounter, confirmStoppedGenerations } from "../src/domain/running-name-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
-import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
+import { SEAT_SKILLS_BOOTSTRAP_LINE, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
@@ -624,7 +625,8 @@ describe("RigTeardownOrchestrator", () => {
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === sessionId)?.status).toBe("exited");
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === survivingSession.id)?.status).toBe("running");
     expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(sessionId)).toEqual({ intentionally_stopped: 1 });
-    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(survivingSession.id)).toEqual({ intentionally_stopped: 0 });
+    // #2940: down recorded the request before the kill; the failed kill leaves it pending (running, not confirmed).
+    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(survivingSession.id)).toEqual({ intentionally_stopped: 1 });
     expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
     expect(sessionRegistry.getBindingForNode(nodeId)).toBeNull();
 
@@ -725,7 +727,7 @@ describe("RigTeardownOrchestrator", () => {
   });
 
   it.each(["kill_failed", "transport_unavailable"] as const)("keeps guidance when termination is unconfirmed: %s", async failure => {
-    const { rigId, sessionId } = seedRigWithNode({ runtime: "codex", cwd: tmpDir });
+    const { rigId, nodeId, sessionId } = seedRigWithNode({ runtime: "codex", cwd: tmpDir });
     const guidance = path.join(tmpDir, "AGENTS.md");
     const content = "<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nworking guidance\n<!-- END OpenRig MANAGED BLOCK: role -->\n";
     fs.writeFileSync(guidance, content);
@@ -733,8 +735,80 @@ describe("RigTeardownOrchestrator", () => {
     if (failure === "transport_unavailable") tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause: "socket unavailable" }));
     await buildTeardown(tmux).teardown(rigId);
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === sessionId)?.status).toBe("running");
-    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(sessionId)).toEqual({ intentionally_stopped: 0 });
+    // #2940: the stop request recorded before the kill stays pending; the session is not reported stopped.
+    expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(sessionId)).toEqual({ intentionally_stopped: 1 });
+    expect(getNodeInventory(db, rigId).find(entry => entry.nodeId === nodeId)).toMatchObject({ intentionallyStopped: false, stopRequested: true });
     expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
+  });
+
+  describe("#2940: down records every selected seat's stop before the first kill", () => {
+    function rigOfThree() {
+      const rig = rigRepo.createRig("down-race");
+      const ids = ["a", "b", "c"].map((name) => {
+        const node = rigRepo.addNode(rig.id, `dev.${name}`, { runtime: "claude-code", cwd: tmpDir });
+        const session = sessionRegistry.registerSession(node.id, `${name}@down-race`);
+        sessionRegistry.updateStatus(session.id, "running");
+        sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: `${name}@down-race` });
+        return { nodeId: node.id, sessionId: session.id, name: `${name}@down-race` };
+      });
+      return { rigId: rig.id, ids };
+    }
+    const row = (id: string) => db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(id);
+
+    it("a daemon lost during down leaves the seats it selected but didn't reach requested, not fallen", async () => {
+      const { rigId, ids } = rigOfThree();
+      const tmux = mockTmux();
+      let calls = 0;
+      tmux.killSession = vi.fn(async () => {
+        calls++;
+        if (calls === 2) throw new Error("daemon lost here");
+        return { ok: true };
+      }) as TmuxAdapter["killSession"];
+      await expect(buildTeardown(tmux).teardown(rigId)).rejects.toThrow("daemon lost here");
+      expect(row(ids[0]!.sessionId)).toEqual({ status: "exited", intentionally_stopped: 1 });
+      expect(row(ids[1]!.sessionId)).toEqual({ status: "running", intentionally_stopped: 1 });
+      expect(row(ids[2]!.sessionId)).toEqual({ status: "running", intentionally_stopped: 1 });
+      expect(getNodeInventory(db, rigId).filter((entry) => entry.stopRequested).map((entry) => entry.nodeId).sort())
+        .toEqual([ids[1]!.nodeId, ids[2]!.nodeId].sort());
+    });
+
+    it("keeps a fallen seat's latest detached session down, and confirms it once tmux shows it absent", async () => {
+      const { rigId, ids } = rigOfThree();
+      sessionRegistry.markDetached(ids[2]!.sessionId);
+      const tmux = mockTmux();
+      tmux.probeSession = vi.fn(async (name: string) => ({ state: name === ids[2]!.name ? "absent" : "present" })) as TmuxAdapter["probeSession"];
+      await buildTeardown(tmux).teardown(rigId);
+      expect(row(ids[2]!.sessionId)).toEqual({ status: "exited", intentionally_stopped: 1 });
+      expect(getNodeInventory(db, rigId).find((entry) => entry.nodeId === ids[2]!.nodeId)).toMatchObject({ intentionallyStopped: true });
+    });
+
+    it("leaves external and claimed sessions out of the request", async () => {
+      const { rigId, ids } = rigOfThree();
+      sessionRegistry.updateBinding(ids[0]!.nodeId, { attachmentType: "external_cli", externalSessionName: "ext" });
+      const claimedNode = rigRepo.addNode(rigId, "dev.claimed", { runtime: "claude-code", cwd: tmpDir });
+      const claimed = sessionRegistry.registerClaimedSession(claimedNode.id, "claimed@down-race");
+      sessionRegistry.updateStatus(claimed.id, "running");
+      const tmux = mockTmux({ ok: false, code: "kill_failed", message: "tmux error" });
+      tmux.probeSession = vi.fn(async () => ({ state: "transport_unavailable", cause: "socket unavailable" })) as TmuxAdapter["probeSession"];
+      await buildTeardown(tmux).teardown(rigId);
+      expect(row(ids[0]!.sessionId)).toMatchObject({ intentionally_stopped: 0 });
+      expect(row(claimed.id)).toMatchObject({ intentionally_stopped: 0 });
+      expect(row(ids[1]!.sessionId)).toMatchObject({ intentionally_stopped: 1 });
+    });
+
+    it("does not clean a pending seat's skills: only a confirmed stop settles it", async () => {
+      const { rigId, ids } = rigOfThree();
+      const skills = seatSkillPaths({ rigId, logicalId: "dev.b", runtime: "claude-code" });
+      fs.mkdirSync(skills.root, { recursive: true });
+      fs.writeFileSync(path.join(skills.root, "marker"), "x");
+      const tmux = mockTmux();
+      tmux.killSession = vi.fn(async (name: string) => name === ids[1]!.name
+        ? { ok: false, code: "timeout", message: "kill timed out", stopPhase: "kill_attempted" } : { ok: true }) as TmuxAdapter["killSession"];
+      const result = await buildTeardown(tmux).teardown(rigId);
+      expect(row(ids[1]!.sessionId)).toEqual({ status: "running", intentionally_stopped: 1 });
+      expect(result.errors.some((error) => error.includes("Seat skills for dev.b kept"))).toBe(true);
+      expect(fs.existsSync(path.join(skills.root, "marker"))).toBe(true);
+    });
   });
 
   it("preserves another rig's shared guidance during ordinary teardown", async () => {

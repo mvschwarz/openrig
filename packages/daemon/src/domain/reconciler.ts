@@ -11,6 +11,9 @@ export interface ReconcileResult {
   detached: number;
   /** The sessions this reconcile marked detached. */
   detachedSessionIds: string[];
+  /** #2940: sessions with a recorded stop request that were gone, now confirmed stopped (never detached): a daemon lost
+   *  during a stop or a down leaves the seat down, not fallen. */
+  stopsConfirmed?: string[];
   /** Not on this daemon's tmux server, yet the seat's last observed process is still running: most likely on a tmux
    *  server this daemon can't see (it didn't inherit the seats' TMUX). Left as they were, never detached, so nothing
    *  relaunches them. `parent` is that process's immediate parent when the process table shows it; it may be the tmux
@@ -61,13 +64,18 @@ export class Reconciler {
     let checked = 0;
     let detached = 0;
     const detachedSessionIds: string[] = [];
+    const stopsConfirmed: string[] = [];
     const unseen: ReconcileResult["unseen"] = [];
     const errors: { sessionId: string; error: string }[] = [];
     let table: Promise<ProcessTableRow[] | null> | null = null;
     const processes = () => (table ??= this.readProcesses().catch(() => null));
 
+    const stopRequested = this.db.prepare("SELECT intentionally_stopped AS flag FROM sessions WHERE id = ?");
+    const latestOfNode = this.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1");
     for (const session of sessions) {
-      if (SKIP_STATUSES.has(session.status)) {
+      // #2940: a stop request still pending on a live or detached row is confirmed once the session is gone.
+      const requested = (stopRequested.get(session.id) as { flag: number } | undefined)?.flag === 1;
+      if (SKIP_STATUSES.has(session.status) && !(requested && session.status === "detached")) {
         continue;
       }
 
@@ -97,6 +105,32 @@ export class Reconciler {
           unseen.push({ sessionId: session.id, sessionName: session.sessionName, ...elsewhere });
           continue;
         }
+        if (requested) {
+          try {
+            const txn = this.db.transaction(() => {
+              this.sessionRegistry.markIntentionallyStopped(session.id);
+              // The binding is the seat's: cleared only when this is still its latest session.
+              if ((latestOfNode.get(session.nodeId) as { id: string } | undefined)?.id === session.id) {
+                this.sessionRegistry.clearBinding(session.nodeId);
+              }
+              return this.eventBus.persistWithinTransaction({
+                type: "session.stopped",
+                rigId,
+                nodeId: session.nodeId,
+                sessionName: session.sessionName,
+                reason: "stop completed: the session was gone when the daemon reconciled",
+                operator: null,
+              });
+            });
+            const persistedEvent = txn();
+            stopsConfirmed.push(session.id);
+            this.eventBus.notifySubscribers(persistedEvent);
+          } catch (err) {
+            errors.push({ sessionId: session.id, error: err instanceof Error ? err.message : String(err) });
+          }
+          continue;
+        }
+        if (session.status === "detached") continue;
         try {
           const txn = this.db.transaction(() => {
             this.sessionRegistry.markDetached(session.id);
@@ -121,7 +155,7 @@ export class Reconciler {
       }
     }
 
-    return { checked, detached, detachedSessionIds, unseen, errors };
+    return { checked, detached, detachedSessionIds, ...(stopsConfirmed.length ? { stopsConfirmed } : {}), unseen, errors };
   }
 }
 

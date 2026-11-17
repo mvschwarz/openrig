@@ -8,6 +8,7 @@ import { RigNotFoundError } from "./errors.js";
 import type { ResumeMetadataRefresher } from "./resume-metadata-refresher.js";
 import fs from "node:fs";
 import nodePath from "node:path";
+import { randomUUID } from "node:crypto";
 import { removeManagedBlocksFromFile } from "./managed-blocks.js";
 import { recordedGuidanceFile, seatGuidanceFile } from "./restore-guidance.js";
 import { cleanupOwnedClaudeCwd } from "./claude-owned-settings.js";
@@ -194,6 +195,31 @@ export class RigTeardownOrchestrator {
       // Best-effort — teardown proceeds even if snapshot fails
     }
 
+    // #2940: `rig down` means stay down, also for a seat it selected but hasn't reached yet, or if the daemon is lost
+    // midway. Before the first kill, one transaction records the stop request on every launched session it selected,
+    // and on each seat's latest detached session (a seat that fell stays down too). External and claimed sessions are
+    // their owners' and are left out. A kill that doesn't complete keeps the request; the next down, or the startup
+    // reconcile once the session is gone, confirms it.
+    const downAttempt = randomUUID();
+    try {
+      this.db.transaction(() => {
+        for (const session of liveSessions) {
+          if (session.origin === "claimed") continue;
+          if (seatProcessOwner(resolveSeatKind(this.deps.sessionRegistry.getBindingForNode(session.nodeId)?.attachmentType)) === "external") continue;
+          this.deps.sessionRegistry.requestStop(session.sessionId, downAttempt);
+        }
+        const fallen = this.db.prepare(`
+          SELECT s.id FROM sessions s JOIN nodes n ON n.id = s.node_id
+          WHERE n.rig_id = ? AND s.status = 'detached' AND s.origin = 'launched' AND s.intentionally_stopped = 0
+            AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+              ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+        `).all(rigId) as Array<{ id: string }>;
+        for (const row of fallen) this.deps.sessionRegistry.requestStop(row.id, downAttempt);
+      })();
+    } catch (err) {
+      result.errors.push(`Stop request could not be recorded before the kills: ${(err as Error).message}`);
+    }
+
     // 5. Kill each live session
     let killFailures = 0;
     const external = new Set<string>();
@@ -325,8 +351,10 @@ export class RigTeardownOrchestrator {
   private settledSkillSeats(seats: ReadonlyArray<{ id: string }>): { settled: Set<string>; heldByReleased: Map<string, string[]> } {
     const settled = new Set<string>();
     const heldByReleased = new Map<string, string[]>();
-    const latest = this.db.prepare(`SELECT id, intentionally_stopped AS stopped FROM sessions WHERE node_id = ?
-      ORDER BY created_at DESC, id DESC LIMIT 1`);
+    // #2940: confirmed, not only requested: a pending stop's session may still be running and using its skills.
+    const latest = this.db.prepare(`SELECT s.id, (s.intentionally_stopped = 1 AND s.status IN ('exited', 'superseded')
+        AND NOT EXISTS (SELECT 1 FROM bindings b WHERE b.node_id = s.node_id)) AS stopped
+      FROM sessions s WHERE s.node_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT 1`);
     const released = this.db.prepare(`SELECT id, session_name AS name FROM sessions WHERE node_id = ? AND origin = 'claimed'
       AND status = 'detached' AND intentionally_stopped = 0 ORDER BY created_at, id`);
     for (const seat of seats) {
@@ -391,7 +419,7 @@ export class RigTeardownOrchestrator {
     const eligible = this.db.prepare(`
       SELECT s.id, s.node_id, s.session_name, s.status FROM sessions s JOIN nodes n ON n.id = s.node_id
       WHERE n.rig_id = ? AND s.status IN ('exited', 'detached', 'superseded')
-        AND s.intentionally_stopped = 0
+        AND (s.intentionally_stopped = 0 OR s.status = 'detached')
         AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
           ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
     `);

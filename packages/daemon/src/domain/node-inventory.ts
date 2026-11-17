@@ -1076,6 +1076,10 @@ function buildInventoryItem(
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
     intentionallyStopped: row.intentionally_stopped === 1
       && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null,
+    // #2940: a stop recorded but not confirmed yet (the session not yet gone, or the daemon lost mid-stop).
+    ...(row.intentionally_stopped === 1
+      && !((row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null)
+      ? { stopRequested: true } : {}),
     // Match the graph's current-status projection without rewriting the startup
     // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],

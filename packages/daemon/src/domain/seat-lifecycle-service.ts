@@ -26,7 +26,7 @@ import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, withContext
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { preferenceHoldsLifecycle } from "./seat-delivery-guard.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
@@ -2163,22 +2163,50 @@ export class SeatLifecycleService {
       if (changed) refuse(changed);
       checked.guard.checkInput(resolved.nodeId);
     });
+    // #2940: a supported stop records its request durably before the first step that stops anything, after the target
+    // was resolved under the lifecycle lease. A daemon lost after this point leaves a pending stop, which the startup
+    // reconcile confirms once the session is gone; it is never read as a fall.
+    let request: { attemptId: string; prev: { flag: number; attempt: string | null } } | null = null;
+    if (recordStopIntent) {
+      const attemptId = randomUUID();
+      const recorded = this.db.transaction((): SeatRefusal | { flag: number; attempt: string | null } | null => {
+        const changed = checked?.selection();
+        if (changed) return changed;
+        return this.sessionRegistry.requestStop(session.id, attemptId);
+      })();
+      if (recorded && "code" in recorded) return recorded;
+      if (recorded) request = { attemptId, prev: recorded };
+    }
+    // Only a failure proven to have had no effect (nothing was detached or killed) puts back this attempt's request.
+    const undoRequest = () => { if (request) this.sessionRegistry.revertStopRequest(session.id, request.attemptId, request.prev); };
     const kill = checked
       ? await this.tmuxAdapter.killSession(session.session_name, beforeEffect)
       : await this.tmuxAdapter.killSession(session.session_name);
     if (checked && !kill.ok) {
       const partialEffect = kill.stopPhase !== undefined && kill.stopPhase !== "none";
       if (kill.code === "selection_changed" || kill.code === "guard_target_changed" || kill.code === "guard_target_unknown") {
+        if (!partialEffect) undoRequest();
         return { ok: false, code: "selection_changed", message: kill.message, partialEffect, stopPhase: kill.stopPhase };
       }
-      if (!partialEffect && kill.code !== "session_not_found") return { ok: false, code: "tmux_probe_failed", message: kill.message };
-      return { ok: false, code: "stop_uncertain", message: `Checked stop did not complete: ${kill.message}`, partialEffect, stopPhase: kill.stopPhase };
+      if (!partialEffect && kill.code !== "session_not_found") {
+        undoRequest();
+        return { ok: false, code: "tmux_probe_failed", message: kill.message };
+      }
+      return { ok: false, code: "stop_uncertain", message: `Checked stop did not complete: ${kill.message}${request ? " The stop request stays recorded." : ""}`, partialEffect, stopPhase: kill.stopPhase };
     }
+    // The session ended on its own before this stop reached it: the stop had no effect, so its request goes back and
+    // the exit stays an unexplained one.
+    if (kill && !kill.ok && kill.code === "session_not_found") undoRequest();
     if (kill && !kill.ok && kill.code !== "session_not_found") {
+      // A timeout or a partial effect is no proof that nothing stopped: the request stays and the result says so.
+      const partialEffect = kill.stopPhase !== undefined && kill.stopPhase !== "none";
+      if (!partialEffect) undoRequest();
       return {
         ok: false,
         code: "tmux_probe_failed",
-        message: `tmux kill-session for "${session.session_name}" failed: ${kill.message ?? kill.code}`,
+        message: `tmux kill-session for "${session.session_name}" failed: ${kill.message ?? kill.code}`
+          + (partialEffect && request ? ` It got as far as ${kill.stopPhase}; the stop request stays recorded.` : ""),
+        ...(partialEffect ? { partialEffect, stopPhase: kill.stopPhase } : {}),
       };
     }
     let persisted: PersistedEvent | null = null;

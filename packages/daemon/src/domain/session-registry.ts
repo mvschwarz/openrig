@@ -528,15 +528,37 @@ export class SessionRegistry {
     };
   }
 
+  /** An observed or recorded status. It leaves a requested stop in place (#2940): an observation, the startup
+   *  reconcile or a compensation must not undo a person's stop. A later start or resume writes a new session row,
+   *  which starts without a request. */
   updateStatus(sessionId: string, status: string): void {
     if (["exited", "detached", "superseded"].includes(status)) new ActivityGrantStore(this.db).revokeForSession(sessionId, status);
     this.db
-      .prepare("UPDATE sessions SET status = ?, intentionally_stopped = 0, last_seen_at = datetime('now') WHERE id = ?")
+      .prepare("UPDATE sessions SET status = ?, last_seen_at = datetime('now') WHERE id = ?")
       .run(status, sessionId);
   }
 
-  /** A supported stop is distinct from an observed exit. Any later status write
-   * clears the intent, including a resume of this same session row. */
+  /** #2940: record a stop request durably before the first step that stops anything, without changing the status.
+   *  Returns this row's earlier request, which only a stop proven to have had no effect puts back. */
+  requestStop(sessionId: string, attemptId: string): { flag: number; attempt: string | null } | null {
+    const prev = this.db.prepare("SELECT intentionally_stopped AS flag, stop_attempt AS attempt FROM sessions WHERE id = ?")
+      .get(sessionId) as { flag: number; attempt: string | null } | undefined;
+    if (!prev) return null;
+    this.db.prepare("UPDATE sessions SET intentionally_stopped = 1, stop_attempt = ? WHERE id = ?").run(attemptId, sessionId);
+    return prev;
+  }
+
+  /** #2940: put back the request this attempt replaced, only while the row still carries this attempt and is still
+   *  live (running, idle or unknown). An older or concurrent stop recorded its own attempt and is left alone, and a
+   *  replacement session is another row. Returns whether the row changed. */
+  revertStopRequest(sessionId: string, attemptId: string, prev: { flag: number; attempt: string | null }): boolean {
+    return this.db.prepare(
+      "UPDATE sessions SET intentionally_stopped = ?, stop_attempt = ? WHERE id = ? AND stop_attempt = ? AND status IN ('running', 'idle', 'unknown')",
+    ).run(prev.flag, prev.attempt, sessionId, attemptId).changes > 0;
+  }
+
+  /** A supported stop is distinct from an observed exit: this confirms one (status exited, request kept). Only a new
+   *  session row (a later start or resume) is without it. */
   markIntentionallyStopped(sessionId: string): void {
     new ActivityGrantStore(this.db).revokeForSession(sessionId, "stopped");
     this.db.prepare(

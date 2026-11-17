@@ -1,3 +1,4 @@
+import { sessionStopAttemptSchema } from "./migrations/175_session_stop_attempt.js";
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
@@ -357,4 +358,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   seatHookBridgeSchema,
   sessionLaunchedCwdSchema,
   coreAppAccessSchema,
+  sessionStopAttemptSchema,
 ];

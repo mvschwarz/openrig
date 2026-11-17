@@ -14,6 +14,7 @@ import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import { SeatLifecycleService, claimedSessionRoutes } from "../src/domain/seat-lifecycle-service.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { Reconciler } from "../src/domain/reconciler.js";
 
 interface FakeTmux {
   adapter: TmuxAdapter;
@@ -338,16 +339,20 @@ describe("SeatLifecycleService", () => {
       expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)?.intentionallyStopped).not.toBe(true);
     });
 
-    it("does not reuse stop intent for an ordinary exit after resuming the same session", async () => {
+    // #2940 (point 3 of the maintainer's design): a later observation or the startup reconcile of the same row must
+    // not undo the person's stop. Only a later start or resume, which writes a new session row, replaces it.
+    it("keeps the stop when the stopped session's row is observed again", async () => {
       const stopped = seatFixture("same-session", "dev.qa");
       seatFixture("same-session", "dev.impl");
       await service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" });
       expect(summary(stopped.rig.id).lifecycleState).toBe("running");
 
-      sessionRegistry.updateStatus(stopped.session.id, "running");
       sessionRegistry.updateStatus(stopped.session.id, "exited");
-      expect(summary(stopped.rig.id).lifecycleState).toBe("degraded");
-      expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)?.intentionallyStopped).not.toBe(true);
+      sessionRegistry.markDetached(stopped.session.id);
+      sessionRegistry.updateStatus(stopped.session.id, "exited");
+      expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(stopped.session.id)).toEqual({ intentionally_stopped: 1 });
+      expect(summary(stopped.rig.id).lifecycleState).toBe("running");
+      expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)?.intentionallyStopped).toBe(true);
     });
 
     it("does not exempt a stopped session after a replacement binding appears", async () => {
@@ -371,16 +376,94 @@ describe("SeatLifecycleService", () => {
       expect(getNodeInventory(db, dead.rig.id).find((entry) => entry.nodeId === dead.node.id)?.intentionallyStopped).not.toBe(true);
     });
 
-    it("does not persist stop intent when the audited stop transaction fails", async () => {
+    // #2940: the request is recorded before the kill, so a stop whose confirming transaction fails after the kill
+    // (the same state a daemon lost between kill and commit leaves) is pending, never a fall: not reported as exited,
+    // binding and skills kept, and confirmed by the reconcile once the session is gone.
+    it("keeps a pending stop when the audited stop transaction fails after the kill", async () => {
       const stopped = seatFixture("failed-stop", "dev.qa");
       seatFixture("failed-stop", "dev.impl");
       vi.spyOn(eventBus, "persistWithinTransaction").mockImplementationOnce(() => { throw new Error("audit unavailable"); });
 
       await expect(service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" })).rejects.toThrow("audit unavailable");
       const entry = getNodeInventory(db, stopped.rig.id).find((node) => node.nodeId === stopped.node.id)!;
-      expect(entry.sessionStatus).toBe("running");
+      expect(entry.sessionStatus).not.toBe("exited");
       expect(entry.intentionallyStopped).not.toBe(true);
+      expect(entry.stopRequested).toBe(true);
       expect(sessionRegistry.getBindingForNode(stopped.node.id)).not.toBeNull();
+
+      const reconcile = await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux.adapter, readProcesses: async () => [] })
+        .reconcile(stopped.rig.id);
+      expect(reconcile.stopsConfirmed).toEqual([stopped.session.id]);
+      expect(reconcile.detachedSessionIds).not.toContain(stopped.session.id);
+      expect(getNodeInventory(db, stopped.rig.id).find((node) => node.nodeId === stopped.node.id)).toMatchObject({
+        sessionStatus: "exited", intentionallyStopped: true,
+      });
+      expect(sessionRegistry.getBindingForNode(stopped.node.id)).toBeNull();
+    });
+
+    it("records the request before the kill: a daemon lost before the kill leaves the live seat pending, not stopped", async () => {
+      const stopped = seatFixture("crash-before", "dev.qa");
+      seatFixture("crash-before", "dev.impl");
+      let seenAtKill: unknown;
+      vi.spyOn(tmux.adapter, "killSession").mockImplementationOnce(async () => {
+        seenAtKill = db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(stopped.session.id);
+        throw new Error("daemon lost here");
+      });
+      await expect(service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" })).rejects.toThrow("daemon lost here");
+      expect(seenAtKill).toEqual({ status: "running", intentionally_stopped: 1 });
+
+      // The session is still there: the reconcile leaves the request pending and does not detach the seat.
+      const reconcile = await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux.adapter, readProcesses: async () => [] })
+        .reconcile(stopped.rig.id);
+      expect(reconcile.stopsConfirmed).toBeUndefined();
+      expect(reconcile.detachedSessionIds).toEqual([]);
+      expect(getNodeInventory(db, stopped.rig.id).find((node) => node.nodeId === stopped.node.id)).toMatchObject({
+        sessionStatus: "running", stopRequested: true,
+      });
+    });
+
+    it("puts back only this attempt's request on a failure proven to have had no effect", async () => {
+      const stopped = seatFixture("no-effect", "dev.qa");
+      seatFixture("no-effect", "dev.impl");
+      vi.spyOn(tmux.adapter, "killSession").mockImplementationOnce(async () =>
+        ({ ok: false, code: "tmux_error", message: "refused before detach", stopPhase: "none" }));
+      const refused = await service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" });
+      expect(refused).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      expect(db.prepare("SELECT intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(stopped.session.id))
+        .toEqual({ intentionally_stopped: 0, stop_attempt: null });
+
+      // An earlier stop request on the same row is never erased by a later attempt's undo.
+      sessionRegistry.requestStop(stopped.session.id, "earlier-attempt");
+      vi.spyOn(tmux.adapter, "killSession").mockImplementationOnce(async () =>
+        ({ ok: false, code: "tmux_error", message: "refused before detach", stopPhase: "none" }));
+      await service.stopSeat({ seatRef: stopped.sessionName, reason: "again" });
+      expect(db.prepare("SELECT intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(stopped.session.id))
+        .toEqual({ intentionally_stopped: 1, stop_attempt: "earlier-attempt" });
+    });
+
+    it("keeps the request on an uncertain failure (the stop got past the first effect)", async () => {
+      const stopped = seatFixture("uncertain", "dev.qa");
+      seatFixture("uncertain", "dev.impl");
+      vi.spyOn(tmux.adapter, "killSession").mockImplementationOnce(async () =>
+        ({ ok: false, code: "timeout", message: "kill timed out", stopPhase: "kill_attempted" }));
+      const refused = await service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" });
+      expect(refused).toMatchObject({ ok: false, partialEffect: true, stopPhase: "kill_attempted" });
+      expect(getNodeInventory(db, stopped.rig.id).find((node) => node.nodeId === stopped.node.id)).toMatchObject({
+        sessionStatus: "running", intentionallyStopped: false, stopRequested: true,
+      });
+      expect(sessionRegistry.getBindingForNode(stopped.node.id)).not.toBeNull();
+    });
+
+    it("a revert never reaches another attempt's request or a replacement session", () => {
+      const stopped = seatFixture("cas", "dev.qa");
+      const prev = sessionRegistry.requestStop(stopped.session.id, "attempt-a")!;
+      sessionRegistry.requestStop(stopped.session.id, "attempt-b");
+      expect(sessionRegistry.revertStopRequest(stopped.session.id, "attempt-a", prev)).toBe(false);
+      expect(db.prepare("SELECT intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(stopped.session.id))
+        .toEqual({ intentionally_stopped: 1, stop_attempt: "attempt-b" });
+      const replacement = sessionRegistry.registerSession(stopped.node.id, stopped.sessionName);
+      sessionRegistry.updateStatus(replacement.id, "running");
+      expect(db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(replacement.id)).toEqual({ intentionally_stopped: 0 });
     });
   });
 

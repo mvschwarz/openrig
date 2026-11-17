@@ -2324,10 +2324,12 @@ export class TmuxAdapter {
         if (this.freshProbes.get(name) === pane && !this.deliveryGuard!.maybeTarget(name) && !this.deliveryGuard!.maybeTarget(pane)) return kill();
         return this.deliveryGuard!.input(this.freshManaged.get(name)?.nodeId ?? name, kill);
       }, true);
-      return beforeEffect ? { ...result, stopPhase } : result;
+      // #2940: a failure always says how far the stop got, so "no effect" can be proven without a checked stop.
+      return beforeEffect || !result.ok ? { ...result, stopPhase } : result;
     }
     if (beforeEffect) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard.", stopPhase };
-    return this.killSessionUnchecked(name);
+    const result = await this.killSessionUnchecked(name, undefined, phase => { stopPhase = phase; });
+    return result.ok ? result : { ...result, stopPhase };
   }
 
   /** The session a seat's stop would end is the seat's own: every session OpenRig creates for a seat carries its node's

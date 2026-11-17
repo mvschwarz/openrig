@@ -873,6 +873,8 @@ export interface NodeInventoryEntry {
   /** The latest session was explicitly stopped and has no replacement binding.
    * It remains non-running, but is not a missing member in the rig lifecycle. */
   intentionallyStopped?: boolean;
+  /** #2940: a supported stop was requested and is not confirmed yet; the seat is not reported as exited. */
+  stopRequested?: boolean;
   // Current projection: an applicable identity failure down-ranks a running
   // session to attention_required; the stored startup result stays unchanged.
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
