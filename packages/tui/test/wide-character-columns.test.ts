@@ -70,6 +70,29 @@ describe("rig table cells are sized in terminal columns", () => {
     expect(styled).toContain(style.paint("chrome", "┃"));
     expect(stripAnsi(styled)).toBe(screen.lines[y - 1]);
   });
+  it("keeps a CJK pod's agent count inside the styled explorer", () => {
+    const snap = demoSnapshot();
+    const host = snap.hosts[0]!;
+    const rig = host.rigs[0]!;
+    const pod = rig.pods[0]!;
+    pod.name = "界";
+    pod.agents = pod.agents.slice(0, 1);
+    const state = createViewState({ instanceId: "wide-explorer-meta", getSnapshot: () => snap }).get();
+    const screen = renderScreen(state, snap, { cols: COLS, rows: 40 });
+    const key = `pod:${host.name}/${rig.name}/${pod.name}`;
+    const y = screen.explorerRows.find((row) => row.key === key)!.y;
+    const plain = screen.lines[y - 1]!;
+    const style = createStyle("truecolor");
+    const styled = stylizeLines(screen, style)[y - 1]!;
+
+    expect(plain.startsWith(" ")).toBe(true);
+    expect(stripAnsi(styled)).toBe(plain);
+    expect(styled).toContain(style.paint("dim", "1") + style.paint("chrome", "┃"));
+    const border = plain.indexOf("1┃") + 1;
+    expect(border).toBeGreaterThan(0);
+    expect(stringWidth(plain.slice(0, border))).toBe(screen.explorerWidth);
+  });
+
   it.each(SUMMARIES)("keeps every line within the terminal width with a %s NOW summary", (_, summary) => {
     const screen = rigScreen(summary);
 
