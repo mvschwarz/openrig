@@ -494,4 +494,14 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(calls.find((call) => call.path === "/api/workflow/wf-1/resume")?.body).toMatchObject({ occurrenceId: "q-failed" });
     expect(calls.find((call) => call.path === "/api/workflow/wf-1/abort")?.body).toEqual({ reason: "operator stopped", actorSession: "orch@rig" });
   });
+
+  it("resume --owner sends the named redrive owner", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "workflow", "resume", "wf-1", "--owner", "qa-slot-2@rig", "--actor-session", "orch@rig", "--json",
+    ]);
+    expect(calls.find((call) => call.path === "/api/workflow/wf-1/resume")?.body).toMatchObject({ ownerSession: "qa-slot-2@rig" });
+  });
 });

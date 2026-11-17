@@ -999,11 +999,13 @@ Examples:
     .option("--actor-session <session>", "Your session, only when it can't be derived from the caller (a managed seat's is): recorded as claimed")
     .option("--occurrence <failed-qitem-id>", "Failure occurrence to redrive (required when more than one is unresolved)")
     .option("--decision <text>", "Durable instruction for the step owner (lands in the redrive packet)")
+    .option("--owner <session>", "Send the redrive to this seat instead of re-resolving the step's owner from its role")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Use after diagnosing an exception item: the instance returns to active,
 REBOUND to the step that failed, with a fresh packet routed to that
-step's re-resolved owner. The trail is preserved and extended; the
+step's re-resolved owner, or to --owner when you name one (recorded as
+named). The trail is preserved and extended; the
 resolved exception occurrence closes; a NEW failure of the same step
 raises a NEW occurrence honestly.
 
@@ -1015,6 +1017,7 @@ Examples:
       actorSession?: string;
       occurrence?: string;
       decision?: string;
+      owner?: string;
       json?: boolean;
     }) => {
       const deps = getDeps();
@@ -1029,6 +1032,7 @@ Examples:
           actorSession: opts.actorSession,
           occurrenceId: opts.occurrence,
           decision: opts.decision,
+          ownerSession: opts.owner,
         });
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
