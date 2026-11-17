@@ -1547,6 +1547,30 @@ describe("#2429: the guard's own paste after Claude Code collapses it", () => {
     expect(f.bodies.a).toBe(text);
   });
 
+  // A count-less label beside literal text is a person's single-line paste, not ours: our own single line collapses to the
+  // bare label, and an inline paste draws no label. The text after it matching our head proves nothing, whether the
+  // composite is first drawn after notePasted's read or already at it.
+  it.each([["after notePasted's read", true], ["at notePasted's read", false]])(
+    "holds an unrecorded count-less label followed by our own text, drawn %s, with no Enter", async (_case, late) => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = `reminder: ${"x".repeat(24)}`;
+      let readsAfterPaste = 0;
+      vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+        frame(f.bodies.a === text ? (late && readsAfterPaste++ === 0 ? text : `[Pasted text #2] ${text}`) : f.bodies.a ?? ""));
+      const result = await f.send("count-less-composite", text, { verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+      expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+      expect(f.submissions).toEqual([]);
+    });
+
+  it("submits its own inline text that spells out a count-less label", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `see [Pasted text #2] in the reminder ${"x".repeat(24)}`;
+    const result = await f.send("quotes-a-label", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
   it.each([["a single-line label for a multi-line paste", "one\ntwo\nthree", "[Pasted text #1]"],
     ["a counted label for a single-line paste", `reminder: ${"x".repeat(1190)}`, "[Pasted text #1 +2 lines]"]])(
     "does not submit %s", async (_case, text, label) => {
