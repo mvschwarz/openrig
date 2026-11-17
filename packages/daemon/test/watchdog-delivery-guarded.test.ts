@@ -1099,6 +1099,36 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
     expect(next.f.submissions).toEqual([]);
   });
 
+  it("a recovery stopped between its finalize and its queue receipt keeps the row pointer when it runs again", async () => {
+    let saved: Buffer | undefined;
+    let first!: ReturnType<typeof queueOnly>;
+    first = queueOnly({ afterCreate: () => { saved ??= first.f.db.serialize(); } });
+    const job = first.operatorReminder();
+    await first.tick(job.jobId);
+    expect(saved).toBeDefined();
+    const next = queueOnly({ saved });
+    const written = next.wdRows();
+    expect(written).toHaveLength(1);
+    // The recovery stops right after its finalize, before the queue receipt is saved.
+    const real = next.f.outbox.finalizeDelivery.bind(next.f.outbox);
+    let stop = true;
+    vi.spyOn(next.f.outbox, "finalizeDelivery").mockImplementation(((id: string, state: never) => {
+      const result = real(id, state);
+      if (stop) { stop = false; throw new Error("recovery stopped after its finalize"); }
+      return result;
+    }) as never);
+    await next.tick(job.jobId);
+    await next.tick(job.jobId);
+    expect(next.wdRows()).toEqual(written);
+    expect(next.s.history.listForJob(job.jobId, 1)[0]).toMatchObject({ outcome: "skipped", skipReason: "delivery_receipt_reconciled",
+      deliveryStatus: "queued_as_row" });
+    const receipt = next.f.db.prepare("SELECT delivery_state, guard_delivery FROM outbox_entries WHERE outbox_id LIKE 'watchdog-occurrence-%'").get() as
+      { delivery_state: string; guard_delivery: string };
+    expect(receipt.delivery_state).toBe("delivered");
+    expect(JSON.parse(receipt.guard_delivery).watchdog).toMatchObject({ queueOnly: { code: "queued_as_row", qitemId: written[0]!.qitem_id } });
+    expect(next.f.submissions).toEqual([]);
+  });
+
   it("a cold row written just before a restart is recorded as the occurrence's row after it, with no second row", async () => {
     let saved: Buffer | undefined;
     let first!: ReturnType<typeof queueOnly>;

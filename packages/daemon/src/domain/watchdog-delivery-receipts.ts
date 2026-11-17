@@ -65,12 +65,17 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
         // row is created idempotently by that id), so a park's one-shot wake isn't spent without a row or note.
         if (receipt?.queueOnlyTarget) {
           const qitemId = queueOnlyRowId(selected[0]!.occurrenceId);
-          const row = outbox.db.prepare("SELECT state FROM queue_items WHERE qitem_id=?").get(qitemId) as { state: string } | undefined;
-          const queued = !!row && ["pending", "in-progress", "blocked"].includes(row.state);
-          if (entry.deliveryState === "indeterminate") outbox.claimForDelivery(entry.outboxId);
-          outbox.finalizeDelivery(entry.outboxId, queued ? "delivered" : "failed");
+          // One transaction, as a normal completion's finalize and receipt are: a stop between them can't leave the entry
+          // delivered without its queue receipt (the row pointer).
+          const queued = outbox.db.transaction(() => {
+            const row = outbox.db.prepare("SELECT state FROM queue_items WHERE qitem_id=?").get(qitemId) as { state: string } | undefined;
+            const open = !!row && ["pending", "in-progress", "blocked"].includes(row.state);
+            if (entry.deliveryState === "indeterminate") outbox.claimForDelivery(entry.outboxId);
+            outbox.finalizeDelivery(entry.outboxId, open ? "delivered" : "failed");
+            if (open) save(entry.outboxId, { ...receipt, queueOnly: { code: QUEUED_AS_ROW, qitemId } });
+            return open;
+          })();
           if (!queued) return null;
-          save(entry.outboxId, { ...receipt, queueOnly: { code: QUEUED_AS_ROW, qitemId } });
           return { status: "ok", occurrenceTracked: true, reconciled: true, outboxIds: [entry.outboxId], sentMessage: receipt.message,
             code: QUEUED_AS_ROW, queuedQitemId: qitemId };
         }
