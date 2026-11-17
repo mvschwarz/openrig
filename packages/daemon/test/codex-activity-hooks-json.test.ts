@@ -238,6 +238,56 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
     expect(m.store[CONFIG]).toContain('model = "gpt"');
   });
 
+  it("keeps stale state under resolved source spellings when removing a known JSON group", () => linkedSources(sources => {
+    const config = sources.map(source =>
+      `[hooks.state.'${source}:stop:8:0']\ntrusted_hash = "stale-person"\nenabled = false\n`).join("\n");
+    const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config,
+      [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP, ours()] } }) });
+    const a = adapter(m.fs);
+    a.removeCodexActivityHooks();
+    expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([USER_GROUP]);
+    for (const source of sources) {
+      expect(state(m.store[CONFIG]!)[`${source}:stop:8:0`]).toEqual({ trusted_hash: "stale-person", enabled: false });
+    }
+    expect(m.store[CONFIG]).toBe(config);
+    const after = m.store[CONFIG];
+    a.removeCodexActivityHooks();
+    expect(m.store[CONFIG]).toBe(after);
+  }));
+
+  it.each([false, true].flatMap(json => ['"""', "'''"].map(quote => ({ json, quote }))))(
+    "carries a disable to source aliases without changing a $quote note (JSON: $json)", ({ json, quote }) => {
+      const file = json ? HOOKS : CONFIG;
+      const basename = json ? "hooks.json" : "config.toml";
+      const resolved = `/storage/${basename}`;
+      const sources = [file, `/resolved/home/${basename}`, resolved];
+      const note = `note = ${quote}\nenabled = true\n[example_only]\nenabled = false\n${quote}\n`;
+      const config = `[hooks.state."${file}:stop:0:0"]\nenabled = false\n\n`
+        + sources.slice(1).map(source => `[hooks.state."${source}:stop:0:0"]\n${note}`).join("\n");
+      const realpath = vi.spyOn(nodeFs.realpathSync, "native").mockImplementation(path => {
+        if (path === HOME) return "/resolved/home";
+        if (path === file) return resolved;
+        throw new Error("fixture path not linked");
+      });
+      try {
+        const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config,
+          ...(json ? { [HOOKS]: JSON.stringify({ hooks: {} }) } : {}) });
+        const a = adapter(m.fs);
+        a.ensureCodexActivityHooks();
+        const written = m.store[CONFIG]!;
+        for (const source of sources) {
+          expect(state(written)[`${source}:stop:0:0`]).toMatchObject({ enabled: false });
+        }
+        for (const source of sources.slice(1)) {
+          expect(state(written)[`${source}:stop:0:0`]?.note).toBe("enabled = true\n[example_only]\nenabled = false\n");
+        }
+        expect(written.split(note)).toHaveLength(3);
+        if (json) expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([ours()]);
+        a.ensureCodexActivityHooks();
+        expect(m.store[CONFIG]).toBe(written);
+      } finally { realpath.mockRestore(); }
+    });
+
   it("the same move finds trust tables Codex saved with literal-quoted keys (#2029)", () => {
     const later = { hooks: [{ type: "command", command: "echo later", timeout: 7 }] };
     const config = `model = "gpt"\n\n[hooks.state.'${HOOKS}:stop:1:0']\ntrusted_hash = 'openrig-old'\n\n`

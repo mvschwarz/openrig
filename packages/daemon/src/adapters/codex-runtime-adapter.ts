@@ -798,7 +798,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           if (!groups) continue;
           const kept = groups.flatMap((group, index) => isOpenRigActivityGroup(group) ? [] : [index]);
           if (kept.length === groups.length) continue;
-          const newIndexOf = (index: number) => { const at = kept.indexOf(index); return at < 0 ? null : at; };
+          const newIndexOf = (index: number) => {
+            if (index >= groups.length) return index; // Stale or unfamiliar state is not one of the groups we removed.
+            const at = kept.indexOf(index);
+            return at < 0 ? null : at;
+          };
           for (const keySource of keySources) {
             const prefix = `${keySource}:${CODEX_HOOK_EVENT_KEY_LABEL[event]}:`;
             config = rekeyCodexHookStateText(config, prefix, newIndexOf);
@@ -2633,9 +2637,11 @@ function upsertCodexHookDisabled(content: string, key: string): string {
   const lines = content.split("\n");
   const at = findTomlTable(lines, path);
   if (at < 0) return tomlDefines(content, path) ? content : `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
+  const topLevel = lineStartsAtDocumentLevel(content);
   let end = lines.length;
-  for (let i = at + 1; i < lines.length; i++) if (lines[i]!.trim().startsWith("[")) { end = i; break; }
-  const enabledAt = lines.findIndex((line, i) => i > at && i < end && /^\s*enabled\s*=/.test(line));
+  for (let i = at + 1; i < lines.length; i++) if (topLevel[i] && lines[i]!.trim().startsWith("[")) { end = i; break; }
+  const enabledAt = lines.findIndex((line, i) => i > at && i < end && topLevel[i]
+    && /^(?:enabled|"enabled"|'enabled')\s*=/.test(line.trim()));
   if (enabledAt >= 0) lines[enabledAt] = "enabled = false";
   else lines.splice(at + 1, 0, "enabled = false");
   return lines.join("\n");
@@ -2670,6 +2676,7 @@ function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (i
       if (tail) {
         const index = newIndexOf(Number(tail[1]));
         if (index === null) { dropping = true; continue; }
+        if (index === Number(tail[1])) { out.push(line); continue; }
         out.push(`[hooks.state.${JSON.stringify(`${prefix}${index}:${tail[2]}`)}]`);
         continue;
       }
