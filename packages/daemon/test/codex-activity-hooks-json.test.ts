@@ -238,16 +238,16 @@ describe("Codex activity hooks with a hooks.json keep the person's own state (#1
     expect(m.store[CONFIG]).toContain('model = "gpt"');
   });
 
-  it("keeps stale state under resolved source spellings when removing a known JSON group", () => linkedSources(sources => {
+  it.each(["8", "08"])("keeps stale state index %s under resolved source spellings when removing a known JSON group", index => linkedSources(sources => {
     const config = sources.map(source =>
-      `[hooks.state.'${source}:stop:8:0']\ntrusted_hash = "stale-person"\nenabled = false\n`).join("\n");
+      `[hooks.state.'${source}:stop:${index}:0']\ntrusted_hash = "stale-person"\nenabled = false\n`).join("\n");
     const m = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config,
       [HOOKS]: JSON.stringify({ hooks: { Stop: [USER_GROUP, ours()] } }) });
     const a = adapter(m.fs);
     a.removeCodexActivityHooks();
     expect(JSON.parse(m.store[HOOKS]!).hooks.Stop).toEqual([USER_GROUP]);
     for (const source of sources) {
-      expect(state(m.store[CONFIG]!)[`${source}:stop:8:0`]).toEqual({ trusted_hash: "stale-person", enabled: false });
+      expect(state(m.store[CONFIG]!)[`${source}:stop:${index}:0`]).toEqual({ trusted_hash: "stale-person", enabled: false });
     }
     expect(m.store[CONFIG]).toBe(config);
     const after = m.store[CONFIG];

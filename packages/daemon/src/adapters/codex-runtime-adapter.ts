@@ -2654,7 +2654,7 @@ function rekeyCodexHookState(state: CodexHookState, prefix: string, newIndexOf: 
     const tail = key.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
     if (!tail) { next[key] = value; continue; }
     const index = newIndexOf(Number(tail[1]));
-    if (index !== null) next[`${prefix}${index}:${tail[2]}`] = value;
+    if (index !== null) next[index === Number(tail[1]) ? key : `${prefix}${index}:${tail[2]}`] = value;
   }
   return next;
 }
