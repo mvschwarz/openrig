@@ -188,6 +188,10 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     const timer = hasTimers ? statements.statement(`SELECT j.job_id, j.policy, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.scan_interval_seconds, j.spec_yaml
       FROM queue_transition_wakes w JOIN watchdog_jobs j ON j.job_id = w.wake_ref
       WHERE w.qitem_id = ? AND w.phase = 'armed' AND j.state = 'active'
+        AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+          WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+        AND NOT EXISTS (SELECT 1 FROM queue_transitions t
+          WHERE t.qitem_id = w.qitem_id AND t.transition_id > w.transition_id AND t.state <> 'blocked')
       ORDER BY w.transition_id DESC LIMIT 1`).get(id) as { job_id: string; policy: WatchdogJob["policy"]; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; scan_interval_seconds: number | null; spec_yaml: string } | undefined : undefined;
     // The scheduler's own due time: a never-evaluated reminder fires one interval after registration (#801),
     // and the wake-now marker is due now (#860).

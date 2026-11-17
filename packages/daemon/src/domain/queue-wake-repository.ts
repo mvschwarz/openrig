@@ -211,6 +211,9 @@ export class QueueWakeRepository {
           AND (? = 0 OR w.transition_id = (
             SELECT MAX(a.transition_id) FROM queue_transition_wakes a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
+          ) AND NOT EXISTS (
+            SELECT 1 FROM queue_transitions t
+             WHERE t.qitem_id = w.qitem_id AND t.transition_id > w.transition_id AND t.state <> 'blocked'
           ))
           AND (? OR NOT EXISTS (
             SELECT 1 FROM queue_transition_wakes f
@@ -257,6 +260,10 @@ export class QueueWakeRepository {
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
           )
           AND NOT EXISTS (
+            SELECT 1 FROM queue_transitions t
+             WHERE t.qitem_id = w.qitem_id AND t.transition_id > w.transition_id AND t.state <> 'blocked'
+          )
+          AND NOT EXISTS (
             SELECT 1 FROM queue_transition_wakes f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
                AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
@@ -301,6 +308,10 @@ export class QueueWakeRepository {
           AND w.transition_id = (
             SELECT MAX(a.transition_id) FROM queue_transition_wakes a
              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM queue_transitions t
+             WHERE t.qitem_id = w.qitem_id AND t.transition_id > w.transition_id AND t.state <> 'blocked'
           )`,
     ).all().map((row) => (row as { wake_ref: string }).wake_ref);
   }

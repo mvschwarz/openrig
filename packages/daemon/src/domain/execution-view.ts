@@ -1279,7 +1279,11 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         now: now(),
       });
       const wake = deps.db
-        .prepare(`SELECT wake_ref, phase FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' LIMIT 1`)
+        .prepare(`SELECT w.wake_ref, w.phase FROM queue_transition_wakes w
+          WHERE w.qitem_id = ? AND w.phase = 'armed'
+            AND NOT EXISTS (SELECT 1 FROM queue_transitions t
+              WHERE t.qitem_id = w.qitem_id AND t.transition_id > w.transition_id AND t.state <> 'blocked')
+          ORDER BY w.transition_id DESC LIMIT 1`)
         .get(r.qitem_id) as { wake_ref: string; phase: string } | undefined;
       // park_kind is a CLOSED enum from the DESIGN: deliberate-with-wake |
       // stalled | indeterminate. Nothing else may leak in (the live artifact
