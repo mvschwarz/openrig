@@ -8,6 +8,9 @@ import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { migrate } from "../src/db/migrate.js";
+import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
+import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
@@ -26,11 +29,12 @@ const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
 function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName: string) => Promise<boolean | null>, pane = "unrecognized provider content",
-  withStructural = false) {
+  withStructural = false, operator = false) {
   const db = createFullTestDb(); databases.push(db);
   const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), bus = new EventBus(db);
-  const rig = rigRepo.createRig("r1001"), node = rigRepo.addNode(rig.id, "worker.a", { role: "worker", runtime });
-  const name = "worker-a@r1001", session = sessionRegistry.registerSession(node.id, name);
+  const rig = rigRepo.createRig(operator ? "kernel" : "r1001"), node = rigRepo.addNode(rig.id,
+    operator ? "operator.agent" : "worker.a", { role: operator ? "operator" : "worker", runtime });
+  const name = operator ? "operator-agent@kernel" : "worker-a@r1001", session = sessionRegistry.registerSession(node.id, name);
   sessionRegistry.updateStatus(session.id, "running"); sessionRegistry.updateBinding(node.id, { tmuxSession: name });
   const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
   const clock = { value: new Date() }, now = () => clock.value;
@@ -380,4 +384,99 @@ it("a Codex wake refused at a native choice the person then answers: no escalati
   expect((await policy.evaluate(job as never)).action).toBe("send");
   expect((await f.transport.send(f.name, "synthetic assigned-work wake")).ok).toBe(true);
   expect(f.paste).toHaveBeenCalledTimes(1);
+});
+
+
+function permissionFixture(operator = false) {
+  const f = fixture("claude-code", undefined, "unrecognized provider content", false, operator);
+  // The shared core fixture deliberately omits these production queue extensions.
+  migrate(f.db, [queueItemSummarySchema, queueItemEvidenceRefSchema]);
+  return f;
+}
+
+// Exercise the production scheduler wiring and hook store, without a refused wake,
+// original queue work, native terminal, or gateway installation.
+it.each(["running", "idle"])("a hook-only permission at a row-less %s seat alerts once in the Feed and clears on answer", async status => {
+  const f = permissionFixture();
+  f.db.prepare("UPDATE sessions SET status=? WHERE session_name=?").run(status, f.name);
+  const repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("Notification", "permission_prompt", 0);
+  expect(repo.list({ limit: 100 })).toEqual([]);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    const alerts = repo.list({ limit: 100 }).filter(r => r.tags?.includes("wake-prompt-refusal"));
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.destinationSession).toBe("human@kernel");
+    expect(alerts[0]!.evidenceRef).toContain(`rig telemetry events --start retained --node ${f.node.id}`);
+    expect(repo.listAttention().map(r => r.qitemId)).toContain(alerts[0]!.qitemId);
+    await scheduler.runTickNow();
+    expect(repo.list({ limit: 100 })).toHaveLength(1);
+    f.clock.value = new Date(f.clock.value.getTime() + 1000);
+    await f.hook("PermissionPromptCleared", null, 0);
+    await scheduler.runTickNow();
+    expect(repo.getById(alerts[0]!.qitemId)?.state).toBe("done");
+    expect(repo.listAttention()).toEqual([]);
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  } finally { await scheduler.stop(); }
+});
+
+it.each([false, true])("a hook-only operator permission alerts elsewhere, never back to the prompted operator (old carrier=%s)", async oldCarrier => {
+  const f = permissionFixture(true);
+  const repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  if (oldCarrier) await repo.create({ sourceSession: "daemon@kernel", destinationSession: f.name,
+    body: "Existing prompt alert", summary: "Operator needs an answer", nudge: false,
+    tags: ["wake-escalation", "wake-prompt-refusal", `prompt-destination:${f.name}`] });
+  await f.hook("Notification", "permission_prompt", 0);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    await scheduler.runTickNow();
+    const alerts = repo.list({ limit: 100 });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.destinationSession).toBe("human@kernel");
+    expect(alerts[0]!.destinationSession).not.toBe(f.name);
+    expect(alerts[0]!.evidenceRef).toContain(`rig telemetry events --start retained --node ${f.node.id}`);
+    expect(repo.listAttention().map(r => r.qitemId)).toEqual([alerts[0]!.qitemId]);
+    expect(repo.list({ destinationSession: f.name, limit: 100 })).toEqual([]);
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  } finally { await scheduler.stop(); }
+});
+
+it("a stale hook-only permission is unknown and creates no alert; a fresh current hook then alerts", async () => {
+  const f = permissionFixture();
+  const repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("Notification", "permission_prompt", 6 * 60_000);
+  expect(f.store.getLatestForNode({ sessionName: f.name })).toMatchObject({ state: "unknown", stale: true });
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    expect(repo.list({ limit: 100 })).toEqual([]);
+    await f.hook("Notification", "permission_prompt", 0);
+    await scheduler.runTickNow();
+    expect(repo.listAttention()).toHaveLength(1);
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  } finally { await scheduler.stop(); }
+});
+
+
+it("a later confirmation of the same hook-only permission does not reopen its owner's disposition", async () => {
+  const f = permissionFixture(), repo = new QueueRepository(f.db, f.bus, { validateRig: () => true });
+  await f.hook("Notification", "permission_prompt", 0);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    const alerts = repo.listAttention();
+    expect(alerts).toHaveLength(1);
+    repo.update({ qitemId: alerts[0]!.qitemId, actorSession: "human@kernel", state: "done", closureReason: "no-follow-on" });
+    f.clock.value = new Date(f.clock.value.getTime() + 1000);
+    await f.hook("PermissionPromptConfirmed", null, 0);
+    await scheduler.runTickNow();
+    expect(repo.listAttention()).toEqual([]);
+    expect(repo.list({ limit: 100 })).toHaveLength(1);
+    expect(repo.getById(alerts[0]!.qitemId)?.state).toBe("done");
+  } finally { await scheduler.stop(); }
 });

@@ -20,6 +20,7 @@ import {
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
+  makePermissionPromptReader,
   makePromptKindReader,
   makePromptStateReader,
   resolveWakeRetryIntervalSeconds,
@@ -249,6 +250,10 @@ export function startWakeLadderScheduler(deps: {
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
       ...(deps.tmuxAdapter ? { readHookReviews: makeKernelHookReviewReader({ db, tmux: deps.tmuxAdapter }) } : {}),
+      readPermissionPrompts: makePermissionPromptReader({ db,
+        getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
+          order: runtime === "claude-code" ? "source" : "arrival" }),
+      }),
       readPromptState: makePromptStateReader({
         db,
         getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),

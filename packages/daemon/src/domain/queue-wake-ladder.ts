@@ -6,7 +6,7 @@ import { seatRuntimeHomeBySession } from "./seat-runtime-home.js";
 import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
-import { latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
+import { AGENT_ACTIVITY_FRESHNESS_MS, latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
@@ -218,6 +218,8 @@ export interface WakeLadderDeps {
   readPromptState?: (destination: string, refusedAt: string) => "blocked" | "clear" | "unknown";
   /** The kind of prompt a seat's cached activity reports (its needs-input reason); "unknown" when it doesn't say. */
   readPromptKind?: (destination: string) => PromptKind;
+  /** Current-occupant permission hooks; no capture or attempted wake is needed. */
+  readPermissionPrompts?: () => PermissionPromptObservation[];
   /** Fresh bound kernel Codex screens only; no native input or new scheduler. */
   readHookReviews?: () => Promise<HookReviewObservation[]>;
   now?: Date;
@@ -1109,6 +1111,33 @@ export function makePromptStateReader(deps: {
   };
 }
 
+export interface PermissionPromptObservation extends HookReviewObservation {
+  evidenceRef: string;
+}
+
+/** A permission hook can need an answer even when its seat holds no work. Use the store's
+ * freshness and generation verdict; retained stale evidence never starts this path. */
+export function makePermissionPromptReader(deps: {
+  db: Database.Database;
+  getLatestHook: (destination: string, runtime: string | null) => AgentActivity | null | undefined;
+}): () => PermissionPromptObservation[] {
+  return () => (deps.db.prepare(`SELECT n.id AS nodeId, s.session_name AS destination, n.runtime
+    FROM sessions s JOIN nodes n ON n.id=s.node_id JOIN rigs r ON r.id=n.rig_id
+    WHERE r.archived_at IS NULL AND s.status NOT IN ('stopped','exited','detached','superseded')
+      AND s.id=(SELECT latest.id FROM sessions latest
+      WHERE latest.node_id=n.id ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)`)
+    .all() as Array<{ nodeId: string; destination: string; runtime: string | null }>).map(({ nodeId, destination, runtime }) => {
+      const hook = deps.getLatestHook(destination, runtime);
+      const fresh = hook?.evidenceSource === "runtime_hook" && hook.stale === false
+        && hook.generationProvenance === "resolved";
+      const state = !fresh ? "unknown"
+        : hook.state === "needs_input" && hook.reason === "permission_prompt" || latestHookPermissionPending(hook, runtime) ? "blocked"
+        : hook.rawEvent === "PermissionPromptCleared" || hook.state === "running" || hook.state === "idle" ? "clear" : "unknown";
+      return { destination, state, episode: hook?.generation ?? "unknown", observedAt: hook?.eventAt ?? "",
+        evidenceRef: `rig telemetry events --start retained --node ${nodeId} --limit 128 --json` };
+    });
+}
+
 /** Marks the row that asks a person to resolve a seat stuck at a permission or approval prompt. */
 export const PROMPT_ALERT_TAG = "wake-prompt-refusal";
 const PROMPT_EPISODE_TAG = "prompt-episode:";
@@ -1238,9 +1267,10 @@ function gatewayOwnsEscalation(deps: WakeLadderDeps, row: QueueItem): boolean {
 
 // The operator engine owns actual human delivery. Its non-nudged queue carrier
 // must still be locally admissible; cross-host source provenance is not a local destination.
-function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string): string {
+function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string, avoidSubject = false): string {
   const candidates = [resolveOperatorSeat(), resolveDefaultReceiver(deps.db).session, source];
-  return candidates.find((candidate): candidate is string => Boolean(candidate && !knownPerson(deps, candidate) && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+  return candidates.find((candidate): candidate is string => Boolean(candidate && (!avoidSubject || candidate !== dest)
+    && !knownPerson(deps, candidate) && deps.queueRepo.acceptsDestination(candidate))) ?? (avoidSubject ? "human@kernel" : dest);
 }
 
 /** A delivery-recovery finding about our own notice stays readable without spawning another notice.
@@ -1263,7 +1293,7 @@ async function advancePromptRefusals(
   attemptWake: (qitemId: string, target: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
-  const groups = new Map<string, { keys: string[]; rowKeys: Map<string, Set<string>>; jobKeys: Set<string>; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean; hookReview?: string;
+  const groups = new Map<string, { keys: string[]; rowKeys: Map<string, Set<string>>; jobKeys: Set<string>; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean; hookReview?: string; permissionHook?: string;
     /** Routed work stuck at this seat's prompt (return-route.ts), by id, and its episode keys. */
     waiters?: Map<string, QueueItem>; waiterKeys?: Set<string> }>();
   const readAt = (dest: string, refusedAt: string): "blocked" | "clear" | "unknown" => {
@@ -1371,6 +1401,25 @@ async function advancePromptRefusals(
     } else group.other = true;
   }
 
+  const permissionObservations = new Map<string, PermissionPromptObservation>();
+  const permissionState = (observation: HookReviewObservation): HookReviewObservation["state"] =>
+    Number.isFinite(Date.parse(observation.observedAt))
+      && Math.abs(now.getTime() - Date.parse(observation.observedAt)) <= AGENT_ACTIVITY_FRESHNESS_MS ? observation.state : "unknown";
+  try {
+    for (const observation of deps.readPermissionPrompts?.() ?? []) {
+      const state = permissionState(observation);
+      permissionObservations.set(observation.destination, { ...observation, state });
+      if (state !== "blocked" || deps.queueRepo.deliveryDrains.holds(observation.destination)) continue;
+      const key = `${PROMPT_EPISODE_TAG}${observation.destination}|permission-hook:${observation.episode}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
+      if (closedEpisode(key)) continue;
+      let group = groups.get(observation.destination);
+      if (!group) { group = { keys: [], rowKeys: new Map(), jobKeys: new Set(), rows: new Map(), jobs: new Map(), refusedAt: observation.observedAt }; groups.set(observation.destination, group); }
+      group.keys.push(key);
+      group.permissionHook = key;
+      group.other = true;
+    }
+  } catch { /* An unreadable hook is unknown; existing obligations keep their own evidence. */ }
+
   const hookObservations = new Map<string, HookReviewObservation>();
   const freshHook = (observation: HookReviewObservation): boolean =>
     Number.isFinite(Date.parse(observation.observedAt)) && Math.abs(now.getTime() - Date.parse(observation.observedAt)) <= 15_000;
@@ -1445,6 +1494,7 @@ async function advancePromptRefusals(
   const promptState = (dest: string, since?: string): "blocked" | "clear" | "unknown" => {
     const group = groups.get(dest);
     if (group?.hookReview) return hookObservations.get(dest)?.state ?? "unknown";
+    if (group?.permissionHook) return permissionObservations.get(dest)?.state ?? "unknown";
     const state = readAt(dest, group?.refusedAt ?? since ?? now.toISOString());
     // A choice prompt no hook announces leaves the seat's own evidence unknown, and the transport's refusal is a read of
     // that prompt. While the latest refusal is at a choice prompt, one held one retry interval with nothing newer clearing
@@ -1471,7 +1521,8 @@ async function advancePromptRefusals(
     if (tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|hook-review:`))
       && (!hookObservations.has(dest) || hookObservations.get(dest)?.state === "unknown")) continue;
     const sameEpisode = group?.keys.some(key => tags.includes(key));
-    const state = promptState(dest, aggregate.tsCreated);
+    const state = tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|permission-hook:`))
+      ? permissionObservations.get(dest)?.state ?? "unknown" : promptState(dest, aggregate.tsCreated);
     const cleared = state === "clear";
     // Keep the prompt boundary without closing the owner's hold. A later refusal is a new episode even if
     // no reminder was delivered between them; repeated clear ticks do not move that boundary forward.
@@ -1581,7 +1632,7 @@ async function advancePromptRefusals(
       }
       members.splice(i, 1);
     }
-    if (!members.length && !group.jobs.size && !group.hookReview && !group.waiters?.size) continue;
+    if (!members.length && !group.jobs.size && !group.hookReview && !group.permissionHook && !group.waiters?.size) continue;
     const orch = openEscalationOwner(deps, `prompt-destination:${dest}`) ?? resolveOrch(dest);
     const waiterTags = [...(group.waiters?.keys() ?? [])].map(id => `${PROMPT_ROUTED_WORK_PREFIX}${id}`);
     // A seat's prompt in work handed over with a return route goes to that conversation through the operator rung, not to the
@@ -1595,18 +1646,20 @@ async function advancePromptRefusals(
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
     const reason = (group.hookReview
       ? `Seat ${dest} is stopped at Codex's "Hooks need review" (hook_trust_gate). Reach that pane on this host with ${tmuxAttachCommand(dest)}. Review the hooks there through Codex's hook review; approve them there only if you choose to. OpenRig does not approve or bypass this review. No input was sent.`
-      : "interactive prompt blocks outstanding work; no input was sent")
+      : group.permissionHook ? `Seat ${dest} is waiting at a permission prompt; no input was sent`
+        : "interactive prompt blocks outstanding work; no input was sent")
       + (route && route.outcome !== "none" && route.outcome !== "parent" ? `; ${route.reason}` : "");
     // Every refusal at a choice prompt: the alert follows queue.wake_human_rung and holds for other choice alerts. Any other
     // prompt keeps the permission-prompt route.
     const choiceOnly = Boolean(group.choice && !group.other);
     const kindTags = choiceOnly ? [PROMPT_CHOICE_TAG] : [];
-    const keys = group.keys.filter(key => key === group.hookReview || group.jobKeys.has(key) || group.waiterKeys?.has(key)
+    const keys = group.keys.filter(key => key === group.hookReview || key === group.permissionHook || group.jobKeys.has(key) || group.waiterKeys?.has(key)
       || members.some(m => group.rowKeys.get(m.row.qitemId)?.has(key)));
     const waiting = [...(group.waiters?.values() ?? [])];
     const aggregate = await ensureEscalationRow(deps, dest,
-      toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0] ?? waiting[0]?.sourceSession) : orch!, members, reason,
-      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys, ...waiterTags], group.jobs, waiting);
+      toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0] ?? waiting[0]?.sourceSession, Boolean(group.permissionHook)) : orch!, members, reason,
+      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys, ...waiterTags], group.jobs, waiting,
+      group.permissionHook ? permissionObservations.get(dest)?.evidenceRef : undefined);
     if (!aggregate || deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row || row.state === "blocked") continue; // The explicit owner hold owns its next wake and disposition.
@@ -1665,6 +1718,11 @@ async function advancePromptRefusals(
     }
     if (view.lastMarkerTs !== null && now.getTime() - view.lastMarkerTs < intervalS * 1000) continue;
     // Re-read at the send boundary after aggregate persistence.
+    if (group.permissionHook) {
+      const current = deps.readPermissionPrompts?.().find(o => o.destination === dest);
+      if (!current || permissionState(current) !== "blocked"
+          || current.episode !== permissionObservations.get(dest)?.episode) continue;
+    }
     if (group.hookReview) {
       const current = (await deps.readHookReviews?.().catch(() => []) ?? []).find(o => o.destination === dest);
       if (!current || !freshHook(current) || current.state !== "blocked"
@@ -1673,7 +1731,7 @@ async function advancePromptRefusals(
     if (deps.queueRepo.deliveryDrains.holds(dest) || members.some(m => deliveryHeld(deps.queueRepo, m.row))) continue;
     if (promptState(dest) !== "blocked") continue;
     const freshMembers = members.map(m => readCandidate(m.row.qitemId, dest));
-    if (unreadableDestinations.has(dest) || (!group.jobs.size && !group.hookReview && !group.waiters?.size && !freshMembers.some(fresh =>
+    if (unreadableDestinations.has(dest) || (!group.jobs.size && !group.hookReview && !group.permissionHook && !group.waiters?.size && !freshMembers.some(fresh =>
       fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state)))) continue;
     if (!view.orchRung) {
       if (!toOperator) {
@@ -1881,6 +1939,7 @@ async function ensureEscalationRow(
   jobs: ReadonlyMap<string, string> = new Map(),
   /** Routed work stuck at this seat's prompt (return-route.ts). Named, never taken over: their owners keep them. */
   waiting: readonly QueueItem[] = [],
+  evidenceRef?: string,
 ): Promise<{ qitemId: string } | null> {
   if (deps.queueRepo.deliveryDrains.holds(dest) || deps.queueRepo.deliveryDrains.holds(orch)
     || members.some(m => deliveryHeld(deps.queueRepo, m.row))) return null;
@@ -1892,8 +1951,14 @@ async function ensureEscalationRow(
     .get(`%"${dedupTag}"%`) as { qitem_id: string } | undefined;
   if (existing) {
     const row = deps.queueRepo.getById(existing.qitem_id);
-    if (row && knownPerson(deps, row.destinationSession) && !gatewayOwnsEscalation(deps, row)) {
-      deps.queueRepo.routeToFallback(row.qitemId, knownPerson(deps, orch)
+    const permissionHook = extraTags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|permission-hook:`));
+    if (row && permissionHook && row.destinationSession === dest && evidenceRef && !row.evidenceRef)
+      deps.queueRepo.update({ qitemId: row.qitemId, actorSession: row.sourceSession, state: row.state,
+        evidenceRef, transitionNote: "permission-hook evidence recorded" });
+    const localFeed = permissionHook && orch === "human@kernel" && row?.destinationSession === orch;
+    if (row && !gatewayOwnsEscalation(deps, row) && (permissionHook && row.destinationSession === dest
+        || knownPerson(deps, row.destinationSession) && !localFeed)) {
+      deps.queueRepo.routeToFallback(row.qitemId, knownPerson(deps, orch) && !permissionHook
         ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession) : orch,
         UNACCEPTED_CARRIER_REROUTE);
     }
@@ -1928,6 +1993,7 @@ async function ensureEscalationRow(
     sourceSession: OPENRIG_SENDER,
     destinationSession: orch,
     body,
+    ...(evidenceRef ? { evidenceRef } : {}),
     summary: `Wake escalation: ${counted || dest} — ${reason}`,
     tags: [WAKE_ESCALATION_TAG, dedupTag,
       ...(oneHop ? [ESCALATION_HOP_TAG] : []), ...extraTags, ...members.map(m => recoveryTag(m.row.qitemId))],
