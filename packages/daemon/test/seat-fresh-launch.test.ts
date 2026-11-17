@@ -17,6 +17,7 @@ import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
+import { Reconciler } from "../src/domain/reconciler.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -62,6 +63,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   let service: SeatLifecycleService;
   let listProcesses: NativeProcessLister;
   let readProcesses: () => Promise<ProcessTableRow[]>;
+  let hiddenPids: number[];
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -135,6 +137,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       executableName: "codex", command: "/opt/native/codex -m model", argv: ["/opt/native/codex", "-m", "model"],
       startedAt: "Sat Jan  1 12:00:00 2000" }];
     readProcesses = async () => [];
+    hiddenPids = [];
     runtimeAdapters = { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } };
     service = new SeatLifecycleService({
       db,
@@ -144,6 +147,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       tmuxAdapter: tmux,
       listProcesses: () => listProcesses(),
       readProcesses: () => readProcesses(),
+      readProcessCensus: async () => ({ rows: await readProcesses(), permissionHiddenPids: hiddenPids }),
       nodeLauncher,
       startupOrchestrator,
       runtimeAdapters,
@@ -585,6 +589,23 @@ describe("SeatLifecycleService.launchFresh", () => {
     Object.defineProperty(tmux, "deliveryGuard", { value: { preference: () => ({ desired: true, effective: true }), lifecycle } });
     const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
     expect(result).toMatchObject({ launchable: false, wouldStop: false, blockers: [{ code: "typing_guard_enabled" }] });
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  // #3076: queue-only refuses no lifecycle work, so the plan names no typing-protection blocker there, as execution
+  // under lifecycle() doesn't; an explicit hold and urgent-only still do.
+  it.each([
+    [{ desired: true, effective: true, desiredLevel: "queue-only", effectiveLevel: "queue-only" }, false],
+    [{ desired: true, effective: true }, true],
+    [{ desired: true, effective: true, desiredLevel: "urgent-only", effectiveLevel: "urgent-only" }, true],
+    [{ desired: true, effective: false, desiredLevel: "queue-only" }, false],
+  ])("the plan's typing-protection blocker follows lifecycle's rule (%j: %s)", async (preference, blocked) => {
+    const seat = seedSeat({ clean: true });
+    const lifecycle = vi.fn();
+    Object.defineProperty(tmux, "deliveryGuard", { value: { preference: () => preference, lifecycle } });
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true }) as { blockers?: Array<{ code: string }> };
+    expect((result.blockers ?? []).some(b => b.code === "typing_guard_enabled")).toBe(blocked);
     expect(lifecycle).not.toHaveBeenCalled();
     expect(tmux.createSession).not.toHaveBeenCalled();
   });
@@ -1108,6 +1129,112 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(server).toEqual({ up: true, starts: 1 });
       expect(tmux.createSession).toHaveBeenCalledTimes(1);
       expect(killed).toEqual([]);
+    });
+
+    // A host restart ends tmux with every seat in it. The daemon's boot reconcile then marks the managed sessions
+    // detached (the server isn't there and nothing recorded is running) and keeps their bindings. Nothing was
+    // stopped on purpose, so the first fresh launch after boot meets "no server running" on a managed, detached row.
+    // The identity sweep observes a session after it was created: evidence at or after the session's created_at.
+    const afterHostRestart = async (stillRunning: boolean, opts?: { noEvidence?: boolean; observedAt?: Date }) => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+      const seen = opts?.observedAt ?? new Date();
+      if (!opts?.noEvidence) new SeatIdentityStore(db).upsert({
+        nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
+        evidence: { registeredPane: "%old", observedPid: 6161, observedPanePid: 6160, observedCommand: "claude", matchedLayer: 1 },
+        sessionName: seat.sessionName, observedAt: seen.toISOString(),
+      });
+      alive.delete(seat.sessionName);
+      livePanes.delete(seat.sessionName);
+      server.up = false;
+      const before = new Date(seen.getTime() - 10 * 60_000);
+      readProcesses = async () => stillRunning ? [processRow(6160, 1, before, "zsh")] : [];
+      const boot = await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux,
+        readProcesses: () => readProcesses() }).reconcile(seat.rig.id);
+      return { seat, server, boot };
+    };
+
+    it("reopens the server for a managed seat the boot reconcile detached after a host restart", async () => {
+      const { seat, server, boot } = await afterHostRestart(false);
+      expect(boot.detached).toBe(1);
+      expect(sessionRegistry.getBindingForNode(seat.node.id)).not.toBeNull();
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      if (!result.ok) return;
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(killed).toEqual([]);
+      expect(result.supersededSessionIds).toContain(seat.session!.id);
+    });
+
+    it.each([
+      { name: "the process table can't be read", noEvidence: false,
+        rows: async (): Promise<ProcessTableRow[]> => { throw new Error("ps failed"); } },
+      { name: "no process evidence was recorded for the session", noEvidence: true, rows: async () => [] as ProcessTableRow[] },
+    ])("keeps refusing a detached managed seat when $name (its end isn't proven)", async ({ noEvidence, rows }) => {
+      const { seat } = await afterHostRestart(false, { noEvidence });
+      readProcesses = rows;
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("no proof its recorded process ended") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it("keeps refusing a detached managed seat whose recorded process is hidden from the daemon (EPERM/EACCES)", async () => {
+      const { seat } = await afterHostRestart(false);
+      hiddenPids = [6160];
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("hidden from this daemon") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it("keeps refusing when the only process evidence is older than the detached session (an earlier occupant's)", async () => {
+      const { seat } = await afterHostRestart(false, { observedAt: new Date(Date.now() - 60 * 60_000) });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("since this session began") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
+    it("keeps refusing a running managed seat's fresh launch while its socket is lost", async () => {
+      const { seat, boot } = await afterHostRestart(true);
+      expect(boot.detached).toBe(0);   // the reconcile kept it: its recorded process still runs
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it("keeps refusing a detached managed seat whose recorded process still runs behind a lost socket", async () => {
+      const { seat } = await afterHostRestart(false);
+      const before = new Date(observed.getTime() - 10 * 60_000);
+      readProcesses = async () => [processRow(6160, 1, before, "zsh")];
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("last ran as process 6160, which is still running") });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
     });
 
     it("proves older non-terminal rows absent on the restored server before superseding them", async () => {

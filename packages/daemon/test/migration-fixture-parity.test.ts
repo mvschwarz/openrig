@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { migrationsForFullTestDb, migrationsForFullTestDbExclusions } from "./helpers/test-app.js";
 import { assertExplicitSubsetOfAllMigrations } from "./helpers/migration-subset-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { coreAppAccessSchema } from "../src/db/migrations/175_core_app_access.js";
 import { nodeInputRouteSchema } from "../src/db/migrations/171_node_input_route.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -109,13 +110,13 @@ describe("P24 — migration-fixture parity (curated lists are DECLARED subsets o
     }
   });
 
-  it("175_node_statusline_throttle adds a nullable column and guards pre-175 databases (#3416 item 3)", () => {
-    expect(ALL_MIGRATIONS.some((m) => m.name === "175_node_statusline_throttle.sql")).toBe(true);
+  it("176_node_statusline_throttle adds a nullable column and guards pre-176 databases (#3416 item 3)", () => {
+    expect(ALL_MIGRATIONS.some((m) => m.name === "176_node_statusline_throttle.sql")).toBe(true);
     const db = new Database(":memory:");
     try {
-      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "175_node_statusline_throttle.sql"));
+      migrate(db, ALL_MIGRATIONS.filter((m) => m.name !== "176_node_statusline_throttle.sql"));
       const repo = new RigRepository(db);
-      const rig = repo.createRig("pre-175");
+      const rig = repo.createRig("pre-176");
       const legacyNode = repo.addNode(rig.id, "legacy", { runtime: "claude-code" });
       expect(repo.getNodeStatuslineThrottle(legacyNode.id)).toBeNull();
       expect(repo.setNodeStatuslineThrottle(legacyNode.id, null)).toBe(false);
@@ -174,5 +175,24 @@ it("upgrades existing nodes to typed input and constrains explicit native select
     expect(repo.setNodeInputRoute(node.id, "native")).toBe(true);
     expect(repo.getRig(rig.id)?.nodes.find(n => n.id === node.id)?.inputRoute).toBe("native");
     expect(() => db.prepare("UPDATE nodes SET input_route='auto' WHERE id=?").run(node.id)).toThrow();
+  } finally { db.close(); }
+});
+
+
+it("adds app credentials and submissions to an existing database without changing retained nodes", () => {
+  const db = new Database(":memory:");
+  try {
+    migrate(db, ALL_MIGRATIONS.filter(m => m.name !== coreAppAccessSchema.name));
+    const tables = () => (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'core_app_%'").all() as Array<{ name: string }>).map(row => row.name).sort();
+    expect(tables()).toEqual([]);
+    const repo = new RigRepository(db), rig = repo.createRig("pre-app-access");
+    const node = repo.addNode(rig.id, "dev", { runtime: "pi" });
+    migrate(db, ALL_MIGRATIONS);
+    expect(tables()).toEqual(["core_app_credentials", "core_app_submissions"]);
+    expect(repo.getRig(rig.id)?.nodes.find(item => item.id === node.id)).toMatchObject({ id: node.id, inputRoute: "typed" });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM core_app_credentials").get()).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM core_app_submissions").get()).toEqual({ n: 0 });
+    migrate(db, ALL_MIGRATIONS);
+    expect(tables()).toEqual(["core_app_credentials", "core_app_submissions"]);
   } finally { db.close(); }
 });

@@ -91,6 +91,7 @@ async function openLocalAttachments(client: DaemonClient, serverArgs: string[]) 
     if (file === "/usr/bin/osascript") return "window";
     if (args.at(-1) === "default-size") return "120x40";
     if (args.at(-1) === "window-size") return "latest";
+    if (args.includes("#{session_id}|#{window_id}|#{pane_id}")) return "$1|@1|%1";
     if (args.includes("#{pane_id}")) return "%1";
     return "";
   });
@@ -98,7 +99,7 @@ async function openLocalAttachments(client: DaemonClient, serverArgs: string[]) 
     exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "inherit-check", herdrConfig: vi.fn(() => "unused") };
   const result = await openTerminalWindow(client, "saved:kernel", "tmux", windowDeps);
   expect(result).toMatchObject({ ok: true, opened: ["namesake"], window: { app: "Terminal" } });
-  expect(exec).toHaveBeenCalledWith("/fixture/tmux", [...serverArgs, "new-session", "-d", "-s", "openrig-view-inherit-check", "-n", "view-1", "-P", "-F", "#{pane_id}", expect.any(String)]);
+  expect(exec).toHaveBeenCalledWith("/fixture/tmux", [...serverArgs, "new-session", "-d", "-s", "openrig-view-inherit-check", "-n", "view-1", "-P", "-F", "#{session_id}|#{window_id}|#{pane_id}", expect.any(String)]);
 }
 
 describe.each([

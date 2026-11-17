@@ -661,6 +661,20 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "tmux_probe_failed" });
   });
 
+  // #3076: the typing-guard preflight follows lifecycle's rule: queue-only refuses no lifecycle work, an explicit hold does.
+  it.each([
+    [{ desired: true, effective: true, desiredLevel: "queue-only", effectiveLevel: "queue-only" }, true],
+    [{ desired: true, effective: true }, false],
+    [{ desired: true, effective: true, desiredLevel: "openrig-urgent", effectiveLevel: "openrig-urgent" }, false],
+  ])("the typing-guard refusal follows lifecycle's rule (%j: restartable %s)", async (preference, restartable) => {
+    const w = world();
+    Object.defineProperty(w.tmux, "deliveryGuard", { value: { preference: () => preference, ownsLifecycle: () => true } });
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    if (restartable) expect(plan).toMatchObject({ ok: true });
+    else expect(plan).toMatchObject({ ok: false, code: "typing_guard_enabled" });
+    expect(w.calls).toEqual([]);
+  });
+
   it("names the shared seat refusals: reason, runtime, adopted session", async () => {
     const w = world();
     expect(await w.service.restartInPlace({ seatRef: SEAT })).toMatchObject({ ok: false, code: "missing_reason" });

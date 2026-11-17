@@ -4,6 +4,8 @@ import { BACKLOG_FOLDED_TAG, createRecoveryLookup, findQueueRecovery, freshRecov
 export { BACKLOG_FOLDED_TAG };
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { queueWaitNotice } from "./queue-wait-backoff.js";
+import { isQueueOnlyDeliveryCode } from "./watchdog-history-log.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "./seat-delivery-guard.js";
 import { lastMeaningfulTransition, pendingSince } from "./queue-waiting.js";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 // S02 (OPR.0.5.5.2) — STANDING STUCK SWEEP. `queue overdue` and `queue undelivered` are the
@@ -312,6 +314,8 @@ export interface StuckSweepDeps {
    *  or two of the owning ladder's own retry intervals, whichever is longer. Injectable for
    *  tests; the default reads the ladder's existing setting. */
   ladderSuppressionMinutes?: number;
+  /** The seat's typing guard is at queue-only (#3076). Injectable for tests; default reads the seat's stored guard. */
+  isQueueOnlySeat?: (session: string) => boolean;
 }
 
 export interface StuckSweepFindingAction {
@@ -801,6 +805,18 @@ export const STUCK_SWEEP_YIELD_EVERY_ROWS = 50;
  *  yield, so the time others run during it does not count against the next stretch. */
 export const STUCK_SWEEP_YIELD_AFTER_MS = 50;
 
+/** The daemon's reading of a seat's queue-only level: an unknown seat or an unreadable guard is not queue-only. */
+function defaultIsQueueOnlySeat(db: Database.Database): (session: string) => boolean {
+  let guard: SeatDeliveryGuard | null = null;
+  return (session) => {
+    try {
+      guard ??= new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
+      const target = guard.maybeTarget(session);
+      return !!target && guard.queueOnly(target.nodeId);
+    } catch { return false; }
+  };
+}
+
 export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepResult> {
   const log = deps.log ?? ((line: string) => console.error(line));
   const status = deps.status;
@@ -810,6 +826,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // candidate and per custody row. Each is a snapshot that is only valid while no other code runs, so both are
     // dropped (and rebuilt on the next lookup) after every yield and every awaited write.
     const recoveries = createRecoveryLookup(deps.db);
+    const isQueueOnlySeat = deps.isQueueOnlySeat ?? defaultIsQueueOnlySeat(deps.db);
     let successors: ReturnType<typeof createLinkedSuccessorLookup> | null = null;
     // Every yield and every awaited write lets other code run: indexes read before it are dropped, and `othersRan`
     // tells a list read before it that its rows need a fresh read.
@@ -928,6 +945,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!row || row.state !== "blocked" || deps.queueRepo.getParkWakeStatus(row.qitemId)?.ref !== jobId) return null;
       const response = lastMeaningfulTransition(deps.db, row.qitemId);
       if (response && Date.parse(response.at) > Date.parse(notice.at)) return null;
+      // A queue-only seat's wait notice (#3076) was noted on the row or became a queue row, with no nudge: held and
+      // readable at the seat, for a person or its next turn, not stuck. A finding would be a poller compensating.
+      if (isQueueOnlyDeliveryCode(notice.deliveryStatus)) return null;
       const ownerActivity = deps.queueRepo.ownerActivity(row.destinationSession);
       if (ownerActivity?.activity === "working" && !ownerActivity.needsInput.count && notice.deliveryStatus === "ok") return null;
       return { kind: "unconsumed-wait", row, route: resolveOrch(row.destinationSession, row) ?? row.sourceSession,
@@ -947,6 +967,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const transitions = deps.queueRepo.listTransitions(qitemId);
       const failure = currentParkedOwnerNoInputFailure(transitions);
       if (!failure) return null;
+      // A queue-only agent seat (#3076) holds OpenRig's reminders on purpose, as the parked policy skips it: an earlier
+      // refusal there is no input to fix, from the switch on, before that policy runs again.
+      if (isQueueOnlySeat(row.destinationSession) && !isBoundTerminalSeat(deps.db, row.destinationSession)) return null;
       // Another seat's incidental note is not the owner's response. This kind follows
       // the parked policy's owner-or-state-change rule, leaving other sweep kinds alone.
       if (transitions.some((t, i) => t.transitionId > (failure.transitionId ?? Number.POSITIVE_INFINITY)
@@ -1062,6 +1085,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // The seat's typing guard or interruption level held its wake on purpose: it's held and readable at the seat, not
       // stuck. (A handed-off baton's one held notice is the wake ladder's.)
       if (row.lastNudgeResult === "retained:typing_guard") return null;
+      // A queue-only seat's cold watchdog reminder (#3076) waits, with no nudge, for a person or the seat's next turn:
+      // held and readable at the seat, not stuck. A finding would be a poller compensating for the level.
+      if (row.sourceSession === "watchdog@system" && row.tags?.includes("watchdog") && row.tags.includes("queue-only")) return null;
       // The ladder check runs LAST here too: a row the ladder alone would have stopped is
       // ladder-suppressed, and its finding stays open (#1419).
       if (hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)) {
