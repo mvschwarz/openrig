@@ -1859,7 +1859,7 @@ export async function attachAgentActivity(
 ): Promise<NodeInventoryEntry[]> {
   const sampledAt = deps.now ?? new Date();
   const captureFallback = deps.captureFallback ?? false;
-  return Promise.all(entries.map(async (entry) => {
+  const attached = await Promise.all(entries.map(async (entry): Promise<NodeInventoryEntry> => {
     // A cached hook, pane sample or motion cannot revive a confirmed absent executor.
     // Preserve the applicable missing-session or exited-pane observation without probing.
     if (identityVerdictConfirmsExecutorStopped(entry.identityVerdict)) {
@@ -2033,4 +2033,13 @@ export async function attachAgentActivity(
     })),
     };
   }));
+  return attached.map(unseenIdleIsUnknown);
+}
+
+/** A seat whose tmux this sweep couldn't reach may be gone: an idle reading is the last thing it said, not what it is
+ *  now, so it reads unknown. Working and waiting readings stay, as the agent's own report of work. */
+function unseenIdleIsUnknown(entry: NodeInventoryEntry): NodeInventoryEntry {
+  if (entry.identityVerdict?.reason !== "tmux_unavailable" || entry.agentActivity?.state !== "idle") return entry;
+  return { ...entry, agentActivity: { ...entry.agentActivity, state: "unknown", reason: "tmux_unavailable",
+    evidenceSource: "tmux_session", sampledAt: entry.identityVerdict.observedAt ?? entry.agentActivity.sampledAt } };
 }

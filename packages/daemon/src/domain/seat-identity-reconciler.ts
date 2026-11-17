@@ -7,7 +7,7 @@ import { isShellForeground } from "./shell-classifier.js";
 import { claudeResumeRotation } from "./session-registry.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { probeShowsNoServer, type TmuxAdapter } from "../adapters/tmux.js";
 import type { SeatIdentityVerdict } from "./types.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./seat-identity-store.js";
 import { RESERVED_HOST_IDS, validateHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -97,7 +97,7 @@ type PaneObservation = { pid: number | null; command: string | null; dead?: bool
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
-  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes">>;
+  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes" | "probeSession">>;
   now?: () => Date;
   listProcesses?: NativeProcessLister;
   readProcessTableCensus?: () => Promise<RunnerProcessCensus>;
@@ -228,8 +228,14 @@ export class SeatIdentityReconciler {
     }
     if (generation !== this.generation) return;
     if (liveSessions === null || liveSessions.size === 0) {
+      // An empty listing can't tell a blip from a server that's gone, but each seat's own probe can: tmux saying no
+      // server runs on the daemon's socket, or a live server without the session, is positive absence, as rig down
+      // reads it. Anything else stays unavailable.
       for (const seat of seats) {
-        this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
+        const probe = await this.tmux.probeSession?.(seat.session_name).catch(() => null) ?? null;
+        if (generation !== this.generation) return;
+        const gone = probe !== null && (probe.state === "absent" || probeShowsNoServer(probe));
+        this.store.upsert(gone ? this.sessionMissingVerdict(seat, observedAt) : this.tmuxUnavailableVerdict(seat, observedAt));
       }
       return;
     }
@@ -323,6 +329,18 @@ export class SeatIdentityReconciler {
         this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
       }
     }
+  }
+
+  private sessionMissingVerdict(seat: RunningSeatRow, observedAt: string): SeatIdentityVerdict {
+    return {
+      nodeId: seat.node_id,
+      verdict: "pane_missing",
+      evidenceSource: "tmux_session",
+      reason: "session_missing",
+      evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: seat.session_name,
+      observedAt,
+    };
   }
 
   private tmuxUnavailableVerdict(seat: RunningSeatRow, observedAt: string): SeatIdentityVerdict {
