@@ -11,8 +11,7 @@ export interface RigDeps extends StatusDeps {
   readFile: (path: string) => string;
 }
 
-/** The daemon's error message from a failed response body (JSON `{ error }`, or its text), e.g. an export refused for
- *  a seat whose stored process_limits can't be read (#3253). */
+/** The daemon's error message from a failed response body (JSON `{ error }`, or its text). */
 export function daemonErrorText(data: unknown): string {
   let body = data;
   if (typeof data === "string") {
@@ -20,6 +19,19 @@ export function daemonErrorText(data: unknown): string {
   }
   const error = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
   return typeof error === "string" && error ? error : JSON.stringify(body);
+}
+
+/** The daemon's X-OpenRig-Export-Warnings header: seats whose settings a JSON export leaves out (#3253). */
+function exportWarnings(headers: Headers | undefined): Array<{ logicalId: string; reason: string }> {
+  const raw = headers?.get("X-OpenRig-Export-Warnings");
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(decodeURIComponent(raw)) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((w): w is { logicalId: string; reason: string } =>
+      !!w && typeof w.logicalId === "string" && typeof w.reason === "string") : [];
+  } catch {
+    return [{ logicalId: "export", reason: "its warnings header can't be read" }];
+  }
 }
 
 export function rigCommand(depsOverride?: RigDeps): Command {
@@ -49,6 +61,7 @@ export function rigCommand(depsOverride?: RigDeps): Command {
           return;
         }
         console.log(JSON.stringify(res.data, null, 2));
+        for (const { logicalId, reason } of exportWarnings(res.headers)) console.error(`Warning: ${logicalId}: ${reason}`);
         return;
       }
 
@@ -78,6 +91,10 @@ export function rigCommand(depsOverride?: RigDeps): Command {
         }
       }
       console.log(opts.json ? JSON.stringify(template, null, 2) : stringifyYaml(template).trimEnd());
+      // The template drops the export's comments, so what it left out goes to stderr.
+      for (const line of res.data.split("\n")) {
+        if (line.startsWith("# Not carried: ") || line.startsWith("# Member startup not carried for ")) console.error(`Warning: ${line.slice(2)}`);
+      }
     });
 
   cmd
