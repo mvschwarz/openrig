@@ -58,7 +58,7 @@ import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
 import { recordedProcessEnded, recordedProcessStillRunning } from "./reconciler.js";
-import { readProcessTable, type ProcessTableRow } from "./process-table.js";
+import { readProcessTable, readProcessTableCensusNow, type ProcessTableCensus, type ProcessTableRow } from "./process-table.js";
 import { applySelectedHome, readRuntimeHomeState, recordRuntimeHome, revertSelectedHome, RECORDABLE_HOME_RUNTIMES, type RecordRuntimeHomeResult, type RuntimeHomeRecordRef,
   type RuntimeHomeState, type SelectedHomePlan } from "./seat-runtime-home-record.js";
 
@@ -118,6 +118,8 @@ export interface SeatLifecycleDeps {
   listProcesses?: NativeProcessLister;
   /** The OS process table, read before reopening a released seat's tmux server; injectable for tests. */
   readProcesses?: () => Promise<ProcessTableRow[]>;
+  /** A census begun now, with the pids hidden from this user, read before reopening a detached seat's server; injectable for tests. */
+  readProcessCensus?: () => Promise<ProcessTableCensus>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
@@ -344,6 +346,7 @@ interface LatestSessionRow {
   session_name: string;
   status: string;
   origin: string;
+  created_at?: string | null;
   community_harness?: string | null;
 }
 
@@ -370,6 +373,7 @@ export class SeatLifecycleService {
   private readonly tmuxAdapter: TmuxAdapter;
   private readonly listProcesses?: NativeProcessLister;
   private readonly readProcesses: () => Promise<ProcessTableRow[]>;
+  private readonly readProcessCensus: () => Promise<ProcessTableCensus>;
   private readonly nodeLauncher: NodeLauncher | null;
   private readonly startupOrchestrator: StartupOrchestrator | null;
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
@@ -393,6 +397,7 @@ export class SeatLifecycleService {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.listProcesses = deps.listProcesses;
     this.readProcesses = deps.readProcesses ?? readProcessTable;
+    this.readProcessCensus = deps.readProcessCensus ?? readProcessTableCensusNow;
     this.nodeLauncher = deps.nodeLauncher ?? null;
     this.startupOrchestrator = deps.startupOrchestrator ?? null;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
@@ -1730,20 +1735,22 @@ export class SeatLifecycleService {
       // A host restart ends tmux with every seat in it, and the daemon's boot reconcile marks those managed sessions
       // detached while keeping their bindings. Nothing was stopped on purpose, so "no server running" alone isn't
       // absence: the server may only have lost its socket. Reopen an empty server for that row only on positive
-      // evidence that the seat's recorded process has ended (recordedProcessEnded); unknown keeps the refusal. Its
-      // binding stays for the stale-row clean below, which proves absence again on the reopened server.
+      // evidence that the seat's recorded process has ended (recordedProcessEnded: a census, hidden pids and evidence older
+      // than this session both count as unknown); unknown keeps the refusal. Its binding stays for the stale-row clean
+      // below, which proves absence again on the reopened server. Limit: only the last recorded process is proven; a
+      // replacement no poll ever saw, followed by a lost socket, is outside this proof.
       const detachedManaged = latest !== null
         && latest.session_name === canonicalSessionName
         && latest.status === "detached" && latest.origin !== "claimed"
         && this.nonTerminalSessions(node.id).length === 0;
-      const table = (stoppedManagedOccupant && released) || detachedManaged
-        ? this.readProcesses().catch(() => null) : null;
-      const processes = () => table ?? Promise.resolve(null);
+      const table = stoppedManagedOccupant && released ? this.readProcesses().catch(() => null) : null;
+      const census = detachedManaged && !stoppedManagedOccupant ? await this.readProcessCensus().catch(() => null) : null;
+      const processes = () => table ?? Promise.resolve(census ? census.rows : null);
       // Unclaim doesn't end the process. While the released (or detached) session's recorded process still runs, its
       // server may only have lost its socket: a server started there would read the session absent and launch a second
       // occupant beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
       const session = { nodeId: node.id, sessionName: canonicalSessionName };
-      const stillRuns = table ? await recordedProcessStillRunning(this.db, session, processes) : null;
+      const stillRuns = table || census ? await recordedProcessStillRunning(this.db, session, processes) : null;
       if (stillRuns) {
         return {
           ...canonicalProbe,
@@ -1752,12 +1759,13 @@ export class SeatLifecycleService {
         };
       }
       const detachedEnded = detachedManaged && !stoppedManagedOccupant
-        && await recordedProcessEnded(this.db, session, processes);
+        && await recordedProcessEnded(this.db, { ...session, createdAt: latest?.created_at }, async () => census);
       if (detachedManaged && !stoppedManagedOccupant && !detachedEnded) {
         return {
           ...canonicalProbe,
-          guidance: "This seat's detached session has no proof its recorded process ended (no process evidence for it, or "
-            + "the process table can't be read), so a server that only lost its socket can't be ruled out. Start the "
+          guidance: "This seat's detached session has no proof its recorded process ended (no process evidence for it since "
+            + "this session began, a recorded process hidden from this daemon, or the process table can't be read), so a "
+            + "server that only lost its socket can't be ruled out. Start the "
             + "terminal server once the seat is known to be gone, then launch again.",
         };
       }
@@ -2524,7 +2532,7 @@ export class SeatLifecycleService {
 
   private latestSession(nodeId: string): LatestSessionRow | null {
     const row = this.db.prepare(
-      `SELECT id, session_name, status, origin, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
+      `SELECT id, session_name, status, origin, created_at, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(nodeId) as LatestSessionRow | undefined;
     return row ?? null;
   }
