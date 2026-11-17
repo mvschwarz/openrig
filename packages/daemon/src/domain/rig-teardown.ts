@@ -471,13 +471,17 @@ export class RigTeardownOrchestrator {
     return this.deps.sessionRegistry.getLatestLiveSessions(rigId);
   }
 
-  /** This rig's seats whose files may still be in use: each live session, and each released one. A released session
-   *  (claimed, then detached by rig unclaim or down) is its owner's and may still be running, whether or not it's still
-   *  its seat's latest, so its cwd stays in use until recordAlreadyStoppedIntent sees tmux report it absent. */
+  /** This rig's seats whose files may still be in use: each live session, each released one, and each seat whose latest
+   *  session reads detached without a recorded stop. A released session (claimed, then detached by rig unclaim or down)
+   *  is its owner's and may still be running, whether or not it's still its seat's latest. A detached latest session may
+   *  still be running too (this server didn't show it), as settledSkillSeats also holds. Either's folders stay in use
+   *  until recordAlreadyStoppedIntent sees tmux report it absent and records the stop. */
   private seatsInUse(rigId: string): Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd"> & { launchedCwd: string | null }> {
     const released = this.db.prepare(`
       SELECT n.id AS nodeId, n.runtime, n.cwd, s.id AS sessionId FROM nodes n JOIN sessions s ON s.node_id = n.id
-      WHERE n.rig_id = ? AND s.origin = 'claimed' AND s.status = 'detached' AND s.intentionally_stopped = 0
+      WHERE n.rig_id = ? AND s.status = 'detached' AND s.intentionally_stopped = 0
+        AND (s.origin = 'claimed' OR s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1))
     `).all(rigId) as Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd" | "sessionId">>;
     return [...this.getLatestLiveSessions(rigId), ...released]
       .map((session) => ({ ...session, launchedCwd: this.launchedCwdOf(session.sessionId) }));

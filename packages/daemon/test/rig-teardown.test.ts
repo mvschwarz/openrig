@@ -972,6 +972,36 @@ describe("RigTeardownOrchestrator", () => {
         expect(fs.existsSync(saved.collector)).toBe(false);
       });
 
+    // A launched seat's latest session can read detached while its terminal still runs (this server didn't show it). Until
+    // tmux reports it absent, its saved and launched folders are its own; once absent, its stop is recorded and both go.
+    it.each(["present", "absent"] as const)("a launched seat whose latest session reads detached and probes %s keeps or gives back both folders", async (state) => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const saved = claudeCwd(own), run = claudeCwd(own);
+      for (const s of [saved, run]) addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
+      const before = [saved, run].map((s) => fs.readFileSync(s.settings, "utf-8"));
+      const rig = rigRepo.createRig("claude-rig");
+      const node = rigRepo.addNode(rig.id, "dev", { runtime: "claude-code", cwd: saved.cwd });
+      const session = sessionRegistry.registerSession(node.id, "dev@claude-rig", "initial", undefined, { launchedCwd: run.cwd });
+      sessionRegistry.updateStatus(session.id, "detached");
+      const tmux = mockTmux();
+      tmux.probeSession = vi.fn(async () => ({ state }));
+
+      await teardownWith(run.asset, tmux).teardown(rig.id);
+
+      const stopped = (db.prepare("SELECT intentionally_stopped FROM sessions WHERE id = ?").get(session.id) as { intentionally_stopped: number }).intentionally_stopped;
+      if (state === "present") {
+        expect([saved, run].map((s) => fs.readFileSync(s.settings, "utf-8"))).toEqual(before);
+        for (const s of [saved, run]) expect(fs.readFileSync(s.collector, "utf-8")).toBe(COLLECTOR);
+        expect(stopped).toBe(0);
+      } else {
+        for (const s of [saved, run]) {
+          expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+          expect(fs.existsSync(s.collector)).toBe(false);
+        }
+        expect(stopped).toBe(1);
+      }
+    });
+
     // A link below the cwd shares a file between two directories: the stopping seat's cwd A and a live seat's cwd B. Whichever
     // way the link points, the shared target stays and is named; A's own, unshared targets still go.
     it.each(["B's .claude and .openrig link to A's", "A's .claude and .openrig link to B's", "settings.local.json is hardlinked"] as const)(
