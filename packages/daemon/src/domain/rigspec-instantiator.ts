@@ -2223,7 +2223,11 @@ export class PodRigInstantiator {
   async launchPersistedFresh(
     rigId: string,
     nodeId: string,
-    opts?: { processLimitsMode?: ProcessLimitsMode },
+    opts?: {
+      processLimitsMode?: ProcessLimitsMode;
+      /** A restore run's `--cwd`, used ahead of the saved folder for this launch only; the saved folder is unchanged. */
+      cwdOverride?: string;
+    },
   ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
     processLimits?: SeatProcessLimitsNotice }> {
     const rig = this.deps.rigRepo.getRig(rigId);
@@ -2263,7 +2267,7 @@ export class PodRigInstantiator {
       nodeId,
       // Preserve the resolved cwd from materialization, including a prior
       // --cwd-override, rather than silently falling back to process cwd.
-      cwdOverride: node.cwd ?? undefined,
+      cwdOverride: opts?.cwdOverride ?? node.cwd ?? undefined,
       resolveResult,
       ...(opts?.processLimitsMode ? { processLimitsMode: opts.processLimitsMode } : {}),
     });

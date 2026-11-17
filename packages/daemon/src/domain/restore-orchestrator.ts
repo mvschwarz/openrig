@@ -9,6 +9,7 @@ import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydra
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
+import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
@@ -260,9 +261,13 @@ export interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. #3253: the restore passes "recovery", so a
-   *  process limit that can't be applied doesn't stop the seat; the notice comes back in `processLimits`. */
-  freshLaunch?: (rigId: string, nodeId: string, opts?: { processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode }) => Promise<{
+  /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe (in `opts.cwdOverride` when this run has one).
+   *  #3253: the restore passes "recovery", so a process limit that can't be applied doesn't stop the seat; the notice
+   *  comes back in `processLimits`. */
+  freshLaunch?: (rigId: string, nodeId: string, opts?: {
+    processLimitsMode?: import("../adapters/tmux.js").ProcessLimitsMode;
+    cwdOverride?: string;
+  }) => Promise<{
     status: "launched" | "failed" | "attention_required";
     error?: string;
     warnings?: string[];
@@ -282,6 +287,15 @@ export interface RestoreOrchestratorDeps {
   getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
   /** Tells the resolved escalation owners which seats an attempt left as bare shells (noticeHarnessNotStarted). */
   harnessNotStartedNotice?: (input: { rigId: string; attempt: string; seats: Array<{ nodeId: string; logicalId: string; cause?: string }> }) => Promise<HarnessNotStartedReport>;
+}
+
+/** A restored seat's checkpoint file in its working directory, named for the seat, so seats restored into one folder (a
+ *  run's `--cwd`, or a saved folder they share) each keep their own: the session name made safe for a file name, then the
+ *  first 8 hex of the SHA-256 of the exact name. Names that become the same safe text (`alpha beta`, `alpha-beta`) or
+ *  differ only in case (on a case-insensitive filesystem) still get different files; no name is refused. */
+function checkpointFileName(sessionName: string): string {
+  const digest = createHash("sha256").update(sessionName).digest("hex").slice(0, 8);
+  return `.rigged-checkpoint-${sessionName.replace(/[^A-Za-z0-9._@-]/g, "-")}-${digest}.md`;
 }
 
 export class RestoreOrchestrator {
@@ -388,6 +402,9 @@ export class RestoreOrchestrator {
     automaticReplacements?: AutomaticSeatReplacement[];
     /** Explicit rig launch choice; persisted only after restore preconditions pass. */
     nonInterruptive?: boolean;
+    /** `rig up <rig> --existing --cwd <dir>`: every seat this restore launches starts there, for this run only (the
+     *  seats' saved directories stay as they are), as `--cwd` does for a new launch. */
+    cwdOverride?: string;
     /** Selection evidence from an automatic caller. Direct restore defaults
      * to explicit because its public door names the snapshot id. */
     snapshotSelection?: RestoreSnapshotSelection;
@@ -469,6 +486,7 @@ export class RestoreOrchestrator {
         currentCodexProfiles: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? [])
           .filter((current) => current.codexConfigProfile !== undefined)
           .map((current) => [current.logicalId, current.codexConfigProfile!])),
+        ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}),
         currentStatuses: observed.currentStatuses,
         attachedLogicalIds: observed.attachedLogicalIds,
       });
@@ -1256,10 +1274,12 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
+    // `--cwd`: the seat launches, resumes and gets its guidance and checkpoint in the given directory, for this run only.
+    if (opts?.cwdOverride) entry = { ...entry, node: { ...entry.node, cwd: opts.cwdOverride } };
     // Compare against the live logical target without changing saved post-launch inputs.
     const node = entry.node;
     // Activity-hook restore gaps (#1530) are collected out-of-band: postLaunchRestore
@@ -1279,6 +1299,13 @@ export class RestoreOrchestrator {
     const external = this.sessionRegistry.getBindingForNode(nodeId);
     if (external && seatProcessOwner(resolveSeatKind(external.attachmentType)) === "external") {
       return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId), ...notStarted };
+    }
+    // A seat's saved directory that isn't on this machine (a workspace restored onto another home) is named plainly, with
+    // the way to launch elsewhere; nothing is refused here, and the launch below goes on as before.
+    const savedCwd = node.cwd ?? liveNode?.cwd;
+    if (!opts?.cwdOverride && savedCwd && isAbsolute(savedCwd) && opts?.fsOps && !opts.fsOps.exists(savedCwd)) {
+      warnings?.push(`Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine. To launch this rig's `
+        + `seats in another directory for this run: rig up ${data.rig?.name ?? rigId} --existing --cwd <dir>.`);
     }
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
@@ -1919,7 +1946,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean } },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -2249,7 +2276,7 @@ export class RestoreOrchestrator {
       if (!node.cwd) {
         return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: "Checkpoint available but node has no cwd" };
       }
-      const written = this.writeCheckpointFile(node.cwd, checkpoint);
+      const written = this.writeCheckpointFile(node.cwd, sessionName, checkpoint);
       if (written) {
         baseStatus = "rebuilt";
       } else {
@@ -2330,8 +2357,10 @@ export class RestoreOrchestrator {
             && candidate.id !== launchResult.session.id);
         try {
           // #3253: this replaces the provisional shell of a restore, so it is a recovery too: a limit that can't be
-          // applied doesn't stop the seat, and its notice is the node's.
-          const fresh = await this.freshLaunch(rigId, node.id, { processLimitsMode: "recovery" });
+          // applied doesn't stop the seat, and its notice is the node's. The replacement launches where the provisional
+          // shell did: this run's `--cwd`, else the saved folder.
+          const fresh = await this.freshLaunch(rigId, node.id,
+            { processLimitsMode: "recovery", ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}) });
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
           // The replacement's own outcome, also when it applied the limit (no notice): the retired provisional shell's
           // notice no longer describes the seat (the key is set either way, so the caller doesn't fall back to it).
@@ -3128,9 +3157,9 @@ export class RestoreOrchestrator {
     return { attemptId: started.seq, status: completed ? nodeStatusIn(completed.payload) : null };
   }
 
-  private writeCheckpointFile(cwd: string, checkpoint: Checkpoint): boolean {
+  private writeCheckpointFile(cwd: string, sessionName: string, checkpoint: Checkpoint): boolean {
     try {
-      const filePath = join(cwd, ".rigged-checkpoint.md");
+      const filePath = join(cwd, checkpointFileName(sessionName));
       const content = [
         "# OpenRig Checkpoint",
         "",

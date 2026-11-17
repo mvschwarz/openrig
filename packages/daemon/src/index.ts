@@ -300,6 +300,10 @@ export async function startServer(port?: number) {
   if (!initialization.ok) {
     throw new Error(`OpenRig instance initialization blocked: ${formatInstanceInitializationConflicts(initialization)}`);
   }
+  if (initialization.workspaceExistingProject) {
+    console.log(`[openrig] workspace.root holds a project of its own (${initialization.workspaceExistingProject}); `
+      + "OpenRig left it as it is and reads that project's own id.");
+  }
 
   // bug-fix slice auth-bearer-tailscale-trust: distinguish "explicit
   // operator opt-in" from "default" by treating an undefined env as
