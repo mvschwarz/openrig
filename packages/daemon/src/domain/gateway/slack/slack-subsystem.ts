@@ -327,9 +327,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   //  durable identity stays in the queue record; this is display-only. Resolved
   //  ONCE here so no settings read sits on the per-post path (restart picks up a
   //  rename, the same pickup cadence as the rest of the connector config).
+  const machineId = getSelfHostId();
   const machineLabel = selfMachineLabel(
     (() => { try { return new SettingsStore().resolveOne("host.name"); } catch { return null; } })(),
-    getSelfHostId(),
+    machineId,
   );
   const receiver = (() => { try { return resolveDefaultReceiver(opts.queueRepo.db); } catch { return null; } })();
   const inbound = effectiveInboundDestination(cfg, receiver?.session ?? null);
@@ -661,6 +662,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // P6: each post names the machine it comes from — the operator's display
         //  name when one is set, else the daemon's own host id.
         machine: () => machineLabel,
+        machineFallback: machineId ?? undefined,
         fetchImpl: opts.fetchImpl,
         stopSignal: runCtl.signal,
         delivered,

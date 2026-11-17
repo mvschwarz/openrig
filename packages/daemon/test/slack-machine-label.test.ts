@@ -1,8 +1,50 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { selfMachineLabel } from "../src/domain/gateway/slack/slack-subsystem.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import { subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
+import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
+import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 
 const configured = (value: string) => ({ value, source: "file" as const });
+
+describe("machine names on the Slack delivery path", () => {
+  it.each([
+    ["Local", "lead@team", "Local"],
+    ["Mac mini & lab", "lead@team", "Mac mini &amp; lab"],
+    ["&".repeat(400), "lead@team", "host-4a409197"],
+    ["x".repeat(1983), "lead@team", "host-4a409197"],
+    ["x".repeat(1983), "a@b", "x".repeat(1983)],
+  ])("posts with a fitting machine label (case %#)", async (name, sender, expected) => {
+    const home = mkdtempSync(path.join(tmpdir(), "slack-machine-"));
+    const posts: unknown[] = [];
+    try {
+      const deliver = subsystemSlackDeliver({
+        botToken: "xoxb-EXAMPLE-fake", channel: "C-TEST", sourceLabel: "vm",
+        machine: () => selfMachineLabel(configured(name), "host-4a409197"),
+        machineFallback: "host-4a409197",
+        delivered: new SeenStore(path.join(home, "delivered.jsonl")),
+        attempted: new SeenStore(path.join(home, "attempted.jsonl")),
+        outboundSeen: new SeenStore(path.join(home, "seen.jsonl")),
+        fetchImpl: async (_url, init) => {
+          posts.push(JSON.parse(String(init?.body)));
+          return new Response(JSON.stringify({ ok: true, ts: "100.1" }), { status: 200 });
+        },
+      });
+      const result = await deliver({
+        kind: "outbound_decision", decisionId: "machine-post", op: OUTBOUND_OP, entityBindingRef: "person@external",
+        payload: { qitemId: "q-machine", sourceSession: sender, summary: "Decide X", body: "The details." },
+      });
+      expect(result.ok).toBe(true);
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).toMatchObject({ text: expect.stringMatching(`^From ${sender} on ${expected}\\n`) });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("selfMachineLabel (Slack sender-line machine label)", () => {
   it("prefers the operator's display name over the generated id", () => {
