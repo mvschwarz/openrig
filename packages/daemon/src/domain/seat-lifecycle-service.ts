@@ -1727,21 +1727,29 @@ export class SeatLifecycleService {
         && ((latest.status === "exited" && latest.origin !== "claimed") || released)
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
-      // Unclaim doesn't end the process. While the released session's recorded process still runs, its server may
-      // only have lost its socket: a server started there would read the session absent and launch a second occupant
-      // beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
-      const stillRuns = stoppedManagedOccupant && released
+      // A host restart ends tmux with every seat in it, and the daemon's boot reconcile marks those managed sessions
+      // detached (no server, nothing recorded running) while keeping their bindings. Nothing was stopped on purpose,
+      // but "no server running" then means no sessions, on the same evidence the reconcile used: so reopen an empty
+      // server for that row too. Its binding stays for the stale-row clean below, which proves absence again.
+      const detachedManaged = latest !== null
+        && latest.session_name === canonicalSessionName
+        && latest.status === "detached" && latest.origin !== "claimed"
+        && this.nonTerminalSessions(node.id).length === 0;
+      // Unclaim doesn't end the process. While the released (or detached) session's recorded process still runs, its
+      // server may only have lost its socket: a server started there would read the session absent and launch a second
+      // occupant beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
+      const stillRuns = (stoppedManagedOccupant && released) || detachedManaged
         ? await recordedProcessStillRunning(this.db, { nodeId: node.id, sessionName: canonicalSessionName },
           () => this.readProcesses().catch(() => null))
         : null;
       if (stillRuns) {
         return {
           ...canonicalProbe,
-          guidance: `This seat's released session last ran as process ${stillRuns.pid}, which is still running, so it may be `
+          guidance: `This seat's ${released ? "released" : "detached"} session last ran as process ${stillRuns.pid}, which is still running, so it may be `
             + "on a tmux server this daemon can't reach. End that process, then launch again.",
         };
       }
-      if (stoppedManagedOccupant) {
+      if (stoppedManagedOccupant || detachedManaged) {
         try {
           const restored = await this.tmuxAdapter.startServer();
           if (restored.ok) {
