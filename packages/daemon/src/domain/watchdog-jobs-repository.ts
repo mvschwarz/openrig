@@ -47,9 +47,12 @@ export const PHASE_D_POLICIES = [
   "mode-scheduled-end",
 ] as const;
 
-/** Policies the daemon ensures exactly one active-or-stopped row for per target (`ensureAutoRegistration`). */
+/**
+ * Policies daemon start ensures one active-or-stopped row for, keyed by the exact target session
+ * (`ensureAutoRegistrationAtStartup`). `idle-gate-qitem` is left out: its key is the seat's whole
+ * set of session aliases, and startup only audits it.
+ */
 export const AUTO_REGISTERED_POLICIES: readonly string[] = [
-  "idle-gate-qitem",
   "parked-owner-consumer",
   "delivery-digest-flush",
 ];
@@ -580,6 +583,31 @@ export class WatchdogJobsRepository {
         : `No action needed.`),
     );
     return this.ensureAutoRegistration(input);
+  }
+
+  /**
+   * Daemon start, one target at a time (#3437): `ensureAutoRegistrationResolvingDuplicates`, but any
+   * other failure for this target (e.g. `auto_registration_state_invalid` from a row in an unknown
+   * state) is warned with its error and the rows are left as they are, so one bad target never
+   * stops the daemon from starting.
+   */
+  ensureAutoRegistrationAtStartup(
+    input: EnsureAutoRegistrationInput,
+    warn: (message: string) => void,
+  ): WatchdogJob | null {
+    try {
+      return this.ensureAutoRegistrationResolvingDuplicates(input, warn);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const details = error instanceof WatchdogJobsError && error.details !== undefined
+        ? `; details=${JSON.stringify(error.details)}`
+        : "";
+      warn(
+        `[watchdog] startup could not ensure ${input.policy}/${input.targetSession}; left its jobs as they are and continued: ` +
+        `${message}${details}`,
+      );
+      return null;
+    }
   }
 
   /**

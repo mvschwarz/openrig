@@ -624,6 +624,30 @@ describe("WatchdogJobsRepository — duplicate auto-registration rows (#3437)", 
     expect(warnings).toHaveLength(1);
   });
 
+  it("startup warns on a target with a row in an unknown state, leaves it, and still ensures the next target", () => {
+    const bad = repo.register(job("daemon@kernel"));
+    db.prepare("UPDATE watchdog_jobs SET state = 'paused' WHERE job_id = ?").run(bad.jobId);
+    const healthy = { ...job("daemon@kernel"), targetSession: "parked-owner-consumer@other" };
+    const warnings: string[] = [];
+    expect(repo.ensureAutoRegistrationAtStartup(job("daemon@kernel"), (m) => warnings.push(m))).toBeNull();
+    expect(repo.ensureAutoRegistrationAtStartup(healthy, (m) => warnings.push(m))).toMatchObject({
+      targetSession: "parked-owner-consumer@other",
+      state: "active",
+    });
+    expect(db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(bad.jobId)).toEqual({ state: "paused" });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("parked-owner-consumer/parked-owner-consumer@demo");
+    expect(warnings[0]).toContain("auto_registration_state_invalid");
+    expect(warnings[0]).toContain(bad.jobId);
+  });
+
+  it("register does not replace idle-gate-qitem rows, whose key is the seat's alias set", () => {
+    const idle = { ...job("operator@demo"), policy: "idle-gate-qitem", specYaml: "policy: idle-gate-qitem\n" };
+    const first = repo.register(idle);
+    expect(repo.registerReplacing(idle).replaced).toEqual([]);
+    expect(repo.getById(first.jobId)?.state).toBe("active");
+  });
+
   it("startup with one row does not warn", () => {
     const first = repo.register(job("daemon@kernel"));
     const warnings: string[] = [];
