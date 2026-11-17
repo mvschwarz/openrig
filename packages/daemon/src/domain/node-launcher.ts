@@ -342,7 +342,7 @@ export class NodeLauncher {
           sessionName,
           opts?.occupantKind ?? "initial",
           occupantGeneration,
-          { keptBoundName },
+          { keptBoundName, ...(sessionCwd ? { launchedCwd: sessionCwd } : {}) },
         );
         createdSessionId = session.id;
         this.sessionRegistry.updateStatus(session.id, "running");

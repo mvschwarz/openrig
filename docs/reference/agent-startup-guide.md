@@ -930,6 +930,9 @@ another rig that isn't archived. That is decided file by file. A guidance file i
 guidance targets the same file. The Claude settings and collector are kept while another Claude seat works in that
 directory. So another rig's Codex seat keeps `AGENTS.md` without keeping `CLAUDE.md` or the Claude settings. It
 removes `.openrig/` and `.claude/` only when they are empty.
+For the Claude settings and collector, a seat's directories are its saved folder and each folder a launch of it ran
+in, such as the folder of a `rig up <rig> --existing --cwd <dir>` restore. For a seat last started before OpenRig
+recorded where a launch runs, `rig down` cleans its saved folder and names the seat.
 `rig down --delete` does nothing more to project files. OpenRig doesn't edit your project's own `.gitignore`.
 
 ## Patterns and Anti-Patterns

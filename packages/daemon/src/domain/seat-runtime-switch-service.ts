@@ -630,6 +630,8 @@ export class SeatRuntimeSwitchService {
       const successor = sessionRegistry.registerClaimedSession(node.id, ctx.sessionName, "handover", ctx.successorGeneration);
       if (sessionRegistry.currentOccupantTenure(node.id)?.generationUuid !== ctx.successorGeneration) throw new Error("the successor's generation couldn't be recorded");
       db.prepare("UPDATE sessions SET origin = 'launched', restore_policy = ? WHERE id = ?").run(ctx.restorePolicy, successor.id);
+      // The successor was launched in the seat's saved folder (stageSuccessor's node.cwd).
+      sessionRegistry.recordLaunchedCwd(successor.id, node.cwd);
       const hooked = db.prepare("SELECT successor_resume_token FROM seat_runtime_switches WHERE id = ?").get(ctx.id) as { successor_resume_token: string | null };
       const nativeId = hooked.successor_resume_token ?? ctx.launchResume?.token;
       if (nativeId) {
