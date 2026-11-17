@@ -1035,6 +1035,7 @@ describe("queue routes", () => {
       for (const row of await read(source.qitemId)) {
         expect(row.successors).toEqual([{ qitemId: replacement.qitemId, destinationSession: "next@r", state: "in-progress", via: "closureTarget" }]);
         expect(row).not.toHaveProperty("successorNote");
+        expect(row).not.toHaveProperty("handoffAdvisory");
       }
       expect(stored()).toEqual(before);
     });
