@@ -1072,7 +1072,7 @@ export class RunnerCore {
   }
 
   private pumpPersonPrompts(): void {
-    if (this.streaming || this.pendingManagedStart || !this.ready) return;
+    if (this.streaming || this.pendingManagedStart || !this.ready || this.cancellation?.submitted) return;
     const command = this.heldPersonPrompts.shift();
     if (command) this.personPrompt(command.type === "follow_up" ? { type: "prompt", message: command.message, streamingBehavior: "steer" } : command);
   }
@@ -1266,18 +1266,27 @@ export class RunnerCore {
   private finishNativeCancellation(outcome: "cancelled" | "requested" | "not-this-turn" | "not-supported", detail?: string): void {
     const operation = this.cancellation; if (!operation) return;
     operation.entry.state = "terminal";
-    this.reportManaged(operation.entry, "result", { kind: "cancel", outcome, confirmed: outcome === "cancelled", operationAccepted: operation.acknowledged, ...(detail ? { detail } : {}) });
+    const words = this.nativeQueues ? [...this.nativeQueues.steering, ...this.nativeQueues.followUp] : [];
+    const inputRequestIds: string[] = []; let unmatchedCount = this.nativeQueues ? 0 : operation.pendingMessages ?? 0;
+    for (const text of words) {
+      const matches = [...this.managed.values()].filter(entry => entry.frame.kind === "input" && entry.nativeTurnId === operation.target.nativeTurnId && entry.frame.payload.text === text);
+      if (matches.length === 1 && matches[0]!.frame.requestId.length > 0 && matches[0]!.frame.requestId.length <= 1024 && inputRequestIds.length < 100 && !inputRequestIds.includes(matches[0]!.frame.requestId)) inputRequestIds.push(matches[0]!.frame.requestId);
+      else unmatchedCount++;
+    }
+    this.reportManaged(operation.entry, "result", { kind: "cancel", outcome, confirmed: outcome === "cancelled", operationAccepted: operation.acknowledged, ...(detail ? { detail } : {}),
+      ...(operation.submitted && (words.length || unmatchedCount) ? { continuation: { inputRequestIds, pendingRequestIds: this.managedQueue.map(entry => entry.frame.requestId).filter(id => id.length > 0 && id.length <= 1024).slice(0, 100), unmatchedCount } } : {}) });
     this.cancellation = null; this.cancellationFence = null;
     this.pumpPersonPrompts(); this.pumpManaged();
   }
 
-  private finishEndedNativeCancellation(): void {
+  private finishEndedNativeCancellation(settled = false): void {
     const operation = this.cancellation;
     if (!operation?.ended) return;
     if (!operation.submitted) { this.finishNativeCancellation("not-this-turn"); return; }
+    if (!settled) return;
     const queueEmpty = operation.pendingMessages === 0 && (!this.nativeQueues
       || this.nativeQueues.steering.length === 0 && this.nativeQueues.followUp.length === 0);
-    const confirmed = operation.acknowledged && operation.aborted && queueEmpty && operation.revision === this.promptRevision;
+    const confirmed = operation.aborted && queueEmpty && operation.revision === this.promptRevision;
     this.finishNativeCancellation(confirmed ? "cancelled" : "requested", confirmed ? undefined : "native_end_without_cancellation_proof");
   }
 
@@ -1327,7 +1336,7 @@ export class RunnerCore {
 
   private personPrompt(command: Record<string, unknown>): void {
     if (this.runtime !== "pi" || !this.io.postRunner) { this.io.sendRpc(command); return; }
-    if (command.type === "follow_up" && (this.streaming || this.pendingManagedStart)) {
+    if (this.cancellation?.submitted || command.type === "follow_up" && (this.streaming || this.pendingManagedStart)) {
       this.heldPersonPrompts.push(command); return;
     }
     const id = `openrig-person-${++this.promptRevision}`;
@@ -1335,6 +1344,7 @@ export class RunnerCore {
     if (!this.streaming) this.pendingManagedStart = true;
     if (this.streaming && typeof command.message === "string") this.personSteers.add(command.message);
     this.io.sendRpc({ ...command, id });
+    this.acceptIntoOpenRun();
   }
 
   /** One aggregated paste block from pane stdin. */
@@ -1374,7 +1384,7 @@ export class RunnerCore {
     // when a prompt was consumed locally and started none. It labels the mirror line only.
     this.personPrompt({ type: "prompt", message: block, streamingBehavior: "steer" });
     this.io.mirrorLine(this.streaming ? `${this.style.commit("you (steer) ▸")} ${block}` : `${this.style.commit("you ▸")} ${block}`);
-    this.acceptIntoOpenRun();
+    if (!this.io.postRunner) this.acceptIntoOpenRun();
   }
 
   /** A working beat counts only for the latest accepted turn, and each prompt the runner gives the agent is accepted with
@@ -1417,7 +1427,7 @@ export class RunnerCore {
       cancellation.submitted = true; cancellation.entry.state = "submitted";
       this.io.sendRpc({ type: "abort", id: `openrig-cancel-${cancellation.entry.frame.requestId}` });
       this.reportManaged(cancellation.entry, "submitted", { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
-      this.diag(`Cancellation ${JSON.stringify(cancellation.entry.frame.requestId)} for ${JSON.stringify(cancellation.target.nativeTurnId)} is requested, not confirmed. Managed inputs ${JSON.stringify(this.managedQueue.map(entry => entry.frame.requestId))} remain recorded for ${this.identity.sessionName}. Inspect rig seat status ${this.identity.sessionName} --json. The named invocation ending releases the cancellation hold; a wake still waits for native idle and an empty queue. Retained native words may need a person to continue them. Person's /abort remains available, or explicitly choose rig seat stop ${this.identity.sessionName} --reason <reason>. Nothing restarts or replays automatically.`);
+      this.diag(`Cancellation ${JSON.stringify(cancellation.entry.frame.requestId)} for ${JSON.stringify(cancellation.target.nativeTurnId)} is requested, not confirmed. Managed inputs ${JSON.stringify(this.managedQueue.map(entry => entry.frame.requestId))} remain recorded for ${this.identity.sessionName}. Inspect rig seat status ${this.identity.sessionName} --json. The named invocation settling releases the cancellation hold; a wake still waits for native idle and an empty queue. Continue with a new plain prompt in this pane, without resending retained words. This is distinct from /abort or stopping the seat; continuation is not cancellation proof and never restores withdrawn approvals. Person's /abort remains available, or explicitly choose rig seat stop ${this.identity.sessionName} --reason <reason>. Nothing restarts or replays automatically.`);
       return;
     }
     if (cancellation && record.id === `openrig-cancel-${cancellation.entry.frame.requestId}`) {
@@ -1820,6 +1830,9 @@ export class RunnerCore {
         && Array.isArray(event.followUp) && event.followUp.every(text => typeof text === "string")
         ? { steering: event.steering as string[], followUp: event.followUp as string[] } : null;
     }
+    if (event.type === "agent_settled" && this.cancellation?.submitted && this.cancellation.ended && typeof event.aborted === "boolean") {
+      this.cancellation.aborted = event.aborted; this.finishEndedNativeCancellation(true);
+    }
     if (this.cancellation && this.nativeTurn?.id === this.cancellation.target.nativeTurnId) {
       const message = event.message as { role?: string; stopReason?: string } | undefined;
       if (event.type === "message_end" && message?.role === "assistant" && message.stopReason === "aborted") this.cancellation.aborted = true;
@@ -1933,6 +1946,7 @@ export class RunnerCore {
       this.streaming = mapped.streaming;
       if (changed) this.refreshPaneStatus();
     }
+    if (this.cancellation?.submitted && (event.type === "agent_start" || opening)) this.finishNativeCancellation("requested", "native_settlement_superseded");
     if (opening) {
       setImmediate(() => this.pumpManaged());
       this.turn += 1;
@@ -2441,12 +2455,18 @@ export async function connectPiRunnerChannel(core: RunnerCore, endpoint: { baseU
   }
 }
 
-async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string }, body: Record<string, unknown>, signal: AbortSignal, onPermanentRunRefusal: () => void): Promise<boolean> {
+async function postPiRunnerChannel(endpoint: { baseUrl: string; token: string }, body: Record<string, unknown>, signal: AbortSignal, onPermanentRunRefusal: () => void, onContinuation?: (line: string) => void): Promise<boolean> {
   while (!signal.aborted) {
     try {
       const response = await fetch(new URL("/api/activity/runner-channel", endpoint.baseUrl), { method: "POST",
         signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]), headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
-      if (response.ok) return true;
+      if (response.ok) {
+        if ((body.result as Record<string, unknown> | undefined)?.continuation) {
+          const reply = await response.json().catch(() => null) as { continuation?: Record<string, unknown> } | null;
+          if (reply?.continuation) onContinuation?.(`Native continuation: ${JSON.stringify(reply.continuation)}`);
+        }
+        return true;
+      }
       const failure = await response.json().catch(() => null) as { code?: string } | null;
       if ([401, 403, 404, 409, 410].includes(response.status) && !["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"].includes(failure?.code ?? "")) {
         if (isPermanentPiRunRefusal(response.status, failure?.code)) onPermanentRunRefusal();
@@ -2643,7 +2663,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   child.once("exit", () => { nativeStream.abort(); setTimeout(() => nativePosts.abort(), 2000).unref(); });
   child.once("error", () => { nativeStream.abort(); nativePosts.abort(); });
   const io: RunnerIo = {
-    ...(runtime === "pi" && endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal, () => core.quarantineManagedChannel()),
+    ...(runtime === "pi" && endpoint && runId ? { postRunner: (body: Record<string, unknown>) => postPiRunnerChannel(endpoint, body, nativePosts.signal, () => core.quarantineManagedChannel(), paneDiag),
       withdrawNativeTurn: async (body: Record<string, unknown>) => {
         try {
           const response = await fetch(`${endpoint.baseUrl}/api/activity/runner-channel`, { method: "POST", signal: AbortSignal.timeout(3000),

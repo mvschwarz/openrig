@@ -1,3 +1,5 @@
+import { reportNativeContinuation } from "../domain/native-continuation-notice.js";
+import type { RunnerReceipt } from "../domain/outbox-handler.js";
 import { RunnerChannel, RunnerChannelError } from "../domain/runner-channel.js";
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
 import { AGENT_RUNNER_HOSTED_PI_RPC, SessionRegistry, physicalSessionName, recordedRunner, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
@@ -172,7 +174,11 @@ activityRoutes.post("/runner-channel", async c => {
       return c.json(channel.prepareCancellation(token, body as Record<string, unknown>, (grant, target) => ctx.permissions.withdrawTurn(
         { nodeId: grant.nodeId, sessionName: ctx.store.resolveSession({ nodeId: grant.nodeId })?.sessionName ?? "", generation: grant.generation }, target)));
     }
-    return c.json(channel.post(token, body));
+    const result = channel.post(token, body);
+    const receipt = result.receipt as RunnerReceipt | undefined;
+    const continuation = receipt?.kind === "cancel" && (body as Record<string, unknown>)?.type === "result"
+      ? await reportNativeContinuation(channel.outbox, c.get("queueRepo" as never) as QueueRepository | undefined, receipt) : undefined;
+    return c.json({ ...result, ...(continuation ? { continuation } : {}) });
   } catch (error) { return channelFailure(c, error); }
 });
 activityRoutes.get("/runner-channel", c => {

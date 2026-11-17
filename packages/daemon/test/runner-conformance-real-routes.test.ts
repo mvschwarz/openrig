@@ -243,8 +243,9 @@ describe("run-bound native channel custody", () => {
     const { OutboxHandler } = await import("../src/domain/outbox-handler.js");
     const bus = new EventBus(db);
     const people = { ok: true as const, entities: [] as ReturnType<typeof person>[] };
+    const nudges: Array<{ session: string; message: string }> = [];
     const queueRepo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => people,
-      permissionDecider: () => null, transport: { send: async () => ({ ok: true, verified: true, sent: true }) } });
+      permissionDecider: () => null, transport: { send: async (session: string, message: string) => { nudges.push({ session, message }); return { ok: true, verified: true, sent: true }; } } });
     const activityStore = new AgentActivityStore({ db, eventBus: bus });
     const outbox = new OutboxHandler(db), channel = new RunnerChannel(grants, outbox, enabled ? new Set([runner === 0 ? "managed-pi" : runner === 1 ? "preset" : "hosted-pi-rpc"]) : new Set());
     queueRepo.attachOutbox(outbox);
@@ -267,7 +268,7 @@ describe("run-bound native channel custody", () => {
     const hello = { type: "hello", version: 1, runId: "run-one", retained: true, capabilities: { input: true, wake: true, cancel: true } };
     const admit = (id: string) => channel.admit(grant.nodeId, { outboxId: id, senderSession: "sender", destinationSession: "dev@channel", body: id,
       kind: "input", inputRoute: "native", payload: { text: id } });
-    return { db, node, grant, grants, outbox, channel, hello, admit, app, guard, transport, tmux, queueRepo, people };
+    return { db, node, grant, grants, outbox, channel, hello, admit, app, guard, transport, tmux, queueRepo, people, nudges };
   }
   it.each([false, true])("a native wake rechecks its route after waiting for the lease without typing or retaining the question (held=%s)", async held => {
     const f = await fixture(); f.db.prepare("UPDATE nodes SET input_route='native' WHERE id=?").run(f.node.id);
@@ -421,6 +422,84 @@ describe("run-bound native channel custody", () => {
     const guarded = await (await f.app.request("/api/seat/status/dev%40channel")).json();
     expect(guarded.nativeInput).toMatchObject({ input: false, wake: false, cancel: false, target: null });
     expect(fullReads).not.toHaveBeenCalled(); expect(bodyReads).not.toHaveBeenCalled();
+  });
+  it.each(["ordinary", "retry-create", "no-owner", "same-node", "stopped-owner", "failed-delivery", "group", "erased-input", "erased-cancel", "erase-notice", "erase-members", "foreign-node", "old-run", "other-E"] as const)("retained continuation uses ordinary responsible-agent work without replay (%s)", async mode => {
+    const f = await fixture(); f.channel.post(f.grant.token, f.hello); cleanups.push(f.channel.connect(f.grant.token));
+    const rigs = new RigRepository(f.db), registry = new SessionRegistry(f.db);
+    const owner = rigs.addNode(f.node.rigId, "owner", { runtime: "claude-code" }); const ownerSession = registry.registerSession(owner.id, "owner@channel"); registry.updateStatus(ownerSession.id, "running");
+    f.db.prepare("INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES('owner-binding',?,'owner@channel','%2')").run(owner.id);
+    f.db.prepare("INSERT INTO edges(id,rig_id,source_id,target_id,kind) VALUES('continuation-owner',?,?,?,'delegates_to')").run(f.node.rigId, owner.id, f.node.id);
+    f.channel.post(f.grant.token, { type: "turn", runId: "run-one", sequence: 1, nativeTurnId: "E", state: "opened", acceptedTurnIds: ["1"] });
+    const privateWords = "PRIVATE: continue the report without losing my words";
+    if (mode === "group") {
+      for (const [id, text] of [["retained-input-id", privateWords], ["group-member-id", "PRIVATE: second grouped words"]]) f.outbox.record({ outboxId: id!, senderSession: "person", destinationSession: "dev@channel", body: text! });
+    }
+    const retained = f.channel.admit(f.node.id, { outboxId: "retained-input-id", senderSession: "person", destinationSession: "dev@channel", body: privateWords, inputRoute: "native", kind: "input",
+      ...(mode === "group" ? { memberIds: ["retained-input-id", "group-member-id"] } : {}), payload: { text: mode === "group" ? privateWords + "\nPRIVATE: second grouped words" : privateWords } }); for (const stage of ["offered", "accepted", "submitted", "completed"] as const) f.outbox.updateRunner(f.node.id, "run-one", retained.requestId, retained.sequence, stage, { nativeTurnId: "E" });
+    const waiting = f.admit("waiting-F");
+    const cancel = f.channel.cancel(f.node.id, { requestId: "continue-E", sender: "requester", destination: "dev@channel", target: { runId: "run-one", nativeTurnId: "E" } });
+    f.channel.frames(f.grant.token, 0); f.outbox.updateRunner(f.node.id, "run-one", cancel.requestId, cancel.sequence, "accepted");
+    f.channel.prepareCancellation(f.grant.token, { runId: "run-one", requestId: cancel.requestId, sequence: cancel.sequence }, () => ({ confirmed: true, pendingSubmissions: 0, withdrawn: 0 }));
+    f.outbox.updateRunner(f.node.id, "run-one", cancel.requestId, cancel.sequence, "submitted", { result: { kind: "cancel", outcome: "requested", confirmed: false } });
+    const body = { type: "result", runId: "run-one", requestId: cancel.requestId, sequence: cancel.sequence, result: { kind: "cancel", outcome: "requested", confirmed: false,
+      continuation: { inputRequestIds: [retained.requestId], pendingRequestIds: [waiting.requestId], unmatchedCount: 0 } } };
+    const foreignInput = ["foreign-node", "old-run", "other-E"].includes(mode);
+    const foreignWords = "PRIVATE FOREIGN WORDS MUST STAY HIDDEN";
+    if (foreignInput) {
+      const nodeId = mode === "foreign-node" ? rigs.addNode(f.node.rigId, "other-input", { runtime: "pi" }).id : f.node.id;
+      const runId = mode === "old-run" ? "older-run" : "run-one";
+      const input = f.outbox.admitRunner({ outboxId: "foreign-input-id", nodeId, runId, senderSession: "another-person", destinationSession: "another-seat@channel", body: foreignWords, inputRoute: "native", kind: "input", payload: { text: foreignWords } });
+      for (const stage of ["offered", "accepted", "submitted", "completed"] as const) f.outbox.updateRunner(nodeId, runId, input.requestId, input.sequence, stage, { nativeTurnId: mode === "other-E" ? "other-native-E" : "E" });
+      body.result.continuation.inputRequestIds = [input.requestId];
+    }
+    const post = () => f.app.request("/api/activity/runner-channel", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${f.grant.token}` }, body: JSON.stringify(body) });
+    if (mode === "no-owner" || mode === "same-node") f.db.prepare("DELETE FROM edges WHERE id='continuation-owner'").run();
+    if (mode === "same-node") f.db.prepare("INSERT INTO edges(id,rig_id,source_id,target_id,kind) VALUES('self-owner',?,?,?,'delegates_to')").run(f.node.rigId, f.node.id, f.node.id);
+    if (mode === "stopped-owner") registry.updateStatus(ownerSession.id, "exited");
+    if (mode === "failed-delivery" || mode === "stopped-owner") f.queueRepo.attachTransport({ send: async (session, message) => { f.nudges.push({ session, message }); return { ok: false, sent: false, reason: "no_session", error: "offline fixture owner" }; } });
+    if (mode === "erased-input") f.outbox.eraseRunner(retained.requestId, "2026-11-17T00:00:00Z");
+    if (mode === "erased-cancel") f.outbox.eraseRunner(cancel.requestId, "2026-11-17T00:00:00Z");
+    const notices = () => f.queueRepo.list({ limit: 100 }).filter(row => row.tags?.includes("native-continuation"));
+    if (mode === "retry-create") {
+      const failure = vi.spyOn(f.queueRepo, "create").mockRejectedValueOnce(new Error("transient queue failure"));
+      expect((await post()).status).toBe(503); expect(f.outbox.runnerReceipt(cancel.requestId)?.stage).toBe("completed"); failure.mockRestore();
+    }
+    if (mode === "ordinary") for (const continuation of [
+      { ...body.result.continuation, inputRequestIds: [retained.requestId, retained.requestId] },
+      { ...body.result.continuation, unmatchedCount: -1 }, { ...body.result.continuation, words: ["must not copy runner words"] },
+      { ...body.result.continuation, pendingRequestIds: ["x".repeat(1025)] },
+    ]) {
+      const rejected = await f.app.request("/api/activity/runner-channel", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${f.grant.token}` }, body: JSON.stringify({ ...body, result: { ...body.result, continuation } }) });
+      expect(rejected.status).toBe(400); expect(f.outbox.runnerReceipt(cancel.requestId)?.stage).toBe("submitted");
+    }
+    const response = await post();
+    if (mode === "erased-cancel") { expect(response.status).toBe(409); expect(notices()).toEqual([]); return; }
+    expect(response.status).toBe(200);
+    if (mode === "no-owner" || mode === "same-node") {
+      expect(await response.json()).toMatchObject({ continuation: { state: "unavailable", step: expect.stringContaining("new plain prompt") } }); expect(notices()).toEqual([]); return;
+    }
+    expect(notices()).toHaveLength(1); expect(notices()[0]).toMatchObject({ sourceSession: "dev@channel", destinationSession: "owner@channel" });
+    if (mode === "erased-input" || foreignInput) expect(notices()[0]!.body).not.toContain(privateWords); else expect(notices()[0]!.body).toContain(privateWords);
+    if (foreignInput) { expect(notices()[0]!.body).not.toContain(foreignWords); expect(notices()[0]!.body).toContain("1 retained word entries were not observable or attributable"); }
+    if (mode === "group") { expect(notices()[0]!.body).toContain("PRIVATE: second grouped words"); expect(notices()[0]!.body).toContain("group-member-id"); }
+    expect(notices()[0]!.body).toContain("waiting-F");
+    expect(notices()[0]!.body).toContain("new plain prompt"); expect(notices()[0]!.body).toContain("without resending");
+    if (mode === "stopped-owner") { expect(notices()[0]!.body).toContain("stopped"); expect(notices()[0]!.body).toContain("not delivery or pickup proof"); }
+    expect(await waitFor(() => f.nudges.some(nudge => nudge.session === "owner@channel"))).toBe(true);
+    if (mode === "failed-delivery" || mode === "stopped-owner") expect(await waitFor(() => notices()[0]!.lastNudgeResult?.includes("failed"))).toBe(true);
+    if (mode === "erase-notice" || mode === "erase-members") {
+      const { eraseQueue } = await import("../src/domain/queue-erasure.js"); const noticeId = notices()[0]!.qitemId;
+      const bySource = await eraseQueue(f.db, { scope: { kind: "members", members: ["dev@channel"] }, apply: false, nowIso: "2026-11-17T00:00:00Z" });
+      expect(bySource.mixed).toContainEqual({ qitemId: noticeId, memberEndpoint: "source" });
+      await eraseQueue(f.db, { scope: mode === "erase-notice" ? { kind: "ids", entries: [{ qitemId: noticeId, action: "scrub" }] } : { kind: "members", members: ["dev@channel", "owner@channel"] }, apply: true, nowIso: "2026-11-17T00:00:00Z" });
+      expect(mode === "erase-notice" ? f.queueRepo.getById(noticeId)?.body : f.queueRepo.getById(noticeId)).toBe(mode === "erase-notice" ? "" : null);
+      expect((await post()).status).toBe(200); expect(notices()).toEqual([]);
+      expect(mode === "erase-notice" ? f.queueRepo.getById(noticeId)?.body : f.queueRepo.getById(noticeId)).toBe(mode === "erase-notice" ? "" : null);
+      expect(f.nudges.filter(nudge => nudge.session === "owner@channel")).toHaveLength(1); return;
+    }
+    f.db.prepare("DELETE FROM edges WHERE id='continuation-owner'").run(); // A retry must keep its original work destination.
+    expect((await post()).status).toBe(200); expect(notices()).toHaveLength(1);
+    expect(f.nudges.filter(nudge => nudge.session === "owner@channel")).toHaveLength(1);
   });
   it("missing permission correlation is accepted diagnostically while claimed cancelled-E hints still deny", async () => {
     const f = await fixture(); f.channel.post(f.grant.token, f.hello);
@@ -683,7 +762,7 @@ describe("run-bound native channel custody", () => {
     const common = `#!${process.execPath}\nconst fs=require('node:fs');const send=x=>{log({native:x});console.log(JSON.stringify(x));};const log=x=>fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(x)+'\\n');log({childToken:!!process.env.OPENRIG_ACTIVITY_HOOK_TOKEN,childPid:process.pid});process.stdin.on('end',()=>process.exit(0));`;
     // Distinct offline RPC and ACP backends. Each is exercised through its own production consumer.
     writeFileSync(backend, kind === "pi" ? `${common}
-let busy=false,timer,activeText='';const end=(stopReason,message)=>{send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'answer '+message}],stopReason}});busy=false;send({type:'agent_end'});};require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const c=JSON.parse(line);log(c);
+let busy=false,timer,activeText='';const end=(stopReason,message)=>{send({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'answer '+message}],stopReason}});busy=false;send({type:'agent_end'});send({type:'agent_settled',aborted:stopReason==='aborted'});};require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const c=JSON.parse(line);log(c);
 if(c.type==='get_state')return send({type:'response',id:c.id,success:true,data:{isStreaming:busy,pendingMessageCount:0,sessionId:'fixture'}});
 if(c.type==='get_entries')return send({type:'response',id:c.id,success:true,data:{entries:[]}});if(c.type==='abort'){if(activeText.includes('EXIT CANCEL'))return process.exit(7);if(busy&&!activeText.includes('IGNORE CANCEL')){clearTimeout(timer);end('aborted','cancelled');}return send({type:'response',id:c.id,success:true});}if(c.type!=='prompt')return;
 if(c.message==='REFUSE')return send({type:'response',id:c.id,success:false,error:'fixture refusal'});
@@ -708,7 +787,7 @@ const child=spawn(${JSON.stringify(program.bin)},process.argv.slice(2),{env:proc
 child.stdin.on('error',()=>{});
 rl.createInterface({input:process.stdin}).on('line',line=>{try{log(JSON.parse(line));}catch{}child.stdin.write(line+'\\n');}).on('close',()=>{child.stdin.end();setTimeout(()=>child.kill('SIGKILL'),1000).unref();});
 rl.createInterface({input:child.stdout}).on('line',line=>{try{const x=JSON.parse(line);const data=x.data,result=x.result;
-log({native:{type:x.type,id:x.id,method:x.method,success:x.success,steering:x.steering,followUp:x.followUp,
+log({native:{type:x.type,id:x.id,method:x.method,success:x.success,aborted:x.aborted,steering:x.steering,followUp:x.followUp,
 message:x.message?{role:x.message.role,stopReason:x.message.stopReason}:undefined,
 data:data?{isStreaming:data.isStreaming,pendingMessageCount:data.pendingMessageCount,disposition:data.disposition,steering:data.steering,followUp:data.followUp}:undefined,
 result:result?{stopReason:result.stopReason,sessionId:result.sessionId,outcome:result.outcome}:undefined}});}catch{}process.stdout.write(line+'\\n');});
@@ -928,7 +1007,7 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
     const body = { type: "cancel", requestId: "cancel-E", target: { runId: target!.runId, nativeTurnId: target!.nativeTurnId } };
     const post = () => h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     expect((await post()).status).toBe(202);
-    expect(await waitFor(() => h.f.outbox.runnerReceipt("cancel-E")?.result?.outcome === (kind === "pi" ? "requested" : "cancelled")), h.output).toBe(true);
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("cancel-E")?.result?.outcome === "cancelled"), h.output).toBe(true);
     expect(await waitFor(() => { const current = h.f.channel.currentTurn(h.f.node.id); return current && current.nativeTurnId !== target!.nativeTurnId; }), h.output).toBeTruthy();
     expect(h.f.outbox.runnerReceipt("cancel-E")?.withdrawal?.stage).toBe("confirmed");
     expect((await post()).status).toBe(200);
@@ -979,7 +1058,7 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
     const response = await h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "cancel", requestId: "newer-control", target: { runId: target!.runId, nativeTurnId: target!.nativeTurnId } }) });
     expect(response.status).toBe(202);
-    expect(await waitFor(() => h.f.outbox.runnerReceipt("newer-control")?.result?.outcome === (kind === "pi" ? "requested" : "cancelled")), h.output).toBe(true);
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("newer-control")?.result?.outcome === "cancelled"), h.output).toBe(true);
     const cursor = h.f.outbox.runnerReceipt("newer-control")!.sequence;
     expect(h.f.channel.frames(h.f.grant.token, cursor)[0]?.requestId).toBe("older-N");
     const hellos = h.hellos; h.server.closeAllConnections();
@@ -998,8 +1077,9 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
     const response = await h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "cancel", requestId: "cancel-steered", target: { runId: target!.runId, nativeTurnId: target!.nativeTurnId } }) });
     expect(response.status).toBe(202);
-    expect(await waitFor(() => h.f.outbox.runnerReceipt("cancel-steered")?.result?.outcome === "requested"), h.output).toBe(true);
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("cancel-steered")?.result?.outcome === "cancelled"), h.output).toBe(true);
     expect(await waitFor(() => h.f.outbox.runnerReceipt("after-E")?.result?.completion === "completed"), h.output).toBe(true);
+    expect(h.entries().some(entry => (entry.native as { type?: string; aborted?: boolean } | undefined)?.type === "agent_settled" && (entry.native as { aborted?: boolean }).aborted === true)).toBe(true);
     expect(h.entries().filter(entry => entry.type === "abort")).toHaveLength(1);
   });
   it.each(["pi", "dsh"] as const)("%s process recovers every custody window through actual Core routes with one native effect", async kind => {
@@ -1159,12 +1239,12 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
       expect(cancelWrites()).toHaveLength(1);
       expect(await waitFor(() => h.entries().some(entry => { const frame = entry.native as { type?: string; result?: { stopReason?: string } } | undefined; return kind === "pi" ? frame?.type === "agent_end" : frame?.result?.stopReason === "cancelled"; }))).toBe(true);
       if (type === "submitted") expect(h.f.outbox.runnerReceipt("fault-cancel")?.result?.outcome).toBe(commit ? "requested" : undefined);
-      else expect(h.f.outbox.runnerReceipt("fault-cancel")?.result?.outcome).toBe(commit ? (kind === "pi" ? "requested" : "cancelled") : "requested");
+      else expect(h.f.outbox.runnerReceipt("fault-cancel")?.result?.outcome).toBe(commit ? "cancelled" : "requested");
     }
     const hellos = h.hellos;
     if (type === "submitted" && !commit) await h.reopen(); else h.server.closeAllConnections();
     expect(await waitFor(() => h.hellos > hellos)).toBe(true); h.fault = null;
-    expect(await waitFor(() => h.f.outbox.runnerReceipt("fault-cancel")?.stage === "completed" && h.f.outbox.runnerReceipt("fault-cancel")?.result?.outcome === (kind === "pi" ? "requested" : "cancelled")), h.output).toBe(true);
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("fault-cancel")?.stage === "completed" && h.f.outbox.runnerReceipt("fault-cancel")?.result?.outcome === "cancelled"), h.output).toBe(true);
     expect(await waitFor(() => h.f.outbox.runnerReceipt("fault-F")?.result?.completion === "completed"), h.output).toBe(true);
     expect(cancelWrites()).toHaveLength(1); expect(h.prompts()).toEqual(["HOLD CANCEL E", "FAULT F"]);
     expect((await h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).status).toBe(200);
@@ -1263,10 +1343,10 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
     h.fault = { type: "result", requestId: "erase-cancel", commit: true, hits: 0 };
     const body = { type: "cancel", requestId: "erase-cancel", target: { runId: target!.runId, nativeTurnId: target!.nativeTurnId } };
     await h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    expect(await waitFor(() => h.f.outbox.runnerReceipt("erase-cancel")?.result?.outcome === (kind === "pi" ? "requested" : "cancelled"))).toBe(true);
+    expect(await waitFor(() => h.f.outbox.runnerReceipt("erase-cancel")?.result?.outcome === "cancelled")).toBe(true);
     const original = h.f.outbox.runnerReceipt("erase-cancel")!; h.f.outbox.eraseRunner(original.requestId, new Date().toISOString());
     await h.reopen(); h.fault = null; await h.ready();
-    expect(h.f.outbox.runnerReceipt(original.requestId)).toMatchObject({ erasedAt: expect.any(String), bindingHash: original.bindingHash, payload: { target: body.target }, withdrawal: { stage: "confirmed" }, result: { outcome: kind === "pi" ? "requested" : "cancelled" } });
+    expect(h.f.outbox.runnerReceipt(original.requestId)).toMatchObject({ erasedAt: expect.any(String), bindingHash: original.bindingHash, payload: { target: body.target }, withdrawal: { stage: "confirmed" }, result: { outcome: "cancelled" } });
     expect((await h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).status).toBe(409);
     expect(() => h.f.channel.post(h.f.grant.token, { type: "result", runId: h.f.grant.runId, requestId: original.requestId, sequence: original.sequence, result: { kind: "cancel", outcome: "cancelled", confirmed: true, detail: "ERASED PRIVATE DATA" } })).toThrow(/erased/);
     expect(() => h.f.channel.prepareCancellation(h.f.grant.token, { runId: h.f.grant.runId, requestId: original.requestId, sequence: original.sequence }, () => { throw new Error("must never reopen"); })).toThrow();
@@ -1356,7 +1436,7 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
       expect((await h.f.app.request("/api/seat/command/dev@channel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(command) })).status).toBe(202);
       expect(await waitFor(() => h.f.outbox.runnerReceipt(cancelId)?.stage === "completed", 12000), h.output).toBe(true);
       const cancellationReceipt = h.f.outbox.runnerReceipt(cancelId)!;
-      expect(cancellationReceipt.result).toMatchObject(kind === "pi"
+      expect(cancellationReceipt.result).toMatchObject(kind === "pi" && busy
         ? { outcome: "requested", confirmed: false, operationAccepted: false, detail: "native_end_without_cancellation_proof" }
         : { outcome: "cancelled", confirmed: true });
       if (busy) {
@@ -1388,6 +1468,8 @@ process.on('SIGTERM',()=>child.kill('SIGTERM'));child.on('error',()=>{process.ex
         const aborted = entries.findIndex((frame, index) => index > eIndex && (frame.native as { message?: { stopReason?: string } } | undefined)?.message?.stopReason === "aborted");
         const ended = entries.findIndex((frame, index) => index > aborted && (frame.native as { type?: string } | undefined)?.type === "agent_end");
         expect(aborted).toBeGreaterThan(eIndex); expect(ended).toBeGreaterThan(aborted); expect(fIndex).toBeGreaterThan(ended);
+        const settled = entries.findIndex((frame, index) => index > ended && (frame.native as { type?: string; aborted?: boolean } | undefined)?.type === "agent_settled" && (frame.native as { aborted?: boolean }).aborted === true);
+        expect(settled).toBeGreaterThan(ended); expect(fIndex).toBeGreaterThan(settled);
         expect(ackIndex).toBeGreaterThan(ended);
         expect(entries.filter(frame => frame.type === "clear_queue")).toEqual([]);
         expect(entries.filter(frame => frame.type === "get_state" && frame.id === `openrig-cancel-state-${cancelId}`)).toEqual([]);

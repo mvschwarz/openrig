@@ -152,6 +152,17 @@ export class RunnerChannel {
       if (!body.result || typeof body.result !== "object" || Array.isArray(body.result)) throw new RunnerChannelError("invalid_runner_result", "Supply a native result.", 400);
       const receipt = this.outbox.runnerReceipt(body.requestId);
       const result = body.result as Record<string, unknown>;
+      if (result.continuation !== undefined) {
+        const continuation = result.continuation as Record<string, unknown> | null;
+        const ids = (value: unknown): value is string[] => Array.isArray(value) && value.length <= 100
+          && value.every(id => typeof id === "string" && id.length > 0 && id.length <= 1024) && new Set(value).size === value.length;
+        if (receipt?.kind !== "cancel" || stage !== "completed" || result.outcome !== "requested" || result.confirmed !== false
+          || !continuation || typeof continuation !== "object" || Array.isArray(continuation)
+          || !ids(continuation.inputRequestIds) || !ids(continuation.pendingRequestIds)
+          || !Number.isSafeInteger(continuation.unmatchedCount) || Number(continuation.unmatchedCount) < 0
+          || Object.keys(continuation).some(key => !["inputRequestIds", "pendingRequestIds", "unmatchedCount"].includes(key)))
+          throw new RunnerChannelError("invalid_runner_result", "Invalid native continuation evidence.", 400);
+      }
       const retiredBeforeWrite = receipt?.kind === "cancel" && stage === "rejected" && result.kind === "cancel"
         && result.applied === false && typeof result.reason === "string" && result.reason.trim().length > 0
         && result.outcome === undefined && (result.confirmed === undefined || result.confirmed === false) && (result.operationAccepted === undefined || result.operationAccepted === false);

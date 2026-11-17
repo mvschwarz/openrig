@@ -1400,9 +1400,9 @@ describe("managed run identity retries", () => {
 
 
 describe("managed Pi input and attributed wake", () => {
-  function managed(retain?: (body: Record<string, unknown>) => void | boolean | Promise<void | boolean>, withdrawNativeTurn?: RunnerIo["withdrawNativeTurn"], preflightState?: (reply: () => void) => void, postEndState = true) {
+  function managed(retain?: (body: Record<string, unknown>) => void | boolean | Promise<void | boolean>, withdrawNativeTurn?: RunnerIo["withdrawNativeTurn"], preflightState?: (reply: () => void) => void, postEndState = true, settleOnEnd = true) {
     const f = fakeIo(), posts: Record<string, unknown>[] = [];
-    let nativeBusy = false, nativePendingCount = 0;
+    let nativeBusy = false, nativePendingCount = 0, aborted = false;
     const core = new RunnerCore({ ...f.io, withdrawNativeTurn, sendRpc: command => {
       f.rpc.push(command);
       if (command.type === "get_state" && (String(command.id).startsWith("openrig-native-idle-") || postEndState && String(command.id).startsWith("openrig-cancel-state-")))
@@ -1423,11 +1423,51 @@ describe("managed Pi input and attributed wake", () => {
     const event = (type: string, extra: Record<string, unknown> = {}) => {
       if (type === "queue_update") nativePendingCount = (extra.steering as string[]).length + (extra.followUp as string[]).length;
       if (type === "agent_start") nativeBusy = true; else if (type === "agent_end") nativeBusy = false;
+      if (type === "message_end") aborted = (extra.message as { stopReason?: string })?.stopReason === "aborted";
       core.handlePiLine(JSON.stringify({ type, ...extra }));
+      if (type === "agent_end" && settleOnEnd) core.handlePiLine(JSON.stringify({ type: "agent_settled", aborted }));
     };
     const response = (id: string, success = true) => event("response", { id: `openrig-native-${id}`, command: "prompt", success, data: { disposition: "started" } });
     return { ...f, posts, core, frame, event, response };
   }
+  it.each(["plain", "followup"].flatMap(mode => ["before-end", "after-end"].map(phase => [mode, phase])))("submitted cancellation holds a %s person prompt (%s) until native settlement and starts F once", async (mode, phase) => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false); f.core.handleUserBlock("E");
+    const e = f.rpc.find(command => command.message === "E")!; f.event("response", { id: e.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "settle-E", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve));
+    f.event("agent_settled", { aborted: true }); // An earlier scope's event cannot settle still-running E.
+    if (phase === "before-end") f.core.handleUserBlock(mode === "plain" ? "person F" : "/followup person F");
+    f.event("message_end", { message: { role: "assistant", stopReason: "aborted" } }); f.event("agent_end");
+    if (phase === "after-end") f.core.handleUserBlock(mode === "plain" ? "person F" : "/followup person F");
+    expect(f.rpc.filter(command => command.message === "person F")).toEqual([]);
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "settle-E")).toEqual([]);
+    f.event("agent_settled", { aborted: true }); await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "settle-E", result: expect.objectContaining({ outcome: "cancelled", confirmed: true }) }));
+    f.event("agent_settled", { aborted: true }); expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
+  });
+  it("retained native input reports only known request IDs and waiting F at settlement, never copied words", async () => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false); f.core.handleUserBlock("E");
+    f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } }); f.event("agent_start");
+    await f.core.acceptRunnerRequest(f.frame("retained words", 1, "input")); f.event("response", { id: "openrig-native-retained words", success: true, data: { disposition: "queued" } });
+    f.event("queue_update", { steering: ["retained words"], followUp: [] });
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "retained-E", sequence: 2, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); await f.core.acceptRunnerRequest(f.frame("waiting F", 3, "wake"));
+    f.event("message_end", { message: { role: "assistant", stopReason: "aborted" } }); f.event("agent_end"); f.event("agent_settled", { aborted: true });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "retained-E", result: expect.objectContaining({ outcome: "requested", confirmed: false,
+      continuation: { inputRequestIds: ["retained words"], pendingRequestIds: ["waiting F"], unmatchedCount: 0 } }) }));
+  });
+  it.each(["intervening start", "start before end", "exit"])("settlement wait preserves later work when %s supersedes the captured cancelled run", async mode => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false); f.core.handleUserBlock("E"); f.event("agent_start");
+    await f.core.acceptRunnerRequest({ version: 1, runId: "run", requestId: "superseded-settle", sequence: 1, kind: "cancel", payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } });
+    await new Promise(resolve => setImmediate(resolve)); if (mode !== "start before end") f.event("agent_end"); f.core.handleUserBlock("person held");
+    if (mode === "exit") f.core.handlePiExit(7); else { f.event("agent_start"); f.event("agent_settled", { aborted: true }); }
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "superseded-settle", result: expect.objectContaining({ outcome: "requested", confirmed: false }) }));
+    expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
+  });
   it.each(["rejected", "handled-wake"])("held person followup dispatches after %s without another native event", async mode => {
     const f = managed(); await f.core.acceptRunnerRequest(f.frame("first", 1, mode === "rejected" ? "input" : "wake"));
     await new Promise(resolve => setImmediate(resolve)); f.core.handleUserBlock("/followup person F");
@@ -1435,7 +1475,7 @@ describe("managed Pi input and attributed wake", () => {
     await new Promise(resolve => setImmediate(resolve));
     expect(f.rpc.filter(command => command.message === "person F")).toHaveLength(1);
   });
-  it.each(["missing", "negative", "positive", "delayed", "normal"])("positive exact E end releases without a post-end probe or %s abort ACK", async ack => {
+  it.each(["missing", "negative", "positive", "delayed", "normal"])("native settlement releases without a post-end probe or %s abort ACK", async ack => {
     const f = managed(undefined, async () => ({ confirmed: true }), undefined, false);
     f.core.handleUserBlock("E");
     f.event("response", { id: f.rpc.find(command => command.message === "E")!.id, success: true, data: { disposition: "started" } });
@@ -1448,7 +1488,7 @@ describe("managed Pi input and attributed wake", () => {
     f.event("message_end", { message: { role: "assistant", stopReason: ack === "normal" ? "stop" : "aborted" } }); f.event("agent_end");
     await new Promise(resolve => setImmediate(resolve));
     expect(f.rpc.filter(command => command.message === "managed F")).toHaveLength(1);
-    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: ack === "positive" ? "cancelled" : "requested", confirmed: ack === "positive" }) }));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: ack !== "normal" ? "cancelled" : "requested", confirmed: ack !== "normal" }) }));
     if (ack === "delayed") { f.event("response", { id: "openrig-cancel-cancel-E", success: true }); await new Promise(resolve => setImmediate(resolve)); }
     expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
     expect(f.rpc.filter(command => command.type === "clear_queue")).toEqual([]);
@@ -1592,8 +1632,8 @@ describe("managed Pi input and attributed wake", () => {
     expect(f.posts.filter(post => post.type === "ack" && post.requestId === cancel.requestId)).toHaveLength(1);
     expect(f.posts.some(post => (post.result as { outcome?: string })?.outcome === "cancelled")).toBe(false);
   });
-  it.each([false, true])("named cancel releases successors on matching native end without waiting for abort acknowledgement (reporting unavailable=%s)", async unavailable => {
-    const f = managed(undefined, async () => ({ confirmed: true }));
+  it.each([false, true])("named cancel releases successors on matching native settlement without waiting for abort acknowledgement (reporting unavailable=%s)", async unavailable => {
+    const f = managed(undefined, async () => ({ confirmed: true }), undefined, true, false);
     f.core.handleUserBlock("start"); f.event("agent_start");
     const cancel = { version: 1 as const, runId: "run", requestId: "cancel-E", sequence: 1, kind: "cancel" as const,
       payload: { target: { runId: "run", nativeTurnId: "pi-invocation-1" } } };
@@ -1603,10 +1643,13 @@ describe("managed Pi input and attributed wake", () => {
     f.core.handleUserBlock("/followup successor");
     f.event("message_end", { message: { role: "assistant", stopReason: "aborted" } }); f.event("agent_end");
     await new Promise(resolve => setImmediate(resolve));
+    expect(f.rpc.some(command => command.message === "successor")).toBe(false);
+    expect(f.posts.filter(post => post.type === "result" && post.requestId === "cancel-E")).toEqual([]);
+    f.event("agent_settled", { aborted: true }); await new Promise(resolve => setImmediate(resolve));
     expect(f.rpc.some(command => command.message === "successor")).toBe(true);
-    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: "requested", confirmed: false }) }));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: "cancelled", confirmed: true }) }));
     f.event("response", { id: "openrig-cancel-cancel-E", success: true }); await new Promise(resolve => setImmediate(resolve));
-    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: "requested" }) }));
+    expect(f.posts).toContainEqual(expect.objectContaining({ type: "result", requestId: "cancel-E", result: expect.objectContaining({ outcome: "cancelled" }) }));
     expect(f.rpc).toContainEqual(expect.objectContaining({ type: "prompt", message: "successor" }));
     await f.core.acceptRunnerRequest(cancel);
     expect(f.rpc.filter(command => command.type === "abort")).toHaveLength(1);
