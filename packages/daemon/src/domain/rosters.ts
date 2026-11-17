@@ -12,6 +12,8 @@ export interface RosterWake {
     url_ref: string;
     /** Secret name holding the Authorization header value, when the tool requires one. */
     authorization_ref?: string;
+    /** Secret name holding a Standard Webhooks signing secret (`whsec_…`), when the tool verifies signed rings. */
+    signing_secret_ref?: string;
     /** Absolute path of an env file (0600) holding those keys, when they aren't in the daemon's environment. */
     secrets_env_file?: string;
   };
@@ -67,11 +69,13 @@ function parseWake(value: unknown): RosterWake {
   const hook = object(value) ? value.webhook : undefined;
   if (!object(hook) || text(hook.url_ref) === null
       || (hook.authorization_ref !== undefined && text(hook.authorization_ref) === null)
+      || (hook.signing_secret_ref !== undefined && text(hook.signing_secret_ref) === null)
       || (hook.secrets_env_file !== undefined && text(hook.secrets_env_file) === null)) {
-    throw new Error("A member's wake needs webhook.url_ref (optional authorization_ref and secrets_env_file): secret names, never values");
+    throw new Error("A member's wake needs webhook.url_ref (optional authorization_ref, signing_secret_ref and secrets_env_file): secret names, never values");
   }
   return { webhook: { url_ref: hook.url_ref as string,
     ...(hook.authorization_ref === undefined ? {} : { authorization_ref: hook.authorization_ref as string }),
+    ...(hook.signing_secret_ref === undefined ? {} : { signing_secret_ref: hook.signing_secret_ref as string }),
     ...(hook.secrets_env_file === undefined ? {} : { secrets_env_file: hook.secrets_env_file as string }) } };
 }
 
