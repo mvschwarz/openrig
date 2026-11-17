@@ -22,7 +22,7 @@ function makeHarness(opts?: {
   isSenderSendable?: (sender: string) => boolean;
   canRecordDestination?: (sessionRef: string) => boolean;
   loadHumanRegistry?: () => LoadResult;
-  participantsReadable?: () => boolean;
+  readSharedChannels?: () => ReadonlyArray<{ entityId: string; address: string }> | null;
 }) {
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
@@ -130,7 +130,7 @@ describe("queue wake nudge carries the stored summary", () => {
     const h = makeHarness({
       canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry, sharedChannels: () => [] })),
       loadHumanRegistry: registry,
-      participantsReadable: () => true,
+      readSharedChannels: () => [],
     });
     try {
       const row = await h.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
@@ -156,7 +156,7 @@ describe("queue wake nudge carries the stored summary", () => {
     const unreadableRegistry = makeHarness({
       canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: broken, sharedChannels: () => [] })),
       loadHumanRegistry: broken,
-      participantsReadable: () => true,
+      readSharedChannels: () => [],
     });
     try {
       const row = await unreadableRegistry.repo.create({ sourceSession: "some-team@external", destinationSession: "dev@rig", body: "status?" });
@@ -170,7 +170,7 @@ describe("queue wake nudge carries the stored summary", () => {
     const unreadableParticipants = makeHarness({
       canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry, sharedChannels: () => [] })),
       loadHumanRegistry: registry,
-      participantsReadable: () => false,
+      readSharedChannels: () => null,
     });
     try {
       const row = await unreadableParticipants.repo.create({ sourceSession: "ops@external", destinationSession: "dev@rig", body: "status?" });
@@ -179,13 +179,15 @@ describe("queue wake nudge carries the stored summary", () => {
     } finally { await settle(); unreadableParticipants.db.close(); }
   });
 
-  it("#3268: a registered shared channel keeps its reply hint", async () => {
+  it("#3268: the note comes from one snapshot, so a later read that can't read doesn't turn a registered channel into 'no route'", async () => {
     const registry = (): LoadResult => ({ ok: true, entities: [] });
     const h = makeHarness({
+      // A second read of the participant file, as admission does it, can't read and collapses to an empty list.
       canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry,
-        sharedChannels: () => [{ entityId: "ops", address: "ops@external" }] })),
+        sharedChannels: () => [] })),
       loadHumanRegistry: registry,
-      participantsReadable: () => true,
+      // The first read succeeds and lists the channel.
+      readSharedChannels: () => [{ entityId: "ops", address: "ops@external" }],
     });
     try {
       const row = await h.repo.create({ sourceSession: "ops@external", destinationSession: "dev@rig", body: "status?" });
@@ -194,11 +196,26 @@ describe("queue wake nudge carries the stored summary", () => {
     } finally { await settle(); h.db.close(); }
   });
 
-  // The destination checks the queue runs first succeed; only the sender lookup the reply line adds throws.
+  it("#3268: a registered shared channel keeps its reply hint", async () => {
+    const registry = (): LoadResult => ({ ok: true, entities: [] });
+    const h = makeHarness({
+      canRecordDestination: makeQueueRecordingCheck(makeTopologyDestinationCheck({ findRigsByName: () => [{}], loadHumanRegistry: registry,
+        sharedChannels: () => [{ entityId: "ops", address: "ops@external" }] })),
+      loadHumanRegistry: registry,
+      readSharedChannels: () => [{ entityId: "ops", address: "ops@external" }],
+    });
+    try {
+      const row = await h.repo.create({ sourceSession: "ops@external", destinationSession: "dev@rig", body: "status?" });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(h.calls[0]!.text.split("\n").at(-1)).toBe(replyHint("ops@external", row.qitemId));
+    } finally { await settle(); h.db.close(); }
+  });
+
+  // The destination checks the queue runs succeed; only the sender lookup the reply line adds throws.
   const throwingLookup = () => makeHarness({
-    canRecordDestination: (ref) => { if (ref === "some-team@external") throw new Error("registry read failed"); return true; },
+    canRecordDestination: () => true,
     loadHumanRegistry: () => ({ ok: true, entities: [] }),
-    participantsReadable: () => true,
+    readSharedChannels: () => { throw new Error("participant file read failed"); },
   });
 
   it("#3268: if the reply-line lookup throws, a new item still delivers its notification with today's reply line", async () => {
