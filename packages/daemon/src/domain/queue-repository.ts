@@ -4405,8 +4405,16 @@ export class QueueRepository {
   /** Notes a queue-only seat's park wake on each parked row it is about (#3076), in one transaction, each only while
    *  the row is still `owner`'s and its current park is still the job's; nothing is typed. Returns the rows noted. */
   noteParkedRows(owner: string, notes: Array<{ qitemId: string; jobId: string; note: string }>): string[] {
+    // Each job's eligible rows are read once per call, inside the transaction: a note keeps its row blocked and parked
+    // by the same job, so it can't change what a later note of the same job finds.
+    const eligible = new Map<string, Set<string>>();
+    const parkedBy = (jobId: string): Set<string> => {
+      let rows = eligible.get(jobId);
+      if (!rows) eligible.set(jobId, rows = new Set(this.wakeRepo.findCurrentParkRowsByWatchdog(jobId, owner)));
+      return rows;
+    };
     const written = this.db.transaction(() => notes.flatMap(({ qitemId, jobId, note }) => {
-      if (!this.wakeRepo.findCurrentParkRowsByWatchdog(jobId, owner).includes(qitemId)) return [];
+      if (!parkedBy(jobId).has(qitemId)) return [];
       this.transitionLog.append({ qitemId, state: "blocked", actorSession: "watchdog@system", transitionNote: note });
       return [{ qitemId, event: this.eventBus.persistWithinTransaction({ type: "queue.updated", qitemId, fromState: "blocked", toState: "blocked",
         closureReason: null, closureTarget: null, actorSession: "watchdog@system", summary: this.getById(qitemId)?.summary ?? null }) }];
