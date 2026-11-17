@@ -230,7 +230,7 @@ describe("rig start (OPR.0.3.4.1)", () => {
     void run.then(value => { early = value; });
     await vi.waitFor(() => { if (early) throw new Error(`start exited early: ${early.logs.join("; ")}`); expect(entered).toBe(limit); }, { timeout: 10000 });
     for (let count = limit + 1; count <= 3; count++) {
-      waiting.shift()!();
+      (waiting.length > 1 ? waiting.splice(1, 1)[0]! : waiting.shift()!)();
       await vi.waitFor(() => expect(entered).toBe(count), { timeout: 10000 });
     }
     while (waiting.length) waiting.shift()!();
@@ -239,6 +239,31 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(exitCode).toBeUndefined();
     const result = JSON.parse(logs.find(line => line.startsWith("{"))!);
     expect(result.restoredRigs.map((entry: { rigName: string }) => entry.rigName)).toEqual(["one", "two", "three"]);
+  });
+
+  it("starts the next request after a timeout and keeps results in selection order", async () => {
+    routes["/api/rigs/summary"] = () => ["one", "two"].map((name, i) => ({ id: `rig-${i}`, name, lifecycleState: "recoverable" })) as never;
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [] } : { status: "restored", rigResult: "fully_restored", nodes: [] };
+    const calls: string[] = [], opts = deps(), prog = new Command();
+    prog.addCommand(startCommand({ ...opts, clientFactory: url => {
+      const client = new DaemonClient(url), post = client.post.bind(client);
+      client.post = (async (path: string, body: unknown, config?: unknown) => {
+        if (path.endsWith("/up") && (body as { plan?: boolean }).plan === false) {
+          calls.push(path);
+          if (path.includes("rig-0")) throw new (await import("../src/client.js")).DaemonConnectionError("timed out");
+        }
+        return post(path, body, config as never);
+      }) as typeof client.post;
+      return client;
+    } }));
+    const { logs, exitCode } = await captureLogs(async () => { await prog.parseAsync(["node", "rig", "start", "--all", "--json", "--concurrency", "1"]); });
+    expect(calls).toEqual(["/api/rigs/rig-0/up", "/api/rigs/rig-1/up"]);
+    expect(logs.join("\n")).toContain("Verify with: rig ps");
+    expect(JSON.parse(logs.find(line => line.startsWith("{"))!).restoredRigs).toMatchObject([
+      { rigName: "one", status: "timeout" }, { rigName: "two", status: "fully_restored" },
+    ]);
+    expect(exitCode).toBe(1);
   });
 
   it.each(["0", "-1", "1.5", "abc"])("rejects invalid concurrency %s before contacting the daemon", async value => {

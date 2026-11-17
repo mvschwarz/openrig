@@ -187,11 +187,14 @@ Examples:
   rig start --last                  Headless: restore everything that was running, except rigs stopped on purpose
   rig start --all                   Headless: restore all rigs with restore-usable snapshots
   rig start --rigs prod-rig dev-rig Headless: restore only the named rigs
-  rig start --last --concurrency 2  Restore up to two rigs at a time
+  rig start --last --concurrency 2  Keep up to two restore requests outstanding
 
 When the daemon is restoring a kernel a reboot left down, rig start goes on to
 your other rigs. Exit 0 then does not mean the kernel is ready (check rig
 status); a restore that returned without a ready kernel exits 1.
+
+Concurrency limits requests outstanding in this command. A timed-out request
+may keep running in the daemon; check rig ps before retrying.
 
 --last restores a rig unless every seat it launched was stopped on purpose. A
 rig taken down with rig down before OpenRig 0.6.12, or whose seats exited or
@@ -207,7 +210,7 @@ back with rig up kernel --existing.
     .option("--last", "Headless: restore all rigs that were last running; a rig stopped on purpose (with rig down or rig seat stop) stays down (zero prompts)")
     .option("--all", "Headless: restore all rigs with restore-usable snapshots (zero prompts)")
     .option("--rigs <names...>", "Headless: restore only the named rigs (zero prompts)")
-    .option("--concurrency <n>", "Maximum concurrent rig restores (default: 1)", "1")
+    .option("--concurrency <n>", "Maximum outstanding restore requests (default: 1)", "1")
     .option("--json", "JSON output for agents")
     .action(async (opts: { last?: boolean; all?: boolean; rigs?: string[]; concurrency: string; json?: boolean }) => {
       if (!/^[1-9]\d*$/.test(opts.concurrency) || !Number.isSafeInteger(Number(opts.concurrency))) {

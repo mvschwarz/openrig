@@ -390,10 +390,11 @@ leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
 (`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
 bring it back with `rig up kernel --existing`.
 
-Rig restores run one at a time by default. To restore up to two rigs at once,
-for example, use `rig start --last --concurrency 2`. Choose a positive integer
-appropriate for the machine's available capacity; each rig's restore still
-reports its own result. Interactive fresh-start decisions remain serialized.
+Restore requests run one at a time by default. To keep up to two requests
+outstanding, for example, use `rig start --last --concurrency 2`. A request that
+times out can keep running in the daemon, so more than two restores can still be
+running; check `rig ps` before retrying. Each rig reports its own result, and
+interactive fresh-start decisions remain serialized.
 
 An explicit `rig up kernel --existing --fresh <seat...>` waits for startup's
 restore to finish, then replaces only the named seats that still hold the exact
