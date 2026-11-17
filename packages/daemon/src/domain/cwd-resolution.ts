@@ -59,6 +59,13 @@ export function isPathInsideRoot(candidatePath: string, rootPath: string): boole
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative));
 }
 
+/** `path` is the seat folder `folder` or lies inside it, and that folder isn't on this machine (a home that moved). Nothing
+ *  creates such a folder in order to write inside it: the seat's terminal started in tmux's fallback folder instead, so
+ *  nothing reads a file there, and a recreated folder would make the next restore start the seat in that stub. */
+export function insideMissingFolder(path: string, folder: string | null | undefined, exists: (path: string) => boolean): boolean {
+  return !!folder && !exists(folder) && isPathInsideRoot(path, folder);
+}
+
 export function isFilesystemRoot(cwd: string): boolean {
   const resolved = nodePath.resolve(cwd);
   return resolved === nodePath.parse(resolved).root;

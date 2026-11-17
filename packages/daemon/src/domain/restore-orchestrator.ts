@@ -11,7 +11,8 @@ import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+import { insideMissingFolder } from "./cwd-resolution.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, ensureSeatSkillPlugin, followSeatSkills, hasFollowingSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, type SeatSkillSelection, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -170,14 +171,6 @@ export function launchStatusIsRunning(status: string): boolean {
 }
 
 /** The facts effectiveRestorePolicy reads for one saved seat: its saved runtime, the runtime it has now, and its recorded sessions. */
-/** The guidance file lies in the seat's saved folder, and that folder isn't on this machine. A file outside it, such as a
- *  Pi agent folder's own AGENTS.md, is read wherever the seat runs. */
-function guidanceInMissingFolder(targetPath: string, cwd: string | null | undefined): boolean {
-  if (!cwd || existsSync(cwd)) return false;
-  const inside = relative(cwd, targetPath);
-  return inside !== "" && !inside.startsWith("..") && !isAbsolute(inside);
-}
-
 function seatFacts(data: SnapshotData, nodeId: string, savedRuntime: string | null, currentRuntime: string | null): RestoreSeatFacts {
   return { savedRuntime, currentRuntime, recordedSessions: data.sessions.filter((session) => session.nodeId === nodeId) };
 }
@@ -1645,11 +1638,12 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
     // tmux starts a terminal whose folder is missing in a fallback folder of its own (its server's HOME), which the launch's
-    // record doesn't hold, so the folder the seat started in is read from its pane.
-    if (missingCwdAt >= 0 && warnings) {
+    // record doesn't hold, so the folder the seat started in is read from the seat's own bound pane, in any window. Another
+    // pane's folder is never named: when that pane isn't listed or can't be read, the line names no folder.
+    if (missingCwdAt >= 0 && warnings && launchResult.binding.tmuxPane) {
       let panes: Array<{ id: string; cwd: string }> = [];
-      try { panes = await this.tmuxAdapter.listPanes(launchResult.sessionName); } catch { /* unread: the line stays as it was */ }
-      const startedIn = (panes.find((pane) => pane.id === launchResult.binding.tmuxPane) ?? panes[0])?.cwd;
+      try { panes = await this.tmuxAdapter.listPanes(launchResult.sessionName, true); } catch { /* unread: the line stays as it was */ }
+      const startedIn = panes.find((pane) => pane.id === launchResult.binding.tmuxPane)?.cwd;
       if (startedIn && startedIn !== savedCwd) {
         warnings[missingCwdAt] = `Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine, so it started in `
           + `${startedIn}. ${launchElsewhere}`;
@@ -1846,7 +1840,7 @@ export class RestoreOrchestrator {
     if (missing.length === 0) return noted;
     // A saved folder this machine doesn't have got nothing put back (see postLaunchRestore): say why the blocks are missing.
     const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}`
-      + (guidanceInMissingFolder(guidance.targetPath, guidanceCwd) ? `, because ${guidanceCwd} doesn't exist on this machine.` : ".");
+      + (insideMissingFolder(guidance.targetPath, guidanceCwd, existsSync) ? `, because ${guidanceCwd} doesn't exist on this machine.` : ".");
     warnings?.push(`Restore: ${gap}`);
     return { ...noted, guidanceGaps: missing };
   }
@@ -2198,9 +2192,10 @@ export class RestoreOrchestrator {
           deliveryHint: "guidance_merge" as const, required: false, appliesOn: ["fresh_start" as const, "restore" as const] }));
         guidance = { ...guidance, items: guidance.items.filter((item) => !carried.includes(item)) };
       }
-      // A saved folder this machine doesn't have isn't created just to hold the file: the seat's terminal started elsewhere
-      // (the restore names where), so nothing would read it there. The check after the launch reports the blocks it lacks.
-      if (guidance && guidanceInMissingFolder(guidance.targetPath, guidanceCwd)) guidance = null;
+      // A saved folder this machine doesn't have isn't created just to hold the file (insideMissingFolder); a file outside
+      // it, such as a Pi agent folder's own AGENTS.md, is read wherever the seat runs. The check after the launch reports
+      // the blocks the seat lacks.
+      if (guidance && insideMissingFolder(guidance.targetPath, guidanceCwd, existsSync)) guidance = null;
       if (guidance && guidance.items.length > 0) {
         // #2456: a block OpenRig wrote whose source changed since is refreshed too; an edited one, or one with no record, is
         // left as it is and named (the check after the launch carries the names onto the seat's result).
