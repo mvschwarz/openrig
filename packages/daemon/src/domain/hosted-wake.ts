@@ -1,6 +1,7 @@
 // Rings a hosted member (an outside tool on the team) when a row lands for it, through the trigger its roster entry
 // declares. It sends a pointer to the row, never the row's body: the member reads the row under its own grant. A 2xx
 // means the trigger accepted the ring, not that the member picked the work up: pickup is its claim on the row.
+import { createHmac, randomUUID } from "node:crypto";
 import type { RosterWake } from "./rosters.js";
 import { resolveSecret } from "./gateway/slack/secrets.js";
 import { safeDecodeURIComponent, validateOutboundUrl } from "./mission-control/outbound-url-validator.js";
@@ -19,6 +20,23 @@ export interface HostedWakeOptions {
   fetchImpl?: typeof fetch;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  /** The clock a signed ring's timestamp is read from, in milliseconds (Date.now by default). */
+  now?: () => number;
+}
+
+/** A Standard Webhooks signing key from its secret: `whsec_` followed by base64 (the prefix may be left off). Null when
+ *  the value isn't one, so a ring is never signed with a key it wasn't given. */
+export function standardWebhookKey(secret: string): Buffer | null {
+  const encoded = secret.startsWith("whsec_") ? secret.slice("whsec_".length) : secret;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
+  const key = Buffer.from(encoded, "base64");
+  return key.length > 0 ? key : null;
+}
+
+/** A Standard Webhooks v1 signature: HMAC-SHA256 over `<webhook-id>.<webhook-timestamp>.` and the body bytes exactly as
+ *  sent, as `v1,<base64>`. */
+export function standardWebhookSignature(key: Buffer, id: string, timestamp: number, body: Uint8Array): string {
+  return `v1,${createHmac("sha256", key).update(`${id}.${timestamp}.`).update(body).digest("base64")}`;
 }
 
 /** The webhook URL can itself be a credential, so a result names the secret it came from, never the URL. */
@@ -29,12 +47,19 @@ export async function ringHostedWake(
   wake: RosterWake,
   opts: HostedWakeOptions = {},
 ): Promise<{ classified: "indeterminate" | "failed"; nudgeResult: string }> {
-  const { url_ref: urlRef, authorization_ref: authorizationRef, secrets_env_file: envFile } = wake.webhook;
+  const { url_ref: urlRef, authorization_ref: authorizationRef, signing_secret_ref: signingRef, secrets_env_file: envFile } = wake.webhook;
   const lookup = { ...(opts.env ? { env: opts.env } : {}), ...(envFile ? { envFile } : {}) };
   const url = resolveSecret(urlRef, lookup);
   if (!url) return failed(urlRef, "isn't set: no webhook URL to ring");
   const authorization = authorizationRef ? resolveSecret(authorizationRef, lookup) : null;
   if (authorizationRef && !authorization) return failed(urlRef, `not rung: its Authorization value (${authorizationRef}) isn't set`);
+  // A trigger set up to verify signatures gets a signed ring or none: a ring is never sent unsigned in its place.
+  const signingSecret = signingRef ? resolveSecret(signingRef, lookup) : null;
+  if (signingRef && !signingSecret) return failed(urlRef, `not rung: its signing secret (${signingRef}) isn't set, and the ring isn't sent unsigned`);
+  const signingKey = signingSecret ? standardWebhookKey(signingSecret) : null;
+  if (signingRef && !signingKey) {
+    return failed(urlRef, `not rung: its signing secret (${signingRef}) isn't a Standard Webhooks key (whsec_ and base64), and the ring isn't sent unsigned`);
+  }
   const checked = validateOutboundUrl(url);
   if (!checked.valid) return failed(urlRef, `not rung: the URL is invalid (${checked.reason})`);
   // Credentials in the URL go in the Authorization header (the validator's contract), so the request URL carries none.
@@ -45,14 +70,25 @@ export async function ringHostedWake(
     target.username = "";
     target.password = "";
   }
+  const body = JSON.stringify({
+    source: "openrig.queue", schema_version: 1, event: "work-waiting",
+    qitem_id: ring.qitemId, destination: ring.destination, summary: ring.summary, from: ring.source,
+  });
+  // Signed over the body's UTF-8 bytes, which are the bytes fetch sends for this string. Each ring is its own message
+  // with its own id: a row can be rung again for a new wake, which a receiver mustn't drop as a repeat.
+  const signing: Record<string, string> = {};
+  if (signingKey) {
+    const id = `msg_${randomUUID().replaceAll("-", "")}`;
+    const timestamp = Math.floor((opts.now ?? Date.now)() / 1000);
+    signing["webhook-id"] = id;
+    signing["webhook-timestamp"] = String(timestamp);
+    signing["webhook-signature"] = standardWebhookSignature(signingKey, id, timestamp, Buffer.from(body, "utf8"));
+  }
   try {
     const res = await (opts.fetchImpl ?? fetch)(target.toString(), {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) },
-      body: JSON.stringify({
-        source: "openrig.queue", schema_version: 1, event: "work-waiting",
-        qitem_id: ring.qitemId, destination: ring.destination, summary: ring.summary, from: ring.source,
-      }),
+      headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}), ...signing },
+      body,
       // A redirect isn't followed: the ring goes only where the roster says.
       redirect: "manual",
       signal: AbortSignal.timeout(opts.timeoutMs ?? HOSTED_WAKE_TIMEOUT_MS),
