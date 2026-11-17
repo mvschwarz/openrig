@@ -195,8 +195,8 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     // A queue-only seat's cold watchdog reminder (#3076) waits, with no nudge, for a person or the seat's next turn; the
     // stuck sweep files no unclaimed finding for it, so none is promised here.
     if (row.state === "pending" && row.source_session === "watchdog@system" && hasTags(row.tags, ["watchdog", "queue-only"])) {
-      view.nextBackstop = { owner: row.destination_session, mechanism: "none (queue-only reminder row: a person or the seat's next turn picks it up)",
-        dueAt: null, intervalSeconds: null };
+      view.nextBackstop = { owner: row.destination_session, dueAt: null, intervalSeconds: null,
+        mechanism: "none (queue-only reminder row: it waits for someone to pick it up or for the agent's next ordinary turn; no timed sweep)" };
     }
   }
   if (row.state === "blocked") {

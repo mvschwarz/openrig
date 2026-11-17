@@ -68,6 +68,7 @@ describe("the level table at the guard", () => {
     expect(row.desired).toBe(1); // a daemon without modes reads the legacy bit: hold
     // Lifecycle work at a middle level is refused, as at hold.
     await expect(f.guard.operation("agent", async () => "restarted")).rejects.toMatchObject({ code: "typing_guard_enabled" });
+    await expect(f.guard.lifecycle(["agent"], async () => "restarted")).rejects.toMatchObject({ code: "typing_guard_enabled" });
   });
 });
 
@@ -82,7 +83,7 @@ describe("the queue-only level (#3076)", () => {
     expect(levelAdmits("queue-only", { source: "agent", urgent: true })).toBe(true);
   });
 
-  it("is stored with the coarse mode hold, so an older daemon holds everything there, and lifecycle work is refused", async () => {
+  it("is stored with the coarse mode hold, so an older daemon holds everything there; a direct write is refused, while lifecycle work goes ahead", async () => {
     const f = fixture();
     expect(await f.guard.set("agent", { mode: "queue-only" }, "person", "focus"))
       .toMatchObject({ desired: true, desiredMode: "hold", desiredLevel: "queue-only" });
@@ -90,6 +91,7 @@ describe("the queue-only level (#3076)", () => {
     expect(JSON.parse(row.desired_config)).toMatchObject({ mode: "hold", level: "queue-only" });
     expect(row.desired).toBe(1);
     await expect(f.guard.operation("agent", async () => "restarted")).rejects.toMatchObject({ code: "typing_guard_enabled" });
+    expect(await f.guard.lifecycle(["agent"], async () => "restarted")).toBe("restarted");
     expect(f.guard.queueOnly("agent")).toBe(true);
     await f.guard.set("agent", { mode: "sends-only" }, "person", "back");
     expect(f.guard.queueOnly("agent")).toBe(false);

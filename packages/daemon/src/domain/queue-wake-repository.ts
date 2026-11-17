@@ -228,7 +228,9 @@ export class QueueWakeRepository {
 
   /** The blocked rows of `owner` whose CURRENT park this job wakes and hasn't consumed: the latest arm, with no exit
    *  from `blocked` since (a row parked again with no wake of its own, by a gate or a person, wrote no arm). Read only
-   *  by a queue-only seat's delivery (#3076), where the reminder becomes a note on these rows, never typed. */
+   *  by a queue-only seat's delivery (#3076), where the reminder becomes a note on these rows, never typed. An active
+   *  recurring reminder attached with --wake-watchdog isn't consumed here: each occurrence notes the row while it stays
+   *  parked, rather than becoming a second assignment. A generated one-shot timer still is. */
   findCurrentParkRowsByWatchdog(jobId: string, owner: string): string[] {
     if (!this.available) return [];
     return this.db.prepare(
@@ -245,13 +247,14 @@ export class QueueWakeRepository {
             SELECT 1 FROM queue_transitions t
              WHERE t.qitem_id = w.qitem_id AND t.transition_id > w.transition_id AND t.state <> 'blocked'
           )
-          AND (? OR NOT EXISTS (
+          AND (? OR (? AND w.wake_kind = 'watchdog') OR NOT EXISTS (
             SELECT 1 FROM queue_transition_wakes f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
                AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
                AND (f.delivery_status IS NULL OR f.delivery_status != 'retained')
           ))`,
-    ).all(jobId, owner, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => (row as { qitem_id: string }).qitem_id);
+    ).all(jobId, owner, this.isRepeatingTimer(jobId) ? 1 : 0, this.isRecurringReminder(jobId) ? 1 : 0)
+      .map((row) => (row as { qitem_id: string }).qitem_id);
   }
 
   /** Queue rows bound to a park-generated timer, regardless of whether that
@@ -350,6 +353,14 @@ export class QueueWakeRepository {
   private isRepeatingTimer(ref: string): boolean {
     const row = this.db.prepare("SELECT spec_yaml FROM watchdog_jobs WHERE job_id = ? AND state = 'active'").get(ref) as { spec_yaml: string } | undefined;
     return row ? isQueueWait(row.spec_yaml) : false;
+  }
+
+  /** An active `periodic-reminder` that no park generated (no park armed it as its timer): it repeats on its interval. */
+  private isRecurringReminder(ref: string): boolean {
+    return this.db.prepare(
+      `SELECT 1 FROM watchdog_jobs j WHERE j.job_id = ? AND j.state = 'active' AND j.policy = 'periodic-reminder'
+          AND NOT EXISTS (SELECT 1 FROM queue_transition_wakes w WHERE w.wake_ref = j.job_id AND w.wake_kind = 'timer')`,
+    ).get(ref) !== undefined;
   }
 
   private isUsageLimitBlocker(qitemId: string): boolean {

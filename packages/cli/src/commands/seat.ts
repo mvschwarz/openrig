@@ -628,8 +628,9 @@ Between off (always interrupt) and hold (full quiet):
 What openrig-urgent, urgent-only and queue-only let through never types over a draft.
 sends-only types like off: a terminal member's typing isn't protected, as today
 (its shell input can't be read). Everything else is held, the sender is told, and
-held messages stay readable. Lifecycle work (including managed compaction) is
-refused at openrig-urgent, urgent-only and queue-only, as at hold.
+held messages stay readable. Lifecycle work is refused at openrig-urgent and
+urgent-only, as at hold; at queue-only it goes ahead, managed compaction and its
+restore included, and each of its writes waits rather than type over a draft.
 Messages use the existing outbox. Uncertain writes never replay automatically.
 Direct human input remains available. Other seats keep their own guard mode.
 

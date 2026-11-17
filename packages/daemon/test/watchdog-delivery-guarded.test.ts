@@ -86,7 +86,8 @@ function fixture(saved?: Buffer) {
   const deliveryDeps = { sessionTransport: transport, hasPendingPostCompactStage: (session: string) => hooks.pendingStage?.(session) ?? false };
   const deliver = makeWatchdogDeliver(deliveryDeps);
   cleanup.push(async () => { await transport.guardedDelivery!.stop(); db.close(); });
-  return { db, outbox, deliver, transport, submissions, pastes, hooks, hold: () => guard.set("a", { mode: "hold" }, "human@test", "hold input"), setInput: (text: string) => { body = text; }, enable: () => guard.set("a", { mode: "draft-aware" }, "human@test", "keep draft") };
+  return { db, outbox, deliver, transport, submissions, pastes, hooks, hold: () => guard.set("a", { mode: "hold" }, "human@test", "hold input"),
+    setQueueOnly: () => guard.set("a", { mode: "queue-only" }, "human@test", "a person types here"), setInput: (text: string) => { body = text; }, enable: () => guard.set("a", { mode: "draft-aware" }, "human@test", "keep draft") };
 }
 
 const seat = "worker@test";
@@ -487,6 +488,46 @@ describe("blocked parked-owner no-input recovery on the real repository", () => 
     expect(f.pastes).toHaveLength(0);
     expect(f.submissions).toHaveLength(0);
   });
+
+  // #3076: a seat that turned queue-only holds OpenRig's reminders on purpose, so an earlier refusal is no reason to fix
+  // its input: the real sweep files no finding, even before the parked-owner policy runs again. Without the switch it does.
+  // A bound terminal seat stays a terminal seat at queue-only: its finding stays.
+  it.each([{ kind: "quota", switched: false }, { kind: "quota", switched: true }, { kind: "terminal", switched: true }])(
+    "a $kind failure followed by a switch to queue-only (switched=$switched) is a no-input finding only for a terminal seat or without the switch", async ({ kind, switched }) => {
+    const f = fixture();
+    if (kind === "quota") {
+      await f.hold();
+      const target = resolveGuardTarget(f.db, seat)!;
+      for (let i = 0; i < 100; i++) f.outbox.retain({ outboxId: `quota-held-${i}`, senderSession: `filler-${i}@test`, destinationSession: seat, body: "held" }, target);
+    } else f.db.prepare("UPDATE nodes SET runtime='terminal' WHERE id='a'").run();
+    const { isBoundTerminalSeat } = await import("../src/domain/terminal-seat.js");
+    const { repo, jobs, history } = scheduled(f);
+    const row = await repo.create({ sourceSession: "orch@test", destinationSession: seat, body: "Current obligation", nudge: false });
+    repo.update({ qitemId: row.qitemId, actorSession: seat, state: "blocked", blockedOn: "external:fixture", transitionNote: "waiting without a backstop" });
+    const { findQueueRecovery } = await import("../src/domain/queue-recovery.js");
+    const policy = makeParkedOwnerConsumerPolicy({
+      diagnoseRig: () => ({ seats: [{ sessionName: seat, parked: true, activity: { value: "idle-at-prompt", needsInput: { count: 0, reason: null } }, obligations: { items: [], held: [{ qitemId: row.qitemId, healthy: false }] } }] }),
+      history: { listForJob: (id, limit) => history.listForJob(id, limit), countForJob: id => history.countForJob(id) },
+      rows: {
+        listTransitions: id => repo.listTransitions(id).map(t => ({ ...t, ts: t.ts, transitionNote: t.transitionNote ?? null })),
+        appendNote: (qitemId, transitionNote) => { repo.update({ qitemId, actorSession: "watchdog@system", transitionNote }); return { ok: true }; },
+        recordNudgeResult: (id, result) => repo.recordNudgeAttempt(id, result),
+        listOpenIds: destination => repo.listOpenObligations(destination, 500).map(r => r.qitemId),
+        recoveryOwnsWake: id => queueRecoveryOwnsWake(f.db, repo.getById(id)),
+      },
+      retentionState: () => JSON.stringify(f.outbox.retentionUsage("a")),
+      isTerminalSeat: session => isBoundTerminalSeat(f.db, session), occupantGeneration: () => "g1",
+    });
+    const job = jobs.register({ policy: PARKED_OWNER_POLICY_NAME, targetSession: makeRigAnchor("test"), intervalSeconds: 60, registeredBySession: seat, specYaml: "{}" });
+    const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(f.db), deliver: f.deliver, additionalPolicies: [policy] });
+    await engine.evaluate(job);
+    await engine.evaluate(jobs.getByIdOrThrow(job.jobId));
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).toMatch(kind === "quota" ? /^failed:.*retained_quota_full/ : /^failed:terminal-seat:/);
+    if (switched) await f.setQueueOnly();
+    await runStuckSweep({ db: f.db, queueRepo: repo, resolveOrchestrator: () => "orch@test", sessionConfirmedMissing: () => false, log: () => {} });
+    expect(findQueueRecovery(f.db, row.qitemId) === null).toBe(kind === "quota" && switched);
+    expect(f.submissions).toHaveLength(0);
+  });
 });
 
 
@@ -708,6 +749,19 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
     expect(s.repo.listTransitions(b.qitemId).filter(t => (t.transitionNote ?? "").startsWith("park wake"))).toEqual([]);
     expect(wdRows().map(r => r.destination_session)).toEqual([seat]);
     expect(s.history.listForJob(job.jobId, 1)[0]).toMatchObject({ outcome: "sent", deliveryStatus: "queued_as_row" });
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("an active recurring reminder attached by --wake-watchdog notes the still-parked row on every occurrence, never a row of its own", async () => {
+    const { f, s, wdRows, parkWith, notes, operatorReminder, tick } = queueOnly();
+    const job = operatorReminder();
+    const b = await parkWith("bound to the operator's reminder", { wakeWatchdogId: job.jobId });
+    await tick(job.jobId);
+    await tick(job.jobId);
+    expect(s.repo.getById(b.qitemId)!.state).toBe("blocked");
+    expect(notes(b.qitemId, job.jobId)).toHaveLength(2);
+    expect(wdRows()).toEqual([]);
+    expect(s.history.listForJob(job.jobId, 10).map(h => h.deliveryStatus)).toEqual(["noted_on_parked_row", "noted_on_parked_row"]);
     expect(f.submissions).toEqual([]);
   });
 
@@ -942,7 +996,7 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
     const [row] = wdRows();
     expect(s.repo.getById(row!.qitem_id)!.state).toBe("pending");
     expect(s.repo.waitingView(row!.qitem_id)!.nextBackstop).toMatchObject({ owner: seat, dueAt: null, intervalSeconds: null,
-      mechanism: expect.stringMatching(/^none \(queue-only reminder row/) });
+      mechanism: "none (queue-only reminder row: it waits for someone to pick it up or for the agent's next ordinary turn; no timed sweep)" });
     s.repo.claim({ qitemId: row!.qitem_id, destinationSession: seat });
     expect(s.repo.waitingView(row!.qitem_id)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:pickup (activity checked at detection)");
   });

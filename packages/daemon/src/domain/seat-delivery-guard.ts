@@ -26,6 +26,8 @@ interface Lease {
   staged?: { text: string; collapsedPaste: string | null };
   /** #2429: the delivery's own check found the paste this guard left unsubmitted, then the adapter submitted it. */
   ownLeftover?: "recognized" | "submitted";
+  /** A lifecycle lease at queue-only: each write is checked as draft-aware, without draft-aware's lifecycle refusal. */
+  queueOnlyLifecycle?: boolean;
 }
 
 export class DeliveryGuardError extends Error {
@@ -117,10 +119,22 @@ function storedGuard(raw: string | null | undefined, enabled: number): TypingGua
 }
 
 /** Whether this configuration holds the input. With a level, a classified input is decided by the level; an input with
- *  no classification (lifecycle work, a direct adapter write) is held only where the coarse mode holds. */
-function holds(config: TypingGuardConfig, input?: AdmissionInput): boolean {
+ *  no classification (lifecycle work, a direct adapter write) is held only where the coarse mode holds. Lifecycle work
+ *  isn't held at queue-only: that level is about how OpenRig's notices reach a seat a person types in, so managed
+ *  compaction, its restore and recovery go ahead there, with the draft-aware check on each write but without
+ *  draft-aware's refusal of an active seat (#3076). Its stored coarse mode stays hold, so a daemon without the level
+ *  still refuses them. */
+function holds(config: TypingGuardConfig, input?: AdmissionInput, lifecycle = false): boolean {
   if (config.level && input) return !levelAdmits(config.level, input);
+  if (lifecycle && config.level === "queue-only") return false;
   return config.mode === "hold";
+}
+
+/** Whether a seat's guard preference refuses a writing lifecycle operation: the same rule lifecycle() applies, for a
+ *  preflight that reads the preference without taking a lease. */
+export function preferenceHoldsLifecycle(preference: Pick<GuardPreference, "desired" | "effective" | "desiredLevel" | "effectiveLevel"> | undefined): boolean {
+  if (!preference) return false;
+  return (preference.desired && preference.desiredLevel !== "queue-only") || (preference.effective && preference.effectiveLevel !== "queue-only");
 }
 
 /** One serialization domain for preference activation, delivery and writing lifecycle.
@@ -298,7 +312,13 @@ export class SeatDeliveryGuard {
 
   /** fn must include lifecycle preflight, effects and last write. Retention callbacks
    * execute under this same lease, before any pane capture/paste/submit branch. */
-  async operation<T>(name: string, fn: () => Promise<T>, held?: (target: GuardTarget) => Promise<T>, input?: AdmissionInput): Promise<T> {
+  operation<T>(name: string, fn: () => Promise<T>, held?: (target: GuardTarget) => Promise<T>, input?: AdmissionInput): Promise<T> {
+    return this.leased(name, fn, held, input, false);
+  }
+
+  /** `lifecycle`: the lease is lifecycle()'s own, for a writing lifecycle operation. */
+  private async leased<T>(name: string, fn: () => Promise<T>, held: ((target: GuardTarget) => Promise<T>) | undefined,
+    input: AdmissionInput | undefined, lifecycle: boolean): Promise<T> {
     const bound = this.target(name);
     const inherited = this.scope.getStore()?.get(bound.nodeId);
     if (inherited?.active && inherited.target.nodeId === bound.nodeId) {
@@ -309,17 +329,23 @@ export class SeatDeliveryGuard {
       const current = this.target(name);
       if (!this.same(bound, current)) throw new DeliveryGuardError("guard_target_changed", "Input target changed while waiting; no input written.");
       const config = this.configuration(bound.nodeId);
-      if (!input?.override && (holds(config.desired, input) || holds(config.effective, input))) {
+      if (!input?.override && (holds(config.desired, input, lifecycle) || holds(config.effective, input, lifecycle))) {
         if (held) return held(bound);
         throw new DeliveryGuardError("typing_guard_enabled", "Automatic input is paused for this seat. Select off or draft-aware mode explicitly before this writing operation.");
       }
       // Input a middle level lets through still never types over a person's draft: it's delivered as draft-aware.
       const draftAwareLevel = (level?: InterruptionLevel) => level === "openrig-urgent" || level === "urgent-only" || level === "queue-only";
       const admittedByLevel = !!input && (draftAwareLevel(config.desired.level) || draftAwareLevel(config.effective.level));
+      // Lifecycle work queue-only lets through writes as draft-aware too: compaction, its restore and recovery never
+      // type over a person's draft there; only draft-aware's refusal of an active seat is left out (lifecycle()). A
+      // draft-aware side (desired or effective, while a change is pending) keeps that refusal.
+      const queueOnlyLifecycle = lifecycle && !input && (config.desired.level === "queue-only" || config.effective.level === "queue-only")
+        && config.desired.mode !== "draft-aware" && config.effective.mode !== "draft-aware";
       const lease: Lease = { target: bound, active: true, origin: "automatic", humanEpoch: this.humanEpochs.get(bound.nodeId) ?? 0,
         // Explicit interaction keeps serialization/binding checks; its own last-paste reader replaces automatic draft retention.
-        config: input?.override ? DEFAULT_GUARD : admittedByLevel ? { mode: "draft-aware", revision: config.desired.revision }
-          : config.desired.mode === "draft-aware" ? config.desired : config.effective };
+        config: input?.override ? DEFAULT_GUARD : admittedByLevel || queueOnlyLifecycle ? { mode: "draft-aware", revision: config.desired.revision }
+          : config.desired.mode === "draft-aware" ? config.desired : config.effective,
+        ...(queueOnlyLifecycle ? { queueOnlyLifecycle: true } : {}) };
       lease.serialOwner = lease;
       try { return await this.scope.run(new Map([...(this.scope.getStore() ?? []), [lease.target.nodeId, lease]]), fn); }
       finally { lease.active = false; }
@@ -395,9 +421,9 @@ export class SeatDeliveryGuard {
       const id = ids[index]; if (!id) return fn();
       if (!writing.has(id)) return this.custodyInPass(id, () => acquire(index + 1));
       if (this.ownsLifecycle(id)) return acquire(index + 1);
-      return this.operation(id, async () => {
+      return this.leased(id, async () => {
         const lease = this.scope.getStore()!.get(id)!;
-        if (lease.config?.mode === "draft-aware") {
+        if (lease.config?.mode === "draft-aware" && !lease.queueOnlyLifecycle) {
           // Only a positively absent input may receive fresh startup/resume writes.
           // An active protected seat requires an explicit guard mode change first.
           const absent = !lease.target.pane || await this.inputAbsent?.(lease.target) === true;
@@ -406,7 +432,7 @@ export class SeatDeliveryGuard {
         }
         lease.lifecycle = true;
         return acquire(index + 1);
-      });
+      }, undefined, undefined, true);
     };
     return acquire(0);
   }
