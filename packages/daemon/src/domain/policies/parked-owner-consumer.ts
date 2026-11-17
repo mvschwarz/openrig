@@ -77,6 +77,9 @@ export interface ParkedOwnerConsumerDeps {
   /** The seat's typing guard is at queue-only (#3076): a person types there, so nothing is typed; its open rows already
    *  are the reminder in its queue. */
   isQueueOnlySeat?: (sessionName: string) => boolean;
+  /** #3315: the seat's tmux server does not answer (the queue's delivery hold). Nothing is reserved or attempted until
+   *  it answers again; the reminder stays owed. */
+  terminalServerUnreachable?: (sessionName: string) => boolean;
   /** Opaque current node/guard revision/retained quota inputs, not a parked-state oracle. */
   retentionState?: (sessionName: string) => string | null;
   /** The clock the waiting grace is measured on; the wall clock when absent. */
@@ -262,6 +265,13 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       const seats = [...ordered.slice(next), ...ordered.slice(0, next)];
 
       for (const seat of seats) {
+        // #3315: first, so it holds whatever else the seat reads as (a seat on a lost server often reads indeterminate):
+        // no reservation and no transition per scan for a seat whose terminal server does not answer; the first scan
+        // after it answers again sends the reminder.
+        if (deps.terminalServerUnreachable?.(seat.sessionName)) {
+          skipped.push({ seat: seat.sessionName, why: "terminal-server-unreachable" });
+          continue;
+        }
         if (seat.parked === "indeterminate") {
           skipped.push({ seat: seat.sessionName, why: "indeterminate-not-parked" });
           continue;
@@ -448,6 +458,11 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       // Only queue-only seats already held, and nothing else: nothing new to record (#3076).
       if (skipped.length > 0 && skipped.every(({ why }) => why === "queue-only-seat-unchanged")) {
         return { action: "skip", reason: "queue_only_seat_unchanged", notes: { skippedSeats: skipped } };
+      }
+      // #3315: deferred only because the terminal server is gone: quiet, like the clean scan, so a long loss writes no
+      // history per scan; the loss itself is recorded once (tmux.server_gone).
+      if (skipped.length > 0 && skipped.every(entry => entry.why === "terminal-server-unreachable")) {
+        return { action: "skip", reason: "terminal-server-unreachable", notes: { skippedSeats: skipped } };
       }
       if (skipped.length > 0) {
         return { action: "skip", reason: "all-parked-owners-deferred", notes: { skippedSeats: skipped } };

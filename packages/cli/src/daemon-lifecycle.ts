@@ -45,6 +45,19 @@ export interface DaemonEventLoopEvidence {
   healthy: boolean;
 }
 
+/** #3315 — whether the daemon reaches its tmux server(s), from the healthz `terminals` field. A separate axis from
+ *  `healthy`: the daemon can be up while its terminals cannot be reached. */
+export interface DaemonTerminalServerEvidence {
+  socket: string;
+  state: "reachable" | "unreachable";
+  since: string;
+  cause?: string;
+}
+export interface DaemonTerminalsEvidence {
+  state: "ok" | "degraded" | "unknown";
+  servers: DaemonTerminalServerEvidence[];
+}
+
 export interface DaemonStatus {
   /** The selected OPENRIG_URL names a non-loopback endpoint. */
   explicitRemote?: boolean;
@@ -69,6 +82,9 @@ export interface DaemonStatus {
   reason?: "unresponsive" | "event-loop-starved";
   /** OPR.0.4.3.21 — event-loop evidence when healthz answered with a monitor. */
   eventLoop?: DaemonEventLoopEvidence;
+  /** #3315 — the daemon's terminal servers as healthz reported them; never part of `healthy`. Absent when the daemon
+   *  predates the field or healthz did not answer. */
+  terminals?: DaemonTerminalsEvidence;
   /** #275 — the OS code behind a failed health probe (e.g. EPERM when a sandbox blocked it). */
   probeErrorCode?: string;
   /** The recorded pid looks missing and the connection was refused, but this shell is not in the
@@ -1360,7 +1376,7 @@ export async function getDaemonStatus(
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);
       const ev = await readHealthEvidence(res);
       const url = new URL(openrigUrl);
-      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
+      return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
       if (!isRefusedError(err)) return { state: "unverified", ...endpoint, ...probeErrorCodeOf(err) };
@@ -1396,7 +1412,7 @@ export async function getDaemonStatus(
         healthy: ev.healthy,
         reason: ev.reason,
         eventLoop: ev.eventLoop,
-        ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}),
+        ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}),
       };
     } catch (err) {
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
@@ -1437,7 +1453,7 @@ export async function getDaemonStatus(
     try {
       const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
       const ev = await readHealthEvidence(res);
-      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}) };
+      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop, ...(ev.databaseWarnings ? { databaseWarnings: ev.databaseWarnings } : {}), ...(ev.terminals ? { terminals: ev.terminals } : {}) };
     } catch (err) {
       // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
       // T2: unless a live start reservation says a launch is in progress.
@@ -1456,6 +1472,7 @@ export async function getDaemonStatus(
   let reason: DaemonStatus["reason"];
   let eventLoop: DaemonEventLoopEvidence | undefined;
   let databaseWarnings: string[] | undefined;
+  let terminals: DaemonTerminalsEvidence | undefined;
   let probeFailure: Pick<DaemonStatus, "probeErrorCode"> = {};
   try {
     const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
@@ -1464,6 +1481,7 @@ export async function getDaemonStatus(
     reason = ev.reason;
     eventLoop = ev.eventLoop;
     databaseWarnings = ev.databaseWarnings;
+    terminals = ev.terminals;
   } catch (err) {
     // OPR.0.4.3.21 — pid alive but healthz timed out: the honest wedged-loop
     // signal. Report process-present/unhealthy (NOT "stopped") with the
@@ -1473,7 +1491,8 @@ export async function getDaemonStatus(
   }
 
   // pid alive = running (state file preserved either way)
-  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...(databaseWarnings ? { databaseWarnings } : {}), ...probeFailure };
+  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...(databaseWarnings ? { databaseWarnings } : {}),
+    ...(terminals ? { terminals } : {}), ...probeFailure };
 }
 
 /** #275 — keep the OS code of a failed health probe (absent for a timeout). */
@@ -1514,13 +1533,16 @@ function readDatabaseWarnings(value: unknown): string[] {
  */
 async function readHealthEvidence(
   res: { ok: boolean; json?: () => Promise<unknown> },
-): Promise<{ healthy: boolean; reason?: DaemonStatus["reason"]; eventLoop?: DaemonEventLoopEvidence; databaseWarnings?: string[] }> {
+): Promise<{ healthy: boolean; reason?: DaemonStatus["reason"]; eventLoop?: DaemonEventLoopEvidence; databaseWarnings?: string[];
+  terminals?: DaemonTerminalsEvidence }> {
   if (!res.ok) return { healthy: false };
   if (!res.json) return { healthy: true };
   try {
-    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence>; databaseWarnings?: unknown } | null;
+    const body = (await res.json()) as { eventLoop?: Partial<DaemonEventLoopEvidence>; databaseWarnings?: unknown; terminals?: unknown } | null;
     const warnings = readDatabaseWarnings(body?.databaseWarnings);
-    const context = warnings.length ? { databaseWarnings: warnings } : {};
+    const terminals = readTerminalsEvidence(body?.terminals);
+    // #3315: the terminals ride along and never change `healthy`: the daemon up and its terminals reachable are two facts.
+    const context = { ...(warnings.length ? { databaseWarnings: warnings } : {}), ...(terminals ? { terminals } : {}) };
     const el = body?.eventLoop;
     if (el && typeof el.healthy === "boolean" && typeof el.lagMeanMs === "number") {
       const eventLoop: DaemonEventLoopEvidence = {
@@ -1539,6 +1561,31 @@ async function readHealthEvidence(
     // Body absent / not JSON — treat as plain healthy (res.ok already true).
   }
   return { healthy: true };
+}
+
+/** #3315 — the healthz `terminals` field, kept only when its shape is the one the daemon writes. */
+export function readTerminalsEvidence(value: unknown): DaemonTerminalsEvidence | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { state, servers } = value as { state?: unknown; servers?: unknown };
+  if (state !== "ok" && state !== "degraded" && state !== "unknown") return undefined;
+  if (!Array.isArray(servers)) return undefined;
+  const read: DaemonTerminalServerEvidence[] = [];
+  for (const server of servers) {
+    if (!server || typeof server !== "object") continue;
+    const s = server as Record<string, unknown>;
+    if (typeof s.socket !== "string" || (s.state !== "reachable" && s.state !== "unreachable") || typeof s.since !== "string") continue;
+    read.push({ socket: s.socket, state: s.state, since: s.since, ...(typeof s.cause === "string" ? { cause: s.cause } : {}) });
+  }
+  return { state, servers: read };
+}
+
+/** #3315 — the one line `rig status` and `rig ps` print when the daemon cannot reach a terminal server. */
+export function terminalsDegradedLine(terminals: DaemonTerminalsEvidence | undefined): string | null {
+  const gone = terminals?.servers.filter(server => server.state === "unreachable") ?? [];
+  if (!gone.length) return null;
+  return gone.map(server => `Terminals: the tmux server on ${server.socket} has not answered since ${server.since}`
+    + `${server.cause ? ` (${server.cause})` : ""}. The daemon is up; automatic delivery to the seats on it is held until it `
+    + "answers again, and the daemon does not restart it.").join("\n");
 }
 
 async function fetchDaemonProbe(deps: LifecycleDeps, url: string, timeoutMs: number): Promise<{ ok: boolean; json?: () => Promise<unknown> }> {

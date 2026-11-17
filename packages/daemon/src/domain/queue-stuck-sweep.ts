@@ -1548,7 +1548,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const unclaimedBacklog = new Map<string, Candidate[]>();
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       if (dueToYield()) await yieldLoop();
-      if (deps.queueRepo.deliveryDrains.hasActive()
+      // #3315: a terminal server can be lost during the pass too, with no maintenance drain active.
+      if (deps.queueRepo.deliveryDrains.anyHeld()
         && deliveryHeld(deps.queueRepo.getById(c.row.qitemId, { waiting: false }) ?? c.row)) {
         drainDeferredIds.add(c.row.qitemId);
         continue;

@@ -46,6 +46,7 @@ in the case named:
 | `slowOperations` | When the slow-operation recorder runs. |
 | `bind` | The bind plan: `mode` (`explicit` or `default`), `hosts` (the addresses bound), `tailscaleDetected`, and `ignoredRoutingHost` when a routing value was ignored. |
 | `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. In `stuckSweep`, `findingsRouted` counts the findings created since the daemon started (an open finding a later pass finds again is not counted again), `findingsOpen` is how many finding rows were still open after the last pass, and `lastOutcome` is `findings` when the last pass created, found again or closed one. |
+| `terminals` | Whether the daemon reaches its tmux server, from what it last observed (healthz doesn't call tmux). `state` is `ok`, `degraded` (a server doesn't answer) or `unknown` (none observed yet); each entry of `servers` has `socket`, `state` (`reachable` or `unreachable`), `since` (when that state began), `lastCheckedAt`, `transitions`, and the tmux diagnostic in `cause` while unreachable. `status` stays `"ok"`: the daemon is up even when its terminals can't be reached. |
 
 ## Bearer tokens
 

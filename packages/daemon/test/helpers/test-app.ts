@@ -315,6 +315,7 @@ export function createTestApp(
     // stress proofs. Omitted by default so every existing test keeps the exact
     // legacy `/healthz` `{ status: "ok" }` body.
     eventLoopMonitor?: import("../../src/domain/event-loop-monitor.js").EventLoopMonitor;
+    terminalReachability?: import("../../src/domain/terminal-server-reachability.js").TerminalServerReachability;
     routeTimingRecorder?: import("../../src/domain/route-timing-recorder.js").RouteTimingRecorder;
     permissionDriftObserver?: {
       diagnose(nodeId: string): import("../../src/domain/permission-drift.js").PermissionDriftDiagnostic | null;
@@ -524,6 +525,7 @@ export function createTestApp(
     seatStructuralActivityService: opts?.seatStructuralActivityService,
     activityHookToken: opts?.activityHookToken,
     eventLoopMonitor: opts?.eventLoopMonitor,
+    terminalReachability: opts?.terminalReachability,
     routeTimingRecorder: opts?.routeTimingRecorder,
     // Hermeticity (hotfix qitem-20260822230440-da0d2ad6 FIX 2): default to a
     // null observer — leaving this undefined makes createApp construct the
