@@ -148,3 +148,16 @@ it.each(["policy", "history", "rig name"])("does not launch a stale %s after an 
   expect(await f.podInstantiator.launchFirstMaterializedNode(f.rigId, node.id)).toMatchObject({ ok: false, code: "selection_changed" });
   expect(f.adapter.launchHarness).not.toHaveBeenCalled();
 });
+
+it("#3253: a pod seat's first start whose limit can't be applied keeps the refusal's code (422 unsupported, 409 unverified)", async () => {
+  for (const [kind, status] of [["unsupported", 422], ["unverified", 409]] as const) {
+    const f = await fixture(true, { process_limits: { tasks_max: 8 } });
+    const problem = { kind, reason: "this host can't make the seat scope", requested: { tasksMax: 8 } };
+    f.tmux.createSession = vi.fn(async () => ({ ok: false as const, code: `process_limits_${kind}`, message: "refused for its limit",
+      retryable: kind === "unverified", processLimits: problem }));
+    const response = await f.app.request(`/api/rigs/${f.rigId}/nodes/dev.lead/launch`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const body = await response.json();
+    expect({ status: response.status, body }, JSON.stringify(body)).toMatchObject({ status,
+      body: { ok: false, code: `process_limits_${kind}`, retryable: kind === "unverified", processLimits: problem } });
+  }
+});

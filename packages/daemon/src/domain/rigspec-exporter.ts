@@ -9,7 +9,7 @@ import type {
   LegacyRigSpec, LegacyRigSpecNode, LegacyRigSpecEdge,
   RigSpec, RigSpecPod, RigSpecPodMember, RigSpecPodEdge, RigSpecCrossPodEdge,
 } from "./types.js";
-import { RigNotFoundError } from "./errors.js";
+import { ExportRefusedError, RigNotFoundError } from "./errors.js";
 import { seatLaunchAdditionsForLaunch, seatLaunchAdditionsForNode } from "./seat-launch-additions.js";
 import { isAbsolute, normalize } from "node:path";
 import { validateSafePath } from "./path-safety.js";
@@ -18,6 +18,14 @@ interface RigSpecExporterDeps {
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
   podRepo?: PodRepository;
+}
+
+/** #3253: a seat whose stored process_limits can't be read stops the export, named, with the way to fix or clear it (an
+ *  export would otherwise drop the request). */
+function processLimitsExportRefused(logicalId: string, error: string): ExportRefusedError {
+  return new ExportRefusedError(`Cannot export seat '${logicalId}': ${error}. Fix it by re-applying the spec with ` +
+    "process_limits: { tasks_max: <N> }, or clear it with process_limits: {} (an ordinary re-apply: a first-start retry " +
+    "keeps an unreadable value as stored); then export again.");
 }
 
 export class RigSpecExporter {
@@ -166,6 +174,8 @@ export class RigSpecExporter {
       const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.db, node.id) : undefined;
       if (envelope !== undefined) specNode.codexPermissions = envelope;
       if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) specNode.launchWrapper = node.launchWrapper;
+      if (node.processLimitsError) throw processLimitsExportRefused(node.logicalId, node.processLimitsError);
+      if (node.processLimits) specNode.processLimits = { tasksMax: node.processLimits.tasksMax };
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;
@@ -250,6 +260,8 @@ export class RigSpecExporter {
         if (node.advisor) member.advisor = node.advisor;
         if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
         if (isLaunchWrapperRuntime(node.runtime) && node.launchWrapper?.length) member.launchWrapper = node.launchWrapper;
+        if (node.processLimitsError) throw processLimitsExportRefused(node.logicalId, node.processLimitsError);
+        if (node.processLimits) member.processLimits = { tasksMax: node.processLimits.tasksMax };
         // #2044: unlike the copied files, a seat's plugin channels are names the record keeps as the spec gave them, so
         // an export carries the ones its launch passes.
         const channels = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.rigRepo.db, node.id).additions?.pluginChannels : undefined;
