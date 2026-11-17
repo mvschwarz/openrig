@@ -4,7 +4,7 @@ import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readNativeProcessArguments } from "./native-process-arguments.js";
-import { readProcessTable } from "./process-table.js";
+import { readProcessChildrenNow, readProcessTable, readProcessTableCensusNow } from "./process-table.js";
 
 export interface NativeProcessRow {
   pid: number;
@@ -1019,6 +1019,40 @@ export async function verifyPaneIdleShell(input: {
       const rows = await (input.listProcesses ?? (() => runAsyncSite("codex.runtime.list_processes", readProcessTable)))();
       const root = idleShellRoot(rows, pid);
       return root ? JSON.stringify(root) : null;
+    } catch { return null; }
+  };
+  const first = await sample();
+  return first !== null && await sample() === first;
+}
+
+/** Whether the bound pane holds nothing but its idle shell: `verifyPaneIdleShell`'s two matching samples, and in each
+ *  the shell has no child process at all. A harness or any other job started from it, suspended or in the background in
+ *  another process group, is a child, so it isn't empty. For ending a pane without --stop; delivery keeps the
+ *  foreground rule above. A missing or failed listing isn't empty. Each sample reads the table anew, after its pane
+ *  read: another observer's shared read still in flight may predate a job started since. A process hidden from this user
+ *  (Linux hidepid) could be the shell's child, so a census with any hidden pid isn't empty either, nor is a shell whose
+ *  own children list (Linux, where the kernel keeps one) names any process. */
+export async function verifyPaneEmptyShell(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  listProcesses?: NativeProcessLister;
+}): Promise<boolean> {
+  const sample = async (): Promise<string | null> => {
+    try {
+      const pid = await input.tmux.getPanePid(input.target);
+      if (!pid) return null;
+      const rows = input.listProcesses ? await input.listProcesses()
+        : await runAsyncSite("codex.runtime.list_processes", async () => {
+          const census = await readProcessTableCensusNow();
+          // A hidden stat can't show its parent; even an unrelated one leaves the shell's children unknown.
+          if (census.permissionHiddenPids.length > 0) throw new Error("some processes are hidden from this user");
+          // hidepid=2 leaves another user's process out of the census altogether; the shell's own list still names it.
+          const children = await readProcessChildrenNow(pid);
+          if (children && children.length > 0) throw new Error("the shell has a child process");
+          return census.rows;
+        });
+      const root = idleShellRoot(rows, pid);
+      return root && !rows.some(row => row.ppid === pid) ? JSON.stringify(root) : null;
     } catch { return null; }
   };
   const first = await sample();

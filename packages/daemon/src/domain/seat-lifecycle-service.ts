@@ -3,7 +3,7 @@ import { readClaudePermissionRules, validateClaudePermissionRules } from "./clau
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
 import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
-import type { NativeProcessLister } from "./native-process-lineage.js";
+import { verifyPaneEmptyShell, type NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -17,7 +17,7 @@ import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
 import type { NodeLauncher } from "./node-launcher.js";
-import type { PendingStartupContext, StartupOrchestrator } from "./startup-orchestrator.js";
+import { getLatestStartupFailedEvent, type PendingStartupContext, type StartupOrchestrator } from "./startup-orchestrator.js";
 import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
@@ -335,6 +335,9 @@ export type LaunchFreshResult =
       generation?: string;
       warnings?: string[];
     });
+
+const UNSTARTED_SHELL_REPLACED = "The seat's pane holds only a shell (its harness never started or returned to the shell), "
+  + "so a fresh launch replaces it without --stop.";
 
 interface LatestSessionRow {
   id: string;
@@ -1495,7 +1498,7 @@ export class SeatLifecycleService {
           + "then launch again. Closing only its viewing window doesn't end the session.",
       };
     }
-    if (!stop) {
+    if (!stop && !await this.holdsUnstartedShell(resolved.nodeId, currentSession!.id, currentBinding?.tmuxPane)) {
       return {
         ok: false,
         code: "session_live",
@@ -1519,6 +1522,22 @@ export class SeatLifecycleService {
       };
     }
     return currentSession!;
+  }
+
+  /** The seat's current session holds no conversation: it's still the seat's latest session, its startup failed with the
+   *  harness gone and the pane left as a shell (a launch's readiness saw it return to a proven idle shell, or restore
+   *  marked it), and the pane is still nothing but that shell now, with no process under it. A fresh launch replaces such
+   *  a shell without --stop; a harness started there since, even suspended or in the background, keeps the refusal. */
+  private async holdsUnstartedShell(nodeId: string, sessionId: string, pane: string | null | undefined): Promise<boolean> {
+    return this.unstartedShellMarked(nodeId, sessionId) && !!pane && await verifyPaneEmptyShell({ target: pane,
+      tmux: this.tmuxAdapter, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
+  }
+
+  /** The recorded half of `holdsUnstartedShell`, readable at a stop's effect boundary: no newer startup event or session. */
+  private unstartedShellMarked(nodeId: string, sessionId: string): boolean {
+    if (this.latestSession(nodeId)?.id !== sessionId) return false;
+    const failure = getLatestStartupFailedEvent(this.db, nodeId, sessionId);
+    return failure?.readinessCode === "returned_to_shell" || failure?.stage === "harness_not_started";
   }
 
   /**
@@ -1599,6 +1618,7 @@ export class SeatLifecycleService {
     const currentOccupant = "code" in probe ? "unknown" : probe.state;
     let stopRequired: boolean | null = currentOccupant === "absent" ? false : null;
     let owned = false;
+    let unstartedShell = false;
     if ("code" in probe) record(probe);
     else if (probe.state === "present") {
       // Check ownership even without --stop; presence alone is not permission to stop.
@@ -1606,8 +1626,11 @@ export class SeatLifecycleService {
       if ("code" in collision) record(collision);
       else {
         owned = true;
-        stopRequired = true;
-        if (!input.stop) blockers.push({ code: "session_live", message: "A live managed occupant requires --stop." });
+        unstartedShell = await this.holdsUnstartedShell(resolved.nodeId, collision.id,
+          this.sessionRegistry.getBindingForNode(resolved.nodeId)?.tmuxPane);
+        stopRequired = !unstartedShell;
+        if (unstartedShell) warnings.push(UNSTARTED_SHELL_REPLACED);
+        else if (!input.stop) blockers.push({ code: "session_live", message: "A live managed occupant requires --stop." });
       }
     }
     const launchable = blockers.length > 0 ? false : complete ? true : null;
@@ -1617,7 +1640,7 @@ export class SeatLifecycleService {
     return {
       ok: true as const, planOnly: true as const, complete, launchable, seat,
       sessionName: canonicalSessionName, currentOccupant,
-      stopRequired, wouldStop: blockers.length > 0 ? false : tmuxUnknown ? null : owned && input.stop === true,
+      stopRequired, wouldStop: blockers.length > 0 ? false : tmuxUnknown ? null : owned && (input.stop === true || unstartedShell),
       blockers, warnings, siblings,
       // OPR.0.7.0.9: what this seat's launch passes of its own additions (null when none).
       launchAdditions: node.runtime === "claude-code"
@@ -1737,12 +1760,38 @@ export class SeatLifecycleService {
     if (canonicalProbe.state === "present") {
       const currentSession = await this.validateFreshCollision(resolved, canonicalSessionName, input.stop === true);
       if ("code" in currentSession) return currentSession;
+      // Without --stop, validation passed only for a pane that held just a shell. The pane observation since may have
+      // seen a start, so prove it again right before the stop, and have the stop re-read the record at its effect.
+      let shellOnly: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]>;
+        prove: () => Promise<SeatRefusal | null> } | undefined;
+      if (input.stop !== true) {
+        if (!await this.holdsUnstartedShell(node.id, currentSession.id, this.sessionRegistry.getBindingForNode(node.id)?.tmuxPane)) {
+          return { ok: false, code: "session_live", message: `Seat "${canonicalSessionName}" is live; fresh launch refuses without --stop.`,
+            guidance: "Its pane no longer holds only a failed start's shell. Re-run with --stop to end exactly this managed occupant." };
+        }
+        viewWarnings.push(UNSTARTED_SHELL_REPLACED);
+        // At each effect, after the adapter's own reads: the pane's processes are observed again, then the record re-read.
+        const guard = this.tmuxAdapter.deliveryGuard;
+        const changed = (what: string): SeatRefusal => ({ ok: false, code: "selection_changed", message: `${what}, so the pane of `
+          + `"${canonicalSessionName}" may no longer hold only a shell; the session wasn't killed. Re-run with --stop to end `
+          + "exactly this managed occupant." });
+        if (guard) shellOnly = { guard,
+          prove: async () => {
+            const pane = this.sessionRegistry.getBindingForNode(node.id)?.tmuxPane;
+            return pane && await verifyPaneEmptyShell({ target: pane, tmux: this.tmuxAdapter,
+              ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) })
+              ? null : changed("Right before the stop, its shell had a process under it or couldn't be observed");
+          },
+          selection: () => this.unstartedShellMarked(node.id, currentSession.id) ? null
+            : changed("A startup event or a newer session arrived before the stop") };
+      }
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,
         input.reason,
         input.operator,
         false,
+        shellOnly,
       );
       if (!stopped.ok) return stopped;
       // Older open views still attach once. Keep recovery guidance for those
@@ -2102,12 +2151,17 @@ export class SeatLifecycleService {
     reason: string,
     operator: string | null | undefined,
     recordStopIntent: boolean,
-    checked?: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]> },
+    checked?: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]>;
+      /** Fresh evidence observed right before each effect, after the adapter's own reads; the selection follows it. */
+      prove?: () => Promise<SeatRefusal | null> },
   ): Promise<StopSeatResult> {
     const seat = this.describe(resolved);
-    const beforeEffect = checked && (() => {
+    const refuse = (refusal: SeatRefusal): never => { throw Object.assign(new Error(refusal.message), { code: refusal.code }); };
+    const beforeEffect = checked && (async () => {
+      const unproven = await checked.prove?.();
+      if (unproven) refuse(unproven);
       const changed = checked.selection();
-      if (changed) throw Object.assign(new Error(changed.message), { code: changed.code });
+      if (changed) refuse(changed);
       checked.guard.checkInput(resolved.nodeId);
     });
     const kill = checked

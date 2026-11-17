@@ -1577,6 +1577,8 @@ Example:
     .addHelpText("after", `
 No resume, fork, rebuild, snapshot, checkpoint, or restore packet is used.
 A live managed seat requires --stop; adopted and unmanaged sessions are refused.
+A pane that holds only a shell after a failed start (the harness never started or
+returned to the shell, and the pane is an idle shell now) is replaced without --stop.
 Sibling seats stay attached and untouched. The runtime adapter composes a new
 command from current settings; launch does not replay a stored wrapper command.
 The seat launch environment and managed executable selection still apply.

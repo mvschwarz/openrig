@@ -2173,8 +2173,10 @@ export class TmuxAdapter {
 
   /** With a delivery guard, terminate by immutable tmux session ID; checked callers validate before detach and kill.
    *  A seat's session is stopped only when it carries that seat's OpenRig marker, and each effect runs only while that
-   *  id still names a session on the server it was read from: a replaced server reuses ids for other terminals. */
-  async killSession(name: string, beforeEffect?: () => void): Promise<TmuxResult> {
+   *  id still names a session on the server it was read from: a replaced server reuses ids for other terminals.
+   *  A checked caller's validation may be asynchronous (a fresh process observation); it's awaited right before each
+   *  effect, after this method's own reads, and the guard's synchronous check runs after it. */
+  async killSession(name: string, beforeEffect?: () => void | Promise<void>): Promise<TmuxResult> {
     let stopPhase: StopPhase = "none";
     if (this.deliveryGuard) {
       const result = await this.guardedInput(name, async (pane, beforeWrite, nodeId) => {
@@ -2190,7 +2192,7 @@ export class TmuxAdapter {
           if (unproven) return unproven;
         }
         const kill = async () => {
-          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; }, { pid, start });
+          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (async () => { await beforeEffect(); beforeWrite(); }), phase => { stopPhase = phase; }, { pid, start });
           if (result.ok) { this.freshProbes.delete(name); this.freshProbes.delete(pane); this.freshManaged.delete(name); }
           return result;
         };
@@ -2227,7 +2229,7 @@ export class TmuxAdapter {
   }
 
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
-  private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void,
+  private async killSessionUnchecked(name: string, beforeEffect?: () => void | Promise<void>, phase?: (value: StopPhase) => void,
     server?: { pid: string; start: string }): Promise<TmuxResult> {
     // The guarded path passes the immutable `$N` id, which stays as it is; a bare name is made exact.
     const session = exactTarget(name, "session");
@@ -2240,7 +2242,7 @@ export class TmuxAdapter {
         `${verb} ${flag} '${session}'`, `display-message -p ${changed}`]
       : ["tmux", verb, flag, session];
     // Detach first so `detach-on-destroy off` cannot switch views onto another session.
-    beforeEffect?.();
+    await beforeEffect?.();
     phase?.("detach_attempted");
     try {
       const out = await this.run(effect("detach-client", "-s"), server ? undefined : `tmux detach-client -s ${shellQuote(session)}`);
@@ -2251,7 +2253,7 @@ export class TmuxAdapter {
       if (!message.toLowerCase().includes("no current client")) return classifyWriteError(err);
     }
     phase?.("detached");
-    beforeEffect?.();
+    await beforeEffect?.();
     phase?.("kill_attempted");
     try {
       const out = await this.run(effect("kill-session", "-t"), server ? undefined : `tmux kill-session -t ${shellQuote(session)}`);
