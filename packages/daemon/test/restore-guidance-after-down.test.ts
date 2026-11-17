@@ -215,7 +215,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
   /** `rig down` (the real teardown), then `rig up --existing` from its auto snapshot. Records
    *  the guidance file's content at the moment the native harness was started. */
   async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean; routerLine?: "yes" | "no"; paneCwd?: string; fsOps?: true;
-    panesAfterLaunch?: Array<{ id: string; cwd: string }> | "fails"; realClaude?: ClaudeCodeAdapter } = {}) {
+    panesAfterLaunch?: Array<{ id: string; cwd: string }> | "fails"; realClaude?: ClaudeCodeAdapter; cwdOverride?: string } = {}) {
     const runtime = opts.runtime ?? "claude-code";
     const tmux = mockTmux({ noPane: opts.noPane, paneCwd: opts.paneCwd, panesAfterLaunch: opts.panesAfterLaunch });
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus })
@@ -257,7 +257,8 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
         { pid: 1235, ppid: 1234, command: runtime === "codex" ? `codex resume ${TOKEN}` : runtime === "pi" ? `pi --session ${TOKEN}` : `claude --resume ${TOKEN}` },
       ],
     });
-    const up = await restore.restore(down.snapshotId!, { adapters: { [runtime]: adapter as never }, ...(opts.fsOps ? { fsOps: nodeFs } : {}) });
+    const up = await restore.restore(down.snapshotId!, { adapters: { [runtime]: adapter as never }, ...(opts.fsOps ? { fsOps: nodeFs } : {}),
+      ...(opts.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}) });
     expect(up.ok).toBe(true);
     if (!up.ok) throw new Error("restore did not run");
     expect(fileAtHarnessStart, "the native harness was started exactly once").toHaveLength(1);
@@ -297,6 +298,20 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       + `${startedIn}. To launch this rig's seats in another directory for this run: rig up poc --existing --cwd <dir>.`);
     expect(result.warnings.join("\n")).toContain(`lacks the OpenRig blocks lead-role, SOP.md, because ${cwd} doesn't exist on this machine`);
     expect(result.warnings.join("\n")).not.toContain("put back missing blocks");
+  });
+
+  // `rig up --existing --cwd <dir>` with a folder this machine doesn't have: a restore doesn't create it, so the terminal
+  // starts in tmux's fallback folder, and the restore names both, as it does for a missing saved folder.
+  it("a --cwd folder this machine doesn't have: names it and where the seat started, and creates nothing", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const given = path.join(tmp, "not-here");
+    const startedIn = path.join(tmp, "home-b");
+    fs.mkdirSync(startedIn);
+    const { result } = await downThenUpExisting(rigId, guidanceFile, { cwdOverride: given, paneCwd: startedIn, fsOps: true });
+    expect(fs.existsSync(given), "the missing --cwd folder is not created").toBe(false);
+    expect(result.warnings).toContain(`Restore: lead's working directory ${given}, given with --cwd, doesn't exist on this machine, so it `
+      + `started in ${startedIn}. To launch this rig's seats in another directory for this run: rig up poc --existing --cwd <dir>.`);
+    expect(result.warnings.join("\n")).not.toContain(`working directory ${cwd} doesn't exist`);
   });
 
   // A guidance file outside the missing folder, such as a Pi agent folder's own AGENTS.md, is read wherever the seat runs,
