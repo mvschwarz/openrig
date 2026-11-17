@@ -36,14 +36,14 @@ export class SlackNoticeContentDedup {
     if (key && messageTs !== "reconciled") this.last.set(key, { payload: p, messageTs, channel, threadTs, count: 1 });
   }
 
-  async deliver(p: OutboundPostPayload, post: () => ReturnType<SubsystemDeliverFn>): ReturnType<SubsystemDeliverFn> {
+  async deliver(p: OutboundPostPayload, post: () => ReturnType<SubsystemDeliverFn>, resume = false): ReturnType<SubsystemDeliverFn> {
     const key = this.key(p);
     if (!key) return post();
     const previous = this.pending.get(key);
     const run = async () => {
       // Concurrent sweeps must compare with the post that actually finished before them.
       if (previous) await previous.catch(() => undefined);
-      if (await this.mark(key, p)) return { ok: true as const };
+      if (!resume && await this.mark(key, p)) return { ok: true as const };
       return post();
     };
     const current = run();
@@ -54,7 +54,9 @@ export class SlackNoticeContentDedup {
 
   private async mark(key: string, p: OutboundPostPayload): Promise<boolean> {
     const last = this.last.get(key);
-    if (!last || last.payload.qitemId === p.qitemId || last.payload.summary !== p.summary || last.payload.body !== p.body) return false;
+    if (!last || last.payload.qitemId === p.qitemId || last.payload.summary !== p.summary || last.payload.body !== p.body
+      || last.payload.humanDetail !== p.humanDetail || last.payload.evidenceRef !== p.evidenceRef
+      || (p.evidenceRef && !/^https:\/\//.test(p.evidenceRef))) return false;
     const fetchImpl: FetchImpl = (url, init) => (this.opts.fetchImpl ?? fetch)(url, { ...init,
       signal: init?.signal ? AbortSignal.any([init.signal, this.opts.signal]) : this.opts.signal });
     // Like settled asks, read the exact original primary, preserving its blocks and reconciliation marker.

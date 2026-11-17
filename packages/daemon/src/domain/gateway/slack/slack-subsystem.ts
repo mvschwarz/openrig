@@ -959,7 +959,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // after quiet. A decision that goes straight to delivery skips this.
   const resolveEarlierAttempt = async (decision: Parameters<SubsystemDeliverFn>[0]): Promise<Awaited<ReturnType<SubsystemDeliverFn>> | null> => {
     const landing = "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<unknown> }).landing(decision) : "unattempted";
-    if (landing === "found" || landing === "partial") return deliver(decision);
+    if (landing === "found" || landing === "partial") {
+      return noticeDedup.deliver(decision.payload as OutboundPostPayload, () => deliver(decision), true);
+    }
     return null;
   };
 
@@ -1131,7 +1133,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // An earlier attempt of this decision found in Slack goes to delivery, which records it.
       const landing = attemptLogUnreadable ? "maybe"
         : !relay && "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<string> }).landing(decision) : "unattempted";
-      if (landing === "found" || landing === "partial") return targetDeliver(decision);
+      if (landing === "found" || landing === "partial") return noticeDedup.deliver(p, () => deliver(decision), true);
       const regForVerdict = registrySurface.loadHumanRegistry(opts.home);
       const alertsForVerdict =
         regForVerdict.ok || regForVerdict.noHumans

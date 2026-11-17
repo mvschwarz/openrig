@@ -13,6 +13,8 @@ import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import type { OutboundPostPayload } from "../src/domain/gateway/slack/outbound-driver.js";
+import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
+import { reconcileToken } from "../src/domain/gateway/slack/message.js";
 
 const human = "person@external";
 const registry = { ok: true as const, entities: [{ entityId: "person", class: "human" as const,
@@ -29,6 +31,8 @@ describe("status notice content dedup", () => {
   let posts: Record<string, unknown>[];
   let edits: Record<string, unknown>[];
   let failEdit: boolean;
+  let beforeEdit: (() => Promise<void>) | undefined;
+  let onHistory: (() => void) | undefined;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "slack-notice-content-"));
@@ -38,6 +42,7 @@ describe("status notice content dedup", () => {
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n");
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-STATUS", secretsEnvFile: secrets }, home);
     posts = []; edits = []; failEdit = false;
+    beforeEdit = undefined; onHistory = undefined;
     wire = buildSlackGatewayWire({ home, queueRepo: repo,
       registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
       fetchImpl: async (url, init) => {
@@ -50,13 +55,15 @@ describe("status notice content dedup", () => {
         }
         if (api.pathname.endsWith("chat.update")) {
           edits.push(body);
+          await beforeEdit?.();
           if (failEdit) return response({ ok: false, error: "cant_update_message" });
           const original = posts.find((p) => p.ts === body.ts && p.channel === body.channel);
           Object.assign(original ?? {}, body);
           return response({ ok: true, ts: body.ts, channel: body.channel });
         }
         const ts = api.searchParams.get("latest") ?? api.searchParams.get("oldest");
-        return response({ ok: true, messages: posts.filter((p) => p.ts === ts) });
+        if (!ts) onHistory?.();
+        return response({ ok: true, messages: ts ? posts.filter((p) => p.ts === ts) : posts });
       },
     });
   });
@@ -102,6 +109,75 @@ describe("status notice content dedup", () => {
     expect(edits).toHaveLength(0);
   });
 
+  it("keeps a resumed changed status newer than a delayed mark", async () => {
+    // Given an older repeat whose Slack edit is in flight.
+    await dispatch((await notice()).payload);
+    const repeat = await notice();
+    let releaseEdit: () => void = () => {};
+    const held = new Promise<void>((resolve) => { releaseEdit = resolve; });
+    beforeEdit = () => held;
+    const marking = dispatch(repeat.payload);
+    await vi.waitFor(() => expect(edits).toHaveLength(1));
+    const changed = await notice({ body: "Build passed on main." });
+    const decisionId = "resumed-changed-status";
+    new SeenStore(join(home, "state", "slack-attempted-decisions.jsonl")).mark(decisionId, "attempted");
+    posts.push({ channel: "C-STATUS", ts: "2.000001", text: reconcileToken(decisionId), blocks: [] });
+    let scanned: () => void = () => {};
+    const landing = new Promise<void>((resolve) => { scanned = resolve; });
+    onHistory = scanned;
+    // When a found earlier attempt resumes while the mark is delayed.
+    try {
+      expect(wire.dispatcher.dispatch("post_message", human, { ...changed.payload, quietRelease: true }, { decisionId })).toMatchObject({ ok: true });
+      await landing;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally { releaseEdit(); }
+    await marking;
+    await dispatch((await notice()).payload);
+    // Then returning to the older status posts after the newer one, rather than marking the old message.
+    expect(posts).toHaveLength(3);
+    expect(edits).toHaveLength(1);
+  });
+
+  it("posts changed human detail", async () => {
+    // Given the same primary status with supplemental detail.
+    await dispatch((await notice({ humanDetail: "First detail" })).payload);
+    // When only the detail changes.
+    await dispatch((await notice({ humanDetail: "Changed detail" })).payload);
+    // Then both primary and supplemental parts post again.
+    expect(posts).toHaveLength(4);
+    expect(edits).toHaveLength(0);
+  });
+
+  it.each([
+    ["https://example.invalid/first", "https://example.invalid/second"],
+    ["/proof/status.png", "/proof/status.png"],
+  ])("posts changed or local evidence (%s -> %s)", async (first, second) => {
+    // Given a status with evidence.
+    await dispatch((await notice({ evidenceRef: first })).payload);
+    // When the link changes, or a local path could have different bytes.
+    await dispatch((await notice({ evidenceRef: second })).payload);
+    // Then the evidence is delivered normally.
+    expect(posts).toHaveLength(2);
+    expect(edits).toHaveLength(0);
+  });
+
+  it("does not repost a marked episode in an already buffered digest", async () => {
+    // Given a digest payload buffered before the identical episode is marked.
+    await dispatch((await notice()).payload);
+    const repeat = await notice();
+    const key = repeat.payload?.notificationKey ?? repeat.item.qitemId;
+    const digest = { ...repeat.payload, deliveryDigestPost: true, digestId: "buffered-status",
+      memberReceipts: [{ qitemId: repeat.item.qitemId, notificationKey: key,
+        level: "NOTICE", kind: "human-update" }] };
+    await dispatch(repeat.payload);
+    // When the buffered digest reaches delivery.
+    await dispatch(digest);
+    // Then the exact marked episode is already delivered, without rewriting its receipt as posted.
+    expect(posts).toHaveLength(1);
+    expect(repo.transitionLog.hasOwnerNotificationReceipt(repeat.item.qitemId, key)).toBe(true);
+    expect(repo.listTransitions(repeat.item.qitemId).some((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "))).toBe(false);
+  });
+
   it("posts a replyTo follow-up", async () => {
     const first = await notice(); await dispatch(first.payload);
     await dispatch((await notice({ replyTo: first.item.qitemId })).payload);
@@ -127,7 +203,7 @@ describe("status notice content dedup", () => {
     await dispatch((await notice()).payload);
     const member = await notice();
     await dispatch({ ...member.payload, deliveryDigestPost: true, digestId: "digest-status",
-      memberReceipts: [{ qitemId: member.item.qitemId, notificationKey: member.item.ownerNotificationKey,
+      memberReceipts: [{ qitemId: member.item.qitemId, notificationKey: member.payload?.notificationKey ?? member.item.qitemId,
         level: "NOTICE", kind: "human-update" }] });
     expect(posts).toHaveLength(2);
     expect(edits).toHaveLength(0);
