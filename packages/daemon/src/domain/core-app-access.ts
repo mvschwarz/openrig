@@ -89,7 +89,7 @@ export interface CoreAppSubmission {
 /** Participate in the queue erasure batch transaction, including databases that predate app access. */
 export function redactCoreAppSubmissions(db: Database.Database, requestIds: string[], erasedAt: string): void {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'core_app_submissions'").get()) return;
-  db.prepare(`UPDATE core_app_submissions SET binding_json = NULL, checkpoint_json = NULL, receipt_json = NULL,
+  db.prepare(`UPDATE core_app_submissions SET binding_hash = '', binding_json = NULL, checkpoint_json = NULL, receipt_json = NULL,
     erased_at = COALESCE(erased_at, ?) WHERE request_id IN (SELECT value FROM json_each(?))`)
     .run(erasedAt, JSON.stringify(requestIds));
 }

@@ -1,5 +1,4 @@
 import { runnerPermissionOrigin } from "./runner-permissions.js";
-import { SessionRegistry } from "./session-registry.js";
 import { randomUUID } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 import { CoreAppAccess, CoreAppError, appObject, exactKeys, appHash, type CoreAppCredential, type CoreAppSubmission } from "./core-app-access.js";
@@ -66,32 +65,26 @@ export class CoreAppJob {
     const path = `/api/apps/v1/requests/${encodeURIComponent(requestId)}`, query = `?actor=${encodeURIComponent(actor)}`;
     return { self: path + query, result: `${path}/result${query}` };
   }
-  /** Missing or unreadable live evidence is unknown (undefined), never positive replacement. Only a successful lookup
-   *  that finds the node itself gone is positive absence (null): its asks can never be answered. */
-  private occupantGeneration(nodeId: string): string | null | undefined {
-    try {
-      const generation = new SessionRegistry(this.access.db).currentOccupantTenure(nodeId)?.generationUuid;
-      if (generation) return generation;
-      return this.access.db.prepare("SELECT 1 FROM nodes WHERE id = ?").get(nodeId) ? undefined : null;
-    } catch { return undefined; }
-  }
-  private unsupported(item: QueueItem): string | null {
+  /** One authority probe per item: why it can't be answered, and whether its agent's authority is unknown. Only positive
+   *  replacement or absence (the queue owner's `replaced`/`absent`) makes a permission ask stale; a seat with no readable tenure
+   *  is unknown, which keeps the ask, its facts and its answer forms. */
+  private assess(item: QueueItem): { reason: string | null; unknown: boolean } {
     const reason = appAskUnsupported(this.queue, item);
-    if (reason) return reason;
+    if (reason) return { reason, unknown: false };
     const origin = runnerPermissionOrigin(item);
-    if (origin) {
-      const generation = this.occupantGeneration(origin.nodeId);
-      if (generation === undefined) throw new CoreAppError("app_job_unavailable", 503, { retrySameSubmission: true });
-      if (generation !== origin.generation) return "request_stale";
-    }
-    return null;
+    if (!origin) return { reason: null, unknown: false };
+    const authority = this.queue.runnerPermissionAuthority(origin);
+    if (authority === "replaced" || authority === "absent") return { reason: "request_stale", unknown: false };
+    return { reason: null, unknown: authority !== "current" };
   }
+  private unsupported(item: QueueItem): string | null { return this.assess(item).reason; }
   request(credential: CoreAppCredential, requestId: string, actor: string) {
     const item = this.queue.getById(requestId);
     if (!item) throw new CoreAppError("request_not_found", 404);
-    return this.project(credential, item, this.unsupported(item), actor);
+    const { reason, unknown } = this.assess(item);
+    return this.project(credential, item, reason, actor, unknown);
   }
-  private project(credential: CoreAppCredential, item: QueueItem, unsupportedReason: string | null, actor: string) {
+  private project(credential: CoreAppCredential, item: QueueItem, unsupportedReason: string | null, actor: string, unknown = false) {
     const requestId = item.qitemId;
     if (unsupportedReason === "unsupported_request_kind" || unsupportedReason === "source_unavailable") return { requestId, answer: null, unsupportedReason, links: this.links(requestId, actor) };
     return { requestId, asker: item.sourceSession, askedPerson: item.destinationSession,
@@ -99,24 +92,21 @@ export class CoreAppJob {
       decisionRevision: this.queue.decisionRevision(item), episodeKey: this.episodeKey(requestId),
       body: item.body, humanDetail: item.humanDetail ?? null, questions: item.humanQuestions ?? [], humanAnswers: item.humanAnswers ?? {},
       answer: unsupportedReason ? null : { job: "human-answer", forms: ["option", "typed-reply"] },
-      ...(unsupportedReason ? { unsupportedReason } : {}), links: this.links(requestId, actor) };
+      ...(unsupportedReason ? { unsupportedReason } : {}),
+      ...(unknown ? { occupantAuthority: "unknown", occupantAuthorityDetail: "The asking agent's seat can't be confirmed current right now. The question and answer stay open; no native effect is implied." } : {}),
+      links: this.links(requestId, actor) };
   }
   needsMe(credential: CoreAppCredential, actor: string) {
     return this.snapshot(() => {
       try {
       const { current, partial } = humanAskAttention(this.queue);
       const view = feedPerspective(this.queue, actor);
-      // One ask's unknown permission tenure omits only that ask; healthy asks stay, and coverage says so.
-      let unknown = 0;
       const requests = current.flatMap(item => {
         if (!view.inView(item.destinationSession)) return [];
-        try { // one authority probe per item, projected in the same boundary
-          const reason = this.unsupported(item);
-          return reason ? [] : [this.project(credential, item, null, actor)];
-        } catch (error) { if (error instanceof CoreAppError && error.code === "app_job_unavailable") { unknown++; return []; } throw error; }
+        const { reason, unknown } = this.assess(item); // one authority probe per item, projected in the same boundary
+        return reason ? [] : [this.project(credential, item, null, actor, unknown)];
       });
-      const detail = unknown ? `${unknown} request(s) omitted: their permission authority is unknown; absence does not establish resolution.` : undefined;
-      return { version: 1, sources: [{ source: "queue", state: partial || unknown ? "partial" : "available", ...(detail ? { detail } : {}) }], requests };
+      return { version: 1, sources: [{ source: "queue", state: partial ? "partial" : "available" }], requests };
       } catch { return { version: 1, sources: [{ source: "queue", state: "unavailable", detail: "Queue source unavailable; absence does not establish resolution." }], requests: [] }; }
     });
   }
@@ -182,7 +172,7 @@ export class CoreAppJob {
   private permission(item: QueueItem, nodes: Map<string, QueueItem>) {
     const origin = runnerPermissionOrigin(item);
     if (!origin) return { status: "not-applicable", nativeEffect: "unknown" };
-    const generation = this.occupantGeneration(origin.nodeId);
+    const authority = this.queue.runnerPermissionAuthority(origin);
     let live: QueueItem | undefined = item;
     const seen = new Set<string>();
     for (let hops = 0; live && (live.state === "handed-off" || live.state === "done" && live.closureReason === "handed_off_to"); hops++) {
@@ -197,8 +187,8 @@ export class CoreAppJob {
     const stale = [...transitions].reverse().find(t => t.transitionNote?.startsWith("runner-permission-stale"));
     const source = (t: NonNullable<typeof withdrawal>) => ({ sourceQitemId: live!.qitemId, sourceTransitionId: t.transitionId, decider: t.actorSession, reason: t.transitionNote });
     if (withdrawal) return { status: "withdrawn", nativeEffect: "unknown", ...source(withdrawal) };
-    if (stale || generation === null || generation && generation !== origin.generation) return { status: "stale", nativeEffect: "unknown", ...(stale ? source(stale) : { sourceQitemId: item.qitemId }) };
-    if (!generation) return { status: "unknown", nativeEffect: "unknown", reason: "occupant_unavailable" };
+    if (stale || authority === "replaced" || authority === "absent") return { status: "stale", nativeEffect: "unknown", ...(stale ? source(stale) : { sourceQitemId: item.qitemId }) };
+    if (authority !== "current") return { status: "unknown", nativeEffect: "unknown", reason: "occupant_unavailable" };
     // Only transitions in the current final state establish a decision, as the receiving-agent owner requires.
     let decision: ReturnType<QueueRepository["listTransitions"]>[number] | undefined;
     for (let i = transitions.length - 1; i >= 0 && transitions[i]!.state === live.state; i--) {
@@ -321,11 +311,22 @@ export class CoreAppJob {
       submission: { state: recovery.retry ? "incomplete" : "conflict", ...(recovery.code ? { conflictCode: recovery.code } : {}) },
       retrySameSubmission: recovery.retry, currentRevision: recovery.revision, links: this.answerLinks(answerId, binding) };
   }
+  /** 503 for a submission whose persistence this call could not settle: `unsaved` only on confirmed absence, else `unknown`. */
+  private persistenceUnavailable(answerId: string, state: "unsaved" | "unknown") {
+    return new CoreAppError("app_job_unavailable", 503, { answerId, submission: { state }, retrySameSubmission: true });
+  }
   async submit(credential: CoreAppCredential, answerId: string, value: unknown): Promise<Record<string, unknown>> {
     if (!/^[A-Za-z0-9_-]{8,128}$/.test(answerId)) throw new CoreAppError("invalid_answer_id", 422);
-    const binding = this.binding(credential, value), hash = appHash(JSON.stringify(binding));
+    let binding: Binding;
+    try { binding = this.binding(credential, value); } catch (error) {
+      // No verified actor means no look at any earlier attempt with this ID: its persistence is unknown, never "unsaved".
+      if (error instanceof CoreAppError && error.code === "app_job_unavailable") throw this.persistenceUnavailable(answerId, "unknown");
+      throw error;
+    }
+    const hash = appHash(JSON.stringify(binding));
     const key = `${credential.appId}:${answerId}`;
-    const existing = this.row(credential.appId, answerId);
+    let existing: CoreAppSubmission | undefined;
+    try { existing = this.row(credential.appId, answerId); } catch { throw this.persistenceUnavailable(answerId, "unknown"); }
     // An erased tombstone answers the same for any payload: the kept hash must not confirm a guessed answer.
     if (existing?.erased_at) throw new CoreAppError("source_unavailable", 409, { answerId, retrySameSubmission: false });
     if (existing && existing.binding_hash !== hash) throw new CoreAppError("answer_id_conflict", 409);
@@ -347,32 +348,44 @@ export class CoreAppJob {
       expectedRevision = recovery.revision!;
     } else {
       // Synchronous validation/reservation before the existing owner reaches any delivery await.
-      db.transaction(() => {
-        const item = this.queue.getById(binding.requestId);
-        if (!item) throw new CoreAppError("request_not_found", 404);
-        const reason = this.unsupported(item);
-        if (reason) throw new CoreAppError(reason, 422);
-        if (this.queue.decisionRevision(item) !== binding.expectedRevision) throw new CoreAppError("decision_revision_changed", 409);
-        if ((this.episodeKey(item.qitemId)) !== binding.episodeKey) throw new CoreAppError("episode_changed", 409);
-        const question = item.humanQuestions!.find(q => q.id === binding.questionId);
-        const answer = binding.answer;
-        if (!question || answer.kind === "option" && !question.options.some(o => o.id === answer.optionId)) throw new CoreAppError("invalid_question_option", 422);
-        const returned = this.queue.getHumanAnswer(binding.requestId, binding.actor);
-        const finalized = unansweredQuestions(item.humanQuestions!, item.humanAnswers ?? {}).length === 0;
-        // The existing owner keeps the first committed return / finalized set. A new ID must never claim a
-        // conflicting payload was applied when that original answer wins. The original ID remains repairable.
-        if ((returned || finalized) && (answer.kind !== "option" || item.humanAnswers?.[binding.questionId] !== answer.optionId)) {
-          throw new CoreAppError(returned ? "answer_already_returned" : "answer_already_finalized", 409, {
-            retrySameSubmission: false, replyQitemId: returned?.qitemId ?? null,
-            currentRevision: this.queue.decisionRevision(item), links: this.links(binding.requestId, binding.actor),
-          });
-        }
-        if (binding.answer.kind === "typed-reply" && unansweredQuestions(item.humanQuestions!, item.humanAnswers ?? {})[0]?.id !== binding.questionId) throw new CoreAppError("typed_reply_question_mismatch", 409);
-        const workIds = (db.prepare("SELECT qitem_id FROM queue_items WHERE blocked_on = ? ORDER BY rowid LIMIT 101").all(binding.requestId) as Array<{ qitem_id: string }>).map(row => row.qitem_id);
-        const checkpoint: Checkpoint = { before: item, revision: binding.expectedRevision, workIds };
-        db.prepare("INSERT INTO core_app_submissions (app_id, answer_id, request_id, binding_hash, binding_json, checkpoint_json) VALUES (?, ?, ?, ?, ?, ?)")
-          .run(credential.appId, answerId, binding.requestId, hash, JSON.stringify(binding), JSON.stringify(checkpoint));
-      })();
+      try {
+        db.transaction(() => {
+          const item = this.queue.getById(binding.requestId);
+          if (!item) throw new CoreAppError("request_not_found", 404);
+          const reason = this.unsupported(item);
+          if (reason) throw new CoreAppError(reason, 422);
+          if (this.queue.decisionRevision(item) !== binding.expectedRevision) throw new CoreAppError("decision_revision_changed", 409);
+          if ((this.episodeKey(item.qitemId)) !== binding.episodeKey) throw new CoreAppError("episode_changed", 409);
+          const question = item.humanQuestions!.find(q => q.id === binding.questionId);
+          const answer = binding.answer;
+          if (!question || answer.kind === "option" && !question.options.some(o => o.id === answer.optionId)) throw new CoreAppError("invalid_question_option", 422);
+          const returned = this.queue.getHumanAnswer(binding.requestId, binding.actor);
+          const finalized = unansweredQuestions(item.humanQuestions!, item.humanAnswers ?? {}).length === 0;
+          // The existing owner keeps the first committed return / finalized set. A new ID must never claim a
+          // conflicting payload was applied when that original answer wins. The original ID remains repairable.
+          if ((returned || finalized) && (answer.kind !== "option" || item.humanAnswers?.[binding.questionId] !== answer.optionId)) {
+            throw new CoreAppError(returned ? "answer_already_returned" : "answer_already_finalized", 409, {
+              retrySameSubmission: false, replyQitemId: returned?.qitemId ?? null,
+              currentRevision: this.queue.decisionRevision(item), links: this.links(binding.requestId, binding.actor),
+            });
+          }
+          if (binding.answer.kind === "typed-reply" && unansweredQuestions(item.humanQuestions!, item.humanAnswers ?? {})[0]?.id !== binding.questionId) throw new CoreAppError("typed_reply_question_mismatch", 409);
+          const workIds = (db.prepare("SELECT qitem_id FROM queue_items WHERE blocked_on = ? ORDER BY rowid LIMIT 101").all(binding.requestId) as Array<{ qitem_id: string }>).map(row => row.qitem_id);
+          const checkpoint: Checkpoint = { before: item, revision: binding.expectedRevision, workIds };
+          db.prepare("INSERT INTO core_app_submissions (app_id, answer_id, request_id, binding_hash, binding_json, checkpoint_json) VALUES (?, ?, ?, ?, ?, ?)")
+            .run(credential.appId, answerId, binding.requestId, hash, JSON.stringify(binding), JSON.stringify(checkpoint));
+        })();
+      } catch (error) {
+        if (error instanceof CoreAppError) throw error;
+        // The transaction rolled back, so this attempt stored nothing, but an earlier or concurrent attempt with this ID may have:
+        // only the authoritative row says. A saved receipt wins, an incomplete row stays incomplete, absence is unsaved.
+        let stored: CoreAppSubmission | undefined, readable = true;
+        try { stored = this.row(credential.appId, answerId); } catch { readable = false; }
+        if (stored?.erased_at) throw new CoreAppError("source_unavailable", 409, { answerId, retrySameSubmission: false });
+        if (stored && stored.binding_hash !== hash) throw new CoreAppError("answer_id_conflict", 409);
+        if (stored) return this.perform(credential, answerId, binding, hash);
+        throw this.persistenceUnavailable(answerId, readable ? "unsaved" : "unknown");
+      }
       row = this.row(credential.appId, answerId)!;
     }
     const checkpoint = parse<Checkpoint>(row.checkpoint_json)!;
@@ -402,7 +415,7 @@ export class CoreAppJob {
       if (recovery.receipt) return { ...recovery.receipt, replayed: true };
       const retry = recovery.retry;
       if (error instanceof MissionControlWriteContractError || retry || recovery.code) throw new CoreAppError(retry ? "submission_incomplete" : recovery.code ?? "submission_conflict", retry ? 503 : 409,
-        { answerId, retrySameSubmission: retry, currentRevision: recovery.revision, links: this.answerLinks(answerId, binding) });
+        { answerId, ...(retry ? { submission: { state: "incomplete" } } : {}), retrySameSubmission: retry, currentRevision: recovery.revision, links: this.answerLinks(answerId, binding) });
       throw error;
     }
     return receipt!;

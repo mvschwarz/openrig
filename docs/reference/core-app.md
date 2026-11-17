@@ -13,8 +13,19 @@ Operator, runner and activity credentials do not authenticate an app. Sender
 headers are attribution, not authentication, and are ignored here. Normal server
 Host/Origin checks still apply.
 
-A local server-side operator client can provision with the **configured nonempty
-operator bearer**, through a native loopback socket:
+Provisioning and revocation are owner acts. They use the existing owner write
+route's own gate (the same `authBearerTokenMiddleware` that guards
+`/api/mission-control/action`), with no new loopback rule and no change to Host/Origin
+handling. Where an owner bearer is configured, that bearer is required, from any peer
+the server accepts. Where none is configured, the daemon's own bind rule applies: it
+allows startup without a bearer only on a loopback or tailnet bind, and then this route
+accepts the request exactly as the existing owner API does, so on a tailnet bind a peer
+that passes Host/Origin can provision. Core does not call such a request local. An
+app credential never acts as the owner. With no owner bearer configured, a request that
+presents an `orapp_`-shaped bearer on a provisioning path is 401, so a failed or revoked app
+credential cannot fall through to the open owner gate. An owner bearer you actually
+configured is matched exactly, even if its value happens to look like an app credential,
+and the owner bearer never authenticates an app read or write.
 
 ```
 POST /api/apps/v1/credentials
@@ -23,10 +34,8 @@ POST /api/apps/v1/credentials
 
 The 201 response returns `credentialId`, `appId`, one-time `token`, fixed `scope`
 (job, canonical actors, and `read: instance-human-questions-and-linked-results`),
-and `attribution: app-attributed`. Core stores only a secret hash. With no configured
-operator token provisioning returns 503 `app_provisioning_unconfigured`; absent or
-wrong operator credentials return 401, and absent/nonlocal native peer evidence
-returns 403. Forwarded headers cannot establish locality.
+and `attribution: app-attributed`. Core stores only a secret hash. With an owner bearer
+configured, a missing or wrong one returns 401.
 
 Transfer the token directly to an app-owned file opened with exclusive creation
 (`wx`, mode 0600) in an owner-only 0700 secrets directory. Keep only the file path
@@ -34,18 +43,19 @@ in app configuration. Never overwrite a token file, log the response, put tokens
 in URLs, or store them in UI state. A failed transfer requires revoking its
 credential ID and issuing a replacement; Core cannot retrieve the plaintext.
 
-`DELETE /api/apps/v1/credentials/:credentialId` uses the same operator/local-peer
-boundary and idempotently returns `{revoked:true}`. Overlapping credentials for one
+`DELETE /api/apps/v1/credentials/:credentialId` uses the same owner gate and idempotently returns `{revoked:true}`. Overlapping credentials for one
 app are allowed, each with its own fixed actor scope. Revoke explicitly after
 rotation; no revoke-first outage is required. Submission ownership is the stable
 app ID, so a replacement credential with the original actor in scope can recover
 that app's existing IDs. Current registration and credential scope are checked on
 every call.
 
-This is one trusted workspace: visibility covers instance human questions and
-linked results, while writes are attributed only to allowlisted registered people.
-A registered colleague may answer another person's ask, as themselves. Core's
-claim is **person attributed by authenticated app X**, never independent human
+A credential can **read and write** human questions and their linked work across the
+whole instance, only as the registered actors it was declared with. It is not a
+per-person private-read credential: any credential can read any person's questions and
+their linked results, and a registered colleague may answer another person's ask, as
+themselves. It is not human login.
+Core's claim is **person attributed by authenticated app X**, never independent human
 authentication. Discovery advertises only `app-attributed` assurance and
 `independentHumanAuthentication:false`. Consumers requiring independent human
 authentication must disable this job. Agents, shared channels, generic `human@host`,
@@ -77,11 +87,15 @@ All paths below are relative to `/api/apps/v1`; all responses use
 Every actor-scoped hypermedia link includes the encoded canonical actor. The key
 is singular `result`. Missing actors return 400; actors outside the credential's
 scope return 403. Needs-me excludes FYIs, resolve-only blockers, unstructured asks,
-pairing, stale permission requests and nonpending items. A direct unsupported
+pairing, positively stale permission requests and nonpending items. A direct unsupported
 request has `answer:null` and `unsupportedReason`; no questions are inferred from
 text. Source failure is explicitly unavailable/partial, so disappearance never
-means resolution. A runner-permission ask whose permission authority is unknown is omitted from needs-me and
-the queue source reports `partial`; healthy asks stay listed. A direct ask has a null episode; creation notification IDs are
+means resolution. A runner-permission ask whose asking agent's authority is **unknown**
+(its seat has no readable tenure) is neither current nor stale: needs-me and the request
+read keep it, with its question, body, recorded facts and answer forms, and add
+`occupantAuthority:"unknown"` (with a short `occupantAuthorityDetail`). Only positive
+evidence of a replaced occupant or a deleted seat makes it stale
+(`unsupportedReason:request_stale`). A direct ask has a null episode; creation notification IDs are
 not new decision episodes.
 
 Before POST, durably save a random opaque answer ID (8–128 ASCII letters, digits,
@@ -108,9 +122,14 @@ normalized submitted `answer`, `replayed`, actor-scoped links, and `submission`:
 `state:committed`, immutable `actionId`, `recordedAt`, `outcome:recorded|answered`,
 `decisionRevisionAfter`, `unanswered`, optional original-owner `message`, and actual
 `replyQitemId` (null for partial/in-row permission answers). `recorded` means a
-partial choice; `answered` means the existing answer owner completed its return
-or permission handoff. Neither means permission granted, native effect or work
-completed.
+partial choice; `answered` means the existing answer owner accepted the whole answer:
+it returned the answer, handed a permission request to its receiving agent, **or kept
+the answer on a request that is still waiting** because no agent could read it or the
+handoff could not complete. The owner's own `message` says which, and is the same text in the
+immutable receipt and its replays. `answered` never proves a native effect: it does not
+mean permission was granted, the tool ran, or work completed. Under unknown authority
+the answer is saved exactly this way, attributed to the person, bound to the exact ask,
+and never granted, resent or moved to a successor.
 
 Retry **the same ID and binding** after an uncertain response. The original receipt
 survives later answers, annotations, decisions and restarts, and is returned with
@@ -121,17 +140,30 @@ the current revision/link and `retrySameSubmission:false`. Identical fresh choic
 that encounter an original return preserve the owner's `Already answered` message
 and actual reply ID.
 
-An interruption may return 503 `submission_incomplete` with the answer ID and
-`retrySameSubmission:true`. Read status before retrying: `submission.state:incomplete`
-permits identical repair only while original own-effect evidence/current decision
-allow it. Missing or unreadable current-occupant evidence is temporary `503 app_job_unavailable`
-with `retrySameSubmission:true`, not proof of replacement. Retain the same submission ID and retry
-after recovery; committed receipts remain readable without repeating effects. A positively replaced
-occupant, or a node positively absent from a successful lookup, remains stale. `state:conflict` includes `conflictCode`, current revision and links, with
-`retrySameSubmission:false`; obtain a new human decision instead of looping or
-automatically minting a replacement ID. Missing scoped IDs return 404. Authorized
-source erasure removes binding/checkpoint/receipt text and leaves an opaque hash
-and ID tombstone: status becomes `source_unavailable`, and any retry of that ID,
+A 503 never means "the agent's authority is unknown": that case saves the answer. The
+503s say what is known about persistence, per stage. Retry **the same ID and binding**
+for each; never mint a new ID or discard the credential:
+
+| 503 | Meaning |
+| --- | --- |
+| `app_job_unavailable` with `submission.state:"unsaved"` | The reservation transaction failed and Core re-read the authoritative row and found none: nothing was stored. |
+| `app_job_unavailable` with `submission.state:"unknown"` | Core could not verify persistence (the registry or the saved row could not be read). An earlier attempt with this ID may be saved; no claim either way. |
+| `submission_incomplete` with `submission.state:"incomplete"` | The binding is reserved, but the owner's write did not finish. It does **not** say the person's answer was recorded: the reservation is not the answer. Read `GET /answers/:id`, then retry. |
+| `app_job_unavailable` with no `submission` | The request did nothing (for example authentication could not read the registry or schema); it says nothing about an earlier attempt. |
+
+A committed receipt stays committed and unchanged. Retrieving it needs the app's
+credential, the registry and the database, so an outage of any of them can still answer
+503 to a read or a replay; that never says the answer was unsaved or undoes the receipt.
+Reads never write. `GET /answers/:id` reports
+`submission.state:incomplete` (identical repair is allowed only while original
+own-effect evidence and the current decision allow it) or `conflict` with `conflictCode`,
+current revision and links and `retrySameSubmission:false`: obtain a new human decision
+instead of looping or automatically minting a replacement ID. A positively replaced
+occupant, or a node positively absent from a successful lookup, is `request_stale` and
+fences new writes; committed receipts are unchanged and stay readable. Missing scoped IDs
+return 404. Authorized
+source erasure removes binding/checkpoint/receipt text and leaves only an ID tombstone
+(the binding hash is cleared too): status becomes `source_unavailable`, and any retry of that ID,
 whatever its payload, returns the same `source_unavailable` without reexecuting. Existing queue audit erasure applies too.
 
 ## Follow recorded facts

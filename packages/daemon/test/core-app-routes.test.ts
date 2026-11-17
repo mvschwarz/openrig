@@ -1,6 +1,7 @@
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { RunnerPermissions } from "../src/domain/runner-permissions.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -32,11 +33,21 @@ describe("Core app boundary", () => {
       expect(response.status).toBe(401);
     }
   });
-  it("refuses provisioning without a configured operator bearer", async () => {
-    const db = new Database(":memory:"); migrate(db, ALL_MIGRATIONS); closes.push(() => db.close());
-    const response = await createTestApp(db).app.request("/api/apps/v1/credentials", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ error: "app_provisioning_unconfigured" });
+  it("provisions through the owner route's own no-bearer posture, and no app credential ever becomes the owner there", async () => {
+    const f = fixture(null); const body = { appId: "test", actors: [PERSON], job: "human-answer", attribution: "app-attributed" };
+    // With no owner bearer configured the owner gate passes everything; the permitted posture needs no peer evidence.
+    const created = await f.send("/v1/credentials", body, null, null);
+    expect(created.status).toBe(201); const issued = await created.json();
+    const spoofed = [issued.token, `orapp_${"0".repeat(64)}`, "orapp_malformed", "ORAPP_upper"];
+    for (const token of spoofed) {
+      expect((await f.send("/v1/credentials", body, token, null)).status).toBe(401);
+      expect((await f.send(`/v1/credentials/${issued.credentialId}`, undefined, token, null, "DELETE")).status).toBe(401);
+    }
+    expect(f.db.prepare("SELECT COUNT(*) AS n, COUNT(revoked_at) AS revoked FROM core_app_credentials").get()).toEqual({ n: 1, revoked: 0 });
+    expect((await f.send(`/v1/credentials/${issued.credentialId}`, undefined, null, null, "DELETE")).status).toBe(200);
+    // A revoked app credential is no more an owner than a live one.
+    expect((await f.send("/v1/credentials", body, issued.token, null)).status).toBe(401);
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM core_app_credentials").get()).toEqual({ n: 1 });
   });
 });
 
@@ -72,13 +83,25 @@ describe("app credential lifecycle", () => {
     expect((await f.send("/v1/capabilities", undefined, second.token)).status).toBe(200);
     expect(new CoreAppAccess(f.db, f.repo).authenticate(`Bearer ${second.token}`).appId).toBe("test");
   });
-  it("requires the configured operator and actual loopback socket to provision", async () => {
+  it("provisions for the configured owner from any peer, and refuses a missing, wrong or app bearer, with no fallback either way", async () => {
     const f = fixture(); const body = { appId: "test", actors: [PERSON], job: "human-answer", attribution: "app-attributed" };
-    for (const peer of [null, "192.0.2.1"]) expect((await f.send("/v1/credentials", body, "operator", peer)).status).toBe(403);
+    for (const peer of [null, "192.0.2.1", "127.0.0.1"]) expect((await f.send("/v1/credentials", body, "operator", peer)).status).toBe(201);
     const token = (await (await f.provision()).json()).token;
-    expect((await f.send("/v1/credentials", body, token)).status).toBe(401);
-    expect((await f.send("/v1/credentials", body, null)).status).toBe(401);
-    expect(f.db.prepare("SELECT COUNT(*) AS n FROM core_app_credentials").get()).toEqual({ n: 1 });
+    for (const wrong of [null, "wrong", token, `orapp_${"0".repeat(64)}`]) {
+      for (const peer of ["127.0.0.1", "192.0.2.1"]) expect((await f.send("/v1/credentials", body, wrong, peer)).status).toBe(401);
+      expect((await f.send(`/v1/credentials/${randomUUID()}`, undefined, wrong, "127.0.0.1", "DELETE")).status).toBe(401);
+    }
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM core_app_credentials").get()).toEqual({ n: 4 });
+    // The owner bearer is no app credential: every other app path still needs one.
+    for (const path of ["/v1/capabilities", `/v1/needs-me?actor=${encodeURIComponent(PERSON)}`]) expect((await f.send(path, undefined, "operator")).status).toBe(401);
+    expect((await f.send("/v1/answers/answer_owner01", {}, "operator")).status).toBe(401);
+  });
+  it("keeps exact owner-token semantics for an opaque owner value that resembles an app token, and for an empty configured value", async () => {
+    const lookalike = `orapp_${"a".repeat(64)}`, f = fixture(lookalike);
+    expect((await f.provision()).status).toBe(201);
+    expect((await f.send("/v1/capabilities", undefined, lookalike)).status).toBe(401); // a configured exact match is owner proof only
+    const empty = fixture("");
+    for (const token of [null, "", "x"]) expect((await empty.send("/v1/credentials", { appId: "test", actors: [PERSON], job: "human-answer", attribution: "app-attributed" }, token)).status).toBe(401);
   });
   it("rejects unknown people, generic human, agents, malformed scopes and independent assurance", async () => {
     const f = fixture();
@@ -339,7 +362,7 @@ describe("follow actual results and erase retained submissions", () => {
     const report = await eraseQueue(f.db, { apply: true, nowIso: new Date().toISOString(), scope: { kind: "ids", entries: [{ qitemId: f.ask.qitemId, action }] } });
     expect(report.error).toBeUndefined(); expect(report.qitems).toContainEqual(expect.objectContaining({ qitemId: f.ask.qitemId, action }));
     const row = f.db.prepare("SELECT binding_hash,binding_json,checkpoint_json,receipt_json,erased_at FROM core_app_submissions").get() as Record<string, unknown>;
-    expect(row).toMatchObject({ binding_json: null, checkpoint_json: null, receipt_json: null, erased_at: expect.any(String), binding_hash: expect.any(String) });
+    expect(row).toMatchObject({ binding_json: null, checkpoint_json: null, receipt_json: null, erased_at: expect.any(String), binding_hash: "" });
     expect(JSON.stringify(row)).not.toContain("Private answer content");
     const changes = f.db.prepare("SELECT total_changes() n").get();
     expect(await (await f.send(`/v1/answers/answer_erase?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json()).toMatchObject({ submission: { state: "source_unavailable" }, retrySameSubmission: false });
@@ -454,8 +477,9 @@ describe("authenticated invalidation refresh", () => {
   });
 });
 
-async function permissionFixture(receiving = true) {
-  const f = fixture("operator", receiving ? () => ({ session: "lead@test" }) : undefined);
+/** `true`: a receiving agent decides; `"keep"`: a decider is wired but none can read it (the answer is kept); `false`: none is wired. */
+async function permissionFixture(receiving: boolean | "keep" = true) {
+  const f = fixture("operator", receiving === true ? () => ({ session: "lead@test" }) : receiving === "keep" ? () => null : undefined);
   f.repo.attachOutbox(new OutboxHandler(f.db));
   const token = (await (await f.provision()).json()).token;
   const rigs = new RigRepository(f.db), rig = rigs.createRig("test"), node = rigs.addNode(rig.id, "runner", { runtime: "synth" });
@@ -477,6 +501,7 @@ describe("permission and refresh truth", () => {
     const response = await f.send("/v1/answers/answer_permission", { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
       expectedRevision: f.repo.decisionRevision(ask), answer: { kind: "option", optionId: "allow" } }, f.token);
     expect(response.status).toBe(200);
+    expect((await response.json()).submission.message).toBe(`Your answer on ${f.askId} went to lead@test, the receiving agent, which decides. The runner waits until then; nothing has run. A note to you says the agent's recorded state.`);
     const resultPath = `/v1/requests/${f.askId}/result?actor=${encodeURIComponent(PERSON)}`;
     const current = await (await f.send(resultPath, undefined, f.token)).json();
     expect(current.answerReturn).toMatchObject({ status: "kept-for-agent", replyQitemId: null });
@@ -579,6 +604,34 @@ it("production route mounting retains Host/Origin checks and rejects app tokens 
   const body = JSON.stringify({ verb: "annotate", qitemId: f.ask.qitemId, annotation: "Authorized operator note" });
   expect((await app.request("/api/mission-control/action", { method: "POST", headers: { Authorization: `Bearer ${f.token}`, "Content-Type": "application/json", "X-OpenRig-Session": PERSON }, body })).status).toBe(401);
   expect((await app.request("/api/mission-control/action", { method: "POST", headers: { Authorization: "Bearer operator", "Content-Type": "application/json", "X-OpenRig-Session": PERSON }, body })).status).toBe(200);
+});
+
+it.each([["a configured owner bearer", "operator"], ["no owner bearer", null]] as const)("production mount gives credential provisioning the owner write route's Host/Origin behavior with %s", async (_label, owner) => {
+  const f = await jobFixture();
+  const { app } = createTestApp(f.db, { appDeps: { queueRepo: f.repo, eventBus: f.bus, missionControlWriteContract: f.writes,
+    missionControlBearerToken: owner, terminalBearerToken: "terminal" } });
+  const credentials = JSON.stringify({ appId: "mounted", actors: [PERSON], job: "human-answer", attribution: "app-attributed" });
+  const note = JSON.stringify({ verb: "annotate", qitemId: f.ask.qitemId, annotation: "Owner parity note" });
+  const matrix: Array<[string, Record<string, string>]> = [
+    ["plain local", { Host: "localhost" }],
+    ["owner bearer on a custom Host", { Host: "evil.example", ...(owner ? { Authorization: `Bearer ${owner}` } : {}) }],
+    ["no bearer on a custom Host", { Host: "evil.example" }],
+    ["bad Origin with the owner bearer", { Host: "localhost", Origin: "https://evil.example", ...(owner ? { Authorization: `Bearer ${owner}` } : {}) }],
+    ["an app credential on a local Host", { Host: "localhost", Authorization: `Bearer ${f.token}` }],
+  ];
+  for (const [label, headers] of matrix) {
+    const provision = await app.request("/api/apps/v1/credentials", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: credentials });
+    const action = await app.request("/api/mission-control/action", { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": PERSON, ...headers }, body: note });
+    // The Host/Origin decision (403) is the shared boundary's, so it must match the owner write route's for the same request.
+    expect([label, provision.status === 403]).toEqual([label, action.status === 403]);
+  }
+  const statuses = async (headers: Record<string, string>) => (await app.request("/api/apps/v1/credentials", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: credentials })).status;
+  expect(await statuses({ Host: "localhost", ...(owner ? { Authorization: `Bearer ${owner}` } : {}) })).toBe(201);
+  expect(await statuses({ Host: "evil.example" })).toBe(403);
+  expect(await statuses({ Host: "localhost", Origin: "https://evil.example" })).toBe(403);
+  expect(await statuses({ Host: "localhost", Authorization: `Bearer ${f.token}` })).toBe(401);
+  if (owner) expect(await statuses({ Host: "evil.example", Authorization: `Bearer ${owner}` })).toBe(201); // the existing current-owner Host waiver
+  else expect(await statuses({ Host: "evil.example", Authorization: `Bearer ${f.token}` })).toBe(403);
 });
 
 it("a revoked stream closes at its 15 second heartbeat without waiting for a queue event", async () => {
@@ -713,82 +766,213 @@ it.each(["unanswered", "answered"] as const)("treats a permission ask whose node
   expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
 });
 
-it("keeps healthy asks usable when one permission ask has unknown tenure, with truthful partial coverage", async () => {
-  const f = await permissionFixture();
-  const ordinary = await f.repo.create({ sourceSession: "builder@test", destinationSession: PERSON, body: "Ordinary ask", humanIntent: "decision",
-    humanQuestions: [questions[0]!], nudge: false });
-  const fault = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockReturnValue(null);
-  try {
-    const response = await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
-    expect(response.status).toBe(200);
-    const body = await response.json();
-    expect(body.requests.map((r: any) => r.requestId)).toEqual([ordinary.qitemId]);
-    expect(body.sources).toEqual([{ source: "queue", state: "partial", detail: expect.stringContaining("unknown") }]);
-  } finally { fault.mockRestore(); }
-  const healthy = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
-  expect(healthy.requests.map((r: any) => r.requestId).sort()).toEqual([f.askId, ordinary.qitemId].sort());
-  expect(healthy.sources).toEqual([{ source: "queue", state: "available" }]);
+// Unknown agent authority (no tenure for an existing node, or an unreadable read) is neither current nor replaced. The person's
+// question, the facts and an attributed answer stay; only positive replacement or absence ends an ask.
+const unreadableTenure = (cause: "missing" | "failed") => vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(() => {
+  if (cause === "failed") throw new Error("fixture tenure read unavailable");
+  return null;
 });
+const permissionBinding = (f: Awaited<ReturnType<typeof permissionFixture>>, answer: unknown) => ({ job: "human-answer", actor: PERSON, requestId: f.askId,
+  questionId: "permission", episodeKey: null, expectedRevision: f.repo.decisionRevision(f.repo.getById(f.askId)!), answer });
 
-it("keeps healthy asks when a permission tenure read becomes unavailable only while that ask is projected", async () => {
+it.each(["missing", "failed"] as const)("keeps showing a permission question, its facts and its answer forms with an unknown qualifier through a %s tenure read, one probe per item", async cause => {
   const f = await permissionFixture();
   const ordinary = await f.repo.create({ sourceSession: "builder@test", destinationSession: PERSON, body: "Ordinary ask", humanIntent: "decision",
     humanQuestions: [questions[0]!], nudge: false });
   const real = SessionRegistry.prototype.currentOccupantTenure; let reads = 0;
-  const fault = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(function (this: SessionRegistry, nodeId: string) {
-    if (++reads > 1) throw new Error("tenure read lost");
-    return real.call(this, nodeId);
-  });
+  const fault = unreadableTenure(cause);
+  fault.mockImplementation(function (this: SessionRegistry, nodeId: string) { reads++; if (cause === "failed") throw new Error("tenure read lost"); return null; });
   try {
-    const body = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
-    expect(reads).toBe(1); // one authority probe per item, no duplicate projection probe
-    expect(body.requests.map((r: any) => r.requestId).sort()).toEqual([f.askId, ordinary.qitemId].sort());
-    expect(body.sources).toEqual([{ source: "queue", state: "available" }]);
-  } finally { fault.mockRestore(); }
-});
-
-it.each(["missing", "failed"] as const)("retains an unfinished permission answer through a %s tenure read and recovers its original submission", async cause => {
-  const f = await permissionFixture(), ask = f.repo.getById(f.askId)!;
-  const binding = { job: "human-answer", actor: PERSON, requestId: f.askId, questionId: "permission", episodeKey: null,
-    expectedRevision: f.repo.decisionRevision(ask), answer: { kind: "option", optionId: "allow" } };
-  const answerId = `answer_unknown_${cause}`, path = `/v1/answers/${answerId}`;
-  vi.spyOn(f.repo, "createHumanAnswer").mockRejectedValueOnce(new Error("fixture interruption after choice"));
-  expect((await f.send(path, binding, f.token)).status).toBe(503);
-  const evidence = () => f.db.prepare("SELECT binding_json, checkpoint_json, receipt_json FROM core_app_submissions WHERE answer_id = ?").get(answerId);
-  const saved = evidence(), seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
-  const unreadable = () => vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(() => {
-    if (cause === "failed") throw new Error("fixture tenure read unavailable");
-    return null;
-  });
-  const fault = unreadable();
-  try {
-    for (const sent of [undefined, binding]) {
-      const response = await f.send(sent ? path : `${path}?actor=${encodeURIComponent(PERSON)}`, sent, f.token);
-      expect(response.status).toBe(503);
-      expect(await response.json()).toMatchObject({ error: "app_job_unavailable", retrySameSubmission: true });
-    }
-    expect(evidence()).toEqual(saved); expect(f.bus.maxSeq()).toBe(seq); expect(f.log.countAll()).toBe(0);
-    expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
-  } finally { fault.mockRestore(); }
-  expect(await (await f.send(`${path}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json())
-    .toMatchObject({ submission: { state: "incomplete" }, retrySameSubmission: true });
-  const recovered = await f.send(path, binding, f.token);
-  expect(recovered.status).toBe(200); const receipt = await recovered.json();
-  expect(receipt.submission.state).toBe("committed"); expect(f.log.countAll()).toBe(1);
-  await new Promise(resolve => setImmediate(resolve));
-  const committedSeq = f.bus.maxSeq(), committedChanges = f.db.prepare("SELECT total_changes() n").get();
-  const later = unreadable();
-  try {
-    for (const sent of [undefined, binding]) {
-      const response = await f.send(sent ? path : `${path}?actor=${encodeURIComponent(PERSON)}`, sent, f.token);
-      expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ submission: receipt.submission, replayed: true });
-    }
+    const needs = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+    expect(reads).toBe(1);
+    expect(needs.sources).toEqual([{ source: "queue", state: "available" }]);
+    expect(needs.requests.map((r: any) => r.requestId).sort()).toEqual([f.askId, ordinary.qitemId].sort());
+    const unknown = needs.requests.find((r: any) => r.requestId === f.askId);
+    expect(unknown).toMatchObject({ occupantAuthority: "unknown", state: "pending", body: expect.stringContaining("Write report"),
+      questions: [expect.objectContaining({ id: "permission" })], answer: { job: "human-answer", forms: ["option", "typed-reply"] } });
+    expect(unknown.unsupportedReason).toBeUndefined();
+    expect(needs.requests.find((r: any) => r.requestId === ordinary.qitemId).occupantAuthority).toBeUndefined();
+    const status = await f.send(`/v1/requests/${f.askId}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
+    expect(status.status).toBe(200); expect(await status.json()).toMatchObject({ occupantAuthority: "unknown", answer: { job: "human-answer" } });
+    const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
     const result = await f.send(`/v1/requests/${f.askId}/result?actor=${encodeURIComponent(PERSON)}`, undefined, f.token);
     expect(result.status).toBe(200);
-    const body = await result.json();
-    expect(body.permissionDecision).toMatchObject({ status: "unknown", reason: "occupant_unavailable", nativeEffect: "unknown" });
-    expect(body.submissions).toEqual(expect.arrayContaining([expect.objectContaining({ answerId, submission: receipt.submission })]));
-    expect(f.bus.maxSeq()).toBe(committedSeq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(committedChanges);
-  } finally { later.mockRestore(); }
+    expect(await result.json()).toMatchObject({ request: { occupantAuthority: "unknown" }, permissionDecision: { status: "unknown", reason: "occupant_unavailable", nativeEffect: "unknown" } });
+    expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes); expect(f.repo.getById(f.askId)?.state).toBe("pending");
+  } finally { fault.mockRestore(); }
+  void real;
+  const healthy = await (await f.send(`/v1/needs-me?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+  expect(healthy.requests.find((r: any) => r.requestId === f.askId).occupantAuthority).toBeUndefined();
+});
+
+it.each(["option", "typed"] as const)("saves a person's %s answer through the owner while the agent's authority is unknown, with no native effect, successor or stale cancel", async form => {
+  for (const cause of ["missing", "failed"] as const) {
+    for (const mode of ["decider", "keep", "none"] as const) {
+      const f = await permissionFixture(mode === "decider" ? true : mode === "keep" ? "keep" : false);
+      const binding = permissionBinding(f, form === "option" ? { kind: "option", optionId: "allow" } : { kind: "typed-reply", text: "Please allow this once" });
+      const answerId = `answer_${form}_${cause}_${mode}`, path = `/v1/answers/${answerId}`, label = [form, cause, mode];
+      const fault = unreadableTenure(cause);
+      let receipt: any;
+      try {
+        const response = await f.send(path, binding, f.token);
+        expect([...label, response.status]).toEqual([...label, 200]);
+        receipt = await response.json();
+        expect(receipt).toMatchObject({ actor: { address: PERSON }, requestId: f.askId, replayed: false, submission: { state: "committed", outcome: "answered" } });
+        // The owner's own words: handed to the receiving agent, or kept; an ask with no decider wired closes as it always did.
+        expect(receipt.submission.message).toEqual(mode === "decider" ? expect.stringContaining("went to lead@test, the receiving agent")
+          : mode === "keep" ? expect.stringContaining("is kept on") : undefined);
+        // Saved through the owner: the person's attributed answer is on the exact ask; never stale-closed, and no native read grants it.
+        const ask = f.repo.getById(f.askId)!;
+        expect([...label, ask.state]).toEqual([...label, mode === "decider" ? "handed-off" : mode === "keep" ? "pending" : "done"]);
+        expect(ask.humanAnswers?.permission).toEqual(form === "option" ? "allow" : expect.objectContaining({ kind: "typed-reply", text: "Please allow this once" }));
+        expect(f.repo.listTransitions(f.askId).some(t => t.transitionNote?.startsWith("runner-permission-stale"))).toBe(false);
+        expect(f.db.prepare("SELECT actor_session FROM mission_control_actions WHERE qitem_id = ?").all(f.askId)).toEqual([{ actor_session: PERSON }]); // attributed to the person
+        expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE handed_off_from = ?").get(f.askId)).toEqual({ n: mode === "decider" ? 1 : 0 });
+        if (cause === "missing") expect(f.permissions.read(null, f.askId)).toMatchObject({ ok: true, state: "pending" });
+        expect(f.log.countAll()).toBe(1);
+      } finally { fault.mockRestore(); }
+      // Authority for the same generation returns: the saved receipt replays; no second write, handoff or native effect.
+      await new Promise(resolve => setImmediate(resolve));
+      const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+      const replay = await f.send(path, binding, f.token);
+      expect(replay.status).toBe(200); expect(await replay.json()).toEqual({ ...receipt, replayed: true });
+      expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+      expect(f.permissions.read(null, f.askId)).not.toMatchObject({ state: "stale" });
+      expect(f.db.prepare("SELECT COUNT(*) n FROM queue_items WHERE handed_off_from = ?").get(f.askId)).toEqual({ n: mode === "decider" ? 1 : 0 });
+      // A positive successor then makes it stale, and the original receipt is unchanged.
+      f.sessions.registerSession(f.node.id, "runner@test", "handover");
+      expect(f.permissions.read(null, f.askId)).toMatchObject({ ok: true, state: "stale" });
+      expect(await (await f.send(path, binding, f.token)).json()).toEqual({ ...receipt, replayed: true });
+      expect(await (await f.send(`${path}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json()).toMatchObject({ submission: receipt.submission, replayed: true });
+      expect(f.log.countAll()).toBe(1);
+    }
+  }
+});
+
+it("still fences a new answer when the seat is positively replaced or gone, before storing anything", async () => {
+  for (const change of ["replaced", "absent"] as const) {
+    const f = await permissionFixture(), binding = permissionBinding(f, { kind: "option", optionId: "allow" });
+    if (change === "replaced") f.sessions.registerSession(f.node.id, "runner@test", "handover"); else f.db.prepare("DELETE FROM nodes WHERE id = ?").run(f.node.id);
+    const response = await f.send(`/v1/answers/answer_${change}_fence`, binding, f.token);
+    expect([change, response.status, (await response.json()).error]).toEqual([change, 422, "request_stale"]);
+    expect(f.db.prepare("SELECT COUNT(*) n FROM core_app_submissions").get()).toEqual({ n: 0 });
+    expect(f.repo.getById(f.askId)?.humanAnswers ?? {}).toEqual({}); expect(f.log.countAll()).toBe(0);
+  }
+});
+
+it.each(["missing", "failed"] as const)("recovers an unfinished permission answer through a %s tenure read as incomplete, then commits once and replays", async cause => {
+  const f = await permissionFixture(), binding = permissionBinding(f, { kind: "option", optionId: "allow" });
+  const answerId = `answer_unfinished_${cause}`, path = `/v1/answers/${answerId}`;
+  vi.spyOn(f.repo, "createHumanAnswer").mockRejectedValueOnce(new Error("fixture interruption after choice"));
+  const interrupted = await f.send(path, binding, f.token);
+  expect(interrupted.status).toBe(503);
+  expect(await interrupted.json()).toMatchObject({ error: "submission_incomplete", retrySameSubmission: true, submission: { state: "incomplete" } });
+  const fault = unreadableTenure(cause);
+  let receipt: any;
+  try {
+    expect(await (await f.send(`${path}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json()).toMatchObject({ submission: { state: "incomplete" }, retrySameSubmission: true });
+    const recovered = await f.send(path, binding, f.token);
+    expect(recovered.status).toBe(200); receipt = await recovered.json();
+    expect(receipt.submission).toMatchObject({ state: "committed", outcome: "answered" });
+  } finally { fault.mockRestore(); }
+  await new Promise(resolve => setImmediate(resolve));
+  const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+  expect(await (await f.send(path, binding, f.token)).json()).toEqual({ ...receipt, replayed: true });
+  expect(f.log.countAll()).toBe(1); expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+});
+
+describe("honest 503 persistence status", () => {
+  const body = (f: Awaited<ReturnType<typeof jobFixture>>) => f.binding();
+  it("an initial reservation failure says unsaved only after the authoritative row proves absence, and the same ID then commits once", async () => {
+    const f = await jobFixture(), sent = body(f), path = "/v1/answers/answer_unsaved01";
+    f.db.exec("CREATE TRIGGER fixture_full BEFORE INSERT ON core_app_submissions BEGIN SELECT RAISE(ABORT, 'fixture database full'); END");
+    const failed = await f.send(path, sent, f.token);
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({ error: "app_job_unavailable", answerId: "answer_unsaved01", submission: { state: "unsaved" }, retrySameSubmission: true });
+    expect(f.db.prepare("SELECT COUNT(*) n FROM core_app_submissions").get()).toEqual({ n: 0 });
+    expect(f.log.countAll()).toBe(0); expect(f.repo.getById(f.ask.qitemId)?.humanAnswers ?? {}).toEqual({});
+    f.db.exec("DROP TRIGGER fixture_full");
+    const retried = await f.send(path, sent, f.token);
+    expect(retried.status).toBe(200); expect(await retried.json()).toMatchObject({ submission: { state: "committed" }, replayed: false });
+    expect(f.log.countAll()).toBe(1);
+  });
+  it("a failed reservation does not deny a row the same ID already stored: a saved receipt wins, an incomplete row stays incomplete, and an unreadable recheck is unknown", async () => {
+    const f = await jobFixture(), sent = body(f), path = "/v1/answers/answer_saved01";
+    // A concurrent attempt stored the binding, then its owner write failed: incomplete, with the ask still answerable.
+    vi.spyOn(f.repo, "recordHumanAnswer").mockImplementationOnce(() => { throw new Error("fixture queue write failure"); });
+    expect((await f.send(path, sent, f.token)).status).toBe(503);
+    const row = vi.spyOn(f.job as any, "row");
+    // This attempt believes the ID is free, so its INSERT hits the existing key; the row recheck then decides what it may claim.
+    const saved = { answerId: "answer_saved01", fixture: "receipt another attempt saved" };
+    f.db.prepare("UPDATE core_app_submissions SET receipt_json = ? WHERE answer_id = ?").run(JSON.stringify(saved), "answer_saved01");
+    row.mockReturnValueOnce(undefined).mockReturnValueOnce(undefined);
+    const raced = await f.send(path, sent, f.token);
+    expect(raced.status).toBe(200); expect(await raced.json()).toEqual({ ...saved, replayed: true });
+    expect(f.log.countAll()).toBe(0); expect(f.repo.getById(f.ask.qitemId)?.humanAnswers ?? {}).toEqual({});
+    // An unreadable recheck proves nothing about persistence: unknown, never unsaved.
+    row.mockReturnValueOnce(undefined).mockReturnValueOnce(undefined).mockImplementationOnce(() => { throw new Error("fixture row read lost"); });
+    const unknown = await f.send(path, sent, f.token);
+    expect(unknown.status).toBe(503);
+    expect(await unknown.json()).toMatchObject({ error: "app_job_unavailable", submission: { state: "unknown" }, retrySameSubmission: true });
+    // An existing incomplete row is never reported unsaved: the same ID finishes it, once.
+    f.db.prepare("UPDATE core_app_submissions SET receipt_json = NULL WHERE answer_id = ?").run("answer_saved01");
+    row.mockReturnValueOnce(undefined).mockReturnValueOnce(undefined);
+    const finished = await f.send(path, sent, f.token);
+    expect(finished.status).toBe(200); expect(await finished.json()).toMatchObject({ submission: { state: "committed" } });
+    row.mockRestore();
+    expect(f.log.countAll()).toBe(1); expect(f.db.prepare("SELECT COUNT(*) n FROM core_app_submissions").get()).toEqual({ n: 1 });
+  });
+  it("an unreadable registry at binding is unknown and never exposes a saved receipt without a verified actor", async () => {
+    const f = await jobFixture(), sent = body(f), path = "/v1/answers/answer_unknown01";
+    const first = await (await f.send(path, sent, f.token)).json();
+    const credential = f.access.authenticate(`Bearer ${f.token}`);
+    vi.spyOn(f.repo, "humanRegistry").mockReturnValueOnce({ ok: false, error: "fixture registry unavailable" });
+    await expect(f.job.submit(credential, "answer_unknown01", sent)).rejects.toMatchObject({ code: "app_job_unavailable", status: 503,
+      details: { answerId: "answer_unknown01", submission: { state: "unknown" }, retrySameSubmission: true } });
+    // Through the route the same outage fails credential authentication first: nothing is claimed, saved or unsaved.
+    vi.spyOn(f.repo, "humanRegistry").mockReturnValue({ ok: false, error: "fixture registry unavailable" });
+    const down = await f.send(path, sent, f.token);
+    expect(down.status).toBe(503); expect(await down.json()).toEqual({ error: "app_job_unavailable" });
+    vi.restoreAllMocks();
+    expect(await (await f.send(path, sent, f.token)).json()).toEqual({ ...first, replayed: true });
+  });
+  it("a Queue write failure after the binding is stored is incomplete, never a recorded answer, and the same ID recovers once", async () => {
+    const f = await jobFixture(), sent = body(f), path = "/v1/answers/answer_incomplete01";
+    vi.spyOn(f.repo, "recordHumanAnswer").mockImplementationOnce(() => { throw new Error("fixture queue write failure"); });
+    const failed = await f.send(path, sent, f.token);
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({ error: "submission_incomplete", answerId: "answer_incomplete01", submission: { state: "incomplete" }, retrySameSubmission: true });
+    expect(f.db.prepare("SELECT COUNT(*) n FROM core_app_submissions WHERE binding_json IS NOT NULL").get()).toEqual({ n: 1 });
+    expect(f.repo.getById(f.ask.qitemId)?.humanAnswers ?? {}).toEqual({}); expect(f.log.countAll()).toBe(0);
+    const status = await (await f.send(`${path}?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json();
+    expect(status).toMatchObject({ submission: { state: "incomplete" }, retrySameSubmission: true }); expect(JSON.stringify(status)).not.toContain("recordedAt");
+    const retried = await f.send(path, sent, f.token);
+    expect(retried.status).toBe(200); expect(await retried.json()).toMatchObject({ submission: { state: "committed" } }); expect(f.log.countAll()).toBe(1);
+  });
+});
+
+describe("the owner's final answer message", () => {
+  it("keeps the owner's kept-answer message in the immutable receipt and in an identical replay", async () => {
+    const f = await permissionFixture("keep"), binding = permissionBinding(f, { kind: "option", optionId: "allow" });
+    const first = await f.send("/v1/answers/answer_kept_message", binding, f.token);
+    expect(first.status).toBe(200); const receipt = await first.json();
+    expect(receipt.submission).toMatchObject({ state: "committed", outcome: "answered",
+      message: expect.stringContaining(`Your answer is kept on ${f.askId}, and the request is still waiting: the tool hasn't run, and nothing was permitted or refused.`) });
+    await new Promise(resolve => setImmediate(resolve));
+    const seq = f.bus.maxSeq(), changes = f.db.prepare("SELECT total_changes() n").get();
+    const replay = await (await f.send("/v1/answers/answer_kept_message", binding, f.token)).json();
+    expect(replay).toEqual({ ...receipt, replayed: true });
+    expect(await (await f.send(`/v1/answers/answer_kept_message?actor=${encodeURIComponent(PERSON)}`, undefined, f.token)).json()).toMatchObject({ ...receipt, replayed: true });
+    expect(f.log.countAll()).toBe(1); expect(f.db.prepare("SELECT COUNT(*) n FROM mission_control_actions WHERE qitem_id = ?").get(f.askId)).toEqual({ n: 1 });
+    expect(f.bus.maxSeq()).toBe(seq); expect(f.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+    expect(f.db.prepare("SELECT audit_notes_json FROM mission_control_actions WHERE qitem_id = ?").get(f.askId)).toMatchObject({ audit_notes_json: expect.stringContaining("nothing was permitted or refused") });
+  });
+  it.each([true, "keep"] as const)("computes the final answer once: the receipt's message is the ordinary return's (decider %s)", async receiving => {
+    const f = await permissionFixture(receiving); let finalized: unknown;
+    const result = await f.writes.act({ verb: "answer", qitemId: f.askId, actorSession: PERSON, identityProvenance: "claimed:v1", questionId: "permission", optionId: "allow",
+      appSubmission: { verify: () => {}, checkpoint: () => {}, finalize: done => { finalized = done.answer; return { fixture: true }; } } });
+    expect(finalized).toEqual(result.answer);
+    expect(result.answer?.message).toEqual(receiving === true ? expect.stringContaining("went to lead@test, the receiving agent") : expect.stringContaining("is kept on"));
+    await new Promise(resolve => setImmediate(resolve));
+  });
 });

@@ -73,7 +73,7 @@ export interface RecordRelayOwnerNotificationTransportFailedInput extends Format
   actorSession?: string;
 }
 import { WAKE_INTENT_PREFIX, type OutboxHandler, type OutboxEntry } from "./outbox-handler.js";
-import { physicalSessionName } from "./session-registry.js";
+import { physicalSessionName, SessionRegistry } from "./session-registry.js";
 import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { withRecoveryIndex } from "./queue-recovery.js";
@@ -2700,27 +2700,35 @@ export class QueueRepository {
     }
   }
 
-  /** A person by address or by the registry: a registered person may be addressed as their seat or an alias. */
-  /** A runner's permission ask whose seat has since been relaunched can't be answered: its request died with the
-   *  occupant. Close it (canceled), so the person sees it isn't waiting, and return true. An unreadable ledger
-   *  closes nothing. */
+  /** Where a runner permission ask's seat stands, read once from the live tenure ledger. Only `replaced` (a later occupant holds
+   *  the seat) and `absent` (the node itself is gone) are positive evidence that the ask can never be answered. `no-tenure`
+   *  (the node exists but its ledger has no tenure) and `unreadable` (the read threw) prove neither that the ask is current
+   *  nor that it is stale: they are unknown. */
+  runnerPermissionAuthority(origin: { nodeId: string; generation: string }): "current" | "replaced" | "absent" | "no-tenure" | "unreadable" {
+    try {
+      const tenure = new SessionRegistry(this.db).currentOccupantTenure(origin.nodeId);
+      if (tenure) return tenure.generationUuid === origin.generation ? "current" : "replaced";
+      return this.db.prepare("SELECT 1 FROM nodes WHERE id = ?").get(origin.nodeId) ? "no-tenure" : "absent";
+    } catch {
+      return "unreadable";
+    }
+  }
+
+  /** A runner's permission ask whose seat has since been relaunched (or gone) can't be answered: its request died with the
+   *  occupant. Close it (canceled), so the person sees it isn't waiting, and return true. Authority that is merely unknown
+   *  (no tenure yet, or an unreadable ledger) closes nothing. */
   private closeStaleRunnerPermission(qitemId: string): boolean {
     const item = this.getById(qitemId);
     const origin = item?.state === "pending" ? runnerPermissionOrigin(item) : null;
     if (!item || !origin) return false;
-    let current: string | null;
-    try {
-      current = (this.db.prepare("SELECT generation_uuid FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1")
-        .get(origin.nodeId) as { generation_uuid: string } | undefined)?.generation_uuid ?? null;
-    } catch {
-      return false;
-    }
-    if (current === origin.generation) return false;
+    const authority = this.runnerPermissionAuthority(origin);
+    if (authority !== "replaced" && authority !== "absent") return false;
     this.update({ qitemId, actorSession: item.sourceSession, state: "canceled",
       transitionNote: "runner-permission-stale reason=relaunched: a later occupant holds this seat, so any answer here is not sent." });
     return true;
   }
 
+  /** A person by address or by the registry: a registered person may be addressed as their seat or an alias. */
   isPersonAddress(destination: string): boolean {
     if (!destination.includes("@")) return false;
     if (isHumanSeatSessionRef(destination)) return true;

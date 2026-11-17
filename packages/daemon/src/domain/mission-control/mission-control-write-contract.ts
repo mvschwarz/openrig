@@ -816,6 +816,9 @@ export class MissionControlWriteContract {
     let after: QueueItem | null = null;
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
     let appResult: MissionControlActionResult | null = null;
+    // The owner's final answer and message, computed once before the receipt is finalized: the immutable app receipt and the
+    // ordinary return carry the same words, handoff or kept alike.
+    let finalAnswer = answer;
     try {
       const persist = (register: NotifyRegister) => {
         if (!outerRegister) input.appSubmission?.verify();
@@ -831,10 +834,13 @@ export class MissionControlWriteContract {
           }
         }
         after = this.queueRepo.getById(input.qitemId);
+        // A runner's permission request isn't closed by an answer: it's handed to the receiving agent, or kept. Say which.
+        const runnerNotice = !answer.message && after && runnerPermissionOrigin(after) ? runnerAnswerNotice(after) : undefined;
+        if (runnerNotice) finalAnswer = { ...answer, message: runnerNotice };
         const actionId = ulid();
         appResult = {
           actionId, verb: actionVerb, qitemId: input.qitemId, closedQitem: after, createdQitemId,
-          notifyAttempted: false, notifyResult: null, auditedAt: evaluatedAt, answer,
+          notifyAttempted: false, notifyResult: null, auditedAt: evaluatedAt, answer: finalAnswer,
           ...(input.expectedRevision && after ? { decisionRevision: this.queueRepo.decisionRevision(after) } : {}),
         };
         const appReceipt = input.appSubmission?.finalize(appResult);
@@ -867,9 +873,6 @@ export class MissionControlWriteContract {
       }
       throw err;
     }
-    // A runner's permission request isn't closed by an answer: it's handed to the receiving agent, or kept. Say which.
-    const final = after as QueueItem | null;
-    const runnerNotice = !answer.message && final && runnerPermissionOrigin(final) ? runnerAnswerNotice(final) : undefined;
     return {
       actionId: actionEntry!.actionId,
       verb: actionVerb,
@@ -879,7 +882,7 @@ export class MissionControlWriteContract {
       notifyAttempted: false,
       notifyResult: null,
       auditedAt: evaluatedAt,
-      answer: runnerNotice ? { ...answer, message: runnerNotice } : answer,
+      answer: finalAnswer,
     };
   }
 

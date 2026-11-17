@@ -117,10 +117,11 @@ describe("queue.answer_recorded: a person's click on an ask with questions", () 
     const f = await fixture();
     const qitemId = await f.ask();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const emit = f.bus.emit.bind(f.bus);
-    vi.spyOn(f.bus, "emit").mockImplementation((event) => {
+    // The click's event is persisted in the answer's own transaction envelope, so that is the write that fails.
+    const persist = f.bus.persistWithinTransaction.bind(f.bus);
+    vi.spyOn(f.bus, "persistWithinTransaction").mockImplementation((event) => {
       if (event.type === "queue.answer_recorded") throw new Error("events table unavailable");
-      return emit(event);
+      return persist(event);
     });
 
     const partial = await f.steering({ qitemId, questionId: "ship", optionId: "no" });

@@ -2,13 +2,13 @@ import { streamSSE } from "hono/streaming";
 import { Hono, type Context } from "hono";
 import type { CoreAppJob } from "../domain/core-app-job.js";
 import type { CoreAppCredential } from "../domain/core-app-access.js";
-import { isIP } from "node:net";
 import { CoreAppAccess, CoreAppError, appObject } from "../domain/core-app-access.js";
-import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
+import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 
 /** Local-instance facade. The server's Host/Origin boundary still precedes this group. */
 export function coreAppRoutes(opts: { access?: CoreAppAccess; operatorToken?: string | null; job?: CoreAppJob }): Hono {
   const app = new Hono();
+  const requireOwner = authBearerTokenMiddleware({ expectedToken: opts.operatorToken ?? null });
   app.onError((error, c) => {
     if (error instanceof CoreAppError) return c.json({ error: error.code, ...error.details }, error.status);
     throw error;
@@ -22,11 +22,10 @@ export function coreAppRoutes(opts: { access?: CoreAppAccess; operatorToken?: st
   });
   app.use("/v1/*", async (c, next) => {
     if (c.req.path === "/api/apps/v1/credentials" || c.req.path.startsWith("/api/apps/v1/credentials/")) {
-      if (!opts.operatorToken) throw new CoreAppError("app_provisioning_unconfigured", 503);
-      if (!constantTimeEqual(c.req.header("Authorization") ?? "", `Bearer ${opts.operatorToken}`)) throw new CoreAppError("unauthorized", 401);
-      // Native socket evidence only: neither Host nor forwarded headers establish locality.
-      const peer = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress;
-      if (!peer || !(peer === "::1" || peer === "::ffff:127.0.0.1" || isIP(peer) === 4 && peer.startsWith("127."))) throw new CoreAppError("local_peer_required", 403);
+      // Provisioning is an owner act: the owner write route's own gate, unchanged. With no owner bearer configured that gate
+      // passes any request, so an app credential (valid, revoked or malformed) must never ride that opening as the owner.
+      if ((opts.operatorToken ?? null) === null && /^Bearer\s+orapp_/i.test(c.req.header("Authorization") ?? "")) throw new CoreAppError("unauthorized", 401);
+      return requireOwner(c, next);
     } else {
       if (!opts.access) throw new CoreAppError("unauthorized", 401);
       c.set("coreAppCredential" as never, opts.access.authenticate(c.req.header("Authorization")) as never);
