@@ -126,9 +126,9 @@ it("still verifies the opened record's native identity", async () => {
   expect(response.status).toBe(409); expect(body.error).toBe("record_identity_mismatch"); expect(body.suffix).toBeUndefined();
 });
 
-it("does not fall back to a copied state row when the proven home's transcript mapping is missing", async () => {
+it("does not fall back to a copied state row when the selected home's retained CLI identity row is missing", async () => {
   const f = fixture(), state = new Database(join(f.selectedHome, "state_5.sqlite"));
   try { state.exec("DELETE FROM threads"); } finally { state.close(); }
   const response = await f.request(), body = await response.json();
-  expect(response.status).toBe(409); expect(body.error).toBe("unsupported_runtime"); expect(body.suffix).toBeUndefined();
+  expect(response.status).toBe(409); expect(body.error).toBe("record_identity_unverified"); expect(body.suffix).toBeUndefined();
 });
