@@ -14,10 +14,10 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 // view → 404; a provider-unavailable or honest-partial is a 200 whose BODY
 // tells the truth (ok / opened / degraded), never an error status.
 //
-// No new auth/trust surface (PRD "no new auth surface v1"): these routes mirror
-// the shipped cmux launch route's posture (which does not gate on the terminal
-// bearer token) — composing a view reads inventory and returns attach commands
-// the provider runs client-side; it mutates no daemon state.
+// `POST /open`, `GET /views`, `GET /status`, `GET /preview`, `POST /close`, and
+// `/api/rigs/:rigId/terminal/open` keep the shipped no-bearer-token posture
+// ("no new auth surface v1"). `/open-all`, `/close-all` and `/follow`
+// require the `terminalAuth` bearer token.
 
 import { Hono } from "hono";
 import type { HerdrAppTarget, TerminalService } from "../domain/terminal/terminal-service.js";
@@ -47,9 +47,10 @@ function getService(c: { get(key: string): unknown }): TerminalService | null {
 }
 
 /** Map a service OpenViewResult code to an HTTP status (body is always the full result). */
-function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 | 409 {
+function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 | 409 | 500 {
   if (ok) return 200;
-  if (code === "view_required" || code === "unknown_provider") return 400;
+  if (code === "corrupt_ledger") return 500;
+  if (code === "view_required" || code === "unknown_provider" || code === "unsupported_provider" || code === "close_unsupported") return 400;
   if (code === "invalid_terminal_session" || code === "unsupported_terminal_session") return 400;
   if (code === "view_not_found" || code === "scope_not_found") return 404;
   if (code === "preview_changed" || code === "scope_ambiguous" || code === "scope_unavailable") return 409;
@@ -146,6 +147,40 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     return c.json(result, result.ok ? 200 : result.code === "view_not_found" ? 404 : statusForOpen(false, result.code));
   });
 
+  const terminalAuth = authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null, diagnosticContext: "terminal" });
+
+  app.post("/open-all", terminalAuth, async (c) => {
+    const svc = getService(c);
+    if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable", rigs: [] }, 503);
+    const raw = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return c.json({ error: "body_invalid", rigs: [] }, 400);
+    const parsed = readOpenBody(raw);
+    if ("error" in parsed) return c.json({ error: "body_invalid", detail: parsed.error, rigs: [] }, 400);
+    const result = await svc.openAll({
+      ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
+      ...(parsed.session !== undefined ? { session: parsed.session } : {}),
+      ...(parsed.viewportColumns !== undefined ? { viewportColumns: parsed.viewportColumns } : {}),
+      ...(parsed.reuseLive ? { reuseLive: true } : {}),
+      ...(parsed.herdrApp ? { herdrApp: parsed.herdrApp } : {}),
+    });
+    return c.json(result, statusForOpen(result.ok, result.code));
+  });
+
+  app.post("/close-all", terminalAuth, async (c) => {
+    const svc = getService(c);
+    if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable", viewers: [] }, 503);
+    const raw = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return c.json({ error: "body_invalid", viewers: [] }, 400);
+    if (raw["provider"] !== undefined && typeof raw["provider"] !== "string") return c.json({ error: "body_invalid", detail: "provider must be a provider name string.", viewers: [] }, 400);
+    const parsed = readOpenBody(raw);
+    if ("error" in parsed) return c.json({ error: "body_invalid", detail: parsed.error, viewers: [] }, 400);
+    const result = await svc.closeAll({
+      ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
+      ...(parsed.session !== undefined ? { session: parsed.session } : {}),
+    });
+    return c.json(result, statusForOpen(result.ok, result.code));
+  });
+
   app.get("/views", async (c) => {
     const svc = getService(c);
     if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
@@ -157,9 +192,10 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
     const width = c.req.query("viewportColumns");
     const session = c.req.query("session");
+    const bulk = c.req.query("bulk") === "1";
     const target = readHerdrAppQuery(c.req.query("appHome"));
     if ("error" in target) return c.json({ code: "body_invalid", error: target.error }, 400);
-    const result = await svc.previewView({ view: c.req.query("view") ?? "", provider: c.req.query("provider"), ...(session !== undefined ? { session } : {}), ...(width !== undefined ? { viewportColumns: Number(width) } : {}), ...target });
+    const result = await svc.previewView({ view: c.req.query("view") ?? "", provider: c.req.query("provider"), ...(session !== undefined ? { session } : {}), ...(width !== undefined ? { viewportColumns: Number(width) } : {}), ...(bulk ? { bulk: true } : {}), ...target });
     return c.json(result, "planId" in result ? 200 : statusForOpen(result.ok, result.code));
   });
 

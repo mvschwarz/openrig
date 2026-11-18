@@ -47,6 +47,16 @@ export const PHASE_D_POLICIES = [
   "mode-scheduled-end",
 ] as const;
 
+/**
+ * Policies daemon start ensures one active-or-stopped row for, keyed by the exact target session
+ * (`ensureAutoRegistrationAtStartup`). `idle-gate-qitem` is left out: its key is the seat's whole
+ * set of session aliases, and startup only audits it.
+ */
+export const AUTO_REGISTERED_POLICIES: readonly string[] = [
+  "parked-owner-consumer",
+  "delivery-digest-flush",
+];
+
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */
 export const PHASE_C_POLICIES = PHASE_D_POLICIES;
 
@@ -288,6 +298,7 @@ export class WatchdogJobsRepository {
           WHERE session.session_name = ?
             AND usage.session_name = ?
             AND usage.availability = 'known'
+            AND COALESCE(usage.source, '') != 'runner_reported'
             AND usage.sampled_at IS NOT NULL
             AND julianday(usage.sampled_at) >= julianday(tenure.boot_at)
           ORDER BY session.id DESC
@@ -535,6 +546,90 @@ export class WatchdogJobsRepository {
       return this.getByIdOrThrow(existing.jobId);
     }
     return this.register(input);
+  }
+
+  /**
+   * `ensureAutoRegistration` for daemon start (#3437): when the tuple already holds more than one
+   * active/stopped row, keep one (a stopped row wins, as an operator opt-out; otherwise the newest),
+   * retire the rest as terminal, warn with every job id, and ensure again. Startup never aborts on it.
+   */
+  ensureAutoRegistrationResolvingDuplicates(
+    input: EnsureAutoRegistrationInput,
+    warn: (message: string) => void,
+  ): WatchdogJob {
+    try {
+      return this.ensureAutoRegistration(input);
+    } catch (error) {
+      if (!(error instanceof WatchdogJobsError) || error.code !== "auto_registration_ambiguous") throw error;
+    }
+    const targetGenerationUuid = input.targetGenerationUuid ?? null;
+    const rows = this.listExactTuple(input.policy, input.targetSession, targetGenerationUuid)
+      .filter((row) => row.state === "active" || row.state === "stopped");
+    const kept = [...rows].reverse().find((row) => row.state === "stopped") ?? rows[rows.length - 1]!;
+    const retired = rows.filter((row) => row.jobId !== kept.jobId);
+    this.db.transaction(() => {
+      for (const row of retired) {
+        this.markTerminal(
+          row.jobId,
+          `superseded: duplicate of ${kept.jobId}, retired at daemon start (auto_registration_ambiguous); was ${row.state}`,
+        );
+      }
+    })();
+    warn(
+      `[watchdog] ${input.policy}/${input.targetSession} had ${rows.length} active/stopped jobs; ` +
+      `kept ${kept.jobId} (${kept.state}) and retired ${retired.map((row) => `${row.jobId} (${row.state})`).join(", ")} as terminal. ` +
+      (kept.state === "stopped"
+        ? `To turn it back on, run 'rig watchdog register' for the same policy and target; it now replaces the stopped job.`
+        : `No action needed.`),
+    );
+    return this.ensureAutoRegistration(input);
+  }
+
+  /**
+   * Daemon start, one target at a time (#3437): `ensureAutoRegistrationResolvingDuplicates`, but any
+   * other failure for this target (e.g. `auto_registration_state_invalid` from a row in an unknown
+   * state) is warned with its error and startup moves on to the next target, so one bad target
+   * never stops the daemon from starting. The failure may come after duplicates were already
+   * retired, so the warning makes no claim that this target's jobs are unchanged.
+   */
+  ensureAutoRegistrationAtStartup(
+    input: EnsureAutoRegistrationInput,
+    warn: (message: string) => void,
+  ): WatchdogJob | null {
+    try {
+      return this.ensureAutoRegistrationResolvingDuplicates(input, warn);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const details = error instanceof WatchdogJobsError && error.details !== undefined
+        ? `; details=${JSON.stringify(error.details)}`
+        : "";
+      warn(
+        `[watchdog] startup could not finish ensuring ${input.policy}/${input.targetSession} and continued: ` +
+        `${message}${details}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Register a job. For an auto-registered policy, an existing active/stopped row for the same
+   * policy and target is replaced (marked terminal) in the same transaction, so stop-then-register
+   * never leaves two rows for the daemon's next `ensureAutoRegistration` to refuse (#3437).
+   */
+  registerReplacing(input: RegisterWatchdogJobInput): {
+    job: WatchdogJob;
+    replaced: Array<{ jobId: string; state: WatchdogJobState }>;
+  } {
+    if (!AUTO_REGISTERED_POLICIES.includes(input.policy)) return { job: this.register(input), replaced: [] };
+    return this.db.transaction(() => {
+      const prior = this.listExactTuple(input.policy, input.targetSession, input.targetGenerationUuid ?? null)
+        .filter((row) => row.state === "active" || row.state === "stopped");
+      const job = this.register(input);
+      for (const row of prior) {
+        this.markTerminal(row.jobId, `replaced by ${job.jobId} (watchdog register); was ${row.state}`);
+      }
+      return { job, replaced: prior.map((row) => ({ jobId: row.jobId, state: row.state })) };
+    })();
   }
 
   /**

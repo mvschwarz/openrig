@@ -107,4 +107,10 @@ describe("scope convention teaching-site sweep", () => {
     expect(retire).not.toContain("MISSION_NOTES");
     expect(advisor).not.toContain("MISSION_NOTES");
   });
+
+  it("#2727 Finishing a slice checklist names the opt-in in-place delivered close path", () => {
+    const sop = read("packages/daemon/assets/plugins/openrig-core/skills/mission-slice-sop/SKILL.md");
+    expect(sop).toContain("--in-place");
+    expect(sop).toContain("--reason delivered");
+  });
 });

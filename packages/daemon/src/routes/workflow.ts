@@ -82,7 +82,7 @@ export function workflowRoutes(): Hono {
     }
     if (err instanceof WorkflowProjectorError) {
       const status =
-        err.code === "instance_not_active" || err.code === "packet_not_on_frontier" ? 409
+        err.code === "instance_not_active" || err.code === "packet_not_on_frontier" || err.code === "packet_already_closed" ? 409
         : err.code === "frontier_packet_required" || err.code === "frontier_binding_indeterminate" ? 409
         : err.code === "failure_occurrence_required" || err.code === "failure_occurrence_not_unresolved" || err.code === "failure_occurrence_replay_indeterminate" || err.code === "failure_occurrence_replay_conflict" ? 409
         : err.code === "instance_not_abortable" || err.code === "instance_not_resumable" ? 409
@@ -200,7 +200,7 @@ export function workflowRoutes(): Hono {
 
   app.post("/:instance_id/revision", async (c) => {
     const body = await c.req.json<Parameters<WorkflowRuntime["reviseGraph"]>[0]>().catch(() => ({} as never));
-    try { return c.json(getRuntime(c).reviseGraph({ ...body, instanceId: c.req.param("instance_id") })); }
+    try { return c.json(await getRuntime(c).reviseGraph({ ...body, instanceId: c.req.param("instance_id") })); }
     catch (err) { return errorResponse(c, err); }
   });
 
@@ -321,10 +321,20 @@ export function workflowRoutes(): Hono {
   // runtime.continue()'s enriched instance.
   app.get("/list", (c) => {
     const status = c.req.query("status");
-    if (status === "active" || status === "waiting" || status === "completed" || status === "failed" || status === "aborted") {
-      return c.json(getRuntime(c).listInstancesWithDeadline(status));
+    const parsedStatus = status === "active" || status === "waiting" || status === "completed" || status === "failed" || status === "aborted" ? status : undefined;
+    const rawLimit = c.req.query("limit");
+    if (rawLimit !== undefined && (!/^[1-9]\d*$/.test(rawLimit) || Number(rawLimit) > 10000)) return c.json({ error: "limit_invalid", message: "limit must be an integer from 1 to 10000" }, 400);
+    const fields = ["project", "mission", "slice", "rig", "name"] as const;
+    const filters: { project?: string; mission?: string; slice?: string; rig?: string; name?: string; tags?: string[]; limit?: number } = {};
+    for (const field of fields) {
+      const value = c.req.query(field);
+      if (value !== undefined) { if (!value.trim()) return c.json({ error: "filter_invalid", message: `${field} must not be empty` }, 400); filters[field] = value; }
     }
-    return c.json(getRuntime(c).listInstancesWithDeadline());
+    const tags = c.req.queries("tag");
+    if (tags?.some((tag) => !tag.trim())) return c.json({ error: "filter_invalid", message: "tag must not be empty" }, 400);
+    if (tags?.length) filters.tags = tags;
+    if (rawLimit !== undefined) filters.limit = Number(rawLimit);
+    return c.json(getRuntime(c).listInstancesWithDeadline(parsedStatus, Object.keys(filters).length ? filters : undefined));
   });
 
   // Lists every cached workflow_spec with an `isBuiltIn` flag computed
@@ -428,8 +438,12 @@ export function workflowRoutes(): Hono {
   app.post("/:instance_id/resume", async (c) => {
     const instanceId = c.req.param("instance_id");
     const body = await c.req
-      .json<{ occurrenceId?: string; decision?: string; actorSession?: string }>()
+      .json<{ occurrenceId?: string; decision?: string; ownerSession?: string; actorSession?: string }>()
       .catch(() => ({}) as never);
+    // An empty ownerSession is not refused: the runtime resolves the owner and says why in ownerNote.
+    if (body.ownerSession !== undefined && typeof body.ownerSession !== "string") {
+      return c.json({ error: "ownerSession must be a string when given" }, 400);
+    }
     const actor = requireSenderIdentity(c, { verb: "workflow resume", bodyClaim: body.actorSession });
     if (!actor.ok) return actor.response;
     try {
@@ -437,6 +451,7 @@ export function workflowRoutes(): Hono {
         instanceId,
         occurrenceId: body.occurrenceId,
         decision: body.decision,
+        ownerSession: body.ownerSession,
         actorSession: actor.session,
         identityProvenance: resolveRecordedProvenance(c, actor),
       });

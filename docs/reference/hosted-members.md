@@ -72,6 +72,22 @@ entry. The entry holds secret names, never values:
   - `authorization_ref`, when the tool needs one, names the secret holding the `Authorization` header value.
   - Credentials in the URL itself (`https://user:pass@host/…`) are sent as Basic `Authorization` instead, unless
     `authorization_ref` is set: then its value is sent, and the URL's credentials are dropped.
+  - `signing_secret_ref`, when the trigger verifies signed webhooks, names the secret holding a
+    [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md)
+    signing secret.
+    - **Use the `whsec_` form** (`whsec_` followed by base64): the sender and the receiver both decode it to the same
+      key.
+    - **A value without `whsec_` is used as its raw UTF-8 bytes,** as receivers that accept raw secrets read it.
+    - **The headers:** each ring then carries three, alongside any `Authorization`:
+      - `webhook-id`, new for every ring, including a row rung again for a new wake;
+      - `webhook-timestamp`, in seconds;
+      - `webhook-signature`, which is `v1,` and the base64 HMAC-SHA256 of `<webhook-id>.<webhook-timestamp>.` and
+        the body bytes exactly as sent.
+    - **When the ring isn't sent:** if the secret it names isn't set, or is `whsec_` followed by nothing or by text
+      that isn't valid base64 (with its padding), the ring isn't sent. The result is
+      `failed:webhook (<url_ref>) not rung: its signing secret (<name>) …`, never an unsigned ring.
+    - **Header names:** a receiver that reads other header names, such as a provider's own prefixed ones, doesn't
+      verify these.
   - The daemon reads each from its environment (the name, or `OPENRIG_<NAME>`), else from `secrets_env_file`, an env file kept at mode 0600.
 - **The ring:** when a row lands for the member, the daemon POSTs
   `{"source":"openrig.queue","schema_version":1,"event":"work-waiting","qitem_id":…,"destination":…,"summary":…,"from":…}`.
@@ -89,7 +105,8 @@ These facts stay separate on the row:
 - **Wake:** with a trigger, the row's wake result is `wake-accepted:webhook (<url_ref>) answered <status>` when the trigger took the
   ring, `indeterminate:webhook …` when it didn't answer in time, or `failed:webhook …`. Accepted means the tool's trigger
   answered, not that the member read the row.
-  - With no trigger, the result is `unroutable`. The member finds work by reading its own inbox and picks a row up by claiming
+  - With no trigger, the result is `awaiting-pickup: …`: no wake is sent, and the work waits until the member reads its queue (rows
+    recorded before this wording read `unroutable: …`, and both are read the same way). The member finds work by reading its own inbox and picks a row up by claiming
     it, so a row gets no finding of its own. Work it leaves unclaimed past the stuck sweep's unclaimed age
     (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default) is listed in one standing notice per member. The notice goes to
     the operator seat when it's a person, else the rows' creator when they all share one, else the operator agent, else the
@@ -170,7 +187,11 @@ and nothing else is offered:
   is exactly that seat.
 - **What it reaches:**
   - It hands work to its rigs' other seats, never to a person or another host's seat.
-  - It reads the items it sent and the items addressed to it from those seats, never the team's internal items.
+  - It reads the items it sent and the items addressed to it from those seats or from an external address
+    (`<id>@external`), never the team's internal items or an external address's items to another seat. The address is
+    matched by its shape, not looked up among registered people: a registered person, a shared channel's address (which
+    its unregistered writers post under) and any other `@external` ref count. A person's answer addressed to its seat is
+    readable this way too.
   - With `queue`/`claim` and `queue`/`update`, it claims and closes only items addressed to its own seat that it can read,
     and waits (blocked) only on an item it names and can read. Its answers hide what reading the item hides.
 - **A first task without a seat address:** with `--task-destination <member@rig>` on the same `rig mcp serve`, a
@@ -182,7 +203,8 @@ and nothing else is offered:
   can address count, and the first of these that any of them matches decides, so another seat's slug never makes an exact
   name ambiguous and a seat the grant can't address never shadows one it can. The item is stored under that
   seat's actual session. A slug two seats match returns `destination_ambiguous` with the candidates, and a name that no
-  seat the grant can reach has returns `destination_not_found`. A name the grant can't address as written (its own seat,
+  seat the grant can reach has returns `destination_not_found`. If the team couldn't be read to check, it returns
+  `destination_unchecked` and nothing was written; try again. A name the grant can't address as written (its own seat,
   or another assistant's without `team`/`list`) stays `out_of_scope`, whether or not that seat exists.
 - **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form

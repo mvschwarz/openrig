@@ -273,8 +273,9 @@ describe("mission execution story — readable rows over the shipped projections
     const scopes = executionScopes(4, (index) => (index === 0 ? "active" : index === 1 ? "blocked" : "done"));
     // Slice 2 has stage "retired"
     scopes[0]!.slices[1]!.stage = "retired";
-    // Slice 3 has status "deferred"
-    scopes[0]!.slices[2]!.status = "closed-deferred";
+    // Slice 3 has the bare status "deferred". A closed-<reason> word such as closed-deferred reads
+    // "closed" instead; that contract is covered in execution-default-flow.test.ts.
+    scopes[0]!.slices[2]!.status = "deferred";
 
     const overview = text(executionContentLines(fixture, scopes, [], null, 160));
     expect(overview).toContain("○ retired");

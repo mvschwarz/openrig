@@ -91,7 +91,8 @@ it("reads foreground identity through the real /proc reader and parser path", as
   vi.stubEnv("PATH", scratch);
   vi.mocked(readNativeProcessArguments).mockClear();
   const rows = await defaultListProcesses();
-  expect(rows.sort((a, b) => a.pid - b.pid)).toEqual(listed.map(({ name, ...row }) => ({ ...row, executableName: name })));
+  // The fake /proc writes every stat line in state S.
+  expect(rows.sort((a, b) => a.pid - b.pid)).toEqual(listed.map(({ name, ...row }) => ({ ...row, executableName: name, state: "S" })));
   expect(readNativeProcessArguments).not.toHaveBeenCalled();
   serveProcRoot(path.join(root, "gone"));
   expect(await defaultListProcesses()).toEqual([]);

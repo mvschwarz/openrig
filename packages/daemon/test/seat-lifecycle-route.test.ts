@@ -242,4 +242,14 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     });
     expect(await res.json()).toMatchObject({ status: "ready", generation: "gen-fresh", warnings: ["Startup submission unverified"] });
   });
+
+  it.each([["process_limits_unverified", true, 409], ["process_limits_unsupported", false, 422], ["process_limits_setup", false, 422],
+    ["process_limits_invalid", false, 422]] as const)("#3253: launch route refused with %s -> %s", async (code, retryable, status) => {
+    const processLimits = { kind: code.slice("process_limits_".length) as "setup", reason: "fixture" };
+    vi.spyOn(SeatLifecycleService.prototype, "launchFresh").mockResolvedValue({ ok: false, code, message: "Nothing was stopped or cleaned",
+      retryable, processLimits });
+    const res = await post("launch", "dev-impl@seat-rig", { fresh: true, reason: "x" });
+    expect(res.status).toBe(status);
+    expect(await res.json()).toMatchObject({ ok: false, code, retryable, processLimits });
+  });
 });

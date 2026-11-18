@@ -66,6 +66,8 @@ export interface CreateQitemInput {
   inReplyTo?: string;
   /** A current typed/button answer, never a reaction or a recovered late message. */
   humanAnswer?: boolean;
+  /** Registered person mapped by the Slack sender resolver, carried with their gateway write. */
+  identityPrincipal?: string;
 }
 
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
@@ -263,6 +265,7 @@ export function makeQueuePorts(
         tags: tagsWithBody(input.tags ?? ["founder-slack", "inbound"], input.body),
         inboundReplyTo: input.inReplyTo ?? null,
         gatewayInbound: true,
+        ...(input.identityPrincipal ? { identityProvenance: "gateway:slack:v1", identityPrincipal: input.identityPrincipal } : {}),
       };
       let created = directAnswer && input.inReplyTo
         ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo,

@@ -98,6 +98,35 @@ describe("Transcript CLI", () => {
     return prog;
   }
 
+  it("--json prints a structured error to stdout when the local daemon is stopped", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const originalExitCode = process.exitCode;
+    const clientFactory = vi.fn();
+    const command = transcriptCommand({
+      lifecycleDeps: {
+        ...mockLifecycleDeps(),
+        fetch: vi.fn(async () => { throw new Error("connection refused"); }),
+      },
+      clientFactory,
+    });
+
+    try {
+      await command.parseAsync(["dev-impl@my-rig", "--json"], { from: "user" });
+      expect(process.exitCode).toBe(1);
+      expect(clientFactory).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(log.mock.calls[0]![0])).toMatchObject({
+        error: { fact: expect.any(String), consequence: expect.any(String), action: expect.any(String) },
+      });
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = originalExitCode;
+      log.mockRestore();
+      error.mockRestore();
+    }
+  });
+
   it("--tail prints tail content", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "transcript", "dev-impl@my-rig", "--tail", "10"]);

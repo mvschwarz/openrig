@@ -966,3 +966,114 @@ describe("legacy flat node launch_wrapper (#2328)", () => {
     }
   });
 });
+
+describe("member process_limits (#3253)", () => {
+  const withMember = (fields: Record<string, unknown>, runtime = "codex") => ({
+    version: "0.2",
+    name: "limits-rig",
+    pods: [{
+      id: "dev",
+      label: "Dev",
+      members: [{ id: "worker", runtime, cwd: ".",
+        ...(runtime === "terminal" ? { agent_ref: "builtin:terminal", profile: "none" }
+          : { agent_ref: "local:agents/worker", profile: "default" }),
+        ...fields }],
+      edges: [],
+    }],
+    edges: [],
+  });
+
+  it.each(["codex", "claude-code", "pi", "terminal"])("accepts tasks_max on %s and normalizes it", (runtime) => {
+    const spec = withMember({ process_limits: { tasks_max: 256 } }, runtime);
+    expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+    expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ tasksMax: 256 });
+  });
+
+  it("takes any positive count, with no floor for every runtime (systemd's own minimum is 1)", () => {
+    for (const tasksMax of [1, 2, 63]) {
+      const spec = withMember({ process_limits: { tasks_max: tasksMax } });
+      expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+      expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ tasksMax });
+    }
+  });
+
+  it("keeps an absent key undefined and normalizes {} to an explicit clear", () => {
+    expect(RigSpecSchema.normalize(withMember({})).pods[0]!.members[0]!.processLimits).toBeUndefined();
+    const cleared = withMember({ process_limits: {} });
+    expect(RigSpecSchema.validate(cleared).valid).toBe(true);
+    expect(RigSpecSchema.normalize(cleared).pods[0]!.members[0]!.processLimits).toEqual({});
+  });
+
+  it.each(["codex", "claude-code", "pi", "terminal"])("accepts memory_max on %s and normalizes it to bytes", (runtime) => {
+    const spec = withMember({ process_limits: { memory_max: "4G" } }, runtime);
+    expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+    expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ memoryMax: 4294967296 });
+  });
+
+  it("reads a memory_max size and the same number of bytes as one value", () => {
+    for (const value of ["512M", 536870912]) {
+      const spec = withMember({ process_limits: { memory_max: value } });
+      expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+      expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ memoryMax: 536870912 });
+    }
+  });
+
+  it("takes both keys together", () => {
+    const spec = withMember({ process_limits: { tasks_max: 256, memory_max: "1G" } });
+    expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+    expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ tasksMax: 256, memoryMax: 1073741824 });
+  });
+
+  it("takes memory_max from 1M (no floor: the probe decides the low end) to its top (2^53 - 2^20 bytes)", () => {
+    for (const [value, memoryMax] of [["1M", 1048576], [1048576, 1048576], ["15M", 15728640], [9007199253692416, 9007199253692416],
+      ["1T", 2 ** 40]] as const) {
+      const spec = withMember({ process_limits: { memory_max: value } });
+      expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+      expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.processLimits).toEqual({ memoryMax });
+    }
+  });
+
+  it.each([
+    [{ memory_max: 0 }, "process_limits.memory_max: must be an integer number of bytes or a size"],
+    [{ memory_max: -1073741824 }, "process_limits.memory_max: must be an integer number of bytes or a size"],
+    [{ memory_max: 1.5 }, "process_limits.memory_max: must be an integer number of bytes or a size"],
+    [{ memory_max: "1.5G" }, "process_limits.memory_max: must be an integer number of bytes or a size"],
+    [{ memory_max: "infinity" }, "process_limits.memory_max: infinity is not a limit"],
+    [{ memory_max: "50%" }, "process_limits.memory_max: a percentage is not accepted"],
+    [{ memory_max: "1X" }, "process_limits.memory_max: must be an integer number of bytes or a size"],
+    [{ memory_max: "1g" }, "process_limits.memory_max: must be an integer number of bytes or a size"],
+    [{ memory_max: "1P" }, "process_limits.memory_max: must be an integer number of bytes or a size"],
+    [{ memory_max: "" }, "process_limits.memory_max: must be an integer number of bytes or a size"],
+    [{ memory_max: "1048576" }, "process_limits.memory_max: a number of bytes is an integer, not a string"],
+    [{ memory_max: 16777216 + 4096 }, "process_limits.memory_max: must be a whole number of MiB"],
+    [{ memory_max: "16388K" }, "process_limits.memory_max: must be a whole number of MiB"],
+    [{ memory_max: "1K" }, "process_limits.memory_max: must be a whole number of MiB"],
+    [{ memory_max: 2 ** 53 }, "process_limits.memory_max: must be at most 9007199253692416 bytes"],
+    [{ memory_max: "8193T" }, "process_limits.memory_max: must be at most 9007199253692416 bytes"],
+    [{ tasks_max: 256, cpu_quota: "50%" }, "process_limits.cpu_quota: not supported"],
+    [{ tasks_max: 0 }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
+    [{ tasks_max: 4194305 }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
+    [{ tasks_max: 1.5 }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
+    [{ tasks_max: "512" }, "process_limits.tasks_max: must be an integer from 1 to 4194304"],
+    [512, "process_limits: must be a mapping"],
+    [[512], "process_limits: must be a mapping"],
+    [null, "process_limits: must be a mapping"],
+  ])("refuses %j by name", (value, message) => {
+    const result = RigSpecSchema.validate(withMember({ process_limits: value }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes(message)), result.errors.join("; ")).toBe(true);
+  });
+
+  it("accepts and refuses the same way on a legacy flat node", () => {
+    const legacy = (value: unknown) => ({
+      schema_version: 1, name: "flat", version: "1.0",
+      nodes: [{ id: "worker", runtime: "codex", process_limits: value }], edges: [],
+    });
+    expect(LegacyRigSpecSchema.validate(legacy({ tasks_max: 128 })).errors).toEqual([]);
+    expect(LegacyRigSpecSchema.normalize(legacy({ tasks_max: 128 })).nodes[0]!.processLimits).toEqual({ tasksMax: 128 });
+    expect(LegacyRigSpecSchema.validate(legacy({ memory_max: "1G" })).errors).toEqual([]);
+    expect(LegacyRigSpecSchema.normalize(legacy({ memory_max: "1G" })).nodes[0]!.processLimits).toEqual({ memoryMax: 1073741824 });
+    const refused = LegacyRigSpecSchema.validate(legacy({ cpu_quota: "50%" }));
+    expect(refused.errors.some((e) => e.includes("process_limits.cpu_quota: not supported"))).toBe(true);
+  });
+});

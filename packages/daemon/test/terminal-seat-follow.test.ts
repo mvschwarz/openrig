@@ -10,12 +10,23 @@ import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 const exec = promisify(execFile);
-const until = async (predicate: () => Promise<boolean>) => {
+const until = async (predicate: () => Promise<boolean>, message = "Timed out waiting for the tile's observed state") => {
   for (let i = 0; i < 100; i++) {
     if (await predicate()) return;
     await new Promise(r => setTimeout(r, 40));
   }
-  throw new Error("Timed out waiting for the tile's observed state");
+  throw new Error(message);
+};
+const stopSeatsServer = async (seats: (args: string[]) => Promise<string>) => {
+  const pid = Number(await seats(["display-message", "-p", "#{pid}"]));
+  await seats(["kill-server"]);
+  await until(async () => {
+    try { process.kill(pid, 0); return false; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+      throw error;
+    }
+  }, "Timed out waiting for the old tmux server to exit");
 };
 async function fixture(run: (f: {
   socket: string; seats: (args: string[]) => Promise<string>;
@@ -35,8 +46,14 @@ async function fixture(run: (f: {
     await viewer(["set-option", "-g", "-w", "remain-on-exit", "on"]);
     try { await run({ socket, seats, viewer, adapter }); }
     catch (error) {
-      console.log("TILE_DIAG", await seats(["list-sessions", "-F", "#{pid} #{session_id} #{session_name} #{session_attached}"]));
-      for (const pane of (await viewer(["list-panes", "-t", "=view:", "-F", "#{pane_id}"])).split("\n")) console.log(pane, await viewer(["capture-pane", "-p", "-S", "-100", "-t", pane]));
+      const diag = async (label: string, read: () => Promise<string>) => {
+        try { console.log(label, await read()); }
+        catch (diagnosticError) { console.log(label, "unavailable:", diagnosticError); }
+      };
+      await diag("TILE_DIAG seats", () => seats(["list-sessions", "-F", "#{pid} #{session_id} #{session_name} #{session_attached}"]));
+      let panes = "";
+      await diag("TILE_DIAG panes", async () => { panes = await viewer(["list-panes", "-t", "=view:", "-F", "#{pane_id}"]); return panes; });
+      for (const pane of panes.split("\n").filter(Boolean)) await diag(`TILE_DIAG pane ${pane}`, () => viewer(["capture-pane", "-p", "-S", "-100", "-t", pane]));
       throw error;
     }
   } finally {
@@ -106,7 +123,7 @@ it.skipIf(process.platform === "win32").each([["seat-other", true], ["seat", tru
     await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
     await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
     const id = await seats(["display-message", "-p", "-t", "=seat:", "#{session_id}"]);
-    await seats(["kill-server"]);
+    await stopSeatsServer(seats);
     await seats(["-f", "/dev/null", "new-session", "-d", "-s", "anchor", "sleep 60", ";",
       "new-session", "-d", "-s", name, "-e", "OPENRIG_NODE_ID=DIFFERENT", "printf 'OTHER-SEAT\\n'; exec cat"]);
     expect(await seats(["display-message", "-p", "-t", id, "#{session_name}"])).toBe(name);
@@ -126,7 +143,7 @@ it.skipIf(process.platform === "win32").each([false, true])("a read-only tile st
     await viewer(["new-session", "-d", "-s", "view", terminal(command)]);
     await until(async () => (await viewer(["capture-pane", "-p", "-t", "=view:"])).includes("ORIGINAL"));
     const id = await seats(["display-message", "-p", "-t", "=seat:", "#{session_id}"]);
-    await seats(["kill-server"]);
+    await stopSeatsServer(seats);
     await seats(["-f", "/dev/null", "new-session", "-d", "-s", "anchor", "sleep 60", ";",
       "new-session", "-d", "-s", "seat-other", "-e", "OPENRIG_NODE_ID=DIFFERENT", "printf 'OTHER-SEAT\\n'; exec cat"]);
     expect(await seats(["display-message", "-p", "-t", id, "#{session_name}"])).toBe("seat-other");

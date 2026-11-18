@@ -13,9 +13,10 @@
 
 export const LEDGER_ENTRY_FIELDS = ["suite", "reason", "receipt", "owner", "expiry"];
 
-// Rail 4 — the 0.5.2 cut ceiling: no exclusion may expire after this instant. DESK-PINNED at the real
-// 0.5.2 cut date; this near-future placeholder is inert while the seed is empty, and the mechanism
-// enforces `expiry <= ceiling` regardless of the exact value.
+// Rail 4 — the cut ceiling: no exclusion may expire after this instant. It is a date a person sets at a
+// cut, so it is not moved by this module on its own. A ceiling that has gone by is reported as a
+// warning (see ceilingWarning) rather than failing the gate: an elapsed date is not a verdict, and an
+// empty ledger says nothing about the suites it covers.
 export const CUT_CEILING_ISO = "2026-09-30";
 
 // Date-only lexicographic compare: for YYYY-MM-DD, string order IS chronological order.
@@ -29,8 +30,13 @@ function isCalendarDate(value) {
 
 /**
  * Rail 3 + Rail 4 static validation: every resident MUST carry the full schema, and its expiry MUST
- * NOT outlive the cut ceiling. Returns { valid, errors } — an invalid ledger is a loud gate failure,
+ * NOT outlive the cut ceiling. Returns { valid, errors }, and an invalid ledger is a loud gate failure,
  * never a silent pass.
+ *
+ * A ceiling that has gone by is deliberately not an error here. It is a date a person sets at a cut,
+ * so an elapsed one is a warning (ceilingWarning), not a verdict about a suite: a stale ceiling makes
+ * the ledger unable to admit a resident, and saying so is useful, while failing an otherwise healthy
+ * gate on the calendar alone is not.
  */
 export function validateLedger(ledger = [], { cutCeiling = CUT_CEILING_ISO } = {}) {
   const errors = [];
@@ -44,11 +50,23 @@ export function validateLedger(ledger = [], { cutCeiling = CUT_CEILING_ISO } = {
     }
     if (!isCalendarDate(entry?.expiry)) {
       errors.push(`${tag}: expiry must be a valid YYYY-MM-DD calendar date`);
-    } else if (day(entry.expiry) > day(cutCeiling)) {
-      errors.push(`${tag}: expiry ${day(entry.expiry)} exceeds the 0.5.2 cut ceiling ${day(cutCeiling)}`);
+    } else if (isCalendarDate(cutCeiling) && day(entry.expiry) > day(cutCeiling)) {
+      errors.push(`${tag}: expiry ${day(entry.expiry)} exceeds the cut ceiling ${day(cutCeiling)}`);
     }
   });
   return { valid: errors.length === 0, errors };
+}
+
+/**
+ * The ceiling's own state, as a warning rather than a verdict. A ceiling that has gone by means no
+ * resident can satisfy both `expiry <= ceiling` and "expiry has not passed", so the ledger cannot
+ * excuse anything until a cut moves it. That is worth saying out loud, and it is not worth turning an
+ * otherwise healthy gate red: the date is a person's decision, not a property of the suite.
+ */
+export function ceilingWarning(cutCeiling = CUT_CEILING_ISO, today = new Date().toISOString()) {
+  if (!isCalendarDate(cutCeiling)) return `cut ceiling ${JSON.stringify(cutCeiling)} is not a YYYY-MM-DD date`;
+  if (day(cutCeiling) >= day(today)) return null;
+  return `cut ceiling ${day(cutCeiling)} has passed (today is ${day(today)}), so no exclusion can be admitted until a cut moves it`;
 }
 
 /**
@@ -73,6 +91,7 @@ export function resolveGateWithLedger({ failures = [], ledger = [], now, cutCeil
   const uncovered = failures.filter((f) => !activeSuites.has(f));
 
   const gate = validity.valid && uncovered.length === 0 && expired.length === 0 ? "pass" : "fail";
+  const warning = ceilingWarning(cutCeiling, today);
   return {
     gate,
     covered,
@@ -80,6 +99,7 @@ export function resolveGateWithLedger({ failures = [], ledger = [], now, cutCeil
     expired: expired.map((e) => e.suite),
     activeExclusions: active,
     validity,
+    warnings: warning === null ? [] : [warning],
   };
 }
 
@@ -106,6 +126,9 @@ export function renderLedgerState(result) {
   }
   if (!result.validity.valid) {
     lines.push(`  ✗ INVALID ledger entries: ${result.validity.errors.join("; ")}`);
+  }
+  for (const warning of result.warnings ?? []) {
+    lines.push(`  ! ${warning}`);
   }
   lines.push(`gate: ${result.gate.toUpperCase()}`);
   return lines.join("\n");
