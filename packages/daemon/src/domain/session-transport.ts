@@ -811,13 +811,15 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   }
 
   if (options.runtime === "omp-tui") {
-    // A permission can outlast the hook freshness window. OMP draws its choices directly above its
-    // navigation footer. The draft/steering footer has different keys and cannot navigate this list.
+    // A permission can outlast the hook freshness window. Stock OMP can draw a panel divider
+    // between Deny and the navigation footer. The draft/steering footer has different keys.
     const rows = lastNonBlank.slice(-20);
     const footer = rows.map(row => /\bchoose · [^·]+ select · [^·]+ approve · [^·]+ deny\b/u.test(row)).lastIndexOf(true);
     const choiceLabel = (row: string) => row.replace(/^[^\p{L}\p{N}]+|[\s│┃║]+$/gu, "");
-    if (footer >= 2 && choiceLabel(rows[footer - 1]!) === "Deny" &&
-        rows.slice(Math.max(0, footer - 12), footer - 1).some(row => /^Approve(?: Once)?$/.test(choiceLabel(row)))) {
+    let lastChoice = footer - 1;
+    if (/^├─+┤$/u.test(rows[lastChoice] ?? "")) lastChoice--;
+    if (lastChoice >= 1 && choiceLabel(rows[lastChoice]!) === "Deny" &&
+        rows.slice(Math.max(0, lastChoice - 11), lastChoice).some(row => /^Approve(?: Once)?$/.test(choiceLabel(row)))) {
       return { state: "attention", reason: "permission_prompt", evidence: "OMP approval menu" };
     }
   }

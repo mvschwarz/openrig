@@ -165,6 +165,47 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendKeys).toHaveBeenCalledTimes(1);
   });
 
+  // Stock OMP 18.22.0 docks the key hints below a full-width divider.
+  const ompApprovalFooter = "│ ↑/↓ choose · ⏎ select · Ctrl+⏎/Ctrl+Q approve · ⎋ deny · Ctrl+O details · type to deny and steer │";
+  const ompApprovalChoices = [
+    "╭─ Allow tool: bash ─────╮", "│ Command: pwd │",
+    "│ ❯ Approve │", "│   Approve bash for this session │", "│   Deny │",
+  ];
+  it.each([15_001, 84_903])("navigates the framed OMP menu with a %d ms old permission event", async (age) => {
+    const seat = seedOmp();
+    const occurredAt = new Date();
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification",
+      subtype: "permission_prompt", occurredAt: occurredAt.toISOString() });
+    const menu = [...ompApprovalChoices, "├────────────────────────┤", ompApprovalFooter, "╰────────────────────────╯"].join("\n");
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => menu, sendText, sendKeys }),
+      { now: () => new Date(occurredAt.getTime() + age) });
+    expect(await transport.send(seat, "ordinary message")).toMatchObject({
+      ok: false, reason: "target_needs_input", activity: { reason: "permission_prompt", evidenceSource: "pane_heuristic" },
+    });
+    expect(await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" }))
+      .toMatchObject({ ok: true, sent: true, promptInteraction: "unverified" });
+    expect(overrideEvents()).toHaveLength(1);
+    expect(sendKeys).toHaveBeenCalledExactlyOnceWith(seat, ["Down"], expect.any(Function), expect.any(Object));
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["├────────────────────────┤", "│ ⏎ deny and send · Ctrl+Q approve · ⎋ deny │"],
+    ["│ unrelated output │", ompApprovalFooter],
+  ])("refuses a delayed OMP arrow when the pane no longer shows navigable choices (%s, %s)", async (separator, footer) => {
+    const seat = seedOmp();
+    agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification", subtype: "permission_prompt" });
+    const menu = [...ompApprovalChoices, separator, footer, "╰────────────────────────╯"].join("\n");
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => menu, sendText, sendKeys }),
+      { now: () => new Date(Date.now() + 84_903) });
+    expect(await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" }))
+      .toMatchObject({ ok: false, sent: false, reason: "omp_menu_navigation_unavailable" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("keeps OMP navigation out of ordinary sends, non-menu prompts and combined input", async () => {
     const seat = seedOmp();
     const { sendText, sendKeys } = spies();
