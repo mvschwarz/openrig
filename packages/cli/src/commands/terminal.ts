@@ -337,14 +337,17 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
             printOpenAll(opts.json ?? false, res, 200);
             return;
           }
+          // Only herdr opens views; the daemon answers any other provider name at once with unknown_provider.
+          const herdr = named === "herdr";
           let res: { status: number; data: OpenAllResult };
           try {
             res = await client.post<OpenAllResult>("/api/terminal/open-all",
               { provider: named, reuseLive: true, ...(session !== undefined ? { session } : {}) },
-              { timeoutMs: BULK_TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+              { timeoutMs: herdr ? BULK_TERMINAL_OPEN_TIMEOUT_MS : TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
           } catch (err) {
-            if (!(err instanceof DaemonTimeoutError)) throw err;
+            if (!herdr || !(err instanceof DaemonTimeoutError)) throw err;
             // No automatic retry: the daemon may still be opening views.
+            if (!opts.json) { console.error(BULK_TERMINAL_OPEN_UNCONFIRMED); process.exitCode = 1; return; }
             res = { status: 200, data: { ok: false, provider: named, ...(session !== undefined ? { session } : {}), rigs: [],
               code: "bulk_open_outcome_unknown", error: BULK_TERMINAL_OPEN_UNCONFIRMED } };
           }
