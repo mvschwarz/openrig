@@ -819,6 +819,174 @@ describe("QueueRepository", () => {
       expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("failed:hook_bridge_not_delivered");
     });
 
+    it("An unpark's wake from before the row moved away and back with wakes is not delivered beside the latest reroute's wake; a later unpark's wake is.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const wakesOf = (qitemId: string) =>
+          (full.prepare("SELECT outbox_id, delivery_state FROM outbox_entries WHERE audit_pointer = ?").all(qitemId) as Array<{ outbox_id: string; delivery_state: string }>);
+        const unparkWakes = (qitemId: string) => wakesOf(qitemId).filter((w) => w.outbox_id.startsWith("wake-intent-blocker-"));
+        const unpark = async (qitemId: string) => {
+          const blocker = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "dave@rig", body: "blocker", nudge: false });
+          fullRepo.update({ qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: blocker.qitemId });
+          fullRepo.claim({ qitemId: blocker.qitemId, destinationSession: "dave@rig" });
+          fullRepo.update({ qitemId: blocker.qitemId, actorSession: "dave@rig", state: "done", closureReason: "no-follow-on" });
+          expect(fullRepo.getById(qitemId)!.state).toBe("pending");
+        };
+        // No transport while the row moves: the unpark's wake to bob stays staged, unsent.
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+        await unpark(item.qitemId);
+        const [older] = unparkWakes(item.qitemId);
+        expect(older?.delivery_state).toBe("pending");
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        const latest = `wake-intent-fallback-${reroutes[1]!.transitionId}`;
+        const sends: string[] = [];
+        fullRepo.attachTransport({ send: async (session: string) => { sends.push(session); return { ok: true, verified: true }; } });
+
+        await fullRepo.drainPendingWakeIntents();
+
+        expect(sends).toEqual(["bob@rig"]);
+        expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([latest]);
+        expect(unparkWakes(item.qitemId).find((w) => w.outbox_id === older!.outbox_id)?.delivery_state).not.toBe("delivered");
+
+        // A later park and unpark at bob wakes bob again: its wake comes after the reroute.
+        await unpark(item.qitemId);
+        await fullRepo.drainPendingWakeIntents();
+        const later = unparkWakes(item.qitemId).find((w) => w.outbox_id !== older!.outbox_id);
+        expect(later?.delivery_state).toBe("delivered");
+        expect(sends).toEqual(["bob@rig", "bob@rig"]);
+      } finally {
+        full.close();
+      }
+    });
+
+    it("An unpark's wake still sending while the row moves away and back with wakes does not overwrite the newer wake's result, and its own entry is settled.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const storedResult = (qitemId: string) =>
+          (full.prepare("SELECT last_nudge_result FROM queue_items WHERE qitem_id = ?").get(qitemId) as { last_nudge_result: string | null }).last_nudge_result;
+        const stateOf = (outboxId: string) =>
+          (full.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string }).delivery_state;
+        // The first send to bob (the unpark's wake) hangs until the test lets it go; every other send is verified at once.
+        let releaseFirst: (r: { ok: boolean; verified?: boolean; error?: string }) => void = () => {};
+        const sends: string[] = [];
+        fullRepo.attachTransport({
+          send: (session: string) => {
+            sends.push(session);
+            return sends.length === 1 ? new Promise((resolve) => { releaseFirst = resolve; }) : Promise.resolve({ ok: true, verified: true });
+          },
+        });
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+        const blocker = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "dave@rig", body: "blocker", nudge: false });
+        fullRepo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: blocker.qitemId });
+        fullRepo.claim({ qitemId: blocker.qitemId, destinationSession: "dave@rig" });
+        fullRepo.update({ qitemId: blocker.qitemId, actorSession: "dave@rig", state: "done", closureReason: "no-follow-on" });
+        void fullRepo.drainPendingWakeIntents();
+        await vi.waitFor(() => expect(sends).toEqual(["bob@rig"]));
+        const unparkWake = (full.prepare("SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-blocker-%'")
+          .get(item.qitemId) as { outbox_id: string }).outbox_id;
+        expect(stateOf(unparkWake)).toBe("sending");
+
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        const latest = `wake-intent-fallback-${reroutes[1]!.transitionId}`;
+        await vi.waitFor(() => expect(stateOf(latest)).toBe("delivered"));
+        expect(storedResult(item.qitemId)).toBe("verified");
+
+        releaseFirst({ ok: false, error: "send timed out" });
+        await vi.waitFor(() => expect(stateOf(unparkWake)).not.toBe("sending"));
+        expect(stateOf(unparkWake)).not.toBe("delivered");
+        expect(storedResult(item.qitemId)).toBe("verified");
+      } finally {
+        full.close();
+      }
+    });
+
+    it("An older wake that finishes after a first reroute whose wake a full quota refused does not overwrite the not-retained result.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const outbox = new OutboxHandler(full);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(outbox);
+        const stateOf = (outboxId: string) =>
+          (full.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string }).delivery_state;
+        // bob's send hangs until the test lets it go; a wake for carol would be held there, and carol's quota is full.
+        let releaseBob: (r: { ok: boolean; verified?: boolean; error?: string }) => void = () => {};
+        const sends: string[] = [];
+        fullRepo.attachTransport({
+          retentionTarget: (session: string) => (session === "carol@rig" ? { nodeId: "node-carol", session, occupant: null, pane: null } : null),
+          send: (session: string) => {
+            sends.push(session);
+            return new Promise((resolve) => { releaseBob = resolve; });
+          },
+        });
+        vi.spyOn(outbox, "retain").mockImplementation(() => {
+          throw Object.assign(new Error("Held-message quota is full. Retire a specific held message to release active quota; no input was written."), { code: "retained_quota_full" });
+        });
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        const createWake = `wake-intent-${item.qitemId}`;
+        await vi.waitFor(() => expect(sends).toEqual(["bob@rig"]));
+
+        // The first reroute with a wake: carol's quota refuses it, so no reroute wake is staged at all.
+        const moved = fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        expect(moved.destinationSession).toBe("carol@rig");
+        expect(fallbackWakes(item.qitemId)).toHaveLength(0);
+        const notRetained = fullRepo.getById(item.qitemId)!.lastNudgeResult;
+        expect(notRetained).toMatch(/^failed:wake not retained: Held-message quota is full/);
+
+        releaseBob({ ok: true, verified: true });
+        await vi.waitFor(() => expect(stateOf(createWake)).toBe("delivered"));
+        expect(fullRepo.getById(item.qitemId)!.lastNudgeResult).toBe(notRetained);
+      } finally {
+        full.close();
+      }
+    });
+
+    it("A row moved away with a wake and back by a caller that passes no options gets its creation wake again, and not the wake for the seat it left.", async () => {
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const wakesOf = (qitemId: string) =>
+          (full.prepare("SELECT outbox_id, destination_session, delivery_state FROM outbox_entries WHERE audit_pointer = ?").all(qitemId) as Array<{ outbox_id: string; destination_session: string; delivery_state: string }>);
+        // No transport while the row moves: the create's wake to bob stays staged, undelivered.
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        const createWake = `wake-intent-${item.qitemId}`;
+        expect(wakesOf(item.qitemId).find((w) => w.outbox_id === createWake)?.delivery_state).toBe("pending");
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "seat-unreachable");
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        expect(reroutes).toHaveLength(2);
+        const carolWake = `wake-intent-fallback-${reroutes[0]!.transitionId}`;
+        // A held wake is released only while the guard finds it current: bob's creation wake is, carol's wake is not.
+        const held: { guard?: (entries: ReadonlyArray<{ outboxId: string; auditPointer: string | null; destinationSession: string }>) => boolean } = {};
+        const sends: string[] = [];
+        fullRepo.attachTransport({
+          configureGuardedWakes: (applicable) => { held.guard = applicable; },
+          send: async (session: string) => { sends.push(session); return { ok: true, verified: true }; },
+        });
+        expect(held.guard?.([{ outboxId: createWake, auditPointer: item.qitemId, destinationSession: "bob@rig" }])).toBe(true);
+        expect(held.guard?.([{ outboxId: carolWake, auditPointer: item.qitemId, destinationSession: "carol@rig" }])).toBe(false);
+
+        await fullRepo.drainPendingWakeIntents();
+
+        expect(sends).toEqual(["bob@rig"]);
+        expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([createWake]);
+      } finally {
+        full.close();
+      }
+    });
+
     it.each(["in-progress", "blocked", "done"] as const)("A wake on a row that is not pending is refused with `wake_not_admitted`, and nothing moves (%s).", async (state) => {
       const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
       if (state === "in-progress" || state === "done") repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
