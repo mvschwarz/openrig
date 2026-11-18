@@ -1,4 +1,62 @@
-# What changed in OpenRig 0.7.18
+# What changed in OpenRig 0.7.19
+
+OpenRig 0.7.19 improves how a team brings permission prompts to a person, reports interrupted recovery, and starts again after a failed launch. It also adds optional Claude hook delivery, per-seat Linux memory limits, and a versioned interface for apps answering human questions.
+
+## Before you upgrade
+
+Run the upgrade in the environment that owns your daemon, keeping the same `OPENRIG_HOME` if you set it. Stop the daemon, back up its database, install the patch, then restart it. Your agents keep running; do not use `rig down` for this upgrade.
+
+If the daemon was started with `--db`, replace the `DB=` line below with that actual database path. Pass the same `--db "$DB"` to every `rig daemon start`, including recovery; `rig config get db.path` reads this shell's configuration, not the running daemon's launch arguments.
+
+```sh
+rig daemon stop &&
+DB="$(rig config get db.path)" &&
+BACKUP="$DB.before-0.7.19-$(date -u +%Y%m%dT%H%M%SZ)" &&
+{ [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists; keep it and run again." >&2; false; }; } &&
+cp "$DB" "$BACKUP" &&
+{ [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
+npm install -g @openrig/cli@0.7.19 &&
+rig daemon start
+```
+
+A failure stops the following commands. Fix it before continuing. If stopping failed, use `rig daemon status`: when it says “Daemon stopped”, continue from `DB=`; when it says “Daemon PID is absent”, start the daemon with its original home/database settings before retrying the block.
+
+Three additive migrations record the hook bridge, each session's launched folder, and app access. Keep the backup: downgrading the migrated database to 0.7.18 is not established. Bundled `openrig` is 0.7.19; `openrig-core` is 0.1.33.
+
+## Questions and consent
+
+A permission prompt can reach the existing alert route even when its seat has no open work. A recovery waiting directly on that prompted seat or row no longer hides the prompt. Clears from an earlier occupant do not clear the current occupant's alert. ([#3425](https://github.com/mvschwarz/openrig/pull/3425), [#3446](https://github.com/mvschwarz/openrig/pull/3446))
+
+The installer guidance keeps your conversation unless you choose the operator's pane, and teaches reloading a skill added during the session. The guidance says an answer covers that prompt, rather than permission to answer unrelated prompts later. Permission checks evaluate the seat's authority once for that decision. ([#3423](https://github.com/mvschwarz/openrig/pull/3423), [#3431](https://github.com/mvschwarz/openrig/pull/3431), [#3454](https://github.com/mvschwarz/openrig/pull/3454))
+
+## Recovery and delivery
+
+Restore now reports skipped saved hooks and missing working folders as gaps. It leaves a missing folder absent; a fresh launch from a spec still creates its declared folder. Recreated seats' notices and receipts agree about which seat launched, and a delivered sequence can close its notice. Closure is best-effort if bookkeeping fails; a later sequence can still owe work. ([#3430](https://github.com/mvschwarz/openrig/pull/3430), [#3436](https://github.com/mvschwarz/openrig/pull/3436), [#3450](https://github.com/mvschwarz/openrig/pull/3450), [#3350](https://github.com/mvschwarz/openrig/pull/3350), [#3415](https://github.com/mvschwarz/openrig/pull/3415))
+
+`launch --fresh` can replace the shell left by a failed start without `--stop`. Fresh launch can reopen a terminal server after a host restart when the old process is confirmed gone. A missing tmux server reads stopped; unavailable readings remain uncertain. Duplicate automatic watchdog registration no longer aborts startup. ([#3392](https://github.com/mvschwarz/openrig/pull/3392), [#3435](https://github.com/mvschwarz/openrig/pull/3435), [#3429](https://github.com/mvschwarz/openrig/pull/3429), [#3443](https://github.com/mvschwarz/openrig/pull/3443))
+
+For a seat you type in, `rig seat set-typing-guard <seat> --mode queue-only --reason <text>` keeps automatic notices out of its input. Watchdog reminders go to the parked rows instead, and interrupted reminders survive daemon restart. Other delivery modes keep their own behavior. ([#3418](https://github.com/mvschwarz/openrig/pull/3418), [#3461](https://github.com/mvschwarz/openrig/pull/3461))
+
+Claude hook delivery is opt-in: `rig seat set-hook-bridge <seat> --enabled true --reason <text>`, then inspect `rig seat hook-bridge <seat>`. It takes effect at launch or restore on supported Claude versions; unavailable bridges fall back to typed delivery and name why. A hook handoff is not proof the agent read or acted on it. ([#3270](https://github.com/mvschwarz/openrig/pull/3270), [#3445](https://github.com/mvschwarz/openrig/pull/3445))
+
+## Settings and connected tools
+
+On Linux with systemd, `process_limits: { memory_max: "512M" }` requests a per-seat memory limit alongside `tasks_max`; swap is separate. `rig seat status` shows the observed limit and counters. A limit that cannot be verified is reported, not silently claimed effective. ([#3417](https://github.com/mvschwarz/openrig/pull/3417))
+
+Apps can use the versioned [human-answer interface](https://github.com/mvschwarz/openrig/blob/v0.7.19/docs/reference/core-app.md) to read questions, submit answers and recover receipts. Credentials identify an app and permitted actors; they are not private per-person logins. Other improvements bind external input to its run, cancel named native invocations after permission withdrawal, add optional webhook signatures, and pass advisory participant fields through `rig_team`. ([#3426](https://github.com/mvschwarz/openrig/pull/3426), [#3420](https://github.com/mvschwarz/openrig/pull/3420), [#3364](https://github.com/mvschwarz/openrig/pull/3364), [#3396](https://github.com/mvschwarz/openrig/pull/3396), [#3410](https://github.com/mvschwarz/openrig/pull/3410))
+
+## Known limits
+
+- A later unreadable tmux sample can show recorded running again after an earlier stopped reading. “Liveness unconfirmed” is not evidence of a live process; inspect the seat before relying on that label.
+- Linked Codex configuration files retain version-specific hook-trust limits. This release does not migrate existing noncanonical state or include the linked-path alias change wholesale. Review any hook prompt yourself; do not treat this upgrade as prior consent.
+- Queue-only reminders are not exactly-once: a lost note receipt can repeat a note, and an interruption while changing back to typed delivery can repeat the occurrence. Check the row before acting twice.
+- Downgrading past the Claude hook `exec` change can leave generated settings unrecognized by the older daemon. Keep your settings backup and inspect them before restarting an older release. ([#3427](https://github.com/mvschwarz/openrig/pull/3427))
+
+## Credits
+
+Thanks to Dery Ferdika, Devulapalli Naga Sri Vaishnavi, Edward Bowie, Evgeny Zotov, James B. Shields, Mike Schwarz, NIKHIL, Roberto Campos, Samuel, Samuel Smith, Wu Shuwen, billbenetti, and dependabot[bot]. Their contributions also improve terminal column sizing, JSON errors, transcript searches, workflow ownership, account-label display, scope links, cleanup and documentation.
+
+## What changed in OpenRig 0.7.18
 
 This note is for an agent on an install that was just upgraded to 0.7.18.
 OpenRig 0.7.18 can send a team's seat prompts to the conversation your person
