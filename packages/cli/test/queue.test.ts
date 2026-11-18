@@ -1084,6 +1084,100 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
+    it("keeps the prior forwarder's reason and adds the pending early-start warning", async () => {
+      const id = "qitem-create-prior-forwarder-pending";
+      const priorWarning = "The receiving daemon did not confirm the requested park options. The row was returned as saved; inspect its blocker and timer before relying on a wake.";
+      const { deps, calls } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: {
+          qitemId: id,
+          state: "pending",
+          parkReceipt: { confirmed: false, state: "pending", blockedOn: null },
+          parkWarning: { code: "qitem_park_not_confirmed", message: priorWarning },
+        } },
+      } });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--wake-after", "15m", "--json"]);
+
+      const request = calls.find((call) => call.method === "POST" && call.path === "/api/queue/create")!;
+      expect(request.body).toMatchObject({ wakeAfterSeconds: 900, nudge: false });
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({ state: "pending", parkReceipt: { confirmed: false }, parkWarning: { code: "qitem_park_not_confirmed" } });
+      expect(result.parkWarning.message).toContain(priorWarning);
+      expect(result.parkWarning.message).toMatch(/older receiving daemon.*start work early/i);
+      expect(errors.join("\n")).toContain(result.parkWarning.message);
+    });
+
+    it("does not trust a prior forwarder's positive blocker-only receipt without a receipt version", async () => {
+      const id = "qitem-create-prior-forwarder-blocked";
+      const { deps, calls } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: {
+          qitemId: id,
+          state: "blocked",
+          blockedOn: "external:condition",
+          parkReceipt: { confirmed: true, state: "blocked", blockedOn: "external:condition", wakeKind: null, wakeAfterSeconds: null },
+        } },
+      } });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const request = calls.find((call) => call.method === "POST" && call.path === "/api/queue/create")!;
+      expect(request.body).toMatchObject({ nudge: false });
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({
+        state: "blocked",
+        blockedOn: "external:condition",
+        parkReceipt: { confirmed: false, blockedOn: "external:condition" },
+        parkWarning: { code: "qitem_park_not_confirmed" },
+      });
+      expect(result.parkWarning.message).toMatch(/did not provide a current park receipt/i);
+    });
+
+    it("accepts a versioned positive park receipt", async () => {
+      const id = "qitem-create-current-forwarder-blocked";
+      const { deps } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: {
+          qitemId: id,
+          state: "blocked",
+          blockedOn: "external:condition",
+          parkReceipt: { receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: "external:condition", wakeKind: null, wakeAfterSeconds: null },
+        } },
+      } });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({ parkReceipt: { receiptVersion: 1, confirmed: true }, state: "blocked" });
+      expect(result).not.toHaveProperty("parkWarning");
+    });
+
+    it("does not copy malformed success receipt fields into the park result", async () => {
+      const id = "qitem-create-malformed-park-receipt";
+      const { deps } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: {
+          qitemId: id,
+          state: "blocked",
+          blockedOn: "external:condition",
+          parkReceipt: ["stale"],
+          parkWarning: ["stale"],
+        } },
+      } });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({
+        state: "blocked",
+        parkReceipt: { confirmed: false, blockedOn: "external:condition" },
+        parkWarning: { code: "qitem_park_not_confirmed" },
+      });
+      expect(result.parkReceipt).not.toHaveProperty("0");
+      expect(result.parkWarning.message).toMatch(/did not provide a current park receipt/i);
+    });
+
     it("create with both --body and --body-file errors with exit 1 + 3-part error + does NOT contact the daemon", async () => {
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "queue-create-conflict-"));
       const bodyPath = path.join(tmp, "body.txt");

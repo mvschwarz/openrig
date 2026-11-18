@@ -68,11 +68,34 @@ import { feedPerspective } from "../domain/feed-perspective.js";
 // (same class as mission-control's REMOTE_ACTION_TIMEOUT_MS). remoteJsonRequest
 // never hangs — a timeout surfaces as a structured host-named failure.
 const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
+/** A confirmed park needs this destination-generated marker; older forwarders only infer confirmation from row state. */
+const PARK_RECEIPT_VERSION = 1;
+const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
 const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
+
+function unconfirmedParkWarning(value: unknown, state: unknown): Record<string, unknown> {
+  const existing = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const originalMessage = typeof existing.message === "string" ? existing.message.trim() : "";
+  const messages = originalMessage ? [originalMessage] : [];
+  if (state === "pending") {
+    if (!/older receiving daemon.*start work early/i.test(originalMessage)) messages.push(EARLY_START_PARK_WARNING);
+    if (!/suppresses only the direct nudge/i.test(originalMessage)) messages.push("This request suppresses only the direct nudge.");
+  }
+  if (messages.length === 0) {
+    messages.push("The receiving daemon did not provide a current park receipt. The requested blocker and timer are not confirmed.");
+  }
+  return {
+    ...existing,
+    code: typeof existing.code === "string" ? existing.code : "qitem_park_not_confirmed",
+    message: [...new Set(messages)].join(" "),
+  };
+}
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -845,9 +868,11 @@ export function queueRoutes(): Hono {
         ? objectPayload.parkReceipt as Record<string, unknown> : null;
       const requestedBlocker = typeof body.blockedOn === "string" ? body.blockedOn : null;
       const responseMatchesBlocker = objectPayload.state === "blocked" && (objectPayload.blockedOn ?? null) === requestedBlocker;
-      const timerConfirmed = body.wakeAfterSeconds == null || (remoteParkReceipt?.confirmed === true
+      const timerConfirmed = body.wakeAfterSeconds == null || (remoteParkReceipt?.receiptVersion === PARK_RECEIPT_VERSION
+        && remoteParkReceipt.confirmed === true
         && remoteParkReceipt.wakeAfterSeconds === body.wakeAfterSeconds);
-      const parkConfirmed = remoteParkReceipt?.confirmed === true
+      const parkConfirmed = remoteParkReceipt?.receiptVersion === PARK_RECEIPT_VERSION
+        && remoteParkReceipt.confirmed === true
         && !objectPayload.parkWarning && responseMatchesBlocker && timerConfirmed;
       const parkReceipt = remoteParkReceipt ?? {
         confirmed: parkConfirmed,
@@ -856,10 +881,7 @@ export function queueRoutes(): Hono {
         wakeKind: null,
         wakeAfterSeconds: null,
       };
-      const parkWarning = objectPayload.parkWarning ?? (!parkConfirmed ? {
-        code: "qitem_park_not_confirmed",
-        message: "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early. This request suppresses the direct nudge, but the daemon did not confirm the requested blocker or timer.",
-      } : undefined);
+      const parkWarning = parkConfirmed ? objectPayload.parkWarning : unconfirmedParkWarning(objectPayload.parkWarning, objectPayload.state);
       return c.json({ ...objectPayload, parkReceipt: { ...parkReceipt, confirmed: parkConfirmed }, ...(parkWarning ? { parkWarning } : {}),
         ...(added.length ? { advisories: [...existingAdvisories, ...added] } : {}) }, fwd.status as 200);
     }
@@ -912,6 +934,7 @@ export function queueRoutes(): Hono {
         message: "The queue row was created, but the daemon could not read its park receipt. Check this row by its ID before retrying with a new ID.",
       } : undefined);
       const parkReceipt = parkRequested ? {
+        receiptVersion: PARK_RECEIPT_VERSION,
         confirmed: !parkReceiptReadFailed && !item.parkWarning && item.state === "blocked"
           && item.blockedOn === (typeof body.blockedOn === "string" ? body.blockedOn : null)
           && (body.wakeAfterSeconds == null || (parkWake?.kind === "timer" && parkWakeAfterSeconds === body.wakeAfterSeconds)),

@@ -347,7 +347,9 @@ describe("queue write receipt (output.compact)", () => {
       logs = [];
       const json = JSON.parse(await create(["--wake-after", "15m", "--json"], data)) as Row;
       expect(json.parkReceipt).toMatchObject({ confirmed: false, state: "pending" });
-      expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed", message });
+      expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
+      expect(json.parkWarning.message).toContain(message);
+      expect(json.parkWarning.message).toMatch(/owner or scheduler can start work early/i);
       expect(json.wake).toMatchObject({
         evidence: "suppressed",
         detail: "park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside",

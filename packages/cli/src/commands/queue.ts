@@ -93,6 +93,30 @@ export interface DeliveryVerifyTarget {
 
 type QueueRow = Record<string, unknown>;
 
+/** Older forwarders can infer a positive receipt from row state without this destination-generated marker. */
+const PARK_RECEIPT_VERSION = 1;
+const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
+
+function unconfirmedParkWarning(value: unknown, state: unknown): Record<string, unknown> {
+  const existing = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const originalMessage = typeof existing.message === "string" ? existing.message.trim() : "";
+  const messages = originalMessage ? [originalMessage] : [];
+  if (state === "pending") {
+    if (!/older receiving daemon.*start work early/i.test(originalMessage)) messages.push(EARLY_START_PARK_WARNING);
+    if (!/suppresses only the direct nudge/i.test(originalMessage)) messages.push("This request suppresses only the direct nudge.");
+  }
+  if (messages.length === 0) {
+    messages.push("The daemon did not provide a current park receipt. The requested blocker and timer are not confirmed.");
+  }
+  return {
+    ...existing,
+    code: typeof existing.code === "string" ? existing.code : "qitem_park_not_confirmed",
+    message: [...new Set(messages)].join(" "),
+  };
+}
+
 function stringField(row: QueueRow, key: string): string | null {
   return typeof row[key] === "string" ? row[key] as string : null;
 }
@@ -1582,32 +1606,31 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             console.error(`Warning: ${createWarning.message}`);
           }
           const parkWarning = created?.parkWarning as { code?: unknown; message?: unknown } | undefined;
-          const parkReceipt = created?.parkReceipt as { confirmed?: unknown; state?: unknown; blockedOn?: unknown; wakeKind?: unknown; wakeAfterSeconds?: unknown } | undefined;
-          const parkMatches = parkRequested && !parkWarning && parkReceipt?.confirmed === true && created?.state === "blocked"
+          const rawParkReceipt = created?.parkReceipt;
+          const parkReceipt = rawParkReceipt && typeof rawParkReceipt === "object" && !Array.isArray(rawParkReceipt)
+            ? rawParkReceipt as { receiptVersion?: unknown; confirmed?: unknown; state?: unknown; blockedOn?: unknown; wakeKind?: unknown; wakeAfterSeconds?: unknown }
+            : undefined;
+          const parkMatches = parkRequested && !parkWarning && parkReceipt?.receiptVersion === PARK_RECEIPT_VERSION
+            && parkReceipt.confirmed === true && created?.state === "blocked"
             && (created?.blockedOn ?? null) === (opts.blockedOn ?? null)
             && (opts.wakeAfter === undefined || parkReceipt.wakeAfterSeconds === opts.wakeAfter);
+          const outputParkWarning = parkMatches ? parkWarning : unconfirmedParkWarning(parkWarning, created?.state);
           const outputCreated = status < 400 && parkRequested && !parkMatches
             ? {
                 ...created,
                 parkReceipt: {
                   ...(parkReceipt ?? {}),
                   confirmed: false,
-                  state: typeof created.state === "string" ? created.state : parkReceipt?.state ?? null,
-                  blockedOn: created.blockedOn ?? parkReceipt?.blockedOn ?? null,
+                  state: typeof created?.state === "string" ? created.state : parkReceipt?.state ?? null,
+                  blockedOn: created?.blockedOn ?? parkReceipt?.blockedOn ?? null,
                   wakeKind: parkReceipt?.wakeKind ?? null,
                   wakeAfterSeconds: parkReceipt?.wakeAfterSeconds ?? null,
                 },
-                parkWarning: parkWarning ?? {
-                  code: "qitem_park_not_confirmed",
-                  message: "The daemon did not confirm the requested park. An older receiving daemon may save the row as pending, where the owner or scheduler can start work early; this request suppresses only the direct nudge. The row state is shown, but the blocker and timer are not confirmed.",
-                },
+                parkWarning: outputParkWarning,
               }
             : created;
           if (status < 400 && parkRequested && !parkMatches) {
-            const outputParkWarning = outputCreated.parkWarning as { message?: unknown } | undefined;
-            const message = typeof outputParkWarning?.message === "string"
-              ? outputParkWarning.message
-              : "The daemon did not confirm the requested park. An older receiving daemon may save the row as pending, where the owner or scheduler can start work early; this request suppresses only the direct nudge.";
+            const message = typeof outputParkWarning?.message === "string" ? outputParkWarning.message : "The park is not confirmed.";
             console.error(`Warning: ${message}`);
           }
           // The address this work's questions come to, and the line to read them by.

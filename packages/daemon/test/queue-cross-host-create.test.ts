@@ -216,6 +216,115 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(rowCount(db)).toBe(0);
   });
 
+  it("preserves a prior forwarder's reason and adds the pending early-start warning", async () => {
+    const priorWarning = "The receiving daemon did not confirm the requested park options. The row was returned as saved; inspect its blocker and timer before relying on a wake.";
+    const forwarded: { body?: Record<string, unknown> } = {};
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        forwarded.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({
+          qitemId: "qitem-prior-forwarder-pending",
+          destinationSession: "dev@rig-b",
+          state: "pending",
+          parkReceipt: { confirmed: false, state: "pending", blockedOn: null },
+          parkWarning: { code: "qitem_park_not_confirmed", message: priorWarning },
+        }, 201);
+      }) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+
+    expect(res.status).toBe(201);
+    expect(forwarded.body).toMatchObject({ nudge: false, wakeAfterSeconds: 90 });
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
+      state: "pending",
+      parkReceipt: { confirmed: false },
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+    expect(returned.parkReceipt).not.toHaveProperty("receiptVersion");
+    expect(returned.parkWarning.message).toContain(priorWarning);
+    expect(returned.parkWarning.message).toMatch(/older receiving daemon.*start work early/i);
+    expect(returned.parkWarning.message).toMatch(/suppresses only the direct nudge/i);
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("does not trust a prior forwarder's positive blocker-only receipt without a receipt version", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async () => jsonResponse({
+        qitemId: "qitem-prior-forwarder-blocked",
+        destinationSession: "dev@rig-b",
+        state: "blocked",
+        blockedOn: "external:condition",
+        parkReceipt: { confirmed: true, state: "blocked", blockedOn: "external:condition", wakeKind: null, wakeAfterSeconds: null },
+      }, 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkReceipt: { confirmed: false, blockedOn: "external:condition" },
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("accepts a versioned positive receipt from a current receiver", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async () => jsonResponse({
+        qitemId: "qitem-current-forwarder-blocked",
+        destinationSession: "dev@rig-b",
+        state: "blocked",
+        blockedOn: "external:condition",
+        parkReceipt: { receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: "external:condition", wakeKind: null, wakeAfterSeconds: null },
+      }, 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkReceipt: { receiptVersion: 1, confirmed: true, blockedOn: "external:condition" },
+    });
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("does not accept malformed success receipt fields as a confirmed park", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async () => jsonResponse({
+        qitemId: "qitem-malformed-forwarder-blocked",
+        destinationSession: "dev@rig-b",
+        state: "blocked",
+        blockedOn: "external:condition",
+        parkReceipt: ["stale"],
+        parkWarning: ["stale"],
+      }, 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkReceipt: { confirmed: false, blockedOn: "external:condition" },
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+    expect(returned.parkReceipt).not.toHaveProperty("0");
+    expect(returned.parkWarning.message).toMatch(/did not provide a current park receipt/i);
+    expect(rowCount(db)).toBe(0);
+  });
+
   // 51-09 incr 4a correction — STAMP-AT-FORWARD: the forwarding daemon IS the
   // origin/sender host, so it stamps its OWN self-id onto sourceSession when
   // building the forward body. Otherwise the DESTINATION daemon's create() would

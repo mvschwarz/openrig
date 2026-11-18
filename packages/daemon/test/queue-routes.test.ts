@@ -114,7 +114,7 @@ describe("queue routes", () => {
     expect(response.status).toBe(201);
     const result = await response.json();
     expect(result).toMatchObject({ state: "blocked", blockedOn: "external:remote-task" });
-    expect(result.parkReceipt).toMatchObject({ confirmed: true, state: "blocked", blockedOn: "external:remote-task", wakeKind: "timer", wakeAfterSeconds: 90 });
+    expect(result.parkReceipt).toMatchObject({ receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: "external:remote-task", wakeKind: "timer", wakeAfterSeconds: 90 });
     expect(queueRepo.getParkWakeStatus(result.qitemId)).toMatchObject({ kind: "timer", live: true });
     expect(db.prepare("SELECT COUNT(*) AS count FROM outbox_entries").get()).toMatchObject({ count: 0 });
   });
@@ -127,12 +127,12 @@ describe("queue routes", () => {
     expect(timed.status).toBe(201);
     const timedRow = await timed.json() as Record<string, any>;
     expect(timedRow).toMatchObject({ state: "blocked", blockedOn: null,
-      parkReceipt: { confirmed: true, state: "blocked", blockedOn: null, wakeKind: "timer", wakeAfterSeconds: 45 } });
+      parkReceipt: { receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: null, wakeKind: "timer", wakeAfterSeconds: 45 } });
 
     const gate = await create({ destinationSession: "worker@rig", body: "Wait for outside event", blockedOn: "external:release", nudge: false });
     expect(gate.status).toBe(201);
     expect(await gate.json()).toMatchObject({ state: "blocked", blockedOn: "external:release",
-      parkReceipt: { confirmed: true, state: "blocked", blockedOn: "external:release", wakeKind: null, wakeAfterSeconds: null },
+      parkReceipt: { receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: "external:release", wakeKind: null, wakeAfterSeconds: null },
       advisories: [expect.objectContaining({ code: "park_without_wake" })] });
   });
 
@@ -186,7 +186,7 @@ describe("queue routes", () => {
       qitemId,
       state: "blocked",
       blockedOn: "external:release",
-      parkReceipt: { confirmed: false, state: "blocked", blockedOn: "external:release" },
+      parkReceipt: { receiptVersion: 1, confirmed: false, state: "blocked", blockedOn: "external:release" },
       parkWarning: { code: "qitem_park_receipt_unavailable" },
     });
     expect(queueRepo.getById(qitemId)).toMatchObject({ state: "blocked", blockedOn: "external:release" });
