@@ -1582,11 +1582,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       ).get(session) as { status: string } | undefined;
       return !row || ["exited", "superseded", "detached"].includes(row.status);
     };
-    const activeBacklogKeyOf = (c: Candidate): string | null => {
-      const key = backlogKeyOf(c);
-      if (!key) return null;
-      return selfRoutedUnclaimed(c) && sessionStoppedOrMissing(c.row.destinationSession) ? null : key;
-    };
     const isUnreachableUnclaimed = (c: Candidate): boolean =>
       c.kind === "unclaimed-obligation"
       && c.route === c.row.destinationSession
@@ -1595,6 +1590,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       && !isHumanTarget(c.row.destinationSession)
       && (classOf(c.row.destinationSession) === "unroutable" || sessionMissing(c.row.destinationSession))
       && sessionStoppedOrMissing(c.row.destinationSession);
+    const activeBacklogKeyOf = (c: Candidate): string | null => {
+      const key = backlogKeyOf(c);
+      if (!key) return null;
+      return selfRoutedUnclaimed(c) && isUnreachableUnclaimed(c) ? null : key;
+    };
     const unroutableGroups = new Map<string, { source: string; destination: string; rows: Candidate[] }>();
     const enqueueUnroutable = (candidate: Candidate): void => {
       const groupKey = `${candidate.row.sourceSession}${UNROUTABLE_NOTICE_SEPARATOR}${candidate.row.destinationSession}`;
@@ -2081,19 +2081,28 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const unreachableNoticeTarget = (destination: string, source: string | null): string | null =>
       [source, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)(), (deps.resolveOperatorSeat ?? resolveOperatorSeat)()]
         .find((seat) => reachableNoticeTarget(seat, destination)) ?? null;
-    const findOpenUnroutableRoot = (source: string, destination: string, target: string): { qitem_id: string } | undefined => {
+    const findOpenUnroutableRoot = (source: string, destination: string): { qitem_id: string } | undefined => {
       const tag = unroutableNoticeTag(source, destination);
       return deps.db.prepare(
         `SELECT q.qitem_id FROM queue_items q
           WHERE q.state IN ('pending', 'in-progress', 'blocked')
             AND q.handed_off_from IS NULL
-            AND q.source_session = ? AND q.destination_session = ?
+            AND q.source_session = ? AND q.destination_session <> q.source_session
             AND (q.tags LIKE '%"stuck-sweep:%') AND q.tags LIKE ? ESCAPE '\\' AND q.tags LIKE ? ESCAPE '\\'
+            AND json_valid(q.tags)
+            AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE j.value = ?)
+            AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE j.value = ?)
             ${provenanceFilter}
           ORDER BY q.ts_updated DESC, q.ts_created DESC, q.qitem_id DESC LIMIT 1`,
-      ).get(destination, target, `%"${escapeLike(STUCK_SWEEP_FINDING_TAG)}"%`, `%"${escapeLike(tag)}"%`) as { qitem_id: string } | undefined;
+      ).get(
+        destination,
+        `%"${escapeLike(STUCK_SWEEP_FINDING_TAG)}"%`,
+        `%"${escapeLike(tag)}"%`,
+        STUCK_SWEEP_FINDING_TAG,
+        tag,
+      ) as { qitem_id: string } | undefined;
     };
-    const findLatestNonSweepClosedRoot = (source: string, destination: string, target: string): { qitem_id: string; ts_updated: string } | undefined => {
+    const findLatestNonSweepClosedRoot = (source: string, destination: string): { qitem_id: string; ts_updated: string } | undefined => {
       const tag = unroutableNoticeTag(source, destination);
       const closed = deps.db.prepare(
         `SELECT q.qitem_id, q.state, q.ts_updated,
@@ -2107,11 +2116,20 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
            FROM queue_items q
           WHERE q.state IN ('done', 'canceled')
             AND q.handed_off_from IS NULL
-            AND q.source_session = ? AND q.destination_session = ?
+            AND q.source_session = ? AND q.destination_session <> q.source_session
             AND (q.tags LIKE '%"stuck-sweep:%') AND q.tags LIKE ? ESCAPE '\\' AND q.tags LIKE ? ESCAPE '\\'
+            AND json_valid(q.tags)
+            AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE j.value = ?)
+            AND EXISTS (SELECT 1 FROM json_each(q.tags) j WHERE j.value = ?)
             ${provenanceFilter}
           ORDER BY q.ts_updated DESC, q.ts_created DESC, q.qitem_id DESC LIMIT 1`,
-      ).get(destination, target, `%"${escapeLike(STUCK_SWEEP_FINDING_TAG)}"%`, `%"${escapeLike(tag)}"%`) as
+      ).get(
+        destination,
+        `%"${escapeLike(STUCK_SWEEP_FINDING_TAG)}"%`,
+        `%"${escapeLike(tag)}"%`,
+        STUCK_SWEEP_FINDING_TAG,
+        tag,
+      ) as
         | { qitem_id: string; state: string; ts_updated: string; close_sig: string | null; archive_close_sig?: string | null }
         | undefined;
       if (!closed) return undefined;
@@ -2145,12 +2163,12 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         }
         continue;
       }
-      const openRoot = findOpenUnroutableRoot(group.source, group.destination, target);
+      const openRoot = findOpenUnroutableRoot(group.source, group.destination);
       if (openRoot) {
         findings.push({ kind: "unroutable-notice", qitemId: groupKey, findingQitemId: openRoot.qitem_id, action: "refreshed" });
         continue;
       }
-      const dismissed = findLatestNonSweepClosedRoot(group.source, group.destination, target);
+      const dismissed = findLatestNonSweepClosedRoot(group.source, group.destination);
       if (dismissed && !liveRows.some((c) => evidenceIsNewer(c.evidenceAt, dismissed.ts_updated))) continue;
       const text = unroutableNoticeText(group.source, group.destination, liveRows.length);
       try {
@@ -2163,7 +2181,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           tags: [STUCK_SWEEP_FINDING_TAG, tag],
           wakeTrigger: "openrig" as const,
         }, () => {
-          const existing = findOpenUnroutableRoot(group.source, group.destination, target);
+          const existing = findOpenUnroutableRoot(group.source, group.destination);
           if (existing) throw new DuplicateOpenUnroutableNoticeError(existing.qitem_id);
         });
         othersMayHaveRun();

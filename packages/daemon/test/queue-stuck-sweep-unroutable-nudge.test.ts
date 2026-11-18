@@ -184,6 +184,16 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(queue.getByIdOrThrow(own2430!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     expect(queue.getByIdOrThrow(n514Dev!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     expect(queue.getByIdOrThrow(hNoNudge.qitemId).state).toBe("pending");
+
+    // 3) P2-1 / R11-F1: exited seat keeping its tmux binding with no pane_missing verdict keeps #2430 standing notice and zero #514 or per-row flood.
+    seedSeat("ops", "work.exitedbound", "exitedbound@ops", { running: "exited", bound: true });
+    await createNoNudge("lead@ops", "exitedbound@ops", "Kept binding 1", 90, now);
+    await createNoNudge("lead@ops", "exitedbound@ops", "Kept binding 2", 90, now);
+    await sweep({ now });
+    const exitedOpen = findingsTo("exitedbound@ops").filter(isOpen);
+    expect(exitedOpen).toHaveLength(1);
+    expect(exitedOpen[0]!.tags).toContain(unclaimedBacklogTag("exitedbound@ops"));
+    expect(allFindings().some((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "exitedbound@ops")))).toBe(false);
   });
 
   it("R2 / C1: intercepts unclaimed --no-nudge and verified rows on unreachable destinations while preserving main claimed/rerouted paths", async () => {
@@ -309,9 +319,10 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     humans = [];
   });
 
-  it("R4 / C3: deduplicates by (source, dest) while open, rejects non-sweep forgery, and enforces atomic verifyBeforeCreate dedup", async () => {
-    seedSeat("ops", "coord.alpha", "Alpha@ops");
+  it("R4 / C3: deduplicates by (source, dest) across target changes, enforces provenance & ASCII case isolation, and enforces atomic verifyBeforeCreate dedup", async () => {
+    const alphaUpper = seedSeat("ops", "coord.alpha", "Alpha@ops");
     seedSeat("ops", "coord.alpha_lower", "alpha@ops");
+    seedSeat("ops", "coord.operator", "operator@ops");
     seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
 
     // Distinct ASCII case sources stay isolated; two rows per source coalesce into one notice.
@@ -319,10 +330,11 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     await createNoNudge("Alpha@ops", "parked@ops", "A2");
     await createNoNudge("alpha@ops", "parked@ops", "a1");
 
-    // HTTP-created spoof carrying exact unroutable-notice tag (stamped identity_provenance) MUST NOT suppress real notice.
+    // P2-2: HTTP spoof matching source_session = dest, destination_session = target, handed_off_from = NULL, and exact tags:
+    // ONLY identity_provenance IS NULL rejects it.
     const spoofRes = await appFor().request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "Alpha@ops" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "parked@ops" },
       body: JSON.stringify({
         destinationSession: "Alpha@ops",
         body: "forged http",
@@ -332,6 +344,7 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
       }),
     });
     expect(spoofRes.status).toBe(201);
+    const httpSpoof = await spoofRes.json() as { qitemId: string };
 
     // Direct queue.create spoof with wrong source_session must also fail shape check.
     await queue.create({
@@ -343,19 +356,40 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     });
 
     await sweep();
-    const realNotices = unroutableNotices().filter((n) => n.sourceSession === "parked@ops");
+    const realNotices = unroutableNotices().filter((n) => n.sourceSession === "parked@ops" && n.qitemId !== httpSpoof.qitemId);
     expect(realNotices.filter((n) => n.destinationSession === "Alpha@ops")).toHaveLength(1);
     expect(realNotices.filter((n) => n.destinationSession === "alpha@ops")).toHaveLength(1);
 
-    // Second pass while open creates zero duplicates; simulated concurrent insert inside verifyBeforeCreate is skipped atomically.
+    // P3-1: Second pass while open creates zero duplicates, even if Alpha@ops stops and notice target shifts to operator@ops.
     const countBefore = realNotices.length;
     await sweep();
-    expect(unroutableNotices().filter((n) => n.sourceSession === "parked@ops")).toHaveLength(countBefore);
+    expect(unroutableNotices().filter((n) => n.sourceSession === "parked@ops" && n.qitemId !== httpSpoof.qitemId)).toHaveLength(countBefore);
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(alphaUpper.nodeId);
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(alphaUpper.nodeId);
+    await sweep({ resolveRecoveryAgentSeat: () => "operator@ops" });
+    expect(unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("Alpha@ops", "parked@ops")) && n.qitemId !== httpSpoof.qitemId)).toHaveLength(1);
 
-    await createNoNudge("Alpha@ops", "parked2@ops", "Race check");
+    // P3-2: Two sources differing only in ASCII case sharing operator@ops get distinct notices and isolated dismissals.
+    await createNoNudge("CaseSrc@ops", "parked@ops", "Upper case fallback");
+    await sweep({ resolveRecoveryAgentSeat: () => "operator@ops" });
+    const [nUpper] = unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("CaseSrc@ops", "parked@ops")));
+    expect(nUpper).toBeDefined();
+    expect(nUpper!.destinationSession).toBe("operator@ops");
+    await queue.update({ qitemId: nUpper!.qitemId, actorSession: "operator@ops", state: "canceled", transitionNote: "dismiss upper only" });
+
+    await createNoNudge("casesrc@ops", "parked@ops", "Lower case fallback");
+    await sweep({ resolveRecoveryAgentSeat: () => "operator@ops" });
+    expect(queue.getByIdOrThrow(nUpper!.qitemId).state).toBe("canceled");
+    const upperOpen = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("CaseSrc@ops", "parked@ops")));
+    const lowerOpen = unroutableNotices().filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("casesrc@ops", "parked@ops")));
+    expect(upperOpen).toHaveLength(0);
+    expect(lowerOpen).toHaveLength(1);
+    expect(lowerOpen[0]!.destinationSession).toBe("operator@ops");
+
+    await createNoNudge("alpha@ops", "parked2@ops", "Race check");
     const origCreate = queue.create.bind(queue);
     queue.create = (async (input, verifyBeforeCreate) => {
-      if ((input.tags ?? []).includes(unroutableNoticeTag("Alpha@ops", "parked2@ops"))) {
+      if ((input.tags ?? []).includes(unroutableNoticeTag("alpha@ops", "parked2@ops"))) {
         // Insert an open sweep-shaped root right before create's transaction checks verifyBeforeCreate.
         await origCreate({
           sourceSession: input.sourceSession,
@@ -370,7 +404,7 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     }) as typeof queue.create;
     const raceRes = await sweep();
     expect(raceRes.outcome).toBe("findings");
-    const parked2Open = unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("Alpha@ops", "parked2@ops")));
+    const parked2Open = unroutableNotices().filter((n) => (n.tags ?? []).includes(unroutableNoticeTag("alpha@ops", "parked2@ops")));
     expect(parked2Open).toHaveLength(1);
   });
 
