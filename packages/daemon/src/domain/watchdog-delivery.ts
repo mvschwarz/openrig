@@ -1,5 +1,5 @@
 import { OutboxHandlerError, type OutboxHandler } from "./outbox-handler.js";
-import { withWatchdogReceipts } from "./watchdog-delivery-receipts.js";
+import { queueOnlyRowId, withWatchdogReceipts } from "./watchdog-delivery-receipts.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { PARKED_OWNER_COMPACTION_PENDING, PARKED_OWNER_POLICY_NAME } from "./policies/parked-owner-consumer.js";
 import { writtenFact, type SessionTransport } from "./session-transport.js";
@@ -25,11 +25,6 @@ export interface QueueOnlyReminderRow {
   /** The row's priority, so a reminder's urgency stays visible in the queue. No watchdog reminder is urgent today, and
    *  without one the row is routine. */
   priority?: QueuePriority;
-}
-
-/** The id of the cold row a reminder occurrence becomes: a retried occurrence (or digest) finds the same row. */
-function queueOnlyRowId(occurrenceId: string): string {
-  return `qitem-watchdog-${occurrenceId.replace(/[^A-Za-z0-9-]/g, "-")}`;
 }
 
 /** The most ids one occurrence tries past a closed row of its own before giving up with no input. */
