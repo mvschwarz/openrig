@@ -911,8 +911,7 @@ describe("QueueRepository", () => {
         }
 
         releaseFirst({ ok: false, error: "send timed out" });
-        await vi.waitFor(() => expect(stateOf(unparkWake)).not.toBe("sending"));
-        expect(stateOf(unparkWake)).not.toBe("delivered");
+        await vi.waitFor(() => expect(stateOf(unparkWake)).toBe("indeterminate"));
         expect(storedResult(item.qitemId)).toBe("verified");
       } finally {
         full.close();
@@ -984,7 +983,7 @@ describe("QueueRepository", () => {
         const before = fullRepo.getById(item.qitemId)!.lastNudgeResult;
 
         releaseBob({ ok: false, error: "send timed out" });
-        await vi.waitFor(() => expect(stateOf(createWake)).not.toBe("sending"));
+        await vi.waitFor(() => expect(stateOf(createWake)).toBe("indeterminate"));
         expect(fullRepo.getById(item.qitemId)!.lastNudgeResult).toBe(before);
       } finally {
         full.close();
