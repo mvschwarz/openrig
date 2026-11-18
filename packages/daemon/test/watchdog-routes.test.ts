@@ -86,6 +86,50 @@ describe("watchdog routes (PL-004 Phase C)", () => {
     expect(jobsRepo.listAll()).toEqual([]);
   });
 
+  it("POST /register records the wire sender as registeredBySession, superseding the body claim", async () => {
+    const res = await app.request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-openrig-session": "seat@rig" },
+      body: JSON.stringify({ ...validRegisterBody, registeredBySession: "body-claim@kernel" }),
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as { registeredBySession: string };
+    expect(job.registeredBySession).toBe("seat@rig");
+  });
+
+  it("POST /register over a stopped parked-owner-consumer job replaces it and names it (#3437)", async () => {
+    const body = {
+      policy: "parked-owner-consumer",
+      specYaml: "policy: parked-owner-consumer\ntarget:\n  session: parked-owner-consumer@demo\ncontext:\n  rig: demo\n",
+      targetSession: "parked-owner-consumer@demo",
+      intervalSeconds: 120,
+      registeredBySession: "ops@kernel",
+    };
+    const stopped = jobsRepo.ensureAutoRegistration({ ...body, registeredBySession: "daemon@kernel" });
+    jobsRepo.stop(stopped.jobId);
+    const res = await app.request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as { jobId: string; state: string; replaced: unknown };
+    expect(job).toMatchObject({ state: "active", replaced: [{ jobId: stopped.jobId, state: "stopped" }] });
+    expect(jobsRepo.getById(stopped.jobId)?.state).toBe("terminal");
+    expect(jobsRepo.ensureAutoRegistration({ ...body, registeredBySession: "daemon@kernel" }).jobId).toBe(job.jobId);
+  });
+
+  it("POST /register without a wire header keeps the body's registeredBySession", async () => {
+    const res = await app.request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validRegisterBody),
+    });
+    expect(res.status).toBe(201);
+    const job = (await res.json()) as { registeredBySession: string };
+    expect(job.registeredBySession).toBe("ops@kernel");
+  });
+
   it("POST /register rejects an uncomputable scan cadence with a named error", async () => {
     const response = await app.request("/api/watchdog/register", {
       method: "POST", headers: { "Content-Type": "application/json" },

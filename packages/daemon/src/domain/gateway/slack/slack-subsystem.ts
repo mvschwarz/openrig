@@ -37,6 +37,7 @@ import { resolveInboundChannelDestination, resolveOutboundChannel, unsupportedCh
 import { resolveRigRepresentative } from "../../queue-owner.js";
 import { recoveryTag } from "../../queue-recovery.js";
 import { getSelfHostId } from "../../hosts/fanout-contract.js";
+import { SettingsStore, type ResolvedSetting } from "../../user-settings/settings-store.js";
 import { envelopeChannel, forwardChannelProblems, makeEnvelopeForwarder } from "./forwarding.js";
 import type { HostRegistryLoadResult } from "../../hosts/hosts-registry-reader.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
@@ -44,7 +45,7 @@ import { HUMAN_ALERT_TAG, loadHumanRegistry, resolveSlackHandle } from "../human
 import { sharedChannelAddresses, sharedChannelFor } from "../participants.js";
 import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../queue-repository.js";
 import { humanAnswerText } from "../../human-questions.js";
-import { formatReplyToChoice, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
+import { formatReplyToChoice, formatArrivalThread, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
 import {
@@ -298,6 +299,14 @@ function deadLetterBacklogFields(
   return { deadLetterBacklog: records, deadLetterBacklogState: "ok" };
 }
 
+/** The chosen host.name is display-only, including reserved-looking names. Only
+ *  an unconfigured default or empty name falls back to the durable self-host id. */
+export function selfMachineLabel(displayName: Pick<ResolvedSetting, "value" | "source"> | null | undefined, selfId: string | null): string | null {
+  const name = displayName?.source !== "default" && typeof displayName?.value === "string" ? displayName.value.trim() : "";
+  if (name) return name;
+  return selfId;
+}
+
 /** Build the production Slack gateway wire from config + secrets. Never throws on a missing
  *  configuration — that is an honest inert wire, not a boot failure. */
 export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
@@ -312,6 +321,17 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const outboundReady = cfg.enabled && bot !== null && cfg.channel !== null;
   const inboundReady = cfg.enabled && app !== null;
   // Read once, when the connector starts, like the rest of its configuration.
+  // The sender line names the machine a post comes from; the operator's display
+  //  name (host.name — the same source the self-host id seeds from) reads better
+  //  than a generated `host-<hash>` id on a machine named after first boot. The
+  //  durable identity stays in the queue record; this is display-only. Resolved
+  //  ONCE here so no settings read sits on the per-post path (restart picks up a
+  //  rename, the same pickup cadence as the rest of the connector config).
+  const machineId = getSelfHostId();
+  const machineLabel = selfMachineLabel(
+    (() => { try { return new SettingsStore().resolveOne("host.name"); } catch { return null; } })(),
+    machineId,
+  );
   const receiver = (() => { try { return resolveDefaultReceiver(opts.queueRepo.db); } catch { return null; } })();
   const inbound = effectiveInboundDestination(cfg, receiver?.session ?? null);
   const inboundNote = inboundDestinationNote(inbound, receiver);
@@ -544,7 +564,21 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         if (root.channel !== channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
         return { kind: "thread", threadTs: root.threadTs };
       }
-      if (!item.replyTo) return { kind: "fallback", reason: "root-missing", qitemId: item.qitemId };
+      if (!item.replyTo) {
+        // #2990: this reply has no gate correlation, but its arrival thread was recorded when
+        // it landed. Its answer returns there; the conversation's gate still recognizes only
+        // the newest root. Consult this record only at the end of the replyTo chain.
+        const arrival = opts.queueRepo.arrivalThreadFor(item.qitemId);
+        const root = arrival ? threadMap.resolveByThread(arrival.threadTs, arrival.channel) : null;
+        if (root) {
+          if (root.state === "closed") return { kind: "fallback", reason: "root-closed", threadTs: root.threadTs };
+          if (root.human !== (p.destinationSession ?? "")) return { kind: "fallback", reason: "root-other-human", threadTs: root.threadTs };
+          if (root.seat !== (p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
+          if (root.channel !== channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
+          return { kind: "thread", threadTs: root.threadTs };
+        }
+        return { kind: "fallback", reason: "root-missing", qitemId: item.qitemId };
+      }
       item = opts.queueRepo.getById(item.replyTo);
     }
     return item
@@ -558,14 +592,21 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // person, a closed root, a live gate) posts top-level in the replying seat's own channel, as before.
   const personRootChannel = (p: OutboundPostPayload): string | null => {
     let item = p.replyTo ? opts.queueRepo.getById(p.replyTo) : null;
+    let lastItem = item;
     for (let depth = 0; item && depth < MAX_REPLY_TO_CHAIN; depth++) {
       const root = threadMap.resolveByConversation(item.qitemId);
       if (root) {
         if (!item.tags?.includes(SLACK_THREAD_ROOT_TAG)) return null;
         return deriveReplyToChoice(p, root.channel).kind === "thread" ? root.channel : null;
       }
+      lastItem = item;
       item = item.replyTo ? opts.queueRepo.getById(item.replyTo) : null;
     }
+    // #2990: A reply in a superseded person-owned root uses that root's channel when a channel map would otherwise move it.
+    const arrival = !item && lastItem ? opts.queueRepo.arrivalThreadFor(lastItem.qitemId) : null;
+    const root = arrival ? threadMap.resolveByThread(arrival.threadTs, arrival.channel) : null;
+    const owner = root ? opts.queueRepo.getById(root.conversationId) : null;
+    if (root && owner?.tags?.includes(SLACK_THREAD_ROOT_TAG) && deriveReplyToChoice(p, root.channel).kind === "thread") return root.channel;
     return null;
   };
   // Decided ONCE and recorded on the row before the first post. Every later attempt reuses
@@ -617,8 +658,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         },
         pinChannel: Boolean(cfg.channelMap?.length),
         sourceLabel: cfg.sourceLabel,
-        // P6: each post names the machine it comes from, the daemon's own host id.
-        machine: () => getSelfHostId(),
+        unfurl: cfg.unfurl === "on" ? "on" : "off",
+        // P6: each post names the machine it comes from — the operator's display
+        //  name when one is set, else the daemon's own host id.
+        machine: () => machineLabel,
+        machineFallback: machineId ?? undefined,
         fetchImpl: opts.fetchImpl,
         stopSignal: runCtl.signal,
         delivered,
@@ -1390,6 +1434,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           });
         } catch (e) {
           log(`thread stamp failed for ${m.conversationId}: ${(e as Error).message}`);
+        }
+      },
+      recordArrivalThread: (input) => {
+        try {
+          opts.queueRepo.update({ qitemId: input.qitemId, actorSession: REPLY_TO_CHOICE_ACTOR, transitionNote: formatArrivalThread(input) });
+        } catch (e) {
+          log(`arrival thread record failed for ${input.qitemId}: ${(e as Error).message}`);
         }
       },
       resolveHumanReply: opts.resolveHumanReply,

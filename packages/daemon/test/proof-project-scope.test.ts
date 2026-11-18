@@ -279,10 +279,10 @@ describe("project-qualified proof scope (#132)", () => {
     const f = fixture();
     const qualified = await (await f.get(`scope=${encodeURIComponent("alpha:m0/slices/01-t001")}`)).json();
     expect(qualified.sourceObservation).toEqual({ state: "unavailable", revision: "unverified" });
-    expect(qualified.project).toEqual({ id: "alpha", root: join(f.workspace, "alpha"), selectedBy: "explicit" });
+    expect(qualified.project).toEqual({ id: "alpha", root: join(f.workspace, "alpha"), missionsRoot: f.alpha.missions, selectedBy: "explicit" });
     const whole = await (await f.get("project=beta")).json();
     expect(whole.sourceObservation).toEqual({ state: "unavailable", revision: "unverified" });
-    expect(whole.project).toEqual({ id: "beta", root: join(f.workspace, "beta"), selectedBy: "explicit" });
+    expect(whole.project).toEqual({ id: "beta", root: join(f.workspace, "beta"), missionsRoot: f.beta.missions, selectedBy: "explicit" });
     const workspace = await (await f.get("scope=m0/slices/01-t001")).json();
     expect(workspace.project).toBeUndefined();
     expect(workspace.sourceObservation).toEqual({ state: "watching", revision: "workspace-1" });

@@ -1,4 +1,5 @@
 import { readClaudePermissionRules } from "../domain/claude-permission-rules.js";
+import { claudeAutoModeForLaunch, readClaudeAutoModeForLaunch } from "../domain/claude-auto-mode.js";
 import { readCodexMemberPermissions } from "../domain/codex-member-permissions.js";
 import { physicalSessionName } from "../domain/session-registry.js";
 // Fork Primitive + Starter Agent Images v0 (PL-016) — daemon HTTP
@@ -220,6 +221,9 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
     let sourceRules: ReturnType<typeof readClaudePermissionRules>;
     try { sourceRules = source.runtime === "claude-code" ? readClaudePermissionRules(db, source.nodeId) : undefined; }
     catch (error) { return c.json({ error: "permission_rules_unavailable", message: (error as Error).message }, 409); }
+    // A source block that can't be read is left out of the fork and named in the response.
+    const { block: sourceAutoMode, warning: autoModeWarning } = claudeAutoModeForLaunch(
+      source.runtime === "claude-code" ? readClaudeAutoModeForLaunch(db, source.nodeId) : undefined);
     let sourceEnvelope: ReturnType<typeof readCodexMemberPermissions>;
     try { sourceEnvelope = source.runtime === "codex" ? readCodexMemberPermissions(db, source.nodeId) : undefined; }
     catch (error) { return c.json({ error: "permission_envelope_unavailable", message: (error as Error).message }, 409); }
@@ -284,6 +288,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
       ...(source.codexConfigProfile ? { codex_config_profile: source.codexConfigProfile } : {}),
       ...(source.permissionPolicy ? { permission_policy: source.permissionPolicy } : {}),
       ...(sourceRules === undefined ? {} : { claude_permissions: sourceRules }),
+      ...(sourceAutoMode === undefined ? {} : { claude_auto_mode: sourceAutoMode }),
       // The source's current envelope, as an independent copy on the new member.
       ...(sourceEnvelope === undefined ? {} : { codex_permissions: sourceEnvelope }),
       // OPR.0.5.6.23 member (b): every node-carried optional rides the fork.
@@ -324,7 +329,8 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
     const { launchAdditions: carry, ...result } = outcome.result;
     return c.json({ ok: true, result, ...(keptImage ? { image: keptImage } : {}),
       ...(carry ? { launchAdditions: carry.status } : {}),
-      ...(carry?.omitted.length ? { launchAdditionsNote: `launch additions left out of the fork: ${carry.omitted.join("; ")}` } : {}) }, 201);
+      ...(carry?.omitted.length ? { launchAdditionsNote: `launch additions left out of the fork: ${carry.omitted.join("; ")}` } : {}),
+      ...(autoModeWarning ? { claudeAutoModeNote: `claude_auto_mode left out of the fork: ${autoModeWarning}` } : {}) }, 201);
   });
 
   router.post("/prune", async (c) => {

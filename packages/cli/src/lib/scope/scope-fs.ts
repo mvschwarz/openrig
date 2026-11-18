@@ -78,6 +78,65 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
   }
 }
 
+/** The line-based frontmatter reader the daemon's slice indexer applies to a
+ *  slice's files (`parseFrontmatter` in packages/daemon/src/domain/slices/slice-indexer.ts):
+ *  every line is trimmed at any indentation, `#` lines are skipped, wrapping quotes are
+ *  stripped, an inline `#` stays in the value, and the last `status:` line wins. */
+function parseIndexerFrontmatter(content: string): Record<string, string> {
+  if (!content.startsWith("---")) return {};
+  const rest = content.slice(3);
+  const endIdx = rest.indexOf("\n---");
+  if (endIdx === -1) return {};
+  const out: Record<string, string> = {};
+  for (const line of rest.slice(0, endIdx).split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) continue;
+    const key = trimmed.slice(0, colonIdx).trim();
+    let value = trimmed.slice(colonIdx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** The files the slice indexer merges for a slice's frontmatter, in its merge order:
+ *  later files win, so `PROGRESS.md` overrides the node file (`SPEC.md` / `README.md`). */
+function indexerFrontmatterFiles(sliceAbsPath: string): string[] {
+  const node = resolveNodeFile(sliceAbsPath);
+  return [
+    path.join(sliceAbsPath, "IMPLEMENTATION-PRD.md"),
+    ...(node ? [path.join(sliceAbsPath, path.basename(node))] : []),
+    path.join(sliceAbsPath, "PROGRESS.md"),
+  ];
+}
+
+/** Whether the slice indexer would read a `status` out of this file on its own. */
+export function indexerReadsStatusIn(content: string): boolean {
+  return Object.prototype.hasOwnProperty.call(parseIndexerFrontmatter(content), "status");
+}
+
+/** Read a slice's status back the way the slice indexer does, and name the file that
+ *  supplies it. `status` is `null` when no file gives the indexer one. This follows the
+ *  indexer's merge (later files win) rather than listing frontmatter shapes up front, so it
+ *  reads what every shape actually becomes; a parity test holds it to the real indexer. */
+export function readIndexerSliceStatus(sliceAbsPath: string): { status: string | null; file: string | null } {
+  let status: string | null = null;
+  let file: string | null = null;
+  for (const candidate of indexerFrontmatterFiles(sliceAbsPath)) {
+    if (!fs.existsSync(candidate)) continue;
+    const frontmatter = parseIndexerFrontmatter(fs.readFileSync(candidate, "utf8"));
+    if (Object.prototype.hasOwnProperty.call(frontmatter, "status")) {
+      status = frontmatter["status"]!;
+      file = candidate;
+    }
+  }
+  return { status, file };
+}
+
 /** Update specific keys in a markdown file's frontmatter. The writer owns only
  *  those keys in valid mappings, preserving inline comments and unowned bytes.
  *  Invalid mappings retain the legacy line-based update with a warning. Valid
