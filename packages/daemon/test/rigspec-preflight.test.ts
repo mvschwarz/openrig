@@ -82,6 +82,13 @@ describe("RigSpecPreflight", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it.each([true, false])("model warnings are advisory and included only when requested (%s)", async (includeModelWarnings) => {
+    const spec = validSpec({ nodes: [{ id: "worker", runtime: "claude-code", cwd: "/", model: "custom/model" }] });
+    const result = await createPreflight().check(spec, includeModelWarnings);
+    expect(result.ready).toBe(true);
+    expect(result.warnings.filter(w => w.includes("unverified"))).toHaveLength(includeModelWarnings ? 1 : 0);
+  });
+
   it("rig name collision -> error", async () => {
     rigRepo.createRig("r99"); // collision
     const pf = createPreflight();
