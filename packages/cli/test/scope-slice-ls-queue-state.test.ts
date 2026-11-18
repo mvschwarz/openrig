@@ -14,6 +14,9 @@ const daemon = vi.hoisted(() => ({
   status: { state: "running", healthy: true, pid: 1234, port: 7433 } as Record<string, unknown>,
   respond: null as null | (() => { status: number; data: unknown } | Error),
   gets: [] as string[],
+  /** The instance-identity check: true only when the daemon is this home's own daemon. */
+  local: true,
+  identityChecks: 0,
 }));
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
@@ -30,6 +33,10 @@ vi.mock("../src/client.js", async () => {
   return {
     ...actual,
     DaemonClient: class {
+      async isLocalInstance(): Promise<boolean> {
+        daemon.identityChecks++;
+        return daemon.local;
+      }
       async get<T>(p: string): Promise<{ status: number; data: T }> {
         daemon.gets.push(p);
         const reply = daemon.respond?.();
@@ -110,6 +117,8 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     ws = seedWorkspace();
     daemon.status = { state: "running", healthy: true, pid: 1234, port: 7433 };
     daemon.gets.length = 0;
+    daemon.local = true;
+    daemon.identityChecks = 0;
     daemon.respond = () => ({
       status: 200,
       data: {
@@ -124,6 +133,20 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     });
   });
   afterEach(() => { fs.rmSync(ws.workRoot, { recursive: true, force: true }); });
+
+  /** A daemon list with a state on every slice, the clean case. */
+  const fullList = () => ({
+    status: 200,
+    data: {
+      slices: [
+        { slicePath: ws.slicePath("01-stuck"), derivedState: "blocked" },
+        { slicePath: ws.slicePath("02-moving"), derivedState: "in-progress" },
+        { slicePath: ws.slicePath("03-closed"), derivedState: "idle" },
+        { slicePath: ws.slicePath("04-unlisted"), derivedState: "pending" },
+        { slicePath: ws.slicePath("05-older-daemon"), derivedState: "none" },
+      ],
+    },
+  });
 
   const ls = async (...args: string[]) => {
     const result = await run(["slice", "ls", "--state", "all", "--json", ...args], ws.workRoot);
@@ -153,7 +176,50 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     expect(Object.fromEntries(parsed!.slices.map((row) => [row.name, row.status]))).toEqual({
       "01-stuck": "active", "02-moving": "active", "03-closed": "placeholder", "04-unlisted": "active", "05-older-daemon": "active",
     });
+    expect(parsed!.warnings, "an absent state and an unlisted slice are each explained, not silent").toHaveLength(2);
+    expect(parsed!.warnings![0]).toContain("reported no queue state for 1 of 4 slices");
+    expect(parsed!.warnings![1]).toContain("1 of 5 slices are not in the daemon's list");
+    expect(daemon.identityChecks, "one instance-identity check before the list is trusted").toBe(1);
+  });
+
+  it("gives no warning when the daemon lists every slice with a state", async () => {
+    daemon.respond = fullList;
+    const { result, parsed } = await ls("--with-queue");
+    expect(result.exitCode).toBe(0);
+    expect(derivedByName(parsed!.slices)).toEqual({
+      "01-stuck": "blocked", "02-moving": "in-progress", "03-closed": "idle", "04-unlisted": "pending", "05-older-daemon": "none",
+    });
     expect(parsed!.warnings).toBeUndefined();
+  });
+
+  it("reports unknown, not another host's state, when the daemon is not this home's own daemon (same absolute paths)", async () => {
+    // A daemon on another host can serve a workspace with the very same absolute paths.
+    daemon.local = false;
+    daemon.respond = fullList;
+    const all = await ls("--with-queue");
+    expect(all.result.exitCode).toBe(0);
+    expect(Object.values(derivedByName(all.parsed!.slices))).toEqual(Array(SLICES.length).fill("unknown"));
+    expect(all.parsed!.warnings).toHaveLength(1);
+    expect(all.parsed!.warnings![0]).toContain("not this home's own daemon");
+    expect(daemon.gets, "the foreign slice list is never read").toEqual([]);
+    for (const state of ["blocked", "idle", "none", "pending"]) {
+      expect((await ls("--derived", state)).parsed!.slices, `--derived ${state} must not match another host's rows`).toEqual([]);
+    }
+    expect((await ls("--derived", "unknown")).parsed!.count).toBe(SLICES.length);
+  });
+
+  it.each([
+    { label: "a null entry after a valid row", slices: () => [{ slicePath: ws.slicePath("01-stuck"), derivedState: "blocked" }, null], failure: "a slice entry is malformed" },
+    { label: "an entry without a path", slices: () => [{ slicePath: ws.slicePath("01-stuck"), derivedState: "blocked" }, { derivedState: "idle" }], failure: "a slice entry is malformed" },
+    { label: "a slice list that is not an array", slices: () => ({ unexpected: true }), failure: "not an array" },
+  ])("discards the whole list for $label, so no partial state remains", async ({ slices, failure }) => {
+    daemon.respond = () => ({ status: 200, data: { slices: slices() } });
+    const { result, parsed } = await ls("--with-queue");
+    expect(result.exitCode).toBe(0);
+    expect(Object.values(derivedByName(parsed!.slices)), "the valid first row must not survive").toEqual(Array(SLICES.length).fill("unknown"));
+    expect(parsed!.warnings).toHaveLength(1);
+    expect(parsed!.warnings![0]).toContain(failure);
+    expect(parsed!.warnings![0]).toContain("unknown for every slice");
   });
 
   it("matches the daemon's slice by physical path when it reports the path through a symlink", async () => {
@@ -205,6 +271,7 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
   });
 
   it("prints the derived state as a column and the warning on stderr in text mode", async () => {
+    daemon.respond = fullList;
     const ok = await run(["slice", "ls", "--state", "all", "--with-queue"], ws.workRoot);
     expect(ok.exitCode).toBe(0);
     const line = ok.stdout.split("\n").find((l) => l.startsWith("alpha/01-stuck"))!;

@@ -787,52 +787,62 @@ export class SliceIndexer {
 
     if (targetsBySliceToken.size === 0) return result;
 
-    const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
-    if (columns.length === 0 || !columns.some((c) => c.name === "tags")) {
-      // The queue cannot be read, so no row can be called absent. Report null
-      // counts (derived state `unknown`) instead of observed zero.
-      for (const slicePath of result.keys()) result.set(slicePath, null);
-      return result;
-    }
-
-    const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
-    for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
-      if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
-      const scope = parseTypedQueueScope(row.tags);
-      if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
-      const rowProject = scope.projects.values().next().value;
-      const firstSlice = scope.slices.values().next().value!;
-      const candidates = targetsBySliceToken.get(firstSlice);
-      if (!candidates) continue;
-
-      let uniqueMatch: TargetScope | null = null;
-      for (const target of candidates) {
-        if (rowProject !== undefined && target.projectId !== rowProject) continue;
-        let allSlicesMatch = true;
-        for (const slice of scope.slices) {
-          if (!target.sliceKeys.has(slice)) {
-            allSlicesMatch = false;
-            break;
-          }
-        }
-        if (!allSlicesMatch) continue;
-        let allMissionsMatch = true;
-        for (const mission of scope.missions) {
-          if (!target.missionKeys.has(mission)) {
-            allMissionsMatch = false;
-            break;
-          }
-        }
-        if (!allMissionsMatch) continue;
-        if (uniqueMatch) {
-          uniqueMatch = null;
-          break;
-        }
-        uniqueMatch = target;
+    // The state-count read is a separate operation from the slice listing, which is
+    // already built by now. If it fails at any point (schema inspection, prepare or
+    // a row read part-way through), drop every partial counter and report null
+    // counts (derived state `unknown`) so the available slice rows still return.
+    // A failure of the listing itself is not caught here and propagates as before.
+    try {
+      const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
+      if (columns.length === 0 || !columns.some((c) => c.name === "tags")) {
+        // The queue cannot be read, so no row can be called absent. Report null
+        // counts (derived state `unknown`) instead of observed zero.
+        for (const slicePath of result.keys()) result.set(slicePath, null);
+        return result;
       }
 
-      if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
-      uniqueMatch.counts[row.state as ObservedQueueState]++;
+      const stmt = this.db.prepare(`SELECT state, tags FROM queue_items WHERE tags LIKE '%slice:%'`);
+      for (const row of stmt.iterate() as Iterable<{ state: string; tags: string | null }>) {
+        if (!KNOWN_QUEUE_STATES.has(row.state)) continue;
+        const scope = parseTypedQueueScope(row.tags);
+        if (!scope || scope.projects.size > 1 || scope.slices.size === 0) continue;
+        const rowProject = scope.projects.values().next().value;
+        const firstSlice = scope.slices.values().next().value!;
+        const candidates = targetsBySliceToken.get(firstSlice);
+        if (!candidates) continue;
+
+        let uniqueMatch: TargetScope | null = null;
+        for (const target of candidates) {
+          if (rowProject !== undefined && target.projectId !== rowProject) continue;
+          let allSlicesMatch = true;
+          for (const slice of scope.slices) {
+            if (!target.sliceKeys.has(slice)) {
+              allSlicesMatch = false;
+              break;
+            }
+          }
+          if (!allSlicesMatch) continue;
+          let allMissionsMatch = true;
+          for (const mission of scope.missions) {
+            if (!target.missionKeys.has(mission)) {
+              allMissionsMatch = false;
+              break;
+            }
+          }
+          if (!allMissionsMatch) continue;
+          if (uniqueMatch) {
+            uniqueMatch = null;
+            break;
+          }
+          uniqueMatch = target;
+        }
+
+        if (!uniqueMatch?.projectId || !uniqueMatch.missionId || !uniqueMatch.counts) continue;
+        uniqueMatch.counts[row.state as ObservedQueueState]++;
+      }
+    } catch {
+      for (const slicePath of result.keys()) result.set(slicePath, null);
+      return result;
     }
 
     return result;

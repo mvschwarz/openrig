@@ -306,7 +306,9 @@ What reads these declarations:
   across missions, as [Project workspace](project-workspace.md) says.
 - **Queue state counts on `GET /api/slices`:** every list row has `queueCounts`, a current, uncapped count by
   `pending`, `in-progress`, `done`, `blocked`, `failed`, `denied`, `canceled` and `handed-off`; it is `null` when
-  the row's project/mission scope cannot be resolved or catalog/candidate-root discovery is incomplete. This is
+  the row's project/mission scope cannot be resolved, catalog/candidate-root discovery is incomplete, the queue
+  table or its `tags` column cannot be read, or the count read itself fails part-way (any partial count is
+  discarded and the slice rows still return). This is
   separate from the existing `qitemCount` display membership field. Counts match exact typed `project:`,
   `mission:` and `slice:` tags in one shared queue scan. Physical candidates include configured indexer roots
   and every catalog project's missions root. A row may omit `project:` or `mission:` only when its remaining
@@ -326,7 +328,11 @@ What reads these declarations:
   `idle` or `none`, when `queueCounts` is `null` because the counts could not be read. `?derived=blocked|in-progress|pending|idle|none|unknown`
   keeps only rows in that state, case-insensitively and after the `filter` status filter, so
   `?filter=active&derived=blocked` narrows the authored active slices to the blocked ones. An unknown value
-  answers 400 `derived_invalid`.
+  answers 400 `derived_invalid`. `rig scope slice ls --with-queue` and `--derived <state>` read this list once and
+  join by physical slice path, only when the daemon is this home's own (its `/healthz` instance id matches this
+  home's); a daemon on another host gives `unknown` for every slice, because the same absolute path can name
+  different workspaces. A warning names each reason the CLI shows `unknown`: an unreachable or foreign daemon, a
+  malformed list (discarded whole), a row without `derivedState` (an older daemon), or a slice absent from the list.
 
 
 ## Resume one banked original conversation

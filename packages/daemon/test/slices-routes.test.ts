@@ -2449,6 +2449,64 @@ describe("GET /api/slices observed queue counts", () => {
       expect(entries[0]).toMatchObject({ name: "live", queueCounts: null, derivedState: "unknown" });
     });
 
+    // Fault injection on the separate count read: the first matching row is read, then the iterator fails.
+    function failCountScanAfterFirstRow(): { hits: () => number; restore: () => void } {
+      const prepare = db.prepare.bind(db);
+      let hits = 0;
+      const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+        const stmt = prepare(sql);
+        if (!/^SELECT state, tags FROM queue_items WHERE tags LIKE/.test(sql)) return stmt;
+        return new Proxy(stmt, { get(target, key) {
+          const value = Reflect.get(target, key);
+          if (key !== "iterate") return typeof value === "function" ? value.bind(target) : value;
+          return (...args: unknown[]) => (function* () {
+            const rows = (target.iterate(...args as []) as Iterable<unknown>)[Symbol.iterator]();
+            try {
+              const first = rows.next();
+              if (!first.done) yield first.value;
+              hits++;
+              throw new Error("SQLITE_IOERR: disk I/O error while reading queue rows");
+            } finally { rows.return?.(); }
+          })();
+        } });
+      }) as typeof db.prepare);
+      return { hits: () => hits, restore: () => spy.mockRestore() };
+    }
+
+    it("returns the slice rows with unknown counts, and no partial counter, when the count scan fails after it starts", async () => {
+      addSlice("alpha", "shipping", "first", "active");
+      addSlice("alpha", "shipping", "second", "active");
+      row("first-0", "blocked", scope("first"));
+      row("first-1", "blocked", scope("first"));
+      row("second-0", "pending", scope("second"));
+      const fault = failCountScanAfterFirstRow();
+      try {
+        const { app } = route();
+        const entries = await list(app);
+        expect(fault.hits(), "the iterator must have produced a row and then failed").toBe(1);
+        expect(entries.map(s => [s.name, s.status, s.queueCounts, s.derivedState]).sort()).toEqual([
+          ["first", "active", null, "unknown"], ["second", "active", null, "unknown"],
+        ]);
+        expect((await list(app, "?derived=blocked")).map(s => s.name), "a counter filled before the failure must not leak").toEqual([]);
+        expect((await list(app, "?derived=unknown")).map(s => s.name).sort()).toEqual(["first", "second"]);
+        expect((await list(app, "?filter=active&derived=unknown")).map(s => s.name).sort()).toEqual(["first", "second"]);
+      } finally { fault.restore(); }
+    });
+
+    it("still fails the request when the underlying slice listing fails", async () => {
+      addSlice("alpha", "shipping", "live");
+      row("live-0", "pending", scope("live"));
+      const prepare = db.prepare.bind(db);
+      const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+        if (/ORDER BY ts_created DESC, qitem_id DESC/.test(sql)) throw new Error("SQLITE_IOERR: disk I/O error while listing");
+        return prepare(sql);
+      }) as typeof db.prepare);
+      try {
+        const response = await route().app.request("/api/slices");
+        expect(response.status).toBe(500);
+      } finally { spy.mockRestore(); }
+    });
+
     it.each([
       { label: "absent counts", counts: undefined },
       { label: "null counts", counts: null },
