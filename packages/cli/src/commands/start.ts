@@ -555,12 +555,15 @@ back with rig up kernel --existing.
         if (!seats.includes(logicalId)) seats.push(logicalId);
         freshByRig.set(candidate.rigId, seats);
       }
-      if (!opts.json) for (const item of skippedFresh) console.log(`  ${item.logicalId}@${item.rigName}: fresh requested, not applied (${item.reason}).`);
+      if (!opts.json) for (const item of skippedFresh) {
+        const label = allSummaries.filter(rig => rig.name === item.rigName).length > 1 ? `${item.rigName} (${item.rigId})` : item.rigName;
+        console.log(`  ${item.logicalId}@${label}: fresh requested, not applied (${item.reason}).`);
+      }
 
       // ---- PHASE 5: restore each selected rig via id-based route (compose slice-02 path) ----
       if (!opts.json) console.log(`\nRestoring ${selectedCandidates.length} rig(s)...\n`);
 
-      const results: Array<{ rigId: string; rigName: string; status: string; nodes: Array<{ logicalId: string; status: string; error?: string }>; error?: string; warnings?: string[]; freshRequestedNotApplied?: string[]; freshOutcomeUnknown?: string[] }> = [];
+      const results: Array<{ rigId: string; rigName: string; status: string; nodes: Array<{ logicalId: string; status: string; error?: string }>; error?: string; warnings?: string[]; freshRequestedNotApplied?: string[]; freshOutcomeUnknown?: string[]; followUpFailures?: Array<{ logicalId: string; error: string }> }> = [];
 
       for (const candidate of selectedCandidates) {
         const rigName = candidate.rigName;
@@ -636,6 +639,9 @@ back with rig up kernel --existing.
             for (const warning of restoreWarnings) console.log(`    Warning: ${warning}`);
           }
 
+          const confirmed: (typeof results)[number] = { rigId, rigName, status: rigResult ?? resStatus, nodes, ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}),
+            ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}) };
+          results.push(confirmed);
           // Handle the awaiting-decision ASK (compose the slice-02 TTY flow).
           const awaiting = nodes.filter((n) => n.status === "awaiting-decision");
           if (awaiting.length > 0) {
@@ -652,7 +658,15 @@ back with rig up kernel --existing.
                 // Each accepted seat starts alone, as the printed command does: a whole-rig restore naming it
                 // is refused while the siblings this restore resumed are running.
                 for (const id of accepted) {
-                  const launched = await launchFreshSeat(client, id, rigName);
+                  let launched: Awaited<ReturnType<typeof launchFreshSeat>>;
+                  try { launched = await launchFreshSeat(client, id, rigName); }
+                  catch (err) {
+                    const error = err instanceof Error ? err.message : String(err);
+                    (confirmed.followUpFailures ??= []).push({ logicalId: id, error });
+                    console.error(`    ${id}: follow-up fresh launch outcome unknown -- ${error}`);
+                    continue;
+                  }
+                  if (!launched.ok) (confirmed.followUpFailures ??= []).push({ logicalId: id, error: launched.message });
                   // --json keeps stdout for the result; a refusal still reaches stderr.
                   if (opts.json && launched.ok) continue;
                   (launched.ok ? console.log : console.error)(`    ${id}: ${launched.message}`);
@@ -669,8 +683,6 @@ back with rig up kernel --existing.
             }
           }
 
-          results.push({ rigId, rigName, status: rigResult ?? resStatus, nodes, ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}),
-            ...(notApplied.length ? { freshRequestedNotApplied: notApplied } : {}) });
         } catch (err) {
           const requested = freshByRig.get(rigId) ?? [];
           if (err instanceof DaemonConnectionError) {
@@ -704,7 +716,7 @@ back with rig up kernel --existing.
       // and non-clean rigResult values (partially_restored, failed, not_attempted).
       const NON_CLEAN_STATUSES = new Set(["timeout", "error", "skipped", "partially_restored", "failed", "not_attempted", "rig_not_stopped", "ambiguous_name", "pre_restore_validation_failed"]);
       const hasFailure = previewErrors.length > 0 || results.some((r) =>
-        NON_CLEAN_STATUSES.has(r.status) || !!r.error ||
+        NON_CLEAN_STATUSES.has(r.status) || !!r.error || !!r.followUpFailures?.length ||
         r.nodes.some((n) => n.status === "failed" || n.status === "awaiting-decision"),
       );
       if (hasFailure) process.exitCode = 1;
