@@ -115,21 +115,28 @@ describe.each(["D12-D", "D12-E"])("%s: audit request arrival, not model completi
   });
 });
 
+const PANE = "%7";
+const capture = (timeNs: number, ansi: boolean, target = PANE) =>
+  JSON.stringify({ timeNs, argv: ["tmux", "capture-pane", "-p", ...(ansi ? ["-e"] : []), "-t", target] }) + "\n";
+const enter = (timeNs: number) => JSON.stringify({ timeNs, argv: ["tmux", "send-keys", "-t", PANE, "Enter"] }) + "\n";
+
 describe("C7-3176-notice: wait for the daemon's post-injection read", () => {
   it.each([
-    ["already present", 0, "PASS"],
-    ["delayed", 300, "PASS"],
-    ["absent", null, "FAIL"],
-  ])("handles a read that is %s", async (_label, delay, expected) => {
+    ["already present", 0, capture(600, true), "PASS"],
+    ["delayed", 300, capture(600, true), "PASS"],
+    ["absent", null, "", "FAIL"],
+    // Another reader's styled capture, with no pre-Enter read: one after that delivery's Enter, or the session's annotation.
+    ["only after that delivery's Enter", 0, enter(550) + capture(600, true), "FAIL"],
+    ["only of another target", 0, capture(600, true, "=fixture@dlv:"), "FAIL"],
+  ])("handles a read that is %s", async (_label, delay, late, expected) => {
     const w = world(), verdict = new Verdict();
     let draft = "", published = false, barrierAt: number | undefined;
     const log = join(w.root, "tmux-argv.jsonl");
-    const capture = (timeNs: number, ansi: boolean) => JSON.stringify({ timeNs, argv: ["tmux", "capture-pane", ...(ansi ? ["-e"] : [])] }) + "\n";
     // Neither an earlier ANSI read nor a later plain read proves the barrier.
     writeFileSync(log, capture(399, true) + capture(500, false));
     const publish = () => {
       if (!published && delay !== null && w.now() >= Number(delay)) {
-        appendFileSync(log, capture(600, true)); published = true;
+        appendFileSync(log, late); published = true;
       }
     };
     const check = verdict.check.bind(verdict);
@@ -145,18 +152,17 @@ describe("C7-3176-notice: wait for the daemon's post-injection read", () => {
       readComposer: async () => draft, composerOf: (screen: string) => screen,
       mark: () => "DLV-notice", armDraftInjection: (text: string) => { draft = text; },
       registerReminder: async () => "job", watchdogStatus: async () => ({}), heldMessages: async () => [], stopWatchdog,
-      waitInjection: async () => { publish(); return { at: "pre-enter", pasteRc: 0, visible: true,
+      waitInjection: async () => { publish(); return { at: "pre-enter", target: PANE, pasteRc: 0, visible: true,
         pasteDoneNs: 200, typedNs: 300, visibleNs: 400, screenAfterPaste: "PASTED" }; },
       paneWrites: () => [], requests: () => [], deliveries: () => ({ turns: [] }),
     };
     await C7.find((c) => c.id === "C7-3176-notice")!.run(ctx);
     expect(verdict.result).toBe(expected);
     expect(stopWatchdog).toHaveBeenCalledOnce();
-    if (delay === 0) expect(barrierAt).toBe(0);
-    else if (delay !== null) expect(barrierAt).toBeGreaterThanOrEqual(Number(delay));
-    else {
+    if (expected === "FAIL") {
       expect(barrierAt).toBe(10_000);
       expect(verdict.toJSON().failed).toEqual([expect.stringMatching(/^barrier:/)]);
-    }
+    } else if (delay === 0) expect(barrierAt).toBe(0);
+    else expect(barrierAt).toBeGreaterThanOrEqual(Number(delay));
   });
 });

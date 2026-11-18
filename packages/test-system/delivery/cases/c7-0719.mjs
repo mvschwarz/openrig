@@ -141,17 +141,29 @@ async function judgePreEnter(ctx, { draft, marker, since }) {
   if (fired.at !== "pre-enter" || fired.pasteRc !== 0) throw new NotRun(`the injection didn't run after a finished paste (at ${fired.at}, paste exit ${fired.pasteRc})`);
   if (!fired.visible) throw new NotRun("the draft never showed on screen after the paste, so the precondition is unproven");
   if ((fired.screenAfterPaste ?? "").includes(draft)) throw new NotRun("the draft was already on screen before the paste finished: that's the pre-paste gap, not this one");
-  const postVisibleReads = () => tmuxCalls(ctx, since).filter((c) => c.argv[0] === "capture-pane" && c.argv.includes("-e") && c.timeNs > fired.visibleNs);
-  let reads = postVisibleReads();
+  // Only a styled read of the armed pane, after the draft showed and before that delivery's Enter, is the read that
+  // precedes its Enter. OpenRig's other styled captures (the activity probe's draft re-read, the input-box annotation)
+  // aren't, so one aimed elsewhere or coming after the Enter doesn't count. With no Enter, the poll bounds the window.
+  const barrierWindow = () => {
+    const calls = tmuxCalls(ctx, since);
+    const enterNs = calls.find((c) => c.argv[0] === "send-keys" && targetOf(c.argv) === fired.target && c.timeNs > fired.pasteDoneNs
+      && c.argv.some((a) => a === "Enter" || a === "C-m"))?.timeNs ?? null;
+    const reads = calls.filter((c) => c.argv[0] === "capture-pane" && c.argv.includes("-e") && targetOf(c.argv) === fired.target
+      && c.timeNs > fired.visibleNs && (enterNs === null || c.timeNs < enterNs));
+    return { enterNs, reads };
+  };
+  let barrier = barrierWindow();
   // fired.json precedes the wrapper's return; an automatic notice may still owe its post-paste read.
   const deadline = Date.now() + 10_000;
-  while (reads.length === 0 && Date.now() < deadline) {
+  while (barrier.reads.length === 0 && Date.now() < deadline) {
     await ctx.sleep(100);
-    reads = postVisibleReads();
+    barrier = barrierWindow();
   }
+  const { enterNs, reads } = barrier;
   verdict.info("the barrier: the paste finished, then the draft showed, then OpenRig read the input", {
-    pasteDoneNs: fired.pasteDoneNs, typedNs: fired.typedNs, visibleNs: fired.visibleNs, readsAfter: reads.map((r) => r.timeNs), screenAfterPaste: ctx.composerOf(fired.screenAfterPaste) });
-  verdict.check("barrier: OpenRig read the input box after the draft showed (the read that precedes its Enter)", reads.length > 0, reads.length);
+    pane: fired.target, pasteDoneNs: fired.pasteDoneNs, typedNs: fired.typedNs, visibleNs: fired.visibleNs, enterNs, readsBefore: reads.map((r) => r.timeNs),
+    screenAfterPaste: ctx.composerOf(fired.screenAfterPaste) });
+  verdict.check("barrier: OpenRig read the armed pane's input box after the draft showed and before that delivery's Enter", reads.length > 0, reads.length);
   await ctx.sleep(4000);
   await ctx.settle({ timeoutMs: 20_000 });
   const enters = ctx.paneWrites(since).filter((w) => w.argv[0] === "send-keys" && w.argv.some((a) => a === "Enter" || a === "C-m") && w.timeNs > fired.pasteDoneNs);
