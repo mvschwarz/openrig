@@ -1,8 +1,11 @@
+/** Tests session-name copying and its availability on seat cards. */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactFlowProvider } from "@xyflow/react";
 import { CopySessionNameButton } from "../src/components/CopySessionNameButton.js";
 import { RigNode } from "../src/components/RigNode.js";
+import { HybridAgentNode } from "../src/components/topology/HybridTopologyNodes.js";
 
 afterEach(() => {
   cleanup();
@@ -57,6 +60,28 @@ describe("CopySessionNameButton", () => {
     });
     expect(screen.getByTestId("copy").getAttribute("title")).toBe("Copy eng-lead@my-rig");
   });
+
+  it("keeps the copy button in its initial state when both copy methods fail", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("Clipboard copy denied"));
+    const execCommand = vi.fn().mockReturnValue(false);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    Object.defineProperty(document, "execCommand", { value: execCommand, configurable: true });
+
+    try {
+      render(<CopySessionNameButton sessionName="eng-lead@my-rig" />);
+      const button = screen.getByRole("button", { name: "Copy eng-lead@my-rig" });
+      await act(async () => {
+        fireEvent.click(button);
+      });
+
+      expect(writeText).toHaveBeenCalledWith("eng-lead@my-rig");
+      expect(execCommand).toHaveBeenCalledWith("copy");
+      expect(screen.getByRole("button", { name: "Copy eng-lead@my-rig" })).toBe(button);
+      expect(screen.queryByTitle("Copied")).toBeNull();
+    } finally {
+      Reflect.deleteProperty(document, "execCommand");
+    }
+  });
 });
 
 describe("RigNode copy button", () => {
@@ -86,5 +111,21 @@ describe("RigNode copy button", () => {
       </ReactFlowProvider>,
     );
     expect(screen.queryByTestId("toolbar-copy-session-name")).toBeNull();
+  });
+});
+
+describe("HybridAgentNode copy button", () => {
+  it("offers to copy the full session name on the topology card", () => {
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <ReactFlowProvider>
+          <HybridAgentNode data={{ logicalId: "dev.impl", canonicalSessionName: "dev-impl@my-rig" }} />
+        </ReactFlowProvider>
+      </QueryClientProvider>,
+    );
+
+    const card = screen.getByTestId("hybrid-agent-node");
+    expect(within(card).getByRole("button", { name: "Copy dev-impl@my-rig" })).toBeTruthy();
   });
 });
