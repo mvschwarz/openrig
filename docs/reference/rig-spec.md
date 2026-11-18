@@ -1157,8 +1157,8 @@ members:
     guest (its agent runs in the guest, and a scope on this host would hold only the local viewer);
   - `process_limits_unverified` (retryable, save where said below) when it isn't known either way: the user manager
     timed out or its socket refused the connection (starting or restarting), the probe read nothing (no `pids.max` or
-    `memory.max` it asked for) or output it could not understand, the probe command ended with SIGKILL (exit 137)
-    under the requested `MemoryMax=` (the process and the cause aren't confirmed: the OOM killer at that limit, the
+    `memory.max` it asked for) or output it could not understand, the probe command ended with SIGKILL (the signal
+    alone, with no exit code, or exit status 137; the reason says which) under the requested `MemoryMax=` (the process and the cause aren't confirmed: the OOM killer at that limit, the
     host's OOM killer, systemd-oomd or a manual kill look the same; a larger value may help; `processLimits.limit` is
     `memory_max`), an error not recognized, a launch setting that couldn't be read, a failed check from the last minute (reported with its age), or a scope start the launch
     didn't see in time (its new session is removed, by the identity tmux printed when it made it, and the seat is never
