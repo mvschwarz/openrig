@@ -138,7 +138,7 @@ async function sequence(ctx, label, { timeoutMs = 300_000 } = {}) {
   const result = await t.run;
   ctx.verdict.info(`${label}: rig compact's own result`, result);
   const prep = sent?.preparation ?? sent?.state?.preparation ?? null;
-  const done = await follow(ctx, stages, () => arrivals(ctx, STEP.audit).length > 0, timeoutMs);
+  const done = await follow(ctx, stages, (s) => stageOf(s) === "audit-sent" && arrivals(ctx, STEP.audit).length > 0, timeoutMs);
   await ctx.sleep(4000);
   ctx.verdict.info(`${label}: the compaction stages rig compact --state showed, in order`, stages);
   return { stages, prep, result, done, since: t.since };
@@ -155,11 +155,11 @@ function judgeOnce(ctx, label, count) {
     count.prep[0] < count.summary[0] && count.summary[0] < count.restore[0] && count.restore[0] < count.audit[0], count);
 }
 
-/** The stages rig compact --state showed are the truthful sequence, in order. */
+/** Current-state polling may miss transient stages; observed stages must advance and end at audit-sent. */
 function judgeStages(ctx, label, stages) {
   const seen = stages.filter((s) => ORDER.includes(s));
-  ctx.verdict.check(`${label}: rig compact --state read a truthful sequence (${ORDER.join(" → ")}, in order)`,
-    seen.length === ORDER.length && seen.every((s, i) => s === ORDER[i]), stages);
+  ctx.verdict.check(`${label}: rig compact --state samples advance in order (${ORDER.join(" → ")}) and end at audit-sent`,
+    seen.at(-1) === "audit-sent" && seen.every((s, i) => i === 0 || ORDER.indexOf(s) > ORDER.indexOf(seen[i - 1])), stages);
 }
 
 async function draftIn(ctx, draft) {
@@ -311,6 +311,8 @@ function armBLater(mode, at) {
         verdict.check("B-default: no loss: the person's draft survives intact in a submitted turn or the input box",
           joined.length > 0 || (await ctx.readComposer().catch(() => "")).includes(DRAFT), { turns: joined.map((r) => r.seq) });
         verdict.check("B-default: no step was delivered twice", Object.values(count).every((s) => s.length <= 1), count);
+        if (at === "restore") verdict.check("B-default: after the summary, one boundary, one restore request and one audit request arrived",
+          count.boundary.length === 1 && count.restore.length === 1 && count.audit.length === 1, count);
         verdict.info("B-default: the compaction state at the end", { state: await compactState(ctx), stages });
         verdict.info("B-default: the turn boundary, restore and audit prompts' text as they reached the model",
           ["boundary", "restore", "audit"].flatMap((k) => count[k].map((seq) => ({ step: k, seq, text: turnText(ctx.requests().find((r) => r.seq === seq)) }))));
@@ -366,7 +368,8 @@ function armD() {
       verdict.info("D: rig compact's own result", await t.run);
       verdict.info("D: the stages after the answer", { stages, done: stageOf(done) });
       const count = steps(ctx);
-      verdict.check("D: afterwards the attempt continued once: one /compact, one restore request", count.summary.length === 1 && count.restore.length === 1, count);
+      verdict.check("D: afterwards one /compact, one restore request and one audit request arrived",
+        count.summary.length === 1 && count.restore.length === 1 && count.audit.length === 1, count);
       packet(ctx);
     },
   };
@@ -530,7 +533,9 @@ function armE() {
       const seen = await sequence(ctx, "E");
       verdict.check("E: the manual request proceeded without usage data (no refusal for missing usage)",
         !/usage/i.test(String(seen.result?.json?.reason ?? seen.result?.json?.error ?? "")) && seen.stages.includes("compact-sent"), { result: seen.result, stages: seen.stages });
-      verdict.check("E: it completed once: one /compact, one restore request", steps(ctx).summary.length === 1 && steps(ctx).restore.length === 1, steps(ctx));
+      const count = steps(ctx);
+      verdict.check("E: one /compact, one restore request and one audit request arrived",
+        count.summary.length === 1 && count.restore.length === 1 && count.audit.length === 1, count);
       packet(ctx);
     },
   };

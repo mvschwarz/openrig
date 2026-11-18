@@ -18,6 +18,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -67,9 +68,15 @@ def inject(directory, real, args):
             break
         time.sleep(0.05)
     record.update({"visible": visible, "visibleNs": time.time_ns(), "screenAfterTyping" if at == "pre-enter" else "screenBeforePaste": screen})
-    fd = os.open(os.path.join(directory, "fired.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False)
+    # Readers see either no receipt or the complete JSON; the claimed arm still fires only once.
+    fd, pending = tempfile.mkstemp(prefix=".fired-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False)
+        os.replace(pending, os.path.join(directory, "fired.json"))
+    finally:
+        if os.path.exists(pending):
+            os.unlink(pending)
     return paste_rc
 
 real = os.environ["DELIVERY_REAL_TMUX"]

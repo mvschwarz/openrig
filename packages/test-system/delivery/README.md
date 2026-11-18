@@ -4,12 +4,13 @@ This kit proves OpenRig's typed delivery against the real Claude Code and Codex 
 
 **Registered and runnable today:** only the cases `cases/index.mjs` lists.
 - **On both programs:** D01 idle, D02 busy, D03 and D04 drafts, D05 permission prompt, D06 other dialog (the model picker), D08 copy mode, D09 order, D15 multi-line paste, and issue #3076's two late-gap cells (`R3076-notice`, `R3076-send`).
+- **D18, registered on both programs:** the six runnable typing-guard modes `off`, `draft-aware`, `openrig-urgent`, `urgent-only`, `sends-only` and `hold`. `D18-queue-only` is registered as NOT RUN because the oracle has no expected outcome for it yet.
 - **On Claude Code only:** D12, managed compaction followed by a restore. Its cells are `D12-A` (the whole sequence on an empty input box, with F's refocus check), `D12-Bg-*` and `D12-Bd-*` (a person's draft at the preparation, at `/compact` and at the restore, under the draft-aware guard and the defaults), `D12-Cg` and `D12-Cd` (an unreadable input box, NOT RUN: see `cases/d12.mjs`), `D12-D` (a permission prompt during preparation) `D12-E` (no usage reading at the trigger) and `D12-W` (Quality's hard wall: `rig compact --skip-map` at Claude's native "Context limit reached" screen, with no usage reading). Codex is not applicable: managed compaction targets Claude seats.
 - **0.7.19 D5's C7 entries** (`cases/c7-0719.mjs`; `C7_0719_ITEMS` maps all nine items to what runs them, and `packages/daemon/test/delivery-c7-0719.test.ts` checks none is dropped or merged): `C7-3311-current-binding` and `C7-3243-same-binding` (a queue wake that failed before input, retried once on the seat's current binding or its same one), `C7-3176-send` and `C7-3176-notice` (a person's draft typed after OpenRig's paste and before the read that precedes its Enter), on both programs; `C7-AUQ` (Claude's AskUserQuestion dialog), on Claude Code; and `C7-3339-withdrawal`, registered and recorded NOT RUN with its source reason, since no runner in this kit can take #3339's native route. Fixture actions that aren't a person's are recorded as the fixture operator's.
 
 `run.mjs` runs nothing else, and `--cases` refuses an id that isn't registered (`no case D10 in this suite yet`).
 
-**Planned, not fixtures yet:** `cases/expected.yaml` already states the expected result for D07, D14, D18 and D19, and its `later` list names D10, D12, D16 and D25. D12's full expected entry is Quality's to bind on this kit: its fixture is registered here, its oracle still the `later` line. Restart has no fixture yet.
+**Planned, not fixtures yet:** `cases/expected.yaml` already states the expected result for D07, D14 and D19, and its `later` list names D10, D12, D16 and D25. D12's full expected entry is Quality's to bind on this kit: its fixture is registered here, its oracle still the `later` line. Restart has no fixture yet.
 
 ## Running a release
 

@@ -2,7 +2,7 @@
 // registered, nothing is dropped or merged, a missing capability is NOT RUN with its reason, D18's automatic cells keep
 // the watchdog's own record, and the logging tmux types a person's draft at the point each injection names.
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,6 +123,7 @@ exit 0
     expect(order(w.calls())).toEqual(["paste-buffer", "send-keys"]);
     const fired = w.fired();
     expect(fired).toMatchObject({ at: "pre-enter", pasteRc: 0, visible: true });
+    expect(statSync(join(w.inject, "fired.json")).mode & 0o777).toBe(0o600);
     expect(fired.screenAfterPaste).toBe("PASTED ");
     expect(fired.screenAfterTyping).toBe("PASTED DRAFT");
     expect(fired.pasteDoneNs).toBeLessThan(fired.typedNs);

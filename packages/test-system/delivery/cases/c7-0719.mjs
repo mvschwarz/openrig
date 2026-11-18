@@ -141,7 +141,14 @@ async function judgePreEnter(ctx, { draft, marker, since }) {
   if (fired.at !== "pre-enter" || fired.pasteRc !== 0) throw new NotRun(`the injection didn't run after a finished paste (at ${fired.at}, paste exit ${fired.pasteRc})`);
   if (!fired.visible) throw new NotRun("the draft never showed on screen after the paste, so the precondition is unproven");
   if ((fired.screenAfterPaste ?? "").includes(draft)) throw new NotRun("the draft was already on screen before the paste finished: that's the pre-paste gap, not this one");
-  const reads = tmuxCalls(ctx, since).filter((c) => c.argv[0] === "capture-pane" && c.argv.includes("-e") && c.timeNs > fired.visibleNs);
+  const postVisibleReads = () => tmuxCalls(ctx, since).filter((c) => c.argv[0] === "capture-pane" && c.argv.includes("-e") && c.timeNs > fired.visibleNs);
+  let reads = postVisibleReads();
+  // fired.json precedes the wrapper's return; an automatic notice may still owe its post-paste read.
+  const deadline = Date.now() + 10_000;
+  while (reads.length === 0 && Date.now() < deadline) {
+    await ctx.sleep(100);
+    reads = postVisibleReads();
+  }
   verdict.info("the barrier: the paste finished, then the draft showed, then OpenRig read the input", {
     pasteDoneNs: fired.pasteDoneNs, typedNs: fired.typedNs, visibleNs: fired.visibleNs, readsAfter: reads.map((r) => r.timeNs), screenAfterPaste: ctx.composerOf(fired.screenAfterPaste) });
   verdict.check("barrier: OpenRig read the input box after the draft showed (the read that precedes its Enter)", reads.length > 0, reads.length);
