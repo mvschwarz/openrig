@@ -342,6 +342,12 @@ These routes use the existing terminal bearer token.
    `nodeId`, `sessionName`, `runtime` (`claude-code` or `codex`) and `nativeId`.
    Keep native conversation IDs in the private bank and request body. They are not returned in diagnostics.
 
+It resumes only while the seat's recorded session still names the banked conversation. A `/clear`, `/resume`
+or new conversation in that seat records a different one, and so does a changed runtime, resume type or
+restore policy. After that, the preview answers `selection_changed` with "This seat's record changed since it
+was saved", naming `rig snapshot <rig>` to save the current conversation, and a resume request returns a
+partial `selection_changed` result.
+
 The operation keeps the current model, cwd, effort and permission choices. The reviewed
 `settingsSource.runtimeHome.uses` plan can first apply the selected original's recorded home as a new
 revision before launch, rather than using the current home reported by `settingsSource.accountHome`.
