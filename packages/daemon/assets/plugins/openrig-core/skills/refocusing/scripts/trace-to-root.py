@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -254,7 +255,7 @@ def parsed_frontmatters(texts):
         if block is None:
             return None
         fields, seen = {}, set()
-        pattern = re.compile(r'''^[ \t]*(?:(?P<quote>["'])(?P<quoted>progress_rail|current_state_updated)(?P=quote)|(?P<plain>progress_rail|current_state_updated))[ \t]*:[ \t]*(?P<value>[^\r\n#]*?)[ \t]*(?:\#.*)?$''')
+        pattern = re.compile(r'''^(?:(?P<quote>["'])(?P<quoted>progress_rail|current_state_updated)(?P=quote)|(?P<plain>progress_rail|current_state_updated))[ \t]*:[ \t]*(?P<value>[^\r\n#]*?)[ \t]*(?:\#.*)?$''')
         for line in block.splitlines():
             match = pattern.match(line)
             if not match:
@@ -290,7 +291,13 @@ def parsed_frontmatters(texts):
     except ImportError:
         # OpenRig ships Node and the same YAML parser used by its scope writer.
         program = r'''const fs = require("fs"), path = require("path");
-const yaml = require(require.resolve("yaml", {paths: [path.dirname(process.argv[1])]}));
+const rig = process.argv[2];
+const roots = [path.dirname(process.argv[1])];
+if (rig) {
+  roots.push(path.dirname(fs.realpathSync(rig)));
+  roots.push(path.join(path.dirname(rig), "node_modules", "@openrig", "cli"));
+}
+const yaml = require(require.resolve("yaml", {paths: roots}));
 const blocks = JSON.parse(fs.readFileSync(0, "utf8"));
 process.stdout.write(JSON.stringify(blocks.map(block => {
   if (block === null) return null;
@@ -299,7 +306,7 @@ process.stdout.write(JSON.stringify(blocks.map(block => {
   } catch { return null; }
 })));'''
         try:
-            result = subprocess.run(["node", "-e", program, str(Path(__file__).resolve())],
+            result = subprocess.run(["node", "-e", program, str(Path(__file__).resolve()), shutil.which("rig") or ""],
                                     input=json.dumps(blocks), capture_output=True, text=True, timeout=1, check=True)
             values = json.loads(result.stdout)
             return values if isinstance(values, list) and len(values) == len(blocks) else [None] * len(blocks)

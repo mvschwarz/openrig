@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { setCurrentState } from "../src/lib/scope/progress-edit.js";
 
+it("preserves an indented following heading and its body", () => {
+  const input = "## Current state\n\nOld\n\n  ## Outcomes\n\nKeep\n";
+  expect(setCurrentState(input, "Ready").content).toBe("## Current state\n\nReady\n\n  ## Outcomes\n\nKeep\n");
+});
+
 describe("current-state heading", () => {
   it("preserves closing hashes, unrelated sections, and repeated updates", () => {
     const input = "# Progress\n\n## Current state ##\n\nOld\n\n## Other\n\nKeep\n";

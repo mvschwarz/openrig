@@ -111,7 +111,7 @@ export function setCurrentState(content: string, value: string): ProgressEditRes
   const start = matches[0]! + 1;
   let end = start;
   while (end < lines.length) {
-    const heading = visible[end]!.match(HEADING_RE);
+    const heading = visible[end]!.match(/^ {0,3}(#{1,6})\s+(.+?)\s*$/);
     if (heading && heading[1]!.length <= 2) break;
     end++;
   }
