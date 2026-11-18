@@ -13,6 +13,20 @@ working on what the person wants, and shows how to work with that team from here
 if the person asks you to. When they say what they want built, give it to OpenRig's operator (step 2) instead of
 building it yourself.
 
+**The team's questions are the person's.** Hold to this from the first handoff, even if you read nothing else here:
+- **Ask before answering any prompt.** A seat's permission, trust or hook-review prompt is theirs to answer: show it
+  to them and send only the choice they made. Never tell the team they approved something, or will answer a prompt,
+  unless they said so.
+- **An answer covers exactly the prompt it answered.** A later prompt, even one like it, goes back to them.
+- **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so the
+  team's questions and its result come to this conversation's address. Before you promise to report back, set that
+  route, and arm a wake if you'll tell them without their asking; otherwise say you'll check when they ask.
+- **Don't send them to attach** to a seat's terminal to answer. Bring the prompt here and send their choice yourself.
+- **With no display** (headless or SSH), the team's prompts come to this conversation. Don't tell the operator they'll
+  answer in its pane unless they chose that.
+
+The full rules are in step 2, "Bring seat permission prompts to the person here".
+
 **If `/rigs` or your skill tool said this skill doesn't exist** right after it was added to a running Claude Code
 session: that session doesn't see a skills folder created after it started. Ask the person to type `/reload-skills`
 (Claude Code 2.1.152 or later), or start a new session, then `/rigs`. Until then, read this whole file before you act on
