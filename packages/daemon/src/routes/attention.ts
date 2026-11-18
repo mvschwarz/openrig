@@ -184,17 +184,19 @@ export function attentionRoutes(): Hono {
       const instances = new WorkflowInstanceStore(queue.db), trails = new WorkflowStepTrailLog(queue.db);
       result.sources.push({ source: "mission outcomes", state: ids.length > 200 ? "partial" : "available", detail: "At most 200 manifest-bound workflows; attributed terminal receipts, with current workflow state. Unbound historical workflows are excluded." });
       for (const { instance_id: id } of ids.slice(0, 200)) {
-        const instance = instances.getByIdOrThrow(id), binding = instance.lifecycleBinding!;
-        const identity = binding.identity as { project?: string; mission?: string } | undefined;
-        const p = projects.find(p => namesProject(p, identity?.project) && !p.error);
-        if (!p || !identity?.mission) continue;
-        const sources = binding.sources as Array<{ kind: string; path: string }> | undefined;
-        const mission = projectMission(p, identity.mission);
-        if (!sources?.some(s => s.kind === "project" && s.path === path.join(p.root, "project.yaml")) || !sources.some(s => s.kind === "mission" && s.path === path.join(mission, "mission.yaml"))) continue;
-        const history = trails.listForInstance(id, 201), receipt = history.find(t => t.closureReason === "done" || t.closureReason === "failed");
-        if (!receipt) continue;
-        const item: AttentionItem = { id: `workflow:${id}`, kind: "update", summary: `${identity.mission}: ${receipt.stepId} ${receipt.closureReason} · workflow ${instance.status}`, urgency: "outcome", unblocks: null, at: receipt.closedAt, scope: `project ${p.id} · mission ${identity.mission}`, project: { id: p.id, root: p.root }, source: `/api/workflow/${encodeURIComponent(id)}/trace` };
-        add(item, () => [`Current workflow state: ${instance.status}; a step receipt alone does not complete the mission.`, `Posture: ${posture?.resolve({ projectId: p.id, missionId: identity.mission }).posture ?? "unknown"}`, `Actor: ${receipt.actorSession}`, `Outcome evidence: ${JSON.stringify(receipt.closureEvidence)}`, `Workflow history${history.length > 200 ? " (partial: 200 retained entries shown)" : ""}:`, ...history.slice(0, 200).map(t => JSON.stringify(t))], () => [{ label: "Mission authority", path: path.join(mission, "mission.yaml") }]);
+        try {
+          const instance = instances.getByIdOrThrow(id), binding = instance.lifecycleBinding!;
+          const identity = binding.identity as { project?: string; mission?: string } | undefined;
+          const p = projects.find(p => namesProject(p, identity?.project) && !p.error);
+          if (!p || !identity?.mission) continue;
+          const sources = binding.sources as Array<{ kind: string; path: string }> | undefined;
+          const mission = projectMission(p, identity.mission);
+          if (!sources?.some(s => s.kind === "project" && s.path === path.join(p.root, "project.yaml")) || !sources.some(s => s.kind === "mission" && s.path === path.join(mission, "mission.yaml"))) continue;
+          const history = trails.listForInstance(id, 201), receipt = history.find(t => t.closureReason === "done" || t.closureReason === "failed");
+          if (!receipt) continue;
+          const item: AttentionItem = { id: `workflow:${id}`, kind: "update", summary: `${identity.mission}: ${receipt.stepId} ${receipt.closureReason} · workflow ${instance.status}`, urgency: "outcome", unblocks: null, at: receipt.closedAt, scope: `project ${p.id} · mission ${identity.mission}`, project: { id: p.id, root: p.root }, source: `/api/workflow/${encodeURIComponent(id)}/trace` };
+          add(item, () => [`Current workflow state: ${instance.status}; a step receipt alone does not complete the mission.`, `Posture: ${posture?.resolve({ projectId: p.id, missionId: identity.mission }).posture ?? "unknown"}`, `Actor: ${receipt.actorSession}`, `Outcome evidence: ${JSON.stringify(receipt.closureEvidence)}`, `Workflow history${history.length > 200 ? " (partial: 200 retained entries shown)" : ""}:`, ...history.slice(0, 200).map(t => JSON.stringify(t))], () => [{ label: "Mission authority", path: path.join(mission, "mission.yaml") }]);
+        } catch (e) { unavailable(`mission outcomes/${id}`, e); }
       }
     } catch (e) { unavailable("mission outcomes", e); }
     if (reads("update")) try {
