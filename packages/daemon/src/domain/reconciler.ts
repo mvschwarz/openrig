@@ -157,17 +157,20 @@ export async function recordedProcessStillRunning(
  *  boot reconcile detached. True only when: the evidence recorded for this very session names at least one pid with a
  *  readable observation time; that observation is at or after the detached session's own creation (`createdAt`,
  *  SQLite's UTC `YYYY-MM-DD HH:MM:SS`), so an earlier occupant's evidence, kept when a later verdict had no pid,
- *  can't authorize it; the census reads; no recorded pid is hidden from it (EPERM/EACCES: a live process this daemon
- *  can't read is not an ended one); and no recorded pid is a process that started at or before the observation.
- *  Anything else is not evidence of an end (false), unlike recordedProcessStillRunning's null, which also covers
- *  "can't tell". Limit: the proof covers only the LAST recorded process; a replacement no poll ever saw, followed by a
- *  lost socket, is outside it. */
+ *  can't authorize it; the census reads; the evidence is the same after the census as before it; no recorded pid is
+ *  hidden from it (EPERM/EACCES: a live process this daemon can't read is not an ended one); and no recorded pid is a
+ *  process that started at or before the observation. `census` must begin its census when called, after the evidence
+ *  is read: a process recorded before then is listed if it still runs, while one recorded during the census may have
+ *  started after it began, so it can't be listed. Anything else is not evidence of an end (false), unlike
+ *  recordedProcessStillRunning's null, which also covers "can't tell". Limit: the proof covers only the LAST recorded
+ *  process; a replacement no poll had recorded by the second read, followed by a lost socket, is outside it. */
 export async function recordedProcessEnded(
   db: Database.Database,
   session: { nodeId: string; sessionName: string; createdAt: string | null | undefined },
   census: () => Promise<ProcessTableCensus | null>,
 ): Promise<boolean> {
-  const evidence = new SeatIdentityStore(db).getProcessEvidence(session.nodeId);
+  const store = new SeatIdentityStore(db);
+  const evidence = store.getProcessEvidence(session.nodeId);
   if (!evidence || evidence.sessionName !== session.sessionName) return false;
   const observedAt = Date.parse(evidence.observedAt) / 1000;
   const createdAt = typeof session.createdAt === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(session.createdAt)
@@ -177,6 +180,9 @@ export async function recordedProcessEnded(
   if (!pids.length || Number.isNaN(observedAt) || Number.isNaN(createdAt) || observedAt < createdAt) return false;
   const table = await census();
   if (!table) return false;
+  const after = store.getProcessEvidence(session.nodeId);
+  if (after?.observedAt !== evidence.observedAt || after.sessionName !== evidence.sessionName
+    || after.pid !== evidence.pid || after.panePid !== evidence.panePid) return false;
   if (pids.some((pid) => table.permissionHiddenPids.includes(pid))) return false;
   return pids.every((pid) => {
     const row = table.rows.find((r) => r.pid === pid);

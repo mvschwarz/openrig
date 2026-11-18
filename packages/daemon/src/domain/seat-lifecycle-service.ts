@@ -1787,8 +1787,8 @@ export class SeatLifecycleService {
       // A host restart ends tmux with every seat in it, and the daemon's boot reconcile marks those managed sessions
       // detached while keeping their bindings. Nothing was stopped on purpose, so "no server running" alone isn't
       // absence: the server may only have lost its socket. Reopen an empty server for that row only on positive
-      // evidence that the seat's recorded process has ended (recordedProcessEnded: a census, hidden pids and evidence older
-      // than this session both count as unknown); unknown keeps the refusal. Its binding stays for the stale-row clean
+      // evidence that the seat's recorded process has ended (recordedProcessEnded: a census; hidden pids, evidence older
+      // than this session and evidence that changed while the census ran count as unknown); unknown keeps the refusal. Its binding stays for the stale-row clean
       // below, which proves absence again on the reopened server. Limit: only the last recorded process is proven; a
       // replacement no poll ever saw, followed by a lost socket, is outside this proof.
       const detachedManaged = latest !== null
@@ -1796,13 +1796,19 @@ export class SeatLifecycleService {
         && latest.status === "detached" && latest.origin !== "claimed"
         && this.nonTerminalSessions(node.id).length === 0;
       const table = stoppedManagedOccupant && released ? this.readProcesses().catch(() => null) : null;
-      const census = detachedManaged && !stoppedManagedOccupant ? await this.readProcessCensus().catch(() => null) : null;
-      const processes = () => table ?? Promise.resolve(census ? census.rows : null);
+      const detachedUnstopped = detachedManaged && !stoppedManagedOccupant;
+      // Begun when first asked, so after recordedProcessEnded has read the evidence it tests.
+      let census: Promise<ProcessTableCensus | null> | undefined;
+      const readCensus = () => census ??= this.readProcessCensus().catch(() => null);
+      const session = { nodeId: node.id, sessionName: canonicalSessionName };
+      const detachedEnded = detachedUnstopped
+        && await recordedProcessEnded(this.db, { ...session, createdAt: latest?.created_at }, readCensus);
+      const processes = () => table ?? readCensus().then((read) => read ? read.rows : null);
       // Unclaim doesn't end the process. While the released (or detached) session's recorded process still runs, its
       // server may only have lost its socket: a server started there would read the session absent and launch a second
       // occupant beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
-      const session = { nodeId: node.id, sessionName: canonicalSessionName };
-      const stillRuns = table || census ? await recordedProcessStillRunning(this.db, session, processes) : null;
+      const stillRuns = table || (detachedUnstopped && !detachedEnded)
+        ? await recordedProcessStillRunning(this.db, session, processes) : null;
       if (stillRuns) {
         return {
           ...canonicalProbe,
@@ -1810,13 +1816,12 @@ export class SeatLifecycleService {
             + "on a tmux server this daemon can't reach. End that process, then launch again.",
         };
       }
-      const detachedEnded = detachedManaged && !stoppedManagedOccupant
-        && await recordedProcessEnded(this.db, { ...session, createdAt: latest?.created_at }, async () => census);
-      if (detachedManaged && !stoppedManagedOccupant && !detachedEnded) {
+      if (detachedUnstopped && !detachedEnded) {
         return {
           ...canonicalProbe,
           guidance: "This seat's detached session has no proof its recorded process ended (no process evidence for it since "
-            + "this session began, a recorded process hidden from this daemon, or the process table can't be read), so a "
+            + "this session began, process evidence recorded while the process table was read, a recorded process hidden "
+            + "from this daemon, or the process table can't be read), so a "
             + "server that only lost its socket can't be ruled out. Start the "
             + "terminal server once the seat is known to be gone, then launch again.",
         };

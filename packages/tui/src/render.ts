@@ -484,6 +484,7 @@ function agentDetailLines(
         ],
         lines: [
           fieldLine({ label: "cwd", value: agent.cwd ?? "— (not served)" }),
+          ...(agent.runtime === "claude-code" ? wrapDetailValue("configured account", `${agent.configuredAccount ?? "unknown"} (not verified sign-in)`, contentWidth) : []),
         ],
       },
       {

@@ -1335,7 +1335,35 @@ describe("a seat whose live tenure can't be proven", () => {
     }
   });
 
-  it.each(["done", "failed"] as const)("an undecided kept answer on a row closed as %s is not decided when the seat is replaced between the read and the decision's own tenure check", async (closed) => {
+  it.each(["denied", "no answer"] as const)("a row closed as %s takes no decision after a first failed, second successful tenure check, and keeps its own outcome", async (close) => {
+    const f = fixture({ decider: null });
+    const askId = String((await f.submit()).body.askId);
+    await f.queueRepo.update({ qitemId: askId, actorSession: PERSON, state: "done", closureReason: close === "denied" ? "denied" : "no-follow-on" });
+    const snapshot = () => JSON.stringify([f.queueRepo.getById(askId)?.state, f.queueRepo.getById(askId)?.closureReason,
+      f.queueRepo.getById(askId)?.humanAnswers, f.queueRepo.listTransitions(askId).length]);
+    const before = snapshot();
+    // The first tenure check throws, so the seat's authority is unknown; any later check would read it current.
+    const real = SessionRegistry.prototype.currentOccupantTenure;
+    let calls = 0;
+    const flaky = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(function (this: SessionRegistry, nodeId: string) {
+      if (calls++ === 0) throw new Error("fixture tenure read unavailable");
+      return real.call(this, nodeId);
+    });
+    let decided: Awaited<ReturnType<typeof f.decide>>;
+    try { decided = await f.decide(askId, "allow"); } finally { flaky.mockRestore(); }
+    // The record first: no decision note on the closed row, and nothing else written to it.
+    expect(f.queueRepo.listTransitions(askId).filter((t) => t.transitionNote?.startsWith("runner-permission-decided")).map((t) => t.transitionNote)).toEqual([]);
+    expect(snapshot()).toEqual(before);
+    expect(decided).toMatchObject({ status: 409, body: { code: "not_recorded" } });
+    // Once the seat reads, the close decides it: a denying close is the agent's reject, and no answer is the default permit.
+    const settled = await f.read(askId);
+    expect(settled.body.state).toBe(close === "denied" ? (settled.body.optionId ? "answered" : "refused") : "permitted");
+    if (close === "denied" && settled.body.optionId) expect(settled.body.optionId).not.toBe("allow");
+    expect(await f.decide(askId, "allow")).toMatchObject({ body: { state: settled.body.state } });
+    expect(f.queueRepo.listTransitions(askId).some((t) => t.transitionNote?.startsWith("runner-permission-decided"))).toBe(false);
+  });
+
+  it.each(["done", "failed"] as const)("an undecided kept answer on a row closed as %s is not decided while its seat can't be read, and reads stale once a successor replaces it", async (closed) => {
     const f = fixture({ decider: null });
     const askId = String((await f.submit()).body.askId);
     await f.answer(askId, { optionId: "allow" });
@@ -1343,18 +1371,22 @@ describe("a seat whose live tenure can't be proven", () => {
     const snapshot = () => JSON.stringify([f.queueRepo.getById(askId)?.humanAnswers, f.queueRepo.listTransitions(askId).length]);
     const before = snapshot();
     const events: unknown[] = []; const unsubscribe = f.bus.subscribe((event) => events.push(event));
+    // The decision's one authority check can't read the seat (its callback throws, and the helper finds the same
+    // occupant): the decision isn't recorded, and nothing checks again to decide it.
     const real = SessionRegistry.prototype.currentOccupantTenure;
-    let calls = 0, relaunched = false;
+    let calls = 0;
     const flaky = vi.spyOn(SessionRegistry.prototype, "currentOccupantTenure").mockImplementation(function (this: SessionRegistry, nodeId: string) {
-      calls++;
-      if (calls === 1) throw new Error("fixture tenure read unavailable");
-      if (calls === 3 && !relaunched) { relaunched = true; flaky.mockRestore(); f.relaunch(); }
+      if (calls++ === 0) throw new Error("fixture tenure read unavailable");
       return real.call(this, nodeId);
     });
     try {
+      expect(await f.decide(askId, "allow")).toMatchObject({ status: 409, body: { code: "not_recorded" } });
+    } finally { flaky.mockRestore(); }
+    // A successor then takes the seat: the next decision reads stale.
+    f.relaunch();
+    try {
       expect(await f.decide(askId, "allow")).toMatchObject({ body: { state: "stale" } });
-    } finally { flaky.mockRestore(); unsubscribe(); }
-    expect(relaunched).toBe(true);
+    } finally { unsubscribe(); }
     expect(snapshot()).toEqual(before);
     expect(events).toHaveLength(0);
     expect(f.permits()).toHaveLength(0);

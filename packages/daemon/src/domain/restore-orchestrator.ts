@@ -1638,23 +1638,31 @@ export class RestoreOrchestrator {
     if (launchResult.warnings?.length) {
       warnings?.push(...launchResult.warnings);
     }
-    // tmux starts a terminal whose folder is missing in a fallback folder of its own (its server's HOME), which the launch's
-    // record doesn't hold, so the folder the seat started in is read from the seat's own bound pane, in any window. Another
-    // pane's folder is never named: when that pane isn't listed or can't be read, the line names no folder.
-    if (missingCwdAt >= 0 && warnings && launchResult.binding.tmuxPane) {
-      let panes: Array<{ id: string; cwd: string }> = [];
-      try { panes = await this.tmuxAdapter.listPanes(launchResult.sessionName, true); } catch { /* unread: the line stays as it was */ }
-      const startedIn = panes.find((pane) => pane.id === launchResult.binding.tmuxPane)?.cwd;
+    // Where the seat started, from its own bound pane only (boundPaneFolder): unread, the line names no folder.
+    if (missingCwdAt >= 0 && warnings) {
+      const startedIn = await this.boundPaneFolder(launchResult.sessionName, launchResult.binding.tmuxPane);
       if (startedIn && startedIn !== savedCwd) {
         warnings[missingCwdAt] = `Restore: ${node.logicalId}'s working directory ${savedCwd} doesn't exist on this machine, so it started in `
           + `${startedIn}. ${launchElsewhere}`;
       }
     }
 
+    // A folder given with `--cwd` that isn't on this machine is named the same way. Where the seat started is read now,
+    // before the harness and its startup are replayed, which can change the pane's folder.
+    const givenMissing = opts?.cwdOverride && isAbsolute(opts.cwdOverride) && opts.fsOps && warnings && !folderPresent(opts.cwdOverride)
+      ? opts.cwdOverride : null;
+    const givenStartedIn = givenMissing ? await this.boundPaneFolder(launchResult.sessionName, launchResult.binding.tmuxPane) : null;
+
     // A selected launch's own blank rolled back after the shell started (postLaunchRestore has many return points).
     const compensation = { ran: false };
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
+    // Whether it's still missing is decided once the launch has run: a fresh launch creates it, and a restore doesn't, so the
+    // seat's terminal started in tmux's fallback folder.
+    if (givenMissing && warnings && !folderPresent(givenMissing)) {
+      warnings.push(`Restore: ${node.logicalId}'s working directory ${givenMissing}, given with --cwd, doesn't exist on this machine`
+        + (givenStartedIn && givenStartedIn !== givenMissing ? `, so it started in ${givenStartedIn}. ` : ". ") + launchElsewhere);
+    }
     // Saved inputs stay keyed by the snapshot; the result names the seat that the launcher actually registered.
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings), nodeId: launchResult.session.nodeId,
       ...(launchResult.session.nodeId !== node.id ? { intendedNodeId: node.id } : {}),
@@ -1927,6 +1935,15 @@ export class RestoreOrchestrator {
     this.eventBus.emit({ type: "node.startup_failed", rigId, nodeId, error, sessionId, stage: "harness_not_started" });
   }
 
+  /** tmux starts a terminal whose folder is missing in a fallback folder of its own (its server's HOME), which the launch's
+   *  record doesn't hold, so the folder a seat started in is read from the seat's own bound pane, in any window. Another
+   *  pane's folder is never named: when that pane isn't listed or can't be read, this is null. */
+  private async boundPaneFolder(sessionName: string, pane: string | null | undefined): Promise<string | null> {
+    if (!pane) return null;
+    try { return (await this.tmuxAdapter.listPanes(sessionName, true)).find((listed) => listed.id === pane)?.cwd ?? null; }
+    catch { return null; }
+  }
+
   /** Retire only the provisional session created by this restore attempt. The prior
    * binding must stay cleared while a replacement launch is handed off. */
   private async retireProvisionalSession(nodeId: string, sessionName: string, launchedSessionId: string | undefined): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -2121,9 +2138,14 @@ export class RestoreOrchestrator {
         warnings?.push(...(result.warnings ?? []));
         for (const skipped of result.skipped) warnings?.push(`Restore activity hooks: skipped ${skipped}; saved hooks could not be reapplied.`);
         for (const failure of result.failed) warnings?.push(`Restore activity hooks: ${failure.error}`);
+        // Saved hooks that couldn't be reapplied are a restore gap, as for the current selection (restoreCurrentActivityHooks),
+        // so the rig doesn't read fully restored. Hooks already in the seat's settings may remain: a failed check writes nothing.
+        const detail = [...result.skipped.map((skipped) => `skipped ${skipped}`), ...result.failed.map((failure) => failure.error)].join("; ");
+        if (detail) activityHookGaps?.push(`claude_activity_hooks: the saved hooks could not be reapplied: ${detail}.`);
       } catch (error) {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.
         warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
+        activityHookGaps?.push(`claude_activity_hooks: the saved hooks could not be reapplied: ${(error as Error).message}.`);
       } else if (entries.length === 0) {
         await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps, launchCwd);
       }
