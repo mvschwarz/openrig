@@ -1077,3 +1077,36 @@ describe("member process_limits (#3253)", () => {
     expect(refused.errors.some((e) => e.includes("process_limits.cpu_quota: not supported"))).toBe(true);
   });
 });
+
+describe("member statusline_throttle (#3416 item 3)", () => {
+  const withMember = (fields: Record<string, unknown>, runtime = "claude-code") => ({
+    version: "0.2", name: "throttle-rig",
+    pods: [{ id: "dev", label: "Dev", members: [{ id: "worker", runtime, cwd: ".", agent_ref: "local:agents/worker", profile: "default", ...fields }], edges: [] }],
+    edges: [],
+  });
+
+  it("accepts whole seconds from 1 to 120 on a Claude member, keeps 0 as an explicit clear and an absent key undefined", () => {
+    for (const seconds of [1, 30, 120, 0]) {
+      const spec = withMember({ statusline_throttle: seconds });
+      expect(RigSpecSchema.validate(spec).errors).toEqual([]);
+      expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.statuslineThrottle).toBe(seconds);
+    }
+    expect(RigSpecSchema.normalize(withMember({})).pods[0]!.members[0]!.statuslineThrottle).toBeUndefined();
+  });
+
+  it.each([121, -1, 2.5, "30", null])("refuses %j", (value) => {
+    expect(RigSpecSchema.validate(withMember({ statusline_throttle: value })).errors)
+      .toEqual(["pods[0].members[0].statusline_throttle must be 0 (off) or a whole number of seconds from 1 to 120"]);
+  });
+
+  it("refuses the key on a member that isn't Claude", () => {
+    expect(RigSpecSchema.validate(withMember({ statusline_throttle: 30 }, "codex")).errors)
+      .toContain('pods[0].members[0].statusline_throttle: only valid when runtime is "claude-code"');
+  });
+
+  it("round-trips through the spec text", () => {
+    const normalized = RigSpecSchema.normalize(withMember({ statusline_throttle: 45 }));
+    const again = RigSpecSchema.normalize(RigSpecCodec.parse(RigSpecCodec.serialize(normalized)) as Record<string, unknown>);
+    expect(again.pods[0]!.members[0]!.statuslineThrottle).toBe(45);
+  });
+});

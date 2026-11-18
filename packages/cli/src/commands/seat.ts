@@ -234,6 +234,7 @@ const LEVEL_WORDS: Record<string, string> = {
   "openrig-urgent": "OpenRig's own messages and anything marked urgent type.",
   "urgent-only": "Only messages marked urgent type.",
   "sends-only": "Deliberate sends from people and agents type; OpenRig's own notices are held.",
+  "queue-only": "Deliberate sends type, never over a draft; OpenRig's reminders arrive as queue rows, never typed.",
 };
 
 // JSON escapes C0; also escape C1, format/separator and default-ignorable characters.
@@ -614,7 +615,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
     });
   cmd.command("set-typing-guard").argument("<seat>")
     .option("--enabled <boolean>", "Compatibility: true selects hold; false selects off")
-    .option("--mode <mode>", "off, draft-aware, openrig-urgent, urgent-only, sends-only or hold; choose this or --enabled")
+    .option("--mode <mode>", "off, draft-aware, openrig-urgent, urgent-only, sends-only, queue-only or hold; choose this or --enabled")
     .requiredOption("--reason <text>").option("--json").description("Choose how this seat's typing guard handles automatic input")
     .addHelpText("after", `
 This one persistent guard defaults off. Hold pauses ALL automatic input, including
@@ -635,11 +636,20 @@ Between off (always interrupt) and hold (full quiet):
                   item at priority urgent or critical).
   sends-only      deliberate sends from people and agents type; OpenRig's own
                   notices are held. A terminal member defaults to this.
-What openrig-urgent and urgent-only let through never types over a draft.
+  queue-only      for a seat a person types in: deliberate sends type as
+                  draft-aware (never over a draft); OpenRig's notices, urgent
+                  ones included, never type. A watchdog reminder becomes a cold
+                  queue row with no nudge, or a note on each parked row it is
+                  about; the parked-owner reminder is skipped and recorded once
+                  as held on the row (the open rows already are the reminder);
+                  other notices are held. A cold row wakes nobody: a person or
+                  the seat's next turn picks it up.
+What openrig-urgent, urgent-only and queue-only let through never types over a draft.
 sends-only types like off: a terminal member's typing isn't protected, as today
 (its shell input can't be read). Everything else is held, the sender is told, and
 held messages stay readable. Lifecycle work is refused at openrig-urgent and
-urgent-only, as at hold.
+urgent-only, as at hold; at queue-only it goes ahead, managed compaction and its
+restore included, and each of its writes waits rather than type over a draft.
 Messages use the existing outbox. Uncertain writes never replay automatically.
 Direct human input remains available. Other seats keep their own guard mode.
 
@@ -665,8 +675,8 @@ Examples:
     .action(async (seat: string, opts: { enabled?: string; mode?: string; reason: string; json?: boolean }) => {
       if ((opts.enabled === undefined) === (opts.mode === undefined)
         || opts.enabled !== undefined && !["true", "false"].includes(opts.enabled)
-        || opts.mode !== undefined && !["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold"].includes(opts.mode)) {
-        console.error("Choose --enabled true|false or --mode off|draft-aware|openrig-urgent|urgent-only|sends-only|hold.");
+        || opts.mode !== undefined && !["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "queue-only", "hold"].includes(opts.mode)) {
+        console.error("Choose --enabled true|false or --mode off|draft-aware|openrig-urgent|urgent-only|sends-only|queue-only|hold.");
         process.exitCode = 1; return;
       }
       await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, {
@@ -895,7 +905,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-terminal-policy" | "set-model" | "set-cwd" | "record-runtime-home" | "set-effort" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "record-runtime-home" | "set-effort" | "set-statusline-throttle" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -1100,6 +1110,62 @@ Examples:
         const running = data["running"] === "yes" ? "running now" : data["running"] === "no" ? "not running now" : `running state unknown (${String(data["runningDetail"] ?? "probe failed")})`;
         console.log(`Seat ${running}. Emitted at launch: not yet. Native effort: not observed.`);
         if (data["warning"]) console.log(`Warning: ${String(data["warning"])}`);
+      });
+    });
+
+  cmd
+    .command("set-statusline-throttle")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--seconds <n>", "Run the context collector at most once every <n> seconds (1 to 120)")
+    .option("--clear", "Remove the throttle: the collector runs on every status line update again")
+    .requiredOption("--reason <text>", "Audit reason recorded on the node.statusline_throttle_changed event")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Throttle one Claude seat's status line collector from its next launch (audited); no restart")
+    .addHelpText("after", `
+Claude Code runs the seat's status line on each update of the conversation, and
+each run starts Node for OpenRig's context collector. With a throttle, a short
+shell check reads the update first and skips the collector when the last
+collection was under <n> seconds ago in the same conversation and the context
+isn't below that collection's reading; a reading below the last collected one
+(a compaction), a new conversation, or an update the check can't read collects
+at once. No throttle is the default. The spec key is statusline_throttle (0
+clears it on a re-apply).
+
+What a throttle costs: while the seat works, the context reading OpenRig keeps
+can be up to <n> seconds behind, so managed compaction can see the seat cross its
+threshold that much later; a seat that goes idle right after a skipped update
+keeps the earlier reading until its next turn. The reading always keeps its real
+sample time: nothing shows a skipped update as a current reading. The value is
+capped at 120 seconds, well inside the 10 minutes after which a reading counts as
+stale.
+
+The throttle goes into the seat's own launch settings, never into the folder's
+.claude/settings.local.json; a status line command of your own there wins, and the
+launch says the throttle wasn't applied. It takes effect at the seat's next launch,
+resume or restore; the running process is unchanged, and so is a relaunch that
+reuses its launch settings (a provider or account switch that keeps them). A
+launch rebuilt from the spec (a persisted fresh launch, or a restore's fresh
+branch) writes the spec's statusline_throttle again over this value, as it does
+for process limits: change the spec too to keep it.
+Examples:
+  rig seat set-statusline-throttle dev-impl@my-rig --seconds 30 --reason "90 seats on one host"
+  rig seat set-statusline-throttle dev.impl --clear --reason "watching context closely" --json`)
+    .action(async (seat: string, opts: { seconds?: string; clear?: boolean; reason: string; operator?: string; json?: boolean }) => {
+      if (Boolean(opts.clear) === (opts.seconds !== undefined)) {
+        console.error("Pass exactly one of --seconds <n> or --clear.");
+        process.exitCode = 1;
+        return;
+      }
+      const seconds = opts.seconds === undefined ? undefined : /^[0-9]+$/.test(opts.seconds) ? Number(opts.seconds) : Number.NaN;
+      const body = opts.clear ? { clear: true, reason: opts.reason, operator: opts.operator } : { seconds, reason: opts.reason, operator: opts.operator };
+      await runLifecycleVerb("set-statusline-throttle", seat, body, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const name = `${s?.logicalId}@${s?.rigName}`;
+        const to = data["to"] as number | null;
+        const state = to === null ? "no throttle" : `at most once every ${to} s`;
+        console.log(data["changed"] === false ? `Status line throttle for ${name} is already ${state}. No change recorded.` : `Status line throttle for ${name}: ${state}.`);
+        console.log(String(data["effect"]));
       });
     });
 

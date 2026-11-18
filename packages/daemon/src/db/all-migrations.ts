@@ -1,9 +1,11 @@
 import { nodeProcessLimitsSchema } from "./migrations/173_node_process_limits.js";
+import { nodeStatuslineThrottleSchema } from "./migrations/176_node_statusline_throttle.js";
 import { sessionLaunchedCwdSchema } from "./migrations/174_session_launched_cwd.js";
 import { rigDeliveryDrainsSchema } from "./migrations/170_rig_delivery_drains.js";
 import { queueReturnRouteSchema } from "./migrations/172_queue_return_route.js";
 import { runBoundActivityGrantsSchema } from "./migrations/165_run_bound_activity_grants.js";
 import { nodeInputRouteSchema } from "./migrations/171_node_input_route.js";
+import { coreAppAccessSchema } from "./migrations/175_core_app_access.js";
 import { piAccountSwitchesSchema } from "./migrations/151_pi_account_switches.js";
 import { workflowInstanceSpecSchema } from "./migrations/152_workflow_instance_spec.js";
 import { eventsRetentionMarksSchema } from "./migrations/153_events_retention_marks.js";
@@ -11,6 +13,7 @@ import { workflowInstanceRootObjectiveSchema } from "./migrations/154_workflow_i
 import { queueErasureSchema } from "./migrations/155_queue_erasure.js";
 import { queueErasureLinkIndexesSchema } from "./migrations/156_queue_erasure_link_indexes.js";
 import { queueErasureBatchesSchema } from "./migrations/157_queue_erasure_batches.js";
+import { workflowBoundPodSchema } from "./migrations/177_workflow_bound_pod.js";
 import { queueInboxCheckinsSchema } from "./migrations/158_queue_inbox_checkins.js";
 import { queueItemsHandedOffFromIndexSchema } from "./migrations/159_queue_items_handed_off_from_index.js";
 import { networkBindingsSchema } from "./migrations/160_network_bindings.js";
@@ -355,4 +358,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeProcessLimitsSchema,
   seatHookBridgeSchema,
   sessionLaunchedCwdSchema,
+  coreAppAccessSchema,
+  nodeStatuslineThrottleSchema,
+  workflowBoundPodSchema,
 ];

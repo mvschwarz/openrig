@@ -113,6 +113,9 @@ export interface EnforcerInput {
   cwd?: string | null;
   runtime: string | null;
   usedPercentage: number | null;
+  /** When the context collector took the sample `usedPercentage` comes from (ISO). A throttled status line (#3416)
+   *  samples less often, so the request names the sample's time rather than calling it current. */
+  sampledAt?: string | null;
   transcriptPath?: string | null;
   sessionId?: string | null;
   /** Revalidate a poll's source snapshot after acquiring the delivery lease. */
@@ -251,6 +254,7 @@ export function buildCompactCommand(compactInstruction: string): string {
 
 function buildPreCompactPrepPrompt(input: {
   usedPercentage: number | null;
+  sampledAt?: string | null;
   thresholdPercent: number;
   preCompactInstruction?: string | null;
   /** The policy's compaction instruction when it is too long for the /compact command. */
@@ -265,7 +269,9 @@ function buildPreCompactPrepPrompt(input: {
     ]
     : [
       "OpenRig automatic compaction preparation is now required.",
-      `Current context usage is ${input.usedPercentage ?? "unknown"}%; configured compaction threshold is ${input.thresholdPercent}%.`,
+      input.sampledAt
+        ? `Context usage was ${input.usedPercentage ?? "unknown"}% in the latest sample, taken at ${input.sampledAt}; configured compaction threshold is ${input.thresholdPercent}%.`
+        : `Current context usage is ${input.usedPercentage ?? "unknown"}%; configured compaction threshold is ${input.thresholdPercent}%.`,
       `The ${AUTO_PREP_WAIT_MS_DEFAULT / 60_000}-minute ceiling starts after preparation delivery returns; completing the restore map and becoming idle must fit within it.`,
     ];
   pieces.push(
@@ -1731,9 +1737,9 @@ export class ClaudeCompactionEnforcer {
     let marked = false;
     try {
       const composed = composeManagedCompactCommand({ compactInstruction: attempt.compactInstruction, mapPath: attempt.mapPath });
-      prep = await this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
+      const send = () => this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
         overflowCompactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
-        usedPercentage: input.usedPercentage ?? null, thresholdPercent: policy.thresholdPercent,
+        usedPercentage: input.usedPercentage ?? null, sampledAt: input.sampledAt ?? null, thresholdPercent: policy.thresholdPercent,
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
       }), { openrigNotice: true, allowDraftWhileIdle: true, ...idleGate, beforeWrite: () => {
         this.reconcilePreparations();
@@ -1743,6 +1749,12 @@ export class ClaudeCompactionEnforcer {
         // At the write, a retry included: from here a restart reads this prompt as possibly delivered and never resends it.
         if (!marked) { marked = true; this.persist(input.sessionName, attempt.attemptId, { delivery: "pending", sends: attempt.sends }); }
       } });
+      // At a queue-only seat the send takes the same lifecycle lease as managed compaction (an automatic attempt already
+      // holds it, so this joins it): a manual `rig compact` there is lifecycle work, not a notice to hold (#3076). At
+      // any other level the manual preparation keeps its ordinary send.
+      const guard = this.sessionTransport.deliveryGuard;
+      prep = guard && this.queueOnlySeat(input.sessionName)
+        ? await guard.lifecycle([guard.target(input.sessionName).nodeId], send) : await send();
     } catch (error) {
       if (error instanceof DeliveryGuardError) {
         const written = (error as { inputWritten?: boolean }).inputWritten === true;
@@ -2382,18 +2394,27 @@ export class ClaudeCompactionEnforcer {
     this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now(), operatorInitiated });
   }
 
+  /** Whether the seat is at the queue-only level (desired or effective). A seat the guard can't resolve isn't. */
+  private queueOnlySeat(sessionName: string): boolean {
+    const guard = this.sessionTransport.deliveryGuard;
+    const target = guard?.maybeTarget(sessionName);
+    if (!guard || !target) return false;
+    try { return guard.queueOnly(target.nodeId); } catch { return false; }
+  }
+
   /** A draft-aware (protected) seat whose binding records no tmux pane. The input layer refuses every write to a
    *  managed seat without a known pane, so compaction refuses it before preparing anything. "Protected" is the
    *  mode an automatic input lease takes from the guard's configuration (desired draft-aware, else effective),
-   *  the mode needsInputCheck then reads. It is read synchronously, so the manual path's in-progress guard
-   *  (no await before an attempt is registered) is unchanged. */
+   *  the mode needsInputCheck then reads; a queue-only seat's lifecycle lease takes draft-aware too (#3076). It is
+   *  read synchronously, so the manual path's in-progress guard (no await before an attempt is registered) is
+   *  unchanged. */
   private paneUnknownProtected(sessionName: string): boolean {
     const guard = this.sessionTransport.deliveryGuard;
     const target = guard?.maybeTarget(sessionName);
     if (!guard || !target || target.pane) return false;
     try {
       const config = guard.configuration(target.nodeId);
-      return (config.desired.mode === "draft-aware" ? config.desired : config.effective).mode === "draft-aware";
+      return (config.desired.mode === "draft-aware" ? config.desired : config.effective).mode === "draft-aware" || guard.queueOnly(target.nodeId);
     } catch { return false; }
   }
 

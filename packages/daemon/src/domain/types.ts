@@ -47,6 +47,9 @@ export interface Node {
   processLimits?: import("./process-limits.js").ProcessLimits | null;
   /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
   processLimitsError?: string;
+  /** #3416 (3): the seat's status line throttle in seconds (spec `statusline_throttle`, `rig seat set-statusline-throttle`);
+   *  null/absent = none. */
+  statuslineThrottle?: number | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -190,6 +193,7 @@ export type RigEvent =
       slot: "account_home" | "member_env"; revision: number; operationId: string; original: string | null; occupantGeneration: string | null;
       reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
+  | { type: "node.statusline_throttle_changed"; rigId: string; nodeId: string; logicalId: string; from: number | null; to: number | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.claude_auto_mode_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -408,7 +412,9 @@ export type RigEvent =
   // edge-artifact-required); workflow-keepalive deferred to Phase D.
   // Pure `not_due` polls are NOT recorded in history and NOT emitted
   // as events; only meaningful evaluations + lifecycle transitions are.
-  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string }
+  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string;
+      /** With a queue-only status (queued_as_row, noted_on_queued_row): the queue row the reminder became or was noted on. */
+      queuedQitemId?: string }
   | { type: "watchdog.evaluation_skipped"; jobId: string; policy: string; skipReason: string }
   | { type: "watchdog.evaluation_terminal"; jobId: string; policy: string; terminalReason: string }
   | { type: "watchdog.job_registered"; jobId: string; policy: string; targetSession: string; registeredBy: string }
@@ -862,6 +868,8 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  /** Configured Claude account label, not an observation of the active login. */
+  configuredAccount?: string | null;
   /** Present only on a community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
   /** Effective current status; confirmed session absence projects as detached. */
@@ -1266,6 +1274,8 @@ export interface LegacyRigSpecNode {
   launchWrapper?: string[];
   /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1396,6 +1406,8 @@ export interface RigSpecPodMember {
   launchWrapper?: string[];
   /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;

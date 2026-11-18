@@ -649,11 +649,14 @@ function createdIdentity(printed: string): CreatedIdentity | null {
   return m ? { pane: m[1]!, session: m[2]!, server: { pid: m[3]!, start: m[4]! } } : null;
 }
 
-/** A command that ended by SIGKILL: the signal itself (the shell replaced by the command) or 137 (128 + 9, from a shell
+/** How a command that ended by SIGKILL was reported, in words that name only that, or null when it didn't end that way:
+ *  the signal itself (the shell replaced by the command; no exit code) or the exit status 137 (128 + 9, from a shell
  *  that ran it, or from timeout, which exits that way when the command it ran was killed). */
-function killedBySigkill(error: unknown): boolean {
+function sigkillSeen(error: unknown): string | null {
   const e = error as { code?: unknown; signal?: unknown };
-  return e.signal === "SIGKILL" || e.code === 137;
+  if (e.code === 137) return "exited with status 137 (128 + SIGKILL)";
+  if (e.signal === "SIGKILL") return "was killed by SIGKILL (no exit code)";
+  return null;
 }
 
 /** A check's failure, classified (#3253): `unsupported` only on a positive answer that the facility is not there. */
@@ -1002,9 +1005,10 @@ export class TmuxAdapter {
         // That does not say which process died nor why (the OOM killer at that MemoryMax=, the host's OOM killer,
         // systemd-oomd, a manual kill, or before the scope was entered), and the scope that could tell (its memory.events
         // `oom`) is collected with it. So it says only what was seen, names the limit and stays retryable (unverified).
-        if (limits.memoryMax !== undefined && killedBySigkill(error)) {
+        const sigkill = sigkillSeen(error);
+        if (limits.memoryMax !== undefined && sigkill !== null) {
           return { ok: false, problem: { kind: "unverified", limit: "memory_max",
-            reason: `the probe command ended with SIGKILL (exit 137) under the requested MemoryMax=${limits.memoryMax}; ` +
+            reason: `the probe command ${sigkill} under the requested MemoryMax=${limits.memoryMax}; ` +
               "the process and the cause aren't confirmed; a larger memory_max may help" } };
         }
         return { ok: false, problem: classifyScopeFailure(error, "a throwaway seat scope") };

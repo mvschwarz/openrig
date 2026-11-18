@@ -346,7 +346,8 @@ describe("persisted pod-aware launch recipes", () => {
       setup.sessionRegistry.updateStatus(session.id, "exited");
 
       const result = await setup.restoreOrchestrator.restore(snapshot.id, {
-        adapters: { codex: runtimeAdapter }, freshLogicalIds: [node.logicalId], ...(withCwd ? { cwdOverride: given } : {}) });
+        adapters: { codex: runtimeAdapter }, freshLogicalIds: [node.logicalId], fsOps: { exists: (file: string) => fs.existsSync(file) },
+        ...(withCwd ? { cwdOverride: given } : {}) });
 
       expect(result.ok).toBe(true);
       expect(freshLaunch).toHaveBeenCalledWith(rig.id, node.id, { processLimitsMode: "recovery", ...(withCwd ? { cwdOverride: given } : {}) });
@@ -356,6 +357,8 @@ describe("persisted pod-aware launch recipes", () => {
       if (withCwd) {
         expect(createFolder).toHaveBeenCalledWith(given);
         expect(fs.existsSync(given)).toBe(true);
+        // The fresh launch created it, so the restore doesn't name it missing.
+        expect(result.ok ? result.result.warnings.join("\n") : "").not.toContain("given with --cwd");
       } else {
         expect(createFolder).not.toHaveBeenCalled();
       }

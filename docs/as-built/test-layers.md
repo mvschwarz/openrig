@@ -84,6 +84,16 @@ are not yet runnable checks.
   A test can still set its own
   overrides after setup. The UI suite (jsdom) uses its own `packages/ui/test/setup.ts`.
 
+  Close-all consumers explicitly create a registered private tmux scope. Their
+  real servers keep that stable environment through server cleanup. The suite
+  then removes its owned directory and retires its registration. This also
+  applies with a retained TMPDIR or a reused fixture home. Unrelated files get
+  no global per-test TMUX_TMPDIR replacement. A test-only TerminalService
+  wrapper checks raw socket paths, registered root identity and symlinks before
+  executor access. It rejects ambiguous selectors and unsupported inherited
+  TMUX forms. Rejected-path controls use inert executors. This boundary is a
+  fixture guard, not a live host audit or OS network isolation.
+
 - **Stale vendored daemon.** `npm run build:package` leaves an assembled copy of the daemon at
   `packages/cli/daemon/` (gitignored). If you change daemon source afterwards,
   `scripts/check-cli-daemon-freshness.test.mjs` inside `test:repo` can fail on the stale copy.

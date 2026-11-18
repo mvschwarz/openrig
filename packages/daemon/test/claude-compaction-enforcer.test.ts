@@ -121,6 +121,19 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("#3416 (3): names the sample's time instead of calling the usage current when the sample time is known", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+    const prep = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 82, sampledAt: "2026-11-17T12:00:00.000Z",
+    });
+    expect(prep).toEqual({ triggered: true });
+    const prompt = send.mock.calls[0]![1] as string;
+    expect(prompt).toContain("Context usage was 82% in the latest sample, taken at 2026-11-17T12:00:00.000Z; configured compaction threshold is 80%");
+    expect(prompt).not.toContain("Current context usage");
+  });
+
   it("HG-2 + HG-3: threshold crossing first sends the pre-compaction prep prompt, then /compact on the next high-usage tick", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();

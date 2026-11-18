@@ -655,6 +655,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
+  /** The seat's typing guard is at queue-only (#3076). An unknown seat, or a guard that can't be read, is not: the
+   *  guard's own level still holds OpenRig's input there. */
+  const isQueueOnlyGuardSeat = (sessionName: string): boolean => {
+    try {
+      const target = resolveGuardTarget(db, sessionName);
+      return !!target && deliveryGuard.queueOnly(target.nodeId);
+    } catch { return false; }
+  };
   tmuxAdapter.deliveryGuard = deliveryGuard;
 
   // Slice 15 — Seat-activity service for the `terminal-active` primitive.
@@ -873,7 +881,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     } catch { return null; }
   };
   const claudeResume = new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch, seatLaunchEnvironment, openrigHome: OPENRIG_HOME, restoreReadPolicy,
-    hookBridgeLaunch: (nodeId, executable) => hookBridge.launchWanted(nodeId, executable) });
+    hookBridgeLaunch: (nodeId, executable) => hookBridge.launchWanted(nodeId, executable),
+    statuslineThrottleLaunch: (nodeId) => rigRepo.getNodeStatuslineThrottle(nodeId) });
   // #275: one reader for both Codex launch adapters, with the PATH, HOME and CODEX_HOME a seat session gets.
   const readCodexNetworkDefault = codexNetworkDefaultReader({ launchPath: process.env.PATH, home: daemonHome, codexHome });
   const prepareTeamWorkspace = (sessionName: string) => prepareCodexTeamWorkspace(sessionName,
@@ -1103,8 +1112,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const claudeCollectorAssetPath = nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
   // #2456: the adapters' guidance writes check and keep OpenRig's record of each managed block.
   const guidanceBlockRecords = managedBlockRecords(db);
-  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
-  const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
+  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, restoreReadPolicy, hookBridgeLaunch: (nodeId: string, executable?: string) => hookBridge.launchWanted(nodeId, executable), statuslineThrottleLaunch: (nodeId: string) => rigRepo.getNodeStatuslineThrottle(nodeId), fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: claudeCollectorAssetPath, autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), managedBlockRecords: guidanceBlockRecords, recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
+  const codexAdapter = new CodexRuntimeAdapter({ managedBlockRecords: guidanceBlockRecords, prepareTeamWorkspace, prepareSeatFolder, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, seatHome: (nodeId: string, ignoreAccountHome?: boolean) => seatRuntimeHome(db, nodeId, "codex", ignoreAccountHome).home, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, codexLoginShell: readCodexLoginShell, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
     const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
     return new SettingsStore().resolveOne("runtime.codex.hooks_enabled").value as boolean;
   }, resolveManagedConfigSettings: async () => {
@@ -1118,8 +1127,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   } });
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
-  const piAdapter = new PiRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
-  const ompAdapter = new OmpRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
+  const piAdapter = new PiRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), linkInfo: lstatLinkInfo }, stateRootForSession: piStateRootForSession, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
+  const ompAdapter = new OmpRuntimeAdapter({ runnerGrants, managedBlockRecords: guidanceBlockRecords, tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), folderPresent, mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
   const { StubRuntimeAdapter } = await import("./adapters/stub-runtime-adapter.js");
@@ -2340,9 +2349,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       viewsStore: new TerminalViewsStore(),
       listRigSeatsBatch: (names) => {
         const rigs = rigRepo.listRigs();
-        // Match listRigSeats' first-name resolution, including duplicate names.
+        // Prefer stable IDs. Names remain a compatibility lookup for individual views.
         const selected = new Map(names.flatMap(name => {
-          const rig = rigs.find(rig => rig.name === name);
+          const rig = rigs.find(rig => rig.id === name) ?? rigs.find(rig => rig.name === name);
           return rig ? [[name, rig] as const] : [];
         }));
         const inventory = getNodeInventoryForRigs(db, new Set([...selected.values()].map(rig => rig.id)));
@@ -2350,13 +2359,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
       listRigSeats: (rigArg) => {
         const rigs = rigRepo.listRigs();
-        const rig = rigs.find((r) => r.name === rigArg) ?? rigs.find((r) => r.id === rigArg);
+        const rig = rigs.find((r) => r.id === rigArg) ?? rigs.find((r) => r.name === rigArg);
         if (!rig) return null;
         return getNodeInventory(db, rig.id).map(toLiveSeatRow);
       },
       listPodSeats: (rigArg, pod) => {
         const rigs = rigRepo.listRigs();
-        const rig = rigs.find((r) => r.name === rigArg) ?? rigs.find((r) => r.id === rigArg);
+        const rig = rigs.find((r) => r.id === rigArg) ?? rigs.find((r) => r.name === rigArg);
         if (!rig) return null;
         const rows = getNodeInventory(db, rig.id)
           .filter((e) => e.podNamespace === pod)
@@ -2370,6 +2379,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         ?? { code: "scope_unavailable", error: "The configured scope index is unavailable." },
       invalidateScopeView: () => scopeTasks?.invalidate(),
       listRigNames: () => rigRepo.listRigs().map((r) => r.name),
+      listRigs: () => rigRepo.listRigs().map(({ id, name }) => ({ id, name })),
       resolveHost: (id) => {
         const res = loadHostRegistry();
         if (!res.ok) return null;
@@ -2379,6 +2389,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       hasSession: (session) => tmuxAdapter.hasSession(session),
       // #707: local tiles run the tmux the daemon resolves, not whatever the provider's PATH finds.
       resolveLocalTmux: async () => (await probeRegistry.probeCli("tmux")).detectedPath,
+      rigViewersDir: nodePath.join(OPENRIG_HOME, "private", "terminal-rig-viewers"),
     });
   }
 
@@ -2493,6 +2504,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
         hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
         createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),
+        // #3076: at a queue-only seat a reminder is a note on its parked row or on the job's unclaimed cold row, or one
+        // cold row in the seat's queue with no nudge; never typed.
+        isQueueOnlySeat: isQueueOnlyGuardSeat,
+        createQueueRow: (row) => queueRepoInstance.create({ ...row, sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" })
+          .then(({ qitemId, state }) => ({ qitemId, state })),
+        resolveParkedRows: ({ jobId, targetSession }) => queueRepoInstance.parkedRowsOwnedBy(jobId, targetSession),
+        noteParkedRows: ({ owner, notes }) => queueRepoInstance.noteParkedRows(owner, notes),
+        noteQueuedRow: ({ jobId, destinationSession, note }) => queueRepoInstance.noteOpenWatchdogRow(jobId, destinationSession, note),
       }),
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
       // occupant_tenures) so a generation-bound wake is refused once the target has handed over.
@@ -2510,8 +2529,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       resolvePreDeliveryTerminalReason: ({ jobId }) =>
         queueRepoInstance.resolveWatchdogPreDeliveryTerminalReason(jobId),
       resolveQueueWait: (input) => queueRepoInstance.evaluateWaitReminder(input),
-      onWakeAttempt: ({ jobId, deliveryStatus, retryAt }) => {
-        queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus, retryAt);
+      onWakeAttempt: ({ jobId, deliveryStatus, retryAt, queuedQitemId, targetSession }) => {
+        queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus, retryAt, { queuedQitemId, targetSession });
       },
       // Due parked-row reminders for one seat in one scheduler pass go as one message.
       resolveDigestEntry: ({ jobId, message }) => queueRepoInstance.parkReminderDigestEntry(jobId, message),
@@ -2532,7 +2551,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           ensureStuckExceptionItem: workflowExceptionEnsurer,
           reconcileStuckExceptions: (id) => workflowRuntime?.reconcileStuckExceptions(id) ?? 0,
         }),
-        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService }),
+        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService, isQueueOnlySeat: isQueueOnlyGuardSeat }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation
@@ -2591,6 +2610,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
               queueRepoInstance.listOpenObligations(destinationSession, 500).map((r) => r.qitemId),
           },
           isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
+          isQueueOnlySeat: isQueueOnlyGuardSeat,
           retentionState: (sessionName) => {
             const target = resolveGuardTarget(db, sessionName);
             if (!target) return null;
@@ -2686,9 +2706,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // rigRepo.onRigCreated (wired below) runs the same ensure in the creation
     // act itself (the birth-property ruling) — no restart wait, no watcher.
     {
-      const ensureParkedOwnerJob = (rigName: string) => {
+      const parkedOwnerJob = (rigName: string) => {
         const anchor = makeRigAnchor(rigName);
-        watchdogJobsRepoInstance.ensureAutoRegistration({
+        return {
           policy: PARKED_OWNER_POLICY_NAME,
           targetSession: anchor,
           registeredBySession: "daemon@kernel",
@@ -2696,14 +2716,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
           specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
-        });
+        };
       };
       const rigRows = db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>;
-      for (const r of rigRows) ensureParkedOwnerJob(r.name);
+      // #3437: one rig's bad watchdog rows warn and never stop the daemon from starting.
+      for (const r of rigRows) {
+        watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(parkedOwnerJob(r.name), (message) => console.warn(message));
+      }
       // R2 repair — born-armed (advisor-ruled): a rig created after startup gets
       // its supervisor job in the same act that creates it, never at the next
       // daemon restart.
-      rigRepo.onRigCreated = (rig) => ensureParkedOwnerJob(rig.name);
+      rigRepo.onRigCreated = (rig) => {
+        watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates(parkedOwnerJob(rig.name), (message) => console.warn(message));
+      };
     }
 
     // OPR.0.5.6.1 — the two digest windows as idempotent watchdog jobs (AM-F1:
@@ -2711,7 +2736,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // SQLite schedule; a daemon down across a window flushes on the next tick).
     {
       const ensureDigestJob = (window: "4h" | "daily", intervalSeconds: number) => {
-        watchdogJobsRepoInstance.ensureAutoRegistration({
+        watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup({
           policy: "delivery-digest-flush",
           targetSession: `delivery-digest-${window}@kernel`,
           registeredBySession: "daemon@kernel",
@@ -2719,7 +2744,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
           specYaml: `policy: delivery-digest-flush\ntarget:\n  session: delivery-digest-${window}@kernel\ncontext:\n  window: ${window}\n`,
-        });
+        }, (message) => console.warn(message));
       };
       ensureDigestJob("4h", 4 * 60 * 60);
       ensureDigestJob("daily", 24 * 60 * 60);

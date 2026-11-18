@@ -29,6 +29,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, isBlockerLive } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -861,6 +862,118 @@ describe("parked reminders after a positive no-input quota rejection", () => {
   });
 });
 
+
+describe("a queue-only seat and the parked-owner reminder (#3076)", () => {
+  const queueOnly = (store: RowStore, q: boolean, history: WatchdogHistoryEntry[] = [], generation = "gen-1") =>
+    makeParkedOwnerConsumerPolicy({ ...makeDeps([parkedSeat()], store, history, () => generation), isQueueOnlySeat: () => q } as ParkedOwnerConsumerDeps);
+
+  it("types nothing: its open rows are the reminder, held once per occupant with no nudge result, never a failure", async () => {
+    const store = new RowStore();
+    const first = await queueOnly(store, true).evaluate(makeJob());
+    expect(first).toMatchObject({ action: "skip", notes: { skippedSeats: [{ seat: SEAT, why: "queue-only-seat" }] } });
+    expect(store.appended).toHaveLength(1);
+    expect(store.appended[0]!.note).toMatch(/^parked-owner wake held: .*; code queue_only_seat; input not_reached;/);
+    expect(store.appended[0]!.note.startsWith(FAILED_PREFIX)).toBe(false);
+    expect(store.nudges).toEqual([]);
+    expect(currentParkedOwnerNoInputFailure(store.deps().listTransitions(store.appended[0]!.qitemId))).toBeNull();
+    for (let i = 0; i < 20; i++) expect((await queueOnly(store, true).evaluate(makeJob())).action).toBe("skip");
+    expect(store.appended).toHaveLength(1);
+    // A new occupant is told once more; nothing is typed to it either.
+    expect((await queueOnly(store, true, [], "gen-2").evaluate(makeJob())).action).toBe("skip");
+    expect(store.appended).toHaveLength(2);
+    expect(store.nudges).toEqual([]);
+    // Leaving queue-only, the reminder types as before.
+    expect((await queueOnly(store, false).evaluate(makeJob())).action).toBe("send");
+  });
+
+  it("through the engine, the held reminder is one history row and one event, not one per scan", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const jobs = new WatchdogJobsRepository(db), history = new WatchdogHistoryLog(db);
+      const job = jobs.register({ policy: PARKED_OWNER_POLICY_NAME, targetSession: makeRigAnchor(RIG), intervalSeconds: 120,
+        registeredBySession: SEAT, specYaml: "interval_seconds: 120\n" });
+      const store = new RowStore();
+      const policy = makeParkedOwnerConsumerPolicy({ ...makeDeps([parkedSeat()], store), history, isQueueOnlySeat: () => true });
+      const typed: string[] = [];
+      const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(db), additionalPolicies: [policy],
+        deliver: async ({ targetSession }) => { typed.push(targetSession); return { status: "ok" }; } });
+      const events = () => (db.prepare("SELECT count(*) AS n FROM events WHERE type LIKE 'watchdog.evaluation_%'").get() as { n: number }).n;
+      for (let i = 0; i < 10; i++) await engine.evaluate(jobs.getByIdOrThrow(job.jobId));
+      expect(typed).toEqual([]);
+      expect(history.countForJob(job.jobId)).toBe(1);
+      expect(events()).toBe(1);
+      expect(store.appended).toHaveLength(1);
+    } finally { db.close(); }
+  });
+
+  it("a no-input failure recorded before the seat turned queue-only is superseded by the held note: no stuck-sweep finding", async () => {
+    const store = new RowStore();
+    await makeParkedOwnerConsumerPolicy({ ...makeDeps([parkedSeat()], store), isTerminalSeat: () => true }).evaluate(makeJob());
+    const row = store.appended[0]!.qitemId;
+    expect(currentParkedOwnerNoInputFailure(store.deps().listTransitions(row))).toMatchObject({ code: "terminal_seat" });
+    // The seat is now queue-only (and no longer bound to a terminal): its reminder is held, and the old refusal no longer
+    // says why input stopped, so the stuck sweep's parked-owner-no-input check finds nothing to report.
+    expect((await queueOnly(store, true).evaluate(makeJob())).action).toBe("skip");
+    expect(store.appended.at(-1)!.note.startsWith("parked-owner wake held:")).toBe(true);
+    expect(currentParkedOwnerNoInputFailure(store.deps().listTransitions(row))).toBeNull();
+  });
+
+  it("a bound terminal seat stays a terminal seat at queue-only: refused as one, never held", async () => {
+    const store = new RowStore();
+    const policy = makeParkedOwnerConsumerPolicy({ ...makeDeps([parkedSeat()], store), isQueueOnlySeat: () => true, isTerminalSeat: () => true });
+    expect(await policy.evaluate(makeJob())).toMatchObject({ action: "skip", notes: { skippedSeats: [{ seat: SEAT, why: "terminal-seat" }] } });
+    const notes = store.appended.map(({ note }) => note);
+    expect(notes.filter(n => n.startsWith(FAILED_PREFIX))).toEqual([expect.stringMatching(/; code terminal_seat; input not_reached;/)]);
+    expect(notes.some(n => n.startsWith("parked-owner wake held:"))).toBe(false);
+    expect(store.nudges.map(({ result }) => result)).toEqual([expect.stringMatching(/^failed:terminal-seat: /)]);
+  });
+
+  it("a reminder decided before the seat turned queue-only is held at delivery: no cold row, and on the row neither delivered nor failed", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const jobs = new WatchdogJobsRepository(db), history = new WatchdogHistoryLog(db);
+      const job = jobs.register({ policy: PARKED_OWNER_POLICY_NAME, targetSession: makeRigAnchor(RIG), intervalSeconds: 120,
+        registeredBySession: SEAT, specYaml: "interval_seconds: 120\n" });
+      const store = new RowStore();
+      // The policy still reads the seat as typed; by delivery its guard is at queue-only.
+      const level = { queueOnly: false };
+      const policy = makeParkedOwnerConsumerPolicy({ ...makeDeps([parkedSeat()], store), history, isQueueOnlySeat: () => level.queueOnly });
+      const typed: string[] = [];
+      const rows: string[] = [];
+      const deliver = makeWatchdogDeliver({ sessionTransport: { send: async (session: string) => { typed.push(session); return { ok: true }; } },
+        isQueueOnlySeat: () => true,
+        createQueueRow: async (row: { qitemId: string }) => { rows.push(row.qitemId); return { qitemId: row.qitemId, state: "pending" }; } } as never);
+      const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(db), additionalPolicies: [policy], deliver });
+      await engine.evaluate(jobs.getByIdOrThrow(job.jobId));
+      expect(typed).toEqual([]);
+      expect(rows).toEqual([]);
+      expect(history.listForJob(job.jobId, 1)[0]).toMatchObject({ outcome: "skipped", deliveryStatus: "retained" });
+      level.queueOnly = true;
+      await engine.evaluate(jobs.getByIdOrThrow(job.jobId));
+      const notes = store.appended.map(({ note }) => note);
+      expect(notes.filter(n => n.startsWith(DELIVERED_PREFIX) || n.startsWith(FAILED_PREFIX))).toEqual([]);
+      expect(notes.filter(n => n.startsWith("parked-owner wake held:"))).toHaveLength(1);
+      expect(store.nudges).toEqual([]);
+      expect(rows).toEqual([]);
+    } finally { db.close(); }
+  });
+
+  it("a reminder recorded as the row it became, or noted on a row, reached the seat: delivered, not a failure", async () => {
+    for (const status of ["queued_as_row", "noted_on_parked_row", "noted_on_queued_row"]) {
+      const store = new RowStore();
+      const first = await queueOnly(store, false).evaluate(makeJob());
+      const entry = sentHistory({ episodeKey: String(first.notes?.["episodeKey"]), primaryRow: String(first.notes?.["primaryRow"]), deliveryStatus: status });
+      entry.outcome = "sent";
+      await queueOnly(store, false, [entry]).evaluate(makeJob());
+      const notes = store.deps().listTransitions(String(first.notes?.["primaryRow"])).map(t => t.transitionNote ?? "");
+      expect(notes).toContain(`${DELIVERED_PREFIX} ${String(first.notes?.["episodeKey"])}`);
+      expect(notes.some(n => n.startsWith(FAILED_PREFIX))).toBe(false);
+      expect(store.nudges).toEqual([]);
+    }
+  });
+});
 
 describe("parked-owner machine marker position", () => {
   it.each([undefined, "attempted", "written"] as const)("keeps marker-shaped free text retryable with phase %s, including pruned history", async phase => {
