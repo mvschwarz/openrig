@@ -1,4 +1,4 @@
-import type { ProjectRead } from "./workspace/project-read.js";
+import { projectIds, type ProjectRead } from "./workspace/project-read.js";
 import type Database from "better-sqlite3";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
@@ -53,6 +53,8 @@ interface ViewShowOptions {
   limit?: number;
   mission?: string;
   project?: ProjectRead | null;
+  /** With `project`: every current and former id the catalogued projects claim. */
+  cataloguedProjectIds?: readonly string[];
 }
 
 export interface CustomView {
@@ -150,7 +152,8 @@ export class ViewProjector {
       }
       const build = () => {
         const deps = this.executionDeps!;
-        return buildExecutionView(opts?.project ? { ...deps, slicesRoot: () => opts.project!.missionsRoot } : deps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id })
+        return buildExecutionView(opts?.project ? { ...deps, slicesRoot: () => opts.project!.missionsRoot } : deps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id,
+          ...(opts?.project ? { projectIds: projectIds(opts.project), cataloguedProjectIds: opts.cataloguedProjectIds, aliasWarnings: opts.project.aliasWarnings } : {}) })
           .then(doc => ({ viewName: "execution" as const, generatedAt: this.now().toISOString(), rows: [doc], rowCount: 1 }));
       };
       // A caller inside a transaction keeps its uncommitted visibility: its build starts now, outside the queue.

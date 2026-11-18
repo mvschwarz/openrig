@@ -1,5 +1,9 @@
 import type Database from "better-sqlite3";
-import { ulid } from "ulid";
+import { monotonicFactory } from "ulid";
+
+// Increasing ids within a millisecond, so the readers' `history_id DESC` tiebreak is newest first for entries with
+// the same evaluated_at.
+const ulid = monotonicFactory();
 
 /**
  * Watchdog history log (PL-004 Phase C; append-only audit writer).

@@ -607,21 +607,26 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
   /** A queue-only seat on the real queue, transport and scheduler, wired as the daemon wires it. `afterResolve` runs
    *  inside the delivery once it has found the parked rows, `beforeCreate` before it creates a cold row; `saved` starts
    *  from a store kept by an earlier process. */
-  function queueOnly(opts: { afterResolve?: (rows: string[]) => void; beforeCreate?: () => void; saved?: Buffer } = {}) {
+  function queueOnly(opts: { afterResolve?: (rows: string[]) => void; beforeCreate?: () => void; afterCreate?: () => void; beforeNote?: () => void; saved?: Buffer } = {}) {
     const f = fixture(opts.saved);
     let repo!: QueueRepository;
     const deliver = makeWatchdogDeliver({ sessionTransport: f.transport, outbox: f.outbox, isQueueOnlySeat: name => name === seat || name === "other@test",
       createQueueRow: (row: Row) => {
         opts.beforeCreate?.();
-        return repo.create({ ...row, sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" } as never).then(r => ({ qitemId: r.qitemId, state: r.state }));
+        return repo.create({ ...row, sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" } as never).then(r => {
+          opts.afterCreate?.();
+          return { qitemId: r.qitemId, state: r.state };
+        });
       },
       resolveParkedRows: ({ jobId, targetSession }: { jobId: string; targetSession: string }) => {
         const rows = repo.parkedRowsOwnedBy(jobId, targetSession);
         opts.afterResolve?.(rows);
         return rows;
       },
-      noteParkedRows: (input: { owner: string; notes: Array<{ qitemId: string; jobId: string; note: string }> }) =>
-        repo.noteParkedRows(input.owner, input.notes),
+      noteParkedRows: (input: { owner: string; notes: Array<{ qitemId: string; jobId: string; note: string }> }) => {
+        opts.beforeNote?.();
+        return repo.noteParkedRows(input.owner, input.notes);
+      },
       noteQueuedRow: (input: { jobId: string; destinationSession: string; note: string }) =>
         repo.noteOpenWatchdogRow(input.jobId, input.destinationSession, input.note),
     } as never);
@@ -735,6 +740,22 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
       expect(notes(q, a.jobId).some(n => n.includes("\nreminder:"))).toBe(false);
     }
     expect(f.submissions).toEqual([]);
+  });
+
+  it("noteParkedRows reads each job's parked rows once, however many notes it carries, and notes only that job's rows", async () => {
+    const { s, parkWith, notes } = queueOnly();
+    const a = await s.park("A's wait");
+    const b = await parkWith("B attached", { wakeWatchdogId: a.jobId });
+    const c = await s.park("C's own wait");
+    const read = vi.spyOn((s.repo as unknown as { wakeRepo: { findCurrentParkRowsByWatchdog: (j: string, o: string) => string[] } }).wakeRepo,
+      "findCurrentParkRowsByWatchdog");
+    const note = (qitemId: string, jobId: string) =>
+      ({ qitemId, jobId, note: `park wake noted on this row: watchdog ${jobId}; delivery=noted_on_parked_row; nothing typed` });
+    expect(s.repo.noteParkedRows(seat, [note(a.qitemId, a.jobId), note(b.qitemId, a.jobId), note(c.qitemId, a.jobId), note(c.qitemId, c.jobId)]))
+      .toEqual([a.qitemId, b.qitemId, c.qitemId]);
+    expect(read.mock.calls.map(([jobId]) => jobId)).toEqual([a.jobId, c.jobId]);
+    expect([notes(a.qitemId, a.jobId), notes(b.qitemId, a.jobId), notes(c.qitemId, a.jobId), notes(c.qitemId, c.jobId)].map(n => n.length))
+      .toEqual([1, 1, 0, 1]);
   });
 
   it("a row that left its park and was parked again with no wake of its own is not that reminder's row: the fire is a cold row", async () => {
@@ -1059,7 +1080,25 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
     expect(noted === row.qitemId).toBe(hasNote);
   });
 
-  it("a cold row whose write was interrupted is reported as the reminder's queue row unconfirmed, never as typed input", async () => {
+  // A restart between the occurrence's claim and its queue write (#3418 review, point 2): the occurrence isn't ended. Its
+  // own row is its delivery; without one it's delivered again under the same id. Nothing is typed either way.
+  it("a park's one-shot wake whose note a restart interrupted is noted on its row after the restart, not spent", async () => {
+    let saved: Buffer | undefined;
+    let first!: ReturnType<typeof queueOnly>;
+    first = queueOnly({ beforeNote: () => { saved ??= first.f.db.serialize(); } });
+    const a = await first.s.park("A's wait");
+    await first.tick(a.jobId);
+    expect(saved).toBeDefined();
+    const next = queueOnly({ saved });
+    expect(next.notes(a.qitemId, a.jobId)).toHaveLength(0);
+    await next.tick(a.jobId);
+    expect(next.notes(a.qitemId, a.jobId)).toHaveLength(1);
+    expect(next.s.history.listForJob(a.jobId, 1)[0]).toMatchObject({ outcome: "sent", deliveryStatus: "noted_on_parked_row" });
+    expect(next.s.jobs.getByIdOrThrow(a.jobId).state).toBe("terminal");
+    expect(next.f.submissions).toEqual([]);
+  });
+
+  it("a cold row a restart interrupted before its write is created after the restart under the occurrence's id, never typed", async () => {
     let saved: Buffer | undefined;
     let first!: ReturnType<typeof queueOnly>;
     first = queueOnly({ beforeCreate: () => { saved ??= first.f.db.serialize(); } });
@@ -1067,13 +1106,64 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
     await first.tick(job.jobId);
     expect(saved).toBeDefined();
     const next = queueOnly({ saved });
-    next.s.due(job.jobId);
-    await next.s.scheduler.runTickNow();
-    const last = next.s.history.listForJob(job.jobId, 1)[0]!;
-    const reason = String((last.evaluationNotes as { deliveryReason?: string }).deliveryReason);
-    expect(reason).toContain("queue row is unconfirmed");
-    expect(reason).not.toContain("input is unconfirmed");
-    expect(String((last.evaluationNotes as { nextAction?: string }).nextAction)).not.toContain("input is unconfirmed");
+    expect(next.wdRows()).toEqual([]);
+    await next.tick(job.jobId);
+    const rows = next.wdRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.qitem_id).toMatch(/^qitem-watchdog-/);
+    expect(next.s.history.listForJob(job.jobId, 1)[0]).toMatchObject({ outcome: "sent", deliveryStatus: "queued_as_row" });
+    expect(next.f.submissions).toEqual([]);
+  });
+
+  it("a recovery stopped between its finalize and its queue receipt keeps the row pointer when it runs again", async () => {
+    let saved: Buffer | undefined;
+    let first!: ReturnType<typeof queueOnly>;
+    first = queueOnly({ afterCreate: () => { saved ??= first.f.db.serialize(); } });
+    const job = first.operatorReminder();
+    await first.tick(job.jobId);
+    expect(saved).toBeDefined();
+    const next = queueOnly({ saved });
+    const written = next.wdRows();
+    expect(written).toHaveLength(1);
+    // The recovery stops right after its finalize, before the queue receipt is saved.
+    const real = next.f.outbox.finalizeDelivery.bind(next.f.outbox);
+    let stop = true;
+    vi.spyOn(next.f.outbox, "finalizeDelivery").mockImplementation(((id: string, state: never) => {
+      const result = real(id, state);
+      if (stop) { stop = false; throw new Error("recovery stopped after its finalize"); }
+      return result;
+    }) as never);
+    await next.tick(job.jobId);
+    await next.tick(job.jobId);
+    expect(next.wdRows()).toEqual(written);
+    expect(next.s.history.listForJob(job.jobId, 1)[0]).toMatchObject({ outcome: "skipped", skipReason: "delivery_receipt_reconciled",
+      deliveryStatus: "queued_as_row" });
+    const receipt = next.f.db.prepare("SELECT delivery_state, guard_delivery FROM outbox_entries WHERE outbox_id LIKE 'watchdog-occurrence-%'").get() as
+      { delivery_state: string; guard_delivery: string };
+    expect(receipt.delivery_state).toBe("delivered");
+    expect(JSON.parse(receipt.guard_delivery).watchdog).toMatchObject({ queueOnly: { code: "queued_as_row", qitemId: written[0]!.qitem_id } });
+    expect(next.f.submissions).toEqual([]);
+  });
+
+  it("a cold row written just before a restart is recorded as the occurrence's row after it, with no second row", async () => {
+    let saved: Buffer | undefined;
+    let first!: ReturnType<typeof queueOnly>;
+    first = queueOnly({ afterCreate: () => { saved ??= first.f.db.serialize(); } });
+    const job = first.operatorReminder();
+    await first.tick(job.jobId);
+    expect(saved).toBeDefined();
+    const next = queueOnly({ saved });
+    const written = next.wdRows();
+    expect(written).toHaveLength(1);
+    await next.tick(job.jobId);
+    expect(next.wdRows()).toEqual(written);
+    // The delivery happened before the restart: the engine records the reconciled receipt, as for any other occurrence.
+    expect(next.s.history.listForJob(job.jobId, 1)[0]).toMatchObject({ outcome: "skipped", skipReason: "delivery_receipt_reconciled",
+      deliveryStatus: "queued_as_row" });
+    const receipt = next.f.db.prepare("SELECT delivery_state, guard_delivery FROM outbox_entries WHERE outbox_id LIKE 'watchdog-occurrence-%'").get() as
+      { delivery_state: string; guard_delivery: string };
+    expect(receipt.delivery_state).toBe("delivered");
+    expect(JSON.parse(receipt.guard_delivery).watchdog).toMatchObject({ queueOnly: { code: "queued_as_row", qitemId: written[0]!.qitem_id } });
     expect(next.f.submissions).toEqual([]);
   });
 });

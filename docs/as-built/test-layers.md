@@ -84,6 +84,16 @@ are not yet runnable checks.
   A test can still set its own
   overrides after setup. The UI suite (jsdom) uses its own `packages/ui/test/setup.ts`.
 
+  Close-all consumers explicitly create a registered private tmux scope. Their
+  real servers keep that stable environment through server cleanup. The suite
+  then removes its owned directory and retires its registration. This also
+  applies with a retained TMPDIR or a reused fixture home. Unrelated files get
+  no global per-test TMUX_TMPDIR replacement. A test-only TerminalService
+  wrapper checks raw socket paths, registered root identity and symlinks before
+  executor access. It rejects ambiguous selectors and unsupported inherited
+  TMUX forms. Rejected-path controls use inert executors. This boundary is a
+  fixture guard, not a live host audit or OS network isolation.
+
 - **Stale vendored daemon.** `npm run build:package` leaves an assembled copy of the daemon at
   `packages/cli/daemon/` (gitignored). If you change daemon source afterwards,
   `scripts/check-cli-daemon-freshness.test.mjs` inside `test:repo` can fail on the stale copy.
@@ -113,6 +123,7 @@ credentials are supplied.
 | `typecheck` | ubuntu | `npm run lint` |
 | `repo-checks` | ubuntu | `npm run test:repo` |
 | `package-tests` | matrix (fail-fast off): `daemon`, `cli` on macOS; `tui`, `ui` on ubuntu | Installs tmux, runs `npm ci` and `npm run build`, then `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. On macOS, a `sandbox-exec` profile blocks outbound network except localhost and the job's own socket directory, and `scripts/ci-macos-process-probe.mjs` runs first. On ubuntu, the suite runs as the unprivileged runner user in a network namespace with loopback only, as in `linux-seat-environment`. A network namespace does not confine pathname Unix sockets, so this is not the macOS sandbox. Each leg reports as `package-tests (<pkg>)`. |
+| `daemon-ubuntu` | ubuntu | The full daemon suite again, beside the unchanged macOS `package-tests (daemon)`, under the same Linux confinement as the ubuntu `package-tests` legs. It adds evidence and replaces no macOS coverage. The job installs only apt's tmux: when that tmux predates control mode (3.7c), or zsh or ksh is absent, those tests skip, and when `/bin/sh` does not expand `~` in `PATH` (dash does not), that test skips too. `scripts/ci-vitest-summary.mjs` writes the counts to the job summary, then failed files and each failed, skipped or todo test with its file and line, up to 300 rows per section; the uploaded `daemon-ubuntu-results` artifact holds that summary and the complete vitest JSON report. Runs on pull requests and manual dispatch. |
 | `linux-seat-environment` | ubuntu | Builds all packages, then runs `seat-env-parent-session.integration.test.ts` with real CLI, daemon, tmux and stub seats. A network namespace has loopback only; tests run as the unprivileged runner user under `env -i` with scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. Runs on pull requests and manual dispatch, like `package-tests`. |
 | `installed-scenario` | ubuntu | `bash scripts/run-pr-scenarios.sh` (fifteen container runs, described below). Uploads `dist/pr-scenarios/` as `installed-scenario-evidence`, including on failure. |
 

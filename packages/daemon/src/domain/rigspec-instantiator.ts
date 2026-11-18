@@ -1,6 +1,7 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { isLaunchWrapperRuntime, sameLaunchWrapper } from "./launch-wrapper.js";
 import { effectiveProcessLimits } from "./process-limits.js";
+import { memberPoolBlock } from "./seat-pool-spec.js";
 import nodePath from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
@@ -138,6 +139,7 @@ export class RigInstantiator {
             codexPermissions: specNode.codexPermissions,
             launchWrapper: specNode.launchWrapper,
             processLimits: effectiveProcessLimits(specNode.processLimits),
+            statuslineThrottle: specNode.statuslineThrottle || null,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -961,6 +963,8 @@ export class PodRigInstantiator {
           processLimits: live.processLimitsError ? undefined : live.processLimits ? { ...live.processLimits } : {},
           codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
+          // #3395: the first start keeps the stored pool block, as an ordinary launch does.
+          pool: undefined, unusablePool: undefined,
           permissionPolicy: undefined },
         effortChoice: live.effortChoice ?? null, env: this.deps.rigRepo.getRigEnv(rigId),
         policyRef: live.permissionPolicy ?? null, rigPolicyRef: this.deps.rigRepo.getRigPermissionPolicy(rigId),
@@ -1376,7 +1380,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1751,6 +1755,8 @@ export class PodRigInstantiator {
             codexPermissions: member.codexPermissions,
             launchWrapper: member.launchWrapper,
             processLimits: effectiveProcessLimits(member.processLimits),
+            statuslineThrottle: member.statuslineThrottle || null,
+            pool: memberPoolBlock(member),
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2057,6 +2063,7 @@ export class PodRigInstantiator {
           label: member.label,
           // #3253: stored with the node, as for agent members, so a seat that never launches still shows its request.
           processLimits: effectiveProcessLimits(member.processLimits),
+          pool: memberPoolBlock(member),
         });
         recordCreated?.(rigId, node.id);
         return node.id;
@@ -2152,6 +2159,8 @@ export class PodRigInstantiator {
       codexPermissions: input.member.codexPermissions,
       launchWrapper: input.member.launchWrapper,
       processLimits: effectiveProcessLimits(input.member.processLimits),
+      statuslineThrottle: input.member.statuslineThrottle || null,
+      pool: memberPoolBlock(input.member),
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
@@ -2302,6 +2311,9 @@ export class PodRigInstantiator {
       // #3253: an unreadable stored value stays as stored (undefined keeps it, {} would clear it).
       processLimits: node.processLimitsError ? undefined : node.processLimits ? { ...node.processLimits } : {},
       claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
+      // #3395: a launch from the recipe never re-applies the recipe's pool block over the one stored since.
+      pool: undefined,
+      unusablePool: undefined,
       ...(node.model !== null ? { model: node.model } : {}),
       ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
       ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
@@ -2663,6 +2675,14 @@ export class PodRigInstantiator {
     if (input.member.processLimits !== undefined) {
       this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
     }
+    // #3416 (3): the launch reads the throttle, so the authored value is written first; 0 clears; absent keeps.
+    if (input.member.statuslineThrottle !== undefined) {
+      this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
+    }
+    // #3395: the pool block is stored where re-applied settings are; `{}` clears it, a block that can't be used is kept
+    // as authored (it holds that pool), and an absent key leaves it unchanged.
+    const pool = memberPoolBlock(input.member);
+    if (pool !== undefined) this.deps.rigRepo.setNodePool(input.nodeId, pool);
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, {
       sessionName: canonicalSessionName,
       ...(input.createCwd ? { createCwd: true } : {}),
@@ -3028,6 +3048,14 @@ export class PodRigInstantiator {
     if (input.member.processLimits !== undefined) {
       this.deps.rigRepo.setNodeProcessLimits(input.nodeId, effectiveProcessLimits(input.member.processLimits) ?? null);
     }
+    // #3416 (3): the launch reads the throttle, so the authored value is written first; 0 clears; absent keeps.
+    if (input.member.statuslineThrottle !== undefined) {
+      this.deps.rigRepo.setNodeStatuslineThrottle(input.nodeId, input.member.statuslineThrottle || null);
+    }
+    // #3395: the pool block is stored where re-applied settings are; `{}` clears it, a block that can't be used is kept
+    // as authored (it holds that pool), and an absent key leaves it unchanged.
+    const pool = memberPoolBlock(input.member);
+    if (pool !== undefined) this.deps.rigRepo.setNodePool(input.nodeId, pool);
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, ...(input.createCwd ? { createCwd: true } : {}),
       ...(input.launchCwd ? { cwd: input.launchCwd } : {}), env: input.envOverride,
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });

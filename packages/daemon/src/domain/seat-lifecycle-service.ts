@@ -1,3 +1,4 @@
+import { validateStatuslineThrottle } from "./claude-statusline-throttle.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { claudeAutoModeAdvisories, readClaudeAutoMode, validateClaudeAutoMode } from "./claude-auto-mode.js";
@@ -58,8 +59,8 @@ import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
 import { resolveSeatKind, seatProcessOwner } from "./seat-kinds.js";
-import { recordedProcessStillRunning } from "./reconciler.js";
-import { readProcessTable, type ProcessTableRow } from "./process-table.js";
+import { recordedProcessEnded, recordedProcessStillRunning } from "./reconciler.js";
+import { readProcessTable, readProcessTableCensusNow, type ProcessTableCensus, type ProcessTableRow } from "./process-table.js";
 import { applySelectedHome, readRuntimeHomeState, recordRuntimeHome, revertSelectedHome, RECORDABLE_HOME_RUNTIMES, type RecordRuntimeHomeResult, type RuntimeHomeRecordRef,
   type RuntimeHomeState, type SelectedHomePlan } from "./seat-runtime-home-record.js";
 
@@ -119,6 +120,8 @@ export interface SeatLifecycleDeps {
   listProcesses?: NativeProcessLister;
   /** The OS process table, read before reopening a released seat's tmux server; injectable for tests. */
   readProcesses?: () => Promise<ProcessTableRow[]>;
+  /** A census begun now, with the pids hidden from this user, read before reopening a detached seat's server; injectable for tests. */
+  readProcessCensus?: () => Promise<ProcessTableCensus>;
   nodeLauncher?: NodeLauncher;
   startupOrchestrator?: StartupOrchestrator;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
@@ -191,6 +194,9 @@ export interface SeatRefusal {
     | "selection_changed"
     | "stop_uncertain"
     | "missing_permissions_to"
+    | "invalid_statusline_throttle"
+    | "statusline_throttle_unsupported_runtime"
+    | "statusline_throttle_unavailable"
     /** #3253: an explicit fresh launch whose process limit can't be applied, refused before anything is stopped. */
     | ProcessLimitsCode
     | "runtime_home_unsupported"
@@ -256,6 +262,11 @@ export interface EffortReport {
   precedence: { decided: boolean; detail: string };
   summary: string;
 }
+
+/** #3416 (3): the result of `rig seat set-statusline-throttle`. */
+export type SetStatuslineThrottleResult =
+  | { ok: true; seat: SeatDescriptor; from: number | null; to: number | null; changed: boolean; effect: string }
+  | SeatRefusal;
 
 export type SetEffortResult =
   | {
@@ -345,6 +356,7 @@ interface LatestSessionRow {
   session_name: string;
   status: string;
   origin: string;
+  created_at?: string | null;
   community_harness?: string | null;
 }
 
@@ -371,6 +383,7 @@ export class SeatLifecycleService {
   private readonly tmuxAdapter: TmuxAdapter;
   private readonly listProcesses?: NativeProcessLister;
   private readonly readProcesses: () => Promise<ProcessTableRow[]>;
+  private readonly readProcessCensus: () => Promise<ProcessTableCensus>;
   private readonly nodeLauncher: NodeLauncher | null;
   private readonly startupOrchestrator: StartupOrchestrator | null;
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
@@ -394,6 +407,7 @@ export class SeatLifecycleService {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.listProcesses = deps.listProcesses;
     this.readProcesses = deps.readProcesses ?? readProcessTable;
+    this.readProcessCensus = deps.readProcessCensus ?? readProcessTableCensusNow;
     this.nodeLauncher = deps.nodeLauncher ?? null;
     this.startupOrchestrator = deps.startupOrchestrator ?? null;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
@@ -757,6 +771,49 @@ export class SeatLifecycleService {
       emitted: "not_yet", observed: "not_observed", effect,
       ...(unknownLevelWarning(runtime, requested) ? { warning: unknownLevelWarning(runtime, requested) } : {}),
     };
+  }
+
+  /** #3416 (3): save (or, with null, clear) a Claude seat's status line throttle for its next launch, resume or restore.
+   *  Validated and written with an audited event in one transaction; it never restarts the seat. */
+  setStatuslineThrottle(input: SeatSettingTarget & { seconds: number | null; reason: string; operator?: string | null }): SetStatuslineThrottleResult {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    if (input.seconds !== null) {
+      try { validateStatuslineThrottle(input.seconds, "--seconds"); }
+      catch (error) { return { ok: false, code: "invalid_statusline_throttle", message: (error as Error).message }; }
+    }
+    const resolved = this.resolveSettingTarget(input);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const runtime = resolved.entry.runtime ?? "unknown";
+    if (runtime !== "claude-code") {
+      return { ok: false, code: "statusline_throttle_unsupported_runtime", message: `Seat "${this.settingTargetLabel(input)}" runs ${runtime}; the status line throttle applies to claude-code seats only.` };
+    }
+    const from = this.rigRepo.getNodeStatuslineThrottle(seat.nodeId);
+    let changed = false;
+    if (from !== input.seconds) {
+      let persisted: PersistedEvent | null = null;
+      let saveError: string | null = null;
+      this.db.transaction(() => {
+        try { changed = this.rigRepo.setNodeStatuslineThrottle(seat.nodeId, input.seconds); }
+        catch (error) { saveError = (error as Error).message; return; }
+        if (!changed) return;
+        persisted = this.eventBus.persistWithinTransaction({
+          type: "node.statusline_throttle_changed", rigId: seat.rigId, nodeId: seat.nodeId, logicalId: seat.logicalId,
+          from, to: input.seconds, reason: input.reason.trim(), operator: input.operator ?? null,
+        });
+      })();
+      if (saveError) return { ok: false, code: "statusline_throttle_unavailable", message: `${saveError}; nothing was saved.` };
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      if (!changed) {
+        return { ok: false, code: "statusline_throttle_unavailable", message: `The status line throttle for seat "${this.settingTargetLabel(input)}" was not saved (no node row was updated); nothing changed.` };
+      }
+    }
+    const effect = (input.seconds === null
+      ? "Cleared: the seat's status line runs the context collector on every update again"
+      : `Saved: the seat's status line runs the context collector at most once every ${input.seconds} s`)
+      + " from its next launch, resume or restore. The running process is unchanged; nothing was restarted.";
+    return { ok: true, seat, from, to: input.seconds, changed, effect };
   }
 
   /** OPR.0.7.0.7 — requested, saved, emitted at launch and observed in the native session, each from
@@ -1730,21 +1787,49 @@ export class SeatLifecycleService {
         && ((latest.status === "exited" && latest.origin !== "claimed") || released)
         && !hasCurrentBinding
         && this.nonTerminalSessions(node.id).length === 0;
-      // Unclaim doesn't end the process. While the released session's recorded process still runs, its server may
-      // only have lost its socket: a server started there would read the session absent and launch a second occupant
-      // beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
-      const stillRuns = stoppedManagedOccupant && released
-        ? await recordedProcessStillRunning(this.db, { nodeId: node.id, sessionName: canonicalSessionName },
-          () => this.readProcesses().catch(() => null))
-        : null;
+      // A host restart ends tmux with every seat in it, and the daemon's boot reconcile marks those managed sessions
+      // detached while keeping their bindings. Nothing was stopped on purpose, so "no server running" alone isn't
+      // absence: the server may only have lost its socket. Reopen an empty server for that row only on positive
+      // evidence that the seat's recorded process has ended (recordedProcessEnded: a census; hidden pids, evidence older
+      // than this session and evidence that changed while the census ran count as unknown); unknown keeps the refusal. Its binding stays for the stale-row clean
+      // below, which proves absence again on the reopened server. Limit: only the last recorded process is proven; a
+      // replacement no poll ever saw, followed by a lost socket, is outside this proof.
+      const detachedManaged = latest !== null
+        && latest.session_name === canonicalSessionName
+        && latest.status === "detached" && latest.origin !== "claimed"
+        && this.nonTerminalSessions(node.id).length === 0;
+      const table = stoppedManagedOccupant && released ? this.readProcesses().catch(() => null) : null;
+      const detachedUnstopped = detachedManaged && !stoppedManagedOccupant;
+      // Begun when first asked, so after recordedProcessEnded has read the evidence it tests.
+      let census: Promise<ProcessTableCensus | null> | undefined;
+      const readCensus = () => census ??= this.readProcessCensus().catch(() => null);
+      const session = { nodeId: node.id, sessionName: canonicalSessionName };
+      const detachedEnded = detachedUnstopped
+        && await recordedProcessEnded(this.db, { ...session, createdAt: latest?.created_at }, readCensus);
+      const processes = () => table ?? readCensus().then((read) => read ? read.rows : null);
+      // Unclaim doesn't end the process. While the released (or detached) session's recorded process still runs, its
+      // server may only have lost its socket: a server started there would read the session absent and launch a second
+      // occupant beside it. So keep the refusal, as the reconciler keeps such a session (the same evidence).
+      const stillRuns = table || (detachedUnstopped && !detachedEnded)
+        ? await recordedProcessStillRunning(this.db, session, processes) : null;
       if (stillRuns) {
         return {
           ...canonicalProbe,
-          guidance: `This seat's released session last ran as process ${stillRuns.pid}, which is still running, so it may be `
+          guidance: `This seat's ${released ? "released" : "detached"} session last ran as process ${stillRuns.pid}, which is still running, so it may be `
             + "on a tmux server this daemon can't reach. End that process, then launch again.",
         };
       }
-      if (stoppedManagedOccupant) {
+      if (detachedUnstopped && !detachedEnded) {
+        return {
+          ...canonicalProbe,
+          guidance: "This seat's detached session has no proof its recorded process ended (no process evidence for it since "
+            + "this session began, process evidence recorded while the process table was read, a recorded process hidden "
+            + "from this daemon, or the process table can't be read), so a "
+            + "server that only lost its socket can't be ruled out. Start the "
+            + "terminal server once the seat is known to be gone, then launch again.",
+        };
+      }
+      if (stoppedManagedOccupant || detachedEnded) {
         try {
           const restored = await this.tmuxAdapter.startServer();
           if (restored.ok) {
@@ -2506,7 +2591,7 @@ export class SeatLifecycleService {
 
   private latestSession(nodeId: string): LatestSessionRow | null {
     const row = this.db.prepare(
-      `SELECT id, session_name, status, origin, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
+      `SELECT id, session_name, status, origin, created_at, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(nodeId) as LatestSessionRow | undefined;
     return row ?? null;
   }

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join as pathJoin, isAbsolute as pathIsAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
+import type { TerminalServerObservation } from "../domain/terminal-server-reachability.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
@@ -172,6 +173,13 @@ export type SessionProbe =
 /** Positive server absence in this adapter's namespace; match the diagnostic line, never a path or command fragment. */
 export function probeShowsNoServer(probe: { state: string; cause?: string }): boolean {
   return probe.state === "transport_unavailable" && /^no server running on /.test(tmuxDiagnosticStart(probe.cause ?? ""));
+}
+
+/** The first line of tmux's own diagnostic for a lost server, for a log line or a status field. */
+function serverDiagnostic(error: unknown): string {
+  const reported = tmuxReportedError(error);
+  const message = reported instanceof Error ? reported.message : String(reported);
+  return tmuxDiagnosticStart(message).split(/\r?\n/, 1)[0]!.trim();
 }
 
 /** Injected executors may retain exec's one-line command wrapper instead of stderr. */
@@ -649,11 +657,14 @@ function createdIdentity(printed: string): CreatedIdentity | null {
   return m ? { pane: m[1]!, session: m[2]!, server: { pid: m[3]!, start: m[4]! } } : null;
 }
 
-/** A command that ended by SIGKILL: the signal itself (the shell replaced by the command) or 137 (128 + 9, from a shell
+/** How a command that ended by SIGKILL was reported, in words that name only that, or null when it didn't end that way:
+ *  the signal itself (the shell replaced by the command; no exit code) or the exit status 137 (128 + 9, from a shell
  *  that ran it, or from timeout, which exits that way when the command it ran was killed). */
-function killedBySigkill(error: unknown): boolean {
+function sigkillSeen(error: unknown): string | null {
   const e = error as { code?: unknown; signal?: unknown };
-  return e.signal === "SIGKILL" || e.code === 137;
+  if (e.code === 137) return "exited with status 137 (128 + SIGKILL)";
+  if (e.signal === "SIGKILL") return "was killed by SIGKILL (no exit code)";
+  return null;
 }
 
 /** A check's failure, classified (#3253): `unsupported` only on a positive answer that the facility is not there. */
@@ -1002,9 +1013,10 @@ export class TmuxAdapter {
         // That does not say which process died nor why (the OOM killer at that MemoryMax=, the host's OOM killer,
         // systemd-oomd, a manual kill, or before the scope was entered), and the scope that could tell (its memory.events
         // `oom`) is collected with it. So it says only what was seen, names the limit and stays retryable (unverified).
-        if (limits.memoryMax !== undefined && killedBySigkill(error)) {
+        const sigkill = sigkillSeen(error);
+        if (limits.memoryMax !== undefined && sigkill !== null) {
           return { ok: false, problem: { kind: "unverified", limit: "memory_max",
-            reason: `the probe command ended with SIGKILL (exit 137) under the requested MemoryMax=${limits.memoryMax}; ` +
+            reason: `the probe command ${sigkill} under the requested MemoryMax=${limits.memoryMax}; ` +
               "the process and the cause aren't confirmed; a larger memory_max may help" } };
         }
         return { ok: false, problem: classifyScopeFailure(error, "a throwaway seat scope") };
@@ -1362,6 +1374,14 @@ export class TmuxAdapter {
     return null;
   }
 
+  /** #3315: told what each classified probe of this adapter's server showed (reachable, or the no-server/socket
+   *  diagnostic). The daemon records only changes (terminal-server-reachability.ts); an observer error never changes
+   *  the probe's own result. */
+  serverObserver?: (observation: TerminalServerObservation) => void;
+  private noteServer(observation: TerminalServerObservation): void {
+    try { this.serverObserver?.(observation); } catch { /* reporting only */ }
+  }
+
   private inputGuard?: SeatDeliveryGuard;
   get deliveryGuard(): SeatDeliveryGuard | undefined { return this.inputGuard; }
   set deliveryGuard(guard: SeatDeliveryGuard | undefined) {
@@ -1695,9 +1715,16 @@ export class TmuxAdapter {
     try {
       const output = await this.run(["tmux", "list-sessions", "-F", SESSION_FORMAT],
         `tmux list-sessions -F "${SESSION_FORMAT}"`);
+      this.noteServer({ reachable: true });
       return parseLines(output, parseSessionLine);
     } catch (err) {
-      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
+      // Classified from what tmux reported (its stderr when the exec kept it), as probeSession does: the wrapper's
+      // "Command failed:" line and stdout never decide it. Unknown and permission errors still throw the original.
+      const error = tmuxReportedError(err);
+      if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
+        return [];
+      }
       throw err;
     }
   }
@@ -1762,13 +1789,16 @@ export class TmuxAdapter {
       const target = `=${name}`; // canonical session name, never a prefix lookup
       await this.run(["tmux", "has-session", "-t", target],
         `tmux has-session -t ${shellQuote(target)}`);
+      this.noteServer({ reachable: true });
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       const error = tmuxReportedError(err);
       if (isSessionAbsenceError(error)) {
+        this.noteServer({ reachable: true }); // the server answered: the session is what is missing
         return { state: "absent" };
       }
       if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
         return { state: "transport_unavailable", cause: (error as Error).message };
       }
       throw err;

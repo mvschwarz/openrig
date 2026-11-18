@@ -12,6 +12,7 @@ import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { isPerSeatRoleGuidance, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { guidanceFileSharedByLink } from "../domain/restore-guidance.js";
+import { insideMissingFolder } from "../domain/cwd-resolution.js";
 import type { TmuxAdapter } from "./tmux.js";
 import { paneAtShell, type OmpLaunchFsOps, type OmpSeatLauncher } from "./omp-seat-launch.js";
 import { ompPluginDirName, type OmpSeatState } from "./omp-seat-protocol.js";
@@ -19,6 +20,7 @@ import { insideSeatStorageFolder, seatSkillWriteRefusal } from "../domain/seat-s
 import { compileOmpPluginHooks, type OmpPluginHookPlan } from "../domain/omp-plugin-hooks.js";
 
 export interface OmpAdapterFsOps extends OmpLaunchFsOps {
+  folderPresent?(path: string): boolean;
   copyFile(source: string, destination: string): void;
   statMode?(path: string): number;
   chmod?(path: string, mode: number): void;
@@ -243,8 +245,8 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
         switch (hint) {
           case "guidance_merge": {
             // Additive context: OMP's own system prompt is never replaced.
-            const targetPath = this.guidanceTarget(binding, warnings);
-            if (!targetPath) continue; // not written through a link: not counted as delivered
+            const targetPath = this.guidanceTarget(binding, warnings, file.path);
+            if (!targetPath) continue;
             if (!this.mergeGuidance(targetPath, file.path, content, warnings)) continue; // a seat's own role: sent as text
             break;
           }
@@ -416,11 +418,14 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
-  /** The file this launch merges guidance into: the one its startup chose (guidanceFileFor, or a restore's saved
-   *  choice), else the repository AGENTS.md in the managed cwd. Null when a chosen file has since become a link:
-   *  nothing is written through it, and nothing falls back to the repository file. */
-  private guidanceTarget(binding: NodeBinding, warnings: string[]): string | null {
-    if (!binding.guidanceFile) return nodePath.join(binding.cwd, "AGENTS.md");
+  /** A restored seat may still have its agent folder even when its former project folder is missing. */
+  private guidanceTarget(binding: NodeBinding, warnings: string[], blockId: string): string | null {
+    const target = binding.guidanceFile ?? nodePath.join(binding.cwd, "AGENTS.md");
+    if (this.fs.folderPresent && insideMissingFolder(target, binding.cwd, this.fs.folderPresent)) {
+      warnings.push(`${blockId}: not written, because ${binding.cwd} doesn't exist on this machine`);
+      return null;
+    }
+    if (!binding.guidanceFile) return target;
     const linked = guidanceFileSharedByLink(binding.guidanceFile, (path) => this.fs.linkInfo?.(path) ?? null);
     if (!linked) return binding.guidanceFile;
     warnings.push(`omp: ${linked} is now a link, so this seat's managed guidance wasn't written to ${binding.guidanceFile}, which other sessions could read`);
@@ -429,7 +434,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
 
   private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[]): boolean {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
-      const targetPath = this.guidanceTarget(binding, warnings);
+      const targetPath = this.guidanceTarget(binding, warnings, entry.effectiveId);
       if (!targetPath) return false;
       return this.mergeGuidance(targetPath, entry.effectiveId, this.fs.readFile(entry.absolutePath), warnings, entry.absolutePath);
     }
