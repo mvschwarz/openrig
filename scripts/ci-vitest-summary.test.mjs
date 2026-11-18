@@ -38,8 +38,18 @@ test("lists every test that did not pass, with its file and line", () => {
   assert.match(text, /### Skipped or todo: these did not run \(2\)/);
   assert.match(text, /- `packages\/daemon\/test\/a\.test\.ts:11` a needs zsh \(skipped\)/);
   assert.match(text, /- `packages\/daemon\/test\/a\.test\.ts:15` a later \(todo\)/);
+  assert.match(text, /### Failed files, including load and hook errors \(2\)/);
+  assert.match(text, /- `packages\/daemon\/test\/a\.test\.ts` failed; see its failed tests$/m);
   assert.match(text, /- `packages\/daemon\/test\/broken\.test\.ts` Failed to load url \.\/missing\.js$/m);
   assert.doesNotMatch(text, /a passes/);
+});
+
+test("lists a failed file whose assertions all passed, as an afterAll failure leaves it", () => {
+  const text = summarize({ testResults: [{ name: "/repo/hook.test.ts", status: "failed",
+    message: "afterAll cleanup failed\n    at stack",
+    assertionResults: [{ fullName: " hook passes", status: "passed", location: { line: 4, column: 1 } }] }] }, root);
+  assert.match(text, /^Files: 1\. Tests: 1 passed, 0 failed, 0 skipped, 0 todo\.$/m);
+  assert.match(text, /### Failed files, including load and hook errors \(1\)\n\n- `hook\.test\.ts` afterAll cleanup failed$/m);
 });
 
 test("counts an unexpected status instead of dropping it", () => {

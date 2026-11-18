@@ -192,8 +192,8 @@ jobs:
     if: ${{ github.event_name != 'push' }}
     # The full daemon suite on Ubuntu, beside `package-tests (daemon)` on macOS, which is unchanged.
     # It adds evidence and replaces no macOS coverage. Confinement is package-tests' Linux one.
-    # Ubuntu's tmux predates control mode and zsh and ksh are not installed, so those tests skip
-    # here; the summary and the daemon-ubuntu-results artifact list every test that did not run.
+    # Tests needing tmux control mode, zsh or ksh skip when the runner lacks them; the job summary
+    # lists the tests that did not run and the daemon-ubuntu-results JSON report has them all.
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:

@@ -1,5 +1,6 @@
 // Summarise a vitest JSON report (--reporter=json --includeTaskLocation) as Markdown:
-// counts by status, then every test that did not pass, with its file and line.
+// counts by status, then each failed file and each test that did not pass, with its file
+// and line, up to LIST_LIMIT rows per section (the JSON report keeps the complete list).
 // Skipped and todo tests are listed by name so they are never read as passes.
 // Exits non-zero only when the report is missing or unreadable; the suite step
 // carries the test result itself.
@@ -19,14 +20,15 @@ function section(title, rows) {
 export function summarize(report, root = process.cwd()) {
   const files = report.testResults ?? [];
   const counts = { passed: 0, failed: 0, skipped: 0, todo: 0, other: 0 };
-  const brokenFiles = [];
+  const failedFiles = [];
   const failed = [];
   const notRun = [];
   for (const file of files) {
     const path = relative(root, file.name);
     const tests = file.assertionResults ?? [];
-    if (file.status === "failed" && tests.length === 0) {
-      brokenFiles.push([path, (file.message || "failed without a test result").split("\n")[0]]);
+    // A file can fail with every assertion passing (a load error, or an afterAll hook), so list it on its own.
+    if (file.status === "failed") {
+      failedFiles.push([path, (file.message || "failed; see its failed tests").split("\n")[0]]);
     }
     for (const test of tests) {
       const where = test.location ? `${path}:${test.location.line}` : path;
@@ -46,7 +48,7 @@ export function summarize(report, root = process.cwd()) {
     `${counts.skipped} skipped, ${counts.todo} todo${counts.other ? `, ${counts.other} other` : ""}.`;
   return [
     totals,
-    ...section("Files that failed without a test result", brokenFiles),
+    ...section("Failed files, including load and hook errors", failedFiles),
     ...section("Failed", failed),
     ...section("Skipped or todo: these did not run", notRun),
   ].join("\n") + "\n";
