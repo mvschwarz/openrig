@@ -6099,6 +6099,8 @@ export class QueueRepository {
       : end.kind === "handed-to-hook" ? "bridged:handed-to-hook"
       : end.kind === "not-delivered" ? "failed:hook_bridge_not_delivered"
       : "indeterminate:hook_bridge_claimed_unacked";
+    const intent = this.outbox?.getById(end.outboxId);
+    if (intent && this.wakeOutcomeStale(intent)) return;
     this.recordNudgeAttempt(qitemId, result);
   }
 

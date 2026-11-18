@@ -776,6 +776,17 @@ describe("QueueRepository", () => {
       }
     });
 
+    it("A hook-bridge end for a wake a reroute replaced does not overwrite the row's wake result; the current wake's end does.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+      repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", wake: true });
+      const [current] = fallbackWakes(item.qitemId);
+      repo.recordNudgeAttempt(item.qitemId, "verified");
+      repo.recordBridgedWakeEnd(item.qitemId, { outboxId: `wake-intent-${item.qitemId}`, auditPointer: item.qitemId, kind: "not-delivered" });
+      expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified");
+      repo.recordBridgedWakeEnd(item.qitemId, { outboxId: current!.outbox_id, auditPointer: item.qitemId, kind: "not-delivered" });
+      expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("failed:hook_bridge_not_delivered");
+    });
+
     it("A wake on a row that is not pending is refused with `wake_not_admitted`, and nothing moves.", async () => {
       const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
       repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
