@@ -33,9 +33,14 @@ npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs --s
 npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs --skill rigs --agent pi
 ```
 
-Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP (after `/reload-plugins` if OMP was already open), and say what you want built. The skill has your agent tell
-you what it will run and change before it does, install OpenRig, open the OpenRig view and pass your goal to
-OpenRig's operator. If Claude Code was already running when you added the skill, type `/reload-skills` first, or start
+**OMP:** this pin installs the shared skill only. The `v0.7.18` skill does not yet include OMP attachment guidance,
+and complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+signed in.
+
+Then type `/rigs` in Claude Code, `$rigs` in Codex, or `/skill:rigs` in OMP (after `/reload-plugins` if OMP was already
+open), and say what you want built. The skill has your agent tell you what it will run and change before it does,
+install OpenRig, open the OpenRig view and pass your goal to OpenRig's operator. If Claude Code was already running
+when you added the skill, type `/reload-skills` first, or start
 a new session: a session doesn't see a skills folder created after it started.
 
 You need Node.js 22 or 24 (22 on Apple silicon), tmux, macOS or Linux (WSL2 on Windows), and Claude Code or Codex

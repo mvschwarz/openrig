@@ -194,6 +194,11 @@ npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" -
 npx skills add "https://github.com/mvschwarz/openrig/tree/v0.7.18/skills/rigs" --skill rigs --agent pi
 ```
 
+**OMP:** this pin installs the shared skill only. The `v0.7.18` skill does not yet include OMP attachment guidance,
+and complete setup from OMP has not been verified. OMP isn't a kernel provider; Claude Code or Codex must still be
+signed in. To invoke the skill in OMP, type `/skill:rigs`; if OMP was already open when you installed it, type
+`/reload-plugins` first.
+
 If OpenRig is already installed, use the release tag matching your installed `rig --version` instead: replace the tag
 after `tree/` with it, including its `v` prefix. `rig --version` prints the version and a commit, for example
 `0.6.11 (379f0a0d)`; the tag is `v0.6.11`. The skill is in the repository from v0.6.6; on an older install, use the
