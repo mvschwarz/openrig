@@ -70,16 +70,33 @@ describe("remoteUpLeaf — the shipped POST /api/up transport", () => {
     expect(JSON.parse(String(capture.init?.body))).toEqual({ sourceRef: "specs/factory.yaml", autoApprove: true });
   });
 
-  it("a 200 partial bootstrap reports a failed entry with the failed-seat reason", async () => {
+  it("a 200 mixed bootstrap retains separate failed-seat identity and unprefixed reason", async () => {
     const res = await remoteUpLeaf(
       { sourceRef: "specs/factory.yaml" },
       HOST_FILE,
-      { readFile: () => "tok-123\n", fetchImpl: fetchStub(200, { status: "partial", errors: ["main.seat: pi launch failed: the runner exited (code 1)"] }) },
+      { readFile: () => "tok-123\n", fetchImpl: fetchStub(200, {
+        status: "partial", errors: ["pi launch failed: the runner exited (code 1)"],
+        stages: [{ stage: "import_rig", status: "failed", detail: { nodes: [
+          { logicalId: "main.sibling", status: "launched" },
+          { logicalId: "main.seat", status: "failed", error: "pi launch failed: the runner exited (code 1)" },
+        ] } }],
+      }) },
     );
     expect(res).toEqual({
       ok: false,
       error: "[remote-command-failed] remote up on host vps-f answered HTTP 200 with status partial: main.seat: pi launch failed: the runner exited (code 1)",
     });
+  });
+
+  it("a 500 all-failed bootstrap retains errors array detail alongside HTTP status", async () => {
+    const res = await remoteUpLeaf({ sourceRef: "r" }, HOST_ENV, {
+      env: { VPS_B_TOKEN: "t" },
+      fetchImpl: fetchStub(500, {
+        status: "failed", stages: [{ stage: "import_rig", status: "failed", detail: { code: "launch_failed" } }],
+        errors: ["All nodes failed to launch: main.seat: pi launch failed: the runner exited (code 1)"], warnings: [],
+      }),
+    });
+    expect(res).toEqual({ ok: false, error: "[remote-command-failed] remote up on host vps-b failed: HTTP 500: All nodes failed to launch: main.seat: pi launch failed: the runner exited (code 1)" });
   });
 
   it("a 200 failed bootstrap reports the failed status even without error strings", async () => {
