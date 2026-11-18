@@ -18,11 +18,11 @@
 // exit 0 unless the daemon is unreachable.
 
 import { Command } from "commander";
-import { DaemonClient, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../terminal-window.js";
+import { BULK_TERMINAL_OPEN_TIMEOUT_MS, BULK_TERMINAL_OPEN_UNCONFIRMED, openAllTerminalWindows, openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 import { attentionLines, checkSeatAttention } from "../seat-attention.js";
 import { existsSync } from "node:fs";
@@ -337,9 +337,17 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
             printOpenAll(opts.json ?? false, res, 200);
             return;
           }
-          const res = await client.post<OpenAllResult>("/api/terminal/open-all",
-            { provider: named, reuseLive: true, ...(session !== undefined ? { session } : {}) },
-            { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+          let res: { status: number; data: OpenAllResult };
+          try {
+            res = await client.post<OpenAllResult>("/api/terminal/open-all",
+              { provider: named, reuseLive: true, ...(session !== undefined ? { session } : {}) },
+              { timeoutMs: BULK_TERMINAL_OPEN_TIMEOUT_MS, headers: terminalAuthHeaders() });
+          } catch (err) {
+            if (!(err instanceof DaemonTimeoutError)) throw err;
+            // No automatic retry: the daemon may still be opening views.
+            res = { status: 200, data: { ok: false, provider: named, ...(session !== undefined ? { session } : {}), rigs: [],
+              code: "bulk_open_outcome_unknown", error: BULK_TERMINAL_OPEN_UNCONFIRMED } };
+          }
           printOpenAll(opts.json ?? false, res.data, res.status);
         });
         return;
