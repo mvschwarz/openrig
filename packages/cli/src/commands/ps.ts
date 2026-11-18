@@ -1599,19 +1599,15 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
-function fitCell(value: string, width: number): string {
-  return truncate(value, width).padEnd(width);
-}
-
 const RIG_COLUMN_SEPARATOR = "  ";
-const rigCellSegmenter = new Intl.Segmenter();
+const cellSegmenter = new Intl.Segmenter();
 
-function fitRigCell(value: string, width: number): string {
+function fitCell(value: string, width: number): string {
   if (stringWidth(value) > width) {
     const limit = width - 1;
     let prefix = "";
     let used = 0;
-    for (const { segment } of rigCellSegmenter.segment(value)) {
+    for (const { segment } of cellSegmenter.segment(value)) {
       const segmentWidth = stringWidth(segment);
       if (used + segmentWidth > limit) break;
       prefix += segment;
@@ -1623,7 +1619,7 @@ function fitRigCell(value: string, width: number): string {
 }
 
 function padRigRow(cells: string[], widths: number[]): string {
-  return cells.map((cell, i) => i < widths.length ? fitRigCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);
+  return cells.map((cell, i) => i < widths.length ? fitCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);
 }
 
 // A cell filled to its width, or cut to it, still ends before the next column begins.
