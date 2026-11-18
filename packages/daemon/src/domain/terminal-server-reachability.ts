@@ -20,6 +20,9 @@
  *   stopped or detached (the seat readings follow their own evidence). One unreachable socket holds only its own seats.
  * - Only a server some running seat depends on counts: tmux exits with its last session, so an absent server with no
  *   seat on it is the normal idle state, not a loss.
+ * - Probes finish in any order. Each state of a socket has an epoch, and a probe carries the epoch it started in: a
+ *   probe that started before the current loss, return or unknown reading can't end it or open another (its
+ *   observation only refreshes the reading when it agrees).
  */
 
 export type TerminalServerObservation =
@@ -79,10 +82,10 @@ export const TERMINAL_PROBE_MAX_INTERVAL_MS = 60_000;
 export class TerminalServerReachability {
   private readonly servers = new Map<string, TerminalServerState>();
   private readonly timers = new Map<string, { timer: ReturnType<typeof setTimeout>; delayMs: number }>();
-  /** The generation of each socket's current loss, new each time it becomes unreachable: a return probe's result
-   *  applies only to the loss it was checking. */
-  private readonly losses = new Map<string, number>();
-  private lossGeneration = 0;
+  /** The epoch of each socket's current state, new at every change of state (from one counter, so never reused): a
+   *  probe's observation can change the state only when the probe started in the current epoch. */
+  private readonly epochs = new Map<string, number>();
+  private epochCounter = 0;
   private readonly now: () => Date;
   private stopped = false;
 
@@ -90,15 +93,24 @@ export class TerminalServerReachability {
     this.now = opts.now ?? (() => new Date());
   }
 
-  /** Record what a probe of `socket` showed. Only a change of state calls onChange. */
-  observe(socket: string, observation: TerminalServerObservation): void {
+  /** The epoch `socket` is in now; a probe reads it when it starts and hands it back with its observation. */
+  epoch(socket: string): number {
+    return this.epochs.get(socket) ?? 0;
+  }
+
+  /** Record what a probe of `socket` showed. Only a change of state calls onChange. `startedIn` is the epoch the probe
+   *  started in (absent: the observation is current): a probe that started before the current state can't change it. */
+  observe(socket: string, observation: TerminalServerObservation, startedIn?: number): void {
     const at = this.now().toISOString();
     const current = this.servers.get(socket);
+    const stale = startedIn !== undefined && startedIn !== this.epoch(socket);
     if (observation.reachable) {
       if (current?.state === "unreachable" || current?.state === "unknown") {
+        if (stale) return; // an older probe's success: the loss (or unknown reading) began after it started
         // From unknown, the return closes the loss kept as history.
         const goneSince = current.state === "unknown" ? current.lastLoss?.since ?? current.since : current.since;
         this.servers.set(socket, { socket, state: "reachable", since: at, lastCheckedAt: at, transitions: current.transitions + 1 });
+        this.newEpoch(socket);
         this.cancelProbe(socket);
         console.warn(`[tmux] The terminal server on ${socket} answers again (unreachable since ${goneSince}).`);
         this.opts.onChange?.({ type: "tmux.server_back", socket, since: at, goneSince });
@@ -112,13 +124,14 @@ export class TerminalServerReachability {
       this.servers.set(socket, { ...current, cause: observation.cause, lastCheckedAt: at });
       return;
     }
+    if (stale) return; // an older probe's failure: the return (or unknown reading) began after it started
     if (!this.isWatched(socket)) {
       if (current) this.servers.set(socket, { ...current, lastCheckedAt: at });
       return;
     }
     this.servers.set(socket, { socket, state: "unreachable", since: at, cause: observation.cause, lastCheckedAt: at,
       transitions: (current?.transitions ?? 0) + (current ? 1 : 0) });
-    this.losses.set(socket, ++this.lossGeneration);
+    this.newEpoch(socket);
     console.warn(`[tmux] The terminal server on ${socket} cannot be reached (${observation.cause}). Automatic delivery to `
       + "its seats is held until it answers again; the daemon does not restart it.");
     this.opts.onChange?.({ type: "tmux.server_gone", socket, cause: observation.cause, since: at });
@@ -150,9 +163,13 @@ export class TerminalServerReachability {
     for (const socket of [...this.timers.keys()]) this.cancelProbe(socket);
   }
 
-  /** The generation of the loss `socket` is in now, or undefined while it is not unreachable. */
+  /** The epoch of the loss `socket` is in now, or undefined while it is not unreachable. */
   private currentLoss(socket: string): number | undefined {
-    return this.servers.get(socket)?.state === "unreachable" ? this.losses.get(socket) : undefined;
+    return this.servers.get(socket)?.state === "unreachable" ? this.epoch(socket) : undefined;
+  }
+
+  private newEpoch(socket: string): void {
+    this.epochs.set(socket, ++this.epochCounter);
   }
 
   private isWatched(socket: string): boolean {
@@ -199,16 +216,17 @@ export class TerminalServerReachability {
         cause: unreadable ?? "the return probe answered nothing", lastCheckedAt: at, transitions: current.transitions + 1,
         lastLoss: { since: current.since, ...(current.cause ? { cause: current.cause } : {}) } };
       this.servers.set(socket, state);
+      this.newEpoch(socket);
       console.warn(`[tmux] The terminal server on ${socket} can't be read (${state.cause}); it was unreachable since `
         + `${current.since}. Automatic delivery to its seats is no longer held; the server is not known to be back.`);
       try { this.opts.onUnknown?.({ ...state }); } catch { /* reporting only */ }
       return;
     }
-    this.observe(socket, observation);
+    this.observe(socket, observation, loss);
     if (this.servers.get(socket)?.state === "unreachable" && !this.isWatched(socket)) {
       // Its seats were stopped or detached meanwhile: an absent server with no seat on it is not a loss any more.
       this.servers.delete(socket);
-      this.losses.delete(socket);
+      this.newEpoch(socket);
       console.warn(`[tmux] No running seat is on ${socket} any more; the daemon stops watching that server.`);
       return;
     }

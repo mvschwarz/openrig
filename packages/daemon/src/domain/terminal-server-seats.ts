@@ -50,7 +50,7 @@ export function runningTmuxSessions(db: Database.Database): string[] {
  */
 export function wireTerminalReachability(opts: {
   db: Database.Database;
-  adapter: Pick<TmuxAdapter, "probeSession" | "serverObserver">;
+  adapter: Pick<TmuxAdapter, "probeSession" | "serverObserver" | "serverEpoch">;
   drains: RigDeliveryDrainStore;
   socket: string;
   emit: (change: TerminalServerChange) => void;
@@ -90,7 +90,10 @@ export function wireTerminalReachability(opts: {
         : { reachable: true };
     },
   });
-  adapter.serverObserver = observation => reach.observe(socket, observation);
+  // Each classified probe carries the epoch it started in, so one that finishes after a newer loss or return can't
+  // overwrite it.
+  adapter.serverEpoch = () => reach.epoch(socket);
+  adapter.serverObserver = (observation, startedIn) => reach.observe(socket, observation, startedIn);
   drains.attachTerminalHold(session => reach.unreachable(socket) !== null && isTmuxBoundSession(db, session),
     () => reach.anyUnreachable());
   return reach;
