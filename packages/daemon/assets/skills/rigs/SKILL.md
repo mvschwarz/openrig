@@ -180,8 +180,9 @@ commands; if the two ever differ, this step is right.
     name someone else), and don't offer again.
   - Several people with no default: ask which should get requests nobody is named for (`rig gateway default <id>`),
     or leave it. Never pick one yourself.
-  - Nobody is registered: offer it in a sentence or two. Registering gives OpenRig its own way to reach them with
-    questions no agent is bringing them, such as a team seat's permission prompt or another machine asking to pair. If
+  - Nobody is registered: offer it in a sentence or two. Registering records them as the person for questions no agent
+    is bringing them, such as a team seat's permission prompt or another machine asking to pair. Without a connector
+    such as Slack, those reach them only in the TUI's Feed and Steering, so say so if they won't have the TUI open. If
     they stay with you, you bring them the team's questions and its result here either way ("If the person stays with
     you" below). Ask the name to use (their login name is only a suggestion). On yes, run
     `rig gateway human add <id> --display-name "<name>" --delivery-class B --default`: they're reached in the TUI's Feed
