@@ -867,6 +867,8 @@ const NEGOTIATE_ID = "omp-runner-negotiate";
 const MAX_PENDING_CURSOR_REFRESHES = 16;
 const MAX_BUFFERED_REFRESH_SPANS = 64;
 const ENTRY_NOT_FOUND_RE = /^entry not found\b/i;
+const OVERSIZED_RESTORE_ERROR_RE = /\bexceeded the transport limit\b|\breassembly limit\b/i;
+const OVERSIZED_REASSEMBLY_DROP_RE = /\babove the \d+-byte reassembly limit$/;
 /** RPC commands that carry operator input. Their failure means the seat
  *  cannot do the requested work; other command failures are not attention. */
 const INPUT_COMMANDS: Record<string, true> = { prompt: true, steer: true, follow_up: true };
@@ -1091,6 +1093,8 @@ export class RunnerCore {
   private restoreState: "settled" | "pending" | "gap";
   private catchUpInFlight = false;
   private catchUpAgedOneTurn = false;
+  private catchUpRetryExhausted = false;
+  private catchUpOversized = false;
   private unheldSavedCursor = false;
   /** #1275: in-memory turn cursor from explicit event.entryId or non-connected turn reads; never persisted directly. */
   private turnCursorId: string | undefined;
@@ -1194,6 +1198,8 @@ export class RunnerCore {
       this.restoreState = "pending";
       this.catchUpInFlight = true;
       this.catchUpAgedOneTurn = false;
+      this.catchUpRetryExhausted = false;
+      this.catchUpOversized = false;
       this.io.sendRpc({ type: "get_entries", since: this.opts.catchUpSince, id: CATCH_UP_ID });
     }
     this.refreshPaneStatus();
@@ -1254,6 +1260,10 @@ export class RunnerCore {
       this.catchUpInFlight = false;
       this.catchUpAgedOneTurn = false;
       this.restoreState = "gap";
+      if (OVERSIZED_REASSEMBLY_DROP_RE.test(reason)) {
+        this.catchUpOversized = true;
+        this.catchUpRetryExhausted = true;
+      }
     }
     if (this.pendingRefreshes.size > 0) {
       for (const pending of this.pendingRefreshes.values()) {
@@ -1659,33 +1669,13 @@ export class RunnerCore {
       if (record.id === CATCH_UP_ID && this.runtime === "pi") {
         // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
         // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
-        this.catchUpInFlight = false;
-        this.catchUpAgedOneTurn = false;
-        if (this.restoreState !== "settled") {
-          if (ENTRY_NOT_FOUND_RE.test(detail)) {
-            this.restoreState = "settled";
-            this.unheldSavedCursor = true;
-            this.bufferedRefreshSpans.clear();
-          } else {
-            this.restoreState = "gap";
-          }
-        }
+        this.handleCatchUpFailure(detail);
         this.diag(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
         this.requestCursorRefresh();
         return;
       }
       if (record.id === CATCH_UP_ID) {
-        this.catchUpInFlight = false;
-        this.catchUpAgedOneTurn = false;
-        if (this.restoreState !== "settled") {
-          if (ENTRY_NOT_FOUND_RE.test(detail)) {
-            this.restoreState = "settled";
-            this.unheldSavedCursor = true;
-            this.bufferedRefreshSpans.clear();
-          } else {
-            this.restoreState = "gap";
-          }
-        }
+        this.handleCatchUpFailure(detail);
       } else if (this.isCursorRefreshId(record.id)) {
         const failed = this.pendingRefreshes.get(record.id);
         if (failed) {
@@ -1826,6 +1816,7 @@ export class RunnerCore {
       if (isCatchUp) {
         if (this.restoreState !== "settled") {
           this.restoreState = "settled";
+          this.catchUpOversized = false;
           this.unheldSavedCursor = false;
           let nextSaved = lastId ?? this.opts.catchUpSince;
           while (nextSaved !== undefined) {
@@ -1851,6 +1842,7 @@ export class RunnerCore {
             this.restoreState = "settled";
             this.catchUpInFlight = false;
             this.catchUpAgedOneTurn = false;
+            this.catchUpOversized = false;
             this.unheldSavedCursor = false;
             this.bufferedRefreshSpans.clear();
             if (this.lastEntryId !== lastId) {
@@ -1968,7 +1960,28 @@ export class RunnerCore {
       this.dispatchCursorRefresh(tailId, tailId);
       return;
     }
+    if (this.catchUpOversized) {
+      return;
+    }
     this.dispatchCursorRefresh(undefined);
+  }
+
+  private handleCatchUpFailure(detail: string): void {
+    this.catchUpInFlight = false;
+    this.catchUpAgedOneTurn = false;
+    if (this.restoreState === "settled") return;
+    if (ENTRY_NOT_FOUND_RE.test(detail)) {
+      this.restoreState = "settled";
+      this.catchUpOversized = false;
+      this.unheldSavedCursor = true;
+      this.bufferedRefreshSpans.clear();
+      return;
+    }
+    this.restoreState = "gap";
+    if (OVERSIZED_RESTORE_ERROR_RE.test(detail)) {
+      this.catchUpOversized = true;
+      this.catchUpRetryExhausted = true;
+    }
   }
 
   private syncCursorAfterTurn(): void {
@@ -1976,8 +1989,9 @@ export class RunnerCore {
       this.dispatchCursorRefresh(undefined);
       return;
     }
-    if (this.restoreState !== "settled" && this.opts.catchUpSince) {
+    if (this.restoreState !== "settled" && this.opts.catchUpSince && !this.catchUpRetryExhausted) {
       if (!this.catchUpInFlight || this.catchUpAgedOneTurn) {
+        this.catchUpRetryExhausted = true;
         this.restoreState = "pending";
         this.catchUpInFlight = true;
         this.catchUpAgedOneTurn = false;
