@@ -5,7 +5,7 @@ import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { sessionRigOf } from "../session-name.js";
 import { DaemonClient, remoteDaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, type LifecycleDeps , daemonStatusGuard, terminalsDegradedLine} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "../host-registry.js";
@@ -1145,6 +1145,10 @@ Exit codes:
 
       const status = await getDaemonStatus(deps.lifecycleDeps, { cleanupStaleState: opts.cleanup });
       if (!daemonStatusGuard(status)) return;
+      // #3315: a seat listed as running sits on a tmux server the daemon cannot reach. Said once, on stderr, so the
+      // listing (and its JSON on stdout) is unchanged and the reader still learns the seats can't be reached.
+      const terminalsLine = terminalsDegradedLine(status.terminals);
+      if (terminalsLine) console.error(terminalsLine);
 
       const client = deps.clientFactory(getDaemonUrl(status));
 
