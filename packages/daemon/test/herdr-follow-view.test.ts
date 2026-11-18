@@ -26,7 +26,8 @@ export function task(seats: string[], complete = true): ComposedView {
 function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "following-test-")); roots.push(root);
   const panes = new Map<string, ViewerPane & { argv: string[] }>();
-  const calls: string[][] = [], rpc: Array<{ method: string; params: unknown }> = [];
+  const calls: string[][] = [], rpc: Array<{ method: string; params: unknown }> = [], reports: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let notAccepted = 0;
   const inputs = new Map<string, "empty" | "text" | "unknown">();
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
@@ -94,7 +95,14 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
       return inputs.get(target.seat) ?? "empty";
     },
     inspect: async argv => ({ sessionId: `$${argv[4]}`, nodeId: argv[4]! }),
+    sleep: async () => {},
     transport: { probe: async () => ({ alive: true, version: "0.9.5", protocol: 22 }), request: async (method, params) => {
+      // A tile's restart-command report is Herdr state, not focus: kept apart from the focus requests below.
+      if (method === "pane.report_agent" || method === "pane.report_agent_session") {
+        reports.push({ method, params });
+        if (method === "pane.report_agent_session" && notAccepted > 0) { notAccepted--; throw new Error("resume_not_accepted: resume_argv requires the reporter to hold the pane"); }
+        return {};
+      }
       rpc.push({ method, params });
       const id = (params as { pane_id: string }).pane_id;
       for (const selected of panes.values()) selected.focused = selected.pane_id === id;
@@ -107,7 +115,9 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
     return path.join(directory, readdirSync(directory).find(name => name.endsWith(".json"))!);
   };
   const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
-  return { root, follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
+  return { root, follow, create, panes, calls, rpc, reports, inputs, frames, exitViewer, journal,
+    refuseResume: (times: number) => { notAccepted = times; },
+    setTransform: (next: (view: ComposedView) => ComposedView) => { transform = next; },
     reportCwd: (cwd: string | null) => { reportedCwd = cwd; },
     changeCreateCwd: () => { changedCreateCwd = true; },
     delayStrip: (ms: number) => { stripReadyAt = Date.now() + ms; },
@@ -489,6 +499,47 @@ describe("after a Herdr restart", () => {
     // A member who arrives later (a handoff) joins the new workspace.
     expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
     expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(2);
+  });
+
+  it("a tile reports its own attach script as its restart command when it opens: held for a terminal seat, the runtime's session report for an agent", async () => {
+    const f = fixture();
+    // b runs Claude Code: its script carries Herdr's detection hint, and Herdr refuses its report twice before detecting it.
+    f.setTransform(view => ({ ...view, opened: view.opened.map(target => target.seat === "b" ? { ...target, runtime: "claude-code" } : target) }));
+    f.refuseResume(2);
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    const tileOf = (seat: string) => [...f.panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!;
+    const scriptOf = (seat: string) => path.join(tileOf(seat).cwd, "attach.sh");
+    expect(f.reports.filter(r => r.params.pane_id === tileOf("a").pane_id)).toEqual([{ method: "pane.report_agent", params: {
+      pane_id: tileOf("a").pane_id, source: "openrig-tile", agent: "openrig-tile", state: "idle", seq: expect.any(Number), resume_argv: ["sh", scriptOf("a")] } }]);
+    expect(readFileSync(scriptOf("a"), "utf8")).not.toContain("HERDR_AGENT");
+    const session = { method: "pane.report_agent_session", params: { pane_id: tileOf("b").pane_id, source: "openrig", agent: "claude", resume_argv: ["sh", scriptOf("b")] } };
+    expect(f.reports.filter(r => r.params.pane_id === tileOf("b").pane_id)).toEqual([session, session, session]);
+    expect(readFileSync(scriptOf("b"), "utf8")).toMatch(/^exec env HERDR_AGENT=claude /);
+    // Reports aren't focus requests, and a tile that's already open isn't reported again.
+    expect(f.rpc).toEqual([]);
+    const count = f.reports.length;
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true });
+    expect(f.reports).toHaveLength(count);
+  });
+
+  it("a workspace Herdr restores with every tile resumed is re-bound: one workspace, its strip restarted, and a later member joins it", async () => {
+    const f = fixture();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    // The restart: the same workspace and pane ids in new terminals; the strip a bare shell, each tile rerun from its
+    // restart command and attached to its seat again.
+    for (const restored of f.panes.values()) {
+      restored.terminal_id = `restarted-${restored.pane_id}`;
+      if (restored.argv[0] === "/usr/bin/tail") restored.argv = ["/bin/bash"];
+    }
+    const recovered = await f.follow(["a", "b"]);
+    expect(recovered).toMatchObject({ ok: true, opened: ["a", "b"], workspaceId: "w1", following: { state: "following" } });
+    expect(recovered.following!.events).toContain("Herdr restarted; this workspace and its tiles were found again and re-attached.");
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
+    expect(f.calls.filter(c => c[1] === "run" && c[3]?.includes("/usr/bin/tail"))).toHaveLength(2);
+    expect(readdirSync(f.root).some(name => name.includes(".replaced-"))).toBe(false);
+    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
+    expect(f.calls.some(c => c[1] === "close")).toBe(false);
   });
 
   it("a strip read that fails while Herdr still lists the strip keeps the previous view", async () => {
