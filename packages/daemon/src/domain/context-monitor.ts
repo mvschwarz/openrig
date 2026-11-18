@@ -147,7 +147,7 @@ export class ContextMonitor {
         }
       }
 
-      await this.normalizeStartupStatus(session, pass);
+      if (session.runtime !== "pi") await this.normalizeStartupStatus(session, pass);
       await this.maybeAutoCompact(session, observed);
     }
     this.drainProviderWindowSamples();
