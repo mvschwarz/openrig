@@ -70,6 +70,16 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
         bindingSource: null,
         anomalies: [{ kind: "seat_with_no_account", seat: "seat-9", evidence: "no bound account", asOf: "2026-08-03T12:00:00.000Z" }],
       },
+      // A daemon that says each seat's runtime: only a Codex seat's missing registry placement is a flag.
+      {
+        accountId: null, seatSession: "cx-1", rigName: "r3", boundAt: null, bindingSource: null, runtime: "codex",
+        anomalies: [{ kind: "seat_with_no_account", seat: "cx-1", evidence: "no Codex registry placement", asOf: "2026-08-03T12:00:00.000Z" }],
+      },
+      {
+        accountId: null, seatSession: "cl-1", rigName: "r3", boundAt: null, bindingSource: null, runtime: "claude-code",
+        configured: { source: "claude_token", label: "team-a", note: "n" },
+        anomalies: [{ kind: "seat_with_no_account", seat: "cl-1", evidence: "no Codex registry placement", asOf: "2026-08-03T12:00:00.000Z" }],
+      },
     ],
     signals: [{ provider: "codex", accountRef: "cdx-a", sourceClass: "unknown", authority: "unknown", asOf: "2026-08-03T12:00:00.000Z", unknownReason: "codex_app_server_unavailable", automationUse: "do_not_automate" }],
     // S-C: the S-A host-usage rollup rows the status verb now renders (arrive via /status verbatim).
@@ -292,7 +302,11 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
     expect(out).toContain("Codex A");
     expect(out).toContain("(codex)");
     expect(out).toContain("ANOMALIES");
-    expect(out).toMatch(/seat with no bound account: seat-9/);
+    // The anomaly means no Codex registry placement: a Codex seat, or a row from a daemon that doesn't name its runtime.
+    expect(out).toMatch(/no Codex registry placement: seat-9/);
+    expect(out).toMatch(/no Codex registry placement: cx-1/);
+    expect(out).not.toMatch(/cl-1/);
+    expect(out).not.toMatch(/no bound account/);
     expect(out).toMatch(/SIGNALS \(1;/); // freshest-signal summary
   });
 

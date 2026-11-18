@@ -60,10 +60,11 @@ export function assembleFourBlock(input: AssembleInput): FourBlockReadModel {
 
   const bindings: ProviderBinding[] = rawBindings.map((rb) => {
     if (rb.accountId === null) {
+      // The kind is locked; what it measures is the Codex registry placement, never the account the seat uses.
       const anomaly: SeatWithNoAccountAnomaly = {
         kind: "seat_with_no_account",
         seat: rb.seatSession,
-        evidence: `seat ${rb.seatSession} in rig ${rb.rigName} has no bound account`,
+        evidence: `seat ${rb.seatSession} in rig ${rb.rigName} has no Codex registry placement on this collection path; this says nothing about the account the seat uses (see configured)`,
         asOf,
       };
       // Non-empty tuple: the seat_with_no_account anomaly is required and always first.

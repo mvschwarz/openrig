@@ -68,7 +68,7 @@ describe("assembleFourBlock — proof-4 mixed-provider shape", () => {
     expect(solo!.anomalies.some((a) => a.kind === "same_account_on_n_seats")).toBe(false);
   });
 
-  it("emits an explicit unbound row for a seat with no account, carrying seat_with_no_account", () => {
+  it("emits an explicit unbound row for a seat with no Codex registry placement, carrying seat_with_no_account", () => {
     const m = assembleFourBlock({
       accounts: ACCOUNTS,
       rawBindings: [
@@ -86,6 +86,9 @@ describe("assembleFourBlock — proof-4 mixed-provider shape", () => {
     if (anomaly && anomaly.kind === "seat_with_no_account") {
       expect(anomaly.seat).toBe("seat-9");
       expect(anomaly.asOf).toBe(ASOF);
+      // It measures the registry placement, never whether the seat has an account.
+      expect(anomaly.evidence).toBe("seat seat-9 in rig rig-3 has no Codex registry placement on this collection path; this says nothing about the account the seat uses (see configured)");
+      expect(anomaly.evidence).not.toMatch(/no bound account/);
     }
   });
 

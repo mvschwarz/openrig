@@ -11,7 +11,7 @@ import type { CodexAuthMetadata } from "./codex-auth-reader.js";
 import { rollupHostUsage } from "./host-usage-rollup.js";
 import { assembleFourBlock, type RawSeatBinding } from "./provider-read-model.js";
 import { claudeStatuslineSignals } from "./provider-signals.js";
-import type { FourBlockReadModel, ProviderAccount, ProviderSignal } from "./provider-types.js";
+import type { FourBlockReadModel, ProviderAccount, ProviderSignal, SeatAccountConfiguration, UnknownSeatObservation } from "./provider-types.js";
 import type { NodeLifecycleState } from "../types.js";
 import type { SeatRuntimeHome } from "../seat-runtime-home.js";
 
@@ -23,6 +23,8 @@ export interface ProviderSeat {
   lifecycleState: NodeLifecycleState;
   /** The seat's own runtime home from its stored `env:`, when it declares one (seat-runtime-home.ts). */
   runtimeHome?: SeatRuntimeHome;
+  /** A Claude seat's own token reference, which its next launch reads: the label is the operator's name for it. */
+  claudeToken?: { label: string; kind?: "api-key" };
 }
 
 export interface ProviderCollectDeps {
@@ -32,6 +34,8 @@ export interface ProviderCollectDeps {
   listSeats: () => ProviderSeat[];
   /** signals[] — empty until the live Codex/Claude/reactive collection lane is wired. */
   collectSignals?: () => ProviderSignal[];
+  /** Each seat's configured account, one per seat in the order given (configuredSeatAccounts). */
+  configuredAccounts?: (seats: ProviderSeat[]) => SeatAccountConfiguration[];
   /** A real caller-provided clock; the read model's asOf (anomalies borrow it, never invented). */
   now: () => string;
 }
@@ -100,11 +104,31 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
     signals.push(...claudeStatuslineSignals({ seatSession, cachePresent: false, asOf }));
   }
   const model = assembleFourBlock({ accounts, rawBindings, signals, asOf });
+  // Beside each seat's registry placement, what the seat uses: the configuration its next launch reads, and its
+  // launch and provider observations, which nothing records yet. The assembler keeps order, so bindings[i] is seat i.
+  const configured = deps.configuredAccounts?.(seatUniverse);
+  const bindings = model.bindings.map((binding, i) => ({
+    ...binding,
+    runtime: seatUniverse[i]!.runtime,
+    ...(configured?.[i] ? { configured: configured[i] } : {}),
+    launched: LAUNCH_NOT_RECORDED,
+    verified: IDENTITY_NOT_OBSERVED,
+  }));
   // Slice-04 S-A: the host-level rollup aggregates the SAME signals this collection produced.
   // Codex deployment presence = auth profiles on disk (a host with codex accounts but no meter
   // must surface an explicit unknown, never an omitted row).
   return {
     ...model,
+    bindings,
     hostUsage: rollupHostUsage({ signals, codexProfilesPresent: profiles.length > 0, now: asOf }),
   };
 }
+
+const LAUNCH_NOT_RECORDED: UnknownSeatObservation = {
+  state: "unknown",
+  reason: "OpenRig doesn't record which credential a seat's launch applied",
+};
+const IDENTITY_NOT_OBSERVED: UnknownSeatObservation = {
+  state: "unknown",
+  reason: "no provider-observed identity is tied to this seat's launch; a stored reading names an operator's label or the login a home holds, not this seat's",
+};

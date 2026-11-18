@@ -18,6 +18,7 @@ import { parseCommand } from "../src/grammar.js";
 import { COMMAND_REGISTRY } from "../src/commands/registry.js";
 import { renderScreen } from "../src/render.js";
 import { resolveEscapeAction } from "../src/input.js";
+import { seatLines } from "../src/usage/usage-model.js";
 import { createLiveRefresh } from "../src/live.js";
 import { pageReadKey } from "../src/page-read.js";
 import type { FleetSnapshot, ViewStateStore, Screen } from "../src/types.js";
@@ -318,5 +319,18 @@ describe("System → Usage through the live page reader", () => {
     expect(screen()).not.toContain("level: exhausted");
     expect(refreshUsage).not.toHaveBeenCalled();
     live.close();
+  });
+});
+
+describe("System → Usage seat lines", () => {
+  it("a Claude seat's own token or API key reads as its configured credential, never unknown", () => {
+    const note = "the seat's own credential file, read when it next launches; not proof the running process uses it, and the label is the operator's name for it";
+    const text = (configured: Record<string, unknown>) => seatLines({ seatSession: "dev-build@r", runtime: "claude-code", configured, allowance: { linked: false, reason: "r" } }).map((l) => l.text);
+    expect(text({ source: "claude_token", label: "team-a", note })).toEqual([
+      "  dev-build@r  claude-code  configured: token team-a (the seat's own credential file) · allowance not linked",
+      `    ${note}`,
+      "    allowance not linked: r",
+    ]);
+    expect(text({ source: "claude_token", label: "ci-key", kind: "api-key", note })[0]).toBe("  dev-build@r  claude-code  configured: API key ci-key (the seat's own credential file) · allowance not linked");
   });
 });

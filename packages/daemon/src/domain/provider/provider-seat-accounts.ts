@@ -33,6 +33,10 @@ const REGISTRY_NOT_LINKED =
   "a registry profile name and an observed account are different kinds of fact; nothing supported links them without reading the profile's contents";
 const DEFAULT_LOGIN_NOT_LINKED =
   "the usage read reads the login this home holds now; the seat runs the login that was active when it launched";
+const TOKEN_NOT_LINKED =
+  "an operator's token label and an observed account are different kinds of fact; nothing supported links them";
+const CLAUDE_TOKEN_NOTE =
+  "the seat's own credential file, read when it next launches; not proof the running process uses it, and the label is the operator's name for it";
 const DIFFERS_NOTE =
   "possibly a different login: this seat's status line reports windows that differ from another seat's (a reset more than 60 s apart); not a verdict";
 
@@ -121,14 +125,18 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
 
     if (seat.runtime === "claude-code") {
       const differs = claudeDiffers.get(seat.seatSession);
+      const token = seat.claudeToken;
       return {
         ...base,
-        configured: own?.home && own.source
+        // The seat's own token reference is what its launch gives Claude, ahead of any config dir's stored login.
+        configured: token
+          ? { source: "claude_token", label: token.label, ...(token.kind ? { kind: token.kind } : {}), note: CLAUDE_TOKEN_NOTE }
+          : own?.home && own.source
           ? { source: "default_login", home: own.home, homeFrom: own.source, homeNote: `the login in this seat's own Claude config dir (from its ${own.source} env)` }
           : { source: "default_login", home: claudeHome.home, homeNote: claudeHome.note },
         ...(notes.length ? { registryNotes: notes } : {}),
         ...ignored,
-        allowance: { linked: false, reason: DEFAULT_LOGIN_NOT_LINKED },
+        allowance: { linked: false, reason: token ? TOKEN_NOT_LINKED : DEFAULT_LOGIN_NOT_LINKED },
         observed: shared > 1
           ? { withheld: true, note: `observation withheld: ${shared} seats share session name ${seat.seatSession}; status-line samples are keyed by session name and cannot be attributed to one seat` }
           : !claudeSampled

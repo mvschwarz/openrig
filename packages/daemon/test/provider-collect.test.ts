@@ -4,12 +4,15 @@ import { collectFourBlockReadModel, type ProviderCollectDeps } from "../src/doma
 import type { CodexAuthMetadata } from "../src/domain/provider/codex-auth-reader.js";
 
 const ASOF = "2026-08-04T00:00:00.000Z";
+const LAUNCHED_UNKNOWN = { state: "unknown", reason: "OpenRig doesn't record which credential a seat's launch applied" };
+const VERIFIED_UNKNOWN = { state: "unknown", reason: expect.stringContaining("no provider-observed identity is tied to this seat's launch") };
 
 function deps(over: Partial<ProviderCollectDeps> & { auth?: CodexAuthMetadata }): ProviderCollectDeps {
   return {
     readCodexAuth: () => over.auth ?? { profiles: [], seats: [] },
     listSeats: over.listSeats ?? (() => []),
     collectSignals: over.collectSignals,
+    configuredAccounts: over.configuredAccounts,
     now: over.now ?? (() => ASOF),
   };
 }
@@ -29,19 +32,47 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
       listSeats: () => [{ seatSession: "dev-driver@rig-a", rigName: "rig-a", runtime: "codex", lifecycleState: "running" }],
     }));
     expect(model.bindings).toEqual([
-      { accountId: "work", seatSession: "dev-driver@rig-a", rigName: "rig-a", boundAt: "2026-08-03T10:00:00Z", bindingSource: "codex_auth_seat_registry", anomalies: [] },
+      { accountId: "work", seatSession: "dev-driver@rig-a", rigName: "rig-a", boundAt: "2026-08-03T10:00:00Z", bindingSource: "codex_auth_seat_registry", anomalies: [],
+        runtime: "codex", launched: LAUNCHED_UNKNOWN, verified: VERIFIED_UNKNOWN },
     ]);
   });
 
-  it("a claude (or unregistered) seat is unbound and carries seat_with_no_account", () => {
+  it("a claude (or unregistered) seat has no registry placement: the locked anomaly says only that, beside what it's configured to use", () => {
     const model = collectFourBlockReadModel(deps({
       auth: { profiles: ["work"], seats: [] },
-      listSeats: () => [{ seatSession: "pm@rig-a", rigName: "rig-a", runtime: "claude-code", lifecycleState: "running" }],
+      listSeats: () => [{ seatSession: "pm@rig-a", rigName: "rig-a", runtime: "claude-code", lifecycleState: "running", claudeToken: { label: "team-a" } }],
+      configuredAccounts: (seats) => seats.map((s) => ({ source: "claude_token", label: s.claudeToken!.label, note: "n" })),
     }));
     expect(model.bindings).toHaveLength(1);
     const b = model.bindings[0]!;
     expect(b.accountId).toBeNull();
     expect(b.anomalies[0]).toMatchObject({ kind: "seat_with_no_account", seat: "pm@rig-a" });
+    expect(b.anomalies[0]!.evidence).toMatch(/has no Codex registry placement on this collection path; this says nothing about the account the seat uses/);
+    expect(b).toMatchObject({ runtime: "claude-code", configured: { source: "claude_token", label: "team-a" }, launched: LAUNCHED_UNKNOWN, verified: VERIFIED_UNKNOWN });
+  });
+
+  it("configured is one per seat in order; launched and verified stay unknown whatever is configured", () => {
+    const seen: string[][] = [];
+    const model = collectFourBlockReadModel(deps({
+      auth: { profiles: ["work"], seats: [{ seat: "cx@r", rig: "r", runtime: "codex", cwd: "/p", authProfile: "work", updatedTs: "t1" }] },
+      listSeats: () => [
+        { seatSession: "cx@r", rigName: "r", runtime: "codex", lifecycleState: "running" },
+        { seatSession: "cl@r", rigName: "r", runtime: "claude-code", lifecycleState: "running" },
+      ],
+      configuredAccounts: (seats) => {
+        seen.push(seats.map((s) => s.seatSession));
+        return [
+          { source: "registry", profileRef: "work", recordedAt: "t1", profileSaved: true },
+          { source: "default_login", home: "/h/.claude", homeNote: "n" },
+        ];
+      },
+    }));
+    expect(seen).toEqual([["cx@r", "cl@r"]]);
+    expect(model.bindings.map((b) => [b.seatSession, b.runtime, b.configured?.source])).toEqual([["cx@r", "codex", "registry"], ["cl@r", "claude-code", "default_login"]]);
+    for (const b of model.bindings) expect([b.launched, b.verified]).toEqual([LAUNCHED_UNKNOWN, VERIFIED_UNKNOWN]);
+    // Without the configured source, the row says nothing about configuration rather than inventing one.
+    const bare = collectFourBlockReadModel(deps({ listSeats: () => [{ seatSession: "cl@r", rigName: "r", runtime: "claude-code", lifecycleState: "running" }] }));
+    expect(bare.bindings[0]).not.toHaveProperty("configured");
   });
 
   it("same profile bound on 2 distinct seats yields a same_account_on_n_seats anomaly", () => {

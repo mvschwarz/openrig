@@ -46,8 +46,13 @@ export type BindingAnomaly = SameAccountOnNSeatsAnomaly | SeatWithNoAccountAnoma
  * has a non-null `accountId` (+ `boundAt`/`bindingSource`); an unbound seat keeps the same field
  * names but `null` for the absent BINDING data and MUST carry a `seat_with_no_account` anomaly —
  * never a fabricated/sentinel account. Discriminant: `accountId` (string vs null).
+ *
+ * The locked fields are the seat's Codex registry PLACEMENT (`rig auth seats set`): a null `accountId`
+ * means no registry row applies to this seat on this collection path, never that the seat has no usable
+ * account. The additive fields say what the seat uses: what it's configured to use at its next launch,
+ * and what its launch and the provider observed, each unknown where nothing records it.
  */
-export type ProviderBinding =
+export type ProviderBinding = (
   | {
       accountId: string;
       seatSession: string;
@@ -66,7 +71,25 @@ export type ProviderBinding =
       // level as a non-empty tuple whose first element is that anomaly, so the dishonest
       // "unbound row with an empty/same-account-only anomaly list" cannot even compile.
       anomalies: [SeatWithNoAccountAnomaly, ...BindingAnomaly[]];
-    };
+    }
+) & BindingSeatAccount;
+
+/** An observation nothing records yet, with the reason. Never filled from configuration or a label. */
+export interface UnknownSeatObservation {
+  state: "unknown";
+  reason: string;
+}
+
+/** Additive per-seat fields on a `bindings[]` row; optional so the sealed assembler's rows stay valid. */
+export interface BindingSeatAccount {
+  runtime?: string;
+  /** What the seat's next launch is configured to use: input, not proof of the running session's login. */
+  configured?: SeatAccountConfiguration;
+  /** The credential the seat's current process launched with. */
+  launched?: UnknownSeatObservation;
+  /** A provider-observed identity tied to this seat's launch. */
+  verified?: UnknownSeatObservation;
+}
 
 export type SignalSourceClass =
   | "provider_structured_read"
@@ -190,9 +213,11 @@ export interface FourBlockReadModel {
 /** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
  *  which login a running session uses. A default login is whatever the seat's home held at its launch: the seat's
  *  own home when its `env:` declares one (`homeFrom` names where; optional, so older readers keep accepting the
- *  record), else the daemon's. */
+ *  record), else the daemon's. A Claude seat's own token reference (`claude_token`, `rig provider switch --seat`) is the
+ *  operator's label for a credential file its next launch reads, not an account the provider observed. */
 export type SeatAccountConfiguration =
   | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean | null }
+  | { source: "claude_token"; label: string; kind?: "api-key"; note: string }
   | { source: "default_login"; home: string | null; homeNote: string; homeFrom?: "member" | "rig" | "account-switch" }
   | { source: "unknown"; reason: string };
 
