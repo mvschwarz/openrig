@@ -44,7 +44,7 @@ export class HerdrFollowView {
     const result = this.pending.then(() => this.apply(viewId, view, controls, stillCurrent, membershipError));
     this.pending = result.catch(() => {}); return result;
   }
-  private async apply(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string): Promise<OpenViewResult> {
+  private async apply(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string, replaced?: string): Promise<OpenViewResult> {
     const id = createHash("sha256").update(JSON.stringify([this.deps.socketPath, viewId])).digest("hex");
     const root = path.join(this.deps.root ?? getDefaultOpenRigPath("private/terminal-following/provider"), id);
     const file = path.join(root, "canvas.json"), log = path.join(root, "events.log");
@@ -103,7 +103,7 @@ export class HerdrFollowView {
       if (!await stillCurrent()) throw new Error("Task membership changed before reconciliation; keeping the previous view.");
       if (!state) {
         state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, ...(view.task.kind === "slice" || view.task.kind === "mission" ? { maxTiles: 4 } : {}), pins: [], suppressed: {} },
-          stripConfirmed: false, tiles: [], events: [`Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
+          stripConfirmed: false, tiles: [], events: [...(replaced ? [replaced] : []), `Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
         mkdirSync(state.cwd, { recursive: true, mode: 0o700 }); save();
         // Persist first. An uncertain response is enumerated on the next call,
         // never interpreted as permission for another workspace.
@@ -130,7 +130,26 @@ export class HerdrFollowView {
         }
         return current;
       };
-      await currentPane(state.pane);
+      try { await currentPane(state.pane); }
+      catch (error) {
+        // After a Herdr restart (or once the person closes the workspace) Herdr no longer has this canvas's strip: it
+        // comes back as a new terminal, or not at all. A complete enumeration without its exact identity says so, and
+        // the canvas yields to a fresh one, kept aside as provenance, so re-following recovers the view. An unreadable
+        // enumeration proves nothing and keeps the previous view, as any failed read does; a fresh canvas never yields.
+        const stored = state.pane;
+        let gone = false;
+        if (!replaced) {
+          try {
+            gone = !(await findAttributedViewerPanes(this.deps.run, state.cwd, stored)).some(found => found.pane_id === stored.pane_id
+              && found.terminal_id === stored.terminal_id && found.workspace_id === stored.workspace_id);
+          } catch { /* unknown, not gone */ }
+        }
+        if (!gone) throw error;
+        const kept = `${root}.replaced-${now()}-${randomUUID().slice(0, 8)}`;
+        renameSync(root, kept);
+        return this.apply(viewId, view, controls, stillCurrent, membershipError,
+          `Herdr no longer has the previous workspace (it restarted, or the workspace was closed); this is a new one. If the old one is still open, close it. Its record is kept at ${kept}.`);
+      }
       if (state.phase === "created") {
         state.phase = "starting"; save();
         await this.deps.run(["pane", "run", state.pane.pane_id, `printf '\\033[2J\\033[3J\\033[H'; exec /usr/bin/tail -n 30 -F ${quote(log)}`]);

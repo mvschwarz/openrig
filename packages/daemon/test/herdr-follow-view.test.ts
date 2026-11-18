@@ -34,6 +34,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
   let changedCreateCwd = false, stripReadyAt = 0;
   let lateFocus: { seat: string; reads: number } | undefined;
   let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false, failedProcessRead = false;
+  const failedGets = new Set<string>();
   const run = async (args: string[]) => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
@@ -54,6 +55,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
     }
     if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()].filter(p => !hideViewers || !p.cwd.includes("/viewers/")) } });
     if (command === "pane get") {
+      if (failedGets.has(args[2]!)) throw new Error("pane read failed");
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
       return JSON.stringify({ result: { pane: { ...selected, cwd: reportedCwd === null ? undefined : reportedCwd ?? selected.cwd } } });
     }
@@ -114,6 +116,7 @@ function fixture(platform: NodeJS.Platform = "linux", status = {}) {
     confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
     hideViewers: () => { hideViewers = true; }, advance: (ms: number) => { clock += ms; },
     loseCreate: () => { lostCreate = true; }, loseClose: () => { lostClose = true; }, failReads: () => { readsFailed = true; },
+    failGet: (paneId: string) => { failedGets.add(paneId); },
     changeTarget: () => { transform = view => ({ ...view, opened: view.opened.map(target => target.seat === "a"
       ? { ...target, paneCommand: `${target.paneCommand} --changed`, attachArgv: [...target.attachArgv!.slice(0, 4), "replacement-a", ...target.attachArgv!.slice(5)] } : target) }); },
     focusAfterPlanning: (seat: string) => { lateFocus = { seat, reads: 0 }; },
@@ -219,10 +222,6 @@ describe("stable task-following workspace", () => {
     expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
     expect([strip.workspace_id, strip.pane_id, strip.terminal_id]).toEqual(identity);
     expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(1);
-    const effects = f.calls.filter(c => ["run", "split", "close"].includes(c[1]!)).length;
-    strip.terminal_id = "replacement-generation";
-    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: false, code: "follow_unconfirmed" });
-    expect(f.calls.filter(c => ["run", "split", "close"].includes(c[1]!))).toHaveLength(effects);
   });
   it("resumes a join paused before attach dispatch through its existing journal without changing drafts or focus", async () => {
     const f = fixture(); await f.follow(); f.inputs.set("b", "text"); f.focusSeat("b");
@@ -466,6 +465,42 @@ describe("stable task-following workspace", () => {
   });
 });
 
+
+describe("after a Herdr restart", () => {
+  // Herdr 0.9.5 restores a workspace's panes as bare shells in new terminals, or the panes are simply gone. Either way
+  // the canvas's strip isn't the one it recorded, and a re-follow must recover the view rather than keep the old one.
+  it.each(["gone", "restored as new terminals"] as const)("a canvas whose strip Herdr no longer has (%s) yields to a fresh workspace, and a later member joins it", async how => {
+    const f = fixture();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true, opened: ["a", "b"] });
+    const canvas = readdirSync(f.root)[0]!;
+    const before = readFileSync(path.join(f.root, canvas, "canvas.json"), "utf8");
+    if (how === "gone") f.panes.clear();
+    else for (const restored of f.panes.values()) { restored.terminal_id = `restarted-${restored.pane_id}`; restored.argv = ["/bin/bash"]; }
+
+    const recovered = await f.follow(["a", "b"]);
+    expect(recovered).toMatchObject({ ok: true, opened: ["a", "b"], following: { state: "following" } });
+    expect(recovered.following!.events[0]).toContain("Herdr no longer has the previous workspace");
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(2);
+    // The old canvas is kept aside as it was, and nothing of the old workspace is closed.
+    const kept = readdirSync(f.root).filter(name => name.startsWith(`${canvas}.replaced-`));
+    expect(kept).toHaveLength(1);
+    expect(readFileSync(path.join(f.root, kept[0]!, "canvas.json"), "utf8")).toBe(before);
+    expect(f.calls.some(c => c[1] === "close")).toBe(false);
+    // A member who arrives later (a handoff) joins the new workspace.
+    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
+    expect(f.calls.filter(c => c[0] === "workspace" && c[1] === "create")).toHaveLength(2);
+  });
+
+  it("a strip read that fails while Herdr still lists the strip keeps the previous view", async () => {
+    const f = fixture();
+    expect(await f.follow(["a", "b"])).toMatchObject({ ok: true });
+    const strip = [...f.panes.values()].find(p => p.cwd.endsWith("/strip"))!;
+    f.failGet(strip.pane_id); const count = f.calls.length;
+    expect(await f.follow(["a", "b", "c"])).toMatchObject({ ok: false, opened: ["a", "b"], following: { state: "retained" } });
+    expect(f.calls.slice(count).some(c => ["create", "run", "split", "close"].includes(c[1]!))).toBe(false);
+    expect(readdirSync(f.root)).toHaveLength(1);
+  });
+});
 
 describe("slice follower policy", () => {
   it("defaults a new scoped workspace to four tiles, allows an override, and keeps qitem eight", async () => {
