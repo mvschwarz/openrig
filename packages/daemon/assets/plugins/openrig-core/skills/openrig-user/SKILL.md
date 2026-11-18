@@ -1735,14 +1735,53 @@ use the `rig` CLI instead, the same way.
 
 Limits today:
 - **OpenRig can't wake this agent itself.** `rig send` to an attached external node is refused, and a task's nudge to
-  it is unroutable. It sees new work when it checks `rig_queue_list`, or, if its app can run background shell
-  commands, with the opt-in wait below.
+  it is unroutable. It sees new work when it checks `rig_queue_list`. In Claude Desktop, a scheduled task can check
+  for it (below). An app that can run background shell commands can also wait for it in an open session.
 - **Proven surfaces:** treat each app, and each mode inside one, as unproven until it has been run there.
+
+#### Pick up work in Claude Desktop with a scheduled task (opt-in)
+
+A local scheduled task in Claude Desktop starts a fresh Code-tab session on a schedule, so the seat picks up its work
+with no session left open. This is the default way to pick up work in Claude Desktop. The wait in the next section is
+for a session the person keeps open.
+
+- **Only if the person asks for it.** They create the task, or ask you to, and they choose its permission mode.
+- **Create it by asking Claude in a Code-tab session,** for example: "Create a local scheduled task for this folder,
+  named openrig-pickup, that runs every 2 minutes, with this prompt: …". Desktop's forms take nothing more often
+  than hourly, while Claude can set a schedule as often as every minute (Anthropic's docs). Claude's scheduling tool
+  has no working-folder field, so the prompt names the folder.
+- **The prompt**, with this seat's identity from the one-time attach:
+
+```text
+Work in <folder>. Run every rig command with OPENRIG_SESSION_NAME=<seat> set.
+Run rig queue list --owned --state pending --json. For each item: read it with
+rig queue show <id> --full, claim it with rig queue claim <id>, do it, and close it
+with the answer (rig queue update <id> --state done --closure-reason no-follow-on
+--note "<answer>"), or hand it off or block it. If there are none, end the run.
+```
+
+- **Then click Run now once** on the task's page, and answer its permission prompts with "always allow". A later run
+  that stops at a prompt waits in its own session until someone answers it (Anthropic's docs).
+- **What OpenRig's test measured** (one test: Claude Desktop 5.11492.5 with Claude Code 2.1.325, OpenRig 0.7.13,
+  macOS, Auto permission mode): a task every 2 minutes picked up two items 51 s and 116 s after they were created,
+  each in a fresh session.
+- **Its limits:**
+  - Each run costs a model turn, even with nothing pending.
+  - Runs happen only while the app is open and the computer is awake. A run is skipped while the previous one is
+    still going (Anthropic's docs).
+  - Not tested with the app quit or the Mac asleep.
 
 #### Wake on new work (opt-in; off unless the person turns it on)
 
 An agent whose app can run a shell command in the background, and starts a new turn when that command finishes, can
 wait for its own work. Claude Code, including Claude Desktop's Code tab, does this.
+
+**In Claude Desktop, use it only in a session the person keeps open.** The scheduled task above is the default there.
+- **If the app runs this wait with its Monitor tool,** the watch ends after 30 minutes at most, even when asked for
+  longer. That's before this loop's own 55-minute deadline, so start it again when the app says the watch ended.
+  OpenRig's test saw Desktop end a one-hour Monitor watch at 30:00, and Anthropic's docs give the same cap.
+- **As a plain background command,** Anthropic's docs give it no time limit in the desktop app. OpenRig hasn't
+  measured one past a few minutes.
 
 - **Only if the person has said they want teammates to be able to wake this session.** Never turn it on yourself, and
   never change their settings for it.
