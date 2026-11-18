@@ -638,9 +638,17 @@ export class SliceIndexer {
   }
 
   // Quiet reconciliation must notice new native membership before the legacy metadata TTL.
-  // This is a cache key over authored bytes and directory entries, not another scope parser.
+  // This is a cache key over physical roots, authored bytes and directory entries, not another scope parser.
   private reconcileComposition(): void {
-    const rows = this.sliceRoots().flatMap(root => {
+    const roots = this.sliceRoots();
+    const rootIdentities = roots.map(root => {
+      try {
+        return [root, fs.realpathSync.native(root)];
+      } catch {
+        return [root, root];
+      }
+    });
+    const rows = roots.flatMap(root => {
       if (!fs.existsSync(root)) return [];
       return fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory()).flatMap(entry => {
         const mission = path.join(root, entry.name), manifest = path.join(mission, "mission.yaml");
@@ -649,7 +657,7 @@ export class SliceIndexer {
         return [[manifest, fs.readFileSync(manifest, "utf8"), fs.existsSync(children) ? fs.readdirSync(children).sort() : []]];
       });
     });
-    const next = JSON.stringify(rows);
+    const next = JSON.stringify({ rootIdentities, rows });
     if (this.compositionBasis !== null && this.compositionBasis !== next) this.invalidate();
     this.compositionBasis = next;
   }

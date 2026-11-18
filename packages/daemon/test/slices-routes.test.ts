@@ -2533,6 +2533,36 @@ describe("GET /api/slices observed queue counts", () => {
       });
     });
 
+    it("invalidates a warm listing when a configured symlink root changes target without refresh", async () => {
+      const oldRoot = path.join(root, "old-missions");
+      const newRoot = path.join(root, "new-missions");
+      const alias = path.join(root, "alpha", "missions-alias");
+      const addMission = (missionsRoot: string, mission: string, slice: string, id: string) => {
+        write(path.join(missionsRoot, mission, "SPEC.md"), nodeBytes(`M.${id}`, "active", "Mission"));
+        write(path.join(missionsRoot, mission, "slices", slice, "SPEC.md"), nodeBytes(`OPR.${id}`, "active", "Slice"));
+      };
+      addMission(oldRoot, "old-mission", "old-slice", "OLD");
+      addMission(newRoot, "new-mission", "new-slice", "NEW");
+      fs.mkdirSync(path.dirname(alias), { recursive: true });
+      fs.symlinkSync(oldRoot, alias, "dir");
+      const { app } = route("alpha", false, alias);
+
+      const first = await app.request("/api/slices");
+      expect(first.status).toBe(200);
+      const firstBody = await first.json() as { slices: Entry[]; missions: Record<string, { readiness?: unknown }> };
+      expect(firstBody.slices.map(slice => slice.name)).toEqual(["old-slice"]);
+      expect(firstBody.missions["old-mission"]?.readiness).toBeDefined();
+
+      fs.rmSync(alias);
+      fs.symlinkSync(newRoot, alias, "dir");
+      const second = await app.request("/api/slices");
+      expect(second.status).toBe(200);
+      const secondBody = await second.json() as { slices: Entry[]; missions: Record<string, { readiness?: unknown }> };
+      expect(secondBody.missions["new-mission"]?.readiness).toBeDefined();
+      expect(secondBody.slices.map(slice => slice.name)).toEqual(["new-slice"]);
+      expect(secondBody.missions["old-mission"]).toBeUndefined();
+    });
+
     it("reports unknown, not none, when the queue table cannot be read", async () => {
       addSlice("alpha", "shipping", "live");
       row("live-0", "pending", scope("live"));
