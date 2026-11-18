@@ -117,7 +117,11 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         if ((res.data as { code?: string }).code === "snapshot_unusable") {
           console.error(`Restore refused: ${(res.data as { error?: string }).error ?? "the selected snapshot is not restore-usable"}. Choose a different snapshot.`);
         } else if ((res.data as { code?: string }).code === "restore_in_progress") {
-          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "restore already in progress"}. Follow the existing attempt with: rig ps --include-archived --nodes --rig ${targetId}`);
+          // No attempt id is available here, and `ps --rig` selects by NAME —
+          // with the selected identity's name filtering out other identities
+          // (or vice versa) it would not show this restore. Point at the
+          // existing all-rigs observation and say what it actually covers.
+          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "restore already in progress"}. An existing restore attempt is already running and this response carries no attempt id; the selected identity is listed in the fleet-wide node view with: rig ps --nodes -A --include-archived (all rigs, not specific to this restore)`);
         } else {
           console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${targetId}`);
         }
@@ -129,7 +133,8 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         // L3 success path: route returned 202 immediately after restore.started.
         console.log(`Restore attempt id: ${res.data.attemptId}`);
         console.log(`Status: ${res.data.status ?? "started"}`);
-        console.log(`Daemon is restoring per-node in the background; follow progress with: rig ps --include-archived --nodes --rig ${targetId}`);
+        // `rig restore status` is the ID-capable consumer for this attempt;
+        // `ps --rig` would filter by name and miss a differently-named identity.
         console.log(`Read the completed attempt and its startup warnings with: rig restore status ${res.data.attemptId} --rig ${targetId}`);
       } else {
         // Defensive: server responded ok=true but didn't include attemptId.

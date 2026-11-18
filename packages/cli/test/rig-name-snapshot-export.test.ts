@@ -9,6 +9,7 @@ import { restoreCommand } from "../src/commands/restore.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import { psCommand } from "../src/commands/ps.js";
 
 const RIG_ID = "01M5F0YZQXETQ4YVH3MJVQPQXQ";
 const REMOVED_RIG_ID = "01M5F0REMOVEDRIGIDXXXXXXXX";
@@ -266,11 +267,36 @@ describe("rig snapshot, rig export and rig restore --rig", () => {
     expect(out).toContain(`Selected rig identity: ${RIG_ID}`);
     if (code === "rig_not_stopped") expect(out).toContain(`rig down ${RIG_ID}`);
     else {
-      expect(out).toContain("existing attempt");
-      expect(out).toContain(`rig ps --include-archived --nodes --rig ${RIG_ID}`);
+      expect(out).toContain("existing restore attempt is already running");
+      // `ps --rig` selects by NAME: a pointer at `--rig <id>` would filter the
+      // selected identity out. The advice names the existing all-rigs view and
+      // says what it really covers.
+      expect(out).toContain("rig ps --nodes -A --include-archived (all rigs, not specific to this restore)");
+      expect(out).not.toContain(`--nodes --rig ${RIG_ID}`);
       expect(out).not.toContain("rig down");
     }
     expect(out).not.toContain("rig down solo");
+  });
+
+  it("the in-progress advice's command is accepted by its consumer and never filters by the id", async () => {
+    // ID-different-from-name control: id RIG_ID, name "solo". `ps --rig`
+    // selects by NAME, so pointing it at the id would hide the selected rig;
+    // the advice must name a command the ps consumer accepts and that does
+    // not pass the id as a rig selector.
+    const d = fakeDaemon([{ id: REMOVED_RIG_ID, name: "solo" }, { id: RIG_ID, name: "solo", archivedAt: "2026-10-21" }]);
+    vi.spyOn(d.deps.clientFactory(""), "post").mockResolvedValue({ status: 409, data: { code: "restore_in_progress", error: "conflict" } });
+    const { out } = await run(restoreCommand(d.deps), ["restore", "snap-1", "--rig", "solo"]);
+    const advised = out.match(/rig (ps --nodes -A --include-archived)/)?.[0];
+    expect(advised).toBe("rig ps --nodes -A --include-archived");
+    expect(out).not.toContain(`--rig ${RIG_ID}`);
+    // Consumer check: the real ps command accepts exactly those flags
+    // (parseOptions validates without executing the action).
+    const ps = psCommand({} as never);
+    expect(() => ps.parseOptions(["--nodes", "-A", "--include-archived"])).not.toThrow();
+    expect(ps.opts()).toMatchObject({ nodes: true, allRigs: true, includeArchived: true });
+    // And the consumer's own contract says --rig selects by name, not id.
+    const rigOption = ps.options.find((option) => option.long === "--rig");
+    expect(rigOption?.description).toContain("named rig");
   });
 
   it.each([".", ".."])("lists and restores the name %s through normalized fetch URLs", async (name) => {
