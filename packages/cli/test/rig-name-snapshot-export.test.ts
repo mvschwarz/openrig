@@ -225,6 +225,8 @@ describe("rig snapshot, rig export and rig restore --rig", () => {
     const d = fakeDaemon();
     vi.spyOn(d.deps.clientFactory(""), "get")
       .mockResolvedValueOnce({ status: 200, data: [{ id: RIG_ID, name: "solo" }, { id: REMOVED_RIG_ID, name: "solo" }] })
+      // The retained-history read under the exact-id "solo": no stored history.
+      .mockResolvedValueOnce({ status: 200, data: [] })
       .mockResolvedValueOnce({ status: 503, data: { error: "unavailable" } });
     const { out, exitCode } = await run(restoreCommand(d.deps), ["restore", "snap-1", "--rig", "solo"]);
     expect(out).toContain("Failed to resolve snapshot (HTTP 503)");
