@@ -4,6 +4,7 @@ import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} 
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { rigIdForHandle } from "../rig-handle.js";
+import { snapshotRigIds } from "../snapshot-rig-handle.js";
 
 export function snapshotCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("snapshot").description("Manage rig snapshots");
@@ -53,17 +54,20 @@ export function snapshotCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
-      const target = await rigIdForHandle(client, rigId);
-      if (!target.ok) { console.error(target.message); process.exitCode = 1; return; }
-
-      const res = await client.get<Array<{ id: string; kind: string; status: string; createdAt: string }>>(`/api/rigs/${encodeURIComponent(target.id)}/snapshots`);
-      if (res.status >= 400) {
-        console.error(`Failed to list snapshots: ${(res.data as { error?: string }).error ?? "unknown error"}`);
-        process.exitCode = 1;
-        return;
+      const target = await snapshotRigIds(client, rigId);
+      let snapshots: Array<{ id: string; kind: string; status: string; createdAt: string }> = [];
+      for (const id of target.ids) {
+        const res = await client.get<typeof snapshots>(`/api/rigs/${encodeURIComponent(id)}/snapshots`);
+        if (res.status >= 400) {
+          console.error(`Failed to list snapshots: ${(res.data as { error?: string }).error ?? "unknown error"}`);
+          process.exitCode = 1;
+          return;
+        }
+        snapshots = snapshots.concat(res.data);
       }
-
-      const snapshots = res.data;
+      if (target.ids.length > 1) {
+        snapshots.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+      }
       // The daemon lists snapshots by exact rig id and answers [] for an id it has none for, so an unknown
       // handle would read as a rig with no snapshots. Snapshots kept under a removed rig's id still list.
       if (snapshots.length === 0 && !target.known) {

@@ -4,6 +4,7 @@ import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} 
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { rigIdForHandle } from "../rig-handle.js";
+import { snapshotRigIds } from "../snapshot-rig-handle.js";
 
 const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
@@ -25,8 +26,27 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
 
       const client = deps.clientFactory(getDaemonUrl(status));
       const rigId = opts.rig;
-      const target = await rigIdForHandle(client, rigId);
-      if (!target.ok) { console.error(target.message); process.exitCode = 1; return; }
+      const candidates = await snapshotRigIds(client, rigId);
+      let targetId = candidates.ids[0];
+      if (candidates.ids.length > 1) {
+        targetId = undefined;
+        for (const id of candidates.ids) {
+          const snapshot = await client.get(`/api/rigs/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`);
+          if (snapshot.status === 404) continue;
+          if (snapshot.status >= 400) {
+            console.error(`Failed to resolve snapshot (HTTP ${snapshot.status}). Nothing was restored.`);
+            process.exitCode = 1;
+            return;
+          }
+          targetId = id;
+          break;
+        }
+      }
+      if (targetId === undefined) {
+        console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list ${rigId}`);
+        process.exitCode = 1;
+        return;
+      }
 
       // L3: install a SIGINT/SIGTERM handler that prints an honest message —
       // interrupting the CLI client does NOT stop daemon-side restore work.
@@ -65,7 +85,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         attachCommand?: string;
         warnings?: string[];
       }>(
-        `/api/rigs/${encodeURIComponent(target.id)}/restore/${encodeURIComponent(snapshotId)}`,
+        `/api/rigs/${encodeURIComponent(targetId)}/restore/${encodeURIComponent(snapshotId)}`,
         undefined,
         { timeoutMs: LONG_RUNNING_TIMEOUT_MS },
       );
@@ -93,7 +113,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         console.log(`Restore attempt id: ${res.data.attemptId}`);
         console.log(`Status: ${res.data.status ?? "started"}`);
         console.log("Daemon is restoring per-node in the background; follow progress with 'rig ps --nodes' or 'rig restore-check'.");
-        console.log(`Read the completed attempt and its startup warnings with: rig restore status ${res.data.attemptId} --rig ${target.id}`);
+        console.log(`Read the completed attempt and its startup warnings with: rig restore status ${res.data.attemptId} --rig ${targetId}`);
       } else {
         // Defensive: server responded ok=true but didn't include attemptId.
         // Fall back to the legacy summary if it's present (back-compat with

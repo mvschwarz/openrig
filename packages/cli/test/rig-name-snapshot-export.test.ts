@@ -34,14 +34,18 @@ function lifecycleDeps(): LifecycleDeps {
 }
 
 /** A daemon that resolves only exact rig ids, as the real routes do, with two rigs named "solo" and "twin". */
-function fakeDaemon(rigs = [{ id: RIG_ID, name: "solo" }]) {
+function fakeDaemon(rigs: Array<{ id: string; name: string; archivedAt?: string | null }> = [{ id: RIG_ID, name: "solo" }]) {
   const requests: string[] = [];
   const client = {
     get: vi.fn(async (path: string) => {
       requests.push(`GET ${path}`);
-      if (path.startsWith("/api/rigs/summary")) return { status: 200, data: rigs.map((r) => ({ ...r, archivedAt: null })) };
+      if (path.startsWith("/api/rigs/summary")) return { status: 200, data: rigs.map((r) => ({ archivedAt: null, ...r })) };
       const m = /^\/api\/rigs\/([^/]+)\/snapshots$/.exec(path);
       if (m) return { status: 200, data: SNAPSHOTS[decodeURIComponent(m[1]!)] ?? [] };
+      const snapshot = /^\/api\/rigs\/([^/]+)\/snapshots\/([^/]+)$/.exec(path);
+      if (snapshot && snapshot[1] === RIG_ID && snapshot[2] === "snap-1") {
+        return { status: 200, data: { id: "snap-1", rigId: RIG_ID } };
+      }
       return { status: 404, data: { error: "not found" } };
     }),
     getText: vi.fn(async (path: string) => {
@@ -105,11 +109,42 @@ describe("rig snapshot list", () => {
     expect(empty.exitCode).toBeUndefined();
   });
 
-  it("stops on a name two active rigs share, before listing", async () => {
+  it("lists snapshots across identities when two rigs share a name", async () => {
     const d = fakeDaemon([{ id: RIG_ID, name: "twin" }, { id: "01M5F0OTHERRIGIDXXXXXXXXXX", name: "twin" }]);
     const { out, exitCode } = await run(snapshotCommand(d.deps), ["snapshot", "list", "twin"]);
-    expect(out).toContain("'twin' matches 2 rigs");
-    expect(d.requests.filter((r) => r.includes("/snapshots"))).toEqual([]);
+    expect(out).toContain("snap-1");
+    expect(d.requests).toContain(`GET /api/rigs/${RIG_ID}/snapshots`);
+    expect(d.requests).toContain("GET /api/rigs/01M5F0OTHERRIGIDXXXXXXXXXX/snapshots");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("lists archived and current identities newest-first, including auto-pre-down", async () => {
+    const d = fakeDaemon([
+      { id: REMOVED_RIG_ID, name: "solo", archivedAt: "2026-10-21 00:00:00" },
+      { id: RIG_ID, name: "solo" },
+    ]);
+    const { out, exitCode } = await run(snapshotCommand(d.deps), ["snapshot", "list", "solo"]);
+    expect(out).toContain("auto-pre-down");
+    expect(out.indexOf("snap-1")).toBeLessThan(out.indexOf("snap-old"));
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("keeps an exact id scoped to that identity even when another rig uses it as a name", async () => {
+    const d = fakeDaemon([{ id: RIG_ID, name: "solo" }, { id: REMOVED_RIG_ID, name: RIG_ID }]);
+    const { out } = await run(snapshotCommand(d.deps), ["snapshot", "list", RIG_ID]);
+    expect(out).toContain("snap-1");
+    expect(out).not.toContain("snap-old");
+  });
+
+  it("does not print a partial history when an identity's list fails", async () => {
+    const d = fakeDaemon();
+    vi.spyOn(d.deps.clientFactory(""), "get")
+      .mockResolvedValueOnce({ status: 200, data: [{ id: RIG_ID, name: "solo" }, { id: REMOVED_RIG_ID, name: "solo" }] })
+      .mockResolvedValueOnce({ status: 200, data: SNAPSHOTS[RIG_ID] })
+      .mockResolvedValueOnce({ status: 503, data: { error: "unavailable" } });
+    const { out, exitCode } = await run(snapshotCommand(d.deps), ["snapshot", "list", "solo"]);
+    expect(out).toContain("Failed to list snapshots: unavailable");
+    expect(out).not.toContain("snap-1");
     expect(exitCode).toBe(1);
   });
 });
@@ -164,6 +199,37 @@ describe("rig snapshot, rig export and rig restore --rig", () => {
     const d = fakeDaemon();
     await run(restoreCommand(d.deps), ["restore", "snap-1", "--rig", "solo"]);
     expect(d.requests).toContain(`POST /api/rigs/${RIG_ID}/restore/snap-1`);
+  });
+
+  it("restores the snapshot's archived identity instead of the current same-name rig", async () => {
+    const d = fakeDaemon([
+      { id: REMOVED_RIG_ID, name: "solo" },
+      { id: RIG_ID, name: "solo", archivedAt: "2026-10-21 00:00:00" },
+    ]);
+    const { out, exitCode } = await run(restoreCommand(d.deps), ["restore", "snap-1", "--rig", "solo"]);
+    expect(d.requests).toContain(`POST /api/rigs/${RIG_ID}/restore/snap-1`);
+    expect(d.requests).not.toContain(`POST /api/rigs/${REMOVED_RIG_ID}/restore/snap-1`);
+    expect(out).toContain("Restore complete");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("does not restore another identity when the snapshot is absent", async () => {
+    const d = fakeDaemon([{ id: RIG_ID, name: "solo" }, { id: REMOVED_RIG_ID, name: "solo" }]);
+    const { out, exitCode } = await run(restoreCommand(d.deps), ["restore", "missing", "--rig", "solo"]);
+    expect(out).toContain('Snapshot "missing" or rig "solo" not found');
+    expect(d.requests.filter((request) => request.startsWith("POST"))).toEqual([]);
+    expect(exitCode).toBe(1);
+  });
+
+  it("does not issue a restore POST when an identity's snapshot read fails", async () => {
+    const d = fakeDaemon();
+    vi.spyOn(d.deps.clientFactory(""), "get")
+      .mockResolvedValueOnce({ status: 200, data: [{ id: RIG_ID, name: "solo" }, { id: REMOVED_RIG_ID, name: "solo" }] })
+      .mockResolvedValueOnce({ status: 503, data: { error: "unavailable" } });
+    const { out, exitCode } = await run(restoreCommand(d.deps), ["restore", "snap-1", "--rig", "solo"]);
+    expect(out).toContain("Failed to resolve snapshot (HTTP 503)");
+    expect(d.requests.filter((request) => request.startsWith("POST"))).toEqual([]);
+    expect(exitCode).toBe(1);
   });
 
   it("restore status --json reports a shared name as rig_ambiguous JSON, like rig grow and rig remove", async () => {
