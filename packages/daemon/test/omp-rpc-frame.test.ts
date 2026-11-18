@@ -729,6 +729,97 @@ describe("OMP runner over protocol v2 (#1275)", () => {
     expect.soft(rDropCap.rpc.at(-1)).toEqual({ type: "get_entries", since: "e4", id: "pi-runner-cursor-refresh" });
     expect.soft(rDropCap.cursor()).toBe("e1");
   });
+
+  it("#1275: turn refreshes skip known oversized or pinned restore positions, skip full-read fallback while the gap is pinned, and record size drops after earlier drops", () => {
+    const bigPayload = "x".repeat(MiB);
+    const largeEntries: Array<Record<string, unknown>> = Array.from({ length: 66 }, (_, i) => ({
+      type: "message",
+      id: `huge-${i + 1}`,
+      parentId: i > 0 ? `huge-${i}` : null,
+      text: bigPayload,
+    }));
+    largeEntries.push(
+      { type: "message", id: "tail-prev", parentId: "huge-66", text: "recent" },
+      { type: "message", id: "turn-after-64m", parentId: "tail-prev", text: "turn" },
+    );
+
+    // 1a. After a size error on catchUpSince, neither an equal live turnCursorId nor a local tail stuck at catchUpSince
+    //     repeats get_entries(since: catchUpSince); once the local tail advances past catchUpSince, bounded turn reads resume.
+    let equalTail: string | null = "huge-1";
+    const rEqualStart = sinceAwareOmp(largeEntries, { catchUpSince: "huge-1", tailFn: () => equalTail });
+    rEqualStart.answerGetEntries(rEqualStart.rpc.at(-1)!); // RPC response exceeded the transport limit on huge-1
+    rEqualStart.line({ type: "agent_start", entryId: "huge-1" });
+    const countAfterSizeFail = rEqualStart.rpc.length;
+    rEqualStart.line({ type: "agent_end", isTerminal: true });
+    rEqualStart.line({ type: "agent_end", isTerminal: true });
+    expect.soft(rEqualStart.rpc).toHaveLength(countAfterSizeFail);
+    expect.soft(rEqualStart.cursor()).toBe("huge-1");
+
+    // Even with turnCursorId still equal to huge-1, advancing the disk tail to turn-after-64m selects turn-after-64m.
+    equalTail = "turn-after-64m";
+    rEqualStart.line({ type: "agent_end", isTerminal: true });
+    expect.soft(rEqualStart.rpc.at(-1)).toEqual({ type: "get_entries", since: "turn-after-64m", id: "pi-runner-cursor-refresh" });
+    expect.soft(rEqualStart.cursor()).toBe("huge-1");
+
+    // 1b. If an ordinary bounded turn refresh itself fails with transport limit on huge-2, a tail stuck at huge-2 is also skipped.
+    let refreshTail: string | null = "huge-2";
+    const rOversizedRefresh = sinceAwareOmp(largeEntries, { catchUpSince: "huge-1", tailFn: () => refreshTail });
+    rOversizedRefresh.answerGetEntries(rOversizedRefresh.rpc.at(-1)!); // catch-up fails for size
+    rOversizedRefresh.line({ type: "agent_end", isTerminal: true }); // tries tail huge-2 once
+    expect.soft(rOversizedRefresh.rpc.at(-1)).toEqual({ type: "get_entries", since: "huge-2", id: "pi-runner-cursor-refresh" });
+    rOversizedRefresh.answerGetEntries(rOversizedRefresh.rpc.at(-1)!); // huge-2 also fails with transport limit
+    const countAfterRefreshFail = rOversizedRefresh.rpc.length;
+    rOversizedRefresh.line({ type: "agent_end", isTerminal: true });
+    expect.soft(rOversizedRefresh.rpc).toHaveLength(countAfterRefreshFail);
+    refreshTail = "turn-after-64m";
+    rOversizedRefresh.line({ type: "agent_end", isTerminal: true });
+    expect.soft(rOversizedRefresh.rpc.at(-1)).toEqual({ type: "get_entries", since: "turn-after-64m", id: "pi-runner-cursor-refresh:2" });
+
+    const smallEntries = [
+      { type: "message", id: "e1", parentId: null },
+      { type: "message", id: "e2", parentId: "e1" },
+      { type: "message", id: "e3", parentId: "e2" },
+      { type: "message", id: "e4", parentId: "e3" },
+    ];
+
+    // 2a. Dropped restore that exhausts its single retry with no live entryId and no readable tail skips full-read fallback.
+    let droppedTail: string | null = null;
+    const rDroppedNoTail = sinceAwareOmp(smallEntries, { catchUpSince: "e1", tailFn: () => droppedTail });
+    rDroppedNoTail.line({ type: "rpc_chunk", chunkId: "rpc-drop-a", index: 0, count: 2, byteLength: 100, data: "!!!!" });
+    rDroppedNoTail.line({ type: "agent_end", isTerminal: true }); // sends the single catch-up retry
+    expect.soft(rDroppedNoTail.rpc.filter((c) => c.id === "pi-runner-catch-up")).toHaveLength(2);
+    const countAfterDroppedRetry = rDroppedNoTail.rpc.length;
+    rDroppedNoTail.line({ type: "rpc_chunk", chunkId: "rpc-drop-b", index: 0, count: 2, byteLength: 100, data: "!!!!" });
+    rDroppedNoTail.line({ type: "agent_end", isTerminal: true });
+    rDroppedNoTail.line({ type: "agent_end", isTerminal: true });
+    expect.soft(rDroppedNoTail.rpc).toHaveLength(countAfterDroppedRetry);
+    expect.soft(rDroppedNoTail.cursor()).toBe("e1");
+    droppedTail = "e4";
+    rDroppedNoTail.line({ type: "agent_end", isTerminal: true });
+    expect.soft(rDroppedNoTail.rpc.at(-1)).toEqual({ type: "get_entries", since: "e4", id: "pi-runner-cursor-refresh" });
+    expect.soft(rDroppedNoTail.cursor()).toBe("e1");
+
+    // 2b. Unanswered restore that exhausts its single retry with no live entryId and no readable tail skips full-read fallback.
+    const rUnansweredNoTail = sinceAwareOmp(smallEntries, { catchUpSince: "e1", tailFn: () => null });
+    rUnansweredNoTail.line({ type: "agent_end", isTerminal: true }); // Turn 1 grace period
+    rUnansweredNoTail.line({ type: "agent_end", isTerminal: true }); // Turn 2 sends the single catch-up retry
+    expect.soft(rUnansweredNoTail.rpc.filter((c) => c.id === "pi-runner-catch-up")).toHaveLength(2);
+    const countAfterUnansweredRetry = rUnansweredNoTail.rpc.length;
+    rUnansweredNoTail.line({ type: "agent_end", isTerminal: true });
+    rUnansweredNoTail.line({ type: "agent_end", isTerminal: true });
+    expect.soft(rUnansweredNoTail.rpc).toHaveLength(countAfterUnansweredRetry);
+    expect.soft(rUnansweredNoTail.cursor()).toBe("e1");
+
+    // 3. A decoder size rejection arriving after an earlier non-size frame drop while restore is unresolved still disables retry.
+    const rDropThenSize = sinceAwareOmp(smallEntries, { catchUpSince: "e1", tailFn: () => "e4" });
+    rDropThenSize.line({ type: "rpc_chunk", chunkId: "rpc-event-corrupt", index: 0, count: 2, byteLength: 100, data: "!!!!" });
+    rDropThenSize.line({ type: "rpc_chunk", chunkId: "rpc-catchup-over", index: 0, count: 260, byteLength: OMP_MAX_REASSEMBLED_FRAME_BYTES + 1024, data: "e30=" });
+    expect.soft(rDropThenSize.mirror.at(-1)).toContain("above the 67108864-byte reassembly limit");
+    rDropThenSize.line({ type: "agent_end", isTerminal: true });
+    expect.soft(rDropThenSize.rpc.filter((c) => c.id === "pi-runner-catch-up")).toHaveLength(1);
+    expect.soft(rDropThenSize.rpc.at(-1)).toEqual({ type: "get_entries", since: "e4", id: "pi-runner-cursor-refresh" });
+    expect.soft(rDropThenSize.cursor()).toBe("e1");
+  });
 });
 
 // The production wiring: the real runner entry hands OMP's ready frame to the core. A fake `omp` answers

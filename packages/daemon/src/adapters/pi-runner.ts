@@ -1110,6 +1110,7 @@ export class RunnerCore {
     anchorId?: string;
   }>();
   private readonly bufferedRefreshSpans = new Map<string, string>();
+  private readonly oversizedSinceIds = new Set<string>();
 
   constructor(
     private io: RunnerIo,
@@ -1200,6 +1201,7 @@ export class RunnerCore {
       this.catchUpAgedOneTurn = false;
       this.catchUpRetryExhausted = false;
       this.catchUpOversized = false;
+      this.oversizedSinceIds.clear();
       this.io.sendRpc({ type: "get_entries", since: this.opts.catchUpSince, id: CATCH_UP_ID });
     }
     this.refreshPaneStatus();
@@ -1256,7 +1258,7 @@ export class RunnerCore {
   /** A frame that can't be reassembled is lost, and said so. If it was a get_entries reply, the cursor stays where it was. */
   private reportDroppedFrame(reason: string | null | undefined): void {
     if (!reason) return;
-    if (this.restoreState === "pending") {
+    if (this.restoreState !== "settled") {
       this.catchUpInFlight = false;
       this.catchUpAgedOneTurn = false;
       this.restoreState = "gap";
@@ -1680,6 +1682,9 @@ export class RunnerCore {
         const failed = this.pendingRefreshes.get(record.id);
         if (failed) {
           this.pendingRefreshes.delete(record.id);
+          if (failed.requestSince !== undefined && OVERSIZED_RESTORE_ERROR_RE.test(detail)) {
+            this.recordOversizedSince(failed.requestSince);
+          }
           if (failed.seq >= this.lastSettledRefreshSeq) {
             this.lastSettledRefreshSeq = failed.seq;
             if (failed.sentSeq >= this.liveTurnSeq) {
@@ -1814,6 +1819,7 @@ export class RunnerCore {
       }
 
       if (isCatchUp) {
+        if (this.opts.catchUpSince) this.oversizedSinceIds.delete(this.opts.catchUpSince);
         if (this.restoreState !== "settled") {
           this.restoreState = "settled";
           this.catchUpOversized = false;
@@ -1843,6 +1849,7 @@ export class RunnerCore {
             this.catchUpInFlight = false;
             this.catchUpAgedOneTurn = false;
             this.catchUpOversized = false;
+            this.oversizedSinceIds.clear();
             this.unheldSavedCursor = false;
             this.bufferedRefreshSpans.clear();
             if (this.lastEntryId !== lastId) {
@@ -1850,19 +1857,22 @@ export class RunnerCore {
               this.writeSidecar({});
             }
           }
-        } else if (this.restoreState === "settled" && !this.unheldSavedCursor && this.lastEntryId !== undefined) {
-          if (lastId !== undefined && lastId !== this.lastEntryId
-            && (requestSince === this.lastEntryId || this.entriesContainId(entries, this.lastEntryId))) {
-            this.lastEntryId = lastId;
-            this.writeSidecar({});
-          }
-        } else if (this.restoreState === "settled" && (this.lastEntryId === undefined || this.unheldSavedCursor)) {
-          const confirmedAnchor = entries.length === 0 ? (record.success === true ? meta?.anchorId : undefined) : lastId;
-          if (confirmedAnchor !== undefined) {
-            this.unheldSavedCursor = false;
-            if (this.lastEntryId !== confirmedAnchor) {
-              this.lastEntryId = confirmedAnchor;
+        } else {
+          this.oversizedSinceIds.delete(requestSince);
+          if (this.restoreState === "settled" && !this.unheldSavedCursor && this.lastEntryId !== undefined) {
+            if (lastId !== undefined && lastId !== this.lastEntryId
+              && (requestSince === this.lastEntryId || this.entriesContainId(entries, this.lastEntryId))) {
+              this.lastEntryId = lastId;
               this.writeSidecar({});
+            }
+          } else if (this.restoreState === "settled" && (this.lastEntryId === undefined || this.unheldSavedCursor)) {
+            const confirmedAnchor = entries.length === 0 ? (record.success === true ? meta?.anchorId : undefined) : lastId;
+            if (confirmedAnchor !== undefined) {
+              this.unheldSavedCursor = false;
+              if (this.lastEntryId !== confirmedAnchor) {
+                this.lastEntryId = confirmedAnchor;
+                this.writeSidecar({});
+              }
             }
           }
         }
@@ -1940,6 +1950,24 @@ export class RunnerCore {
     this.io.sendRpc(since ? { type: "get_entries", since, id } : { type: "get_entries", id });
   }
 
+  private isRestoreGapPinned(): boolean {
+    return this.restoreState !== "settled" && (this.catchUpOversized || this.catchUpRetryExhausted);
+  }
+
+  private recordOversizedSince(since: string | undefined): void {
+    if (!since || this.oversizedSinceIds.has(since)) return;
+    if (this.oversizedSinceIds.size >= MAX_PENDING_CURSOR_REFRESHES) {
+      const oldest = this.oversizedSinceIds.keys().next().value;
+      if (oldest !== undefined) this.oversizedSinceIds.delete(oldest);
+    }
+    this.oversizedSinceIds.add(since);
+  }
+
+  private isDisallowedTurnRefreshSince(id: string): boolean {
+    if (this.restoreState !== "settled" && id === this.opts.catchUpSince) return true;
+    return this.oversizedSinceIds.has(id);
+  }
+
   /** #1275: refresh the cursor boundedly using `since` when held or seeded, keeping full reads for Pi --usage-facts. */
   private requestCursorRefresh(): void {
     if (this.isPiUsageFactsActive()) {
@@ -1947,20 +1975,29 @@ export class RunnerCore {
       return;
     }
     if (this.restoreState === "settled" && !this.unheldSavedCursor && this.lastEntryId !== undefined) {
-      this.dispatchCursorRefresh(this.lastEntryId);
-      return;
+      if (!this.oversizedSinceIds.has(this.lastEntryId)) {
+        this.dispatchCursorRefresh(this.lastEntryId);
+        return;
+      }
     }
+    let skippedDisallowedSince = false;
     if (this.turnCursorId !== undefined) {
-      this.dispatchCursorRefresh(this.turnCursorId, this.turnCursorId);
-      return;
+      if (!this.isDisallowedTurnRefreshSince(this.turnCursorId)) {
+        this.dispatchCursorRefresh(this.turnCursorId, this.turnCursorId);
+        return;
+      }
+      skippedDisallowedSince = true;
     }
     const sessionFile = this.readableSessionFile();
     const tailId = sessionFile ? this.io.readLastEntryId?.(sessionFile) ?? null : null;
     if (tailId) {
-      this.dispatchCursorRefresh(tailId, tailId);
-      return;
+      if (!this.isDisallowedTurnRefreshSince(tailId)) {
+        this.dispatchCursorRefresh(tailId, tailId);
+        return;
+      }
+      skippedDisallowedSince = true;
     }
-    if (this.catchUpOversized) {
+    if (this.isRestoreGapPinned() || skippedDisallowedSince || this.oversizedSinceIds.size > 0) {
       return;
     }
     this.dispatchCursorRefresh(undefined);
@@ -1973,6 +2010,7 @@ export class RunnerCore {
     if (ENTRY_NOT_FOUND_RE.test(detail)) {
       this.restoreState = "settled";
       this.catchUpOversized = false;
+      if (this.opts.catchUpSince) this.oversizedSinceIds.delete(this.opts.catchUpSince);
       this.unheldSavedCursor = true;
       this.bufferedRefreshSpans.clear();
       return;
@@ -1981,6 +2019,7 @@ export class RunnerCore {
     if (OVERSIZED_RESTORE_ERROR_RE.test(detail)) {
       this.catchUpOversized = true;
       this.catchUpRetryExhausted = true;
+      this.recordOversizedSince(this.opts.catchUpSince);
     }
   }
 
