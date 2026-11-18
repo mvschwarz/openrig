@@ -56,7 +56,21 @@ export async function remoteUpLeaf(
     env: deps.env,
     readFile: deps.readFile,
   });
-  if (res.ok) return { ok: true };
+  if (res.ok) {
+    // A 2xx is not a full success: /api/up answers 200 with the bootstrap
+    // outcome in the body (completed | partial | failed | …). A partial or
+    // failed bootstrap — one seat failed to launch — must report a failed
+    // entry with the failed-seat reason, so a sequential topology cannot
+    // claim all rigs launched; the walk's per-entry reporting keeps the
+    // surviving siblings running.
+    const payload = (res.payload ?? {}) as { status?: unknown; errors?: unknown };
+    const status = typeof payload.status === "string" ? payload.status : "completed";
+    if (status === "partial" || status === "failed") {
+      const errors = Array.isArray(payload.errors) ? payload.errors.filter((e): e is string => typeof e === "string").join("; ") : "";
+      return { ok: false, error: `[remote-command-failed] remote up on host ${host.id} answered HTTP ${res.status} with status ${status}${errors ? `: ${errors}` : ""}` };
+    }
+    return { ok: true };
+  }
 
   switch (res.kind) {
     case "bearer":

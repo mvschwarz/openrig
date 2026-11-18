@@ -70,6 +70,28 @@ describe("remoteUpLeaf — the shipped POST /api/up transport", () => {
     expect(JSON.parse(String(capture.init?.body))).toEqual({ sourceRef: "specs/factory.yaml", autoApprove: true });
   });
 
+  it("a 200 partial bootstrap reports a failed entry with the failed-seat reason", async () => {
+    const res = await remoteUpLeaf(
+      { sourceRef: "specs/factory.yaml" },
+      HOST_FILE,
+      { readFile: () => "tok-123\n", fetchImpl: fetchStub(200, { status: "partial", errors: ["main.seat: pi launch failed: the runner exited (code 1)"] }) },
+    );
+    expect(res).toEqual({
+      ok: false,
+      error: "[remote-command-failed] remote up on host vps-f answered HTTP 200 with status partial: main.seat: pi launch failed: the runner exited (code 1)",
+    });
+  });
+
+  it("a 200 failed bootstrap reports the failed status even without error strings", async () => {
+    const res = await remoteUpLeaf(
+      { sourceRef: "specs/factory.yaml" },
+      HOST_FILE,
+      { readFile: () => "tok-123\n", fetchImpl: fetchStub(200, { status: "failed" }) },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("status failed");
+  });
+
   it("401/403 classifies permission-gate; 4xx/5xx classifies remote-command-failed with the remote error text verbatim", async () => {
     const auth = await remoteUpLeaf({ sourceRef: "r" }, HOST_ENV, {
       env: { VPS_B_TOKEN: "t" },
