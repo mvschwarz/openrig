@@ -308,9 +308,11 @@ What reads these declarations:
   `pending`, `in-progress`, `done`, `blocked`, `failed`, `denied`, `canceled` and `handed-off`; it is `null` when
   the row's project/mission scope cannot be resolved or catalog/candidate-root discovery is incomplete. This is
   separate from the existing `qitemCount` display membership field. Counts match exact typed `project:`,
-  `mission:` and `slice:` tags in one shared queue scan. Physical candidates include configured indexer roots
-  and every catalog project's missions root. A row may omit `project:` or `mission:` only when its remaining
-  tags identify exactly one physical slice with a resolved project and mission. Ambiguous matches count nowhere,
+  `mission:` and `slice:` tags in one shared queue scan. A `project:` tag naming a former id a project declares
+  under `aliases:` counts as that project ([Project workspace](project-workspace.md#renaming-a-project)).
+  Physical candidates include configured indexer roots and every catalog project's missions root. A row may omit
+  `project:` or `mission:` only when its remaining tags identify exactly one physical slice with a resolved project
+  and mission. Ambiguous matches count nowhere,
   even if first-wins discovery or a list filter leaves only one row visible; an explicit mismatched project or
   mission never counts. Several `slice:` or `mission:` tags on one row count only when they all name the same
   physical slice or mission (a slice's folder name and its frontmatter `id:`, say); a row that names two distinct
