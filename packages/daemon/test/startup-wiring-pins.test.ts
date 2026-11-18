@@ -26,10 +26,14 @@ import type { ContextMonitor } from "../src/domain/context-monitor.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { getActiveRotationCount, startTranscriptRotation, stopTranscriptRotation } from "../src/domain/transcript-rotation.js";
 import type { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
+import type { makeSeatPoolPolicy } from "../src/domain/policies/seat-pool.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { PodRepository } from "../src/domain/pod-repository.js";
+import { SeatPoolSlotsRepository } from "../src/domain/seat-pool-slots.js";
 
 // What production startup hands the watchdog's delivery and two of its policies, recorded on the way through to the
 // real factories (nothing else changes): their queue-only seams are closures with no other handle.
-const composed = vi.hoisted(() => ({ deliver: [] as unknown[], idleGate: [] as unknown[], parkedOwner: [] as unknown[] }));
+const composed = vi.hoisted(() => ({ deliver: [] as unknown[], idleGate: [] as unknown[], parkedOwner: [] as unknown[], seatPool: [] as unknown[], seatPoolRegistration: [] as string[] }));
 vi.mock("../src/domain/watchdog-delivery.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../src/domain/watchdog-delivery.js")>();
   return { ...real, makeWatchdogDeliver: (deps: Parameters<typeof real.makeWatchdogDeliver>[0]) => { composed.deliver.push(deps); return real.makeWatchdogDeliver(deps); } };
@@ -41,6 +45,22 @@ vi.mock("../src/domain/policies/idle-gate-qitem.js", async (importOriginal) => {
 vi.mock("../src/domain/policies/parked-owner-consumer.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../src/domain/policies/parked-owner-consumer.js")>();
   return { ...real, makeParkedOwnerConsumerPolicy: (deps: Parameters<typeof real.makeParkedOwnerConsumerPolicy>[0]) => { composed.parkedOwner.push(deps); return real.makeParkedOwnerConsumerPolicy(deps); } };
+});
+// Any call into the seat pool registration module, which nothing in the daemon calls while the job is unarmed.
+vi.mock("../src/domain/seat-pool-registration.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/domain/seat-pool-registration.js")>();
+  const spy = <F extends (...args: never[]) => unknown>(name: string, fn: F) =>
+    ((...args: Parameters<F>) => { composed.seatPoolRegistration.push(name); return fn(...args); }) as F;
+  return {
+    ...real,
+    ensureSeatPoolJob: spy("ensureSeatPoolJob", real.ensureSeatPoolJob),
+    reconcileSeatPoolNode: spy("reconcileSeatPoolNode", real.reconcileSeatPoolNode),
+    reconcileSeatPoolsAtStartup: spy("reconcileSeatPoolsAtStartup", real.reconcileSeatPoolsAtStartup),
+  };
+});
+vi.mock("../src/domain/policies/seat-pool.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/domain/policies/seat-pool.js")>();
+  return { ...real, makeSeatPoolPolicy: (deps: Parameters<typeof real.makeSeatPoolPolicy>[0]) => { composed.seatPool.push(deps); return real.makeSeatPoolPolicy(deps); } };
 });
 
 let db: Database.Database;
@@ -226,6 +246,44 @@ describe("a queue-only seat's watchdog reminders go through its queue, as startu
       expect(deliverDeps().noteQueuedRow!({ jobId: "pin-job", destinationSession: typist, note: "again" })).toBe("qitem-watchdog-pin");
       expect(again).toHaveBeenCalledWith("pin-job", typist, "again");
     } finally { parked.mockRestore(); noted.mockRestore(); again.mockRestore(); }
+  });
+});
+
+describe("the seat-pool job stays unarmed until the activation change (#3395)", () => {
+  it("Startup composes the seat-pool policy and leaves it unarmed: the watchdog engine does not resolve `seat-pool`, daemon start registers no seat-pool job, and a seat-pool job registered by hand ends `terminal` with `unknown_policy:seat-pool` at its first evaluation.", async () => {
+    // composed with the real readers: the model node's stored block and its slot rows
+    expect(composed.seatPool).toHaveLength(1);
+    const readers = composed.seatPool[0] as Parameters<typeof makeSeatPoolPolicy>[0];
+    const rigRepo = new RigRepository(db);
+    const rig = rigRepo.createRig("pin-pool");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    const block = { max: 3, min: 1, dispatchAfterSeconds: 45, idleGraceSeconds: 120, cooldownSeconds: 90, dispatchTag: null, cwdTemplate: null, drain: false };
+    const model = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: pod.id, pool: { spec: block } });
+    const agent = rigRepo.addNode(rig.id, "dev.impl-s1", { runtime: "claude-code", podId: pod.id });
+    const slots = new SeatPoolSlotsRepository(db);
+    slots.insert({ modelNodeId: model.id, slotNumber: 1, nodeId: agent.id, phase: "live", at: "2026-11-18T10:00:00.000Z" });
+    expect(readers.readBlock(model.id)).toEqual({ spec: block });
+    expect(readers.readSlots(model.id)).toEqual(slots.forModel(model.id));
+    expect(readers.readSlots(model.id).map((s) => s.nodeId)).toEqual([agent.id]);
+
+    // unarmed: the engine does not have the policy, and daemon start called no registration
+    const engine = deps.watchdogPolicyEngine!;
+    const jobs = deps.watchdogJobsRepo!;
+    expect(engine.resolvePolicy("seat-pool")).toBeUndefined();
+    expect(composed.seatPoolRegistration).toEqual([]);
+    expect(jobs.listAll().filter((job) => job.policy === "seat-pool")).toEqual([]);
+
+    const job = jobs.register({
+      policy: "seat-pool",
+      specYaml: "policy: seat-pool\ntarget:\n  session: dev-impl@pin-pool\n",
+      targetSession: "dev-impl@pin-pool",
+      intervalSeconds: 60,
+      registeredBySession: "person@pin-pool",
+    });
+    expect(job.state).toBe("active");
+    const result = await engine.evaluate(job);
+    expect(result.outcome).toEqual({ action: "terminal", reason: "unknown_policy:seat-pool" });
+    expect(jobs.getById(job.jobId)).toMatchObject({ state: "terminal", terminalReason: "unknown_policy:seat-pool" });
   });
 });
 

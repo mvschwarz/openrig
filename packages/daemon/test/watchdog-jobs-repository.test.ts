@@ -112,6 +112,13 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     expect(job.state).toBe("active");
   });
 
+  it("register accepts seat-pool, the job the daemon ensures for each pool model member", () => {
+    const job = repo.register(validInput({ policy: "seat-pool", targetSession: "dev-impl@pool-rig", registeredBySession: "daemon@kernel" }));
+    expect(job.policy).toBe("seat-pool");
+    expect(job.state).toBe("active");
+    expect(repo.getById(job.jobId)?.policy).toBe("seat-pool");
+  });
+
   it("register rejects unknown policy with policy_unknown", () => {
     try {
       repo.register(validInput({ policy: "totally-bogus" }));
