@@ -1197,6 +1197,25 @@ describe("rig queue CLI", () => {
       expect(result).not.toHaveProperty("parkWarning");
     });
 
+    it("uses the issued source for a successful parked auto-route create without a sender", async () => {
+      const id = "qitem-issued-route-park";
+      const issuedSource = "conversation-2a9debc43e02@kernel";
+      vi.stubEnv("OPENRIG_SESSION_NAME", "");
+      const { deps, calls } = makeDeps({
+        senderIdentity: { originUnknown: true },
+        routes: { "POST /api/queue/create": { status: 201, data: validParkCreateResponse(id, { sourceSession: issuedSource }) } },
+      });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--return-route", "auto", "--json"]);
+
+      const request = calls.find((call) => call.method === "POST" && call.path === "/api/queue/create")!;
+      expect(request.body).toMatchObject({ returnRoute: "auto", nudge: false });
+      expect(JSON.parse(JSON.stringify(request.body))).not.toHaveProperty("sourceSession");
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({ qitemId: id, persisted: true, parkReceipt: { confirmed: true } });
+      expect(process.exitCode).toBeUndefined();
+    });
+
     it("accepts a no-timer blocker wake when the request sent a blocker", async () => {
       const id = "qitem-create-blocker-wake";
       const response = validParkCreateResponse(id, {
@@ -1374,6 +1393,28 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
+    it.each([
+      ["negative byte length", { byteLength: -1, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }, { sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }],
+      ["fractional byte length", { byteLength: 1.5, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }, { sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }],
+      ["non-hex digest", { byteLength: 17, sha256: "private-digest-text" }, { byteLength: 17 }],
+      ["short digest", { byteLength: 17, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7" }, { byteLength: 17 }],
+    ] as const)("drops invalid body summary fields in a forwarded envelope: %s", async (label, body, expected) => {
+      const id = `qitem-forwarded-summary-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+      const createWarning = { code: "qitem_create_outcome_unknown", message: "The create outcome is unknown.", fields: ["body"], observed: { body } };
+      const { deps } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: {
+        qitemId: id,
+        createOutcome: "unknown",
+        createWarning,
+        parkWarning: { code: "qitem_park_not_confirmed", message: "The park is not confirmed." },
+      } } } });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result.createWarning.observed.body).toEqual(expected);
+      if (label === "non-hex digest") expect(JSON.stringify(result)).not.toContain("private-digest-text");
+    });
+
     it("merges the existing body-not-saved warning without exposing the received body", async () => {
       const id = "qitem-existing-body-not-saved";
       const receivedBody = "private-body-text";
@@ -1396,6 +1437,45 @@ describe("rig queue CLI", () => {
       expect(errors.join("\n")).not.toContain(receivedBody);
       expect(result).not.toHaveProperty("parkReceipt.receiptVersion");
       expect(result).not.toHaveProperty("persisted");
+    });
+
+    it.each([
+      {
+        label: "object body with forged summary fields",
+        body: { byteLength: 17, sha256: "private-digest-text" },
+        summary: { type: "object" },
+        secret: "private-digest-text",
+      },
+      { label: "null body", body: null, summary: { type: "null" }, secret: null },
+    ])("summarizes $label once without copying body text", async ({ label, body, summary, secret }) => {
+      const id = `qitem-body-summary-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+      const { deps } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: validParkCreateResponse(id, { body }) } } });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result.createWarning.observed.body).toEqual(summary);
+      expect(result.existingRow.body).toEqual(summary);
+      if (secret) expect(JSON.stringify(result)).not.toContain(secret);
+    });
+
+    it.each([
+      ["sourceSession", "private-source-text"],
+      ["destinationSession", "private-destination-text"],
+    ] as const)("drops malformed %s from the existing-row summary", async (field, secret) => {
+      const id = `qitem-malformed-${field}`;
+      const malformed = { nested: { body: secret } };
+      const { deps } = makeDeps({ routes: { "POST /api/queue/create": {
+        status: 201,
+        data: validParkCreateResponse(id, { [field]: malformed }),
+      } } });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result.existingRow).not.toHaveProperty(field);
+      expect(result.createWarning.observed[field]).toEqual({ type: "object" });
+      expect(JSON.stringify(result)).not.toContain(secret);
     });
 
     it("uses the create-outcome code when an earlier warning has no string code", async () => {
@@ -1569,6 +1649,23 @@ describe("rig queue CLI", () => {
       expect(process.exitCode).toBe(1);
       expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.");
       if (field === "body") expect(JSON.stringify(result.createWarning)).not.toContain("private-body-text");
+    });
+
+    it("does not confirm a park from a matching recovery GET receipt", async () => {
+      const id = "qitem-readback-positive-park-receipt";
+      const { deps, calls } = makeDeps({
+        postError: { path: "/api/queue/create", error: new DaemonConnectionError("connection dropped", "ECONNRESET") },
+        routes: { [`GET /api/queue/${id}`]: { status: 200, data: validParkCreateResponse(id) } },
+      });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({ qitemId: id, persisted: true, parkReceipt: { confirmed: false } });
+      expect(result.parkReceipt).not.toHaveProperty("receiptVersion");
+      expect(result.parkWarning.fields).toContain("parkReceipt");
+      expect(process.exitCode).toBeUndefined();
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
     it("ignores park fields in a non-park response", async () => {

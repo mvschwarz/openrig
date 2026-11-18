@@ -13,6 +13,7 @@ import { shellQuote } from "../cross-host-executor.js";
 import { bearerAuthHeaders, loadHostRegistry, resolveHost, resolveRemoteBearer } from "../host-registry.js";
 import { loadHostBindings } from "../host-bindings.js";
 import { eligibleQueueBindings, ineligibleBindingDetail } from "@openrig/daemon/learned-host-bindings";
+import { issuedReturnAddress } from "@openrig/daemon/issued-return-address";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
@@ -97,6 +98,16 @@ type QueueRow = Record<string, unknown>;
 const PARK_RECEIPT_VERSION = 1;
 const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
 const QUEUE_STATES = new Set(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
+const BODY_SUMMARY_TYPES = new Set(["null", "object", "array", "number", "boolean", "undefined"]);
+const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
+
+function validIdentitySession(value: unknown): value is string {
+  return typeof value === "string"
+    && value === value.trim()
+    && /^[A-Za-z0-9._@-]+$/.test(value)
+    && parseSessionName(value).kind === "canonical"
+    && !isHumanSeatSessionRef(value);
+}
 
 function isQueueRow(value: unknown): value is QueueRow {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -109,12 +120,32 @@ function bodySummary(value: unknown): QueueRow {
   return { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
 }
 
+/** Sanitize a body summary received from a warning or a forwarding envelope. Raw row bodies use bodySummary directly. */
+function safeBodySummary(value: unknown): QueueRow | undefined {
+  if (!isQueueRow(value)) return bodySummary(value);
+  if (Object.keys(value).length === 1 && typeof value.type === "string" && BODY_SUMMARY_TYPES.has(value.type)) {
+    return { type: value.type };
+  }
+  const summary: QueueRow = {};
+  if (Object.prototype.hasOwnProperty.call(value, "byteLength")
+    && Number.isInteger(value.byteLength) && (value.byteLength as number) >= 0) {
+    summary.byteLength = value.byteLength;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "sha256")
+    && typeof value.sha256 === "string" && SHA256_PATTERN.test(value.sha256)) {
+    summary.sha256 = value.sha256;
+  }
+  if (Object.keys(summary).length > 0) return summary;
+  if (Object.prototype.hasOwnProperty.call(value, "byteLength") || Object.prototype.hasOwnProperty.call(value, "sha256")) return undefined;
+  return bodySummary(value);
+}
+
 function observedValue(field: string, value: unknown): unknown {
   if (value === undefined) return undefined;
-  if (field === "body" && isQueueRow(value) && typeof value.byteLength === "number" && typeof value.sha256 === "string") {
-    return { byteLength: value.byteLength, sha256: value.sha256 };
-  }
   if (field === "body") return bodySummary(value);
+  if (field === "sourceSession" || field === "destinationSession") {
+    return validIdentitySession(value) ? value : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+  }
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
   if (isQueueRow(value)) {
     const safe: QueueRow = {};
@@ -127,13 +158,19 @@ function observedValue(field: string, value: unknown): unknown {
   return { type: Array.isArray(value) ? "array" : typeof value };
 }
 
-function safeRemoteEnvelopeValue(field: string, value: unknown): unknown {
-  if (field === "body") return observedValue(field, value);
-  if (Array.isArray(value)) return value.map((item) => safeRemoteEnvelopeValue("", item));
+function safeRemoteEnvelopeValue(field: string, value: unknown, inObserved = false): unknown {
+  if (field === "body") return inObserved ? safeBodySummary(value) : bodySummary(value);
+  if (field === "sourceSession" || field === "destinationSession") {
+    return validIdentitySession(value) ? value : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+  }
+  if (Array.isArray(value)) return value.map((item) => safeRemoteEnvelopeValue("", item, inObserved));
   if (isQueueRow(value)) {
     const safe: QueueRow = {};
     for (const [key, received] of Object.entries(value)) {
-      if (received !== undefined) safe[key] = safeRemoteEnvelopeValue(key, received);
+      if (received !== undefined) {
+        const summary = safeRemoteEnvelopeValue(key, received, inObserved || key === "observed");
+        if (summary !== undefined) safe[key] = summary;
+      }
     }
     return safe;
   }
@@ -168,11 +205,11 @@ function mergeWarning(
   const oldObserved = isQueueRow(existing.observed) ? existing.observed : {};
   const mergedObserved: QueueRow = {};
   for (const [field, received] of Object.entries(oldObserved)) {
-    const safe = observedValue(field, received);
+    const safe = field === "body" ? safeBodySummary(received) : observedValue(field, received);
     if (safe !== undefined) mergedObserved[field] = safe;
   }
   for (const [field, received] of Object.entries(observed)) {
-    const safe = observedValue(field, received);
+    const safe = field === "body" ? safeBodySummary(received) : observedValue(field, received);
     if (safe !== undefined) mergedObserved[field] = safe;
   }
   return {
@@ -659,7 +696,13 @@ const CREATE_READ_BACK_TIMEOUT_MS = 10_000;
 
 /** What a create sent, for telling its row from another with the same ID. `claimedSource` is the body's source, which the
  *  daemon records only when the request carries no sender; `remoteHost` is the host it was sent to with `--host`. */
-interface SentCreate { destinationSession: string; claimedSource: string | undefined; body: string; remoteHost: string | undefined }
+interface SentCreate {
+  destinationSession: string;
+  claimedSource: string | undefined;
+  issuedSource: string | undefined;
+  body: string;
+  remoteHost: string | undefined;
+}
 
 /** The daemon's host id: null when it reports none, undefined when it can't be read. */
 async function daemonSelfHostId(client: DaemonClient): Promise<string | null | undefined> {
@@ -678,7 +721,7 @@ async function daemonSelfHostId(client: DaemonClient): Promise<string | null | u
  *  unknown. Undefined when that host id is needed and can't be read. */
 async function storedSourceOf(client: DaemonClient, sent: SentCreate): Promise<string | undefined> {
   const { session, originUnknown } = await client.senderIdentity();
-  const source = (session ?? sent.claimedSource)?.trim();
+  const source = (session ?? sent.claimedSource ?? sent.issuedSource)?.trim();
   if (!source) return undefined;
   const parts = source.split("@");
   const canonicalizes = session !== undefined && parts.length === 3 && parts.every(Boolean);
@@ -715,14 +758,17 @@ function observedResponseShape(value: unknown): QueueRow {
   return { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
 }
 
-function existingRowSummary(row: QueueRow): QueueRow {
-  return {
-    qitemId: row.qitemId,
-    state: row.state,
-    destinationSession: row.destinationSession,
-    sourceSession: row.sourceSession,
-    ...(row.body === undefined ? {} : { body: observedValue("body", row.body) }),
-  };
+function existingRowSummary(row: QueueRow, expectedId: string, bodyIsSummary = false): QueueRow {
+  const summary: QueueRow = {};
+  if (row.qitemId === expectedId) summary.qitemId = expectedId;
+  if (typeof row.state === "string" && QUEUE_STATES.has(row.state)) summary.state = row.state;
+  if (validIdentitySession(row.destinationSession)) summary.destinationSession = row.destinationSession;
+  if (validIdentitySession(row.sourceSession)) summary.sourceSession = row.sourceSession;
+  if (row.body !== undefined) {
+    const body = bodyIsSummary ? safeBodySummary(row.body) : bodySummary(row.body);
+    if (body !== undefined) summary.body = body;
+  }
+  return summary;
 }
 
 /** Check the returned row identity before reading any park receipt from a park create. */
@@ -770,7 +816,7 @@ async function checkParkCreateIdentity(
     observed,
     reason: `The returned row does not confirm this create (${identityFields}). The create outcome is unknown. Keep the sent ID for a read back.`,
     ...(value.qitemId === qitemId && typeof value.state === "string" && QUEUE_STATES.has(value.state)
-      ? { existingRow: existingRowSummary(value) } : {}),
+      ? { existingRow: existingRowSummary(value, qitemId) } : {}),
   };
 }
 
@@ -1011,11 +1057,13 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
             observed,
             reason: `The read back row does not match this create (${field}). The create outcome is unknown. Keep the sent ID for a read back.`,
             ...(typeof res.data.state === "string" && QUEUE_STATES.has(res.data.state)
-              ? { existingRow: existingRowSummary(res.data) } : {}),
+              ? { existingRow: existingRowSummary(res.data, qitemId) } : {}),
           },
         };
       }
-      return { row: res.data, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
+      const recoveredRow = { ...res.data };
+      delete recoveredRow.parkReceipt;
+      return { row: recoveredRow, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
         remoteConfirmed: target.remoteConfirmed };
     }
     if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
@@ -1843,8 +1891,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
-        const sent: SentCreate = { destinationSession: hostResolved.destination, claimedSource: managedSource === undefined ? source : undefined, body: resolvedBody,
-          remoteHost: remoteHostOf(hostResolved.hostId) };
+        const sent: SentCreate = {
+          destinationSession: hostResolved.destination,
+          claimedSource: managedSource === undefined ? source : undefined,
+          issuedSource: issuedActor ? issuedReturnAddress(qitemId) : undefined,
+          body: resolvedBody,
+          remoteHost: remoteHostOf(hostResolved.hostId),
+        };
         const emitScopeAdvisories = (created: Record<string, unknown>) => {
           const advisories = Array.isArray(created?.advisories) ? created.advisories : [];
           for (const value of advisories) {
@@ -1906,7 +1959,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               const parkWarning = isQueueRow(forwardedParkWarning)
                 ? forwardedParkWarning
                 : unconfirmedParkWarning(undefined, undefined);
-              const existingRow = safeRemoteEnvelopeValue("existingRow", created.existingRow);
+              const existingRow = isQueueRow(created.existingRow)
+                ? existingRowSummary(created.existingRow, qitemId, true)
+                : undefined;
               const result = {
                 qitemId,
                 createOutcome: "unknown",

@@ -73,6 +73,8 @@ const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
 const PARK_RECEIPT_VERSION = 1;
 const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
 const VALID_PARK_CREATE_STATES = new Set<QueueState>(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
+const BODY_SUMMARY_TYPES = new Set(["null", "object", "array", "number", "boolean", "undefined"]);
+const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
@@ -83,14 +85,46 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function validIdentitySession(value: unknown): value is string {
+  return typeof value === "string"
+    && value === value.trim()
+    && /^[A-Za-z0-9._@-]+$/.test(value)
+    && parseSessionName(value).kind === "canonical"
+    && !isHumanSeatSessionRef(value);
+}
+
+function bodySummary(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    return { byteLength: Buffer.byteLength(value, "utf8"), sha256: createHash("sha256").update(value, "utf8").digest("hex") };
+  }
+  return { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+}
+
+/** Validate a body summary imported from a warning. Raw row bodies use bodySummary directly. */
+function safeBodySummary(value: unknown): Record<string, unknown> | undefined {
+  if (!isObjectRecord(value)) return bodySummary(value);
+  if (Object.keys(value).length === 1 && typeof value.type === "string" && BODY_SUMMARY_TYPES.has(value.type)) {
+    return { type: value.type };
+  }
+  const summary: Record<string, unknown> = {};
+  if (Object.prototype.hasOwnProperty.call(value, "byteLength")
+    && Number.isInteger(value.byteLength) && (value.byteLength as number) >= 0) {
+    summary.byteLength = value.byteLength;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "sha256")
+    && typeof value.sha256 === "string" && SHA256_PATTERN.test(value.sha256)) {
+    summary.sha256 = value.sha256;
+  }
+  if (Object.keys(summary).length > 0) return summary;
+  if (Object.prototype.hasOwnProperty.call(value, "byteLength") || Object.prototype.hasOwnProperty.call(value, "sha256")) return undefined;
+  return bodySummary(value);
+}
+
 function safeParkObserved(field: string, value: unknown): unknown {
   if (value === undefined) return undefined;
-  if (field === "body") {
-    if (isObjectRecord(value) && typeof value.byteLength === "number" && typeof value.sha256 === "string") {
-      return { byteLength: value.byteLength, sha256: value.sha256 };
-    }
-    if (typeof value === "string") return { byteLength: Buffer.byteLength(value, "utf8"), sha256: createHash("sha256").update(value, "utf8").digest("hex") };
-    return { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+  if (field === "body") return bodySummary(value);
+  if (field === "sourceSession" || field === "destinationSession") {
+    return validIdentitySession(value) ? value : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
   }
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
   if (isObjectRecord(value)) {
@@ -117,11 +151,11 @@ function mergeParkWarning(
   const oldObserved = isObjectRecord(existing.observed) ? existing.observed : {};
   const mergedObserved: Record<string, unknown> = {};
   for (const [field, received] of Object.entries(oldObserved)) {
-    const safe = safeParkObserved(field, received);
+    const safe = field === "body" ? safeBodySummary(received) : safeParkObserved(field, received);
     if (safe !== undefined) mergedObserved[field] = safe;
   }
   for (const [field, received] of Object.entries(observed)) {
-    const safe = safeParkObserved(field, received);
+    const safe = field === "body" ? safeBodySummary(received) : safeParkObserved(field, received);
     if (safe !== undefined) mergedObserved[field] = safe;
   }
   return {
@@ -194,9 +228,9 @@ function checkForwardedParkCreate(payload: unknown, forwardBody: Record<string, 
       ? { existingRow: {
           qitemId: payload.qitemId,
           state: payload.state,
-          destinationSession: payload.destinationSession,
-          sourceSession: payload.sourceSession,
-          ...(payload.body === undefined ? {} : { body: safeParkObserved("body", payload.body) }),
+          ...(validIdentitySession(payload.destinationSession) ? { destinationSession: payload.destinationSession } : {}),
+          ...(validIdentitySession(payload.sourceSession) ? { sourceSession: payload.sourceSession } : {}),
+          ...(payload.body === undefined ? {} : { body: bodySummary(payload.body) }),
         } } : {}),
   };
 }

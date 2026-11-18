@@ -355,7 +355,10 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     { label: "ID malformed", response: (request) => remoteParkPayload(request, { qitemId: 4 }), field: "qitemId" },
     { label: "destination mismatch", response: (request) => remoteParkPayload(request, { destinationSession: "other@rig-b" }), field: "destinationSession" },
     { label: "source mismatch", response: (request) => remoteParkPayload(request, { sourceSession: "other@rig-a" }), field: "sourceSession" },
+    { label: "malformed destination identity", response: (request) => remoteParkPayload(request, { destinationSession: { nested: { body: "private-destination-text" } } }), field: "destinationSession" },
+    { label: "malformed source identity", response: (request) => remoteParkPayload(request, { sourceSession: { nested: { body: "private-source-text" } } }), field: "sourceSession" },
     { label: "body mismatch", response: (request) => remoteParkPayload(request, { body: "private-body-text" }), field: "body" },
+    { label: "body object with forged summary fields", response: (request) => remoteParkPayload(request, { body: { byteLength: 17, sha256: "private-digest-text" } }), field: "body" },
     { label: "state missing", response: (request) => { const row = remoteParkPayload(request); delete row.state; return row; }, field: "state" },
     { label: "state malformed", response: (request) => remoteParkPayload(request, { state: 5 }), field: "state" },
     { label: "state unknown", response: (request) => remoteParkPayload(request, { state: "unknown" }), field: "state" },
@@ -389,6 +392,17 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
         sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d",
       });
       expect(JSON.stringify(returned.createWarning)).not.toContain("private-body-text");
+    }
+    if (testCase.label === "body object with forged summary fields") {
+      expect(returned.createWarning.observed.body).toEqual({ type: "object" });
+      expect(JSON.stringify(returned)).not.toContain("private-digest-text");
+    }
+    if (testCase.label === "malformed source identity" || testCase.label === "malformed destination identity") {
+      const field = testCase.label === "malformed source identity" ? "sourceSession" : "destinationSession";
+      const secret = testCase.label === "malformed source identity" ? "private-source-text" : "private-destination-text";
+      expect(returned.createWarning.observed[field]).toEqual({ type: "object" });
+      expect(returned.existingRow).not.toHaveProperty(field);
+      expect(JSON.stringify(returned)).not.toContain(secret);
     }
     expect(rowCount(db)).toBe(0);
   });
