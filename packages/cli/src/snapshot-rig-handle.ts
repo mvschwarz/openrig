@@ -26,6 +26,8 @@ export async function snapshotRigIds(
   if (rigs.some((rig) => rig.id === handle)) return { ids: [handle], known: true };
   const ids = rigs.filter((rig) => rig.name === handle).map((rig) => rig.id);
   if (ids.length > 0) {
+    // URL normalization removes literal dot segments; these names need their resolved database ids.
+    if (handle === "." || handle === "..") return { ids, known: true };
     // A name match must not shadow retained history under the exact id of a
     // deleted rig whose id happens to equal an archived rig's name: check for
     // stored snapshots under the exact id before resolving the name.

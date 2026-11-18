@@ -33,6 +33,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         return;
       }
       let targetId = candidates.ids[0];
+      let incomplete = false;
       if (candidates.ids.length > 1) {
         targetId = undefined;
         for (const id of candidates.ids) {
@@ -40,27 +41,27 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
           try {
             snapshot = await client.get(`/api/rigs/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`);
           } catch (err) {
-            // The lookup failed BEFORE any restore was submitted: nothing was
-            // restored, and the outcome is not unknown — say so plainly.
-            console.error(`Snapshot lookup failed before any restore was submitted (${(err as Error).message}). Nothing was restored; safe to retry.`);
-            process.exitCode = 1;
-            return;
+            console.error(`Snapshot lookup failed for identity "${id}" before any restore was submitted (${err instanceof Error ? err.message : String(err)}).`);
+            incomplete = true;
+            continue;
           }
           if (snapshot.status === 404) continue;
           if (snapshot.status >= 400) {
-            console.error(`Failed to resolve snapshot (HTTP ${snapshot.status}). Nothing was restored.`);
-            process.exitCode = 1;
-            return;
+            console.error(`Failed to resolve snapshot for identity "${id}" (HTTP ${snapshot.status}).`);
+            incomplete = true;
+            continue;
           }
           targetId = id;
           break;
         }
       }
       if (targetId === undefined) {
-        console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list ${rigId}`);
+        if (incomplete) console.error("Snapshot resolution is incomplete; no owner was proved and no restore was submitted. Retry the failed identity reads.");
+        else console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list ${rigId}`);
         process.exitCode = 1;
         return;
       }
+      console.log(`Selected rig identity: ${targetId} (requested: ${rigId})`);
 
       // L3: install a SIGINT/SIGTERM handler that prints an honest message —
       // interrupting the CLI client does NOT stop daemon-side restore work.
@@ -105,7 +106,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       );
 
       if (res.status === 404) {
-        console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list ${rigId}`);
+        console.error(`Snapshot "${snapshotId}" or rig "${targetId}" not found. List snapshots with: rig snapshot list ${targetId}`);
         process.exitCode = 1;
       } else if (res.status === 409) {
         if ((res.data as { code?: string }).code === "pre_restore_validation_failed") {
@@ -115,8 +116,10 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         }
         if ((res.data as { code?: string }).code === "snapshot_unusable") {
           console.error(`Restore refused: ${(res.data as { error?: string }).error ?? "the selected snapshot is not restore-usable"}. Choose a different snapshot.`);
+        } else if ((res.data as { code?: string }).code === "restore_in_progress") {
+          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "restore already in progress"}. Follow the existing attempt with: rig ps --include-archived --nodes --rig ${targetId}`);
         } else {
-          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${rigId}`);
+          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${targetId}`);
         }
         process.exitCode = 1;
       } else if (res.status >= 400) {
@@ -126,7 +129,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         // L3 success path: route returned 202 immediately after restore.started.
         console.log(`Restore attempt id: ${res.data.attemptId}`);
         console.log(`Status: ${res.data.status ?? "started"}`);
-        console.log("Daemon is restoring per-node in the background; follow progress with 'rig ps --nodes' or 'rig restore-check'.");
+        console.log(`Daemon is restoring per-node in the background; follow progress with: rig ps --include-archived --nodes --rig ${targetId}`);
         console.log(`Read the completed attempt and its startup warnings with: rig restore status ${res.data.attemptId} --rig ${targetId}`);
       } else {
         // Defensive: server responded ok=true but didn't include attemptId.

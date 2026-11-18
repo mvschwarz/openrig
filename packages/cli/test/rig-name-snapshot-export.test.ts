@@ -6,7 +6,7 @@ import { Command } from "commander";
 import { snapshotCommand } from "../src/commands/snapshot.js";
 import { exportCommand, type ExportDeps } from "../src/commands/export.js";
 import { restoreCommand } from "../src/commands/restore.js";
-import type { DaemonClient } from "../src/client.js";
+import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -149,8 +149,11 @@ describe("rig snapshot list", () => {
       return get(url);
     });
     const { out, exitCode } = await run(snapshotCommand(d.deps), ["snapshot", "list", "solo"]);
-    expect(out).toContain("Failed to list snapshots: unavailable");
-    expect(out).not.toContain("snap-1");
+    expect(out).toContain(REMOVED_RIG_ID);
+    expect(out).toContain(order === "thrown" ? "socket hang up" : "unavailable");
+    expect(out).toContain("INCOMPLETE");
+    expect(out).toContain("snap-1");
+    expect(out).not.toContain("No snapshots");
     expect(exitCode).toBe(1);
   });
 });
@@ -227,17 +230,75 @@ describe("rig snapshot, rig export and rig restore --rig", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("does not issue a restore POST when an identity's snapshot read fails", async () => {
-    const d = fakeDaemon();
-    vi.spyOn(d.deps.clientFactory(""), "get")
-      .mockResolvedValueOnce({ status: 200, data: [{ id: RIG_ID, name: "solo" }, { id: REMOVED_RIG_ID, name: "solo" }] })
-      // The retained-history read under the exact-id "solo": no stored history.
-      .mockResolvedValueOnce({ status: 200, data: [] })
-      .mockResolvedValueOnce({ status: 503, data: { error: "unavailable" } });
-    const { out, exitCode } = await run(restoreCommand(d.deps), ["restore", "snap-1", "--rig", "solo"]);
-    expect(out).toContain("Failed to resolve snapshot (HTTP 503)");
-    expect(d.requests.filter((request) => request.startsWith("POST"))).toEqual([]);
-    expect(exitCode).toBe(1);
+  it.each(["owner", "absent", "thrown-owner", "thrown-absent"])("continues owner search after a failed candidate: %s", async (outcome) => {
+    const d = fakeDaemon([{ id: REMOVED_RIG_ID, name: "solo" }, { id: RIG_ID, name: "solo" }]);
+    const get = vi.mocked(d.deps.clientFactory("").get).getMockImplementation();
+    if (!get) throw new Error("Missing fixture GET implementation");
+    vi.spyOn(d.deps.clientFactory(""), "get").mockImplementation(async (url) => {
+      if (url.startsWith(`/api/rigs/${REMOVED_RIG_ID}/snapshots/`)) {
+        if (outcome.startsWith("thrown")) throw new Error("socket hang up");
+        return { status: 503, data: { error: "unavailable" } };
+      }
+      return get(url);
+    });
+    const owns = outcome.endsWith("owner");
+    const { out, exitCode } = await run(restoreCommand(d.deps), ["restore", owns ? "snap-1" : "missing", "--rig", "solo"]);
+    expect(out).toContain(REMOVED_RIG_ID);
+    expect(out).toContain(outcome.startsWith("thrown") ? "socket hang up" : "HTTP 503");
+    expect(d.requests.filter((request) => request.startsWith("POST"))).toEqual(owns ? [`POST /api/rigs/${RIG_ID}/restore/snap-1`] : []);
+    if (owns) {
+      expect(out).toContain(`Selected rig identity: ${RIG_ID}`);
+      expect(exitCode).toBeUndefined();
+    } else {
+      expect(out).toMatch(/resolution is incomplete/i);
+      expect(out).toContain("no restore was submitted");
+      expect(out).not.toContain("not found");
+      expect(exitCode).toBe(1);
+    }
+  });
+
+  it.each(["rig_not_stopped", "restore_in_progress"])("gives selected-identity advice for %s", async (code) => {
+    const d = fakeDaemon([{ id: REMOVED_RIG_ID, name: "solo" }, { id: RIG_ID, name: "solo", archivedAt: "2026-10-21" }]);
+    const post = vi.spyOn(d.deps.clientFactory(""), "post").mockResolvedValue({ status: 409, data: { code, error: "conflict" } });
+    const { out } = await run(restoreCommand(d.deps), ["restore", "snap-1", "--rig", "solo"]);
+    expect(post).toHaveBeenCalledOnce();
+    expect(post.mock.calls[0]?.[0]).toBe(`/api/rigs/${RIG_ID}/restore/snap-1`);
+    expect(out).toContain(`Selected rig identity: ${RIG_ID}`);
+    if (code === "rig_not_stopped") expect(out).toContain(`rig down ${RIG_ID}`);
+    else {
+      expect(out).toContain("existing attempt");
+      expect(out).toContain(`rig ps --include-archived --nodes --rig ${RIG_ID}`);
+      expect(out).not.toContain("rig down");
+    }
+    expect(out).not.toContain("rig down solo");
+  });
+
+  it.each([".", ".."])("lists and restores the name %s through normalized fetch URLs", async (name) => {
+    const requests: string[] = [];
+    const client = new DaemonClient("http://fixture", {
+      sessionName: "",
+      fetchImpl: async (input, init) => {
+        const url = new URL(String(input));
+        requests.push(`${init?.method ?? "GET"} ${url.pathname}${url.search}`);
+        if (url.pathname === "/api/rigs/summary") return Response.json([{ id: RIG_ID, name }]);
+        if (url.pathname === `/api/rigs/${RIG_ID}/snapshots`) return Response.json(SNAPSHOTS[RIG_ID]);
+        if (url.pathname === `/api/rigs/${RIG_ID}/restore/snap-1`) return Response.json({ attemptId: 7, status: "started" }, { status: 202 });
+        return Response.json({ error: "unexpected normalized route" }, { status: 404 });
+      },
+    });
+    client.remoteTarget = true;
+    const deps = { lifecycleDeps: lifecycleDeps(), clientFactory: () => client };
+    const listed = await run(snapshotCommand(deps), ["snapshot", "list", name]);
+    const restored = await run(restoreCommand(deps), ["restore", "snap-1", "--rig", name]);
+    expect(listed.out).toContain("snap-1");
+    expect(listed.exitCode).toBeUndefined();
+    expect(restored.exitCode).toBeUndefined();
+    expect(requests).toEqual([
+      "GET /api/rigs/summary?includeArchived=true",
+      `GET /api/rigs/${RIG_ID}/snapshots`,
+      "GET /api/rigs/summary?includeArchived=true",
+      `POST /api/rigs/${RIG_ID}/restore/snap-1`,
+    ]);
   });
 
   it("restore status --json reports a shared name as rig_ambiguous JSON, like rig grow and rig remove", async () => {
