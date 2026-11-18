@@ -7,12 +7,22 @@ import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
 import { renderScreen } from "../src/render.js";
-import { terminalLines } from "../src/terminals/terminal-model.js";
+import { readTerminals, terminalLines } from "../src/terminals/terminal-model.js";
 import { terminalWindowNotice } from "../src/terminals/open-window.js";
 import { parseCommand } from "../src/grammar.js";
 import type { FleetSnapshot, ViewStateStore } from "../src/types.js";
 
 let snap: FleetSnapshot, view: ViewStateStore, client: DaemonClient, service: TerminalService;
+
+it("keeps same-name rig catalog selections separate by their stable IDs", async () => {
+  const read = await readTerminals({ baseUrl: "http://catalog.invalid", terminalViews: async () => ({
+    saved: [], rigs: ["alpha", "alpha"], rigIdentities: [{ id: "stopped-id", name: "alpha" }, { id: "live-id", name: "alpha" }],
+  }) } as unknown as DaemonClient);
+  expect(read.error).toBeUndefined();
+  expect(read.catalog.map(({ view, name }) => ({ view, name }))).toEqual([
+    { view: "rig:stopped-id", name: "alpha" }, { view: "rig:live-id", name: "alpha" },
+  ]);
+});
 let effects: Array<{ method: string; params: any }>, requests: string[], alive: boolean, providerAlive: boolean, failPage: boolean, unconfirmed: "none" | "idless" | "listing" | "second-page";
 beforeEach(() => {
   effects = []; requests = []; alive = true; providerAlive = true; failPage = false; unconfirmed = "none";
@@ -59,6 +69,16 @@ beforeEach(() => {
   snap = emptySnapshot(); view = createViewState({ instanceId: "fixture", getSnapshot: () => snap });
 });
 async function refresh() { snap = await hydrateSnapshot(client, undefined, null, null, null, view.get()); }
+it("combined rig preview shows its human name while its Open action retains the ID", async () => {
+  const preview = await client.previewTerminal("rig:fixture", "herdr");
+  const state = { ...view.get(), terminalView: "rig:identity-id" };
+  const snapshot = { ...snap, terminals: { catalog: [], preview: { ...preview, view: "rig:identity-id",
+    composed: { ...preview.composed, id: "rig:identity-id", rigName: "Human display" } } } };
+  const lines = terminalLines(state, snapshot, 100);
+  expect(lines.some(line => line.text === "Human display")).toBe(true);
+  expect(lines.some(line => line.text === "rig:identity-id")).toBe(false);
+  expect(lines.find(line => line.action?.type === "act")?.action).toMatchObject({ act: "open-terminal", view: "rig:identity-id" });
+});
 function draw(cols: number, rows: number) {
   const screen = renderScreen(view.get(), snap, { cols, rows });
   view.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });

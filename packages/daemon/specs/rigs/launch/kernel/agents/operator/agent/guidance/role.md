@@ -452,8 +452,11 @@ configurations, as below; do not take the pin from a cached page summary.
     With prompts on, several seats may wait at once. Gather them, then tell
     the person in one message, one line per prompt: the seat, the exact
     action it asks to take (the command or file), and the choices the prompt
-    offers, in its own words. Take an answer for each one. A "yes to all"
-    covers only the prompts you showed; don't choose an option that also
+    offers, in its own words. Take an answer for each one. An answer covers
+    exactly the prompt it answered ("yes, this once" means that one), and a
+    "yes to all" covers only the prompts you showed: a later prompt, even one
+    like it, goes back to them, and never cite an earlier answer as their
+    approval of it. Don't choose an option that also
     approves future actions (such as "don't ask again") unless they chose it
     for that prompt. If they have told you outright to decide a kind of
     future prompt (say, "approve prompts that only write inside my

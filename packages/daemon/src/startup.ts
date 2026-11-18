@@ -2362,9 +2362,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       viewsStore: new TerminalViewsStore(),
       listRigSeatsBatch: (names) => {
         const rigs = rigRepo.listRigs();
-        // Match listRigSeats' first-name resolution, including duplicate names.
+        // Prefer stable IDs. Names remain a compatibility lookup for individual views.
         const selected = new Map(names.flatMap(name => {
-          const rig = rigs.find(rig => rig.name === name);
+          const rig = rigs.find(rig => rig.id === name) ?? rigs.find(rig => rig.name === name);
           return rig ? [[name, rig] as const] : [];
         }));
         const inventory = getNodeInventoryForRigs(db, new Set([...selected.values()].map(rig => rig.id)));
@@ -2372,13 +2372,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
       listRigSeats: (rigArg) => {
         const rigs = rigRepo.listRigs();
-        const rig = rigs.find((r) => r.name === rigArg) ?? rigs.find((r) => r.id === rigArg);
+        const rig = rigs.find((r) => r.id === rigArg) ?? rigs.find((r) => r.name === rigArg);
         if (!rig) return null;
         return getNodeInventory(db, rig.id).map(toLiveSeatRow);
       },
       listPodSeats: (rigArg, pod) => {
         const rigs = rigRepo.listRigs();
-        const rig = rigs.find((r) => r.name === rigArg) ?? rigs.find((r) => r.id === rigArg);
+        const rig = rigs.find((r) => r.id === rigArg) ?? rigs.find((r) => r.name === rigArg);
         if (!rig) return null;
         const rows = getNodeInventory(db, rig.id)
           .filter((e) => e.podNamespace === pod)
@@ -2392,6 +2392,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         ?? { code: "scope_unavailable", error: "The configured scope index is unavailable." },
       invalidateScopeView: () => scopeTasks?.invalidate(),
       listRigNames: () => rigRepo.listRigs().map((r) => r.name),
+      listRigs: () => rigRepo.listRigs().map(({ id, name }) => ({ id, name })),
       resolveHost: (id) => {
         const res = loadHostRegistry();
         if (!res.ok) return null;
@@ -2401,6 +2402,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       hasSession: (session) => tmuxAdapter.hasSession(session),
       // #707: local tiles run the tmux the daemon resolves, not whatever the provider's PATH finds.
       resolveLocalTmux: async () => (await probeRegistry.probeCli("tmux")).detectedPath,
+      rigViewersDir: nodePath.join(OPENRIG_HOME, "private", "terminal-rig-viewers"),
     });
   }
 
@@ -2717,9 +2719,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // rigRepo.onRigCreated (wired below) runs the same ensure in the creation
     // act itself (the birth-property ruling) — no restart wait, no watcher.
     {
-      const ensureParkedOwnerJob = (rigName: string) => {
+      const parkedOwnerJob = (rigName: string) => {
         const anchor = makeRigAnchor(rigName);
-        watchdogJobsRepoInstance.ensureAutoRegistration({
+        return {
           policy: PARKED_OWNER_POLICY_NAME,
           targetSession: anchor,
           registeredBySession: "daemon@kernel",
@@ -2727,14 +2729,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
           specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
-        });
+        };
       };
       const rigRows = db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>;
-      for (const r of rigRows) ensureParkedOwnerJob(r.name);
+      // #3437: one rig's bad watchdog rows warn and never stop the daemon from starting.
+      for (const r of rigRows) {
+        watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup(parkedOwnerJob(r.name), (message) => console.warn(message));
+      }
       // R2 repair — born-armed (advisor-ruled): a rig created after startup gets
       // its supervisor job in the same act that creates it, never at the next
       // daemon restart.
-      rigRepo.onRigCreated = (rig) => ensureParkedOwnerJob(rig.name);
+      rigRepo.onRigCreated = (rig) => {
+        watchdogJobsRepoInstance.ensureAutoRegistrationResolvingDuplicates(parkedOwnerJob(rig.name), (message) => console.warn(message));
+      };
     }
 
     // OPR.0.5.6.1 — the two digest windows as idempotent watchdog jobs (AM-F1:
@@ -2742,7 +2749,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // SQLite schedule; a daemon down across a window flushes on the next tick).
     {
       const ensureDigestJob = (window: "4h" | "daily", intervalSeconds: number) => {
-        watchdogJobsRepoInstance.ensureAutoRegistration({
+        watchdogJobsRepoInstance.ensureAutoRegistrationAtStartup({
           policy: "delivery-digest-flush",
           targetSession: `delivery-digest-${window}@kernel`,
           registeredBySession: "daemon@kernel",
@@ -2750,7 +2757,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
           specYaml: `policy: delivery-digest-flush\ntarget:\n  session: delivery-digest-${window}@kernel\ncontext:\n  window: ${window}\n`,
-        });
+        }, (message) => console.warn(message));
       };
       ensureDigestJob("4h", 4 * 60 * 60);
       ensureDigestJob("daily", 24 * 60 * 60);
