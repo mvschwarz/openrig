@@ -67,12 +67,13 @@ describe("parked diagnosis for a row its owner's own repeating reminder serves",
   /** One evaluation of the job, as the engine records it: the audit row, then (for a delivery attempt) the row's fire. */
   /** `deliveredTo`: the session the engine delivered to (its spec's target), recorded as history's delivery target;
    *  the owner unless a test says otherwise, `null` for an unrecorded one. */
-  function fire(jobId: string, delivery: "ok" | "failed" | "retained" | { skipped: string }, opts: { history?: boolean; deliveredTo?: string | null } = {}) {
+  function fire(jobId: string, delivery: "ok" | "queued_as_row" | "noted_on_parked_row" | "noted_on_queued_row" | "failed" | "retained" | { skipped: string },
+    opts: { history?: boolean; deliveredTo?: string | null } = {}) {
     const evaluatedAt = new Date(Date.UTC(2026, 9, 18, 3, 0, clock++)).toISOString();
     if (opts.history !== false) {
       history.record(typeof delivery === "object"
         ? { jobId, evaluatedAt, outcome: "skipped", skipReason: delivery.skipped }
-        : { jobId, evaluatedAt, outcome: delivery === "retained" ? "skipped" : delivery === "ok" ? "sent" : "failed", deliveryStatus: delivery,
+        : { jobId, evaluatedAt, outcome: delivery === "retained" ? "skipped" : delivery === "failed" ? "failed" : "sent", deliveryStatus: delivery,
           deliveryTargetSession: opts.deliveredTo === undefined ? SEAT : opts.deliveredTo,
           ...(delivery === "retained" ? { skipReason: "typing_guard_retained" } : {}) } as never);
     }
@@ -96,6 +97,15 @@ describe("parked diagnosis for a row its owner's own repeating reminder serves",
   }
 
   describe("now healthy (the changed result)", () => {
+    // #3076: at a queue-only seat the reminder is recorded as what it became (a note on the parked row, or a cold row in
+    // the seat's queue), never a typed "ok"; it still reached the owner, as a typed one does.
+    it.each(["queued_as_row", "noted_on_parked_row", "noted_on_queued_row"] as const)("a repeating reminder recorded as %s still serves its row", async (status) => {
+      const q = await row();
+      const job = reminder();
+      park(q, { watchdogId: job });
+      fire(job, status);
+      expect(diagnose()).toMatchObject({ parked: false, healthy: true, held: { servedByOwnReminder: true } });
+    });
     it("S3: the owner re-parks onto the same reminder, which fires again", async () => {
       const q = await row();
       const job = reminder();

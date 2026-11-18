@@ -1,4 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { processLimitsToSpec } from "./process-limits.js";
 import type {
   RigSpec,
   LegacyRigSpec,
@@ -166,10 +167,13 @@ export class RigSpecCodec {
         // OPR.0.4.8.3 Seam B: per-seat permission_policy ref round-trips through spec serialization.
         if (m.permissionPolicy) member["permission_policy"] = m.permissionPolicy;
         if (m.claudePermissions !== undefined) member["claude_permissions"] = m.claudePermissions;
+        if (m.claudeAutoMode !== undefined) member["claude_auto_mode"] = m.claudeAutoMode;
         if (m.claudeTokenRef) member["claude_token"] = { label: m.claudeTokenRef.label, file: m.claudeTokenRef.tokenFile };
         if (m.claudeMcp !== undefined) member["claude_mcp"] = m.claudeMcp;
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
         if (m.launchWrapper !== undefined) member["launch_wrapper"] = [...m.launchWrapper];
+        if (m.processLimits !== undefined) member["process_limits"] = processLimitsToSpec(m.processLimits);
+        if (m.statuslineThrottle !== undefined) member["statusline_throttle"] = m.statuslineThrottle;
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
         if (m.pluginDirs?.length) member["plugin_dirs"] = m.pluginDirs;
@@ -251,10 +255,13 @@ export class LegacyRigSpecCodec {
         if (node.effort != null) n["effort"] = node.effort;
         if (node.advisor != null) n["advisor"] = node.advisor;
         if (node.claudePermissions !== undefined) n["claude_permissions"] = node.claudePermissions;
+        if (node.claudeAutoMode !== undefined) n["claude_auto_mode"] = node.claudeAutoMode;
         if (node.claudeTokenRef) n["claude_token"] = { label: node.claudeTokenRef.label, file: node.claudeTokenRef.tokenFile };
         if (node.claudeMcp !== undefined) n["claude_mcp"] = node.claudeMcp;
         if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
         if (node.launchWrapper !== undefined) n["launch_wrapper"] = [...node.launchWrapper];
+        if (node.processLimits !== undefined) n["process_limits"] = processLimitsToSpec(node.processLimits);
+        if (node.statuslineThrottle !== undefined) n["statusline_throttle"] = node.statuslineThrottle;
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

@@ -41,6 +41,19 @@ function report(overrides: Partial<SeatEffortRead> = {}): SeatEffortRead {
 }
 
 describe("#1347: per-seat effort with configured/observed provenance", () => {
+  it("keeps the account out of tables and shows its full label in detail", () => {
+    const snap = demoSnapshot();
+    const driver = agents(snap)[0]!;
+    driver.runtime = "claude-code";
+    driver.configuredAccount = "long-account-label";
+    const table = renderScreen(rigView(snap).get(), snap, { cols: 160, rows: 34 }).lines.join("\n");
+    expect(table).not.toContain("ACCT");
+    const view = createViewState({ instanceId: "account-detail", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "agent", name: driver.name, target: { host: "vm-host", rig: "openrig-build", pod: "dev50" } });
+    const detail = renderScreen(view.get(), snap, { cols: 200, rows: 80 }).lines.join("\n");
+    expect(detail).toContain("long-account-label");
+    expect(detail.indexOf("cwd")).toBeLessThan(detail.indexOf("configured account"));
+  });
   it("labels the effort column as configured and marks each value's source at 160 columns", () => {
     const snap = demoSnapshot();
     const [driver, guard, qa] = agents(snap);

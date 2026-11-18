@@ -107,6 +107,44 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean; a
 }
 
 
+it.each([false, true])("keeps reserved Pi compaction on its guarded typed path with native preference (held=%s)", async held => {
+  const f = fixture(undefined, { runtime: "pi" });
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  if (held) await f.guard.set("a", { mode: "hold" }, "human@test", "quiet");
+  const { PiCompactionService } = await import("../src/domain/pi-compaction-service.js");
+  const service = new PiCompactionService({ readSidecar: () => ({ launchId: "launch" }) as never,
+    newAttemptId: () => "native-preference-compact", send: (session, text, opts) => f.transport.send(session, text, opts) });
+  const result = await service.trigger({ nodeId: "a", sessionName: "worker@test", runtime: "pi" });
+  if (held) {
+    expect(result).toMatchObject({ triggered: false, reason: "held" });
+    const item = f.outbox.heldForNode("a").items[0]!;
+    expect(item.body).toBe("/openrig-compact native-preference-compact");
+    expect(f.outbox.inputRoute(item.outboxId)).toBe("typed");
+    expect(f.submissions).toEqual([]);
+  } else {
+    expect(result).toMatchObject({ triggered: true, stage: "submitted_unconfirmed" });
+    expect(f.submissions).toEqual(["/openrig-compact native-preference-compact"]);
+  }
+});
+
+it("submit-only with native preference presses Enter only onto the existing staged text", async () => {
+  const f = fixture();
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  f.bodies.a = "staged command";
+  expect(await f.send("submit-native", "", { submitOnly: true, expectedStagedText: "staged command", verify: false }))
+    .toMatchObject({ ok: true, submitOnly: true });
+  expect(f.writes.some(write => write.startsWith("paste:"))).toBe(false);
+  expect(f.submissions).toEqual(["staged command"]);
+});
+
+it("a terminal seat's exact text stays terminal input with native preference", async () => {
+  const f = fixture();
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  expect(await f.send("exact-native", "enveloped input", { exactText: "printf exact", verify: false }))
+    .toMatchObject({ ok: true, envelopeOmitted: true });
+  expect(f.submissions).toEqual(["printf exact"]);
+});
+
 // Retained D1 geometry: empty Codex 0.164 at 65x9; after paste the editor
 // shows only the envelope's reply footer and an upward scroll indicator.
 function codexViewport(body: string, width: number, height: number, renderedRows?: string[]): ComposerSnapshot {
@@ -418,6 +456,31 @@ describe("current draft-aware delivery through the real transport", () => {
       expect(f.bodies.a).toBe(text);
     });
 
+  // D04 at full width (Claude 2.1.322 and 2.1.323, 200x50, as banked): the paste hint and the auto-update failure share
+  // the footer row under an empty input box, before any paste of ours.
+  const wideFooter = `  paste again to expand${" ".repeat(97)}✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code`;
+  const underWideFooter = (f: ReturnType<typeof fixture>) => vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+    const snapshot = frame(f.bodies.a ?? "");
+    snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${wideFooter}\n`);
+    return snapshot;
+  });
+
+  it("delivers once to an empty input box under the full-width paste hint and auto-update failure row", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    underWideFooter(f);
+    const result = await f.send("wide-footer", "next work", { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["next work"]);
+  });
+
+  it("still holds a person's draft under the same full-width footer row", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable(); f.bodies.a = "a person's draft";
+    underWideFooter(f);
+    expect(await f.send("wide-footer-draft", "next work")).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe("a person's draft");
+  });
+
   it.each(Array.from({ length: nativePaste.afterSamples }, (_, i) => i + 1))("submits its retained native paste across the footer change (sample %i)", async () => {
     const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
     const text = Array.from({ length: 71 }, (_, i) => `delivery line ${i}`).join("\n");
@@ -637,6 +700,24 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(oldPrerequisite).not.toHaveBeenCalled();
   });
 
+  it("at queue-only, a deliberate send never types over a person's draft and is delivered once the input is empty; OpenRig's own notice is held (#3076)", async () => {
+    const f = fixture(); await f.guard.set("a", { mode: "queue-only" }, "human@test", "a person types here");
+    f.bodies.a = "a person's draft";
+    for (const urgent of [undefined, { by: "lead@test" }]) {
+      expect(await f.send(`qo-draft-${urgent ? "urgent" : "plain"}`, "deliberate send", { verify: false, ...(urgent ? { urgent } : {}) }))
+        .toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    }
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("a person's draft");
+    f.bodies.a = "";
+    expect(await f.send("qo-empty", "deliberate send", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["deliberate send"]);
+    const notice = await f.send("qo-notice", "OpenRig notice", { verify: false, openrigNotice: true, urgent: { by: "OpenRig" } });
+    // Held for the seat, not refused nor failed: retained in its outbox, nothing written.
+    expect(notice).toMatchObject({ ok: true, outcome: "retained", sent: false, reason: "typing_guard_enabled", outboxIds: ["qo-notice"] });
+    expect(f.submissions).toEqual(["deliberate send"]);
+  });
+
   it("delivers at an ordinary empty prompt when receipt bookkeeping is unavailable", async () => {
     const f = fixture(); await f.enable();
     f.db.exec("CREATE TRIGGER fail_delivery_receipt BEFORE UPDATE OF guard_delivery ON outbox_entries BEGIN SELECT RAISE(ABORT, 'fixture receipt unavailable'); END;");
@@ -716,8 +797,11 @@ describe("current draft-aware delivery through the real transport", () => {
     const first = fixture(); await first.enable(); first.bodies.a = "draft"; await first.send("crash");
     first.db.exec("UPDATE outbox_entries SET delivery_state='sending',guard_delivery=json_remove(guard_delivery,'$.result');");
     const resumed = fixture(first.db.serialize());
+    const interrupted = resumed.outbox.listForSender("human@test")[0]!.outboxId;
+    expect(resumed.guarded.lookup(interrupted)).toMatchObject({ state: "sending", reason: "delivery_in_progress" });
     if (genericFirst) resumed.outbox.reconcileAbandonedSending("crash");
     resumed.guarded.recover();
+    expect(resumed.guarded.lookup(interrupted)).toMatchObject({ state: "indeterminate", reason: "interrupted_write" });
     expect(await resumed.send("crash")).toMatchObject({ ok: true, sent: true });
     expect(resumed.submissions).toEqual(["incoming message"]);
     expect(resumed.db.prepare("SELECT count(*) AS n FROM outbox_entries WHERE delivery_state='indeterminate'").get()).toEqual({ n: 1 });
@@ -971,6 +1055,36 @@ describe("supported seat and queue integration", () => {
     expect(f.submissions).toEqual(["http message"]);
   });
 
+  it.each(["typed", "native"])("%s route retention alone does not project a delivery attempt through HTTP", async route => {
+    const f = fixture();
+    await f.guard.set("a", { mode: "hold" }, "human@test", "quiet seat");
+    f.db.prepare("UPDATE nodes SET input_route=? WHERE id='a'").run(route);
+    const result = await f.send("route-only", "held by level");
+    expect(result).toMatchObject({ outcome: "retained", sent: false, reason: "typing_guard_enabled" });
+    const id = result.outboxIds![0]!;
+    expect(f.outbox.getById(id)).toMatchObject({ deliveryState: "retained", body: "held by level" });
+    expect(f.outbox.inputRoute(id)).toBe(route);
+    expect(f.guarded.lookup(id)).toBeNull();
+    const page = await (await f.app.request("/api/seat/held-messages/worker@test")).json();
+    expect(page.items[0].delivery).toBeUndefined();
+    const detail = await (await f.app.request(`/api/seat/held-messages/worker@test?id=${id}`)).json();
+    expect(detail.delivery).toBeUndefined();
+    expect(f.writes).toEqual([]);
+  });
+
+  it("native admission and lost receiver ownership remain visible in delivery history", () => {
+    const f = fixture();
+    const input = { outboxId: "native-attempt", senderSession: "human@test", destinationSession: "worker@test", body: "native input" };
+    f.outbox.retain(input, f.guard.target("worker@test"));
+    f.outbox.admitRunner({ ...input, nodeId: "a", runId: "projection-run", kind: "input", inputRoute: "native", payload: { text: input.body } });
+    expect(f.guarded.lookup(input.outboxId)).toMatchObject({ state: "sending", reason: "delivery_in_progress" });
+    f.outbox.updateRunner("a", "projection-run", input.outboxId, 1, "offered");
+    f.outbox.forgetRunnerMap("a", "projection-run");
+    expect(f.guarded.lookup(input.outboxId)).toMatchObject({ state: "indeterminate", reason: "interrupted_write" });
+    expect(f.outbox.runnerReceipt(input.outboxId)).toMatchObject({ reconciliation: "receiver_state_lost" });
+    expect(f.writes).toEqual([]);
+  });
+
   it("attempts each explicit HTTP request despite a reused caller ID", async () => {
     const f = fixture(); await f.enable();
     const send = () => f.post("/api/transport/send", { session: "worker@test", text: "http success", deliveryId: "http-success", verify: true });
@@ -1046,7 +1160,16 @@ describe("supported seat and queue integration", () => {
 
 describe("deliberate override preserves existing input", () => {
   const override = { dangerouslyInteract: true, reason: "fixture interaction", verify: false };
-  it.each(["off", "draft-aware", "hold", "openrig-urgent", "urgent-only", "sends-only"])("stops and shows typed input under %s without retaining it", async mode => {
+  it("keeps explicit terminal interaction draft protection with a native input preference", async () => {
+    const f = fixture();
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+    f.bodies.a = "person draft";
+    expect(await f.send("override-native", "incoming", override)).toMatchObject({ ok: false, sent: false,
+      reason: "override_input_present", existingInput: { classification: "typed_or_pasted" } });
+    expect(f.writes).toEqual([]);
+  });
+
+  it.each(["off", "draft-aware", "hold", "openrig-urgent", "urgent-only", "sends-only", "queue-only"])("stops and shows typed input under %s without retaining it", async mode => {
     const f = fixture();
     await f.guard.set("a", { mode }, "human@test", "fixture policy");
     const draft = "私の下書き😀\n  second line U3-private";
@@ -1252,9 +1375,13 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
   it("holds as unreadable when tmux can't report recent writable-client activity; with no writable client it delivers", async () => {
     const f = fixture(undefined, { runtime: "claude-code", appendPaste: true });
     await f.enable();
-    vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("command timed out"));
+    vi.spyOn(f.tmux, "lastClientActivity").mockRejectedValue(new Error("PRIVATE_DETAIL command timed out"));
     const held = await f.send("activity-unreadable", notice, { openrigNotice: true, verify: false });
-    expect(held).toMatchObject({ sent: false, reason: "draft_input_unknown" });
+    // The hold carries its own reason, so a caller that keeps the last diagnostic it was given never keeps an older one.
+    expect(held).toMatchObject({ sent: false, reason: "draft_input_unknown", inputReadFailure: {
+      check: "draft-aware", status: "unknown", confidence: null, reason: "client_activity_unavailable", timedOut: null,
+      cursor: { present: false, valid: null, atEnd: null } } });
+    expect(JSON.stringify(held.inputReadFailure)).not.toContain("PRIVATE_DETAIL");
     expect(pasted(f)).toEqual([]);
     setActivity(f, () => null);
     f.advance();

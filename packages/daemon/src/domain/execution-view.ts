@@ -5,6 +5,7 @@ import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
 import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
+import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
@@ -1292,9 +1293,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
         postClaimMotionCount: Number(r.post_claim_motion ?? 0),
         now: now(),
       });
-      const wake = deps.db
-        .prepare(`SELECT wake_ref, phase FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' LIMIT 1`)
-        .get(r.qitem_id) as { wake_ref: string; phase: string } | undefined;
+      const wake = readWithCurrentParkBoundary(boundary => deps.db
+        .prepare(`SELECT w.wake_ref, w.phase FROM queue_transition_wakes w
+          WHERE w.qitem_id = ? AND w.phase = 'armed'
+            AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+            ${boundary}
+          ORDER BY w.transition_id DESC LIMIT 1`)
+        .get(r.qitem_id)) as { wake_ref: string; phase: string } | undefined;
       // park_kind is a CLOSED enum from the DESIGN: deliberate-with-wake |
       // stalled | indeterminate. Nothing else may leak in (the live artifact
       // once emitted 'working' here), and the enum member is lowercase.
@@ -1368,7 +1374,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
     const derived = readiness?.slices.find(s => s.scope === sequenced.dir);
     if (!derived?.readiness.configured) continue;
     sequenced.next_up = derived.eligible === null ? INDETERMINATE : derived.eligible && derived.readiness.state !== "ready" && sequenced.work_rows.length === 0;
-    sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`;
+    sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`
+      + (derived.dependsOnBasis === "not-recorded"
+        ? "; no order recorded (depends_on INDETERMINATE, EC-1), so eligibility assumed no recorded edges"
+        : derived.dependsOnBasis === "frontmatter-advisory"
+          ? "; only the SPEC frontmatter lists depends_on, which readiness treats as advisory, so eligibility assumed no recorded edges"
+          : derived.dependsOnBasis === "frontmatter-unparsed"
+            ? "; only the SPEC frontmatter lists depends_on, in a form EC-1 doesn't define (not an inline JSON array), so eligibility assumed no recorded edges"
+            : "");
   }
   const q6 = {
     lanes_live: lanes.filter((l) => l.waiting === null).length,

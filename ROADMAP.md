@@ -6,9 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.13
+## Released in 0.7.18
 
-[0.7.13 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.13): OpenRig 0.7.13 is a patch for people running their own agent teams. When you answer a runner's permission request, you now get a note back saying who decides it, and the runner wakes on the decision. See its release notes for what shipped, known issues, upgrade instructions and contributor credits.
+[0.7.18 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.18): OpenRig 0.7.18 can send a team's seat prompts to the conversation you handed the work over from; in this release's two first-user runs, that route didn't complete the journey (see Known limits). Restore says more truthfully what it left running, and three settings can be chosen per seat. See its release notes for what shipped, known limits, upgrade instructions and contributor credits.
 
 ## How to help
 

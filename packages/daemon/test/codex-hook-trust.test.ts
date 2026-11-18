@@ -137,6 +137,56 @@ describe("OPR.0.4.3.33 — upsertCodexHookTrust (idempotent, non-clobbering, sec
     expect(updated).not.toContain("sha256:old");
   });
 
+  it.each(['"trusted_hash"', "'trusted_hash'"])("updates a quoted trust field %s without duplicating it", (field) => {
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\nenabled = false\n${field} = "sha256:old"\n`
+      + 'trusted_hash_note = "person-note"\n';
+    const after = upsertCodexHookTrust(before, KEY, HASH);
+    expect(parseToml(after)).toEqual({ hooks: { state: { [KEY]: {
+      enabled: false, trusted_hash: HASH, trusted_hash_note: "person-note",
+    } } } });
+    expect(upsertCodexHookTrust(after, KEY, HASH)).toBe(after);
+  });
+
+  it("does not replace a field that only starts with trusted_hash", () => {
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\ntrusted_hash_note = "person-note"\n`;
+    expect(parseToml(upsertCodexHookTrust(before, KEY, HASH))).toEqual({ hooks: { state: { [KEY]: {
+      trusted_hash: HASH, trusted_hash_note: "person-note",
+    } } } });
+  });
+
+  it.each(['"""', "'''"])("keeps quoted trust examples in a %s note unchanged", (quote) => {
+    const note = `note = ${quote}\n"trusted_hash" = "double example"\n 'trusted_hash' = "literal example"\n${quote}\n`;
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\n${note}trusted_hash = "sha256:old"\nenabled = false\n`;
+    const after = upsertCodexHookTrust(before, KEY, HASH);
+    expect(after).toBe(before.replace('trusted_hash = "sha256:old"', `trusted_hash = "${HASH}"`));
+    expect(parseToml(after)).toMatchObject({ hooks: { state: { [KEY]: { trusted_hash: HASH, enabled: false } } } });
+    expect(upsertCodexHookTrust(after, KEY, HASH)).toBe(after);
+  });
+
+  it("inserts real trust when a quoted assignment exists only in a note", () => {
+    const note = 'note = \'\'\'\n"trusted_hash" = "example"\n\'\'\'\n';
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\n${note}`;
+    const after = upsertCodexHookTrust(before, KEY, HASH);
+    expect(after).toContain(note);
+    expect(parseToml(after)).toEqual({ hooks: { state: { [KEY]: {
+      note: '"trusted_hash" = "example"\n', trusted_hash: HASH,
+    } } } });
+  });
+
+  it.each(['"""', "'''"])("ignores table-looking text in a %s note when locating real trust", (quote) => {
+    const note = `note = ${quote}\n[not-a-table]\n"trusted_hash" = "example"\n${quote}\n`;
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\n${note}trusted_hash = "sha256:old"\n`;
+    const after = upsertCodexHookTrust(before, KEY, HASH);
+    expect(after).toBe(before.replace('trusted_hash = "sha256:old"', `trusted_hash = "${HASH}"`));
+    expect(() => parseToml(after)).not.toThrow();
+  });
+
+  it("keeps a bare trust example in a multiline note unchanged", () => {
+    const before = `[hooks.state.${JSON.stringify(KEY)}]\nnote = '''\ntrusted_hash = "example"\n'''\ntrusted_hash = "sha256:old"\n`;
+    expect(upsertCodexHookTrust(before, KEY, HASH)).toBe(
+      before.replace('trusted_hash = "sha256:old"', `trusted_hash = "${HASH}"`));
+  });
+
   it("does NOT clobber an unrelated [hooks.state], a [projects] trust entry, or other content", () => {
     const existing =
       '[projects."/some/project"]\ntrust_level = "trusted"\n\n' +
@@ -268,17 +318,63 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
     expect(fs._store[CONFIG]).toBe(before);
   });
 
-  it("resolves the source folder while retaining the config file name", () => {
-    const canonicalHome = nodePath.join("/resolved", "codex");
-    const nativeRealpath = vi.spyOn(nodeFs.realpathSync, "native").mockReturnValue(canonicalHome);
+  it.each([
+    { source: "supplied", field: '"trusted_hash"' }, { source: "supplied", field: "'trusted_hash'" },
+    { source: "parent", field: '"trusted_hash"' }, { source: "parent", field: "'trusted_hash'" },
+    { source: "file", field: '"trusted_hash"' }, { source: "file", field: "'trusted_hash'" },
+  ])("keeps an inline home loadable with a quoted hash at $source ($field)", ({ source, field }) => {
+    const home = nodePath.join("/resolved", "codex");
+    const sources = { supplied: CONFIG, parent: nodePath.join(home, "config.toml"), file: nodePath.join("/storage", "source.toml") };
+    const keySource = source === "supplied" ? sources.supplied : source === "parent" ? sources.parent : sources.file;
+    const key = computeCodexHookTrust("SessionStart", { keySource, command: COMMAND, timeoutSec: 5 }).key;
+    const person = '[projects."/person"]\ntrust_level = "trusted"\n';
+    const config = `${person}\n[hooks.state.${JSON.stringify(key)}]\n${field} = "sha256:old"\nenabled = false\n`;
+    const nativeRealpath = vi.spyOn(nodeFs.realpathSync, "native").mockImplementation(file => {
+      if (file === nodePath.dirname(CONFIG)) return home;
+      if (file === CONFIG) return sources.file;
+      throw new Error("unexpected realpath");
+    });
     try {
-      const fakeFs = mockCodexFs({ [RELAY]: "// relay" });
-      makeAdapter(fakeFs).ensureCodexActivityHooks();
-      const configPath = Object.keys(fakeFs._store).find((path) => path.endsWith("config.toml"))!;
-      const config = fakeFs._store[configPath]!;
+      const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: config });
+      makeAdapter(fs).ensureCodexActivityHooks();
+      const written = fs._store[CONFIG]!;
+      expect(() => parseToml(written)).not.toThrow();
+      const canonical = computeCodexHookTrust("SessionStart", { keySource: sources.parent, command: COMMAND, timeoutSec: 5 });
+      expect(parseToml(written)).toMatchObject({ hooks: { state: { [canonical.key]: { trusted_hash: canonical.hash } } } });
+      expect(written).toContain(person);
+    } finally { nativeRealpath.mockRestore(); }
+  });
 
-      expect(config).toContain(`[hooks.state.${JSON.stringify(`${nodePath.join(canonicalHome, "config.toml")}:session_start:0:0`)}]`);
-      expect(config).not.toContain(`[hooks.state.${JSON.stringify(`${configPath}:session_start:0:0`)}]`);
+  it("trusts inline source aliases while keeping conflicting enabled choices", () => {
+    const canonicalHome = nodePath.join("/resolved", "codex");
+    const canonicalFile = nodePath.join("/storage", "source.toml");
+    const parentSource = nodePath.join(canonicalHome, "config.toml");
+    const nativeRealpath = vi.spyOn(nodeFs.realpathSync, "native").mockImplementation(file => {
+      if (file === nodePath.dirname(CONFIG)) return canonicalHome;
+      if (file === CONFIG) return canonicalFile;
+      throw new Error("unexpected realpath");
+    });
+    try {
+      const choices = `[hooks.state.${JSON.stringify(`${CONFIG}:stop:0:0`)}]\nenabled = true\n`
+        + `[hooks.state.${JSON.stringify(`${parentSource}:stop:0:0`)}]\nenabled = false\n`;
+      const fakeFs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: choices });
+      const adapter = makeAdapter(fakeFs);
+      adapter.ensureCodexActivityHooks();
+      const config = fakeFs._store[CONFIG]!;
+      const parsed = parseToml(config).hooks;
+      if (!parsed || typeof parsed !== "object") throw new Error("missing hooks");
+      const state: unknown = Reflect.get(parsed, "state");
+      if (!state || typeof state !== "object") throw new Error("missing state");
+      for (const [index, source] of [CONFIG, parentSource, canonicalFile].entries()) {
+        for (const event of EVENTS) {
+          const { key, hash } = computeCodexHookTrust(event, { keySource: source, command: COMMAND, timeoutSec: 5 });
+          expect(Reflect.get(state, key)).toEqual({ trusted_hash: hash,
+            ...(event === "Stop" ? { enabled: index === 0 } : {}) });
+        }
+      }
+      expect(Object.keys(state)).toHaveLength(12);
+      adapter.ensureCodexActivityHooks();
+      expect(fakeFs._store[CONFIG]).toBe(config);
     } finally {
       nativeRealpath.mockRestore();
     }
@@ -287,7 +383,7 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
   it.skipIf(process.platform === "win32").each([
     { json: false, linkedHome: false }, { json: true, linkedHome: false },
     { json: false, linkedHome: true }, { json: true, linkedHome: true },
-  ])("trusts file names inside the resolved home (JSON: $json, linked home: $linkedHome)", ({ json, linkedHome }) => {
+  ])("trusts source aliases without replacing links (JSON: $json, linked home: $linkedHome)", ({ json, linkedHome }) => {
     const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "codex-linked-trust-"));
     try {
       const home = nodePath.join(root, "home"); nodeFs.mkdirSync(home);
@@ -309,9 +405,14 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
       if (!hooks || typeof hooks !== "object") throw new Error("missing hook table");
       const states: unknown = Reflect.get(hooks, "state");
       if (!states || typeof states !== "object") throw new Error("missing trust table");
-      expect(Object.keys(states).sort()).toEqual(["permission_request", "session_start", "stop", "user_prompt_submit"]
-        .map(event => `${nodePath.join(nodeFs.realpathSync.native(home), json ? "hooks.json" : "config.toml")}:${event}:0:0`).sort());
+      const file = nodePath.join(selectedHome, json ? "hooks.json" : "config.toml");
+      const sources = [...new Set([file,
+        nodePath.join(nodeFs.realpathSync.native(home), nodePath.basename(file)), nodeFs.realpathSync.native(file)])];
+      expect(Object.keys(states).sort()).toEqual(sources.flatMap(source =>
+        ["permission_request", "session_start", "stop", "user_prompt_submit"].map(event => `${source}:${event}:0:0`)).sort());
       expect(nodeFs.lstatSync(nodePath.join(home, "config.toml")).isSymbolicLink()).toBe(true);
+      if (json) expect(nodeFs.lstatSync(file).isSymbolicLink()).toBe(true);
+      if (linkedHome) expect(nodeFs.lstatSync(selectedHome).isSymbolicLink()).toBe(true);
     } finally { nodeFs.rmSync(root,{recursive:true,force:true}); }
   });
 

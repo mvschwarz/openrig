@@ -6,9 +6,17 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+TRACE_STARTED = time.monotonic()
+try:
+    PARENT_TRACE_BUDGET = max(0, float(os.environ.get("OPENRIG_REFOCUS_PARENT_BUDGET_MS", "1650")) / 1000)
+except ValueError:
+    PARENT_TRACE_BUDGET = 1.65
 
 SHELVES = {"rigs", "pods", "seats", "missions", "slices"}
 # The daemon's exact current-work refusal meaning "this seat holds no in-progress typed baton"
@@ -26,10 +34,10 @@ SESSION_CHARS = re.compile(r"[A-Za-z0-9\-_.@]+")
 HUMAN_CLASS_SESSION = re.compile(r"human(?:-[A-Za-z0-9._-]+)?@(?:kernel|host)|[A-Za-z0-9._:-]+@external")
 
 
-def rig_output(*args):
+def rig_output(*args, timeout=10):
     try:
         result = subprocess.run(
-            ["rig", *args], capture_output=True, text=True, timeout=10, check=False
+            ["rig", *args], capture_output=True, text=True, timeout=timeout, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -92,6 +100,44 @@ def read(path):
         return path.read_text(encoding="utf8", errors="replace")
     except OSError:
         return None
+
+
+def may_have_parent(node, spec_text, timeout):
+    # Avoid a parser process for ordinary documents without any possible key.
+    # For possible links, use the same YAML parser as the CLI before querying.
+    manifest = read(node / "mission.yaml")
+    if manifest is None and (node / "mission.yaml").exists():
+        return None
+    frontmatter = re.match(r"\A---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)", spec_text)
+    text = manifest if manifest is not None else (frontmatter.group(1) if frontmatter else "")
+    if not re.search(r"parent|\\|\*|<<|\?", text, re.IGNORECASE):
+        return False
+    if timeout <= 0:
+        return None
+    rig = shutil.which("rig")
+    paths = [str(Path(__file__).resolve().parent), str(node), str(Path.cwd())]
+    if rig:
+        paths.append(str(Path(rig).resolve().parent))
+    script = """
+const fs = require('node:fs');
+const path = require('node:path');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+let yamlPath;
+try { yamlPath = require.resolve('yaml', { paths: input.paths }); }
+catch {
+  const cli = require.resolve('@openrig/cli', { paths: input.paths });
+  yamlPath = require.resolve('yaml', { paths: [path.dirname(cli)] });
+}
+const YAML = require(yamlPath);
+const doc = YAML.parse(input.text);
+const value = input.manifest ? doc?.metadata?.parent : doc?.parent;
+process.stdout.write(typeof value === 'string' && value.trim() ? 'yes' : 'no');
+"""
+    try:
+        result = subprocess.run(["node", "-e", script], input=json.dumps({"text": text, "manifest": manifest is not None, "paths": paths}), capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {"yes": True, "no": False}.get(result.stdout) if result.returncode == 0 else None
 
 
 # Contract twin of CLI scope-fs.ts and daemon scope/node-file.ts; parity is tested.
@@ -294,6 +340,28 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
                 body = f"intent: {value}" if value else "MISSING INTENT — no readable intent: field"
             output.append(f"\n### {label} · {spec.name}\n{body}")
 
+            # Parent links are logical edges, not filesystem ancestors. Ask the
+            # scope reader to resolve IDs so tracing uses the same rules as CLI.
+            remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
+            has_parent = may_have_parent(node, text, remaining)
+            if has_parent is None:
+                failures.append(f"parent link unavailable or timed out: {node}")
+                output.append(f"PARENT TRACE GAP — unable to read parent link within budget at {node}")
+            elif has_parent:
+                remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
+                workspace = next((ancestor for ancestor in node.parents if under_root(ancestor, root) and (ancestor / "project.yaml").is_file()), node.parent)
+                raw = rig_output("scope", "mission", "show", str(node), "--workspace", str(workspace), "--json", timeout=remaining) if remaining > 0 else None
+                try:
+                    mission = json.loads(raw)["mission"]
+                    for parent in mission["parentChain"]:
+                        output.append(f"PARENT · {parent['id']} · {parent['path']}\nintent: {parent.get('intent') or 'MISSING INTENT'}")
+                    if mission.get("parentGap"):
+                        failures.append(mission["parentGap"])
+                        output.append(f"PARENT TRACE GAP — {mission['parentGap']}")
+                except (TypeError, ValueError, KeyError):
+                    failures.append(f"parent link unavailable or timed out: {node}")
+                    output.append(f"PARENT TRACE GAP — unable to read parent link within budget at {node}")
+
         notes, resolution_error = resolve_notes(node)
         if resolution_error:
             failures.append(resolution_error)
@@ -404,7 +472,7 @@ def render_held_and_next(evidence):
     return "\n".join(output)
 
 
-def render_candidates(evidence, root, depth, failures, extra_roots=()):
+def render_candidates(evidence, root, depth, failures, extra_roots=(), project=None, project_unknown=None):
     """The work section from labelled queue evidence. One direct, resolved tag is shown as the
     work with its source; anything less certain lists every candidate and asks the agent."""
     candidates = evidence.get("candidates") or []
@@ -444,9 +512,18 @@ def render_candidates(evidence, root, depth, failures, extra_roots=()):
             output.append(f"Missions on this host: {listing}")
     output.append("Then read that mission's current intent as text:")
     output.append(f"  python3 {Path(__file__).resolve()} --trees work --packet --work-start {missions_root}/<mission>")
-    orientation = render_work(root, root, "light", failures, packet=True)
+    # Nothing in progress: orient from the seat's selected project, which may live outside
+    # workspace.root (#3320), or say why none was selected. Held and next work stay evidence only.
+    orient_root = root
+    if not candidates and not unknown and project:
+        orient_root = Path(project).expanduser().resolve()
+    elif not candidates and not unknown and project_unknown:
+        output.append(f"PROJECT UNSELECTED — {project_unknown}; showing the work root instead")
+    orientation = render_work(orient_root, orient_root, "light", failures, packet=True)
     _, _, rest = orientation.partition("\n")
-    output.append("\n## ORIENTATION — the project-level chain, not your work\n" + rest.lstrip("\n"))
+    heading = ("the selected project's chain, not your work" if orient_root is not root
+               else "the project-level chain, not your work")
+    output.append(f"\n## ORIENTATION — {heading}\n" + rest.lstrip("\n"))
     return "\n".join(output)
 
 
@@ -524,6 +601,8 @@ def main():
     parser.add_argument("--topology-start")
     parser.add_argument("--work-start")
     parser.add_argument("--work-root", action="append", default=[], help="an extra root the work trace may ascend to, for a catalogued project outside workspace.root; repeatable (also OPENRIG_REFOCUS_WORK_ROOT, separated by the OS path separator)")
+    parser.add_argument("--work-project", help="the root of the project selected for this seat (as work-install selects it); the broad orientation when there is no current typed baton")
+    parser.add_argument("--work-project-unknown", help="why no single project was selected for this seat")
     parser.add_argument("--work-basis", help="the daemon's reason no current work node was named")
     parser.add_argument("--work-unknown", help="why the current work node could not be read")
     parser.add_argument("--unresolved-work-advisory", action="store_true", help="show unresolved typed work as an advisory with broad orientation")
@@ -565,13 +644,22 @@ def main():
             if explicit:
                 sections.append(render_work(Path(explicit), work_root_for(explicit, root, extra_roots), args.depth, failures, packet=args.packet))
             elif evidence is not None:
-                sections.append(render_candidates(evidence, root, args.depth, failures, extra_roots))
+                sections.append(render_candidates(evidence, root, args.depth, failures, extra_roots,
+                                                  project=args.work_project, project_unknown=args.work_project_unknown))
             elif args.work_candidates:
                 pass  # the unreadable-evidence gap above is the answer; never fall back to the root
+            elif args.work_basis == NO_CURRENT_BATON_BASIS and args.work_project:
+                # The seat's selected project, which may live outside workspace.root (#3320).
+                project = Path(args.work_project).expanduser().resolve()
+                sections.append(render_work(project, project, args.depth, failures, packet=args.packet, fallback=(
+                    f"no current typed baton ({args.work_basis}). Showing the selected project's chain from its root: "
+                    "a broad orientation, not evidence of a current mission")))
             elif args.work_basis == NO_CURRENT_BATON_BASIS:
+                unselected = (f"\nPROJECT UNSELECTED — {args.work_project_unknown}; showing the work root instead"
+                              if args.work_project_unknown else "")
                 sections.append(render_work(root, root, args.depth, failures, packet=args.packet, fallback=(
                     f"no current typed baton ({args.work_basis}). Showing the project-level chain from the work root: "
-                    "a broad orientation, not evidence of a current mission")))
+                    "a broad orientation, not evidence of a current mission" + unselected)))
             elif args.unresolved_work_advisory and args.work_basis and args.work_basis.startswith("typed work did not resolve: "):
                 sections.append(f"## WORK TRACE\nTRACE GAP — no single current work node: {args.work_basis}")
                 sections.append(render_work(root, root, args.depth, failures, packet=args.packet, fallback=(

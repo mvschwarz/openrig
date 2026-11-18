@@ -40,9 +40,18 @@ the reply route, because your address has no terminal and `rig send` can't reach
 
 > To ask me anything, create a queue item to `<address>` (`rig queue create --destination <address> ...`), then block
 > this item on that new item's id (`rig queue block <this id> --on <question id>`), so my answer wakes you. I check it
-> when the person asks. Don't ask in your own terminal: the person isn't there. If you hand this item on, copy this
-> paragraph into the new item. When you finish, put the outcome in this item's resolution and any file in its
-> evidence ref.
+> whenever the person talks to me. Don't ask in your own terminal: the person isn't there. A seat's permission prompt
+> in this work is their question too: send me its own text and choices, the seat, what it was doing and any
+> escalation's id, unless a question about that prompt is already open at my address. Whoever sent the question
+> passes on the answer, and no one else does. Capture that seat again first (a changed prompt needs a new answer),
+> then `rig send <seat> "<key>" --dangerously-interact --reason 'task <question id>: <their answer>'` with the key the
+> prompt shows for their choice (for Escape, `$'\e'` in place of `"<key>"`, never the word). Keep the reason in single
+> quotes so the shell runs nothing in their words, and write each `'` in them as `'\''`. A no stays a no. If they gave
+> no answer, or their words don't clearly pick one choice
+> (a condition the action doesn't plainly meet, say), ask me again before sending anything, and never pick a "don't
+> ask again" choice they didn't pick. Check the effect, and never send again while it's unknown. If you hand this item
+> on or give this work to another seat, copy this paragraph into the new item. When you finish, put the outcome in
+> this item's resolution, with what the latest review found, and any file in its evidence ref.
 
 Write the body to a file first, so quotes and newlines survive the shell.
 
@@ -65,7 +74,10 @@ OPENRIG_SESSION_NAME=<address> rig queue create --destination <lead session> \
   `rig queue list --destination <that seat> -a -o json`. Follow the chain to the newest item before you report.
 - Report what the record says. A claimed item isn't finished work, and a quiet one isn't stuck: say what you saw and
   when it last changed.
-- Nothing wakes this chat when the team finishes. Check again when the person asks, or when they come back.
+- Before you say the work is done, find the newest review of it on the chain and tell the person its outcome. Work a
+  review sent back with something to fix isn't done, even if a commit exists: say what the review asked for.
+- Nothing wakes this chat when the team asks or finishes. While its work is open, check each time the person talks to
+  you, and when they come back.
 
 ## The team's questions
 
@@ -89,8 +101,11 @@ OPENRIG_SESSION_NAME=<address> rig queue create --destination <lead session> \
 - If a work item is blocked waiting on the person but no question reached your address, its transitions
   (`rig queue transitions <qitemId> --full`) usually say what it needs. Show the person, and send their answer as a new
   item to the same seat that names the blocked `qitemId`.
-- Some questions go to the person directly, not to your address. Those wait where they already answer the team, such
-  as the OpenRig TUI or Slack. You can mention them; answering them isn't yours.
+- A question can be a seat's permission prompt that the operator or a team seat sent you: show it with the seat, the
+  exact action and the choices it offers, and record the person's words the same way. The agent that sent it passes
+  their answer to the seat, so don't send that prompt's answer yourself as well.
+- Some questions go to a registered person directly, not to your address. Those wait where they already answer the
+  team, such as the OpenRig TUI or Slack. You can mention them; answering them isn't yours.
 
 ## Read the result
 

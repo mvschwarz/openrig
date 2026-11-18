@@ -45,6 +45,7 @@ export interface SubsystemSlackDeliveryOpts {
   unfurl?: "on" | "off";
   /** This daemon's machine name, read per post, shown after a seat sender (message.ts `machine`). */
   machine?: () => string | null;
+  machineFallback?: string;
   bodyExcerpt?: number;
   fetchImpl?: FetchImpl;
   /** The owning gateway run's stop signal. When the wire stops (restart, disable,
@@ -320,6 +321,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           // structurally cannot carry username/icon overrides — the customize-absence rail).
           attribution: attributionFromSession(q.sourceSession),
           machine: opts.machine?.() ?? undefined,
+          machineFallback: opts.machineFallback,
           mentionUserId: opts.resolveMentionUserId?.(q),
           // fix-r3 — the reconcile identity, reserved outside the clamp budget (same function
           // the scan above matches: one identity, same bytes, both sides).
@@ -616,6 +618,7 @@ function renderPart(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, part: Del
     sourceLabel: opts.sourceLabel,
     attribution: attributionFromSession(part.sourceSession),
     machine: opts.machine?.() ?? undefined,
+    machineFallback: opts.machineFallback,
     mentionUserId: index === 0 ? opts.resolveMentionUserId?.(q) : undefined,
     reconcileMarker: reconcileToken(partId),
     mediaRefs: partEvidence.mediaRefs,

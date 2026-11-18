@@ -12,6 +12,7 @@ export interface AgentRow {
   nodeId?: string;
   name: string;
   runtime: string;
+  configuredAccount?: string | null;
   /** effective served model; separate from runtime, null when not served */
   model?: string | null;
   /** Configured launch effort: the seat's explicit choice, else the authored value.
@@ -461,6 +462,8 @@ export interface FleetSnapshot {
   /** Compatibility coordinate for S11 fixtures; new code prefers recentTransitionsScope. */
   recentTransitionsRig?: string | null;
   hosts: HostNode[];
+  /** ui.topology_remote_seats: an open remote rig page reads that rig's seats through this daemon. */
+  topologyRemoteSeats?: boolean;
   specs: SpecEntry[];
   /** grounded composeNeedsYou union in daemon priority order, VERBATIM (PIN 3) */
   needs: NeedsItem[];

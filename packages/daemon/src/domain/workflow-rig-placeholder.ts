@@ -30,14 +30,13 @@ export function expandRigRelativeTarget(target: string, boundRig: string | null)
 
 /** The spec with each `member@{rig}` target resolved against `boundRig`. Returns
  *  `spec` itself when `boundRig` is null or no target uses the form. */
-export function bindSpecToRig(spec: WorkflowSpec, boundRig: string | null): WorkflowSpec {
-  if (boundRig === null) return spec;
-  const uses = Object.values(spec.roles ?? {}).some((role) => (role?.preferred_targets ?? []).some(isRigRelativeTarget));
+export function bindSpecToRig(spec: WorkflowSpec, boundRig: string | null, boundPod: string | null = null): WorkflowSpec {
+  const uses = Object.values(spec.roles ?? {}).some((role) => (role?.preferred_targets ?? []).some((target) => (boundRig !== null && isRigRelativeTarget(target)) || (boundPod !== null && target.startsWith("{pod}-"))));
   if (!uses) return spec;
   const roles: NonNullable<WorkflowSpec["roles"]> = {};
   for (const [name, role] of Object.entries(spec.roles ?? {})) {
     roles[name] = role?.preferred_targets
-      ? { ...role, preferred_targets: role.preferred_targets.map((t) => expandRigRelativeTarget(t, boundRig)) }
+      ? { ...role, preferred_targets: role.preferred_targets.map((t) => expandRigRelativeTarget(boundPod !== null && t.startsWith("{pod}-") ? boundPod + t.slice(5) : t, boundRig)) }
       : role;
   }
   return { ...spec, roles };

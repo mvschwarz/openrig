@@ -29,6 +29,7 @@ import type {
   removeChannelMapEntry as RemoveChannelMapEntryFn,
   FEATURE_SCOPES as FeatureScopes,
   BASELINE_REQUIRED_SCOPES as BaselineScopes,
+  PRIVATE_CHANNEL_SCOPES as PrivateChannelScopes,
   SlackConnectorConfig,
   FetchImpl,
 } from "@openrig/daemon/gateway-slack";
@@ -92,6 +93,7 @@ interface SlackSurface {
   removeChannelMapEntry: typeof RemoveChannelMapEntryFn;
   FEATURE_SCOPES: typeof FeatureScopes;
   BASELINE_REQUIRED_SCOPES: typeof BaselineScopes;
+  PRIVATE_CHANNEL_SCOPES: typeof PrivateChannelScopes;
 }
 
 export interface SlackDeps {
@@ -120,6 +122,20 @@ const CHANNEL_MAP_APPLY =
   "`rig slack enable` for it: enabling marks alerts still waiting to be posted as already seen.";
 
 const POST_OPEN_ASKS = "`rig slack post-open-asks`";
+
+type PrivateScopeCheck = { status: "not-applicable" | "unknown" | "missing" | "complete"; missing: string[] };
+
+function checkPrivateScopes(
+  isPrivate: boolean | null | undefined,
+  scope: Awaited<ReturnType<typeof VerifyScopesFn>>,
+  privateScopes: readonly string[],
+): PrivateScopeCheck {
+  if (isPrivate === false) return { status: "not-applicable", missing: [] };
+  if (isPrivate !== true || scope.error || scope.granted.length === 0) return { status: "unknown", missing: [] };
+  const granted = new Set(scope.granted);
+  const missing = privateScopes.filter((required) => !granted.has(required));
+  return { status: missing.length ? "missing" : "complete", missing };
+}
 
 type OpenAskOutcome = "posted" | "already-posted" | "queued" | "held" | "below-floor" | "no-longer-active" | "superseded"
   | "recipient-changed" | "no-connector" | "state-unavailable" | "transport-failed" | "uncertain";
@@ -320,6 +336,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
   cmd
     .command("manifest")
     .description("Print the Slack app manifest for creating your own OpenRig Slack app (offline)")
+    .option("--private-channel", "also request private-channel scopes and the message.groups event")
     .option("--url", "print Slack's create-app link with the manifest prefilled (URL-encoded)")
     .option("--json", "JSON output: the manifest plus its bot scopes and bot events")
     .addHelpText("after", [
@@ -327,7 +344,9 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       "Creates nothing: open the --url link yourself in a browser signed in to your Slack workspace.",
       "If Slack shows an empty manifest or parsing error with --url, paste the plain YAML output of",
       "`rig slack manifest` into the YAML tab in Slack's \"Create an app from an app manifest\" dialog.",
+      "If you chose --private-channel, keep it when printing the YAML.",
       "The app is private to that workspace (Socket Mode; OpenRig hosts nothing and publishes nothing).",
+      "--private-channel is opt-in; without it the manifest remains public-channel-only.",
       "--json lists every requested scope and why. `rig slack verify` checks only the baseline scopes,",
       "so a READY there does not prove attachments or mentions have their grants.",
       "Steps after creating the app: docs/reference/slack-app-setup.md",
@@ -335,11 +354,16 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     ].join("\n"))
     .action(async (opts) => {
       const surface = await loadSurface();
-      const bundle = surface.buildSlackAppManifest();
+      const bundle = opts.privateChannel
+        ? surface.buildSlackAppManifest(undefined, { privateChannel: true })
+        : surface.buildSlackAppManifest();
       if (opts.json) {
         const reasons: Record<string, string> = {};
         for (const scope of surface.BASELINE_REQUIRED_SCOPES) reasons[scope] = "baseline: checked by `rig slack verify`";
         for (const f of surface.FEATURE_SCOPES) reasons[f.scope] = `feature, not checked by verify: ${f.usedBy}`;
+        for (const scope of surface.PRIVATE_CHANNEL_SCOPES) {
+          reasons[scope] = "optional private-channel access; request with `rig slack manifest --private-channel`";
+        }
         log(JSON.stringify({
           manifest: bundle.manifest, url: bundle.url, scopes: bundle.scopes, events: bundle.events,
           why: Object.fromEntries(bundle.scopes.map((scope) => [scope, reasons[scope] ?? "unexplained"])),
@@ -367,7 +391,12 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       // #192: membership in every channel the connector uses — the default and each mapped one.
       const channels = [];
       for (const c of surface.mappedChannels(cfg)) {
-        channels.push({ ...c, member: await surface.verifyChannelMembership(s.bot, c.channel, deps.fetchImpl) });
+        const membership = await surface.verifyChannelMembership(s.bot, c.channel, deps.fetchImpl);
+        const isPrivate = typeof membership.isPrivate === "boolean" ? membership.isPrivate : null;
+        channels.push({
+          ...c,
+          member: { ...membership, isPrivate, privateScopes: checkPrivateScopes(isPrivate, scope, surface.PRIVATE_CHANNEL_SCOPES) },
+        });
       }
       const member = channels.find((c) => c.isDefault)?.member ?? null;
       const ready = scope.ok && member !== null && channels.every((c) => c.member.isMember);
@@ -386,6 +415,17 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         for (const c of channels.filter((x) => !x.isDefault)) {
           const forWhom = `for ${c.matches.join(", ")}`;
           log(c.member.isMember ? `✓ channel member (${c.member.name ?? c.channel}) ${forWhom}` : `✗ NOT a member of channel ${c.channel} ${forWhom} — invite the app`);
+        }
+        for (const c of channels) {
+          const forWhom = c.isDefault ? "" : ` for ${c.matches.join(", ")}`;
+          if (c.member.isPrivate === false) continue;
+          if (c.member.isPrivate !== true) {
+            log(`… channel privacy unknown for ${c.channel}${forWhom}; private-channel scopes were not assessed.`);
+          } else if (c.member.privateScopes.status === "unknown") {
+            log(`… private channel grant status unknown for ${c.channel}${forWhom}; Slack did not return an available scope list.`);
+          } else if (c.member.privateScopes.status === "missing") {
+            log(`⚠ private channel ${c.channel}${forWhom} missing scopes: ${c.member.privateScopes.missing.join(", ")}. Create an app with \`rig slack manifest --private-channel\` and reinstall it.`);
+          }
         }
         for (const feature of missingFeatures ?? []) {
           log(`⚠ ${feature.scope} missing: ${feature.usedBy}. Reinstall the app with this scope to use the feature.`);

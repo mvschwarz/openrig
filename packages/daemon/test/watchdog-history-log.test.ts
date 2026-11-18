@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -90,6 +90,20 @@ describe("WatchdogHistoryLog (PL-004 Phase C; append-only audit)", () => {
     const list = log.listForJob(jobId);
     expect(list[0]?.deliveryMessage).toBe("second");
     expect(list[1]?.deliveryMessage).toBe("first");
+  });
+
+  it("entries with the same evaluated_at, recorded in the same millisecond, list newest first", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-05-03T07:00:00.000Z"));
+      const sent = Array.from({ length: 20 }, (_, i) => `entry-${i}`);
+      for (const message of sent) {
+        log.record({ jobId, evaluatedAt: "2026-05-03T07:00:00.000Z", outcome: "sent", deliveryTargetSession: "a@rig", deliveryStatus: "ok", deliveryMessage: message });
+      }
+      expect(log.listForJob(jobId).map((e) => e.deliveryMessage)).toEqual([...sent].reverse());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("countForJob returns the number of recorded entries", () => {
