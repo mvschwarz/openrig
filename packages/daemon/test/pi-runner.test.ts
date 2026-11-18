@@ -738,8 +738,14 @@ describe("RunnerCore identity + sidecar", () => {
   });
 
   it("events carrying entry ids advance the sidecar cursor", () => {
-    const { core, sidecars } = readyCore();
+    const { core, rpc, sidecars } = readyCore();
     core.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "entry-7" }));
+    expect(sidecars.at(-1)!.lastEntryId).toBeUndefined();
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(rpc.at(-1)).toEqual({ type: "get_entries", since: "entry-7", id: "pi-runner-cursor-refresh" });
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", success: true, data: { entries: [] },
+    }));
     expect(sidecars.at(-1)!.lastEntryId).toBe("entry-7");
   });
 
@@ -1381,6 +1387,13 @@ describe("cursor refresh via get_entries (QA RED, qitem-20260707020922)", () => 
     }));
     expect(f.sidecars.at(-1)!.lastEntryId).toBe("e5");
     core.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "entry-8" }));
+    expect(f.sidecars.at(-1)!.lastEntryId).toBe("e5");
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-catch-up", data: { entries: [] } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(f.rpc.at(-1)).toEqual({ type: "get_entries", since: "e5", id: "pi-runner-cursor-refresh" });
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", success: true, data: { entries: [{ id: "entry-8" }] },
+    }));
     expect(f.sidecars.at(-1)!.lastEntryId).toBe("entry-8");
   });
 
@@ -1394,6 +1407,200 @@ describe("cursor refresh via get_entries (QA RED, qitem-20260707020922)", () => 
       data: { sessionFile: SESSION_FILE, sessionId: "x" },
     }));
     expect(f.sidecars.at(-1)!.lastEntryId).toBe("e5");
+  });
+
+  it("#1275: live entryId stays in-memory with monotonic refresh ordering, OMP event.id is ignored, and failed turn refreshes drop turnCursorId", () => {
+    // 1. Live entryId stays off lastEntryId, and a refresh sent before a newer live entryId cannot overwrite turnCursorId
+    //    unless its returned entries contain that live entryId and extend past it.
+    const fOrder = fakeIo();
+    const coreOrder = new RunnerCore(fOrder.io, { sessionName: SESSION, launchId: "launch-order" }, {
+      catchUpSince: "ui-stale",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreOrder.start();
+    coreOrder.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    coreOrder.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "Entry not found: ui-stale",
+    }));
+    // Initial full recovery refresh (seq 1) is sent BEFORE live-B arrives.
+    const preLiveRefreshId = String(fOrder.rpc.at(-1)!.id);
+    coreOrder.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "live-B" }));
+    expect.soft(fOrder.sidecars.at(-1)!.lastEntryId).toBe("ui-stale");
+    // Suppose preLiveRefreshId fails or returns an older snapshot while unheld: test an unseeded runner where refresh 1
+    // returns older-A after live-B arrived on an open restore gap so turnCursorId stays at live-B.
+    const fGap = fakeIo();
+    const coreGap = new RunnerCore(fGap.io, { sessionName: "omp-a@rig", launchId: "launch-gap" }, {
+      runtime: "omp",
+      catchUpSince: "gap-0",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreGap.start({ type: "ready" });
+    coreGap.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    coreGap.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "seed-A" }));
+    coreGap.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    const firstTurnRefresh = fGap.rpc.at(-1)!;
+    expect.soft(firstTurnRefresh).toEqual({ type: "get_entries", since: "seed-A", id: "pi-runner-cursor-refresh" });
+    // Before firstTurnRefresh answers, Turn 2 begins and reports newer live-B.
+    coreGap.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "live-B" }));
+    expect.soft(fGap.sidecars.at(-1)!.lastEntryId).toBe("gap-0");
+    // Older snapshot [older-A-end] arrives for firstTurnRefresh -> does not overwrite turnCursorId = live-B.
+    coreGap.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", success: true, data: { entries: [{ id: "older-A-end" }] },
+    }));
+    // Complete catch-up as Entry not found so the next agent_end uses turnCursorId rather than retrying catch-up.
+    coreGap.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "Entry not found: gap-0",
+    }));
+    coreGap.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fGap.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-B", id: "pi-runner-cursor-refresh:2" });
+    // When a pre-event refresh actually contains the newer live cursor and extends past it, turnCursorId advances to the end.
+    coreGap.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "live-C" }));
+    coreGap.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh:2", success: true, data: { entries: [{ id: "live-C" }, { id: "after-C" }] },
+    }));
+    expect.soft(fGap.sidecars.at(-1)!.lastEntryId).toBe("after-C");
+    void preLiveRefreshId;
+
+    // 2. Generic OMP event `id` fields never count as history entry cursors.
+    const fOmp = fakeIo();
+    const coreOmp = new RunnerCore(fOmp.io, { sessionName: "omp-b@rig", launchId: "launch-omp-id" }, {
+      runtime: "omp",
+      catchUpSince: "e0",
+    });
+    coreOmp.start({ type: "ready" });
+    coreOmp.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    coreOmp.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-catch-up", success: true, data: { entries: [] } }));
+    coreOmp.handlePiLine(JSON.stringify({ type: "prompt_result", id: "req-1" }));
+    coreOmp.handlePiLine(JSON.stringify({ type: "bash_execution_update", id: "bash-1", delta: "ok" }));
+    expect.soft(fOmp.sidecars.at(-1)!.lastEntryId).toBe("e0");
+    coreOmp.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fOmp.rpc.at(-1)).toEqual({ type: "get_entries", since: "e0", id: "pi-runner-cursor-refresh" });
+
+    // 3. Failed bounded turn refresh (Entry not found or other RPC error) leaves lastEntryId unmoved, drops turnCursorId,
+    //    and uses the local tail anchor (or full-read fallback) on the next turn.
+    const fErr = fakeIo();
+    let tailId: string | null = "tail-9";
+    fErr.io.readLastEntryId = () => tailId;
+    const coreErr = new RunnerCore(fErr.io, { sessionName: "omp-c@rig", launchId: "launch-err" }, {
+      runtime: "omp",
+      catchUpSince: "stale-0",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreErr.start({ type: "ready" });
+    coreErr.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    coreErr.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "Entry not found: stale-0",
+    }));
+    coreErr.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "bad-live" }));
+    coreErr.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fErr.rpc.at(-1)).toEqual({ type: "get_entries", since: "bad-live", id: "pi-runner-cursor-refresh" });
+    coreErr.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, error: "Entry not found: bad-live",
+    }));
+    expect.soft(fErr.sidecars.at(-1)!.lastEntryId).toBe("stale-0");
+    expect.soft(fErr.lines).toContain("[omp-runner] ERROR rpc: Entry not found: bad-live");
+    // Next turn drops bad-live and uses the local tail anchor tail-9; if tail-9 also fails, no loop occurs and null tail falls back to full read.
+    coreErr.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fErr.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-9", id: "pi-runner-cursor-refresh:2" });
+    coreErr.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: false, error: "Entry not found: tail-9",
+    }));
+    expect.soft(fErr.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-9", id: "pi-runner-cursor-refresh:2" });
+    expect.soft(fErr.sidecars.at(-1)!.lastEntryId).toBe("stale-0");
+    tailId = null;
+    coreErr.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fErr.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+  });
+
+  it("#1275: inactive Pi seats bound get_entries with since, while active --usage-facts Pi seats keep full get_entries refreshes", () => {
+    // Inactive Pi seat (default usageFacts off): bounded post-turn refresh and bounded refused-catch-up tail re-read.
+    const fInactive = fakeIo();
+    let tailReads = 0;
+    fInactive.io.readLastEntryId = (path) => {
+      tailReads += 1;
+      return path === SESSION_FILE ? "tail-7" : "wrong-tail";
+    };
+    const coreInactive = new RunnerCore(fInactive.io, { sessionName: SESSION, launchId: "launch-pi-inactive" }, {
+      runtime: "pi",
+      usageFacts: false,
+      catchUpSince: "ui-old",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreInactive.start();
+    coreInactive.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    coreInactive.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "Entry not found: ui-old",
+    }));
+    expect.soft(tailReads).toBe(1);
+    expect.soft(fInactive.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-7", id: "pi-runner-cursor-refresh" });
+    coreInactive.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(fInactive.sidecars.at(-1)!.lastEntryId).toBe("tail-7");
+    coreInactive.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fInactive.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-7", id: "pi-runner-cursor-refresh:2" });
+
+    // Mismatched resume sessionFile (resumedElsewhere) never reads locally, and usageFacts without postUsageFacts stays inactive.
+    const fNoHook = fakeIo();
+    let mismatchReads = 0;
+    fNoHook.io.readLastEntryId = () => { mismatchReads += 1; return "wrong"; };
+    const coreMismatch = new RunnerCore(fNoHook.io, { sessionName: SESSION, launchId: "launch-mismatch" }, {
+      runtime: "pi",
+      usageFacts: true, // no postUsageFacts on io -> predicate is false
+      catchUpSince: "e5",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreMismatch.start();
+    coreMismatch.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: "/state/pi/other/unexpected.jsonl", sessionId: "other" },
+    }));
+    coreMismatch.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-catch-up", success: true, data: { entries: [] } }));
+    coreMismatch.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(mismatchReads).toBe(0);
+    expect.soft(fNoHook.rpc.at(-1)).toEqual({ type: "get_entries", since: "e5", id: "pi-runner-cursor-refresh" });
+
+    // Active Pi --usage-facts seat (opts.usageFacts && runtime === "pi" && io.postUsageFacts): keeps main's full get_entries
+    // both on refused catch-up and at agent_end, and full read settles pending/gap state via Rule 3(b).
+    const fActive = fakeIo();
+    fActive.io.readLastEntryId = () => "should-not-use-tail";
+    fActive.io.postUsageFacts = async () => true;
+    const coreActive = new RunnerCore(fActive.io, { sessionName: SESSION, launchId: "launch-pi-active" }, {
+      runtime: "pi",
+      usageFacts: true,
+      catchUpSince: "ui-old",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreActive.start();
+    coreActive.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    coreActive.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "Entry not found: ui-old",
+    }));
+    expect.soft(fActive.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    coreActive.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", success: true, data: { entries: [{ id: "u1" }, { id: "u9" }] },
+    }));
+    expect.soft(fActive.sidecars.at(-1)!.lastEntryId).toBe("u9");
+    coreActive.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fActive.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
   });
 });
 
