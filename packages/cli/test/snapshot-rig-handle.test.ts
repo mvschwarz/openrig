@@ -32,6 +32,30 @@ describe("snapshot rig identities", () => {
     expect(await snapshotRigIds(client, "old")).toEqual({ ids: ["old"], known: true });
   });
 
+  it("an unreadable exact-id history read stops resolution instead of falling to the name", async () => {
+    // "old" is an archived rig's NAME and possibly a deleted rig's id with
+    // retained history; the history read 503s — the name match must NOT be
+    // silently used, because it could be another rig's history.
+    const client = new DaemonClient("http://fixture");
+    vi.spyOn(client, "get").mockImplementation(async (url: string) => {
+      if (url === "/api/rigs/summary?includeArchived=true") return { status: 200, data: [{ id: "new", name: "old" }] };
+      return { status: 503, data: { error: "unavailable" } };
+    });
+    const outcome = await snapshotRigIds(client, "old");
+    expect(outcome.unreadable).toContain("HTTP 503");
+    // The ids stay available for the error report, but callers must stop.
+  });
+
+  it("a thrown exact-id history read stops resolution too", async () => {
+    const client = new DaemonClient("http://fixture");
+    vi.spyOn(client, "get").mockImplementation(async (url: string) => {
+      if (url === "/api/rigs/summary?includeArchived=true") return { status: 200, data: [{ id: "new", name: "old" }] };
+      throw new Error("socket hang up");
+    });
+    const outcome = await snapshotRigIds(client, "old");
+    expect(outcome.unreadable).toContain("socket hang up");
+  });
+
   it("a name match without retained id-history resolves the name", async () => {
     const client = clientWith([{ id: "new", name: "old" }]);
     expect(await snapshotRigIds(client, "old")).toEqual({ ids: ["new"], known: true });

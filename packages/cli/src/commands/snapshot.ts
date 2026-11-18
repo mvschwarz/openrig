@@ -55,6 +55,11 @@ export function snapshotCommand(depsOverride?: StatusDeps): Command {
       if (!client) { process.exitCode = 1; return; }
 
       const target = await snapshotRigIds(client, rigId);
+      if (target.unreadable) {
+        console.error(`Snapshot history is unresolved: ${target.unreadable}. Nothing was listed — the name match could be another rig's history; retry once the read answers.`);
+        process.exitCode = 1;
+        return;
+      }
       let snapshots: Array<{ id: string; kind: string; status: string; createdAt: string }> = [];
       for (const id of target.ids) {
         const res = await client.get<typeof snapshots>(`/api/rigs/${encodeURIComponent(id)}/snapshots`);

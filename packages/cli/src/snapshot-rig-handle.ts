@@ -1,10 +1,19 @@
 import type { DaemonClient } from "./client.js";
 
-/** Snapshot history follows a name across archived identities; an exact id stays scoped to that id. */
+/** Snapshot history follows a name across archived identities; an exact id stays scoped to that id.
+ *  `unreadable` is set when retained history under an exact id could not be
+ *  read: callers must STOP and report it — silently resolving the name instead
+ *  could list or restore another rig's history under this handle. */
+export interface SnapshotRigIds {
+  ids: string[];
+  known: boolean;
+  unreadable?: string;
+}
+
 export async function snapshotRigIds(
   client: DaemonClient,
   handle: string,
-): Promise<{ ids: string[]; known: boolean }> {
+): Promise<SnapshotRigIds> {
   let rigs: Array<{ id: string; name: string }>;
   try {
     const res = await client.get<Array<{ id: string; name: string }>>("/api/rigs/summary?includeArchived=true");
@@ -20,12 +29,16 @@ export async function snapshotRigIds(
     // A name match must not shadow retained history under the exact id of a
     // deleted rig whose id happens to equal an archived rig's name: check for
     // stored snapshots under the exact id before resolving the name.
+    let kept: Awaited<ReturnType<typeof client.get>>;
     try {
-      const kept = await client.get<unknown[]>(`/api/rigs/${encodeURIComponent(handle)}/snapshots`);
-      if (kept.status === 200 && Array.isArray(kept.data) && kept.data.length > 0) return { ids: [handle], known: true };
-    } catch {
-      // History unreadable: the name match resolves, as before.
+      kept = await client.get<unknown[]>(`/api/rigs/${encodeURIComponent(handle)}/snapshots`);
+    } catch (err) {
+      return { ids, known: true, unreadable: `retained history under id "${handle}" could not be read (${(err as Error).message})` };
     }
+    if (kept.status !== 200) {
+      return { ids, known: true, unreadable: `retained history under id "${handle}" could not be read (HTTP ${kept.status})` };
+    }
+    if (Array.isArray(kept.data) && kept.data.length > 0) return { ids: [handle], known: true };
     return { ids, known: true };
   }
   return { ids: [handle], known: false };

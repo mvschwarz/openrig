@@ -27,6 +27,11 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       const client = deps.clientFactory(getDaemonUrl(status));
       const rigId = opts.rig;
       const candidates = await snapshotRigIds(client, rigId);
+      if (candidates.unreadable) {
+        console.error(`Snapshot history is unresolved: ${candidates.unreadable}. Nothing was restored — no restore was submitted; retry once the read answers.`);
+        process.exitCode = 1;
+        return;
+      }
       let targetId = candidates.ids[0];
       if (candidates.ids.length > 1) {
         targetId = undefined;
