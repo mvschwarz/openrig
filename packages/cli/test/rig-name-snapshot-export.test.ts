@@ -136,12 +136,18 @@ describe("rig snapshot list", () => {
     expect(out).not.toContain("snap-old");
   });
 
-  it("does not print a partial history when an identity's list fails", async () => {
-    const d = fakeDaemon();
-    vi.spyOn(d.deps.clientFactory(""), "get")
-      .mockResolvedValueOnce({ status: 200, data: [{ id: RIG_ID, name: "solo" }, { id: REMOVED_RIG_ID, name: "solo" }] })
-      .mockResolvedValueOnce({ status: 200, data: SNAPSHOTS[RIG_ID] })
-      .mockResolvedValueOnce({ status: 503, data: { error: "unavailable" } });
+  it.each(["success-first", "error-first", "thrown"])("keeps usable history and marks %s reads incomplete", async (order) => {
+    const rigs = [{ id: RIG_ID, name: "solo" }, { id: REMOVED_RIG_ID, name: "solo" }];
+    const d = fakeDaemon(order === "success-first" ? rigs : rigs.reverse());
+    const get = vi.mocked(d.deps.clientFactory("").get).getMockImplementation();
+    if (!get) throw new Error("Missing fixture GET implementation");
+    vi.spyOn(d.deps.clientFactory(""), "get").mockImplementation(async (url) => {
+      if (url === `/api/rigs/${REMOVED_RIG_ID}/snapshots`) {
+        if (order === "thrown") throw new Error("socket hang up");
+        return { status: 503, data: { error: "unavailable" } };
+      }
+      return get(url);
+    });
     const { out, exitCode } = await run(snapshotCommand(d.deps), ["snapshot", "list", "solo"]);
     expect(out).toContain("Failed to list snapshots: unavailable");
     expect(out).not.toContain("snap-1");

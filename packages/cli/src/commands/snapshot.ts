@@ -61,27 +61,37 @@ export function snapshotCommand(depsOverride?: StatusDeps): Command {
         return;
       }
       let snapshots: Array<{ id: string; kind: string; status: string; createdAt: string }> = [];
+      let incomplete = false;
       for (const id of target.ids) {
-        const res = await client.get<typeof snapshots>(`/api/rigs/${encodeURIComponent(id)}/snapshots`);
-        if (res.status >= 400) {
-          console.error(`Failed to list snapshots: ${(res.data as { error?: string }).error ?? "unknown error"}`);
-          process.exitCode = 1;
-          return;
+        try {
+          const res = await client.get<typeof snapshots>(`/api/rigs/${encodeURIComponent(id)}/snapshots`);
+          if (res.status >= 400) {
+            console.error(`Failed to list snapshots for identity "${id}": ${(res.data as { error?: string }).error ?? `HTTP ${res.status}`}`);
+            incomplete = true;
+            continue;
+          }
+          snapshots = snapshots.concat(res.data);
+        } catch (err) {
+          console.error(`Failed to list snapshots for identity "${id}": ${err instanceof Error ? err.message : String(err)}`);
+          incomplete = true;
         }
-        snapshots = snapshots.concat(res.data);
+      }
+      if (incomplete) {
+        console.error("Snapshot list INCOMPLETE: showing only successfully read history; retry the failed identities.");
+        process.exitCode = 1;
       }
       if (target.ids.length > 1) {
         snapshots.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
       }
       // The daemon lists snapshots by exact rig id and answers [] for an id it has none for, so an unknown
       // handle would read as a rig with no snapshots. Snapshots kept under a removed rig's id still list.
-      if (snapshots.length === 0 && !target.known) {
+      if (snapshots.length === 0 && !target.known && !incomplete) {
         console.error(`Rig '${rigId}' not found: no rig has that name or id. List rigs with: rig ps`);
         process.exitCode = 1;
         return;
       }
       if (snapshots.length === 0) {
-        console.log("No snapshots");
+        if (!incomplete) console.log("No snapshots");
         return;
       }
 
