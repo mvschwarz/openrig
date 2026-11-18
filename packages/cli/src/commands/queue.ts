@@ -100,13 +100,32 @@ const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as
 const QUEUE_STATES = new Set(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
 const BODY_SUMMARY_TYPES = new Set(["null", "object", "array", "number", "boolean", "undefined"]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
+const IDENTITY_SESSION_PART_PATTERN = /^[A-Za-z0-9._-]+$/;
+const PARK_CREATE_RESPONSE_FIELDS = [
+  "qitemId", "tsCreated", "tsUpdated", "sourceSession", "destinationSession", "state", "priority", "tier",
+  "deliveryOutcome", "deliveryFailureClass", "deliveryFailureDetail", "tags", "blockedOn", "pickup", "waiting",
+  "handedOffTo", "handedOffFrom", "expiresAt", "chainOfRecord", "body", "humanIntent", "humanDetail", "replyTo",
+  "replyToFallback", "humanQuestions", "humanAnswers", "delegatedDecision", "summary", "evidenceRef", "contentErasedAt",
+  "returnRoute", "returnRouteBasis", "fieldsElided", "closureReason", "closureTarget", "handoffAdvisory",
+  "closureRequiredAt", "claimedAt", "lastNudgeAttempt", "lastNudgeResult", "lastNudgeWireResult", "lastHeartbeat",
+  "resolution", "targetRepo", "createWarning", "parkReceipt", "parkWarning", "advisories",
+] as const;
 
+/** Diagnostic summaries keep only a plain member@rig address, not malformed text. */
 function validIdentitySession(value: unknown): value is string {
-  return typeof value === "string"
-    && value === value.trim()
-    && /^[A-Za-z0-9._@-]+$/.test(value)
+  if (typeof value !== "string" || value !== value.trim()) return false;
+  const parts = value.split("@");
+  return parts.length === 2
+    && parts.every((part) => IDENTITY_SESSION_PART_PATTERN.test(part))
     && parseSessionName(value).kind === "canonical"
     && !isHumanSeatSessionRef(value);
+}
+
+function safeIdentitySessionValue(value: unknown): unknown {
+  if (validIdentitySession(value)) return value;
+  return typeof value === "string"
+    ? "invalid"
+    : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
 }
 
 function isQueueRow(value: unknown): value is QueueRow {
@@ -144,7 +163,7 @@ function observedValue(field: string, value: unknown): unknown {
   if (value === undefined) return undefined;
   if (field === "body") return bodySummary(value);
   if (field === "sourceSession" || field === "destinationSession") {
-    return validIdentitySession(value) ? value : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+    return safeIdentitySessionValue(value);
   }
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
   if (isQueueRow(value)) {
@@ -161,7 +180,7 @@ function observedValue(field: string, value: unknown): unknown {
 function safeRemoteEnvelopeValue(field: string, value: unknown, inObserved = false): unknown {
   if (field === "body") return inObserved ? safeBodySummary(value) : bodySummary(value);
   if (field === "sourceSession" || field === "destinationSession") {
-    return validIdentitySession(value) ? value : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+    return safeIdentitySessionValue(value);
   }
   if (Array.isArray(value)) return value.map((item) => safeRemoteEnvelopeValue("", item, inObserved));
   if (isQueueRow(value)) {
@@ -175,6 +194,22 @@ function safeRemoteEnvelopeValue(field: string, value: unknown, inObserved = fal
     return safe;
   }
   return value;
+}
+
+function safeCreateWarning(value: unknown): QueueRow | undefined {
+  const safe = safeRemoteEnvelopeValue("createWarning", value);
+  return isQueueRow(safe) ? safe : undefined;
+}
+
+/** Copy only declared queue fields from a received park response. */
+function safeParkCreateResponseRow(row: QueueRow): QueueRow {
+  const safe: QueueRow = {};
+  for (const field of PARK_CREATE_RESPONSE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(row, field)) continue;
+    const value = field === "createWarning" ? safeCreateWarning(row[field]) : row[field];
+    if (value !== undefined) safe[field] = value;
+  }
+  return safe;
 }
 
 function stateWarningMessages(state: unknown): string[] {
@@ -762,8 +797,8 @@ function existingRowSummary(row: QueueRow, expectedId: string, bodyIsSummary = f
   const summary: QueueRow = {};
   if (row.qitemId === expectedId) summary.qitemId = expectedId;
   if (typeof row.state === "string" && QUEUE_STATES.has(row.state)) summary.state = row.state;
-  if (validIdentitySession(row.destinationSession)) summary.destinationSession = row.destinationSession;
-  if (validIdentitySession(row.sourceSession)) summary.sourceSession = row.sourceSession;
+  if (typeof row.destinationSession === "string") summary.destinationSession = safeIdentitySessionValue(row.destinationSession);
+  if (typeof row.sourceSession === "string") summary.sourceSession = safeIdentitySessionValue(row.sourceSession);
   if (row.body !== undefined) {
     const body = bodyIsSummary ? safeBodySummary(row.body) : bodySummary(row.body);
     if (body !== undefined) summary.body = body;
@@ -2002,7 +2037,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
 
             const row = identity.row;
             const parkCheck = checkParkReceipt(row, opts.blockedOn, opts.wakeAfter);
-            const outputCreated: QueueRow = { ...row, persisted: true };
+            const outputCreated: QueueRow = { ...safeParkCreateResponseRow(row), persisted: true };
             if (parkCheck.confirmed) {
               outputCreated.parkReceipt = parkCheck.receipt;
             } else {

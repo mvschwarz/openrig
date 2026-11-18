@@ -315,6 +315,32 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(rowCount(db)).toBe(0);
   });
 
+  it("projects a matching forwarded row and summarizes its create-warning body", async () => {
+    const privateBody = "private-body-text";
+    const privateExtension = "private-row-extension";
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init), {
+        createWarning: { code: "remote_warning", message: "The receiver sent a warning.", fields: ["body"], observed: { body: privateBody } },
+        privateExtension,
+      }), 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned.createWarning.observed.body).toEqual({
+      byteLength: 17,
+      sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d",
+    });
+    expect(JSON.stringify(returned)).not.toContain(privateBody);
+    expect(returned).not.toHaveProperty("privateExtension");
+    expect(JSON.stringify(returned)).not.toContain(privateExtension);
+    expect(returned.persisted).toBe(true);
+    expect(rowCount(db)).toBe(0);
+  });
+
   it("does not accept malformed success receipt fields as a confirmed park", async () => {
     const app = makeApp({
       db,
@@ -358,6 +384,7 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     { label: "malformed destination identity", response: (request) => remoteParkPayload(request, { destinationSession: { nested: { body: "private-destination-text" } } }), field: "destinationSession" },
     { label: "malformed source identity", response: (request) => remoteParkPayload(request, { sourceSession: { nested: { body: "private-source-text" } } }), field: "sourceSession" },
     { label: "body mismatch", response: (request) => remoteParkPayload(request, { body: "private-body-text" }), field: "body" },
+    { label: "null body", response: (request) => remoteParkPayload(request, { body: null }), field: "body" },
     { label: "body object with forged summary fields", response: (request) => remoteParkPayload(request, { body: { byteLength: 17, sha256: "private-digest-text" } }), field: "body" },
     { label: "state missing", response: (request) => { const row = remoteParkPayload(request); delete row.state; return row; }, field: "state" },
     { label: "state malformed", response: (request) => remoteParkPayload(request, { state: 5 }), field: "state" },
@@ -393,6 +420,7 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
       });
       expect(JSON.stringify(returned.createWarning)).not.toContain("private-body-text");
     }
+    if (testCase.label === "null body") expect(returned.createWarning.observed.body).toEqual({ type: "null" });
     if (testCase.label === "body object with forged summary fields") {
       expect(returned.createWarning.observed.body).toEqual({ type: "object" });
       expect(JSON.stringify(returned)).not.toContain("private-digest-text");
@@ -404,6 +432,54 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
       expect(returned.existingRow).not.toHaveProperty(field);
       expect(JSON.stringify(returned)).not.toContain(secret);
     }
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it.each([
+    ["extra separator", "private@rig@host"],
+    ["empty part", "private@@rig"],
+    ["invalid character", "private name@rig"],
+  ] as const)("replaces malformed source address text with invalid: %s", async (label, malformedAddress) => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init), {
+        sourceSession: malformedAddress,
+      }), 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned.createWarning.observed.sourceSession).toBe("invalid");
+    expect(returned.existingRow.sourceSession).toBe("invalid");
+    expect(JSON.stringify(returned)).not.toContain(malformedAddress);
+    expect(returned.createWarning.fields).toContain("sourceSession");
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("drops invalid imported body-summary fields from a forwarded warning", async () => {
+    const privateDigest = "private-digest-text";
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init), {
+        sourceSession: "other@rig-a",
+        createWarning: {
+          code: "qitem_create_outcome_unknown",
+          message: "The receiver reported an unknown create.",
+          fields: ["body"],
+          observed: { body: { byteLength: -1, sha256: privateDigest } },
+        },
+      }), 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned.createWarning.fields).toContain("sourceSession");
+    expect(returned.createWarning.observed).not.toHaveProperty("body");
+    expect(JSON.stringify(returned)).not.toContain(privateDigest);
     expect(rowCount(db)).toBe(0);
   });
 

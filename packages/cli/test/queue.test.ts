@@ -1465,6 +1465,29 @@ describe("rig queue CLI", () => {
       expect(result).not.toHaveProperty("persisted");
     });
 
+    it("projects a matching park row and summarizes its create-warning body", async () => {
+      const id = "qitem-matching-warning-body";
+      const privateBody = "private-body-text";
+      const privateExtension = "private-row-extension";
+      const { deps } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: validParkCreateResponse(id, {
+        createWarning: { code: "remote_warning", message: "The receiver sent a warning.", fields: ["body"], observed: { body: privateBody } },
+        privateExtension,
+      }) } } });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result.createWarning.observed.body).toEqual({
+        byteLength: 17,
+        sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d",
+      });
+      expect(JSON.stringify(result)).not.toContain(privateBody);
+      expect(result).not.toHaveProperty("privateExtension");
+      expect(JSON.stringify(result)).not.toContain(privateExtension);
+      expect(result.persisted).toBe(true);
+      expect(process.exitCode).toBeUndefined();
+    });
+
     it.each([
       {
         label: "object body with forged summary fields",
@@ -1502,6 +1525,26 @@ describe("rig queue CLI", () => {
       expect(result.existingRow).not.toHaveProperty(field);
       expect(result.createWarning.observed[field]).toEqual({ type: "object" });
       expect(JSON.stringify(result)).not.toContain(secret);
+    });
+
+    it.each([
+      ["extra separator", "private@rig@host"],
+      ["empty part", "private@@rig"],
+      ["invalid character", "private name@rig"],
+    ] as const)("replaces malformed source address text with invalid: %s", async (label, malformedAddress) => {
+      const id = `qitem-malformed-address-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+      const { deps } = makeDeps({ routes: { "POST /api/queue/create": {
+        status: 201,
+        data: validParkCreateResponse(id, { sourceSession: malformedAddress }),
+      } } });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result.createWarning.observed.sourceSession).toBe("invalid");
+      expect(result.existingRow.sourceSession).toBe("invalid");
+      expect(JSON.stringify(result)).not.toContain(malformedAddress);
+      expect(process.exitCode).toBe(1);
     });
 
     it("uses the create-outcome code when an earlier warning has no string code", async () => {

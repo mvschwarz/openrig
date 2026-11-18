@@ -75,6 +75,16 @@ const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as
 const VALID_PARK_CREATE_STATES = new Set<QueueState>(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
 const BODY_SUMMARY_TYPES = new Set(["null", "object", "array", "number", "boolean", "undefined"]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
+const IDENTITY_SESSION_PART_PATTERN = /^[A-Za-z0-9._-]+$/;
+const FORWARDED_PARK_CREATE_FIELDS = [
+  "qitemId", "tsCreated", "tsUpdated", "sourceSession", "destinationSession", "state", "priority", "tier",
+  "deliveryOutcome", "deliveryFailureClass", "deliveryFailureDetail", "tags", "blockedOn", "pickup", "waiting",
+  "handedOffTo", "handedOffFrom", "expiresAt", "chainOfRecord", "body", "humanIntent", "humanDetail", "replyTo",
+  "replyToFallback", "humanQuestions", "humanAnswers", "delegatedDecision", "summary", "evidenceRef", "contentErasedAt",
+  "returnRoute", "returnRouteBasis", "fieldsElided", "closureReason", "closureTarget", "handoffAdvisory",
+  "closureRequiredAt", "claimedAt", "lastNudgeAttempt", "lastNudgeResult", "lastNudgeWireResult", "lastHeartbeat",
+  "resolution", "targetRepo", "createWarning", "parkReceipt", "parkWarning", "advisories",
+] as const;
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
@@ -85,12 +95,21 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Diagnostic summaries keep only a plain member@rig address, not malformed text. */
 function validIdentitySession(value: unknown): value is string {
-  return typeof value === "string"
-    && value === value.trim()
-    && /^[A-Za-z0-9._@-]+$/.test(value)
+  if (typeof value !== "string" || value !== value.trim()) return false;
+  const parts = value.split("@");
+  return parts.length === 2
+    && parts.every((part) => IDENTITY_SESSION_PART_PATTERN.test(part))
     && parseSessionName(value).kind === "canonical"
     && !isHumanSeatSessionRef(value);
+}
+
+function safeIdentitySessionValue(value: unknown): unknown {
+  if (validIdentitySession(value)) return value;
+  return typeof value === "string"
+    ? "invalid"
+    : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
 }
 
 function bodySummary(value: unknown): Record<string, unknown> {
@@ -124,7 +143,7 @@ function safeParkObserved(field: string, value: unknown): unknown {
   if (value === undefined) return undefined;
   if (field === "body") return bodySummary(value);
   if (field === "sourceSession" || field === "destinationSession") {
-    return validIdentitySession(value) ? value : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+    return safeIdentitySessionValue(value);
   }
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
   if (isObjectRecord(value)) {
@@ -136,6 +155,34 @@ function safeParkObserved(field: string, value: unknown): unknown {
     return safe;
   }
   return { type: Array.isArray(value) ? "array" : typeof value };
+}
+
+function safeForwardedCreateWarning(value: unknown): Record<string, unknown> | undefined {
+  if (!isObjectRecord(value)) return undefined;
+  const safe: Record<string, unknown> = { ...value };
+  if (!Object.prototype.hasOwnProperty.call(value, "observed")) return safe;
+  if (!isObjectRecord(value.observed)) {
+    delete safe.observed;
+    return safe;
+  }
+  const observed: Record<string, unknown> = {};
+  for (const [field, received] of Object.entries(value.observed)) {
+    const summary = field === "body" ? safeBodySummary(received) : safeParkObserved(field, received);
+    if (summary !== undefined) observed[field] = summary;
+  }
+  safe.observed = observed;
+  return safe;
+}
+
+/** Copy only declared queue response fields from a remote park response. */
+function safeForwardedParkCreateRow(row: Record<string, unknown>): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  for (const field of FORWARDED_PARK_CREATE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(row, field)) continue;
+    const value = field === "createWarning" ? safeForwardedCreateWarning(row[field]) : row[field];
+    if (value !== undefined) safe[field] = value;
+  }
+  return safe;
 }
 
 function mergeParkWarning(
@@ -228,8 +275,8 @@ function checkForwardedParkCreate(payload: unknown, forwardBody: Record<string, 
       ? { existingRow: {
           qitemId: payload.qitemId,
           state: payload.state,
-          ...(validIdentitySession(payload.destinationSession) ? { destinationSession: payload.destinationSession } : {}),
-          ...(validIdentitySession(payload.sourceSession) ? { sourceSession: payload.sourceSession } : {}),
+          ...(typeof payload.destinationSession === "string" ? { destinationSession: safeIdentitySessionValue(payload.destinationSession) } : {}),
+          ...(typeof payload.sourceSession === "string" ? { sourceSession: safeIdentitySessionValue(payload.sourceSession) } : {}),
           ...(payload.body === undefined ? {} : { body: bodySummary(payload.body) }),
         } } : {}),
   };
@@ -1093,14 +1140,15 @@ export function queueRoutes(): Hono {
       }
 
       const objectPayload = identity.row;
-      const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
+      const outputRow = safeForwardedParkCreateRow(objectPayload);
+      const existingAdvisories = Array.isArray(outputRow.advisories) ? outputRow.advisories : [];
       const requestedBlocker = typeof body.blockedOn === "string" ? body.blockedOn : null;
       const requestedWakeAfter = typeof body.wakeAfterSeconds === "number" ? body.wakeAfterSeconds : null;
       const parkCheck = checkForwardedParkReceipt(objectPayload, requestedBlocker, requestedWakeAfter);
       const parkWarning = parkCheck.confirmed ? undefined
         : unconfirmedParkWarning(objectPayload.parkWarning, objectPayload.state, parkCheck.fields, parkCheck.observed);
       return c.json({
-        ...objectPayload,
+        ...outputRow,
         persisted: true,
         parkReceipt: { ...parkCheck.receipt, confirmed: parkCheck.confirmed },
         ...(parkWarning ? { parkWarning } : {}),
