@@ -42,7 +42,7 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
     const rig = rigRepo.createRig("test-rig-pi");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "pi" });
     const session = sessionRegistry.registerSession(node.id, seat);
-    db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(session.id);
+    db.prepare("UPDATE sessions SET status = 'running', created_at = '2026-11-14 08:30:00' WHERE id = ?").run(session.id);
     nodeIdRef.value = node.id;
   });
 
@@ -88,7 +88,7 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
     entry({ entryId: "fork-1", entryTimestamp: "2026-11-14T08:00:00.000Z", inputTokens: 9_000, outputTokens: 900, cacheReadTokens: 900_000, origin: "inherited" });
     entry({ piSessionId: "pi-session-0", entryId: "old-1", entryTimestamp: "2026-11-13T09:00:00.000Z", inputTokens: 7_000, outputTokens: 700, cacheReadTokens: 700_000 });
 
-    const observed = store.readPiUsageAndNormalize({ seatSession: seat });
+    const observed = store.readPiUsageAndNormalize({ seatSession: seat, sessionStartedAt: "2026-11-14 08:30:00" });
     expect(observed.availability).toBe("known");
     expect(observed.source).toBe("pi_usage_entries");
     expect(observed.sessionId).toBe(piSession);
@@ -144,10 +144,38 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
 
   it("reports an unmeasured Pi seat as unknown, never a zero sample", async () => {
     await monitor.pollOnce();
-    const observed = store.readPiUsageAndNormalize({ seatSession: seat });
+    const observed = store.readPiUsageAndNormalize({ seatSession: seat, sessionStartedAt: "2026-11-14 08:30:00" });
     expect(observed.availability).toBe("unknown");
     expect(observed.reason).toBe("no_data");
     const count = db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE seat_session = ?").get(seat) as { n: number };
     expect(count.n).toBe(0);
+  });
+
+  it("reports a relaunched Pi seat as unknown until its first post, then counts the resumed conversation", async () => {
+    // Given a previous launch's usage and a replacement with no post of its own.
+    entry({ entryId: "before-relaunch", entryTimestamp: "2026-11-14T09:00:00.000Z", inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 40_000 });
+    await monitor.pollOnce();
+    db.prepare("UPDATE sessions SET status = 'stopped' WHERE node_id = ?").run(nodeIdRef.value);
+    const replacement = sessionRegistry.registerSession(nodeIdRef.value, seat, "relaunch");
+    db.prepare("UPDATE sessions SET status = 'running', created_at = '2026-11-14 09:04:00' WHERE id = ?").run(replacement.id);
+
+    // When the monitor polls before the replacement posts.
+    await monitor.pollOnce();
+
+    // Then neither the context lane nor the burn series inherits the old totals.
+    expect(store.getForNode(nodeIdRef.value, seat)).toMatchObject({
+      availability: "unknown", reason: "no_data", totalInputTokens: null, totalOutputTokens: null,
+      usedPercentage: null, contextWindowSize: null,
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE seat_session = ?").get(seat)).toEqual({ n: 1 });
+
+    // A post in the resumed conversation unlocks its whole session, not just post-launch entries.
+    entry({ entryId: "after-relaunch", entryTimestamp: "2026-11-14T09:05:00.000Z", inputTokens: 500, outputTokens: 50, cacheReadTokens: 20_000 });
+    await monitor.pollOnce();
+    expect(store.getForNode(nodeIdRef.value, seat)).toMatchObject({
+      availability: "known", sessionId: piSession, totalInputTokens: 61_500, totalOutputTokens: 150,
+      usedPercentage: null, contextWindowSize: null,
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE seat_session = ?").get(seat)).toEqual({ n: 2 });
   });
 });

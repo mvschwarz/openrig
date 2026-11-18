@@ -196,8 +196,10 @@ export class ContextUsageStore {
    *  context-window sample, so the window size is unknown here and usedPercentage stays null: the token
    *  threshold and the burn series work from the cumulative counters, while a percent threshold honestly
    *  cannot (absent, never invented). Only `origin = 'own'` entries count, and only the seat's CURRENT Pi
-   *  session: a fork's copied entries and an earlier launch are history, not this occupant's context. */
-  readPiUsageAndNormalize(input: { seatSession: string }): ContextUsage {
+   *  session: a fork's copied entries and an earlier launch are history, not this occupant's context.
+   *  Until an entry reaches this launch's start, report no_data; after a resumed conversation posts,
+   *  its whole session counts, including entries from before the relaunch. */
+  readPiUsageAndNormalize(input: { seatSession: string; sessionStartedAt: string }): ContextUsage {
     if (!hasPiUsageEntriesTable(this.db)) return this.unknownUsage("no_data");
     const row = this.db
       .prepare(
@@ -217,6 +219,7 @@ export class ContextUsageStore {
         | { piSessionId: string; totalInput: number | null; totalOutput: number | null; sampledAt: string | null }
         | undefined;
     if (!row?.piSessionId || row.sampledAt === null) return this.unknownUsage("no_data");
+    if (Date.parse(row.sampledAt) < parseSqliteUtcMs(input.sessionStartedAt)) return this.unknownUsage("no_data");
     return {
       availability: "known",
       reason: null,
