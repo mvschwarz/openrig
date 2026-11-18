@@ -102,7 +102,8 @@ export function parsePoolBlock(raw: unknown): { ok: true; spec: SeatPoolSpec | n
     if (typeof cwdTemplate !== "string" || !cwdTemplate.startsWith("/")) {
       problems.push({ field: "cwd_template", reason: "must be an absolute path" });
     } else {
-      const rest = cwdTemplate.replaceAll("{slot}", "").replaceAll("{rig}", "");
+      // one pass, so removing a placeholder never builds another out of the text around it ("{r{slot}ig}")
+      const rest = cwdTemplate.replace(/\{(?:rig|slot)\}/g, "");
       if (rest.includes("{") || rest.includes("}")) {
         problems.push({ field: "cwd_template", reason: "may use only the placeholders {rig} and {slot}" });
       }

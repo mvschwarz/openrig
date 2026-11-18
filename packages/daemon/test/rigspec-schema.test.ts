@@ -1154,6 +1154,7 @@ describe("member pool block (#3395 Piece 1)", () => {
     ["a blank tag", { max: 3, dispatch_tag: " " }, "dev.impl pool.dispatch_tag: must be a non-empty tag; pool not used"],
     ["a non-absolute cwd_template", { max: 3, cwd_template: "work/{slot}" }, "dev.impl pool.cwd_template: must be an absolute path; pool not used"],
     ["an unknown placeholder", { max: 3, cwd_template: "/work/{user}/{slot}" }, "dev.impl pool.cwd_template: may use only the placeholders {rig} and {slot}; pool not used"],
+    ["a placeholder nested in another", { max: 3, cwd_template: "/work/{r{slot}ig}" }, "dev.impl pool.cwd_template: may use only the placeholders {rig} and {slot}; pool not used"],
     ["a non-boolean drain", { max: 3, drain: "yes" }, "dev.impl pool.drain: must be true or false; pool not used"],
     ["not a mapping", 3, "dev.impl pool: must be a mapping, e.g. { max: 3 } (use {} to clear a stored pool); pool not used"],
   ])("Each bad field (wrong type, out of bounds, `max < min`, a non-absolute `cwd_template` or one with an unknown placeholder) raises `<member> pool.<field>: <reason>; pool not used`, drops the whole block, and the rig still loads with the spec `valid` (%s).", (_case, pool, advisory) => {
@@ -1163,6 +1164,16 @@ describe("member pool block (#3395 Piece 1)", () => {
     expect(normalized.pods[0]!.members[0]!.pool).toBeUndefined();
     expect(normalized.pods[0]!.members[0]!.unusablePool).toEqual({ raw: pool });
     expect(normalized.pods[0]!.members.map((m) => m.id)).toEqual(["impl", "qa"]);
+  });
+
+  it("A number JSON can't hold (`.inf`) is an advisory too, and the block is kept as JSON, where it reads `null`, still unusable.", () => {
+    const spec = withPool({ max: Infinity });
+    expect(RigSpecSchema.validate(spec)).toEqual({
+      valid: true, errors: [], advisories: ["dev.impl pool.max: must be a whole number of 0 or more; pool not used"],
+    });
+    const normalized = RigSpecSchema.normalize(spec).pods[0]!.members[0]!;
+    expect(normalized.pool).toBeUndefined();
+    expect(normalized.unusablePool).toEqual({ raw: { max: null } });
   });
 
   it("An unknown key inside `pool` raises an advisory, drops the whole block, and the rig loads with the spec `valid`.", () => {

@@ -54,11 +54,28 @@ export class SeatPoolSlotsRepository {
       .get(modelNodeId) as { n: number | null };
     const taken = this.db.prepare("SELECT 1 FROM nodes WHERE rig_id = ? AND logical_id = ?");
     let n = highest.n ?? 0;
-    do n++; while (taken.get(model.rig_id, `${model.logical_id}-s${n}`));
+    do {
+      if (n >= Number.MAX_SAFE_INTEGER) throw new Error(`seat pool: no slot number left for model node ${modelNodeId}`);
+      n++;
+    } while (taken.get(model.rig_id, `${model.logical_id}-s${n}`));
     return { slotNumber: n, logicalId: `${model.logical_id}-s${n}` };
   }
 
+  /** Refuses a slot number that is not a positive safe integer, and an agent node that is the model's own node or a
+   *  node of another rig. */
   insert(input: { modelNodeId: string; slotNumber: number; nodeId: string | null; phase: SeatPoolSlotPhase; at: string }): SeatPoolSlot {
+    if (!Number.isSafeInteger(input.slotNumber) || input.slotNumber < 1) {
+      throw new Error(`seat pool: slot number must be a positive safe integer, got ${input.slotNumber}`);
+    }
+    if (input.nodeId !== null) {
+      if (input.nodeId === input.modelNodeId) throw new Error("seat pool: a model node cannot be its own pool agent");
+      const rigOf = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?");
+      const model = rigOf.get(input.modelNodeId) as { rig_id: string } | undefined;
+      const agent = rigOf.get(input.nodeId) as { rig_id: string } | undefined;
+      if (model && agent && agent.rig_id !== model.rig_id) {
+        throw new Error(`seat pool: agent node ${input.nodeId} is in another rig than model node ${input.modelNodeId}`);
+      }
+    }
     const slotId = ulid();
     this.db.prepare(
       `INSERT INTO seat_pool_slots (slot_id, model_node_id, slot_number, node_id, phase, phase_changed_at, created_at)

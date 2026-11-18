@@ -1349,8 +1349,9 @@ function validateClaudeAdditions(member: Record<string, unknown>, prefix: string
 }
 
 /** #3395: a usable block becomes `pool` (`{}` is `null`, the clear); one that can't be used is dropped from `pool` and
- *  kept, as authored, only for its node. Never throws: a block JSON can't hold (a YAML alias that refers to itself) is
- *  kept as a note saying so, so the node and the launch recipe can still store it. */
+ *  kept, as authored, only for its node. It is kept as JSON, so a number JSON can't hold (`.inf`, `.nan`) is kept as
+ *  `null`, which reads back as unusable for the same field. Never throws: a block JSON can't hold at all (a YAML alias
+ *  that refers to itself) is kept as a note saying so, so the node and the launch recipe can still store it. */
 function normalizePool(raw: unknown): Pick<RigSpecPodMember, "pool" | "unusablePool"> {
   if (raw === undefined) return {};
   const read = parsePoolBlock(raw);

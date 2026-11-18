@@ -2496,7 +2496,7 @@ state: 2-named
 
         clearOccupancy(rigId);
         const cleared = await inst.launchMaterialized(yamlSpec({}), RIG_ROOT, rigId);
-        expect(cleared.ok, JSON.stringify(cleared)).toBe(true);
+        expect(cleared, JSON.stringify(cleared)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
         expect(rigRepo.getNodePool(nodeId)).toBeUndefined();
         expect((db.prepare("SELECT pool FROM nodes WHERE id = ?").get(nodeId) as { pool: string | null }).pool).toBeNull();
       } finally {
@@ -2514,12 +2514,12 @@ state: 2-named
         const nodeId = rigRepo.getRig(rigId)!.nodes[0]!.id;
 
         const kept = await inst.launchMaterialized(yamlSpec(), RIG_ROOT, rigId);
-        expect(kept.ok, JSON.stringify(kept)).toBe(true);
+        expect(kept, JSON.stringify(kept)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
         expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ min: 1 }));
 
         clearOccupancy(rigId);
         const replaced = await inst.launchMaterialized(yamlSpec({ max: 5 }), RIG_ROOT, rigId);
-        expect(replaced.ok, JSON.stringify(replaced)).toBe(true);
+        expect(replaced, JSON.stringify(replaced)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
         expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ max: 5 }));
       } finally {
         db.close();
@@ -2538,7 +2538,7 @@ state: 2-named
         clearOccupancy(rigId);
         const bad = { max: 2, min: 4 };
         const reapplied = await inst.launchMaterialized(yamlSpec(bad), RIG_ROOT, rigId);
-        expect(reapplied.ok, JSON.stringify(reapplied)).toBe(true);
+        expect(reapplied, JSON.stringify(reapplied)).toMatchObject({ ok: true, result: { nodes: [{ status: "launched" }] } });
         expect(rigRepo.getNodePool(nodeId)).toEqual({ raw: bad, error: "pool.max: must be at least min (4)" });
 
         const unknownKey = { max: 1, colour: "blue" };

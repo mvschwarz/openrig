@@ -1318,7 +1318,8 @@ Stored and validated; it has no runtime effect until the seat pool job is armed.
   (a pool never runs on part of its settings), the spec stays `valid` and the rest of the rig loads.
 - **Persistence and clear:** the block is stored on the model member's seat. Applying an authored spec to an existing
   seat replaces a stored block whole, clears it with `pool: {}` and leaves it unchanged when the key is absent. A block
-  that can't be used is stored as written, with its error, rather than clearing the one before; it is not a removal.
+  that can't be used is stored as written (as JSON: a number JSON can't hold, such as `.inf` or `.nan`, is stored as
+  `null`, still unusable), with its error, rather than clearing the one before; it is not a removal.
   A fresh launch of the seat from its recorded launch keeps the stored block.
 - **Older daemons:** `pool` is a new member key. A daemon from 0.7.18 or earlier refuses a spec that has it, as it
   refuses any unknown member key.

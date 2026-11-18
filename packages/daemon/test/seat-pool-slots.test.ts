@@ -108,4 +108,55 @@ describe("seat pool slots (#3395 Piece 1)", () => {
       db.close();
     }
   });
+
+  it("A slot number is a positive safe integer: the repository and the table both refuse any other.", () => {
+    const { db, slots, model } = setup();
+    try {
+      for (const bad of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() => slots.insert({ modelNodeId: model.id, slotNumber: bad, nodeId: null, phase: "adding", at: AT }))
+          .toThrow(/slot number must be a positive safe integer/);
+      }
+      expect(() => db.prepare(
+        `INSERT INTO seat_pool_slots (slot_id, model_node_id, slot_number, phase, phase_changed_at, created_at)
+         VALUES ('raw', ?, 1.5, 'adding', ?, ?)`,
+      ).run(model.id, AT, AT)).toThrow(/CHECK/);
+      expect(slots.forModel(model.id)).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("The next number at the top of the safe range fails with a clear error rather than looping.", () => {
+    const { db, slots, model } = setup();
+    try {
+      slots.insert({ modelNodeId: model.id, slotNumber: Number.MAX_SAFE_INTEGER, nodeId: null, phase: "adding", at: AT });
+      expect(() => slots.nextSlot(model.id)).toThrow(/no slot number left/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("A slot's agent is never the model's own node nor a node of another rig; a same-rig node and no node are accepted.", () => {
+    const { db, rigRepo, slots, rig, model } = setup();
+    try {
+      expect(() => slots.insert({ modelNodeId: model.id, slotNumber: 1, nodeId: model.id, phase: "live", at: AT }))
+        .toThrow(/cannot be its own pool agent/);
+      expect(() => db.prepare(
+        `INSERT INTO seat_pool_slots (slot_id, model_node_id, slot_number, node_id, phase, phase_changed_at, created_at)
+         VALUES ('raw', ?, 1, ?, 'live', ?, ?)`,
+      ).run(model.id, model.id, AT, AT)).toThrow(/CHECK/);
+      const other = rigRepo.createRig("other-rig");
+      const foreign = rigRepo.addNode(other.id, "dev.impl-s1", { runtime: "claude-code" });
+      expect(() => slots.insert({ modelNodeId: model.id, slotNumber: 1, nodeId: foreign.id, phase: "live", at: AT }))
+        .toThrow(/in another rig/);
+      expect(slots.poolAgentNodeIds(rig.id)).toEqual([]);
+
+      const agent = rigRepo.addNode(rig.id, "dev.impl-s1", { runtime: "claude-code" });
+      slots.insert({ modelNodeId: model.id, slotNumber: 1, nodeId: agent.id, phase: "live", at: AT });
+      slots.insert({ modelNodeId: model.id, slotNumber: 2, nodeId: null, phase: "adding", at: AT });
+      expect(slots.poolAgentNodeIds(rig.id)).toEqual([agent.id]);
+    } finally {
+      db.close();
+    }
+  });
 });
