@@ -334,6 +334,12 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         await withClient(deps, async (client) => {
           if (opts.window || !named) {
             const res = await openAllTerminalWindows(client, named, deps.windowDeps, session);
+            if (!opts.json && res.code === "terminal_window_failed" && res.error?.endsWith(BULK_TERMINAL_OPEN_UNCONFIRMED)) {
+              // The unconfirmed-result warning goes to stderr, like --provider herdr, so redirecting stdout does not hide it.
+              console.error([res.error, ...(res.notes ?? []).map(n => `  note: ${n}`)].join("\n"));
+              process.exitCode = 1;
+              return;
+            }
             printOpenAll(opts.json ?? false, res, 200);
             return;
           }

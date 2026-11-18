@@ -623,6 +623,34 @@ describe("#3473 bulk Herdr open deadline", () => {
     expect(result.error).toBe(`${windowPrefix ? "A terminal window was requested. " : ""}${BULK_TERMINAL_OPEN_UNCONFIRMED}`);
   });
 
+  it("rig terminal open --all --window sends the human unconfirmed warning to stderr and keeps JSON on stdout", async () => {
+    for (const flags of [[] as string[], ["--json"]]) {
+      logs.length = 0;
+      errs.length = 0;
+      process.exitCode = undefined;
+      const get = vi.fn(async () => ({ status: 200, data: { tmux: { mode: "inherit" }, providers: [{ liveness: { alive: true }, status: { launch: { socketPath: "/tmp/h/herdr.sock" } } }] } }));
+      const post = vi.fn(async () => { throw timeout(); });
+      const client = { baseUrl: "http://localhost:7433", isLocalInstance: async () => true, get, post } as unknown as DaemonClient;
+      const windowDeps: WindowDeps = {
+        platform: "linux", env: { TERM_PROGRAM: "ghostty", DISPLAY: ":0", HOME: "/tmp/h" }, exists: f => f.endsWith("/herdr"),
+        exec: async (file: string, args: string[]) => (file === "/bin/sh" && args[1]?.includes("command -v herdr") ? "/usr/local/bin/herdr\n" : ""),
+        launch: async () => {}, sleep: async () => {}, id: () => "bulk-deadline", herdrConfig: () => "/tmp/herdr.cfg",
+      };
+      const cliDeps: TerminalDeps = { lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], clientFactory: () => client, windowDeps };
+      await createProgram({ terminalDeps: cliDeps }).parseAsync(["node", "rig", "terminal", "open", "--all", "--window", ...flags]);
+      expect(process.exitCode).toBe(1);
+      expect(post).toHaveBeenCalledOnce();
+      if (flags.length) {
+        const out = JSON.parse(logs[0]!) as OpenAllResult;
+        expect(out).toMatchObject({ ok: false, provider: "herdr", rigs: [], code: "terminal_window_failed" });
+        expectUnconfirmed(out.error);
+      } else {
+        expect(logs).toEqual([]);
+        expect(errs.join("\n")).toContain(`A terminal window was requested. ${BULK_TERMINAL_OPEN_UNCONFIRMED}`);
+      }
+    }
+  });
+
   it("leaves the single-open deadline at 45 seconds", async () => {
     const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/open": { status: 200, data: { ok: true, provider: "herdr", opened: [], absent: [], degraded: [], pages: 1, remote: [] } } } });
     await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", "open", "alpha", "--provider", "herdr", "--json"]);
