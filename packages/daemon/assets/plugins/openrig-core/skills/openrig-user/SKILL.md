@@ -1781,8 +1781,9 @@ wait for its own work. Claude Code, including Claude Desktop's Code tab, does th
   timeout, and after 30 minutes at most, even when asked for longer. Either is before this loop's own 55-minute
   deadline, so start it again when the app says the watch ended.
   OpenRig's test saw Desktop end a one-hour Monitor watch at 30:00, and Anthropic's docs give the same cap.
-- **As a plain background command,** Anthropic's docs give it no time limit in the desktop app. OpenRig hasn't
-  measured one past a few minutes.
+- **As a plain background command,** Anthropic's docs give it no time limit in the desktop app. In OpenRig's test,
+  one outlasted Monitor's cap: it was still running at 40 minutes when an item arrived, and the session closed that
+  item 11 s after it was created. The full 55 minutes, a quit app and a sleeping Mac weren't tested.
 
 - **Only if the person has said they want teammates to be able to wake this session.** Never turn it on yourself, and
   never change their settings for it.
