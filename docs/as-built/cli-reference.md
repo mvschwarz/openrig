@@ -21,12 +21,15 @@ The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **93 top-level registrations**, **449 registered command objects**
+There are **93 top-level registrations**, **457 registered command objects**
 below `rig` (including groups and the hidden `restore apply` and `exec connector` commands), and
-**1,494 explicitly registered option objects**, including the root version
-option. Aliases do not add command objects; short/long spellings of one
-option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release. Every registered family is inside the snapshot: the `exec`, `environment` and `network` families, the `roster` and `telemetry` rows, the `host edit`, `host remove` and `terminal attach` rows that earlier snapshots listed as later additions, the herdr-app provider's `terminal close` row and its `--app-home` options, and `scope slice close --in-place` are all counted here.
+**1,535 explicitly registered option objects**, including the root version
+option. Aliases do not add command objects; short and long spellings of one option do not add option
+objects. Commander-generated help is additional. These counts were taken from `createProgram()` at
+`e16972d7`, not from a deployed release. The snapshot covers the `exec`, `environment`
+and `network` families, the `roster` and `telemetry` rows, `host edit`, `host remove`,
+`terminal attach`, the `terminal open --all` and `terminal close --all` flags, the herdr-app
+provider's `terminal close` row and `--app-home` options, and `scope slice close --in-place`.
 
 ## Reading this reference
 
@@ -622,9 +625,9 @@ default-permit record (tag `runner-permission-permit`) opens no row.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
+| `rig terminal open [view]` | — | `--all`<br>`--provider <name>`<br>`--session <name>`<br>`--window`<br>`--app-home <dir>`<br>`--expected-plan <id>`<br>`--follow`<br>`--no-follow`<br>`--max-tiles <count>`<br>`--pin <seats...>`<br>`--unpin <seats...>`<br>`--suppress <seats...>`<br>`--unsuppress <seats...>`<br>`--suppression-ms <ms>`<br>`--grace-ms <ms>`<br>`--focus-retention-ms <ms>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
-| `rig terminal close <view>` | — | `--app-home <dir>`<br>`--json` |
+| `rig terminal close [view]` | — | `--all`<br>`--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--app-home <dir>`<br>`--json` |
 | `rig terminal attach <session>` | — | `--read-only` |
 
@@ -667,7 +670,7 @@ herdr-app views (`--provider herdr-app`, plain `rig terminal open <view>` inside
 | `rig workflow unregister [spec]` | — | `--prune-missing`<br>`--json` |
 | `rig workflow watch <instanceId>` | — | `--json` |
 | `rig workflow route <instanceId>` | — | `--to <session>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--packet <qitem-id>`<br>`--reason <text>`<br>`--json` |
-| `rig workflow resume <instanceId>` | — | `--actor-session <session>` (only when the caller's session can't be derived)<br>`--occurrence <failed-qitem-id>`<br>`--decision <text>`<br>`--json` |
+| `rig workflow resume <instanceId>` | — | `--actor-session <session>` (only when the caller's session can't be derived)<br>`--occurrence <failed-qitem-id>`<br>`--decision <text>`<br>`--owner <session>` (redrive to this seat instead of the role's re-resolved owner; recorded as named, also in `rig workflow trace`; an empty value resolves the owner as without it, and the output says so)<br>`--json` |
 | `rig workflow abort <instanceId>` | — | `--reason <text>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--json` |
 | `rig workflow status` | — | `--json` |
 

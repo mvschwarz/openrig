@@ -914,10 +914,11 @@ describe("the plugin's activity relay", () => {
     expect(posts.map((p) => p.url)).toEqual(["/api/activity/hooks"]);
   });
 
-  it("deduplicates a pinned settings interpreter with no Node on PATH", async () => {
+  // #3416: the settings relay OpenRig writes now starts with `exec`; one written by an earlier version doesn't.
+  it.each(["", "exec "])("deduplicates a pinned settings interpreter with no Node on PATH (prefix %j)", async prefix => {
     const quote = (value: string) => "'" + value.replace(/'/g, `'"'"'`) + "'";
     writeFileSync(join(project, ".claude", "settings.local.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{
-      type: "command", command: `${quote(process.execPath)} ${quote(settingsRelay)}`,
+      type: "command", command: `${prefix}${quote(process.execPath)} ${quote(settingsRelay)}`,
     }] }] } }));
     await run({ hook_event_name: "Stop" }, ["--from-plugin"], { PATH: "" });
     expect(posts).toEqual([]);

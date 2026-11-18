@@ -2012,6 +2012,9 @@ export interface SendOpts {
    *  id) with the admission it was queued with, taken back from the bridge under the seat's lease. Never accepted from the
    *  public transport route. */
   hookBridgeFallback?: { nodeId: string; reason: string; admission: AdmissionInput | null };
+  /** Internal, evidence only: told why the seat's hook bridge couldn't take this send when it goes to typed delivery
+   *  instead, so the send's delivery record can say so. It asks nothing of the write. */
+  onHookBridgeUnavailable?: (reason: string) => void;
   /** Internal: this caller can't yet represent a message queued for the seat's hook bridge (the watchdog's receipts
    *  and accounting read only typed outcomes), so its send is typed. */
   noHookBridge?: true;
@@ -2796,9 +2799,10 @@ export class SessionTransport {
     };
     // Only the caller's own input-effect callback is a write-time contract; this observer alone isn't (bridgeable).
     if (!opts?.onInputEffect) evidenceOnlyObservers.add(observer);
-    const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: observer } : opts;
+    let bridgeUnavailable: string | null = null;
+    const observed: SendOpts | undefined = seat ? { ...opts, onInputEffect: observer, onHookBridgeUnavailable: (reason) => { bridgeUnavailable = reason; } } : opts;
     const result = await this.sendMarkingUrgent(sessionName, text, observed);
-    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire);
+    this.recordDeliveryEvidence(sessionName, seat, opts, result, wire, bridgeUnavailable);
     return result;
   }
 
@@ -2819,7 +2823,7 @@ export class SessionTransport {
    *  can't be written never changes the result, holds the send or resends anything. A fact the result doesn't give is
    *  unknown. Only an outbox row that exists counts as admitted. */
   private recordDeliveryEvidence(sessionName: string, seat: ReturnType<SessionTransport["evidenceSeat"]>, opts: SendOpts | undefined, result: SendResult,
-    wire: { text: string; at: string } | null): void {
+    wire: { text: string; at: string } | null, bridgeUnavailable: string | null): void {
     if (!this.eventBus || !seat) return;
     try {
       const outboxIds = opts?.committedOutboxIds ?? result.outboxIds ?? [];
@@ -2834,6 +2838,7 @@ export class SessionTransport {
         admitted: admissionUnknown ? "unknown" : admitted.length > 0 ? { outboxIds: admitted } : "none", written: writtenFact(result),
         terminalObserved: { outcome: result.outcome ?? null, verified: result.verified ?? null }, inputBoundary: "unknown", source: "send_result",
         ...wireFingerprint(wire), outcome: readSendOutcome(result, writtenFact(result)),
+        ...(bridgeUnavailable ? { hookBridgeUnavailable: bridgeUnavailable } : {}),
       });
     } catch (err) {
       if (!this.evidenceFailureLogged) {
@@ -3216,7 +3221,10 @@ export class SessionTransport {
                 setImmediate(() => { void this.sweepHookBridge({ nodeId: target.nodeId }).catch(() => {}); });
                 return { ...queued, warning: `${sessionName}'s hook bridge isn't available (${reason}): this message is typed after the ones already queued for it.` };
               }
-              if (routed) bridgeWarning = `${sessionName}'s hook bridge isn't available (${reason}): delivered by typing instead.`;
+              if (routed) {
+                bridgeWarning = `${sessionName}'s hook bridge isn't available (${reason}): delivered by typing instead.`;
+                memberOpts?.onHookBridgeUnavailable?.(reason);
+              }
             }
           }
         }

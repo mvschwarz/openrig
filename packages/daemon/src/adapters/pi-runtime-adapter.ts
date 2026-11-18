@@ -28,6 +28,7 @@ import { isPerSeatRoleGuidance, perSeatRoleSkipWarning } from "../domain/managed
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { guidanceFileSharedByLink } from "../domain/restore-guidance.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
+import { insideMissingFolder } from "../domain/cwd-resolution.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER, PI_RUNNER_EXIT_MARKER,
@@ -46,6 +47,9 @@ export interface PiAdapterFsOps {
   chmod?(path: string, mode: number): void;
   /** Whether a path is a symlink and its hard-link count, or null when it doesn't exist (an lstat). */
   linkInfo?(path: string): { link: boolean; nlink: number } | null;
+  /** Whether a folder is there (cwd-resolution's folderPresent), to leave a missing seat folder uncreated. Optional: a
+   *  folder reads as present if absent. */
+  folderPresent?(path: string): boolean;
 }
 
 export interface PiRuntimeAdapterDeps {
@@ -246,8 +250,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
             // ADDITIVE context-file merge (Omnigent best-practice: never
             // replace Pi's default system prompt). Pi reads AGENTS.md from its
             // agent folder and from the managed cwd as context files.
-            const targetPath = this.guidanceTarget(binding, warnings);
-            if (!targetPath) continue; // not written through a link: not counted as delivered
+            const targetPath = this.guidanceTarget(binding, warnings, file.path);
+            if (!targetPath) continue; // not written (a link, or a missing seat folder): not counted as delivered
             const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
@@ -572,11 +576,22 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return linked ? { file: null, note: `${this.runtime}: ${linked} is a link, so this seat's managed guidance stays in its repository AGENTS.md` } : { file };
   }
 
+  /** A folder reads as present unless the filesystem can say it isn't (insideMissingFolder). */
+  private readonly folderPresent = (path: string): boolean => this.fs.folderPresent?.(path) ?? true;
+
   /** The file this launch merges guidance into: the one its startup chose (guidanceFileFor, or a restore's saved choice),
    *  else the repository AGENTS.md in the managed cwd. Null when a chosen file has since become a link (#2432): nothing is
-   *  written through it, and nothing falls back to the repository file. */
-  private guidanceTarget(binding: NodeBinding, warnings: string[]): string | null {
-    if (!binding.guidanceFile) return nodePath.join(binding.cwd, "AGENTS.md");
+   *  written through it, and nothing falls back to the repository file. Null too when the file lies in a seat folder this
+   *  machine doesn't have, which isn't recreated to hold it (insideMissingFolder). */
+  private guidanceTarget(binding: NodeBinding, warnings: string[], blockId: string): string | null {
+    const target = binding.guidanceFile ?? nodePath.join(binding.cwd, "AGENTS.md");
+    // A seat folder this machine doesn't have isn't recreated to hold it (insideMissingFolder); an agent folder's own
+    // AGENTS.md outside it still goes.
+    if (insideMissingFolder(target, binding.cwd, this.folderPresent)) {
+      warnings.push(`${blockId}: not written, because ${binding.cwd} doesn't exist on this machine`);
+      return null;
+    }
+    if (!binding.guidanceFile) return target;
     const linked = guidanceFileSharedByLink(binding.guidanceFile, (path) => this.fs.linkInfo?.(path) ?? null);
     if (!linked) return binding.guidanceFile;
     warnings.push(`${this.runtime}: ${linked} is now a link, so this seat's managed guidance wasn't written to ${binding.guidanceFile}, which other sessions could read`);
@@ -585,7 +600,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[]): boolean {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
-      const targetPath = this.guidanceTarget(binding, warnings);
+      const targetPath = this.guidanceTarget(binding, warnings, entry.effectiveId);
       if (!targetPath) return false;
       const content = this.fs.readFile(entry.absolutePath);
       return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings, entry.absolutePath);

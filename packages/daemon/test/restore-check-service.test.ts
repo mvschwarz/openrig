@@ -950,7 +950,7 @@ describe("RestoreCheckService", () => {
     expect(hookChecks).toHaveLength(0);
   });
 
-  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"].flatMap(matcher => ["node", "'/runtime/node'"].map(executable => ({ matcher, executable }))))("checks usable selected activity-hook matcher $matcher / $executable", ({ matcher, executable }) => {
+  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"].flatMap(matcher => ["node", "'/runtime/node'", "exec node", "exec '/runtime/node'"].map(executable => ({ matcher, executable }))))("checks usable selected activity-hook matcher $matcher / $executable", ({ matcher, executable }) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
     const relayPath = RELAY_PATH;

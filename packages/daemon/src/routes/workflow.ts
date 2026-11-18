@@ -441,8 +441,12 @@ export function workflowRoutes(): Hono {
   app.post("/:instance_id/resume", async (c) => {
     const instanceId = c.req.param("instance_id");
     const body = await c.req
-      .json<{ occurrenceId?: string; decision?: string; actorSession?: string }>()
+      .json<{ occurrenceId?: string; decision?: string; ownerSession?: string; actorSession?: string }>()
       .catch(() => ({}) as never);
+    // An empty ownerSession is not refused: the runtime resolves the owner and says why in ownerNote.
+    if (body.ownerSession !== undefined && typeof body.ownerSession !== "string") {
+      return c.json({ error: "ownerSession must be a string when given" }, 400);
+    }
     const actor = requireSenderIdentity(c, { verb: "workflow resume", bodyClaim: body.actorSession });
     if (!actor.ok) return actor.response;
     try {
@@ -450,6 +454,7 @@ export function workflowRoutes(): Hono {
         instanceId,
         occurrenceId: body.occurrenceId,
         decision: body.decision,
+        ownerSession: body.ownerSession,
         actorSession: actor.session,
         identityProvenance: resolveRecordedProvenance(c, actor),
       });

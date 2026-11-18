@@ -111,6 +111,29 @@ describe("stuck sweep: unclaimed rows of a seat with no escalation route (#2430)
     expect(reopened[0]!.body).toContain(newer.qitemId);
   });
 
+  it("files no finding for a queue-only seat's cold watchdog reminder: held and readable at the seat, not stuck (#3076)", async () => {
+    const door = seat("front", "door.root", "root@front");
+    seat("ops", "watch.desk", "desk@ops");
+    rigs.addEdge(door.rig.id, door.node.id, "desk@ops", "escalates_to");
+    const reminder = async (tags: string[]) => {
+      const row = await queue.create({ qitemId: `qitem-watchdog-${tags.length}`, sourceSession: "watchdog@system", destinationSession: "root@front",
+        body: "[OpenRig watchdog scheduler · policy: periodic-reminder · job: j]\nCheck the deploy", summary: "Watchdog (periodic-reminder): Check the deploy",
+        tags, nudge: false, wakeTrigger: "openrig" });
+      const at = new Date(Date.now() - 90 * 60_000).toISOString();
+      db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(at, row.qitemId);
+      db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(at, row.qitemId);
+      return row;
+    };
+    const cold = await reminder(["watchdog", "queue-only", "watchdog-job:j", "policy:periodic-reminder"]);
+    // The same row without the queue-only mark is an ordinary obligation, and still gets its finding.
+    const ordinary = await reminder(["watchdog"]);
+    await sweep();
+    const tags = findingsTo("desk@ops").flatMap((f) => f.tags ?? []);
+    expect(tags).not.toContain(`stuck-sweep:unclaimed-obligation:${cold.qitemId}`);
+    expect(tags).toContain(`stuck-sweep:unclaimed-obligation:${ordinary.qitemId}`);
+    expect(queue.getById(cold.qitemId)).toMatchObject({ state: "pending", claimedAt: null });
+  });
+
   it("keeps the notice open while the wake ladder is still waking its row", async () => {
     seat("front", "door.root", "root@front");
     const row = await work("root@front");

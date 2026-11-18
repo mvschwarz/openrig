@@ -6,9 +6,17 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+TRACE_STARTED = time.monotonic()
+try:
+    PARENT_TRACE_BUDGET = max(0, float(os.environ.get("OPENRIG_REFOCUS_PARENT_BUDGET_MS", "1650")) / 1000)
+except ValueError:
+    PARENT_TRACE_BUDGET = 1.65
 
 SHELVES = {"rigs", "pods", "seats", "missions", "slices"}
 # The daemon's exact current-work refusal meaning "this seat holds no in-progress typed baton"
@@ -26,10 +34,10 @@ SESSION_CHARS = re.compile(r"[A-Za-z0-9\-_.@]+")
 HUMAN_CLASS_SESSION = re.compile(r"human(?:-[A-Za-z0-9._-]+)?@(?:kernel|host)|[A-Za-z0-9._:-]+@external")
 
 
-def rig_output(*args):
+def rig_output(*args, timeout=10):
     try:
         result = subprocess.run(
-            ["rig", *args], capture_output=True, text=True, timeout=10, check=False
+            ["rig", *args], capture_output=True, text=True, timeout=timeout, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -92,6 +100,44 @@ def read(path):
         return path.read_text(encoding="utf8", errors="replace")
     except OSError:
         return None
+
+
+def may_have_parent(node, spec_text, timeout):
+    # Avoid a parser process for ordinary documents without any possible key.
+    # For possible links, use the same YAML parser as the CLI before querying.
+    manifest = read(node / "mission.yaml")
+    if manifest is None and (node / "mission.yaml").exists():
+        return None
+    frontmatter = re.match(r"\A---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)", spec_text)
+    text = manifest if manifest is not None else (frontmatter.group(1) if frontmatter else "")
+    if not re.search(r"parent|\\|\*|<<|\?", text, re.IGNORECASE):
+        return False
+    if timeout <= 0:
+        return None
+    rig = shutil.which("rig")
+    paths = [str(Path(__file__).resolve().parent), str(node), str(Path.cwd())]
+    if rig:
+        paths.append(str(Path(rig).resolve().parent))
+    script = """
+const fs = require('node:fs');
+const path = require('node:path');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+let yamlPath;
+try { yamlPath = require.resolve('yaml', { paths: input.paths }); }
+catch {
+  const cli = require.resolve('@openrig/cli', { paths: input.paths });
+  yamlPath = require.resolve('yaml', { paths: [path.dirname(cli)] });
+}
+const YAML = require(yamlPath);
+const doc = YAML.parse(input.text);
+const value = input.manifest ? doc?.metadata?.parent : doc?.parent;
+process.stdout.write(typeof value === 'string' && value.trim() ? 'yes' : 'no');
+"""
+    try:
+        result = subprocess.run(["node", "-e", script], input=json.dumps({"text": text, "manifest": manifest is not None, "paths": paths}), capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {"yes": True, "no": False}.get(result.stdout) if result.returncode == 0 else None
 
 
 # Contract twin of CLI scope-fs.ts and daemon scope/node-file.ts; parity is tested.
@@ -293,6 +339,28 @@ def render_work(start, root, depth, failures, fallback=None, packet=False):
                 value = intent(text)
                 body = f"intent: {value}" if value else "MISSING INTENT — no readable intent: field"
             output.append(f"\n### {label} · {spec.name}\n{body}")
+
+            # Parent links are logical edges, not filesystem ancestors. Ask the
+            # scope reader to resolve IDs so tracing uses the same rules as CLI.
+            remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
+            has_parent = may_have_parent(node, text, remaining)
+            if has_parent is None:
+                failures.append(f"parent link unavailable or timed out: {node}")
+                output.append(f"PARENT TRACE GAP — unable to read parent link within budget at {node}")
+            elif has_parent:
+                remaining = PARENT_TRACE_BUDGET - (time.monotonic() - TRACE_STARTED)
+                workspace = next((ancestor for ancestor in node.parents if under_root(ancestor, root) and (ancestor / "project.yaml").is_file()), node.parent)
+                raw = rig_output("scope", "mission", "show", str(node), "--workspace", str(workspace), "--json", timeout=remaining) if remaining > 0 else None
+                try:
+                    mission = json.loads(raw)["mission"]
+                    for parent in mission["parentChain"]:
+                        output.append(f"PARENT · {parent['id']} · {parent['path']}\nintent: {parent.get('intent') or 'MISSING INTENT'}")
+                    if mission.get("parentGap"):
+                        failures.append(mission["parentGap"])
+                        output.append(f"PARENT TRACE GAP — {mission['parentGap']}")
+                except (TypeError, ValueError, KeyError):
+                    failures.append(f"parent link unavailable or timed out: {node}")
+                    output.append(f"PARENT TRACE GAP — unable to read parent link within budget at {node}")
 
         notes, resolution_error = resolve_notes(node)
         if resolution_error:

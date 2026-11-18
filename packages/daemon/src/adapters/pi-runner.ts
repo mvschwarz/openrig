@@ -2584,7 +2584,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       try {
         const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
         const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
-        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
+        writePiRunnerSidecar(paths.runnerStatePath, exitedState);
       } catch { /* the pane ERROR marker still fails readiness */ }
       process.exitCode = 127;
       return;
@@ -2704,8 +2704,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     },
     writeSidecar: (state) => {
       try {
-        if (runtime === "pi") writePiRunnerSidecar(paths.runnerStatePath, state);
-        else fs.writeFileSync(paths.runnerStatePath, JSON.stringify(state));
+        writePiRunnerSidecar(paths.runnerStatePath, state);
       } catch { /* best-effort; adapter falls back to pane markers */ }
     },
     now: () => new Date().toISOString(),

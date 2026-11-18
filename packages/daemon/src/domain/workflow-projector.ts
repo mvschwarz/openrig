@@ -1005,7 +1005,7 @@ export class WorkflowProjector {
     const packet = this.queueRepo.getById(input.currentPacketId);
     if (!packet || !isTerminalState(packet.state)) return null;
     const entry = this.trailLog.listForInstanceInAppendOrder(instance.instanceId)
-      .filter((candidate) => candidate.priorQitemId === input.currentPacketId).at(-1);
+      .filter((candidate) => candidate.priorQitemId === input.currentPacketId && candidate.closureReason !== "resumed").at(-1);
     const recorded = readAlreadyClosedRecord(entry?.closureEvidence);
     if (!entry || !recorded || !sameIntent(recorded, input)) return null;
     const nextQitemId = recorded.next_qitem_ids[0] ?? null;

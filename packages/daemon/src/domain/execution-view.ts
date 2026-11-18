@@ -5,6 +5,7 @@ import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
 import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
+import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
@@ -1278,9 +1279,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         postClaimMotionCount: Number(r.post_claim_motion ?? 0),
         now: now(),
       });
-      const wake = deps.db
-        .prepare(`SELECT wake_ref, phase FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' LIMIT 1`)
-        .get(r.qitem_id) as { wake_ref: string; phase: string } | undefined;
+      const wake = readWithCurrentParkBoundary(boundary => deps.db
+        .prepare(`SELECT w.wake_ref, w.phase FROM queue_transition_wakes w
+          WHERE w.qitem_id = ? AND w.phase = 'armed'
+            AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+            ${boundary}
+          ORDER BY w.transition_id DESC LIMIT 1`)
+        .get(r.qitem_id)) as { wake_ref: string; phase: string } | undefined;
       // park_kind is a CLOSED enum from the DESIGN: deliberate-with-wake |
       // stalled | indeterminate. Nothing else may leak in (the live artifact
       // once emitted 'working' here), and the enum member is lowercase.

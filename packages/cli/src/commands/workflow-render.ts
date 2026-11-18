@@ -194,10 +194,14 @@ export function renderTraceTree(
   for (let i = 0; i < trail.length; i++) {
     const row = trail[i];
     if (!row) continue;
-    const glyph = row.closureReason === "failed" ? "✖" : "✔";
+    const glyph = row.closureReason === "failed" ? "✖" : row.closureReason === "resumed" ? "↻" : "✔";
     const bar = i === trail.length - 1 && !instance.currentStepId ? "└─" : "├─";
     const duration = humanDuration(prevClosed, row.closedAt);
     lines.push(`  ${bar} ${glyph} ${fitCell(row.stepId, 20)}${fitCell(row.actorSession, 28)}${fitCell(row.closureReason, 10)}${duration}`);
+    const resume = row.closureEvidence?.["resume"] as { ownerSession?: unknown; ownerSource?: unknown } | undefined;
+    if (row.closureReason === "resumed" && typeof resume?.ownerSession === "string") {
+      lines.push(`  │    ↳ owner: ${resume.ownerSession} (${resume.ownerSource === "named" ? "named" : "resolved"})`);
+    }
     const branchTaken = row.closureEvidence?.["branch_taken"];
     if (typeof branchTaken === "string" && branchTaken.length > 0) {
       lines.push(`  │    ↳ branch: ${branchTaken}`);

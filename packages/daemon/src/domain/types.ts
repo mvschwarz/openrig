@@ -231,7 +231,11 @@ export type RigEvent =
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
       wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
       /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
-      outcome: ReturnType<typeof readSendOutcome> }
+      outcome: ReturnType<typeof readSendOutcome>;
+      /** Slice 13: the seat routes through its hook bridge, which couldn't take this send (its waiter expired, say), so it
+       *  went to typed delivery: why, as the sender's warning said it. A message queued for the bridge and typed later is
+       *  named by `transport.hook_bridge_fallback` instead. */
+      hookBridgeUnavailable?: string }
   /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
    *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
    *  queued messages were handed back to typed delivery because the bridge had no live arm. */
@@ -404,7 +408,9 @@ export type RigEvent =
   // edge-artifact-required); workflow-keepalive deferred to Phase D.
   // Pure `not_due` polls are NOT recorded in history and NOT emitted
   // as events; only meaningful evaluations + lifecycle transitions are.
-  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string }
+  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string;
+      /** With a queue-only status (queued_as_row, noted_on_queued_row): the queue row the reminder became or was noted on. */
+      queuedQitemId?: string }
   | { type: "watchdog.evaluation_skipped"; jobId: string; policy: string; skipReason: string }
   | { type: "watchdog.evaluation_terminal"; jobId: string; policy: string; terminalReason: string }
   | { type: "watchdog.job_registered"; jobId: string; policy: string; targetSession: string; registeredBy: string }
@@ -420,7 +426,7 @@ export type RigEvent =
   | { type: "workflow.next_qitem_projected"; instanceId: string; nextQitemId: string; nextOwner: string; nextStepId: string }
   | { type: "workflow.completed"; instanceId: string; workflowName: string }
   | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
-  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number }
+  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number; ownerSession?: string; ownerSource?: "named" | "resolved" }
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
@@ -858,6 +864,8 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  /** Configured Claude account label, not an observation of the active login. */
+  configuredAccount?: string | null;
   /** Present only on a community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
   /** Effective current status; confirmed session absence projects as detached. */

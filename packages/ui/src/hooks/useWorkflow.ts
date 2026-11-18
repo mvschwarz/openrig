@@ -16,6 +16,8 @@ import { useQuery } from "@tanstack/react-query";
 
 export type WorkflowInstanceStatus = "active" | "waiting" | "completed" | "failed" | "aborted";
 export type WorkflowExitKind = "handoff" | "waiting" | "done" | "failed";
+/** A step-trail row's reason: an exit, or `resumed` for a resume line (the step's packet is redriven). */
+export type WorkflowTrailReason = WorkflowExitKind | "resumed";
 
 export interface WorkflowStepDeadlineEvidence {
   instanceId: string;
@@ -60,7 +62,7 @@ export interface WorkflowStepTrailEntry {
   stepId: string;
   stepRole: string;
   closedAt: string;
-  closureReason: WorkflowExitKind;
+  closureReason: WorkflowTrailReason;
   closureEvidence: Record<string, unknown> | null;
   actorSession: string;
   nextQitemId: string | null;

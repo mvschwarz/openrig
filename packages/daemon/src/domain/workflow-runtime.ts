@@ -1152,11 +1152,18 @@ export class WorkflowRuntime {
    * seat is a common CAUSE of the exception, and resume is the one
    * sanctioned re-resolution point (FAC-1 R1) the binding layer later
    * upgrades uniformly.
+   *
+   * The resumer may instead NAME the owner (`ownerSession`, `--owner`):
+   * it is checked like an explicit `--next-owner` (harness pin + bound
+   * target) and recorded as named, so the redrive and its wake go to that
+   * seat and never touch the role's default. An empty or blank one names
+   * nobody: the owner is resolved as without it, and `ownerNote` says so.
    */
   async resume(input: {
     instanceId: string;
     occurrenceId?: string;
     decision?: string;
+    ownerSession?: string;
     actorSession: string;
     identityProvenance?: string | null;
   }): Promise<{
@@ -1164,10 +1171,21 @@ export class WorkflowRuntime {
     stepId: string;
     newPacketId: string;
     ownerSession: string;
+    ownerSource?: "named" | "resolved";
+    ownerNote?: string;
+    currentOwnerSession?: string;
     resumeCount: number;
     exceptionItemsClosed: number;
     absorbedReplay?: boolean;
   }> {
+    if (input.ownerSession !== undefined && !input.ownerSession.trim()) {
+      const result = await this.resume({ ...input, ownerSession: undefined });
+      // An absorbed replay redrove nothing, so it resolved no owner: say it was already resumed instead.
+      const ownerNote = result.absorbedReplay
+        ? `--owner was empty; replay absorbed, already resumed to ${result.ownerSession}`
+        : "--owner was empty; the owner was resolved";
+      return { ...result, ownerNote };
+    }
     const occurrences = this.instanceStore.listFailureOccurrences(input.instanceId);
     if (input.occurrenceId || occurrences.length > 0) {
       return this.resumeFailureOccurrence(input);
@@ -1177,6 +1195,7 @@ export class WorkflowRuntime {
       stepId: string;
       newPacketId: string;
       ownerSession: string;
+      ownerSource: "named" | "resolved";
       resumeCount: number;
       exceptionItemsClosed: number;
     };
@@ -1228,10 +1247,14 @@ export class WorkflowRuntime {
       // instance's role-only failed step re-resolves capability-aware
       // against CURRENT inventory (a dead seat is a common CAUSE of the
       // exception; the redrive picks the seat that is eligible NOW).
-      const owner = resolveDefaultOwner(
+      // A named owner skips the re-resolution and gets the explicit-owner checks.
+      const runtimeOf = (session: string) => nodeRuntimeOf(this.db, session);
+      if (input.ownerSession) reconcileExplicitOwnerHarness(step, input.ownerSession, runtimeOf);
+      const ownerSource = input.ownerSession ? "named" : "resolved";
+      const owner = input.ownerSession || resolveDefaultOwner(
         spec,
         step,
-        (session) => nodeRuntimeOf(this.db, session),
+        runtimeOf,
         roleResolutionContext(this.db, instance.boundRig, instance.boundPod),
       );
       if (!owner) {
@@ -1262,6 +1285,7 @@ export class WorkflowRuntime {
             `instance: ${instance.instanceId}\n` +
             `step: ${step.id} (role ${step.actor_role}) — re-driven from the recorded failure; completed steps are NOT re-run\n` +
             `resumed by: ${input.actorSession} (redrive #${(instance.resumeCount ?? 0) + 1})\n` +
+            (ownerSource === "named" ? `owner: ${owner} (named by ${input.actorSession})\n` : "") +
             (input.decision ? `decision: ${input.decision}\n` : "") +
             `history: rig workflow trace ${instance.instanceId}`,
           instanceId: instance.instanceId,
@@ -1312,6 +1336,7 @@ export class WorkflowRuntime {
           hopsBaseline: instance.hopCount,
         },
       });
+      this.recordResumeTrail({ instanceId: instance.instanceId, step, priorQitemId: failedPacketId ?? created.qitemId, redrivePacketId: created.qitemId, owner, ownerSource, input });
 
       // Keepalive re-arm for the redriven owner (in-txn, WF-1 FR-3).
       if (this.watchdogJobsRepo) {
@@ -1331,6 +1356,8 @@ export class WorkflowRuntime {
           resumedBy: input.actorSession,
           decision: input.decision ?? null,
           resumeCount: (instance.resumeCount ?? 0) + 1,
+          ownerSession: owner,
+          ownerSource,
         }),
       );
 
@@ -1339,6 +1366,7 @@ export class WorkflowRuntime {
         stepId: step.id,
         newPacketId: created.qitemId,
         ownerSession: owner,
+        ownerSource,
         resumeCount: (instance.resumeCount ?? 0) + 1,
         exceptionItemsClosed,
       };
@@ -1409,10 +1437,41 @@ export class WorkflowRuntime {
     return openItems.length;
   }
 
+  /** The resume line in the step trail (`rig workflow trace`): who the redrive went to, and whether that owner was named or resolved. */
+  private recordResumeTrail(args: {
+    instanceId: string;
+    step: { id: string; actor_role: string };
+    priorQitemId: string;
+    redrivePacketId: string;
+    owner: string;
+    ownerSource: "named" | "resolved";
+    occurrenceId?: string;
+    input: { actorSession: string; decision?: string };
+  }): void {
+    this.trailLog.record({
+      instanceId: args.instanceId,
+      stepId: args.step.id,
+      stepRole: args.step.actor_role,
+      closedAt: this.now().toISOString(),
+      closureReason: "resumed",
+      closureEvidence: { resume: {
+        ownerSession: args.owner,
+        ownerSource: args.ownerSource,
+        actorSession: args.input.actorSession,
+        decision: args.input.decision ?? null,
+        ...(args.occurrenceId ? { occurrenceId: args.occurrenceId } : {}),
+      } },
+      actorSession: args.input.actorSession,
+      nextQitemId: args.redrivePacketId,
+      priorQitemId: args.priorQitemId,
+    });
+  }
+
   private async resumeFailureOccurrence(input: {
     instanceId: string;
     occurrenceId?: string;
     decision?: string;
+    ownerSession?: string;
     actorSession: string;
     identityProvenance?: string | null;
   }): Promise<{
@@ -1420,6 +1479,8 @@ export class WorkflowRuntime {
     stepId: string;
     newPacketId: string;
     ownerSession: string;
+    ownerSource?: "named" | "resolved";
+    currentOwnerSession?: string;
     resumeCount: number;
     exceptionItemsClosed: number;
     absorbedReplay?: boolean;
@@ -1445,8 +1506,20 @@ export class WorkflowRuntime {
       if (!packet) {
         throw new WorkflowProjectorError("failure_occurrence_replay_indeterminate", `resolved occurrence ${selected.occurrenceId} points to missing redrive packet ${selected.redrivePacketId}`, { instanceId: input.instanceId, occurrenceId: selected.occurrenceId });
       }
+      // Compare with the owner the occurrence was resumed to, not the packet's current owner: a fallback reroute
+      // rewrites destination_session in place but appends `fallback-from:<previous>` to chain_of_record, so the
+      // first such entry is the original destination (and with none, the destination never changed).
+      const fallbackFrom = packet.chainOfRecord?.find((entry) => entry.startsWith("fallback-from:"));
+      const resumedOwner = fallbackFrom ? fallbackFrom.slice("fallback-from:".length) : packet.destinationSession;
+      if (input.ownerSession && input.ownerSession !== resumedOwner) {
+        throw new WorkflowProjectorError(
+          "failure_occurrence_replay_conflict",
+          `failure occurrence ${selected.occurrenceId} was already resumed to ${resumedOwner} (now owned by ${packet.destinationSession}), not ${input.ownerSession}`,
+          { instanceId: input.instanceId, occurrenceId: selected.occurrenceId, expectedOwner: resumedOwner, currentOwner: packet.destinationSession, attemptedOwner: input.ownerSession },
+        );
+      }
       const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
-      return { instanceId: input.instanceId, stepId: selected.stepId, newPacketId: selected.redrivePacketId, ownerSession: packet.destinationSession, resumeCount: instance.resumeCount, exceptionItemsClosed: 0, absorbedReplay: true };
+      return { instanceId: input.instanceId, stepId: selected.stepId, newPacketId: selected.redrivePacketId, ownerSession: resumedOwner, currentOwnerSession: packet.destinationSession, resumeCount: instance.resumeCount, exceptionItemsClosed: 0, absorbedReplay: true };
     }
     const unresolved = all.filter((occurrence) => occurrence.status === "unresolved");
     if (!input.occurrenceId && unresolved.length !== 1) {
@@ -1462,6 +1535,7 @@ export class WorkflowRuntime {
       stepId: string;
       newPacketId: string;
       ownerSession: string;
+      ownerSource: "named" | "resolved";
       resumeCount: number;
       exceptionItemsClosed: number;
     };
@@ -1475,7 +1549,10 @@ export class WorkflowRuntime {
       if (!specRow) throw new WorkflowProjectorError("spec_not_cached", `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not cached`);
       const step = specRow.spec.steps.find((candidate) => candidate.id === occurrence.stepId);
       if (!step) throw new WorkflowProjectorError("resume_step_missing_from_spec", `failed step "${occurrence.stepId}" no longer exists`, { instanceId: instance.instanceId, stepId: occurrence.stepId });
-      const owner = resolveDefaultOwner(specRow.spec, step, (session) => nodeRuntimeOf(this.db, session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
+      const runtimeOf = (session: string) => nodeRuntimeOf(this.db, session);
+      if (input.ownerSession) reconcileExplicitOwnerHarness(step, input.ownerSession, runtimeOf);
+      const ownerSource = input.ownerSession ? "named" : "resolved";
+      const owner = input.ownerSession || resolveDefaultOwner(specRow.spec, step, runtimeOf, roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
       if (!owner) throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve owner for failed step "${step.id}"`);
       assertBoundWorkflowTarget(owner, this.queueRepo);
       const redrivePacketId = newQitemId();
@@ -1487,7 +1564,7 @@ export class WorkflowRuntime {
         body: withWorkflowContinuation({
           binding: instance.lifecycleBinding,
           library: this.guidanceLibrary,
-          body: `WORKFLOW RESUME (packet redrive)\nworkflow: ${instance.workflowName} v${instance.workflowVersion}\ninstance: ${instance.instanceId}\noccurrence: ${occurrence.occurrenceId}\nstep: ${step.id}\n${input.decision ? `decision: ${input.decision}\n` : ""}`,
+          body: `WORKFLOW RESUME (packet redrive)\nworkflow: ${instance.workflowName} v${instance.workflowVersion}\ninstance: ${instance.instanceId}\noccurrence: ${occurrence.occurrenceId}\nstep: ${step.id}\n${ownerSource === "named" ? `owner: ${owner} (named by ${input.actorSession})\n` : ""}${input.decision ? `decision: ${input.decision}\n` : ""}`,
           instanceId: instance.instanceId,
           packetId: redrivePacketId,
           ownerSession: owner,
@@ -1517,17 +1594,18 @@ export class WorkflowRuntime {
         currentStepId: bindings.length === 1 ? bindings[0]!.stepId : "clear",
         expectedVersion: instance.version,
         resumeStamp: { resumeCount: instance.resumeCount + 1, hopsBaseline: instance.hopCount },
-        lastContinuationDecision: { action: "resume_occurrence", occurrenceId: occurrence.occurrenceId, redrivePacketId: created.qitemId, actorSession: input.actorSession, decision: input.decision ?? null },
+        lastContinuationDecision: { action: "resume_occurrence", occurrenceId: occurrence.occurrenceId, redrivePacketId: created.qitemId, actorSession: input.actorSession, decision: input.decision ?? null, ownerSession: owner, ownerSource },
       });
+      this.recordResumeTrail({ instanceId: instance.instanceId, step, priorQitemId: occurrence.failedPacketId, redrivePacketId: created.qitemId, owner, ownerSource, occurrenceId: occurrence.occurrenceId, input });
       if (this.watchdogJobsRepo) ensureWorkflowKeepaliveArmed(this.watchdogJobsRepo, {
         instanceId: instance.instanceId,
         packetId: created.qitemId,
         targetSession: owner,
         registeredBySession: input.actorSession,
       });
-      register(this.eventBus.persistWithinTransaction({ type: "workflow.resumed", instanceId: instance.instanceId, workflowName: instance.workflowName, stepId: step.id, occurrenceId: occurrence.occurrenceId, resumedBy: input.actorSession, decision: input.decision ?? null, resumeCount: instance.resumeCount + 1 }));
+      register(this.eventBus.persistWithinTransaction({ type: "workflow.resumed", instanceId: instance.instanceId, workflowName: instance.workflowName, stepId: step.id, occurrenceId: occurrence.occurrenceId, resumedBy: input.actorSession, decision: input.decision ?? null, resumeCount: instance.resumeCount + 1, ownerSession: owner, ownerSource }));
       wake = { qitemId: created.qitemId, session: created.destinationSession, nudge: created.nudge };
-      output = { instanceId: instance.instanceId, stepId: step.id, newPacketId: created.qitemId, ownerSession: owner, resumeCount: instance.resumeCount + 1, exceptionItemsClosed };
+      output = { instanceId: instance.instanceId, stepId: step.id, newPacketId: created.qitemId, ownerSession: owner, ownerSource, resumeCount: instance.resumeCount + 1, exceptionItemsClosed };
     });
     const nudge = wake as { qitemId: string; session: string; nudge: boolean | undefined } | null;
     if (nudge) await this.queueRepo.deliverWakeForSuccessor(nudge.qitemId, nudge.session, nudge.nudge, input.actorSession);
