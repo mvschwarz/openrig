@@ -107,6 +107,7 @@ export class RigSpecPreflight {
     // Runtime availability
     const checkedRuntimes = new Set<string>();
     for (const node of spec.nodes) {
+      if (node.model) warnings.push(`${node.id}: configured model '${node.model}' is unverified. Launch checks do not establish model availability or account entitlement; no model call is made to verify it.`);
       if (checkedRuntimes.has(node.runtime)) continue;
       checkedRuntimes.add(node.runtime);
 
@@ -379,6 +380,7 @@ async function preflightMembers(
   // 3. For each pod member: resolve agent_ref + profile, check runtime, check cwd
   for (const pod of rigSpec.pods) {
     for (const member of pod.members) {
+      if (member.model) warnings.push(`${pod.id}.${member.id}: configured model '${member.model}' is unverified. Launch checks do not establish model availability or account entitlement; no model call is made to verify it.`);
       // Terminal members: skip agent resolution and profile resolution
       if (member.agentRef === "builtin:terminal") {
         // Only validate runtime and cwd for terminal members

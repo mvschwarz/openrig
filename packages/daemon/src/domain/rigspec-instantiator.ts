@@ -204,7 +204,7 @@ export class RigInstantiator {
       return {
         ok: false,
         code: "instantiate_error",
-        message: "all node launches failed",
+        message: `all node launches failed — ${nodeResults.map((n) => `${n.logicalId}: ${n.error ?? "failure reason unavailable"}`).join("; ")}`,
       };
     }
 

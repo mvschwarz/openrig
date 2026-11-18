@@ -420,11 +420,23 @@ describe("BootstrapOrchestrator", () => {
       });
     });
 
-    it("does not normalize an unrelated mixed legacy create failure", async () => {
+    it("reports a mixed launch failure without losing the failed seat", async () => {
       const { orch } = await realLaunch({ removal: "confirmed", createFailure: true });
       const result = await orch.bootstrap({ mode: "apply", ...await source() });
-      expect(result.status).toBe(podSpec ? "partial" : "completed");
-      if (!podSpec) expect(result.errors).toEqual([]);
+      expect(result.status).toBe("partial");
+      expect(result.errors.join("\n")).toContain("fixture create failure");
+      expect(result.stages.find(s => s.stage === "import_rig")).toMatchObject({
+        status: "failed", detail: { nodes: expect.arrayContaining([
+          expect.objectContaining({ logicalId: failedSeat, status: "failed", error: expect.stringContaining("fixture create failure") }),
+        ]) },
+      });
+    });
+    it("keeps the seat and its failure reason when every launch fails", async () => {
+      const { orch } = await realLaunch({ removal: "confirmed", createFailure: true });
+      const result = await orch.bootstrap({ mode: "apply", ...await source(true) });
+      expect(result.status).toBe("failed");
+      expect(result.errors.join("\n")).toContain(failedSeat);
+      expect(result.errors.join("\n")).toContain("fixture create failure");
     });
 
     it("keeps a launch without an override unchanged", async () => {

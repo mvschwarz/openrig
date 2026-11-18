@@ -484,6 +484,7 @@ describe("RigInstantiator", () => {
     if (!result.ok) {
       expect(result.code).toBe("instantiate_error");
       expect(result.message).toContain("all node launches failed");
+      for (const id of ["orchestrator", "worker-a", "worker-b"]) expect(result.message).toContain(`${id}: all fail`);
     }
 
     // Rig should be deleted
