@@ -718,7 +718,7 @@ describe("QueueRepository", () => {
         // No transport while the row moves: the create's wake to bob stays staged, undelivered.
         const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
         const createWake = `wake-intent-${item.qitemId}`;
-        expect(wakesOf(item.qitemId).find((w) => w.outbox_id === createWake)?.delivery_state).not.toBe("delivered");
+        expect(wakesOf(item.qitemId).find((w) => w.outbox_id === createWake)?.delivery_state).toBe("pending");
         fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
         fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
         const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
