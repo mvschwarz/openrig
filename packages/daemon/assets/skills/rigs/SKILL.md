@@ -15,15 +15,22 @@ building it yourself.
 
 **The team's questions are the person's.** Hold to this from the first handoff, even if you read nothing else here:
 - **Ask before answering any prompt.** A seat's permission, trust or hook-review prompt is theirs to answer: show it
-  to them and send only the choice they made. Never tell the team they approved something, or will answer a prompt,
-  unless they said so.
-- **An answer covers exactly the prompt it answered.** A later prompt, even one like it, goes back to them.
+  to them and send only the choice they made. Approving a plan, a task or "go ahead" isn't an answer to the prompts
+  that work raises: each one still goes to them. Never tell the team they approved something, or will answer a
+  prompt, unless they said so.
+- **An answer covers exactly the prompt it answered.** A later prompt, even one like it, goes back to them, unless
+  they told you outright to decide that kind of prompt (step 2).
 - **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so the
-  team's questions and its result come to this conversation's address. Before you promise to report back, set that
-  route, and arm a wake if you'll tell them without their asking; otherwise say you'll check when they ask.
-- **Don't send them to attach** to a seat's terminal to answer. Bring the prompt here and send their choice yourself.
-- **With no display** (headless or SSH), the team's prompts come to this conversation. Don't tell the operator they'll
-  answer in its pane unless they chose that.
+  team's questions and its result come to this conversation's address. Set it before you promise to report back.
+  This chat has no wake of its own: say you'll check when they ask, start each turn by listing your address's tasks
+  and checking the seats, and offer a wake only where their app actually has one (Claude Desktop's scheduled tasks,
+  for example).
+- **Don't send them to attach** to a seat's terminal to answer. Bring the prompt here. If the operator or a seat sent
+  it to you, record their words and let that sender pass them on; otherwise send their choice yourself, with
+  `rig send`, not raw tmux keys into a seat's terminal.
+- **With no display** (headless or SSH), they answer here. Bring the prompts here: with the return route set, most
+  come to your address as tasks, but not all (choice dialogs and other hosts keep their path), so check the seats
+  while they wait. Don't tell the operator they'll answer in its pane unless they chose that.
 
 The full rules are in step 2, "Bring seat permission prompts to the person here".
 
