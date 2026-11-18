@@ -1213,6 +1213,31 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
     });
 
+    it("keeps refusing when a replacement is recorded while the census runs (it may have started after the census began)", async () => {
+      const { seat } = await afterHostRestart(false);
+      // A poll records a replacement during the census; it started after the census began, so the census can't list it.
+      let censuses = 0;
+      readProcesses = async () => {
+        censuses++;
+        new SeatIdentityStore(db).upsert({
+          nodeId: seat.node.id, verdict: "verified", evidenceSource: null, reason: null,
+          evidence: { registeredPane: "%new", observedPid: 7171, observedPanePid: 7170, observedCommand: "claude", matchedLayer: 1 },
+          sessionName: seat.sessionName, observedAt: new Date().toISOString(),
+        });
+        return [];
+      };
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "after a host restart" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed",
+        guidance: expect.stringContaining("recorded while the process table was read") });
+      expect(censuses).toBe(1);
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(killed).toEqual([]);
+      expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.status)).toEqual(["detached"]);
+    });
+
     it("keeps refusing a running managed seat's fresh launch while its socket is lost", async () => {
       const { seat, boot } = await afterHostRestart(true);
       expect(boot.detached).toBe(0);   // the reconcile kept it: its recorded process still runs
