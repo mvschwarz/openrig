@@ -318,6 +318,15 @@ What reads these declarations:
   subject to the existing project filter and the newest 500 rows per slice. Counts are recomputed on every list
   request. `?refresh=1|true` invalidates the separate listing cache, not a stored queue-count snapshot. This
   resolution does not change the returned slice list or filters.
+- **Queue-derived state on `GET /api/slices`:** every list row also has `derivedState`, read from the same
+  `queueCounts` with no further query, beside the authored `status`, which it never changes. It is `blocked`
+  when any matched item is blocked, otherwise `in-progress`, otherwise `pending`. It is `idle` when matched
+  items exist and none is open (`done`, `failed`, `denied`, `canceled` and `handed-off` are not open), and
+  `none` when no item matched. `idle` does not mean nobody is working on the slice. It is `unknown`, never
+  `idle` or `none`, when `queueCounts` is `null` because the counts could not be read. `?derived=blocked|in-progress|pending|idle|none|unknown`
+  keeps only rows in that state, case-insensitively and after the `filter` status filter, so
+  `?filter=active&derived=blocked` narrows the authored active slices to the blocked ones. An unknown value
+  answers 400 `derived_invalid`.
 
 
 ## Resume one banked original conversation

@@ -129,7 +129,7 @@ import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
-import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
+import { SliceIndexer, deriveSliceQueueState } from "../src/domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../src/domain/slices/slice-detail-projector.js";
 import { slicesRoutes } from "../src/routes/slices.js";
 import * as slicesRoutesModule from "../src/routes/slices.js";
@@ -1576,7 +1576,7 @@ describe("qitem-render-driver #3 — GET /api/slices qitemCount does not leak mi
 describe("GET /api/slices observed queue counts", () => {
   const ZERO = { pending: 0, "in-progress": 0, done: 0, blocked: 0, failed: 0, denied: 0, canceled: 0, "handed-off": 0 };
   type Counts = typeof ZERO;
-  type Entry = { name: string; missionId: string | null; slicePath: string; status: string; rawStatus: string | null; qitemCount: number; queueCounts?: Counts | null };
+  type Entry = { name: string; missionId: string | null; slicePath: string; status: string; rawStatus: string | null; qitemCount: number; queueCounts?: Counts | null; derivedState?: string };
   let db: Database.Database;
   let root: string;
   let docs: Map<string, string>;
@@ -2131,6 +2131,9 @@ describe("GET /api/slices observed queue counts", () => {
     expect.soft(before[0]!.queueCounts, "initial pending").toEqual({ ...ZERO, pending: 1 });
     expect.soft(claimed[0]!.queueCounts, "same route after real claim").toEqual({ ...ZERO, "in-progress": 1 });
     expect.soft(done[0]!.queueCounts, "same route after real completion").toEqual({ ...ZERO, done: 1 });
+    expect.soft(before[0]!.derivedState, "pending row, none claimed").toBe("pending");
+    expect.soft(claimed[0]!.derivedState, "after real claim").toBe("in-progress");
+    expect.soft(done[0]!.derivedState, "all matched rows closed: idle, not none").toBe("idle");
   });
 
   it("drops scrubbed and deleted rows from observed counts after an explicit list refresh", async () => {
@@ -2312,10 +2315,14 @@ describe("GET /api/slices observed queue counts", () => {
       catalog([{ id: "alpha", root: "alpha" }, { id: "shadow", root: "alpha" }]);
       slicesRoot = path.join(root, "alpha", "missions");
     }
-    const entries = await list(route("alpha", false, slicesRoot).app);
+    const { app } = route("alpha", false, slicesRoot);
+    const entries = await list(app);
     expect(entries).toHaveLength(1);
     expect(entries[0]!.qitemCount).toBe(0);
     expect(entries[0]!.queueCounts).toBeNull();
+    expect(entries[0]!.derivedState, "counts that cannot be read are unknown, never idle or none").toBe("unknown");
+    expect((await list(app, "?derived=unknown")).map(s => s.name)).toEqual([entries[0]!.name]);
+    for (const state of ["idle", "none"]) expect(await list(app, "?derived=" + state), state).toEqual([]);
   });
 
   it("uses bounded batched queue scans for both one slice and many slices", async () => {
@@ -2357,6 +2364,97 @@ describe("GET /api/slices observed queue counts", () => {
       expect(small.map(s => s.queueCounts)).toEqual([{ ...ZERO, pending: 1 }]);
       expect(many.map(s => s.queueCounts)).toEqual(Array.from({ length: 24 }, () => ({ ...ZERO, pending: 1 })));
     } finally { spy.mockRestore(); }
+  });
+
+  describe("#2729 queue-derived state beside the authored status", () => {
+    const scope = (name: string) => ["project:alpha", "mission:shipping", "slice:" + name];
+    const derivedByName = (entries: Entry[]) => Object.fromEntries(entries.map(s => [s.name, s.derivedState]));
+
+    it.each([
+      { label: "blocked wins over in-progress, pending and closed rows", states: ["pending", "in-progress", "blocked", "done"], expected: "blocked" },
+      { label: "in-progress wins over pending", states: ["pending", "pending", "in-progress"], expected: "in-progress" },
+      { label: "pending wins over closed rows", states: ["done", "pending", "handed-off"], expected: "pending" },
+      { label: "only done rows: matched rows, none open", states: ["done", "done"], expected: "idle" },
+      { label: "only handed-off rows: matched rows, none open", states: ["handed-off"], expected: "idle" },
+      { label: "failed, denied and canceled rows are not open", states: ["failed", "denied", "canceled"], expected: "idle" },
+      { label: "no matched rows", states: [] as string[], expected: "none" },
+    ])("reports $expected: $label", async ({ states, expected }) => {
+      addSlice("alpha", "shipping", "target");
+      addSlice("alpha", "shipping", "decoy");
+      states.forEach((state, i) => row("target-row-" + i, state, scope("target")));
+      row("decoy-row", "blocked", scope("decoy"));
+      const entries = await list(route().app);
+      expect(derivedByName(entries)).toEqual({ target: expected, decoy: "blocked" });
+    });
+
+    it("leaves status and rawStatus authored while the derived state follows the rows", async () => {
+      addSlice("alpha", "shipping", "started-late", "placeholder");
+      addSlice("alpha", "shipping", "all-closed", "placeholder");
+      addSlice("alpha", "shipping", "never-started", "placeholder");
+      for (const [i, state] of ["blocked", "handed-off", "handed-off", "handed-off"].entries()) row("late-" + i, state, scope("started-late"));
+      for (const [i, state] of ["done", "done", "handed-off"].entries()) row("closed-" + i, state, scope("all-closed"));
+      const { app } = route();
+      const entries = await list(app);
+      for (const entry of entries) expect(entry, entry.name).toMatchObject({ status: "draft", rawStatus: "placeholder" });
+      expect(derivedByName(entries)).toEqual({ "started-late": "blocked", "all-closed": "idle", "never-started": "none" });
+      expect((await list(app, "?filter=blocked")).map(s => s.name), "the authored blocked filter does not see queue rows").toEqual([]);
+      expect((await list(app, "?derived=blocked")).map(s => s.name)).toEqual(["started-late"]);
+    });
+
+    it("filters by derived state, case-insensitively, and narrows the authored status filter", async () => {
+      addSlice("alpha", "shipping", "stuck", "active");
+      addSlice("alpha", "shipping", "moving", "active");
+      addSlice("alpha", "shipping", "waiting", "active");
+      addSlice("alpha", "shipping", "closed", "active");
+      addSlice("alpha", "shipping", "empty", "active");
+      addSlice("alpha", "shipping", "parked", "parked-with-evidence");
+      row("stuck-0", "blocked", scope("stuck"));
+      row("moving-0", "in-progress", scope("moving"));
+      row("waiting-0", "pending", scope("waiting"));
+      row("closed-0", "done", scope("closed"));
+      row("parked-0", "blocked", scope("parked"));
+      const { app } = route();
+      const names = async (query: string) => (await list(app, query)).map(s => s.name).sort();
+      expect(await names("?derived=blocked")).toEqual(["parked", "stuck"]);
+      expect(await names("?derived=BLOCKED")).toEqual(["parked", "stuck"]);
+      expect(await names("?derived=in-progress")).toEqual(["moving"]);
+      expect(await names("?derived=pending")).toEqual(["waiting"]);
+      expect(await names("?derived=idle")).toEqual(["closed"]);
+      expect(await names("?derived=none")).toEqual(["empty"]);
+      expect(await names("?derived=unknown"), "every row here is readable").toEqual([]);
+      expect(await names("?filter=active&derived=blocked")).toEqual(["stuck"]);
+      expect(await names("?filter=blocked&derived=blocked")).toEqual(["parked"]);
+      expect(await names("?filter=done&derived=blocked")).toEqual([]);
+    });
+
+    it("rejects an unknown derived state with 400 and names every allowed value", async () => {
+      addSlice("alpha", "shipping", "any");
+      const { app } = route();
+      for (const query of ["?derived=open", "?derived="]) {
+        const response = await app.request("/api/slices" + query);
+        expect(response.status, query).toBe(400);
+        const body = await response.json() as { error: string; hint: string };
+        expect(body.error).toBe("derived_invalid");
+        for (const state of ["blocked", "in-progress", "pending", "idle", "none", "unknown"]) expect(body.hint).toContain(state);
+      }
+    });
+
+    it("reports unknown, not none, when the queue table cannot be read", async () => {
+      addSlice("alpha", "shipping", "live");
+      row("live-0", "pending", scope("live"));
+      const { app } = route();
+      expect((await list(app))[0]).toMatchObject({ name: "live", derivedState: "pending" });
+      db.exec("DROP TABLE queue_items");
+      const entries = await list(app, "?refresh=1");
+      expect(entries[0]).toMatchObject({ name: "live", queueCounts: null, derivedState: "unknown" });
+    });
+
+    it.each([
+      { label: "absent counts", counts: undefined },
+      { label: "null counts", counts: null },
+    ])("derives unknown from $label", ({ counts }) => {
+      expect(deriveSliceQueueState(counts)).toBe("unknown");
+    });
   });
 
   describe("PR2902 JOIN001 hidden authored node metadata", () => {

@@ -402,6 +402,16 @@ by first-wins listing or a list filter. An explicit mismatched project or
 mission never counts. Physical candidates are used for counting only and do
 not change which slice is listed or served.
 
+Each row also carries `derivedState`, a read-time projection of `queueCounts`
+beside the authored `status`, which stays unchanged and is never written back.
+Among open rows `blocked` wins, then `in-progress`, then `pending`. `idle` means
+matched rows exist and none is open (`done`, `failed`, `denied`, `canceled` and
+`handed-off` are not open); it does not say nobody is working on the slice.
+`none` means no row matched. `unknown` means `queueCounts` is `null` or the
+queue table cannot be read, and is never reported as `idle` or `none`.
+`?derived=blocked|in-progress|pending|idle|none|unknown` filters on it after the
+`filter` status filter, from the same counts and with no extra query.
+
 > Source: `domain/slices/slice-indexer.ts` (read-only/no-new-state module
 > contract; `SliceRecord.qitemIds` / `SliceRecord.proofPacket`;
 > `DEFAULT_CACHE_TTL_MS`; `isReady()`; `invalidate()`;

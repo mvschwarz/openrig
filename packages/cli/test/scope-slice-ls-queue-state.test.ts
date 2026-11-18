@@ -1,0 +1,238 @@
+// #2729 — `rig scope slice ls --with-queue` / `--derived <state>` show the queue-derived
+// state the daemon reports in `GET /api/slices`, beside the authored status. The CLI does
+// not recompute the state. It reads the daemon's one list and matches each slice by its
+// physical path. A slice the daemon does not list, an older daemon without `derivedState`
+// and a daemon that cannot answer are all `unknown`, never `idle` or `none`.
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Command } from "commander";
+
+const daemon = vi.hoisted(() => ({
+  status: { state: "running", healthy: true, pid: 1234, port: 7433 } as Record<string, unknown>,
+  respond: null as null | (() => { status: number; data: unknown } | Error),
+  gets: [] as string[],
+}));
+
+vi.mock("../src/daemon-lifecycle.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>("../src/daemon-lifecycle.js");
+  return {
+    ...actual,
+    getDaemonStatus: vi.fn(async () => daemon.status),
+    getDaemonUrl: vi.fn(() => "http://localhost:7433"),
+  };
+});
+
+vi.mock("../src/client.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>("../src/client.js");
+  return {
+    ...actual,
+    DaemonClient: class {
+      async get<T>(p: string): Promise<{ status: number; data: T }> {
+        daemon.gets.push(p);
+        const reply = daemon.respond?.();
+        if (reply instanceof Error) throw reply;
+        return (reply ?? { status: 200, data: { slices: [] } }) as { status: number; data: T };
+      }
+    },
+  };
+});
+
+const { scopeCommand } = await import("../src/commands/scope.js");
+
+function mktemp(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "rig-slice-ls-queue-"));
+}
+
+function writeFile(p: string, content: string): void {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, content, "utf8");
+}
+
+const SLICES = [
+  { folder: "01-stuck", id: "OPR.1.1", status: "active" },
+  { folder: "02-moving", id: "OPR.1.2", status: "active" },
+  { folder: "03-closed", id: "OPR.1.3", status: "placeholder" },
+  { folder: "04-unlisted", id: "OPR.1.4", status: "active" },
+  { folder: "05-older-daemon", id: "OPR.1.5", status: "active" },
+] as const;
+
+function seedWorkspace(): { workRoot: string; missionsRoot: string; slicePath: (folder: string) => string } {
+  const workRoot = mktemp();
+  const missionsRoot = path.join(workRoot, "missions");
+  writeFile(path.join(missionsRoot, "alpha", "README.md"), "---\nid: OPR.1\n---\n# alpha\n");
+  for (const slice of SLICES) {
+    writeFile(
+      path.join(missionsRoot, "alpha", "slices", slice.folder, "README.md"),
+      `---\nid: ${slice.id}\nstatus: ${slice.status}\n---\n# ${slice.folder}\n`,
+    );
+  }
+  return { workRoot, missionsRoot, slicePath: (folder) => path.join(missionsRoot, "alpha", "slices", folder) };
+}
+
+async function run(args: string[], workRoot: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const stdoutBuf: string[] = [];
+  const stderrBuf: string[] = [];
+  const origWrite = process.stdout.write.bind(process.stdout);
+  const origErrWrite = process.stderr.write.bind(process.stderr);
+  const origExit = process.exit;
+  let exitCode = 0;
+  process.stdout.write = ((chunk: unknown) => { stdoutBuf.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: unknown) => { stderrBuf.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  process.exit = ((code?: number) => {
+    exitCode = code ?? 0;
+    throw new Error(`__EXIT__${exitCode}`);
+  }) as typeof process.exit;
+  const program = new Command();
+  program.addCommand(scopeCommand());
+  program.exitOverride();
+  try {
+    await program.parseAsync(["node", "rig", "scope", "--workspace", workRoot, ...args]);
+  } catch (err) {
+    const msg = (err as Error).message ?? "";
+    if (!msg.startsWith("__EXIT__")) stderrBuf.push(msg + "\n");
+  } finally {
+    process.stdout.write = origWrite;
+    process.stderr.write = origErrWrite;
+    process.exit = origExit;
+  }
+  return { exitCode, stdout: stdoutBuf.join(""), stderr: stderrBuf.join("") };
+}
+
+type Row = { name: string; status: string; derivedState?: string };
+
+describe("rig scope slice ls queue-derived state (#2729)", () => {
+  let ws: ReturnType<typeof seedWorkspace>;
+
+  beforeEach(() => {
+    ws = seedWorkspace();
+    daemon.status = { state: "running", healthy: true, pid: 1234, port: 7433 };
+    daemon.gets.length = 0;
+    daemon.respond = () => ({
+      status: 200,
+      data: {
+        slices: [
+          { name: "01-stuck", slicePath: ws.slicePath("01-stuck"), derivedState: "blocked" },
+          { name: "02-moving", slicePath: ws.slicePath("02-moving"), derivedState: "in-progress" },
+          { name: "03-closed", slicePath: ws.slicePath("03-closed"), derivedState: "idle" },
+          // 05-older-daemon is listed without derivedState, and 04-unlisted is not listed at all.
+          { name: "05-older-daemon", slicePath: ws.slicePath("05-older-daemon") },
+        ],
+      },
+    });
+  });
+  afterEach(() => { fs.rmSync(ws.workRoot, { recursive: true, force: true }); });
+
+  const ls = async (...args: string[]) => {
+    const result = await run(["slice", "ls", "--state", "all", "--json", ...args], ws.workRoot);
+    return { result, parsed: result.stdout ? JSON.parse(result.stdout) as { ok: boolean; count: number; slices: Row[]; warnings?: string[] } : null };
+  };
+  const derivedByName = (rows: Row[]) => Object.fromEntries(rows.map((row) => [row.name, row.derivedState]));
+
+  it("keeps the filesystem-only listing, with no daemon read and no derived field, when no queue flag is given", async () => {
+    const { result, parsed } = await ls();
+    expect(result.exitCode).toBe(0);
+    expect(daemon.gets).toEqual([]);
+    expect(parsed!.slices).toHaveLength(SLICES.length);
+    for (const row of parsed!.slices) expect(row, row.name).not.toHaveProperty("derivedState");
+  });
+
+  it("adds the daemon's derived state beside the unchanged authored status and reads the list once", async () => {
+    const { result, parsed } = await ls("--with-queue");
+    expect(result.exitCode).toBe(0);
+    expect(daemon.gets).toEqual(["/api/slices?filter=all"]);
+    expect(derivedByName(parsed!.slices)).toEqual({
+      "01-stuck": "blocked",
+      "02-moving": "in-progress",
+      "03-closed": "idle",
+      "04-unlisted": "unknown",
+      "05-older-daemon": "unknown",
+    });
+    expect(Object.fromEntries(parsed!.slices.map((row) => [row.name, row.status]))).toEqual({
+      "01-stuck": "active", "02-moving": "active", "03-closed": "placeholder", "04-unlisted": "active", "05-older-daemon": "active",
+    });
+    expect(parsed!.warnings).toBeUndefined();
+  });
+
+  it("matches the daemon's slice by physical path when it reports the path through a symlink", async () => {
+    const alias = path.join(ws.workRoot, "alias");
+    fs.symlinkSync(ws.missionsRoot, alias);
+    daemon.respond = () => ({
+      status: 200,
+      data: { slices: [{ slicePath: path.join(alias, "alpha", "slices", "01-stuck"), derivedState: "pending" }] },
+    });
+    const { parsed } = await ls("--with-queue");
+    expect(derivedByName(parsed!.slices)["01-stuck"]).toBe("pending");
+  });
+
+  it.each([
+    { derived: "blocked", expected: ["01-stuck"] },
+    { derived: "IDLE", expected: ["03-closed"] },
+    { derived: "in-progress", expected: ["02-moving"] },
+    { derived: "unknown", expected: ["04-unlisted", "05-older-daemon"] },
+    { derived: "none", expected: [] as string[] },
+  ])("--derived $derived keeps $expected and reads the daemon without --with-queue", async ({ derived, expected }) => {
+    const { result, parsed } = await ls("--derived", derived);
+    expect(result.exitCode).toBe(0);
+    expect(parsed!.slices.map((row) => row.name).sort()).toEqual(expected);
+    expect(parsed!.count).toBe(expected.length);
+    expect(daemon.gets).toHaveLength(1);
+  });
+
+  it("--derived narrows the authored --state filter", async () => {
+    const { parsed } = await ls("--derived", "unknown", "--state", "active");
+    expect(parsed!.slices.map((row) => row.name).sort()).toEqual(["04-unlisted", "05-older-daemon"]);
+  });
+
+  it.each([
+    { label: "the daemon is stopped", arrange: () => { daemon.status = { state: "stopped", healthy: false }; }, warning: "Daemon not running." },
+    { label: "the daemon answers 500", arrange: () => { daemon.respond = () => ({ status: 500, data: { error: "boom" } }); }, warning: "answered 500" },
+    { label: "the request throws", arrange: () => { daemon.respond = () => new Error("socket hang up"); }, warning: "socket hang up" },
+  ])("reports unknown for every slice, with a warning, when $label", async ({ arrange, warning }) => {
+    arrange();
+    const all = await ls("--with-queue");
+    expect(all.result.exitCode).toBe(0);
+    expect(Object.values(derivedByName(all.parsed!.slices))).toEqual(Array(SLICES.length).fill("unknown"));
+    expect(all.parsed!.warnings).toHaveLength(1);
+    expect(all.parsed!.warnings![0]).toContain(warning);
+    for (const state of ["idle", "none"]) {
+      const filtered = await ls("--derived", state);
+      expect(filtered.parsed!.slices, `--derived ${state} must not match unread counts`).toEqual([]);
+    }
+    expect((await ls("--derived", "unknown")).parsed!.count).toBe(SLICES.length);
+  });
+
+  it("prints the derived state as a column and the warning on stderr in text mode", async () => {
+    const ok = await run(["slice", "ls", "--state", "all", "--with-queue"], ws.workRoot);
+    expect(ok.exitCode).toBe(0);
+    const line = ok.stdout.split("\n").find((l) => l.startsWith("alpha/01-stuck"))!;
+    expect(line.trim().split(/\s{2,}/)).toEqual(["alpha/01-stuck", "OPR.1.1", "active", "blocked"]);
+    expect(ok.stderr).toBe("");
+
+    daemon.status = { state: "stopped", healthy: false };
+    const down = await run(["slice", "ls", "--state", "all", "--with-queue"], ws.workRoot);
+    expect(down.stderr).toContain("Warning: Daemon not running. Queue state is unknown for every slice.");
+    expect(down.stdout.split("\n").find((l) => l.startsWith("alpha/01-stuck"))!.trim().split(/\s{2,}/).at(-1)).toBe("unknown");
+  });
+
+  it("refuses an unknown --derived value before reading anything", async () => {
+    const result = await run(["slice", "ls", "--derived", "open", "--json"], ws.workRoot);
+    expect(result.exitCode).toBe(1);
+    const error = JSON.parse(result.stdout).error as { fact: string; consequence: string; action: string };
+    expect(error.fact).toBe('Unknown --derived value "open".');
+    expect(error.consequence).toBe("Command did not run.");
+    expect(error.action).toBe("Pick one of: blocked, in-progress, pending, idle, none, unknown.");
+    expect(daemon.gets).toEqual([]);
+  });
+
+  it("help says idle means matched items with none open, not that nobody is working on it", () => {
+    const slice = scopeCommand().commands.find((c) => c.name() === "slice")!;
+    const help = slice.commands.find((c) => c.name() === "ls")!.helpInformation().replace(/\s+/g, " ");
+    expect(help).toContain("idle (matched items, none open; not \"nobody is working on it\")");
+    expect(help).toContain("none (no matched items)");
+    expect(help).toContain("unknown (counts could not be read)");
+    expect(help).toContain("--derived <state>");
+  });
+});

@@ -215,11 +215,53 @@ function formatTrustLine(trust: ReturnType<typeof deriveScopeTrust>): string {
 // rig scope slice ls
 // ---------------------------------------------------------------------
 
+/** Queue-derived states (#2729), the same set `GET /api/slices` reports in `derivedState`. */
+const QUEUE_DERIVED_STATES = ["blocked", "in-progress", "pending", "idle", "none", "unknown"] as const;
+type QueueDerivedState = (typeof QUEUE_DERIVED_STATES)[number];
+
+const QUEUE_DERIVED_HELP = "blocked (an open item is blocked) > in-progress > pending (open items, in that precedence) | idle (matched items, none open; not \"nobody is working on it\") | none (no matched items) | unknown (counts could not be read)";
+
+function physicalSlicePath(slicePath: string): string {
+  try {
+    return fs.realpathSync(slicePath);
+  } catch {
+    return path.resolve(slicePath);
+  }
+}
+
+/** Queue-derived state of each slice, read from the daemon's one `GET /api/slices` list. A slice the daemon
+ *  does not list, an older daemon without `derivedState`, or a daemon that cannot answer all yield `unknown`:
+ *  a state that could not be read is never `idle` or `none`. */
+async function readQueueDerivedStates(): Promise<{ byPath: Map<string, QueueDerivedState>; warning: string | null }> {
+  const byPath = new Map<string, QueueDerivedState>();
+  try {
+    const status = await getDaemonStatus(realDeps());
+    if (!daemonMayAnswer(status)) {
+      return { byPath, warning: `${statusGuardMessage(status).fact} Queue state is unknown for every slice.` };
+    }
+    const res = await new DaemonClient(getDaemonUrl(status)).get<{ slices?: Array<{ slicePath?: unknown; derivedState?: unknown }> }>("/api/slices?filter=all");
+    if (res.status >= 400) {
+      return { byPath, warning: `GET /api/slices answered ${res.status}. Queue state is unknown for every slice.` };
+    }
+    for (const entry of res.data?.slices ?? []) {
+      if (typeof entry.slicePath !== "string") continue;
+      const derived = QUEUE_DERIVED_STATES.find((state) => state === entry.derivedState);
+      byPath.set(physicalSlicePath(entry.slicePath), derived ?? "unknown");
+    }
+    return { byPath, warning: null };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { byPath, warning: `Could not read queue state from the daemon: ${message}. Queue state is unknown for every slice.` };
+  }
+}
+
 function buildSliceLsCommand(): Command {
   const cmd = new Command("ls")
     .description("List slices in a mission (or across all missions)")
     .option("--mission <name>", "Restrict to a single mission")
     .option("--state <state>", "Filter: active (in flight, blocked included) | shipped (delivered in place: shipped or done) | closed (in closed/, or superseded, retired or closed in place) | all", "active")
+    .option("--with-queue", `Add the queue-derived state beside the authored status, read from the daemon's queue rows. The authored status is unchanged. ${QUEUE_DERIVED_HELP}`)
+    .option("--derived <state>", `Keep only slices with this queue-derived state (reads the daemon like --with-queue): ${QUEUE_DERIVED_STATES.join(" | ")}`)
     .option("--json", "Machine-readable output")
     .action(async (opts, command) => {
       const out = makeStdout();
@@ -232,16 +274,28 @@ function buildSliceLsCommand(): Command {
           action: "Pick one of: active, closed, shipped, all.",
         }), json, out);
       }
+      const derivedFilter = typeof opts.derived === "string" ? opts.derived.toLowerCase() : null;
+      if (derivedFilter !== null && !(QUEUE_DERIVED_STATES as readonly string[]).includes(derivedFilter)) {
+        fail(new ScopeCliError({
+          fact: `Unknown --derived value "${opts.derived}".`,
+          consequence: "Command did not run.",
+          action: `Pick one of: ${QUEUE_DERIVED_STATES.join(", ")}.`,
+        }), json, out);
+      }
+      const withQueue = Boolean(opts.withQueue) || derivedFilter !== null;
       try {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const missions = opts.mission
           ? [findMission(missionsRoot, opts.mission)]
           : listMissions(missionsRoot);
+        const queue = withQueue ? await readQueueDerivedStates() : null;
         const rows: unknown[] = [];
         const lines: string[] = [];
         for (const mission of missions) {
           const slices = listSlices(mission, state);
           for (const slice of slices) {
+            const derivedState = queue ? queue.byPath.get(physicalSlicePath(slice.absPath)) ?? "unknown" : null;
+            if (derivedFilter !== null && derivedState !== derivedFilter) continue;
             rows.push({
               mission: mission.name,
               name: slice.name,
@@ -249,12 +303,15 @@ function buildSliceLsCommand(): Command {
               slug: slice.slug,
               id: slice.id,
               status: slice.status,
+              ...(derivedState === null ? {} : { derivedState }),
               path: slice.absPath,
             });
-            lines.push(`${mission.name}/${slice.name}    ${slice.id ?? "—"}    ${slice.status ?? "—"}`);
+            lines.push(`${mission.name}/${slice.name}    ${slice.id ?? "—"}    ${slice.status ?? "—"}${derivedState === null ? "" : `    ${derivedState}`}`);
           }
         }
-        emit(out, { ok: true, count: rows.length, slices: rows }, json, lines.length === 0 ? ["(no slices)"] : lines);
+        const warnings = queue?.warning ? [queue.warning] : [];
+        if (!json) for (const warning of warnings) process.stderr.write(`Warning: ${warning}\n`);
+        emit(out, { ok: true, count: rows.length, slices: rows, ...(warnings.length ? { warnings } : {}) }, json, lines.length === 0 ? ["(no slices)"] : lines);
       } catch (err) {
         fail(err, json, out);
       }

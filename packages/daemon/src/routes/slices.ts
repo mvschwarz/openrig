@@ -5,6 +5,8 @@ import { inferCatalogProject, ProjectReadError } from "../domain/workspace/proje
 //
 // Endpoints:
 //   GET /api/slices?filter=all|active|done|closed|blocked  — list (default: all)
+//       &derived=blocked|in-progress|pending|idle|none|unknown — optional
+//                                                       queue-derived state filter
 //   GET /api/slices/:name                            — full per-tab payload
 //   GET /api/slices/:name/proof-asset/:relPath{.+}   — serves screenshots /
 //                                                       videos / traces from
@@ -22,7 +24,14 @@ import { readParentScope, type ParentScopeNode } from "../domain/scope/mission-p
 import { createProofPolicyRead, readSliceReadiness, readProjectReadinessAsync } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SliceIndexer, SliceListEntry, SliceStatus } from "../domain/slices/slice-indexer.js";
+import {
+  deriveSliceQueueState,
+  SLICE_QUEUE_DERIVED_STATES,
+  SliceIndexer,
+  SliceListEntry,
+  SliceStatus,
+  type SliceQueueDerivedState,
+} from "../domain/slices/slice-indexer.js";
 import { SliceDetailProjector } from "../domain/slices/slice-detail-projector.js";
 import { findSliceWorkflowBinding } from "../domain/workflow/slice-workflow-binding.js";
 
@@ -32,6 +41,7 @@ export interface SlicesRoutesDeps {
 }
 
 const VALID_FILTERS = new Set<SliceStatus | "all">(["all", "active", "done", "closed", "blocked"]);
+const VALID_DERIVED = new Set<SliceQueueDerivedState>(SLICE_QUEUE_DERIVED_STATES);
 
 export function slicesRoutes(): Hono {
   const app = new Hono();
@@ -54,6 +64,14 @@ export function slicesRoutes(): Hono {
         hint: `Unknown filter '${filter}'. Allowed: ${[...VALID_FILTERS].sort().join(", ")}.`,
       }, 400);
     }
+    const derivedParam = c.req.query("derived")?.toLowerCase();
+    if (derivedParam !== undefined && !VALID_DERIVED.has(derivedParam as SliceQueueDerivedState)) {
+      return c.json({
+        error: "derived_invalid",
+        hint: `Unknown derived state '${derivedParam}'. Allowed: ${[...SLICE_QUEUE_DERIVED_STATES].join(", ")}.`,
+      }, 400);
+    }
+    const derivedFilter = derivedParam as SliceQueueDerivedState | undefined;
     const refresh = c.req.query("refresh");
     if (refresh === "1" || refresh === "true") {
       deps.indexer.invalidate();
@@ -106,6 +124,12 @@ export function slicesRoutes(): Hono {
         complete: projectLookup.complete,
       });
       const authored = deps.indexer.missionAuthoredStatuses();
+      // Queue-derived state (#2729) is read beside the authored status, from the
+      // same counts and with no further query. A `?derived=` filter narrows the
+      // already status-filtered rows; it never changes `status` or `rawStatus`.
+      const derivedStateOf = (slicePath: string): SliceQueueDerivedState =>
+        deriveSliceQueueState(queueCountsByPath.get(slicePath) ?? null);
+      if (derivedFilter) filtered = filtered.filter((s) => derivedStateOf(s.slicePath) === derivedFilter);
       const parentRoots = new Map<string, ParentScopeNode[]>();
       const parentWarnings: string[] = [];
       for (const slice of filtered) {
@@ -124,6 +148,7 @@ export function slicesRoutes(): Hono {
           ...s,
           childMissions: childMissions(s.slicePath, s.missionId),
           queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
+          derivedState: derivedStateOf(s.slicePath),
           readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
         })),
         totalCount: filtered.length,

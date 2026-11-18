@@ -42,6 +42,28 @@ export type SliceQueueCounts = Record<ObservedQueueState, number>;
 
 const KNOWN_QUEUE_STATES = new Set<string>(QUEUE_COUNT_STATES);
 
+/** Queue-derived state (#2729) for `GET /api/slices`, read beside the authored
+ *  `status` and never stored. Order of precedence among open rows is
+ *  blocked, then in-progress, then pending. `idle` means matched rows exist
+ *  and none is open; it does not say nobody is working on the slice. `none`
+ *  means no row matched. `unknown` means the counts could not be read, and is
+ *  never reported as `idle` or `none`.
+ */
+export const SLICE_QUEUE_DERIVED_STATES = ["blocked", "in-progress", "pending", "idle", "none", "unknown"] as const;
+export type SliceQueueDerivedState = (typeof SLICE_QUEUE_DERIVED_STATES)[number];
+
+/** Derive the queue state from observed counts. `null` or absent counts are `unknown`. */
+export function deriveSliceQueueState(counts: SliceQueueCounts | null | undefined): SliceQueueDerivedState {
+  if (!counts) return "unknown";
+  if (counts.blocked > 0) return "blocked";
+  if (counts["in-progress"] > 0) return "in-progress";
+  if (counts.pending > 0) return "pending";
+  for (const state of QUEUE_COUNT_STATES) {
+    if (counts[state] > 0) return "idle";
+  }
+  return "none";
+}
+
 function zeroQueueCounts(): SliceQueueCounts {
   return {
     pending: 0,
@@ -767,6 +789,9 @@ export class SliceIndexer {
 
     const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
     if (columns.length === 0 || !columns.some((c) => c.name === "tags")) {
+      // The queue cannot be read, so no row can be called absent. Report null
+      // counts (derived state `unknown`) instead of observed zero.
+      for (const slicePath of result.keys()) result.set(slicePath, null);
       return result;
     }
 
