@@ -10,13 +10,19 @@
 // keep the translated-LIKE regex path in the caller.
 //
 // Why: the previous prefilter was one RegExp alternating every term, whose
-// cost per row grew with the number of terms; this pass is linear in the
-// haystack and independent of the number of terms.
+// cost per row grew with the number of terms. This is one transition pass over
+// the haystack plus a visit per matched output (every term ending at that
+// position, including terms already marked for the row: nested terms such as
+// `a`, `aa`, `aaa` over a long run of `a` cost more per character as terms are
+// added); the caller then does per-term work on the rows that match.
 //
-// Size: the transition table is dense, 128 Int32 entries (512 bytes) per trie
-// state, and there is at most one state per character of the terms: ~800
-// terms of ~20 characters cost a few MB, 10k such terms about 100 MB, for the
-// duration of one index build.
+// Size: the finished transition table is dense, 128 Int32 entries (512 bytes)
+// per trie state, and there is at most one state per character of the terms:
+// ~800 terms of ~20 characters cost a few MB, 10k such terms about 100 MB, for
+// the duration of one index build. That is the table only: construction also
+// holds a Map of children and an output list per state until it finishes, so
+// the peak is higher. A compressed alphabet (only the characters the terms
+// use) would shrink the dense table if the number of terms grows.
 
 const ALPHABET = 128;
 

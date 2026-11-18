@@ -1478,10 +1478,11 @@ export class SliceIndexer {
     if (!tableAbsent && fallbackTerms.size > 0) {
       const termList = Array.from(fallbackTerms);
       // Plain ASCII terms (names without `_`, `%`, non-ASCII or U+0000) are
-      // answered by ONE linear pass over the raw haystack
-      // (AsciiLiteralMatcher): a single RegExp alternating every term scaled
-      // with the term count. Only the remaining terms keep the translated-LIKE
-      // regex, with its own prefilter, so the matched set is unchanged.
+      // answered by ONE transition pass over the raw haystack plus a visit per
+      // matched output (AsciiLiteralMatcher), instead of a single RegExp
+      // alternating every term; a row that matches still gets per-term work
+      // below. Only the remaining terms keep the translated-LIKE regex, with
+      // its own prefilter, so the matched set is unchanged.
       const literalIdOfTerm = new Int32Array(termList.length).fill(-1);
       const literalTerms: string[] = [];
       termList.forEach((term, index) => {
