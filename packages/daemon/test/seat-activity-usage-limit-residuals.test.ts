@@ -29,6 +29,7 @@ function fixture() {
   const rig = rigs.createRig("limit-rig");
   const claude = rigs.addNode(rig.id, "dev.lead", { runtime: "claude-code" });
   const codex = rigs.addNode(rig.id, "dev.qa", { runtime: "codex" });
+  const terminal = rigs.addNode(rig.id, "infra.shell", { runtime: "terminal" });
   const sessions = new SessionRegistry(db);
   const occupy = (nodeId: string, name: string) => {
     const session = sessions.registerSession(nodeId, name);
@@ -37,6 +38,7 @@ function fixture() {
   };
   const claudeSession = occupy(claude.id, "dev-lead@limit-rig");
   const codexSession = occupy(codex.id, "dev-qa@limit-rig");
+  const terminalSession = occupy(terminal.id, "infra-shell@limit-rig");
   // The seat's own Claude conversation: the store keeps a limit's reset only from a post that names it (#99).
   const conversation = "conv-dev-lead";
   db.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = ? WHERE node_id = ?").run(conversation, claude.id);
@@ -83,17 +85,18 @@ function fixture() {
       read: { listFiles: () => ["1.json"], readFile: () => file } });
     if (evidence) oracle.reportEvidence(evidence);
   }
-  function codexIdleSample() {
-    oracle.reportEvidence({ seatNodeId: codex.id, sessionName: codexSession, rung: "window-sampling", sourceId: "tmux:window-activity",
+  function idleSample(nodeId: string, sessionName: string) {
+    oracle.reportEvidence({ seatNodeId: nodeId, sessionName, rung: "window-sampling", sourceId: "tmux:window-activity",
       seq: clock.now, observedAt: new Date(clock.now).toISOString(), activity: "idle-at-prompt" });
   }
+  const codexIdleSample = () => idleSample(codex.id, codexSession);
   function seat(nodeId: string) {
     const state = oracle.getSeatState(nodeId)!;
     return { ...state, display: deriveDisplayActivity(state.activity, state.needsInput) };
   }
   const banner = { resetText: "try again at 6:00 PM", evidence: "You've hit your usage limit" };
-  return { clock, reset, store, sessions, claude, codex, claudeSession, codexSession, generation, post, restart, claudeStatus,
-    codexIdleSample, seat, banner, oracle: () => oracle };
+  return { clock, reset, store, sessions, claude, codex, terminal, claudeSession, codexSession, terminalSession, generation, post,
+    restart, claudeStatus, idleSample, codexIdleSample, seat, banner, oracle: () => oracle };
 }
 
 describe("a seat at its usage limit, across a daemon restart and on Codex", () => {
@@ -140,6 +143,17 @@ describe("a seat at its usage limit, across a daemon restart and on Codex", () =
     f.clock.now += 1_000;
     f.claudeStatus("busy", f.clock.now); // a turn that started after the restart
     expect(f.seat(f.claude.id).display).toBe("working");
+  });
+
+  it("leaves a seat that can't post a typed limit to its own evidence when the store can't be read at a restart", async () => {
+    // A terminal seat has no turn and no banner that could end an unread hold, so it must never get one.
+    const f = fixture();
+    f.clock.now += 3600_000;
+    await f.restart("unreadable");
+    f.idleSample(f.terminal.id, f.terminalSession);
+    expect(f.seat(f.terminal.id).display).toBe("idle");
+    expect(f.seat(f.terminal.id).decidedBy).toBe("window-sampling");
+    expect(f.seat(f.terminal.id).usageLimit).toBeNull();
   });
 
   it("holds a Codex seat's banner as its usage limit, not idle, and ends it when a newer capture shows none", () => {

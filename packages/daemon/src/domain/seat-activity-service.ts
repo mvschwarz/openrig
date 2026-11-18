@@ -856,10 +856,12 @@ export class SeatActivityService {
 
   /** After a daemon restart, a typed usage limit still in force holds again, as it did live: a hook-rung limit is its hook
    *  evidence again (seq 0, so any live hook outranks it), any other rung's is held directly. A store that can't be read
-   *  leaves the seat unknown until a newer turn, never working on an older report. */
+   *  leaves the seat unknown until a newer turn, never working on an older report. Only Claude and Codex seats post a typed
+   *  limit, and only they have a newer turn or a banner to end that hold, so no other seat reads the store for one. */
   private restoreUsageLimit(seat: { seatNodeId: string; sessionName: string }, seatRuntime: string | null): void {
     const ladder = this.ladder.get(seat.seatNodeId);
-    if (!this.restoreUsageLimitEvidence || !seatRuntime || !ladder || ladder.usageLimit) return;
+    if (!this.restoreUsageLimitEvidence || (seatRuntime !== "claude-code" && seatRuntime !== "codex") || !ladder
+        || ladder.usageLimit) return;
     let evidence: ActivityEvidence | null;
     try {
       evidence = this.restoreUsageLimitEvidence(seat, seatRuntime);
