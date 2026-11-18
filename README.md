@@ -69,7 +69,7 @@ Setting up Node.js on Linux, on a Mac where you aren't an administrator, or on W
 
 ### Install it yourself
 
-This runs OpenRig's install script from the `v0.7.18` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+This runs OpenRig's install script from the `v0.7.19` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.19/scripts/install.sh | sh -s -- --dry-run
