@@ -101,15 +101,19 @@ describe("seat-pool planner: dispatch", () => {
     const reply = rows(1, MODEL, 900, ["review"]);
     const untagged = rows(2, MODEL, 900);
     const toDrained = rows(1, drained.sessionName!, 600, ["review"]);
+    // Carrying the tag and the oldest of all, but addressed to a live agent, not the model: it stays with that agent.
+    const busy = agent({ openRows: 1, idleAtPrompt: false, idleSince: null });
+    const toBusy = rows(1, busy.sessionName!, 1200, ["role:impl"]);
     const result = plan(
       spec({ dispatchTag: "role:impl", max: 9 }),
-      state({ agents: [drained, ...free], pending: [...tagged, ...reply, ...untagged, ...toDrained] }),
+      state({ agents: [drained, busy, ...free], pending: [...toBusy, ...tagged, ...reply, ...untagged, ...toDrained] }),
     );
     expect(ofKind(result.intents, "dispatch")).toEqual([
       { kind: "dispatch", qitemId: tagged[0]!.qitemId, from: MODEL, slotNumber: free[0]!.slotNumber },
       { kind: "dispatch", qitemId: toDrained[0]!.qitemId, from: drained.sessionName, slotNumber: free[1]!.slotNumber },
     ]);
-    // The reply and the untagged rows stay with the model: they are not demand, so nothing is added for them.
+    // The reply and the untagged rows stay with the model, and the tagged row to the busy agent stays with it: none of
+    // them is demand, so nothing is added for them.
     expect(result.counts.unplaced).toBe(0);
     expect(ofKind(result.intents, "add")).toEqual([]);
   });
@@ -237,6 +241,14 @@ describe("seat-pool planner: sizing", () => {
     // No demand at all: the floor O + S keeps the target at 1, and nothing is cancelled or drained.
     expect(quiet.target).toBe(1);
     expect(quiet.intents).toEqual([]);
+    // With one agent occupied and one add still reserved, the floor O + S is 2: the target stays at 2 and the reserved
+    // add is not cancelled, though no row waits.
+    const busy = agent({ openRows: 1, idleAtPrompt: false, idleSince: null });
+    const floor = plan(spec({ max: 3 }), state({ agents: [busy, starting("reserved")] }));
+    expect(floor.counts).toMatchObject({ occupied: 1, starting: 1, unplaced: 0 });
+    expect(floor.target).toBe(2);
+    expect(floor.surplus).toBe(0);
+    expect(ofKind(floor.intents, "cancel")).toEqual([]);
     // The row it was added for is still waiting: no second add for it.
     const same = plan(spec({ max: 3 }), state({ agents: [issued], pending: rows(1) }));
     expect(same.target).toBe(1);
