@@ -8,6 +8,10 @@ import type { QueueRepository } from "./queue-repository.js";
 export type EnvironmentEffect = "close-viewer" | "stop-native" | "stop-compute" | "delete-owned";
 export type NativeObservation = { nativeId: string; generation: string; running: boolean };
 export type DependentObservation = { workload: boolean; supervisor: boolean; volumes: boolean };
+/** A local engine socket as observed: its path, the socket object (device and inode), and the host and user it serves. */
+export type EngineEndpoint = { socket: string; socketDevice: number; socketInode: number; uid: number; host: string };
+/** Recreation's read of the predecessor's dependents on the current endpoint, and whether its socket object changed. */
+export type RecreationCleanup = { remaining: DependentObservation; endpoint: EngineEndpoint; endpointChanged: boolean };
 export type EnvironmentLifecycleDriver = EnvironmentDriver & {
   nativeIdentity?(binding: EnvironmentBinding): Promise<NativeObservation>;
   stopNative?(binding: EnvironmentBinding, native: NativeObservation, operationId: string, beforeDispatch?: () => boolean): Promise<void>;
@@ -15,6 +19,7 @@ export type EnvironmentLifecycleDriver = EnvironmentDriver & {
   deleteEnvironment?(binding: EnvironmentBinding, operationId: string, beforeDispatch?: () => boolean): Promise<void>;
   captureCleanup?(binding: EnvironmentBinding, socket: string): Promise<PodmanCleanupSelection>;
   cleanupState?(binding: EnvironmentBinding, selection?: PodmanCleanupSelection): Promise<DependentObservation>;
+  recreationCleanupState?(binding: EnvironmentBinding, selection?: PodmanCleanupSelection): Promise<RecreationCleanup>;
   checkpointFiles?(binding: EnvironmentBinding, native: NativeObservation): Promise<Array<{ path: string; sha256: string; bytes: number }>>;
 };
 export type EnvironmentCheckpoint = {
@@ -264,7 +269,18 @@ export class EnvironmentLifecycle {
     const listing = await this.driver.list(binding.placement);
     if (!listing.complete) refuse("environment_listing_incomplete", "A complete provider listing is required before successor compute");
     if (listing.resources.some(row => row.id === cp.predecessorResourceId)) refuse("environment_predecessor_present", "Stop and delete the predecessor explicitly before creating successor compute");
-    if (!this.driver.cleanupState || Object.values(await this.driver.cleanupState({ ...binding, resource: { ...binding.resource, id: cp.predecessorResourceId } }, (() => { const saved = this.operation(`inventory-${cp.predecessorResourceId}`)?.receipt_json; return saved ? JSON.parse(saved) : undefined; })())).some(value => value !== false)) refuse("environment_cleanup_unconfirmed", "Predecessor workload/supervisor/volume absence is unconfirmed");
+    // The predecessor's dependents, read where it ran. A replaced socket object on the same host and user (a restart or
+    // reboot) doesn't stop this selected, nondestructive recreation: anything still present refuses, and the earlier
+    // socket's cleanup is recorded as unknown beside its retained inventory, never as absent.
+    const predecessorBinding = { ...binding, resource: { ...binding.resource, id: cp.predecessorResourceId } };
+    const savedInventory = this.operation(`inventory-${cp.predecessorResourceId}`)?.receipt_json;
+    const retained = savedInventory ? JSON.parse(savedInventory) as PodmanCleanupSelection : undefined;
+    let replaced: EngineEndpoint | undefined;
+    if (this.driver.recreationCleanupState) {
+      const observed = await this.driver.recreationCleanupState(predecessorBinding, retained);
+      if (Object.values(observed.remaining).some(value => value !== false)) refuse("environment_cleanup_unconfirmed", "The predecessor's workload, supervisor or volumes are still on the engine. This attempt didn't create a successor, though an earlier attempt of this operation may have; remove them from the engine, then retry with the same operation ID and request");
+      if (observed.endpointChanged) replaced = observed.endpoint;
+    } else if (!this.driver.cleanupState || Object.values(await this.driver.cleanupState(predecessorBinding, retained)).some(value => value !== false)) refuse("environment_cleanup_unconfirmed", "Predecessor workload/supervisor/volume absence is unconfirmed");
     const matches = listing.resources.filter(row => row.operationId === op.effect_id);
     if (matches.length > 1) refuse("environment_duplicate_resources", "Multiple successor resources match this operation");
     let resource = matches[0];
@@ -280,14 +296,18 @@ export class EnvironmentLifecycle {
       if (!predecessor) refuse("environment_cleanup_unconfirmed", "The predecessor's actual provider host is not retained");
       const previous = JSON.parse(predecessor) as PodmanCleanupSelection;
       const captured = await this.driver.captureCleanup({ ...binding, resource, placement: request.placement }, previous.socket);
-      if (captured.host !== previous.host || captured.uid !== previous.uid || captured.socketDevice !== previous.socketDevice || captured.socketInode !== previous.socketInode)
-        refuse("environment_restore_host_changed", "The successor is not on the selected predecessor host/engine");
+      // The successor must be on the endpoint the predecessor was just read on: the retained one, or its replacement.
+      const expected = replaced ?? previous;
+      if (captured.host !== expected.host || captured.uid !== expected.uid || captured.socketDevice !== expected.socketDevice || captured.socketInode !== expected.socketInode)
+        refuse("environment_restore_host_changed", "The successor was created but isn't on the engine selected for it, so it is kept unbound. Retry with the same operation ID and request to reconcile it; no second successor is created");
       const inventoryId = `inventory-${resource.id}`;
       this.intent(binding, inventoryId, "cleanup-inventory", { resourceId: resource.id, engineSocket: previous.socket }); this.save(inventoryId, captured);
     }
     const receipt = { version: 1, state: "confirmed", operationId: input.operationId, bindingId: id, checkpointId: cp.checkpointId,
       nativeType: cp.nativeType, nativeId: cp.nativeId, predecessorResourceId: cp.predecessorResourceId, successorResourceId: resource.id, predecessorGeneration: input.generation, successorGeneration: null,
-      destinationCwd: cp.destinationCwd, nativeState: cp.nativeState };
+      destinationCwd: cp.destinationCwd, nativeState: cp.nativeState, predecessorCleanup: replaced ? "unknown" : "confirmed",
+      ...(replaced && retained ? { predecessorCleanupDetail: `The engine socket was replaced after the predecessor's inventory was taken. Its workload, supervisor and volumes aren't on the current engine, but their cleanup on the earlier socket isn't established; inventory-${cp.predecessorResourceId} is kept.`,
+        predecessorEngine: { socket: retained.socket, previous: { socketDevice: retained.socketDevice, socketInode: retained.socketInode }, current: { socketDevice: replaced.socketDevice, socketInode: replaced.socketInode } } } : {}) };
     this.platform.db.transaction(() => {
       const current = this.platform.get(id)!;
       if (current.resource!.id !== cp.predecessorResourceId) refuse("environment_selection_changed", "The compute binding changed during recreation");

@@ -37,6 +37,7 @@ import { resolveInboundChannelDestination, resolveOutboundChannel, unsupportedCh
 import { resolveRigRepresentative } from "../../queue-owner.js";
 import { recoveryTag } from "../../queue-recovery.js";
 import { getSelfHostId } from "../../hosts/fanout-contract.js";
+import { SettingsStore, type ResolvedSetting } from "../../user-settings/settings-store.js";
 import { envelopeChannel, forwardChannelProblems, makeEnvelopeForwarder } from "./forwarding.js";
 import type { HostRegistryLoadResult } from "../../hosts/hosts-registry-reader.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
@@ -298,6 +299,14 @@ function deadLetterBacklogFields(
   return { deadLetterBacklog: records, deadLetterBacklogState: "ok" };
 }
 
+/** The chosen host.name is display-only, including reserved-looking names. Only
+ *  an unconfigured default or empty name falls back to the durable self-host id. */
+export function selfMachineLabel(displayName: Pick<ResolvedSetting, "value" | "source"> | null | undefined, selfId: string | null): string | null {
+  const name = displayName?.source !== "default" && typeof displayName?.value === "string" ? displayName.value.trim() : "";
+  if (name) return name;
+  return selfId;
+}
+
 /** Build the production Slack gateway wire from config + secrets. Never throws on a missing
  *  configuration — that is an honest inert wire, not a boot failure. */
 export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
@@ -312,6 +321,17 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const outboundReady = cfg.enabled && bot !== null && cfg.channel !== null;
   const inboundReady = cfg.enabled && app !== null;
   // Read once, when the connector starts, like the rest of its configuration.
+  // The sender line names the machine a post comes from; the operator's display
+  //  name (host.name — the same source the self-host id seeds from) reads better
+  //  than a generated `host-<hash>` id on a machine named after first boot. The
+  //  durable identity stays in the queue record; this is display-only. Resolved
+  //  ONCE here so no settings read sits on the per-post path (restart picks up a
+  //  rename, the same pickup cadence as the rest of the connector config).
+  const machineId = getSelfHostId();
+  const machineLabel = selfMachineLabel(
+    (() => { try { return new SettingsStore().resolveOne("host.name"); } catch { return null; } })(),
+    machineId,
+  );
   const receiver = (() => { try { return resolveDefaultReceiver(opts.queueRepo.db); } catch { return null; } })();
   const inbound = effectiveInboundDestination(cfg, receiver?.session ?? null);
   const inboundNote = inboundDestinationNote(inbound, receiver);
@@ -639,8 +659,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         pinChannel: Boolean(cfg.channelMap?.length),
         sourceLabel: cfg.sourceLabel,
         unfurl: cfg.unfurl === "on" ? "on" : "off",
-        // P6: each post names the machine it comes from, the daemon's own host id.
-        machine: () => getSelfHostId(),
+        // P6: each post names the machine it comes from — the operator's display
+        //  name when one is set, else the daemon's own host id.
+        machine: () => machineLabel,
+        machineFallback: machineId ?? undefined,
         fetchImpl: opts.fetchImpl,
         stopSignal: runCtl.signal,
         delivered,

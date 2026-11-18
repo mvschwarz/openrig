@@ -10,6 +10,7 @@ import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-t
 import type { ComposedView, OpenViewResult, TerminalProvider } from "../src/domain/terminal/terminal-provider.js";
 
 const RIG = "big";
+const INCOMPLETE_OWNERSHIP_NOTE = "Herdr workspace identity could not be confirmed completely and was not recorded for close.";
 const TEAM_HANDOFF_NOTE = "The shared dashboard is the overview; the team's lead pane is where you can talk about the work. Check the opened seats and any absent or degraded seats above. Can you see the team? A created workspace or a capture alone does not confirm what is visible on your screen.";
 const rows = Array.from({ length: 17 }, (_, i) => {
   const s = `seat-${String(i + 1).padStart(2, "0")}@${RIG}`;
@@ -135,7 +136,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     expect(requests[3]!.params).toEqual({ workspace_id: "w1" });
     expect(requests[6]!.params).toEqual({ tab_id: "w1:t1" });
     expect(requests[7]!.params).toEqual({ tab_id: "w1:t0" });
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE]);
+    expect(res.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE]);
   });
 
   it("never closes a tab that holds a page, even if herdr reuses the starting tab", async () => {
@@ -157,9 +158,9 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const third = await svc.openView({ view: `rig:${RIG}` });
     const creates = requests.filter((r) => r.method === "workspace.create");
     expect(creates.map((c) => c.params["label"])).toEqual([RIG, `${RIG} (2)`, `${RIG} (3)`]);
-    expect(first.notes).toEqual([TEAM_HANDOFF_NOTE]);
-    expect(second.notes).toEqual([TEAM_HANDOFF_NOTE, `A view named "${RIG}" is already open, so this one is "${RIG} (2)".`]);
-    expect(third.notes).toEqual([TEAM_HANDOFF_NOTE, `A view named "${RIG}" is already open, so this one is "${RIG} (3)".`]);
+    expect(first.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE]);
+    expect(second.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE, `A view named "${RIG}" is already open, so this one is "${RIG} (2)".`]);
+    expect(third.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE, `A view named "${RIG}" is already open, so this one is "${RIG} (3)".`]);
     expect([first.ok, second.ok, third.ok]).toEqual([true, true, true]);
     const labels = requests.filter((r) => r.method === "layout.apply").map((a) => a.params["tab_label"]);
     expect(new Set(labels).size).toBe(6);
@@ -188,7 +189,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(requests.filter((r) => r.method === "workspace.create").map((c) => c.params["label"])).toEqual([RIG, `${RIG} (3)`]);
     expect(res.ok).toBe(true);
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, `A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`]);
+    expect(res.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE, `A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`]);
   });
 
   it("a refused focus or close is a note; the opened seats are unchanged", async () => {
@@ -208,7 +209,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(res.opened).toHaveLength(17);
     expect(res.degraded).toEqual([]);
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, "herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
+    expect(res.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE, "herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
   });
 
   it("honest partials: a page herdr refuses names its seats as degraded; the tile count never overclaims", async () => {
@@ -252,7 +253,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(requests.find((r) => r.method === "tab.focus")!.params).toEqual({ tab_id: "t2" });
     expect(res.opened).toEqual([rows[16]!.canonicalSessionName]);
     expect(res.degraded.map(d => [d.seat, d.code])).toEqual(rows.slice(0, 16).map(row => [row.canonicalSessionName, "pane_unconfirmed"]));
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
+    expect(res.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
   it("no page reports a tab id: no focus or close, with direct attach recovery", async () => {
@@ -266,6 +267,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(res.degraded.every(d => d.code === "pane_unconfirmed")).toBe(true);
     // No pane is confirmed, so the service preserves its existing route to the live seat sessions.
     expect(res.notes).toEqual([
+      INCOMPLETE_OWNERSHIP_NOTE,
       "In a new terminal on the daemon's host, attach directly using one of these commands:",
       ...rows.map(row => `${row.logicalId}: env -u TMUX tmux attach -t '${row.tmuxSession}'`),
       "Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.",
@@ -290,7 +292,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(closes(requests)).toEqual([]);
     expect(res.opened).toEqual([rows[16]!.canonicalSessionName]);
     expect(res.degraded).toHaveLength(16);
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, KEPT]);
+    expect(res.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE, KEPT]);
   });
 
   it("every page fails: nothing is focused or closed", async () => {
@@ -307,7 +309,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(closes(requests).map((r) => r.params)).toEqual([{ tab_id: "w1:t0" }]);
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE]);
+    expect(res.notes).toEqual([INCOMPLETE_OWNERSHIP_NOTE, TEAM_HANDOFF_NOTE]);
   });
 });
 

@@ -160,6 +160,8 @@ except Captured: pass
       ANTHROPIC_BASE_URL: "https://provider.test",
       ANTHROPIC_API_KEY: "fixture-provider-key",
       UNRELATED_SECRET: "must-not-inherit",
+      OPENRIG_RUN_ID: "host-run-must-not-inherit",
+      OPENRIG_ACTIVITY_HOOK_TOKEN: "host-scoped-token-must-not-inherit",
       NODE_TLS_REJECT_UNAUTHORIZED: "0",
       ...(supplied ? ca : {}),
     },
@@ -168,9 +170,12 @@ except Captured: pass
   expect(result.env).toMatchObject({
     HOME: join(root, "native"), CLAUDE_CONFIG_DIR: join(root, "native"),
     OPENRIG_ENVIRONMENT_BINDING: "binding-one", OPENRIG_OCCUPANT_GENERATION: "generation-one",
+    OPENRIG_ACTIVITY_HOOK_TOKEN: "fixture-token",
     ANTHROPIC_BASE_URL: "https://provider.test", ANTHROPIC_API_KEY: "fixture-provider-key",
   });
   expect(result.env).not.toHaveProperty("UNRELATED_SECRET");
+  expect(result.env).not.toHaveProperty("OPENRIG_RUN_ID");
+  expect(JSON.stringify(result)).not.toContain("host-scoped-token-must-not-inherit");
   expect(result.env).not.toHaveProperty("NODE_TLS_REJECT_UNAUTHORIZED");
   if (supplied) expect(result.env).toMatchObject(ca);
   else for (const name of Object.keys(ca)) expect(result.env).not.toHaveProperty(name);

@@ -90,12 +90,18 @@ export const MISSION_TEMPLATE_KINDS: ReadonlyArray<MissionTemplateKind> = [
   "release",
 ];
 
-export type CloseReason = "wontfix" | "deferred" | "superseded" | "stale";
-export const CLOSE_REASONS: ReadonlyArray<CloseReason> = [
+export type NonDeliveryCloseReason = "wontfix" | "deferred" | "superseded" | "stale";
+export const NON_DELIVERY_CLOSE_REASONS: ReadonlyArray<NonDeliveryCloseReason> = [
   "wontfix",
   "deferred",
   "superseded",
   "stale",
+];
+
+export type CloseReason = NonDeliveryCloseReason | "delivered";
+export const CLOSE_REASONS: ReadonlyArray<CloseReason> = [
+  ...NON_DELIVERY_CLOSE_REASONS,
+  "delivered",
 ];
 
 /** OPR.0.4.1.6 — the scope-and-versioning §2 epistemic-maturity `stage` enum

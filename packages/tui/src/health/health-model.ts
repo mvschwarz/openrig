@@ -1,5 +1,6 @@
 import { DEFAULT_TIME_ZONE, displayTime } from "../time.js";
-import { sectionRule, sliceWhole, wrapDetailLines, type ContentLine } from "../detail.js";
+import { sectionRule, wrapDetailLines, type ContentLine } from "../detail.js";
+import { columnIndex, columns } from "../visual-layout.js";
 import type { Action, FleetSnapshot, HealthCoverage, HealthEvidenceReference, HealthRecord } from "../types.js";
 import type { Token } from "../theme.js";
 
@@ -60,12 +61,12 @@ function signalLabel(record: HealthRecord): string {
 
 function clip(text: string, width: number): string {
   if (width <= 0) return "";
-  return text.length <= width ? text : `${sliceWhole(text, Math.max(0, width - 1))}…`;
+  return columns(text) <= width ? text : `${text.slice(0, columnIndex(text, width - 1))}…`;
 }
 
 function cell(text: string, width: number): string {
   const clipped = clip(text, width);
-  return clipped + " ".repeat(Math.max(0, width - clipped.length));
+  return clipped + " ".repeat(Math.max(0, width - columns(clipped)));
 }
 
 function fitLine(parts: Array<{ text: string; token?: Token; bold?: boolean }>, width: number, action?: Action): ContentLine {
@@ -75,7 +76,7 @@ function fitLine(parts: Array<{ text: string; token?: Token; bold?: boolean }>, 
     if (room <= 0) break;
     const text = clip(part.text, room);
     out.push({ ...part, text });
-    room -= text.length;
+    room -= columns(text);
     if (text.length < part.text.length) break;
   }
   return { text: out.map((part) => part.text).join(""), segs: out, ...(action ? { action } : {}) };

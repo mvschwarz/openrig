@@ -95,6 +95,9 @@ export class OpenShellDriver implements EnvironmentDriver {
   async cleanupState(binding: EnvironmentBinding, selection?: PodmanCleanupSelection) {
     return new OpenShellPodmanObserver().observe(binding, selection);
   }
+  async recreationCleanupState(binding: EnvironmentBinding, selection?: PodmanCleanupSelection) {
+    return new OpenShellPodmanObserver().observeEndpoint(binding, selection);
+  }
   async nativeIdentity(binding: EnvironmentBinding): Promise<NativeObservation> {
     const observed = await this.guest(binding, ["--identity"]);
     if (typeof observed.running !== "boolean" || typeof observed.nativeId !== "string" || typeof observed.generation !== "string")

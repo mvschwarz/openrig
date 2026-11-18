@@ -28,6 +28,8 @@ export interface NodeBinding extends Binding {
   accountHome?: string | null;
   accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  /** The seat's Claude `autoMode` block, read live; composed into the launch's one --settings value. */
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoModeChoice;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   launchWrapper?: readonly string[];
   /** A Codex seat's own permission envelope, read live; emitted instead of the posture decision. */
@@ -160,6 +162,9 @@ export type HarnessLaunchResult = {
     /** Launch notes for the person, such as a community harness whose launch identity is unavailable. */
     warnings?: string[];
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess;
+    /** Claude managed launches: the frozen executable the launch ran and whether it is a #! script (#2341), which a later
+     *  proof of that launch needs as readiness has it (the handover recovery, #2985). */
+    launchedExecutable?: { path: string; isScript: boolean };
     /** Codex (#1524): the native process a managed resume was proven on from Codex's own records. Restore's join
      *  compares the process it verifies later against this one before it reports the seat resumed. */
     resumedProcess?: { pid: number; startedAt: string } }

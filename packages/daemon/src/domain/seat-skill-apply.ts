@@ -174,7 +174,7 @@ export interface SeatSkillApplyResult {
 }
 
 export interface SeatSkillSender {
-  send(sessionName: string, text: string, opts: { deliveryId: string; verify: boolean; waitForIdleMs?: number }): Promise<{ ok: boolean; outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained" | "unknown"; error?: string; reason?: string }>;
+  send(sessionName: string, text: string, opts: { deliveryId: string; verify: boolean; waitForIdleMs?: number }): Promise<{ ok: boolean; outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained" | "bridged" | "unknown"; error?: string; reason?: string }>;
 }
 
 /**
@@ -248,8 +248,9 @@ export async function applySeatSkills(input: {
   }
   const transportOutcome = sent.outcome ?? (sent.ok ? "unknown" : "failed");
   // Only a confirmed delivery or a definite failure is final as such; rendering without confirmation, or not knowing,
-  // is indeterminate. A guard's retention has already moved the row to retained, which this leaves as it is.
-  const finalized = outbox.finalizeDelivery(deliveryId, transportOutcome === "delivered" ? "delivered"
+  // is indeterminate. A guard's retention has already moved the row to retained, which this leaves as it is. A send
+  // queued for the seat's hook bridge is the bridge's row to settle (#3270), so it's read, not finalized.
+  const finalized = transportOutcome === "bridged" ? outbox.getById(deliveryId)! : outbox.finalizeDelivery(deliveryId, transportOutcome === "delivered" ? "delivered"
     : transportOutcome === "failed" ? "failed" : transportOutcome === "retained" ? "retained" : "indeterminate");
   return result({ state: "sent", record: recordOf(finalized, occupant), transportOutcome, ...(sent.error || sent.reason ? { detail: sent.error ?? sent.reason } : {}) });
 }

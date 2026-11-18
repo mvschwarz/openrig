@@ -181,9 +181,11 @@ unavailable; another project's matching work ID is never a fallback.
 existing file-reader allowlist. Catalog membership does not grant file-read or
 execution permission. These views only read; they do not select a lifecycle
 operation or activate a mission. Execution and slice queue membership require
-an exact `project:<id>` tag; lifecycle instances use their authored project
-identity. Unscoped historical tasks and global review artifacts without
-project binding are excluded from project-specific claims.
+an exact `project:<id>` tag, for the project's id or a former id it declares
+(see [Renaming a project](#renaming-a-project)); lifecycle instances use their
+authored project identity, matched the same way. Unscoped historical tasks and
+global review artifacts without project binding are excluded from
+project-specific claims.
 
 The read API adds `GET /api/scopes/projects` and optional `project` and
 `projectRoot` parameters to scopes, execution and slice-detail reads. Slice
@@ -195,6 +197,35 @@ their `dirName`, `id`, `displayName`, `status`, `stage` and `locks` (and
 `sourcePath` for a selected project), read from each slice's node file alone. It
 leaves out readiness and proof pairing, which are most of the work and bytes of
 the default list. `detail=1` takes precedence when both are given.
+
+## Renaming a project
+
+Queue tags are written when a row is created and never rewritten, so a project's
+earlier rows keep the id they were tagged with. When you change a project's id
+in `workspace.yaml` and `project.yaml`, list the former id in `project.yaml`:
+
+```yaml
+id: default
+aliases: [oc-beacon]
+```
+
+Rows tagged `project:oc-beacon`, and workflow instances compiled under it, then
+count as `default` in the execution view, slice detail and queue counts,
+attention, operating posture and current-work roots. Nothing is rewritten. A
+workspace with no `workspace.yaml` lists former ids in its own `project.yaml` the
+same way.
+
+A declared former id that is another catalogued project's current id stays that
+project's, and one that two projects both declare belongs to neither. Either way
+the declaration is ignored, not refused: the project read (`aliasWarnings` on
+`GET /api/scopes/projects`) and the execution view (`alias_warnings`, shown in the
+TUI's execution pane) name the ignored id and the project it conflicts with.
+
+With a project selected, the execution view reports `uncatalogued_project_tags`
+(`{ rows, ids }`): the mission's rows whose project tag no catalogued project
+claims, by current or former id. Those rows aren't shown, and the TUI's
+execution pane says how many and which tags. Declaring the former id under
+`aliases:` brings them back.
 
 ## UI Mapping
 

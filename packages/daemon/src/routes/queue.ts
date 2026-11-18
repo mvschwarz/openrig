@@ -10,11 +10,13 @@ import type {
   QueuePriority,
   QueueState,
 } from "../domain/queue-repository.js";
-import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker } from "../domain/queue-repository.js";
+import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure, isTypedGateBlocker, isTerminalState, DEFAULT_RECENT_TRANSITIONS_LIMIT } from "../domain/queue-repository.js";
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { NO_TIMED_BACKSTOP } from "../domain/queue-waiting.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession, canonicalSenderSession } from "./require-sender-identity.js";
+import { issuedReturnAddress, isRouteAddress, RETURN_ROUTE_BASES, RETURN_ROUTE_NOT_CARRIED, RETURN_ROUTE_NOT_CARRIED_TAG, RETURN_ROUTE_NOTE_PREFIX,
+  routeIsPersonMessage, routeNotCarriedMessage, splitRoute, type ReturnRouteBasis } from "../domain/return-route.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -34,16 +36,19 @@ import {
   evaluateCreateScope,
   skippedCreateScopeAdvisory,
   toCreateScopeAdvisory,
+  type CreateScopeAdvisoryContext,
   type CurrentWorkRow,
   type MissionsRootResolver,
   type RoleOrientation,
 } from "../domain/current-work.js";
-import { listProjects, projectCatalogPaths } from "../domain/workspace/project-read.js";
-import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
+import { listProjects, namesProject, projectCatalogPaths, projectIds as projectIdsOf } from "../domain/workspace/project-read.js";
+import { inferCatalogProject, ProjectReadError, readProjectCatalog, rigFromSession, selectCatalogProject } from "../domain/workspace/project-catalog.js";
+import { physicalSessionName } from "../domain/session-registry.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
-import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope } from "../domain/queue-erasure.js";
+import { EraseRefusal, eraseQueue, type EraseAction, type EraseScope, type HostClass } from "../domain/queue-erasure.js";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
+import { HUMAN_ALERT_TAG } from "../domain/gateway/human-registry.js";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
@@ -65,6 +70,9 @@ import { feedPerspective } from "../domain/feed-perspective.js";
 const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
+/** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
+const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
+const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -75,6 +83,26 @@ const WORK_CANDIDATE_LIST_LIMIT = 50;
 // shipped registry has no canonical own-alias reader, and D-4 frames this name
 // as free-text best-effort by design.
 export const CROSS_HOST_TAG = "cross-host";
+/** A route this daemon sends to another host, naming this host (`member@rig@<self>`); one carried from another host keeps
+ *  its own. Null when this daemon doesn't know its host id, so the route can't say where it is. */
+export function hostQualifiedRoute(route: string): string | null {
+  if (splitRoute(route).host) return route;
+  const stamped = stampSelfHostSuffix(route);
+  return stamped === route ? null : stamped;
+}
+
+/** A forwarded row's tags, with the mark that its return route wasn't carried when that's so. */
+function withRouteNotCarriedTag(tags: string[] | undefined, notCarried: string | null): string[] | undefined {
+  if (!notCarried) return tags;
+  return [...(tags ?? []).filter(t => t !== RETURN_ROUTE_NOT_CARRIED_TAG), RETURN_ROUTE_NOT_CARRIED_TAG];
+}
+
+/** How a named route was established: a route carried from another host keeps the basis it was sent with there. */
+function carriedRouteBasis(route: string, basis: unknown): ReturnRouteBasis {
+  return splitRoute(canonicalSenderSession(route)).host && RETURN_ROUTE_BASES.includes(basis as ReturnRouteBasis)
+    ? basis as ReturnRouteBasis : "named";
+}
+
 export function crossHostProvenanceTags(existing: string[] | undefined): string[] {
   const base = existing ?? [];
   const fromHost = `from-host:${osHostname()}`;
@@ -100,7 +128,7 @@ export interface HandoffSuccessor { qitemId: string; destinationSession: string;
  *  successor is named as recorded (`<id>@<host>`), never looked up remotely. A lookup that fails says so; it never fails
  *  the read. Past HANDOFF_SUCCESSOR_LIMIT rows naming it, the newest are named and `successorsTruncated` says so. */
 export const HANDOFF_SUCCESSOR_LIMIT = 20;
-export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
+export function handoffSuccessors(repo: QueueRepository, item: Pick<QueueItem, "qitemId" | "closureTarget" | "closureReason">): { successors: HandoffSuccessor[]; successorsTruncated?: true; successorNote?: string } {
   try {
     // Newest first, one past the bound so a cut list is known.
     const found = repo.list({ handedOffFrom: item.qitemId, compact: true, limit: HANDOFF_SUCCESSOR_LIMIT + 1 });
@@ -117,8 +145,9 @@ export function handoffSuccessors(repo: QueueRepository, item: QueueItem): { suc
     return {
       successors,
       successorNote: target && /^qitem-[^@\s]+@[^@\s]+$/.test(target)
-        ? `It was handed to another host; its successor there is ${target}. This daemon has no copy.`
-        : "No row on this daemon was made by this handoff.",
+        ? `${item.closureReason === "superseded" ? "Its recorded successor on another host is" : "It was handed to another host; its successor there is"} ${target}. This daemon has no copy.`
+        : item.closureReason === "superseded" ? "No successor row was found on this daemon for this supersession."
+          : "No row on this daemon was made by this handoff.",
     };
   } catch {
     return { successors: [], successorNote: "Its successor couldn't be looked up; the closure target is as recorded." };
@@ -159,7 +188,7 @@ export function queueRoutes(): Hono {
     try { return getRepo(c).destinationAdvisory(sessionRef); }
     catch { return null; }
   }
-  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null) {
+  function createScopeAdvisory(c: { get: (key: string) => unknown }, tags: string[] | null, context?: CreateScopeAdvisoryContext) {
     try {
       const check = evaluateCreateScope(tags, () => {
         const flat = (tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim())).filter(Boolean);
@@ -172,7 +201,7 @@ export function queueRoutes(): Hono {
           const { catalog } = projectCatalogPaths(c as never);
           const entries = readProjectCatalog(catalog);
           if (!entries) return null;
-          const project = listProjects(c as never).projects.find((entry) => entry.id === projectId);
+          const project = listProjects(c as never).projects.find((entry) => namesProject(entry, projectId));
           if (!project || project.error || !project.missionsRoot) return null;
           return project.missionsRoot;
         }
@@ -180,7 +209,7 @@ export function queueRoutes(): Hono {
         const value = store?.resolveOne("workspace.slices_root").value;
         return typeof value === "string" && value.trim() ? value : null;
       });
-      return check ? toCreateScopeAdvisory(check) : null;
+      return check ? toCreateScopeAdvisory(check, context) : null;
     } catch {
       return null;
     }
@@ -525,6 +554,7 @@ export function queueRoutes(): Hono {
     },
     createSuccessor: (forwardBody: Record<string, unknown>) => Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> =
       (forwardBody) => forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody),
+    delivery: "forwarded" | "in-process" = "forwarded",
   ): Promise<Response> {
     const repo = getRepo(c);
     const source = repo.getById(qitemId);
@@ -556,8 +586,12 @@ export function queueRoutes(): Hono {
       );
     }
 
-    // (2) The deterministic successor identity + forwarded body.
-    const effectiveTags = body.tags ?? source.tags ?? undefined;
+    // (2) The deterministic successor identity + forwarded body. The goal's return route goes with the work, naming the host
+    // it's on. Without this host's id it can't say where the conversation is, so the work goes without it, and the response,
+    // the source row and the successor say so; the route is never sent as a bare address the other host would read as its own.
+    const carriedRoute = source.returnRoute ? hostQualifiedRoute(source.returnRoute) : null;
+    const routeNotCarried = source.returnRoute && !carriedRoute ? routeNotCarriedMessage(source.returnRoute) : null;
+    const effectiveTags = withRouteNotCarriedTag(body.tags ?? source.tags ?? undefined, routeNotCarried);
     const forwardBody: Record<string, unknown> = {
       qitemId: successorId,
       // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon IS the origin,
@@ -579,6 +613,7 @@ export function queueRoutes(): Hono {
       ...(body.evidenceRef !== undefined ? { evidenceRef: body.evidenceRef } : {}),
       ...(body.nudge !== undefined ? { nudge: body.nudge } : {}),
       ...(body.humanAlert !== undefined ? { humanAlert: body.humanAlert } : {}),
+      ...(carriedRoute ? { returnRoute: carriedRoute, returnRouteBasis: source.returnRouteBasis ?? "named" } : {}),
     };
 
     // (3) Successor-create FIRST — origin-owns-the-record; failure leaves the
@@ -603,10 +638,40 @@ export function queueRoutes(): Hono {
     } catch (err) {
       return errorResponse(c, err);
     }
+    const notCarriedNote = routeNotCarried ? `${RETURN_ROUTE_NOTE_PREFIX}not-carried: ${routeNotCarried}` : null;
+    if (notCarriedNote && !repo.listTransitions(source.qitemId).some(t => t.transitionNote === notCarriedNote)) {
+      repo.transitionLog.append({ qitemId: source.qitemId, state: closed.item.state, actorSession: body.fromSession, transitionNote: notCarriedNote });
+    }
 
-    // Same {closed, created} shape as the local transactional handoff;
-    // `created` is the origin daemon's row, verbatim.
-    return c.json({ closed: closed.item, created: fwd.payload }, 201);
+    // `created` is the origin daemon's row, verbatim. The origin can also report
+    // that its own scope check was skipped, without pretending the forwarding
+    // daemon inspected remote filesystem state.
+    const receiverReportedTags = fwd.payload && typeof fwd.payload === "object" && !Array.isArray(fwd.payload)
+      ? (fwd.payload as { tags?: unknown }).tags
+      : undefined;
+    const hasAcceptedTags = receiverReportedTags === null || Array.isArray(receiverReportedTags);
+    const acceptedTags = Array.isArray(receiverReportedTags)
+      ? receiverReportedTags.filter((tag): tag is string => typeof tag === "string")
+      : [];
+    const requestedTags = forwardBody.tags as string[];
+    const acceptedScopeTags = acceptedTags.filter((tag) => tag !== HUMAN_ALERT_TAG);
+    const requestedScopeTags = requestedTags.filter((tag) => tag !== HUMAN_ALERT_TAG);
+    const acceptedTagsMatchRequest = acceptedScopeTags.length === requestedScopeTags.length
+      && acceptedScopeTags.every((tag, index) => tag === requestedScopeTags[index]);
+    const scopeCheckRequested = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1";
+    const scopeCheck = scopeCheckRequested
+      ? skippedCreateScopeAdvisory(hasAcceptedTags ? acceptedTags : requestedTags)
+      : null;
+    const scopeAdvisory = scopeCheck ? toCreateScopeAdvisory(scopeCheck, {
+      verb: terminalState === "done" ? "handoff-and-complete" : "handoff",
+      tagSource: hasAcceptedTags && acceptedTagsMatchRequest ? (body.tags == null ? "inherited" : "explicit") : "unknown",
+      delivery,
+    }) : null;
+    const advisories = [...(scopeAdvisory ? [scopeAdvisory] : []),
+      ...(routeNotCarried ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
+    return c.json({ closed: closed.item, created: fwd.payload,
+      ...(advisories.length ? { advisories } : {}),
+      ...(scopeCheckRequested ? { [HANDOFF_SCOPE_CHECK_ACKNOWLEDGED]: true } : {}) }, 201);
   }
 
   /**
@@ -630,7 +695,9 @@ export function queueRoutes(): Hono {
       if (refusal) return { ok: false, response: refusal };
       try {
         // Recorded as the receiving /create records a forwarded write: no transport header, so claimed:v1.
-        const item = await getRepo(c).create({ ...input, identityProvenance: "claimed:v1" });
+        // A route naming this host is one of this host's own addresses.
+        const route = typeof input.returnRoute === "string" ? canonicalSenderSession(input.returnRoute) : input.returnRoute;
+        const item = await getRepo(c).create({ ...input, ...(route ? { returnRoute: route } : {}), identityProvenance: "claimed:v1" });
         const advisory = destinationAdvisory(c, item.destinationSession);
         return { ok: true, payload: { ...item, ...(advisory ? { advisories: [advisory] } : {}) } };
       } catch (err) {
@@ -665,15 +732,51 @@ export function queueRoutes(): Hono {
       // session string stays member@rig; the host is NEVER in-string).
       // Absent / "" / "local" = today's local path, byte-identical.
       hostId?: string;
+      /** The first-user return route (return-route.ts): auto, self, or an agent conversation's queue address. */
+      returnRoute?: string;
+      /** How a route carried from another host was established there. */
+      returnRouteBasis?: string;
     }>().catch(() => ({} as never));
+
+    // The return route, when the caller asks for one: `auto` issues a conversation address for this create (from its id, so
+    // an exact retry issues the same one), `self` takes the caller's own identity, and anything else is an address the
+    // caller named. Absent, the create is exactly as before.
+    const requestedRoute = typeof body.returnRoute === "string" ? body.returnRoute.trim() : undefined;
+    if (body.returnRoute !== undefined && (!requestedRoute
+      || (requestedRoute !== "auto" && requestedRoute !== "self" && !isRouteAddress(canonicalSenderSession(requestedRoute))))) {
+      return c.json({ error: "invalid_return_route", message: "A return route is auto, self, or an agent conversation's queue address (member@rig). A person is reached through the gateway, not a return route." }, 400);
+    }
+    const createId = body.qitemId ?? (requestedRoute ? newQitemId() : undefined);
+    const issued = requestedRoute === "auto" ? issuedReturnAddress(createId!) : null;
 
     // P21 I3 — the source is the transport-derived sender (X-OpenRig-Session), NEVER the body claim.
     // P18 deliver-and-label: absent header + a body sourceSession → recorded as the claimed-era stamp
     // claimed:v1; absent header + no body → 400 actor_required; a body sourceSession that DIFFERS from the
     // header → the wire SUPERSEDES it (transport:v1), not a 409. `sourceSession` below is authoritative.
-    const identity = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
+    // A caller with neither that asks for an issued route is declared by it: the issued address is the row's actor,
+    // recorded as claimed:v1 (declared here, not verified), never as a transport identity. A known caller keeps its own.
+    const derived = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
+    const identity: typeof derived = !derived.ok && issued ? { ok: true, session: issued, provenance: "claimed:v1" } : derived;
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
+    let route = requestedRoute === undefined ? null
+      : requestedRoute === "auto" ? { address: issued!, basis: sourceSession === issued ? "issued-actor" : "issued" }
+        : requestedRoute === "self" ? { address: sourceSession, basis: "caller" }
+          : { address: canonicalSenderSession(requestedRoute), basis: carriedRouteBasis(requestedRoute, body.returnRouteBasis) };
+    if (route && !isRouteAddress(route.address)) {
+      return c.json({ error: "invalid_return_route", message: `--return-route self takes the caller's own address, and this caller is ${sourceSession}, which isn't an agent conversation's queue address. Use auto, or name the address.` }, 400);
+    }
+    // A registered person's alias on this host is a person, reached through the gateway: the work goes on without that route,
+    // and the response and the row say so. An unreadable registry decides nothing.
+    let routeNotKept: string | null = null;
+    if (route && route.basis !== "issued" && route.basis !== "issued-actor" && !splitRoute(route.address).host) {
+      let person = false;
+      try { person = getRepo(c).isHumanDestination(route.address); } catch { /* unreadable registry: the route is kept as given */ }
+      if (person) {
+        routeNotKept = routeIsPersonMessage(route.address);
+        route = null;
+      }
+    }
     { const held = switchCustody(c, sourceSession); if (held) return held; }
     // Required destination and body, then PL-007: validate target_repo against
     // source rig's workspace.repos[].
@@ -696,39 +799,49 @@ export function queueRoutes(): Hono {
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       if (body.classificationBinding !== undefined)
         return c.json({ error: "invalid_classification_binding", message: "Classifier-bound effects belong to this daemon's local queue." }, 400);
-      const mintedId = body.qitemId ?? newQitemId();
-      const { hostId: _dropped, ...rest } = body;
+      const mintedId = createId ?? newQitemId();
+      // The route names this host, so the receiving daemon never reads it as one of its own addresses. Without this host's id
+      // the work goes without the route, and the response and the row say so.
+      const carried = route ? hostQualifiedRoute(route.address) : null;
+      const routeNotCarried = routeNotKept ?? (route && !carried ? routeNotCarriedMessage(route.address) : null);
+      const { hostId: _dropped, returnRoute: _route, returnRouteBasis: _basis, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
         ...rest,
+        ...(route && carried ? { returnRoute: carried, returnRouteBasis: route.basis } : {}),
         qitemId: mintedId,
         // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon is the origin,
         // so it stamps its OWN self-id (overriding the bare spread) before the
         // remote create() runs — else the remote would forge member@rig@RECEIVER.
         sourceSession: c.req.header(ORIGIN_UNKNOWN_HEADER) === "true" ? sourceSession : stampSelfHostSuffix(sourceSession),
-        tags: crossHostProvenanceTags(body.tags),
+        tags: crossHostProvenanceTags(withRouteNotCarriedTag(body.tags, routeNotCarried)),
       };
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
       if (!fwd.ok) return fwd.response;
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
       const payload = fwd.payload;
-      if (!skippedScope || payload === null || typeof payload !== "object" || Array.isArray(payload))
+      // A same-id retry returns the row the receiver already stored: say the route wasn't carried only when it has none.
+      const returnedRoute = payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        && typeof (payload as { returnRoute?: unknown }).returnRoute === "string";
+      const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
+        ...(routeNotCarried && !returnedRoute ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
+      if (!added.length || payload === null || typeof payload !== "object" || Array.isArray(payload))
         return c.json(payload, fwd.status as 200);
       const objectPayload = payload as Record<string, unknown>;
       const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
-      return c.json({ ...objectPayload, advisories: [...existingAdvisories, toCreateScopeAdvisory(skippedScope)] }, fwd.status as 200);
+      return c.json({ ...objectPayload, advisories: [...existingAdvisories, ...added] }, fwd.status as 200);
     }
 
     try {
       const fence = classificationRefusal(c, sourceSession, body.classificationBinding);
       if (fence) return fence;
       const item = await getRepo(c).create({
-        qitemId: body.qitemId,
+        qitemId: createId,
         sourceSession,
         destinationSession: body.destinationSession!, // required by createInputRefusal
         body: body.body!,
         priority: body.priority,
         tier: body.tier,
-        tags: body.tags,
+        tags: withRouteNotCarriedTag(body.tags, routeNotKept),
         expiresAt: body.expiresAt,
         chainOfRecord: body.chainOfRecord,
         targetRepo: body.targetRepo,
@@ -741,9 +854,12 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
+        ...(route ? { returnRoute: route.address, returnRouteBasis: route.basis } : {}),
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
-      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory].filter(Boolean);
+      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory,
+        // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
+        routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
@@ -771,8 +887,11 @@ export function queueRoutes(): Hono {
       return refuse("erase_rig_invalid", "rig is the account rig's id, given with members.");
     }
     if (body.members !== undefined) {
-      const members = exactList(body.members);
-      if (!members) return refuse("erase_members_invalid", "members must be a non-empty list of exact session names.");
+      // An empty list, given with rig, is an account rig that never had a member; the erasure checks the rig's history.
+      const members = Array.isArray(body.members) && body.members.length === 0 && typeof body.rig === "string" ? [] : exactList(body.members);
+      if (!members) {
+        return refuse("erase_members_invalid", "members must be a non-empty list of exact session names, or [] with rig for an account rig that never had a member.");
+      }
       scope = { kind: "members", members, ...(typeof body.rig === "string" ? { rig: body.rig } : {}) };
     } else if (body.ids !== undefined) {
       // Plain ids take the request's action (delete by default); a report's qitems entries keep their own.
@@ -810,10 +929,34 @@ export function queueRoutes(): Hono {
       }
       scope = { kind: "routine", contentDays, metadataDays };
     }
+    // Whose host a host-qualified address at the rig names, for a never-member erase. Another host is proved only by a
+    // registered entry whose identity is established (declared, or a learned binding still eligible) and differs from this
+    // daemon's known id. This daemon's id, or an entry established as it, is this host. Anything else (an entry known only
+    // by its label, or no known id for this daemon) is unknown, which refuses. Routing is unchanged.
+    const registryLoader = (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ?? loadHostRegistry;
+    const bindingsLoader =
+      (c.get("hostBindingsLoader" as never) as (() => ReturnType<typeof loadLearnedHostBindings>) | undefined) ?? loadLearnedHostBindings;
+    let hosts: { registry: Parameters<typeof eligibleQueueBindings>[0]; learned: ReturnType<typeof eligibleQueueBindings> } | null | undefined;
+    const classifyHost = (host: string): HostClass => {
+      const self = getSelfHostId();
+      if (resolvesToLocalHost(host, self)) return "self";
+      if (self === null) return "unknown";
+      if (hosts === undefined) {
+        const reg = registryLoader();
+        hosts = reg.ok ? { registry: reg.registry, learned: eligibleQueueBindings(reg.registry, bindingsLoader()) } : null;
+      }
+      const known = hosts;
+      if (!known) return "unknown";
+      const match = resolveHost(known.registry, host, known.learned);
+      if (!match.ok) return "unknown";
+      const identity = match.host.hostId ?? known.learned[match.host.id]?.hostId;
+      if (identity === undefined) return "unknown";
+      return identity === self ? "self" : "other";
+    };
     try {
       const ledger = settings?.resolveOne("retention.erasure_ledger").value;
       const report = await eraseQueue(c.get("db" as never) as Database.Database, {
-        scope, apply: body.apply === true, nowIso: new Date().toISOString(),
+        scope, apply: body.apply === true, nowIso: new Date().toISOString(), classifyHost,
         ...(typeof ledger === "string" && ledger.length > 0 ? { ledgerPath: ledger } : {}),
       });
       console.log(`[queue-erase] ${identity.session} ${scope.kind} ${report.applied ? "applied" : "dry run"}: `
@@ -945,6 +1088,28 @@ export function queueRoutes(): Hono {
     }
   });
 
+  // POST /:qitemId/tags — add tags to a row, in any state ({ add: [...] }). Add-only: existing tags stay, a tag the
+  // row already has adds nothing, and nothing else about the row changes. The actor is the transport-derived sender,
+  // as for update, and the tags added are recorded on a transition naming it.
+  app.post("/:qitemId/tags", async (c) => {
+    const qitemId = c.req.param("qitemId");
+    const body = await c.req.json<{ add?: unknown; actorSession?: string }>().catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "queue tag", bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
+    const actorSession = identity.session;
+    { const held = switchCustody(c, actorSession); if (held) return held; }
+    const add = body.add;
+    if (!Array.isArray(add) || add.length === 0 || !add.every((tag) => typeof tag === "string" && tag.trim().length > 0)) {
+      return c.json({ error: "tags_required", message: "add takes one or more non-blank tags; nothing was written" }, 400);
+    }
+    try {
+      const { item, added } = getRepo(c).addTags({ qitemId, actorSession, tags: add as string[], ...resolveRecordedIdentity(c, identity) });
+      return c.json({ ...item, added });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
   // POST /:qitemId/handoff — transactional close+create (local); cross-host
   // message-passing choreography when a registered hostId is enveloped
   // (OPR.0.4.6.MH3 FR-4, C2).
@@ -1005,7 +1170,7 @@ export function queueRoutes(): Hono {
     // Exact self id: finish a handoff that an earlier self-forward already started.
     if (typeof body.hostId === "string" && body.hostId === getSelfHostId()
       && priorSelfForwardSuccessor(c, qitemId, crossHostBody.toSession, body.hostId)) {
-      return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody, createSuccessorInProcess(c));
+      return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody, createSuccessorInProcess(c), "in-process");
     }
 
     try {
@@ -1025,8 +1190,17 @@ export function queueRoutes(): Hono {
         humanAlert: body.humanAlert,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisory = destinationAdvisory(c, result.created.destinationSession);
-      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const destination = destinationAdvisory(c, result.created.destinationSession);
+      const scopeCheckRequested = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1";
+      const scope = scopeCheckRequested
+        ? createScopeAdvisory(c, result.created.tags, {
+          verb: "handoff",
+          tagSource: body.tags == null ? "inherited" : "explicit",
+        })
+        : null;
+      const advisories = [destination, scope].filter(Boolean);
+      return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}),
+        ...(scopeCheckRequested ? { [HANDOFF_SCOPE_CHECK_ACKNOWLEDGED]: true } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -1090,7 +1264,7 @@ export function queueRoutes(): Hono {
     // Exact self id: finish a handoff that an earlier self-forward already started.
     if (typeof body.hostId === "string" && body.hostId === getSelfHostId()
       && priorSelfForwardSuccessor(c, qitemId, crossHostBody.toSession, body.hostId)) {
-      return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody, createSuccessorInProcess(c));
+      return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody, createSuccessorInProcess(c), "in-process");
     }
 
     try {
@@ -1110,8 +1284,17 @@ export function queueRoutes(): Hono {
         humanAlert: body.humanAlert,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      const advisory = destinationAdvisory(c, result.created.destinationSession);
-      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const destination = destinationAdvisory(c, result.created.destinationSession);
+      const scopeCheckRequested = c.req.header(CLI_HANDOFF_SCOPE_ADVISORY_HEADER) === "1";
+      const scope = scopeCheckRequested
+        ? createScopeAdvisory(c, result.created.tags, {
+          verb: "handoff-and-complete",
+          tagSource: body.tags == null ? "inherited" : "explicit",
+        })
+        : null;
+      const advisories = [destination, scope].filter(Boolean);
+      return c.json({ ...result, ...(advisories.length > 0 ? { advisories } : {}),
+        ...(scopeCheckRequested ? { [HANDOFF_SCOPE_CHECK_ACKNOWLEDGED]: true } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -1201,6 +1384,7 @@ export function queueRoutes(): Hono {
     // workspace.root, and the trace can only ascend to a root it knows (#2693).
     let workRoots: string[] = [];
     let catalogPath: string | null = null;
+    let catalogError: unknown;
     try {
       catalogPath = projectCatalogPaths(c).catalog;
     } catch {
@@ -1212,14 +1396,45 @@ export function queueRoutes(): Hono {
       if (entries) {
         catalogStatus = "usable";
         const projects = listProjects(c).projects;
-        projectMissionsRoots = new Map(projects.map((project) => [project.id, {
+        // A former id a project declares resolves to that project's root too (#3261).
+        projectMissionsRoots = new Map(projects.flatMap((project) => projectIdsOf(project).map((id) => [id, {
           root: project.error ? null : project.missionsRoot,
           error: project.error,
-        }]));
+        }] as const)));
         workRoots = projects.filter((project) => !project.error).map((project) => project.root);
       }
-    } catch {
+    } catch (error) {
       catalogStatus = "unavailable";
+      catalogError = error;
+    }
+    // The project this seat's broad refocus orientation belongs to when no typed baton names
+    // one (#3320), chosen as work-install chooses: the only catalog entry, then the rig's
+    // association, the seat's working folder, the only unclaimed entry. No unique answer is
+    // reported with its reason, never guessed.
+    let workProject: { id: string; root: string; selectedBy: string } | { error: string } | undefined;
+    const unselected = (error: unknown) => {
+      const candidates = error instanceof ProjectReadError && error.candidates?.length ? ` (candidates: ${error.candidates.join(", ")})` : "";
+      return { error: `${error instanceof Error ? error.message : String(error)}${candidates}` };
+    };
+    // An unreadable catalog selects nothing; say why, and the trace keeps the workspace root.
+    if (catalogStatus === "unavailable") workProject = unselected(catalogError);
+    if (catalogPath && catalogStatus === "usable") {
+      try {
+        const only = selectCatalogProject(catalogPath);
+        if (only) workProject = { ...only, selectedBy: "single" };
+      } catch (error) {
+        if (error instanceof ProjectReadError && error.code === "project_required") {
+          let cwd: string | null = null;
+          try {
+            const db = c.get("db" as never) as Database.Database | undefined;
+            const seat = db && db.prepare("SELECT n.cwd FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.session_name = ? ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1")
+              .get(physicalSessionName(db, session)) as { cwd: string | null } | undefined;
+            cwd = seat?.cwd ?? null;
+          } catch { /* No recorded working folder: selection continues without it. */ }
+          try { workProject = inferCatalogProject(catalogPath, error, { rigName: rigFromSession(session), cwd }, []); }
+          catch (inferred) { workProject = unselected(inferred); }
+        } else workProject = unselected(error);
+      }
     }
     const currentWorkRoot: MissionsRootResolver = (row: CurrentWorkRow) => {
       const projectIds = [...new Set((row.tags ?? []).flatMap((tag) => tag.split(",").map((part) => part.trim()))
@@ -1277,11 +1492,11 @@ export function queueRoutes(): Hono {
         },
         missionsRoot,
       );
-      return c.json({ ...position, ...derived, ...choiceField, role, workRoots,
+      return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}),
         // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
         workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, ...choiceField, role, workRoots });
+    return c.json({ ...position, ...derived, ...choiceField, role, workRoots, ...(workProject ? { workProject } : {}) });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
@@ -1409,7 +1624,9 @@ export function queueRoutes(): Hono {
       if (sender && named.length > 0 && !sentOnly && (!state || state.includes("pending")) && named.every((s) => repo.isSameSession(sender, s))) {
         repo.recordInboxCheckIn(sender);
       }
-      return c.json(items);
+      return c.json(items.map((item) => item.state === "handed-off" || item.closureReason === "handed_off_to"
+        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-"))
+        ? { ...item, ...handoffSuccessors(repo, item) } : item));
     }
 
     // OPR.0.3.2.20 — attention path goes through
@@ -1505,8 +1722,8 @@ export function queueRoutes(): Hono {
       return c.json({ error: "rig_required", message: "rig is required for a rig RECENT read" }, 400);
     }
     const raw = c.req.query("limit");
-    const parsed = raw == null ? 20 : Number.parseInt(raw, 10);
-    const limit = Number.isInteger(parsed) && parsed > 0 ? parsed : 20;
+    const parsed = raw == null ? DEFAULT_RECENT_TRANSITIONS_LIMIT : Number.parseInt(raw, 10);
+    const limit = Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_RECENT_TRANSITIONS_LIMIT;
     const scope = scopeKind === "instance"
       ? { kind: "instance" } as const
       : { kind: "rig", rig: rig! } as const;
@@ -1574,8 +1791,10 @@ export function queueRoutes(): Hono {
       ...item,
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
-      // The answer rows returned to this row, read by their link rather than their text; empty when none came back.
+      // The answer rows returned to this row, read by their link rather than their text; empty when none came back here.
+      // Only this daemon's rows are read: an answer another host holds isn't in them, so empty isn't proof of none.
       answers: repo.answersForAsk(qitemId),
+      answersFrom: "this-daemon",
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,
@@ -1586,8 +1805,9 @@ export function queueRoutes(): Hono {
         actorSession: closing.actorSession,
         transitionNote: closing.transitionNote,
       } } : {}),
-      // #2794: a handed-off row names the row its handoff made (read only; nothing stored changes).
-      ...(item.state === "handed-off" || item.closureReason === "handed_off_to" ? handoffSuccessors(repo, item) : {}),
+      // #2794: a closed handoff or supersession names its successor (read only; nothing stored changes).
+      ...(item.state === "handed-off" || item.closureReason === "handed_off_to"
+        || ((isTerminalState(item.state) || item.state === "canceled") && item.closureReason === "superseded" && item.closureTarget?.startsWith("qitem-")) ? handoffSuccessors(repo, item) : {}),
       destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
       ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
     });

@@ -8,7 +8,7 @@ import { NODE_FILE_PRECEDENCE } from "../scope/node-file.js";
 import { projectTaskOwners, type TaskSeat, type TaskTerminalView } from "./task-terminal-view.js";
 
 export interface ScopeViewError { code: "scope_unsupported" | "scope_not_found" | "scope_ambiguous" | "scope_unavailable"; error: string }
-type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "projectId">;
+type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "projectId"> & Partial<Pick<SliceIndexer, "projectIds">>;
 interface Scope { name: string; id?: string; title: string; source: string; mission?: string; missionSource?: string }
 interface Mission { name: string; source: string; manifest?: string }
 interface ScopeIndex { slices: Scope[]; missions: Mission[]; claims: Map<string, Set<string>>; missionIssues: string[] }
@@ -196,7 +196,7 @@ export function readScopedTaskTerminalView(db: Database.Database, view: string, 
       if (!Array.isArray(tags) || tags.some(tag => typeof tag !== "string")) {
         issues.add("Some active scope tags are malformed; membership is incomplete."); continue;
       }
-      if (index.projectId && !belongsToProject(row.tags, index.projectId)) continue;
+      if (index.projectId && !belongsToProject(row.tags, index.projectIds?.length ? index.projectIds : index.projectId)) continue;
       const parsed = parseScopeTags(row.tags);
       if (kind === "mission") {
         if (missionKey && parsed.missions.has(missionKey)) { selected.push(row); continue; }

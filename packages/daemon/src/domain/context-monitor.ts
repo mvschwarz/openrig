@@ -189,6 +189,7 @@ export class ContextMonitor {
           cwd: session.cwd,
           runtime: session.runtime,
           usedPercentage: usage.usedPercentage,
+          sampledAt: usage.sampledAt,
           transcriptPath: usage.transcriptPath,
           sessionId: usage.sessionId,
           isObservationCurrent: () => this.isCurrentSession(session),
@@ -303,7 +304,7 @@ export class ContextMonitor {
     // A Pi seat's usage arrives as persisted entries its runner posts (no sidecar to poll), so the same tick
     // reads the store the runner already wrote — one sampler, not a second one.
     if (session.runtime === "pi") {
-      return this.store.readPiUsageAndNormalize({ seatSession: session.session_name, sessionStartedAt: session.created_at });
+      return this.store.readPiUsageAndNormalize({ nodeId: session.node_id, seatSession: session.session_name, sessionStartedAt: session.created_at });
     }
 
     if (session.runtime === "codex") {
@@ -352,8 +353,7 @@ export class ContextMonitor {
         updatedAt: "",
         cwd: session.cwd ?? "",
         ...(claude && session.generation_uuid ? { launchGeneration: session.generation_uuid } : {}),
-      }, ...(claude && session.resume_token ? [{ resumeToken: session.resume_token, ...(rotation ? { resumeRotation: rotation } : {}) }]
-        // Only the Codex adapter takes its process listings from the pass; the others are called as before.
+      }, ...(claude ? [{ observationPass: pass, ...(session.resume_token ? { resumeToken: session.resume_token } : {}), ...(rotation ? { resumeRotation: rotation } : {}) }]
         : session.runtime === "codex" ? [{ observationPass: pass }] : []));
       // Hold no database lock while observing the runtime. Revalidation and
       // the write share an immediate transaction, reserving the writer before the

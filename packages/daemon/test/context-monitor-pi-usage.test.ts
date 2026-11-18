@@ -35,7 +35,12 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
     sessionRegistry = new SessionRegistry(db);
     tmpDir = join(tmpdir(), `context-monitor-pi-${Date.now()}`);
     mkdirSync(join(tmpDir, "state", "context-usage"), { recursive: true });
-    store = new ContextUsageStore(db, { stateDir: tmpDir });
+    store = new ContextUsageStore(db, {
+      stateDir: tmpDir,
+      runnerObservations: { getRunnerObservation: () => { throw new Error("Pi spend must not read generic runner context"); } },
+      resolveOccupantBootAt: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.bootAt ?? null,
+      resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    });
     usageSamples = new UsageSamplesStore(db);
     monitor = new ContextMonitor(db, store, undefined, undefined, undefined, usageSamples);
 
@@ -88,9 +93,9 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
     entry({ entryId: "fork-1", entryTimestamp: "2026-11-14T08:00:00.000Z", inputTokens: 9_000, outputTokens: 900, cacheReadTokens: 900_000, origin: "inherited" });
     entry({ piSessionId: "pi-session-0", entryId: "old-1", entryTimestamp: "2026-11-13T09:00:00.000Z", inputTokens: 7_000, outputTokens: 700, cacheReadTokens: 700_000 });
 
-    const observed = store.readPiUsageAndNormalize({ seatSession: seat, sessionStartedAt: "2026-11-14 08:30:00" });
+    const observed = store.readPiUsageAndNormalize({ nodeId: nodeIdRef.value, seatSession: seat, sessionStartedAt: "2026-11-14 08:30:00" });
     expect(observed.availability).toBe("known");
-    expect(observed.source).toBe("pi_usage_entries");
+    expect(observed.source).toBe("runner_reported");
     expect(observed.sessionId).toBe(piSession);
     expect(observed.totalInputTokens).toBe(1_000 + 40_000 + 500 + 60_000);
     expect(observed.totalOutputTokens).toBe(150);
@@ -108,7 +113,7 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
       .prepare("SELECT availability, source, total_input_tokens, total_output_tokens FROM context_usage WHERE node_id = ?")
       .get(nodeIdRef.value) as { availability: string; source: string; total_input_tokens: number; total_output_tokens: number };
     expect(pointInTime.availability).toBe("known");
-    expect(pointInTime.source).toBe("pi_usage_entries");
+    expect(pointInTime.source).toBe("runner_reported");
     expect(pointInTime.total_input_tokens).toBe(41_000);
     expect(pointInTime.total_output_tokens).toBe(100);
 
@@ -116,7 +121,7 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
       .prepare("SELECT lane, source, native_session_id, total_input_tokens FROM usage_samples WHERE seat_session = ?")
       .all(seat) as Array<{ lane: string; source: string; native_session_id: string; total_input_tokens: number }>;
     expect(series).toHaveLength(1);
-    expect(series[0]).toMatchObject({ lane: "context", source: "pi_usage_entries", native_session_id: piSession, total_input_tokens: 41_000 });
+    expect(series[0]).toMatchObject({ lane: "context", source: "runner_reported", native_session_id: piSession, total_input_tokens: 41_000 });
   });
 
   it("puts the Pi seat in the ranked burn view once two turns land", async () => {
@@ -144,7 +149,7 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
 
   it("reports an unmeasured Pi seat as unknown, never a zero sample", async () => {
     await monitor.pollOnce();
-    const observed = store.readPiUsageAndNormalize({ seatSession: seat, sessionStartedAt: "2026-11-14 08:30:00" });
+    const observed = store.readPiUsageAndNormalize({ nodeId: nodeIdRef.value, seatSession: seat, sessionStartedAt: "2026-11-14 08:30:00" });
     expect(observed.availability).toBe("unknown");
     expect(observed.reason).toBe("no_data");
     const count = db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE seat_session = ?").get(seat) as { n: number };
@@ -175,6 +180,13 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
     expect(store.getForNode(nodeIdRef.value, seat)).toMatchObject({
       availability: "known", sessionId: piSession, totalInputTokens: 61_500, totalOutputTokens: 150,
       usedPercentage: null, contextWindowSize: null,
+      occupantGeneration: sessionRegistry.currentOccupantTenure(nodeIdRef.value)?.generationUuid,
+    });
+    expect(store.getForNodes([{ nodeId: nodeIdRef.value, currentSessionName: seat }]).get(nodeIdRef.value)).toMatchObject({
+      availability: "known", totalInputTokens: 61_500, totalOutputTokens: 150, usedPercentage: null,
+    });
+    expect(db.prepare("SELECT occupant_generation FROM context_usage WHERE node_id = ?").get(nodeIdRef.value)).toEqual({
+      occupant_generation: sessionRegistry.currentOccupantTenure(nodeIdRef.value)?.generationUuid,
     });
     expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE seat_session = ?").get(seat)).toEqual({ n: 2 });
   });
