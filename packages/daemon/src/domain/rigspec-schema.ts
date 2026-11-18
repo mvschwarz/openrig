@@ -5,6 +5,7 @@ import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, validateLaunchWrapper } from "./launch-wrapper.js";
 import { validateProcessLimits } from "./process-limits.js";
+import { validateSpecStatuslineThrottle } from "./claude-statusline-throttle.js";
 import { isClaudePluginChannel } from "./claude-plugin-channels.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
@@ -70,7 +71,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_auto_mode", "claude_token", "claude_mcp", "codex_permissions", "launch_wrapper", "process_limits", "statusline_throttle", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
   "agent_file", "append_system_prompt_file", "plugin_dirs", "plugin_channels",
 ]);
@@ -569,6 +570,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   if (member["process_limits"] !== undefined) {
     // Valid on every runtime, terminal included: the limit is on the seat's pane, not on its harness.
     try { validateProcessLimits(member["process_limits"], `${prefix}.process_limits`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
+  if (member["statusline_throttle"] !== undefined) {
+    if (member["runtime"] !== "claude-code") errors.push(`${prefix}.statusline_throttle: only valid when runtime is "claude-code"`);
+    try { validateSpecStatuslineThrottle(member["statusline_throttle"], `${prefix}.statusline_throttle`); }
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["codex_config_profile"] !== undefined) {
@@ -1336,6 +1342,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
     ...(m["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(m["launch_wrapper"]) }),
     ...(m["process_limits"] === undefined ? {} : { processLimits: validateProcessLimits(m["process_limits"]) }),
+    ...(m["statusline_throttle"] === undefined ? {} : { statuslineThrottle: validateSpecStatuslineThrottle(m["statusline_throttle"]) }),
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
@@ -1489,6 +1496,11 @@ export class LegacyRigSpecSchema {
           try { validateProcessLimits(node["process_limits"], `nodes.${nodeWhere}.process_limits`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        if (node["statusline_throttle"] !== undefined) {
+          if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.statusline_throttle: only valid when runtime is "claude-code"`);
+          try { validateSpecStatuslineThrottle(node["statusline_throttle"], `nodes.${nodeWhere}.statusline_throttle`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["effort"] !== undefined) {
           if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
             advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
@@ -1560,6 +1572,7 @@ export class LegacyRigSpecSchema {
       ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
       ...(n["launch_wrapper"] === undefined ? {} : { launchWrapper: validateLaunchWrapper(n["launch_wrapper"]) }),
       ...(n["process_limits"] === undefined ? {} : { processLimits: validateProcessLimits(n["process_limits"]) }),
+      ...(n["statusline_throttle"] === undefined ? {} : { statuslineThrottle: validateSpecStatuslineThrottle(n["statusline_throttle"]) }),
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

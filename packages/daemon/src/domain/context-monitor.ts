@@ -188,6 +188,7 @@ export class ContextMonitor {
           cwd: session.cwd,
           runtime: session.runtime,
           usedPercentage: usage.usedPercentage,
+          sampledAt: usage.sampledAt,
           transcriptPath: usage.transcriptPath,
           sessionId: usage.sessionId,
           isObservationCurrent: () => this.isCurrentSession(session),
