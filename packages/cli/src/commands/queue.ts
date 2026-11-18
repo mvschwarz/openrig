@@ -1583,13 +1583,31 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           }
           const parkWarning = created?.parkWarning as { code?: unknown; message?: unknown } | undefined;
           const parkReceipt = created?.parkReceipt as { confirmed?: unknown; state?: unknown; blockedOn?: unknown; wakeKind?: unknown; wakeAfterSeconds?: unknown } | undefined;
-          const parkMatches = parkRequested && created?.state === "blocked"
+          const parkMatches = parkRequested && !parkWarning && parkReceipt?.confirmed === true && created?.state === "blocked"
             && (created?.blockedOn ?? null) === (opts.blockedOn ?? null)
-            && (opts.wakeAfter === undefined || (parkReceipt?.confirmed === true && parkReceipt.wakeAfterSeconds === opts.wakeAfter));
-          if (status < 400 && parkRequested && (parkWarning || !parkMatches)) {
-            const message = typeof parkWarning?.message === "string"
-              ? parkWarning.message
-              : "The daemon response did not confirm the requested park options. The row was saved; inspect its blocker and timer before relying on a wake.";
+            && (opts.wakeAfter === undefined || parkReceipt.wakeAfterSeconds === opts.wakeAfter);
+          const outputCreated = status < 400 && parkRequested && !parkMatches
+            ? {
+                ...created,
+                parkReceipt: {
+                  ...(parkReceipt ?? {}),
+                  confirmed: false,
+                  state: typeof created.state === "string" ? created.state : parkReceipt?.state ?? null,
+                  blockedOn: created.blockedOn ?? parkReceipt?.blockedOn ?? null,
+                  wakeKind: parkReceipt?.wakeKind ?? null,
+                  wakeAfterSeconds: parkReceipt?.wakeAfterSeconds ?? null,
+                },
+                parkWarning: parkWarning ?? {
+                  code: "qitem_park_not_confirmed",
+                  message: "The daemon did not confirm the requested park. An older receiving daemon may save the row as pending, where the owner or scheduler can start work early; this request suppresses only the direct nudge. The row state is shown, but the blocker and timer are not confirmed.",
+                },
+              }
+            : created;
+          if (status < 400 && parkRequested && !parkMatches) {
+            const outputParkWarning = outputCreated.parkWarning as { message?: unknown } | undefined;
+            const message = typeof outputParkWarning?.message === "string"
+              ? outputParkWarning.message
+              : "The daemon did not confirm the requested park. An older receiving daemon may save the row as pending, where the owner or scheduler can start work early; this request suppresses only the direct nudge.";
             console.error(`Warning: ${message}`);
           }
           // The address this work's questions come to, and the line to read them by.
@@ -1605,15 +1623,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             if (status < 400 && advisory.code === "shared_channel_correspondence" && typeof advisory.message === "string") console.error(`Warning: ${advisory.message}`);
           }
           if (opts.verify && status < 400) {
-            const createdId = typeof created.qitemId === "string" ? created.qitemId : null;
+            const createdId = typeof outputCreated.qitemId === "string" ? outputCreated.qitemId : null;
             const delivery = createdId
               ? await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), createdId, deps.deliveryVerify,
                 { destinationSession: hostResolved.destination, nudge: requestNudge, parked: parkRequested })
               : unreadableDeliveryResult(null, hostResolved.destination, {}, "create response did not include a qitem id; delivery cannot be correlated");
-            await printWriteResult(client, opts.json ?? false, { ...created, qitemId: createdId, persisted: true, delivery }, status, receipt);
+            await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId: createdId, persisted: true, delivery }, status, receipt);
             return;
           }
-          await printWriteResult(client, opts.json ?? false, created, status, receipt);
+          await printWriteResult(client, opts.json ?? false, outputCreated, status, receipt);
         };
         if (res instanceof Error) {
           // A pre-header disconnect can follow a committed create. Preserve the

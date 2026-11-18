@@ -847,7 +847,8 @@ export function queueRoutes(): Hono {
       const responseMatchesBlocker = objectPayload.state === "blocked" && (objectPayload.blockedOn ?? null) === requestedBlocker;
       const timerConfirmed = body.wakeAfterSeconds == null || (remoteParkReceipt?.confirmed === true
         && remoteParkReceipt.wakeAfterSeconds === body.wakeAfterSeconds);
-      const parkConfirmed = !objectPayload.parkWarning && responseMatchesBlocker && timerConfirmed;
+      const parkConfirmed = remoteParkReceipt?.confirmed === true
+        && !objectPayload.parkWarning && responseMatchesBlocker && timerConfirmed;
       const parkReceipt = remoteParkReceipt ?? {
         confirmed: parkConfirmed,
         state: typeof objectPayload.state === "string" ? objectPayload.state : null,
@@ -857,7 +858,7 @@ export function queueRoutes(): Hono {
       };
       const parkWarning = objectPayload.parkWarning ?? (!parkConfirmed ? {
         code: "qitem_park_not_confirmed",
-        message: `The receiving daemon did not confirm the requested park options. The row was returned as saved; inspect its blocker and timer before relying on a wake.`,
+        message: "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early. This request suppresses the direct nudge, but the daemon did not confirm the requested blocker or timer.",
       } : undefined);
       return c.json({ ...objectPayload, parkReceipt: { ...parkReceipt, confirmed: parkConfirmed }, ...(parkWarning ? { parkWarning } : {}),
         ...(added.length ? { advisories: [...existingAdvisories, ...added] } : {}) }, fwd.status as 200);
@@ -895,10 +896,23 @@ export function queueRoutes(): Hono {
         parkWithoutWakeAdvisory(item),
         // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
         routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
-      const parkWake = parkRequested ? getRepo(c).getParkWakeStatus(item.qitemId) : null;
+      let parkWake: ReturnType<QueueRepository["getParkWakeStatus"]> = null;
+      let parkReceiptReadFailed = false;
+      if (parkRequested) {
+        try {
+          parkWake = getRepo(c).getParkWakeStatus(item.qitemId);
+        } catch {
+          // Creation and park transaction already committed. This read only enriches the response.
+          parkReceiptReadFailed = true;
+        }
+      }
       const parkWakeAfterSeconds = parkWake?.kind === "timer" ? parkWake.intervalSeconds ?? null : null;
+      const parkWarning = item.parkWarning ?? (parkReceiptReadFailed ? {
+        code: "qitem_park_receipt_unavailable",
+        message: "The queue row was created, but the daemon could not read its park receipt. Check this row by its ID before retrying with a new ID.",
+      } : undefined);
       const parkReceipt = parkRequested ? {
-        confirmed: !item.parkWarning && item.state === "blocked"
+        confirmed: !parkReceiptReadFailed && !item.parkWarning && item.state === "blocked"
           && item.blockedOn === (typeof body.blockedOn === "string" ? body.blockedOn : null)
           && (body.wakeAfterSeconds == null || (parkWake?.kind === "timer" && parkWakeAfterSeconds === body.wakeAfterSeconds)),
         state: item.state,
@@ -906,7 +920,7 @@ export function queueRoutes(): Hono {
         wakeKind: parkWake?.kind ?? null,
         wakeAfterSeconds: parkWakeAfterSeconds,
       } : undefined;
-      return c.json({ ...item, ...(parkReceipt ? { parkReceipt } : {}), ...(advisories.length ? { advisories } : {}) }, 201);
+      return c.json({ ...item, ...(parkReceipt ? { parkReceipt } : {}), ...(parkWarning ? { parkWarning } : {}), ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

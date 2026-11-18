@@ -332,6 +332,28 @@ describe("queue write receipt (output.compact)", () => {
       expect(out).toContain("wake: --no-nudge: no wake was requested");
     });
 
+    it("an unconfirmed park stays a request in the compact receipt", async () => {
+      const message = "An older receiving daemon may save this row as pending, where work can start early.";
+      const data = row({
+        state: "pending",
+        parkReceipt: { confirmed: false, state: "pending", blockedOn: null, wakeKind: null, wakeAfterSeconds: null },
+        parkWarning: { code: "qitem_park_not_confirmed", message },
+      });
+      const out = await create(["--wake-after", "15m"], data);
+      expect(out).toContain("park: not confirmed");
+      expect(out).toContain("wake: park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside");
+      expect(out).toContain(`WARNING: ${message}`);
+
+      logs = [];
+      const json = JSON.parse(await create(["--wake-after", "15m", "--json"], data)) as Row;
+      expect(json.parkReceipt).toMatchObject({ confirmed: false, state: "pending" });
+      expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed", message });
+      expect(json.wake).toMatchObject({
+        evidence: "suppressed",
+        detail: "park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside",
+      });
+    });
+
     it("staging failed: the row saved, the wake did not", async () => {
       const out = await create([], row({ lastNudgeResult: "failed:wake not retained: outbox locked", lastNudgeAttempt: "2026-10-10T18:00:00.500Z" }));
       expect(out).toContain("wake: failed:wake not retained: outbox locked at 2026-10-10T18:00:00.500Z — the row saved but its wake was NOT staged");

@@ -149,25 +149,69 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(rowCount(db)).toBe(0);
   });
 
-  it("cross-host parked create suppresses immediate nudge and reports an older receiver that drops park fields", async () => {
+  it("a saved pending row on an older receiver gets no nudge and carries an early-start warning", async () => {
+    const receiverDb = createDb();
+    migrate(receiverDb, ALL_MIGRATIONS);
+    const receiverBus = new EventBus(receiverDb);
+    const receiverRepo = new QueueRepository(receiverDb, receiverBus, { validateRig: () => true });
+    receiverRepo.attachOutbox(new OutboxHandler(receiverDb));
     const capture: { body?: Record<string, unknown> } = {};
+    try {
+      const app = makeApp({
+        db,
+        bus,
+        fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+          capture.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          // Model an older fixed-field receiver. It saves an ordinary pending row.
+          const oldFieldsOnly = capture.body;
+          const saved = await receiverRepo.create({
+            qitemId: String(oldFieldsOnly.qitemId),
+            sourceSession: String(oldFieldsOnly.sourceSession),
+            destinationSession: String(oldFieldsOnly.destinationSession),
+            body: String(oldFieldsOnly.body),
+            nudge: oldFieldsOnly.nudge === true,
+          });
+          return jsonResponse(saved, 201);
+        }) as unknown as typeof fetch,
+      });
+      const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+      expect(res.status).toBe(201);
+      expect(capture.body).toMatchObject({ blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: false });
+      const returned = await res.json() as Record<string, any>;
+      expect(returned).toMatchObject({
+        state: "pending",
+        parkReceipt: { confirmed: false, state: "pending" },
+        parkWarning: { code: "qitem_park_not_confirmed" },
+      });
+      expect(returned.parkWarning.message).toMatch(/older receiving daemon.*start work early/i);
+      expect(receiverRepo.getById(String(returned.qitemId))).toMatchObject({ state: "pending", blockedOn: null });
+      expect(receiverDb.prepare("SELECT COUNT(*) AS count FROM outbox_entries").get()).toMatchObject({ count: 0 });
+      expect(rowCount(db)).toBe(0);
+    } finally {
+      receiverDb.close();
+    }
+  });
+
+  it("does not confirm a blocker-only park from a matching old receiver row without a park receipt", async () => {
     const app = makeApp({
       db,
       bus,
-      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
-        capture.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        // An older receiver ignores blockedOn and wakeAfterSeconds.
-        return jsonResponse({ qitemId: "qitem-old-receiver", destinationSession: "dev@rig-b", state: "pending" }, 201);
-      }) as unknown as typeof fetch,
+      fetchImpl: (async () => jsonResponse({
+        qitemId: "qitem-old-receiver-already-blocked",
+        destinationSession: "dev@rig-b",
+        state: "blocked",
+        blockedOn: "external:condition",
+      }, 201)) as unknown as typeof fetch,
     });
-    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+
     expect(res.status).toBe(201);
-    expect(capture.body).toMatchObject({ blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: false });
     expect(await res.json()).toMatchObject({
-      qitemId: "qitem-old-receiver",
-      state: "pending",
-      parkReceipt: { confirmed: false, state: "pending" },
-      parkWarning: { code: "qitem_park_not_confirmed", message: expect.stringContaining("park options") },
+      qitemId: "qitem-old-receiver-already-blocked",
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkReceipt: { confirmed: false, state: "blocked", blockedOn: "external:condition" },
+      parkWarning: { code: "qitem_park_not_confirmed" },
     });
     expect(rowCount(db)).toBe(0);
   });

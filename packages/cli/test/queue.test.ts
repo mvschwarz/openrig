@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { PassThrough } from "node:stream";
+import { DaemonConnectionError } from "../src/client.js";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { resolveQueueBody, previewBody, previewCutMarker, waitForDeliveryOutcome } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
@@ -35,6 +36,7 @@ const STUB_SENDER = "stub@rig";
 
 function makeDeps(opts?: {
   routes?: Record<string, StubResponse | StubResponse[]>;
+  postError?: { path: string; error: Error };
 }): { deps: QueueDeps; calls: Array<{ method: string; path: string; body?: unknown }> } {
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
   const routes = opts?.routes ?? {};
@@ -81,6 +83,7 @@ function makeDeps(opts?: {
         }),
         post: vi.fn(async (path: string, body: unknown) => {
           calls.push({ method: "POST", path, body });
+          if (opts?.postError?.path === path) throw opts.postError.error;
           const route = routes[`POST ${path}`];
           return (Array.isArray(route) ? route.shift() : route) ?? { status: 201, data: { qitemId: "qitem-test-1" } };
         }),
@@ -1038,8 +1041,46 @@ describe("rig queue CLI", () => {
       const request = calls.find((call) => call.method === "POST" && call.path === "/api/queue/create")!;
       expect(request.body).toMatchObject({ wakeAfterSeconds: 900, nudge: false });
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result.delivery).toMatchObject({ receiptSource: "terminal", outcome: "not-requested" });
-      expect(errors.join("\n")).toMatch(/did not confirm.*park options/i);
+      expect(result).toMatchObject({
+        state: "pending",
+        parkReceipt: { confirmed: false, state: "pending" },
+        parkWarning: { code: "qitem_park_not_confirmed" },
+        delivery: { receiptSource: "terminal", outcome: "not-requested" },
+      });
+      expect(errors.join("\n")).toMatch(/older receiving daemon may save.*pending.*start work early/i);
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
+    });
+
+    it("does not confirm a blocker-only create from a matching row read after the reply is lost", async () => {
+      const id = "qitem-create-lost-reply";
+      const { deps, calls } = makeDeps({
+        postError: { path: "/api/queue/create", error: new DaemonConnectionError("connection dropped", "ECONNRESET") },
+        routes: { [`GET /api/queue/${id}`]: { status: 200, data: {
+          qitemId: id,
+          sourceSession: STUB_SENDER,
+          destinationSession: "bob@rig",
+          body: "Wait for release",
+          state: "blocked",
+          blockedOn: "external:release",
+        } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create", "--id", id,
+        "--destination", "bob@rig", "--body", "Wait for release", "--summary", "Wait for release",
+        "--blocked-on", "external:release", "--json",
+      ]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({
+        qitemId: id,
+        state: "blocked",
+        blockedOn: "external:release",
+        parkReceipt: { confirmed: false, state: "blocked", blockedOn: "external:release" },
+        parkWarning: { code: "qitem_park_not_confirmed" },
+      });
+      expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 

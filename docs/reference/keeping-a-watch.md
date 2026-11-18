@@ -57,6 +57,8 @@ rig queue create --destination <your session> --tags watch \
 `--blocked-on` uses the same blocker meaning as `queue block` and `queue update`. Here,
 `external:<what>` names the outside thing you are waiting on. The timer first fires after the interval, not now.
 
+An older receiving daemon may save this row as pending, where the owner or scheduler can start work early; this command suppresses the direct nudge and reports the limit, but it cannot prevent later pickup. If that limit is unacceptable, the maintainer can choose to refuse writes until the receiver supports parked creates.
+
 **3. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
 it stops. For example: "I'll check the release PR every hour and message you here once it merges. Then I'll stop."
 

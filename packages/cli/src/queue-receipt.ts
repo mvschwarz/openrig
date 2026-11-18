@@ -92,7 +92,13 @@ function wakeEvidence(row: Row, ctx: ReceiptContext): WakeEvidence {
   const result = str(row.lastNudgeResult);
   const at = str(row.lastNudgeAttempt) ?? undefined;
   const warning = isRow(row.createWarning) ? row.createWarning : null;
-  if (ctx.parked) return { evidence: "suppressed", detail: "parked create: no immediate wake was requested; see the park receipt for its blocker and any timer" };
+  if (ctx.parked) {
+    const parkReceipt = isRow(row.parkReceipt) ? row.parkReceipt : null;
+    const confirmedPark = parkReceipt?.confirmed === true && row.state === "blocked";
+    return { evidence: "suppressed", detail: confirmedPark
+      ? "parked create: no immediate terminal wake was requested; the park receipt shows its blocker and any timer"
+      : "park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside" };
+  }
   if (ctx.nudgeSuppressed) return { evidence: "suppressed", detail: "--no-nudge: no wake was requested" };
   if (warning?.code === "qitem_body_not_saved") {
     return { evidence: "existing-row", ...(result ? { result } : {}), ...(at ? { at } : {}), detail: "an existing row was returned; this write started no new wake" };

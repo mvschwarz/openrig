@@ -161,6 +161,45 @@ describe("queue routes", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
   });
 
+  it("keeps a parked create successful when its post-commit receipt read fails, without adding a timer on retry", async () => {
+    const qitemId = "qitem-park-receipt-read-fails";
+    const body = {
+      qitemId,
+      destinationSession: "worker@rig",
+      body: "Wait for the release",
+      blockedOn: "external:release",
+      wakeAfterSeconds: 90,
+      nudge: false,
+    };
+    vi.spyOn(queueRepo, "getParkWakeStatus").mockImplementationOnce(() => {
+      throw new Error("injected post-commit receipt read failure");
+    });
+    const create = () => app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify(body),
+    });
+
+    const first = await create();
+    expect(first.status).toBe(201);
+    expect(await first.json()).toMatchObject({
+      qitemId,
+      state: "blocked",
+      blockedOn: "external:release",
+      parkReceipt: { confirmed: false, state: "blocked", blockedOn: "external:release" },
+      parkWarning: { code: "qitem_park_receipt_unavailable" },
+    });
+    expect(queueRepo.getById(qitemId)).toMatchObject({ state: "blocked", blockedOn: "external:release" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get(qitemId)).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+
+    const retry = await create();
+    expect(retry.status).toBe(201);
+    expect(await retry.json()).toMatchObject({ parkReceipt: { confirmed: false }, parkWarning: { code: "qitem_park_not_confirmed" } });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get(qitemId)).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+  });
+
   it("rejects a non-string blockedOn with a field error before creating a row", async () => {
     const response = await app.request("/api/queue/create", {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
