@@ -1216,6 +1216,32 @@ describe("rig queue CLI", () => {
       expect(process.exitCode).toBeUndefined();
     });
 
+    it("reports an unknown parked auto-route create when the returned issued source is wrong", async () => {
+      const id = "qitem-issued-route-wrong-source";
+      const wrongSource = "conversation-000000000000@kernel";
+      vi.stubEnv("OPENRIG_SESSION_NAME", "");
+      const { deps, calls } = makeDeps({
+        senderIdentity: { originUnknown: true },
+        routes: { "POST /api/queue/create": { status: 201, data: validParkCreateResponse(id, { sourceSession: wrongSource }) } },
+      });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--return-route", "auto", "--json"]);
+
+      const request = calls.find((call) => call.method === "POST" && call.path === "/api/queue/create")!;
+      expect(request.body).toMatchObject({ returnRoute: "auto", nudge: false });
+      expect(JSON.parse(JSON.stringify(request.body))).not.toHaveProperty("sourceSession");
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({
+        qitemId: id,
+        createOutcome: "unknown",
+        createWarning: { fields: expect.arrayContaining(["sourceSession"]) },
+        parkReceipt: { confirmed: false },
+      });
+      expect(result).not.toHaveProperty("persisted");
+      expect(result).not.toHaveProperty("parkReceipt.receiptVersion");
+      expect(process.exitCode).toBe(1);
+    });
+
     it("accepts a no-timer blocker wake when the request sent a blocker", async () => {
       const id = "qitem-create-blocker-wake";
       const response = validParkCreateResponse(id, {
