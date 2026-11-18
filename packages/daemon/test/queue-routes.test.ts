@@ -136,7 +136,7 @@ describe("queue routes", () => {
       advisories: [expect.objectContaining({ code: "park_without_wake" })] });
   });
 
-  it("same-ID create retries do not add a timer and do not confirm changed park options", async () => {
+  it("same-ID park retries return an unconfirmed version 1 receipt without adding a timer", async () => {
     const create = (body: Record<string, unknown>) => app.request("/api/queue/create", {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify(body),
     });
@@ -148,9 +148,23 @@ describe("queue routes", () => {
 
     const exact = await create(base);
     expect(exact.status).toBe(201);
-    expect(await exact.json()).toMatchObject({ state: "blocked", blockedOn: "external:first",
-      parkReceipt: { confirmed: false },
-      parkWarning: { code: "qitem_park_not_confirmed" } });
+    expect(await exact.json()).toMatchObject({
+      qitemId: base.qitemId,
+      state: "blocked",
+      blockedOn: "external:first",
+      parkReceipt: {
+        receiptVersion: 1,
+        confirmed: false,
+        state: "blocked",
+        blockedOn: "external:first",
+        wakeKind: "timer",
+        wakeAfterSeconds: 60,
+      },
+      parkWarning: {
+        code: "qitem_park_not_confirmed",
+        message: expect.stringContaining("this retry cannot confirm that its original blocker or timer matches the supplied park options"),
+      },
+    });
 
     const changed = await create({ ...base, blockedOn: "external:second", wakeAfterSeconds: 120 });
     expect(changed.status).toBe(201);

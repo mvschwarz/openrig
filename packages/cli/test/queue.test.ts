@@ -1302,6 +1302,8 @@ describe("rig queue CLI", () => {
       expect(result.createWarning.fields).toContain(testCase.field);
       expect(result).not.toHaveProperty("persisted");
       expect(result.parkReceipt.confirmed).toBe(false);
+      expect(process.exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.");
       if (testCase.label.includes("missing")) expect(JSON.stringify(result.createWarning.observed)).not.toContain('"missing":true');
       if (testCase.label === "ID missing") expect(result.createWarning.observed).not.toHaveProperty("qitemId");
       if (testCase.label === "ID malformed") expect(result.createWarning.observed.qitemId).toBe(17);
@@ -1313,6 +1315,63 @@ describe("rig queue CLI", () => {
         expect(JSON.stringify(result.createWarning)).not.toContain("private-body-text");
         expect(errors.join("\n")).not.toContain("private-body-text");
       }
+    });
+
+    it("preserves a forwarder unknown envelope and exits nonzero without delivery verification", async () => {
+      const id = "qitem-forwarder-unknown-envelope";
+      const bodyHash = {
+        byteLength: 17,
+        sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d",
+      };
+      const createWarning = {
+        code: "qitem_create_outcome_unknown",
+        message: "The forwarded row does not confirm this create (body). Keep the sent ID for a read back.",
+        fields: ["body"],
+        observed: { body: "private-body-text" },
+      };
+      const parkWarning = {
+        code: "qitem_park_not_confirmed",
+        message: "The create identity is unknown, so this response cannot confirm its park.",
+      };
+      const existingRow = {
+        qitemId: id,
+        state: "blocked",
+        destinationSession: "bob@rig",
+        sourceSession: STUB_SENDER,
+        body: bodyHash,
+      };
+      const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: {
+        qitemId: id,
+        createOutcome: "unknown",
+        createWarning,
+        parkReceipt: { confirmed: false },
+        parkWarning,
+        existingRow,
+      } } } });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--verify", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toEqual({
+        qitemId: id,
+        createOutcome: "unknown",
+        createWarning: { ...createWarning, observed: { body: bodyHash } },
+        parkReceipt: { confirmed: false },
+        parkWarning,
+        existingRow,
+      });
+      expect(result.createWarning.fields).toEqual(["body"]);
+      expect(result.createWarning.fields).not.toContain("state");
+      expect(result.createWarning.fields).not.toContain("destinationSession");
+      expect(result.createWarning.fields).not.toContain("sourceSession");
+      expect(result).not.toHaveProperty("persisted");
+      expect(result).not.toHaveProperty("state");
+      expect(result).not.toHaveProperty("destinationSession");
+      expect(result).not.toHaveProperty("sourceSession");
+      expect(JSON.stringify(result)).not.toContain("private-body-text");
+      expect(process.exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.");
+      expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
     it("merges the existing body-not-saved warning without exposing the received body", async () => {
@@ -1403,6 +1462,26 @@ describe("rig queue CLI", () => {
       if (testCase.field === "parkReceipt") expect(result.parkReceipt).not.toHaveProperty("0");
     });
 
+    it("rejects a blocker wake for a timer park with no blocker", async () => {
+      const id = "qitem-timer-blocker-wake-without-blocker";
+      const { deps } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: validParkCreateResponse(id, {
+        blockedOn: null,
+        parkReceipt: { receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: null, wakeKind: "blocker", wakeAfterSeconds: 900 },
+      }) } } });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--wake-after", "15m", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({
+        qitemId: id,
+        persisted: true,
+        blockedOn: null,
+        parkReceipt: { confirmed: false, wakeKind: "blocker" },
+      });
+      expect(result.parkWarning.fields).toContain("wakeKind");
+      expect(process.exitCode).toBeUndefined();
+    });
+
     const stateWarningCases: Array<{ state: string; message: string }> = [
       { state: "pending", message: "The row is live and may start early." },
       { state: "blocked", message: "The row is live and may start early." },
@@ -1429,18 +1508,31 @@ describe("rig queue CLI", () => {
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).not.toHaveProperty("persisted");
       expect(result).not.toHaveProperty("delivery");
+      expect(process.exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.");
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
     it("keeps an existing matching row from a same-ID retry but does not infer its earlier park", async () => {
       const id = "qitem-same-id-retry";
-      const row = validParkCreateResponse(id);
-      delete row.parkReceipt;
+      const row = validParkCreateResponse(id, {
+        parkReceipt: { receiptVersion: 1, confirmed: false, state: "blocked", blockedOn: "external:condition", wakeKind: null, wakeAfterSeconds: null },
+        parkWarning: {
+          code: "qitem_park_not_confirmed",
+          message: `qitem ${id} already exists. The existing row is returned unchanged; this retry cannot confirm that its original blocker or timer matches the supplied park options. No second timer or delivery was created.`,
+        },
+      });
       const { deps } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: row } } });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({ qitemId: id, persisted: true, parkReceipt: { confirmed: false } });
-      expect(result.parkWarning.fields).toContain("parkReceipt");
+      expect(result).toMatchObject({
+        qitemId: id,
+        persisted: true,
+        parkReceipt: { receiptVersion: 1, confirmed: false, state: "blocked", blockedOn: "external:condition", wakeKind: null, wakeAfterSeconds: null },
+        parkWarning: { code: "qitem_park_not_confirmed" },
+      });
+      expect(result.parkWarning.message).toContain("this retry cannot confirm that its original blocker or timer matches the supplied park options");
+      expect(process.exitCode).toBeUndefined();
     });
 
     it("keeps a same-ID body mismatch as UNKNOWN and reports a safe body summary", async () => {
@@ -1474,6 +1566,8 @@ describe("rig queue CLI", () => {
       expect(result).toMatchObject({ qitemId: id, createOutcome: "unknown", parkReceipt: { confirmed: false } });
       expect(result.createWarning.fields).toContain(field);
       expect(result).not.toHaveProperty("persisted");
+      expect(process.exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.");
       if (field === "body") expect(JSON.stringify(result.createWarning)).not.toContain("private-body-text");
     });
 

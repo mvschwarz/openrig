@@ -127,6 +127,19 @@ function observedValue(field: string, value: unknown): unknown {
   return { type: Array.isArray(value) ? "array" : typeof value };
 }
 
+function safeRemoteEnvelopeValue(field: string, value: unknown): unknown {
+  if (field === "body") return observedValue(field, value);
+  if (Array.isArray(value)) return value.map((item) => safeRemoteEnvelopeValue("", item));
+  if (isQueueRow(value)) {
+    const safe: QueueRow = {};
+    for (const [key, received] of Object.entries(value)) {
+      if (received !== undefined) safe[key] = safeRemoteEnvelopeValue(key, received);
+    }
+    return safe;
+  }
+  return value;
+}
+
 function stateWarningMessages(state: unknown): string[] {
   if (state === "pending") return [
     "The row is live and may start early.",
@@ -450,6 +463,8 @@ async function withClient<T>(
   }
 }
 
+const UNKNOWN_PARK_CREATE_NOTE = "The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.";
+
 function printResult(json: boolean, body: unknown, status: number): void {
   if (isIndeterminateRemoteWrite(status, body)) {
     console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
@@ -706,7 +721,7 @@ function existingRowSummary(row: QueueRow): QueueRow {
     state: row.state,
     destinationSession: row.destinationSession,
     sourceSession: row.sourceSession,
-    ...(row.body === undefined ? {} : { body: bodySummary(row.body) }),
+    ...(row.body === undefined ? {} : { body: observedValue("body", row.body) }),
   };
 }
 
@@ -1882,6 +1897,32 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           knownIdentityFailure?: ParkCreateIdentityCheck,
         ) => {
           if (status < 400 && parkRequested) {
+            if (created?.createOutcome === "unknown") {
+              const forwardedCreateWarning = safeRemoteEnvelopeValue("createWarning", created.createWarning);
+              const forwardedParkWarning = safeRemoteEnvelopeValue("parkWarning", created.parkWarning);
+              const createWarning = isQueueRow(forwardedCreateWarning)
+                ? forwardedCreateWarning
+                : createOutcomeWarning(undefined, [], {}, "The forwarder returned an unknown create outcome. Reconcile by ID before any retry.");
+              const parkWarning = isQueueRow(forwardedParkWarning)
+                ? forwardedParkWarning
+                : unconfirmedParkWarning(undefined, undefined);
+              const existingRow = safeRemoteEnvelopeValue("existingRow", created.existingRow);
+              const result = {
+                qitemId,
+                createOutcome: "unknown",
+                createWarning,
+                parkReceipt: { confirmed: false },
+                parkWarning,
+                ...(isQueueRow(existingRow) ? { existingRow } : {}),
+              };
+              if (typeof createWarning.message === "string") console.error(`Warning: ${createWarning.message}`);
+              if (typeof parkWarning.message === "string") console.error(`Warning: ${parkWarning.message}`);
+              console.error(UNKNOWN_PARK_CREATE_NOTE);
+              printResult(opts.json ?? false, result, status);
+              process.exitCode = 1;
+              return;
+            }
+
             const identity = knownIdentityFailure ?? await checkParkCreateIdentity(client, qitemId, created, sent);
             if (!identity.row) {
               const createWarning = createOutcomeWarning(created?.createWarning, identity.fields, identity.observed, identity.reason);
@@ -1891,6 +1932,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               }, undefined);
               console.error(`Warning: ${createWarning.message}`);
               console.error(`Warning: ${parkWarning.message}`);
+              console.error(UNKNOWN_PARK_CREATE_NOTE);
               printResult(opts.json ?? false, {
                 qitemId,
                 createOutcome: "unknown",
@@ -1899,6 +1941,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
                 parkWarning,
                 ...(identity.existingRow ? { existingRow: identity.existingRow } : {}),
               }, status);
+              process.exitCode = 1;
               return;
             }
 
