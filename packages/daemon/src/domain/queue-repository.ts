@@ -1399,6 +1399,21 @@ export class QueueRepository {
     return expected === latest?.transition_id;
   }
 
+  /** Whether a wake's outcome no longer belongs on its row, so the row's last wake result is left as it is (the wake's
+   *  own outbox entry is still settled). Only once a reroute has staged a wake for the row: the row now waits on
+   *  another seat, or a later reroute's wake has replaced this one. A row no reroute has staged a wake for keeps
+   *  today's bookkeeping. */
+  private wakeOutcomeStale(entry: Pick<OutboxEntry, "outboxId" | "auditPointer" | "destinationSession">): boolean {
+    if (!entry.auditPointer) return false;
+    const latest = this.latestFallbackWake(entry.auditPointer);
+    if (latest === null) return false;
+    const row = this.db.prepare("SELECT destination_session FROM queue_items WHERE qitem_id = ?")
+      .get(entry.auditPointer) as { destination_session: string } | undefined;
+    if (!row || row.destination_session !== entry.destinationSession) return true;
+    const replaceable = entry.outboxId.startsWith(FALLBACK_WAKE_PREFIX) || entry.outboxId === `${WAKE_INTENT_PREFIX}${entry.auditPointer}`;
+    return replaceable && entry.outboxId !== latest;
+  }
+
   /** The wake the row's latest reroute with a wake staged, or null when no reroute has staged one. */
   private latestFallbackWake(qitemId: string): string | null {
     const ids = this.db.prepare("SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?")
@@ -1753,7 +1768,7 @@ export class QueueRepository {
     const alreadyHeld = this.outbox.getById(outboxId);
     if (alreadyHeld?.deliveryState === "retained" || alreadyHeld?.deliveryState === "retired") {
       if (this.deliveryDrains.holds(alreadyHeld.destinationSession)) return "retained";
-      if (alreadyHeld.auditPointer) this.recordNudgeAttempt(alreadyHeld.auditPointer, "retained:typing_guard");
+      if (alreadyHeld.auditPointer && !this.wakeOutcomeStale(alreadyHeld)) this.recordNudgeAttempt(alreadyHeld.auditPointer, "retained:typing_guard");
       return "retained";
     }
     const claim = (entry: OutboxEntry): boolean => {
@@ -1903,7 +1918,7 @@ export class QueueRepository {
             ?.slice(AUTO_UNPARK_BLOCKER_TAG_PREFIX.length)
         : undefined;
       const wakeEvent = this.db.transaction(() => {
-        this.recordNudgeAttempt(qitemId, nudgeResult);
+        if (!this.wakeOutcomeStale(intent)) this.recordNudgeAttempt(qitemId, nudgeResult);
         if (finalState) this.outbox!.finalizeDelivery(intent.outboxId, finalState);
         // Only a first attempt creates proof: an actual retry consumes it even if it again fails before input.
         if (intent.deliveryState === "pending" && finalState === "failed" && outcome.preInputFailure === true) {
