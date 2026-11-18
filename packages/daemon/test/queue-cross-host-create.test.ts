@@ -149,6 +149,29 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(rowCount(db)).toBe(0);
   });
 
+  it("cross-host parked create suppresses immediate nudge and reports an older receiver that drops park fields", async () => {
+    const capture: { body?: Record<string, unknown> } = {};
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        capture.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        // An older receiver ignores blockedOn and wakeAfterSeconds.
+        return jsonResponse({ qitemId: "qitem-old-receiver", destinationSession: "dev@rig-b", state: "pending" }, 201);
+      }) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: true });
+    expect(res.status).toBe(201);
+    expect(capture.body).toMatchObject({ blockedOn: "external:condition", wakeAfterSeconds: 90, nudge: false });
+    expect(await res.json()).toMatchObject({
+      qitemId: "qitem-old-receiver",
+      state: "pending",
+      parkReceipt: { confirmed: false, state: "pending" },
+      parkWarning: { code: "qitem_park_not_confirmed", message: expect.stringContaining("park options") },
+    });
+    expect(rowCount(db)).toBe(0);
+  });
+
   // 51-09 incr 4a correction — STAMP-AT-FORWARD: the forwarding daemon IS the
   // origin/sender host, so it stamps its OWN self-id onto sourceSession when
   // building the forward body. Otherwise the DESTINATION daemon's create() would

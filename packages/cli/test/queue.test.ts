@@ -530,7 +530,7 @@ describe("rig queue CLI", () => {
       let now = 0;
       return { timeoutMs, intervalMs: 1, sleep: async (ms: number) => { now += ms; }, now: () => now };
     }
-    const verify = (rows: Array<Record<string, unknown>>, target: { destinationSession?: string; nudge?: boolean } = { destinationSession: "bob@rig" }) => {
+    const verify = (rows: Array<Record<string, unknown>>, target: { destinationSession?: string; nudge?: boolean; parked?: boolean } = { destinationSession: "bob@rig" }) => {
       const client = rowsClient(rows);
       return waitForDeliveryOutcome(client, "qitem-t", boundedDeps(), target).then((result) => ({ result, reads: client.reads }));
     };
@@ -650,6 +650,21 @@ describe("rig queue CLI", () => {
       expect(reads).toBeGreaterThan(1);
       expect(result).toMatchObject({ outcome: "still-pending", wakeResult: null, claim: { observed: false } });
       expect(result.detail).toContain("No terminal receipt was recorded within 10ms.");
+    });
+
+    it("a parked create settles the immediate terminal leg without waiting, while a claim remains visible", async () => {
+      const { result, reads } = await verify([
+        { state: "blocked", blockedOn: "external:condition" },
+      ], { destinationSession: "bob@rig", parked: true });
+      expect(reads).toBe(1);
+      expect(result).toMatchObject({ receiptSource: "terminal", outcome: "not-requested", claim: { observed: false } });
+      expect(result.detail).toContain("parked row");
+
+      const claimed = await verify([
+        { state: "in-progress", claimedAt: "2026-11-18T01:00:00.000Z" },
+      ], { destinationSession: "bob@rig", parked: true });
+      expect(claimed.reads).toBe(1);
+      expect(claimed.result).toMatchObject({ receiptSource: "terminal", outcome: "claimed", claim: { observed: true } });
     });
 
     it("a claim before any wake result ends the wait without a null duration", async () => {
@@ -1004,8 +1019,28 @@ describe("rig queue CLI", () => {
         body: "Wait for remote work",
         blockedOn: "external:remote-work",
         wakeAfterSeconds: 900,
+        nudge: false,
       });
       expect(calls.some((call) => call.method === "POST" && /\/update$/.test(call.path))).toBe(false);
+    });
+
+    it("create --verify for a park settles the immediate wake and reports an unconfirmed older daemon", async () => {
+      const id = "qitem-create-old-daemon";
+      const { deps, calls } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: { qitemId: id, state: "pending" } },
+        [`GET /api/queue/${id}`]: { status: 200, data: { qitemId: id, state: "pending", destinationSession: "bob@rig", lastNudgeResult: null, destinationClass: "pane-bound" } },
+      } });
+      let now = 0;
+      deps.deliveryVerify = { timeoutMs: 10, intervalMs: 1, sleep: async (ms) => { now += ms; }, now: () => now };
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--wake-after", "15m", "--verify", "--json"]);
+      const request = calls.find((call) => call.method === "POST" && call.path === "/api/queue/create")!;
+      expect(request.body).toMatchObject({ wakeAfterSeconds: 900, nudge: false });
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result.delivery).toMatchObject({ receiptSource: "terminal", outcome: "not-requested" });
+      expect(errors.join("\n")).toMatch(/did not confirm.*park options/i);
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
     it("create with both --body and --body-file errors with exit 1 + 3-part error + does NOT contact the daemon", async () => {

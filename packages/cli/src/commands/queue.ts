@@ -87,6 +87,8 @@ export interface DeliveryVerifyTarget {
   destinationSession?: string;
   /** false when the create passed --no-nudge: no wake was requested, so none is awaited. */
   nudge?: boolean;
+  /** A parked create suppresses the immediate terminal wake; its blocker or timer owns the next wake. */
+  parked?: boolean;
 }
 
 type QueueRow = Record<string, unknown>;
@@ -158,6 +160,7 @@ function terminalDeliveryResult(
   row: QueueRow,
   outcome: TerminalDeliveryResult["outcome"],
   waitedMs: number | null,
+  parked = false,
 ): TerminalDeliveryResult {
   const wakeResult = stringField(row, "lastNudgeResult");
   const claimedAt = stringField(row, "claimedAt");
@@ -177,7 +180,9 @@ function terminalDeliveryResult(
       ? `The member's trigger accepted the ring (${wakeResult}). That isn't pickup: its claim is.`
       : `Terminal receipt unconfirmed (${wakeResult}).`,
     "still-pending": waitedMs === null ? "No terminal receipt was recorded before the claim." : `No terminal receipt was recorded within ${waitedMs}ms.`,
-    "not-requested": "No terminal wake was requested (--no-nudge).",
+    "not-requested": parked
+      ? "No immediate terminal wake was sent for this parked row. See the park receipt for its blocker and any timer."
+      : "No terminal wake was requested (--no-nudge).",
   };
   const claimText = claim.observed
     ? `Claimed at ${claimedAt}${pickupState ? ` (pickup ${pickupState})` : ""}. A claim shows the seat took the item; it does not prove the body was read.`
@@ -287,7 +292,10 @@ export async function waitForDeliveryOutcome(
     } else {
       // --no-nudge requested no wake: there is no terminal receipt to wait for.
       const wakeResult = stringField(row, "lastNudgeResult");
-      const outcome = target.nudge === false ? "not-requested" : terminalWakeOutcome(wakeResult);
+      const outcome = target.parked
+        ? wakeResult !== null ? terminalWakeOutcome(wakeResult)
+          : stringField(row, "claimedAt") !== null ? "claimed" : "not-requested"
+        : target.nudge === false ? "not-requested" : terminalWakeOutcome(wakeResult);
       // Any recorded wake result (or an existing claim) settles the terminal side: a later pickup
       // is `rig queue show`'s to report. When the gateway may also post the row, its receipt is
       // awaited too. Only a missing receipt waits, up to the bound. Nothing here re-sends anything.
@@ -295,9 +303,9 @@ export async function waitForDeliveryOutcome(
       const terminalSettled = outcome === "not-requested" || wakeResult !== null || stringField(row, "claimedAt") !== null;
       const gatewaySettled = !gatewaySide || stringField(row, "deliveryOutcome") !== null;
       if (terminalSettled && gatewaySettled) {
-        return terminalDeliveryResult(qitemId, destination, row, outcome, null);
+        return terminalDeliveryResult(qitemId, destination, row, outcome, null, target.parked);
       }
-      if (timedOut) return terminalDeliveryResult(qitemId, destination, row, outcome, timeoutMs);
+      if (timedOut) return terminalDeliveryResult(qitemId, destination, row, outcome, timeoutMs, target.parked);
     }
     await sleep(intervalMs);
   }
@@ -1487,8 +1495,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         // stderr survives an interrupted wait without adding a second JSON
         // document to stdout. This is a request identity, NOT a commit receipt.
         console.error(`Queue create request ID: ${qitemId} (not proof of persistence). ${recovery}`);
+        const parkRequested = opts.blockedOn !== undefined || opts.wakeAfter !== undefined;
+        const requestNudge = parkRequested ? false : opts.nudge;
         const receipt = writeReceipt(opts.full, {
-          verb: "create", nudgeSuppressed: opts.nudge === false, idGiven: opts.id !== undefined, remoteHost: remoteHostOf(hostResolved.hostId),
+          verb: "create", nudgeSuppressed: opts.nudge === false, parked: parkRequested, idGiven: opts.id !== undefined, remoteHost: remoteHostOf(hostResolved.hostId),
         });
         const res: DaemonResponse<Record<string, unknown>> | Error = await client.post<Record<string, unknown>>("/api/queue/create", {
           ...(managedSource === undefined ? { sourceSession: source } : {}),
@@ -1509,7 +1519,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           blockedOn: opts.blockedOn,
           wakeAfterSeconds: opts.wakeAfter,
           targetRepo: opts.targetRepo,
-          nudge: opts.nudge,
+          nudge: requestNudge,
           ...(opts.returnRoute !== undefined ? { returnRoute: opts.returnRoute } : {}),
           // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (omitted for
           // plain local writes — the local path stays byte-identical).
@@ -1571,6 +1581,17 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
           }
+          const parkWarning = created?.parkWarning as { code?: unknown; message?: unknown } | undefined;
+          const parkReceipt = created?.parkReceipt as { confirmed?: unknown; state?: unknown; blockedOn?: unknown; wakeKind?: unknown; wakeAfterSeconds?: unknown } | undefined;
+          const parkMatches = parkRequested && created?.state === "blocked"
+            && (created?.blockedOn ?? null) === (opts.blockedOn ?? null)
+            && (opts.wakeAfter === undefined || (parkReceipt?.confirmed === true && parkReceipt.wakeAfterSeconds === opts.wakeAfter));
+          if (status < 400 && parkRequested && (parkWarning || !parkMatches)) {
+            const message = typeof parkWarning?.message === "string"
+              ? parkWarning.message
+              : "The daemon response did not confirm the requested park options. The row was saved; inspect its blocker and timer before relying on a wake.";
+            console.error(`Warning: ${message}`);
+          }
           // The address this work's questions come to, and the line to read them by.
           if (status < 400 && typeof created?.returnRoute === "string") {
             const route = created.returnRoute;
@@ -1586,7 +1607,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           if (opts.verify && status < 400) {
             const createdId = typeof created.qitemId === "string" ? created.qitemId : null;
             const delivery = createdId
-              ? await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), createdId, deps.deliveryVerify, { destinationSession: hostResolved.destination, nudge: opts.nudge })
+              ? await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), createdId, deps.deliveryVerify,
+                { destinationSession: hostResolved.destination, nudge: requestNudge, parked: parkRequested })
               : unreadableDeliveryResult(null, hostResolved.destination, {}, "create response did not include a qitem id; delivery cannot be correlated");
             await printWriteResult(client, opts.json ?? false, { ...created, qitemId: createdId, persisted: true, delivery }, status, receipt);
             return;

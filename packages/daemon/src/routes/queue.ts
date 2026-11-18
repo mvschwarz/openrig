@@ -313,10 +313,13 @@ export function queueRoutes(): Hono {
   function createInputRefusal(
     c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response },
     sourceSession: string,
-    body: { destinationSession?: string; body?: string; targetRepo?: string | null },
+    body: { destinationSession?: string; body?: string; targetRepo?: string | null; blockedOn?: unknown },
   ): Response | null {
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
+    if (body.blockedOn !== undefined && body.blockedOn !== null && typeof body.blockedOn !== "string") {
+      return c.json({ error: "invalid_blocked_on", field: "blockedOn", message: "blockedOn must be a string when supplied." }, 400);
+    }
     if (body.targetRepo) {
       const validation = validateTargetRepo(c, sourceSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
@@ -718,7 +721,7 @@ export function queueRoutes(): Hono {
       tier?: string;
       tags?: string[];
       expiresAt?: string;
-      blockedOn?: string;
+      blockedOn?: unknown;
       wakeAfterSeconds?: number;
       chainOfRecord?: string[];
       targetRepo?: string;
@@ -791,6 +794,8 @@ export function queueRoutes(): Hono {
     const refusal = createInputRefusal(c, sourceSession, body);
     if (refusal) return refusal;
 
+    const parkRequested = body.blockedOn != null || body.wakeAfterSeconds != null;
+
     // OPR.0.4.6.MH3 FR-2 (C1): cross-host CREATE. A registered remote host id
     // forwards the write to that host's daemon; the qitem lives in the origin
     // host's DB (origin-owns-the-record) and its OWN maybeNudge fires on its
@@ -809,6 +814,9 @@ export function queueRoutes(): Hono {
       const { hostId: _dropped, returnRoute: _route, returnRouteBasis: _basis, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
         ...rest,
+        // An older receiving daemon may ignore park fields. Suppress its ordinary
+        // create nudge so a requested park never wakes the owner immediately.
+        ...(parkRequested ? { nudge: false } : {}),
         ...(route && carried ? { returnRoute: carried, returnRouteBasis: route.basis } : {}),
         qitemId: mintedId,
         // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon is the origin,
@@ -826,11 +834,33 @@ export function queueRoutes(): Hono {
         && typeof (payload as { returnRoute?: unknown }).returnRoute === "string";
       const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
         ...(routeNotCarried && !returnedRoute ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
-      if (!added.length || payload === null || typeof payload !== "object" || Array.isArray(payload))
+      if (payload === null || typeof payload !== "object" || Array.isArray(payload))
         return c.json(payload, fwd.status as 200);
       const objectPayload = payload as Record<string, unknown>;
       const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
-      return c.json({ ...objectPayload, advisories: [...existingAdvisories, ...added] }, fwd.status as 200);
+      if (!parkRequested) return added.length
+        ? c.json({ ...objectPayload, advisories: [...existingAdvisories, ...added] }, fwd.status as 200)
+        : c.json(payload, fwd.status as 200);
+      const remoteParkReceipt = objectPayload.parkReceipt && typeof objectPayload.parkReceipt === "object" && !Array.isArray(objectPayload.parkReceipt)
+        ? objectPayload.parkReceipt as Record<string, unknown> : null;
+      const requestedBlocker = typeof body.blockedOn === "string" ? body.blockedOn : null;
+      const responseMatchesBlocker = objectPayload.state === "blocked" && (objectPayload.blockedOn ?? null) === requestedBlocker;
+      const timerConfirmed = body.wakeAfterSeconds == null || (remoteParkReceipt?.confirmed === true
+        && remoteParkReceipt.wakeAfterSeconds === body.wakeAfterSeconds);
+      const parkConfirmed = !objectPayload.parkWarning && responseMatchesBlocker && timerConfirmed;
+      const parkReceipt = remoteParkReceipt ?? {
+        confirmed: parkConfirmed,
+        state: typeof objectPayload.state === "string" ? objectPayload.state : null,
+        blockedOn: typeof objectPayload.blockedOn === "string" ? objectPayload.blockedOn : null,
+        wakeKind: null,
+        wakeAfterSeconds: null,
+      };
+      const parkWarning = objectPayload.parkWarning ?? (!parkConfirmed ? {
+        code: "qitem_park_not_confirmed",
+        message: `The receiving daemon did not confirm the requested park options. The row was returned as saved; inspect its blocker and timer before relying on a wake.`,
+      } : undefined);
+      return c.json({ ...objectPayload, parkReceipt: { ...parkReceipt, confirmed: parkConfirmed }, ...(parkWarning ? { parkWarning } : {}),
+        ...(added.length ? { advisories: [...existingAdvisories, ...added] } : {}) }, fwd.status as 200);
     }
 
     try {
@@ -845,7 +875,7 @@ export function queueRoutes(): Hono {
         tier: body.tier,
         tags: withRouteNotCarriedTag(body.tags, routeNotKept),
         expiresAt: body.expiresAt,
-        blockedOn: body.blockedOn,
+        blockedOn: typeof body.blockedOn === "string" ? body.blockedOn : undefined,
         wakeAfterSeconds: body.wakeAfterSeconds,
         chainOfRecord: body.chainOfRecord,
         targetRepo: body.targetRepo,
@@ -865,7 +895,18 @@ export function queueRoutes(): Hono {
         parkWithoutWakeAdvisory(item),
         // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
         routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
-      return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
+      const parkWake = parkRequested ? getRepo(c).getParkWakeStatus(item.qitemId) : null;
+      const parkWakeAfterSeconds = parkWake?.kind === "timer" ? parkWake.intervalSeconds ?? null : null;
+      const parkReceipt = parkRequested ? {
+        confirmed: !item.parkWarning && item.state === "blocked"
+          && item.blockedOn === (typeof body.blockedOn === "string" ? body.blockedOn : null)
+          && (body.wakeAfterSeconds == null || (parkWake?.kind === "timer" && parkWakeAfterSeconds === body.wakeAfterSeconds)),
+        state: item.state,
+        blockedOn: item.blockedOn,
+        wakeKind: parkWake?.kind ?? null,
+        wakeAfterSeconds: parkWakeAfterSeconds,
+      } : undefined;
+      return c.json({ ...item, ...(parkReceipt ? { parkReceipt } : {}), ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

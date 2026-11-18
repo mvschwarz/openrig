@@ -2455,6 +2455,8 @@ export class QueueRepository {
   async create(input: QueueCreateInput & QueueCreateParkInput, verifyBeforeCreate?: () => void): Promise<QueueItem & {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };
+    /** Response-only: an absorbed create cannot prove that the stored park matches this retry. */
+    parkWarning?: { code: "qitem_park_not_confirmed"; message: string };
   }> {
     // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
     // a LOCAL write stores the bare transport identity — no self-host suffix inside one
@@ -2527,9 +2529,23 @@ export class QueueRepository {
                   code: "qitem_body_not_saved",
                   message: `qitem ${input.qitemId} already exists with a different body. The supplied body was not saved; the existing row is returned unchanged. No new work or delivery was created.`,
                 },
+                ...(input.blockedOn != null || input.wakeAfterSeconds != null ? {
+                  parkWarning: {
+                    code: "qitem_park_not_confirmed",
+                    message: `qitem ${input.qitemId} already exists. The existing row is returned unchanged; this retry cannot confirm that its original blocker or timer matches the supplied park options. No second timer or delivery was created.`,
+                  },
+                } : {}),
               };
             }
-            return existing;
+            return input.blockedOn != null || input.wakeAfterSeconds != null
+              ? {
+                  ...existing,
+                  parkWarning: {
+                    code: "qitem_park_not_confirmed",
+                    message: `qitem ${input.qitemId} already exists. The existing row is returned unchanged; this retry cannot confirm that its original blocker or timer matches the supplied park options. No second timer or delivery was created.`,
+                  },
+                }
+              : existing;
           }
           throw new QueueRepositoryError(
             "qitem_id_reuse",

@@ -5,9 +5,11 @@ keeps, using today's queue commands.** The person speaks in sentences. They neve
 unless they ask.
 
 > **Status (0.7.0).** The kernel operator's role guidance points here: when a person asks it to watch something or
-> remind them, it reads this page (installed at `$OPENRIG_HOME/reference/keeping-a-watch.md`) first. Every step below
-> was exercised with the CLI on an isolated private daemon: create, set aside, fire, re-arm, list, change, stop, a
-> daemon restart and a handover. A native run with a real operator, install and channel has **not** been run yet.
+> remind them, it reads this page (installed at `$OPENRIG_HOME/reference/keeping-a-watch.md`) first. The earlier
+> procedure for create, set aside, fire, re-arm, list, change, stop, restart and handover was exercised with the CLI
+> on an isolated private daemon. The blocked-create command added below has CLI request and daemon route tests, but no
+> test runs this page's command from the CLI to a daemon. A native run with a real operator, install and channel has
+> **not** been run yet.
 > The usage warning's command and field names are checked against the served command on a test fixture; it hasn't
 > been run as a watch.
 

@@ -114,8 +114,61 @@ describe("queue routes", () => {
     expect(response.status).toBe(201);
     const result = await response.json();
     expect(result).toMatchObject({ state: "blocked", blockedOn: "external:remote-task" });
+    expect(result.parkReceipt).toMatchObject({ confirmed: true, state: "blocked", blockedOn: "external:remote-task", wakeKind: "timer", wakeAfterSeconds: 90 });
     expect(queueRepo.getParkWakeStatus(result.qitemId)).toMatchObject({ kind: "timer", live: true });
     expect(db.prepare("SELECT COUNT(*) AS count FROM outbox_entries").get()).toMatchObject({ count: 0 });
+  });
+
+  it("creates a timed park without a blocker and reports a typed gate with no wake", async () => {
+    const create = (body: Record<string, unknown>) => app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify(body),
+    });
+    const timed = await create({ destinationSession: "worker@rig", body: "Remind me", wakeAfterSeconds: 45, nudge: false });
+    expect(timed.status).toBe(201);
+    const timedRow = await timed.json() as Record<string, any>;
+    expect(timedRow).toMatchObject({ state: "blocked", blockedOn: null,
+      parkReceipt: { confirmed: true, state: "blocked", blockedOn: null, wakeKind: "timer", wakeAfterSeconds: 45 } });
+
+    const gate = await create({ destinationSession: "worker@rig", body: "Wait for outside event", blockedOn: "external:release", nudge: false });
+    expect(gate.status).toBe(201);
+    expect(await gate.json()).toMatchObject({ state: "blocked", blockedOn: "external:release",
+      parkReceipt: { confirmed: true, state: "blocked", blockedOn: "external:release", wakeKind: null, wakeAfterSeconds: null },
+      advisories: [expect.objectContaining({ code: "park_without_wake" })] });
+  });
+
+  it("same-ID create retries do not add a timer and do not confirm changed park options", async () => {
+    const create = (body: Record<string, unknown>) => app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify(body),
+    });
+    const base = { qitemId: "qitem-park-retry", destinationSession: "worker@rig", body: "Wait", blockedOn: "external:first", wakeAfterSeconds: 60, nudge: false };
+    const first = await create(base);
+    expect(first.status).toBe(201);
+    const firstRow = await first.json() as Record<string, any>;
+    expect(firstRow.parkReceipt).toMatchObject({ confirmed: true, wakeAfterSeconds: 60 });
+
+    const exact = await create(base);
+    expect(exact.status).toBe(201);
+    expect(await exact.json()).toMatchObject({ state: "blocked", blockedOn: "external:first",
+      parkReceipt: { confirmed: false },
+      parkWarning: { code: "qitem_park_not_confirmed" } });
+
+    const changed = await create({ ...base, blockedOn: "external:second", wakeAfterSeconds: 120 });
+    expect(changed.status).toBe(201);
+    expect(await changed.json()).toMatchObject({ state: "blocked", blockedOn: "external:first",
+      parkReceipt: { confirmed: false },
+      parkWarning: { code: "qitem_park_not_confirmed" } });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get(base.qitemId)).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+  });
+
+  it("rejects a non-string blockedOn with a field error before creating a row", async () => {
+    const response = await app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({ destinationSession: "worker@rig", body: "Invalid blocker", blockedOn: 42 }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_blocked_on", field: "blockedOn" });
+    expect(queueRepo.list()).toHaveLength(0);
   });
 
   it.each(["create", "handoff", "handoff-and-complete"])("keeps committed %s successful when the destination advisory throws", async (verb) => {
