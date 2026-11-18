@@ -79,6 +79,10 @@ export const TERMINAL_PROBE_MAX_INTERVAL_MS = 60_000;
 export class TerminalServerReachability {
   private readonly servers = new Map<string, TerminalServerState>();
   private readonly timers = new Map<string, { timer: ReturnType<typeof setTimeout>; delayMs: number }>();
+  /** The generation of each socket's current loss, new each time it becomes unreachable: a return probe's result
+   *  applies only to the loss it was checking. */
+  private readonly losses = new Map<string, number>();
+  private lossGeneration = 0;
   private readonly now: () => Date;
   private stopped = false;
 
@@ -114,6 +118,7 @@ export class TerminalServerReachability {
     }
     this.servers.set(socket, { socket, state: "unreachable", since: at, cause: observation.cause, lastCheckedAt: at,
       transitions: (current?.transitions ?? 0) + (current ? 1 : 0) });
+    this.losses.set(socket, ++this.lossGeneration);
     console.warn(`[tmux] The terminal server on ${socket} cannot be reached (${observation.cause}). Automatic delivery to `
       + "its seats is held until it answers again; the daemon does not restart it.");
     this.opts.onChange?.({ type: "tmux.server_gone", socket, cause: observation.cause, since: at });
@@ -145,6 +150,11 @@ export class TerminalServerReachability {
     for (const socket of [...this.timers.keys()]) this.cancelProbe(socket);
   }
 
+  /** The generation of the loss `socket` is in now, or undefined while it is not unreachable. */
+  private currentLoss(socket: string): number | undefined {
+    return this.servers.get(socket)?.state === "unreachable" ? this.losses.get(socket) : undefined;
+  }
+
   private isWatched(socket: string): boolean {
     try { return this.opts.watched ? this.opts.watched(socket) : true; } catch { return true; }
   }
@@ -164,7 +174,8 @@ export class TerminalServerReachability {
 
   private async runProbe(socket: string, delayMs: number): Promise<void> {
     this.timers.delete(socket);
-    if (this.stopped || this.servers.get(socket)?.state !== "unreachable") return;
+    const loss = this.currentLoss(socket);
+    if (this.stopped || loss === undefined) return;
     let observation: TerminalServerObservation | null = null;
     let unreadable: string | null = null;
     try {
@@ -174,11 +185,15 @@ export class TerminalServerReachability {
       const message = error instanceof Error ? error.message.replace(/^Command failed:[^\r\n]*\r?\n/, "") : String(error);
       unreadable = `the return probe failed: ${message.split(/\r?\n/, 1)[0]!.trim()}`;
     }
-    const current = this.servers.get(socket);
+    // The result belongs to the loss the probe was checking. If that loss ended while it ran (a return, or a return
+    // and a newer loss, recorded by any probe, this one's own observer included), the result is stale: it neither ends
+    // the newer loss's hold nor applies an older failure over a return. A newer loss has its own return probe.
+    if (this.currentLoss(socket) !== loss) return;
+    const current = this.servers.get(socket)!;
     if (!observation) {
       // Neither loss nor return is proven: keep the loss as history, read as unknown, and stop holding. No event and
       // no more probing; the next classified probe (a delivery's, or any other) records what it finds.
-      if (this.stopped || current?.state !== "unreachable") return;
+      if (this.stopped) return;
       const at = this.now().toISOString();
       const state: TerminalServerState = { socket, state: "unknown", since: at,
         cause: unreadable ?? "the return probe answered nothing", lastCheckedAt: at, transitions: current.transitions + 1,
@@ -193,6 +208,7 @@ export class TerminalServerReachability {
     if (this.servers.get(socket)?.state === "unreachable" && !this.isWatched(socket)) {
       // Its seats were stopped or detached meanwhile: an absent server with no seat on it is not a loss any more.
       this.servers.delete(socket);
+      this.losses.delete(socket);
       console.warn(`[tmux] No running seat is on ${socket} any more; the daemon stops watching that server.`);
       return;
     }

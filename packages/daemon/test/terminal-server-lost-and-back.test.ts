@@ -7,13 +7,13 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
-import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TmuxAdapter, type SessionProbe } from "../src/adapters/tmux.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
 import { RigDeliveryDrainStore } from "../src/domain/rig-delivery-drain.js";
 import type { SendResult } from "../src/domain/session-transport.js";
-import { TerminalServerReachability, type TerminalServerChange } from "../src/domain/terminal-server-reachability.js";
+import { TerminalServerReachability, type TerminalServerChange, type TerminalServerObservation } from "../src/domain/terminal-server-reachability.js";
 import { wireTerminalReachability } from "../src/domain/terminal-server-seats.js";
 import type { OutboxEntry } from "../src/domain/outbox-handler.js";
 import { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
@@ -223,6 +223,69 @@ describe("the record of a lost tmux server", () => {
       goneSince: "2026-01-01T00:00:05.000Z" });
     expect(reach.snapshot()).toMatchObject({ state: "ok", servers: [{ state: "reachable" }] });
     expect(reach.snapshot().servers[0]).not.toHaveProperty("lastLoss");
+    reach.stop();
+  });
+
+  /** The daemon's wiring over an adapter whose return probes the TEST settles, so another probe's observation can land
+   *  while one is pending. */
+  function pendingProbes(db: Database.Database, drains: RigDeliveryDrainStore) {
+    const pending: Array<{ resolve: (probe: SessionProbe) => void; reject: (error: unknown) => void }> = [];
+    const adapter: Pick<TmuxAdapter, "probeSession" | "serverObserver"> = {
+      probeSession: () => new Promise<SessionProbe>((resolve, reject) => { pending.push({ resolve, reject }); }),
+    };
+    const changes: TerminalServerChange[] = [];
+    const drainPendingWakeIntents = vi.fn(async (_opts: { eligible: (entry: OutboxEntry) => boolean }) => ({}));
+    const reach = wireTerminalReachability({ db, adapter, drains, socket: SOCKET, emit: change => { changes.push(change); },
+      drainPendingWakeIntents, retryPromptWakes: () => {} });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    return { reach, pending, changes, drainPendingWakeIntents, observe: (o: TerminalServerObservation) => adapter.serverObserver!(o) };
+  }
+
+  it("an unreadable return probe ends only the loss it was checking: a loss that began meanwhile stays held", async () => {
+    const db = database(); seats(db);
+    const drains = new RigDeliveryDrainStore(db);
+    const { reach, pending, changes, drainPendingWakeIntents, observe } = pendingProbes(db, drains);
+    observe({ reachable: false, cause: NO_SERVER }); // loss A
+    await vi.advanceTimersByTimeAsync(5_000); // A's return probe starts and is still pending
+    expect(pending).toHaveLength(1);
+    vi.setSystemTime(new Date("2026-01-01T00:00:07Z"));
+    observe({ reachable: true }); // the server answers again...
+    vi.setSystemTime(new Date("2026-01-01T00:00:08Z"));
+    observe({ reachable: false, cause: NO_SERVER }); // ...and goes again: loss B
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_back", "tmux.server_gone"]);
+    const passes = drainPendingWakeIntents.mock.calls.length; // the return's pass
+    pending[0]!.reject(new Error("Command failed: tmux has-session\nerror connecting to /x (Permission denied)"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(drains.holds("worker@test")).toBe(true);
+    expect(reach.snapshot().servers[0]).toMatchObject({ state: "unreachable", since: "2026-01-01T00:00:08.000Z", cause: NO_SERVER });
+    expect(drainPendingWakeIntents).toHaveBeenCalledTimes(passes); // nothing offered while B holds
+    await vi.advanceTimersByTimeAsync(5_000); // B keeps its own return probe
+    expect(pending).toHaveLength(2);
+    pending[1]!.reject(new Error("unreadable")); // B's own unreadable probe still ends B's hold
+    await vi.advanceTimersByTimeAsync(0);
+    expect(drains.holds("worker@test")).toBe(false);
+    expect(reach.snapshot().servers[0]).toMatchObject({ state: "unknown", lastLoss: { since: "2026-01-01T00:00:08.000Z" } });
+    reach.stop();
+  });
+
+  it("a return probe's classified result never applies an older failure over a return recorded meanwhile", async () => {
+    // The record's contract: its probe need not report through the adapter's observer, so another probe can record the
+    // return while this one is pending. (Through the adapter, its observer and its result come out together.)
+    const changes: TerminalServerChange[] = [];
+    const pending: Array<(observation: TerminalServerObservation) => void> = [];
+    const reach = new TerminalServerReachability({ onChange: c => changes.push(c),
+      probe: () => new Promise<TerminalServerObservation>(resolve => { pending.push(resolve); }) });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    reach.observe(SOCKET, { reachable: false, cause: NO_SERVER });
+    await vi.advanceTimersByTimeAsync(5_000); // the return probe starts and is still pending
+    reach.observe(SOCKET, { reachable: true }); // another probe records the return
+    pending[0]!({ reachable: false, cause: NO_SERVER }); // the pending probe answers with what it saw before
+    await vi.advanceTimersByTimeAsync(0);
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_back"]);
+    expect(reach.unreachable(SOCKET)).toBeNull();
+    expect(reach.snapshot()).toMatchObject({ state: "ok", servers: [{ state: "reachable" }] });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(pending).toHaveLength(1); // no probing while the server answers
     reach.stop();
   });
 });
