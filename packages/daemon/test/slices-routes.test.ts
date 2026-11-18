@@ -1718,7 +1718,7 @@ describe("GET /api/slices observed queue counts", () => {
     nodeMetadataFault.readHits = 0;
     nodeMetadataFault.selectionPath = null;
     nodeMetadataFault.selectionHits = 0;
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "slice-counts-"));
+    root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "slice-counts-")));
     docs = new Map();
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
@@ -2478,6 +2478,43 @@ describe("GET /api/slices observed queue counts", () => {
         const entries = await list(app);
         expect(entries.map(s => [s.name, s.slicePath])).toEqual([["physical-slice", physicalDir]]);
         expect(indexer.slicesRoot, "every consumer of the root field sees the same identity").toBe(path.join(root, "alpha", "missions"));
+      });
+
+      it("uses the current root for the refreshed list and its readiness", async () => {
+        addSlice("beta", "retargeted-mission", "retargeted-slice");
+        const { app, indexer } = route("alpha", false, configured());
+        const link = path.join(root, "beta", "link");
+        fs.mkdirSync(path.join(root, "beta", "sub"), { recursive: true });
+        fs.rmSync(link);
+        fs.symlinkSync(path.join(root, "beta", "sub"), link, "dir");
+
+        const refreshed = await app.request("/api/slices/refresh", { method: "POST" });
+        expect(refreshed.status).toBe(200);
+        const response = await app.request("/api/slices");
+        expect(response.status).toBe(200);
+        const body = await response.json() as { slices: Entry[]; missions: Record<string, { readiness?: unknown }> };
+        expect(body.slices.map((slice) => slice.name).sort()).toEqual(["lexical-slice", "retargeted-slice"]);
+        expect(body.missions["retargeted-mission"]?.readiness).toBeDefined();
+        expect(indexer.slicesRoot).toBe(path.join(root, "beta", "missions"));
+      });
+
+      it("resolves a root that was missing at startup after the target is created", async () => {
+        const missingConfigured = `${root}/beta/link/../later-missions`;
+        const { app, indexer } = route("alpha", false, missingConfigured);
+        const missing = await app.request("/api/slices");
+        expect(missing.status).toBe(503);
+
+        const missionRoot = path.join(root, "alpha", "later-missions", "created-mission");
+        write(path.join(missionRoot, "SPEC.md"), nodeBytes("M.CREATED", "active", "Mission"));
+        write(path.join(missionRoot, "slices", "created-slice", "SPEC.md"), nodeBytes("OPR.CREATED", "active", "Slice"));
+        const refreshed = await app.request("/api/slices/refresh", { method: "POST" });
+        expect(refreshed.status).toBe(200);
+        const response = await app.request("/api/slices");
+        expect(response.status).toBe(200);
+        const body = await response.json() as { slices: Entry[]; missions: Record<string, { readiness?: unknown }> };
+        expect(body.slices.map((slice) => slice.name)).toEqual(["created-slice"]);
+        expect(body.missions["created-mission"]?.readiness).toBeDefined();
+        expect(indexer.slicesRoot).toBe(path.join(root, "alpha", "later-missions"));
       });
 
       it("keeps the physical identity for an additional root and does not list the collapsed sibling", async () => {

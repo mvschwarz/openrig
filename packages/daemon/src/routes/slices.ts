@@ -51,120 +51,125 @@ export function slicesRoutes(): Hono {
   app.get("/", async (c) => {
     const deps = getDeps(c);
     if (!deps) return c.json({ error: "slices_indexer_unavailable" }, 503);
-    if (!deps.indexer.isReady()) {
-      return c.json({
-        error: "slices_root_not_configured",
-        hint: "Run rig config init-workspace, or set workspace.slices_root to workspace/missions. Supported shape: missions/<mission>/slices/<slice>.",
-      }, 503);
-    }
-    const filter = (c.req.query("filter") ?? "all").toLowerCase();
-    if (!VALID_FILTERS.has(filter as SliceStatus | "all")) {
-      return c.json({
-        error: "filter_invalid",
-        hint: `Unknown filter '${filter}'. Allowed: ${[...VALID_FILTERS].sort().join(", ")}.`,
-      }, 400);
-    }
-    const derivedParam = c.req.query("derived")?.toLowerCase();
-    if (derivedParam !== undefined && !VALID_DERIVED.has(derivedParam as SliceQueueDerivedState)) {
-      return c.json({
-        error: "derived_invalid",
-        hint: `Unknown derived state '${derivedParam}'. Allowed: ${[...SLICE_QUEUE_DERIVED_STATES].join(", ")}.`,
-      }, 400);
-    }
-    const derivedFilter = derivedParam as SliceQueueDerivedState | undefined;
-    const refresh = c.req.query("refresh");
-    if (refresh === "1" || refresh === "true") {
-      deps.indexer.invalidate();
-    }
-    // ONE HTTP request is ONE composite
-    // operation: the list rebuild, the boundToWorkflow per-slice get loop,
-    // and the mission sidecar share ONE membership batch (pre-scope, each
-    // uncached get built its own 2-scan batch: 2+2N total queue scans).
-    // One request-local policy reader for every readiness in this response
-    // (the listing and the project readiness below); never across requests.
-    const readPolicy = createProofPolicyRead();
-    const listing = deps.indexer.withMembershipBatch(() => {
-      const all = deps.indexer.list();
-      let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
-      // Workflows in Spec Library v0: optional lens filter — narrow to
-      // slices bound to a workflow_instance of <name>:<version>.
-      const boundToWorkflow = c.req.query("boundToWorkflow");
-      let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
-      if (boundToWorkflow) {
-        const colonIdx = boundToWorkflow.lastIndexOf(":");
-        if (colonIdx === -1) {
-          return c.json({
-            error: "boundToWorkflow_invalid",
-            hint: "Format is boundToWorkflow=<specName>:<specVersion>",
-          }, 400);
+    const operation = deps.indexer.withResolvedRoots(() => {
+      if (!deps.indexer.isReady()) {
+        return c.json({
+          error: "slices_root_not_configured",
+          hint: "Run rig config init-workspace, or set workspace.slices_root to workspace/missions. Supported shape: missions/<mission>/slices/<slice>.",
+        }, 503);
+      }
+      const filter = (c.req.query("filter") ?? "all").toLowerCase();
+      if (!VALID_FILTERS.has(filter as SliceStatus | "all")) {
+        return c.json({
+          error: "filter_invalid",
+          hint: `Unknown filter '${filter}'. Allowed: ${[...VALID_FILTERS].sort().join(", ")}.`,
+        }, 400);
+      }
+      const derivedParam = c.req.query("derived")?.toLowerCase();
+      if (derivedParam !== undefined && !VALID_DERIVED.has(derivedParam as SliceQueueDerivedState)) {
+        return c.json({
+          error: "derived_invalid",
+          hint: `Unknown derived state '${derivedParam}'. Allowed: ${[...SLICE_QUEUE_DERIVED_STATES].join(", ")}.`,
+        }, 400);
+      }
+      const derivedFilter = derivedParam as SliceQueueDerivedState | undefined;
+      const refresh = c.req.query("refresh");
+      if (refresh === "1" || refresh === "true") {
+        deps.indexer.invalidate();
+      }
+      // ONE HTTP request is ONE composite
+      // operation: the list rebuild, the boundToWorkflow per-slice get loop,
+      // and the mission sidecar share ONE membership batch (pre-scope, each
+      // uncached get built its own 2-scan batch: 2+2N total queue scans).
+      // One request-local policy reader for every readiness in this response
+      // (the listing and the project readiness below); never across requests.
+      const readPolicy = createProofPolicyRead();
+      const listing = deps.indexer.withMembershipBatch(() => {
+        const all = deps.indexer.list();
+        let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
+        // Workflows in Spec Library v0: optional lens filter — narrow to
+        // slices bound to a workflow_instance of <name>:<version>.
+        const boundToWorkflow = c.req.query("boundToWorkflow");
+        let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
+        if (boundToWorkflow) {
+          const colonIdx = boundToWorkflow.lastIndexOf(":");
+          if (colonIdx === -1) {
+            return c.json({
+              error: "boundToWorkflow_invalid",
+              hint: "Format is boundToWorkflow=<specName>:<specVersion>",
+            }, 400);
+          }
+          const specName = boundToWorkflow.slice(0, colonIdx);
+          const specVersion = boundToWorkflow.slice(colonIdx + 1);
+          const db = deps.indexer.db;
+          const before = filtered.length;
+          filtered = filtered.filter((slice) => {
+            // Re-resolve binding per slice. The indexer's list payload
+            // doesn't carry workflowName so we do the join here. v0 cost
+            // is bounded by the slice count + a small SQL per slice (the
+            // membership batch is shared across the whole request).
+            const sliceRecord = deps.indexer.get(slice.name);
+            if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
+            const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
+            return binding.primary?.workflowName === specName
+              && binding.primary?.workflowVersion === specVersion;
+          });
+          boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
         }
-        const specName = boundToWorkflow.slice(0, colonIdx);
-        const specVersion = boundToWorkflow.slice(colonIdx + 1);
-        const db = deps.indexer.db;
-        const before = filtered.length;
-        filtered = filtered.filter((slice) => {
-          // Re-resolve binding per slice. The indexer's list payload
-          // doesn't carry workflowName so we do the join here. v0 cost
-          // is bounded by the slice count + a small SQL per slice (the
-          // membership batch is shared across the whole request).
-          const sliceRecord = deps.indexer.get(slice.name);
-          if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
-          const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
-          return binding.primary?.workflowName === specName
-            && binding.primary?.workflowVersion === specVersion;
+        // Sort by lastActivityAt DESC (most recently touched first); slices
+        // without activity sort to the end.
+        filtered.sort(compareByActivityDesc);
+        const projectLookup = resolveSliceProjectLookup(c, deps.indexer);
+        const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
+          additionalSliceRoots: projectLookup.additionalSliceRoots,
+          complete: projectLookup.complete,
+          canonicalProjectId: projectLookup.canonicalProjectId,
         });
-        boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
-      }
-      // Sort by lastActivityAt DESC (most recently touched first); slices
-      // without activity sort to the end.
-      filtered.sort(compareByActivityDesc);
-      const projectLookup = resolveSliceProjectLookup(c, deps.indexer);
-      const queueCountsByPath = deps.indexer.observedQueueCounts(filtered, projectLookup.resolveProjectId, {
-        additionalSliceRoots: projectLookup.additionalSliceRoots,
-        complete: projectLookup.complete,
-        canonicalProjectId: projectLookup.canonicalProjectId,
+        const authored = deps.indexer.missionAuthoredStatuses();
+        // Queue-derived state (#2729) is read beside the authored status, from the
+        // same counts and with no further query. A `?derived=` filter narrows the
+        // already status-filtered rows; it never changes `status` or `rawStatus`.
+        const derivedStateOf = (slicePath: string): SliceQueueDerivedState =>
+          deriveSliceQueueState(queueCountsByPath.get(slicePath) ?? null);
+        if (derivedFilter) filtered = filtered.filter((s) => derivedStateOf(s.slicePath) === derivedFilter);
+        const parentRoots = new Map<string, ParentScopeNode[]>();
+        const parentWarnings: string[] = [];
+        for (const slice of filtered) {
+          if (!slice.missionId) continue;
+          const root = path.resolve(slice.slicePath, "..", "..", "..");
+          if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
+        }
+        const childMissions = (slicePath: string, missionId: string | null) => {
+          if (!missionId) return [];
+          const nodes = parentRoots.get(path.resolve(slicePath, "..", "..", "..")) ?? [];
+          const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === slicePath);
+          return node && nodes.filter((candidate) => candidate.id === node.id).length === 1 ? nodes.filter((candidate) => candidate.kind === "mission" && candidate.parent === node.id) : [];
+        };
+        return {
+          slices: filtered.map((s) => ({
+            ...s,
+            childMissions: childMissions(s.slicePath, s.missionId),
+            queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
+            derivedState: derivedStateOf(s.slicePath),
+            readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
+          })),
+          totalCount: filtered.length,
+          filter,
+          boundToWorkflow: boundDiagnostic,
+          parentWarnings,
+          // VM-005 (release-0.4.7): additive authored mission-status sidecar so
+          // chip surfaces can honor authored-wins precedence without a second
+          // round-trip. The `slices` array itself is byte-untouched.
+          missions: authored,
+        };
       });
-      const authored = deps.indexer.missionAuthoredStatuses();
-      // Queue-derived state (#2729) is read beside the authored status, from the
-      // same counts and with no further query. A `?derived=` filter narrows the
-      // already status-filtered rows; it never changes `status` or `rawStatus`.
-      const derivedStateOf = (slicePath: string): SliceQueueDerivedState =>
-        deriveSliceQueueState(queueCountsByPath.get(slicePath) ?? null);
-      if (derivedFilter) filtered = filtered.filter((s) => derivedStateOf(s.slicePath) === derivedFilter);
-      const parentRoots = new Map<string, ParentScopeNode[]>();
-      const parentWarnings: string[] = [];
-      for (const slice of filtered) {
-        if (!slice.missionId) continue;
-        const root = path.resolve(slice.slicePath, "..", "..", "..");
-        if (!parentRoots.has(root)) parentRoots.set(root, readParentScope(root, { onInvalid: (message) => parentWarnings.push(message) }));
-      }
-      const childMissions = (slicePath: string, missionId: string | null) => {
-        if (!missionId) return [];
-        const nodes = parentRoots.get(path.resolve(slicePath, "..", "..", "..")) ?? [];
-        const node = nodes.find((candidate) => candidate.kind === "slice" && candidate.path === slicePath);
-        return node && nodes.filter((candidate) => candidate.id === node.id).length === 1 ? nodes.filter((candidate) => candidate.kind === "mission" && candidate.parent === node.id) : [];
-      };
-      return {
-        slices: filtered.map((s) => ({
-          ...s,
-          childMissions: childMissions(s.slicePath, s.missionId),
-          queueCounts: queueCountsByPath.get(s.slicePath) ?? null,
-          derivedState: derivedStateOf(s.slicePath),
-          readiness: readSliceReadiness(s.slicePath, undefined, readPolicy),
-        })),
-        totalCount: filtered.length,
-        filter,
-        boundToWorkflow: boundDiagnostic,
-        parentWarnings,
-        // VM-005 (release-0.4.7): additive authored mission-status sidecar so
-        // chip surfaces can honor authored-wins precedence without a second
-        // round-trip. The `slices` array itself is byte-untouched.
-        missions: authored,
-      };
+      return { listing, slicesRoot: deps.indexer.slicesRoot, readPolicy };
     });
+    if (operation instanceof Response) return operation;
+    const { listing, slicesRoot, readPolicy } = operation;
     if (listing instanceof Response) return listing;
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
-    const readiness = await readProjectReadinessAsync(deps.indexer.slicesRoot, readPolicy);
+    const readiness = await readProjectReadinessAsync(slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
       ...listing.missions[m.name],
       authoredStatus: m.historicalStatus ?? listing.missions[m.name]?.authoredStatus ?? null,

@@ -415,8 +415,9 @@ export class SliceIndexer {
   /** `projectId` and its declared former ids: the tags this indexer's project membership accepts. */
   readonly projectIds: readonly string[];
   readonly missionId?: string;
-  readonly slicesRoot: string;
-  readonly additionalSliceRoots: string[];
+  private readonly configuredSlicesRoot: string;
+  private readonly configuredAdditionalSliceRoots: string[];
+  private resolvedRootsForOperation: string[] | null = null;
   readonly dogfoodEvidenceRoot: string | null;
   /** Workflows in Spec Library v0: exposed read-only so the slices
    *  route's `boundToWorkflow` lens filter can call
@@ -445,11 +446,32 @@ export class SliceIndexer {
     this.projectId = opts.projectId;
     this.projectIds = opts.projectId ? [opts.projectId, ...(opts.projectAliases ?? [])] : [];
     this.missionId = opts.missionId;
-    this.slicesRoot = configuredRootIdentity(opts.slicesRoot);
-    this.additionalSliceRoots = (opts.additionalSliceRoots ?? []).map(configuredRootIdentity);
+    this.configuredSlicesRoot = opts.slicesRoot;
+    this.configuredAdditionalSliceRoots = opts.additionalSliceRoots ?? [];
     this.dogfoodEvidenceRoot = opts.dogfoodEvidenceRoot;
     this.db = opts.db;
     this.cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  }
+
+  /** Current filesystem identity of the configured root, resolved at read time. */
+  get slicesRoot(): string {
+    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots())[0] ?? "";
+  }
+
+  /** Current filesystem identities of the configured additional roots. */
+  get additionalSliceRoots(): string[] {
+    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots()).slice(1);
+  }
+
+  /** Keep one configured-root snapshot across a synchronous compound read. */
+  withResolvedRoots<T>(fn: () => T): T {
+    if (this.resolvedRootsForOperation !== null) return fn();
+    this.resolvedRootsForOperation = this.resolveConfiguredRoots();
+    try {
+      return fn();
+    } finally {
+      this.resolvedRootsForOperation = null;
+    }
   }
 
   /** Returns true when any configured slice root exists on disk. */
@@ -1142,7 +1164,8 @@ export class SliceIndexer {
    *  these, so the walk, the duplicate check and the published paths name the same
    *  directory, and a client sees absolute paths whatever its working directory. */
   private sliceRoots(additionalRoots: readonly string[] = []): string[] {
-    const roots = [this.slicesRoot, ...this.additionalSliceRoots, ...additionalRoots].filter((root) => root.length > 0);
+    const configuredRoots = this.resolvedRootsForOperation ?? this.resolveConfiguredRoots();
+    const roots = [...configuredRoots, ...additionalRoots].filter((root) => root.length > 0);
     const seen = new Set<string>();
     const out: string[] = [];
     for (const root of roots) {
@@ -1152,6 +1175,10 @@ export class SliceIndexer {
       out.push(identity);
     }
     return out;
+  }
+
+  private resolveConfiguredRoots(): string[] {
+    return [this.configuredSlicesRoot, ...this.configuredAdditionalSliceRoots].map(configuredRootIdentity);
   }
 
   private toListEntry(location: SliceLocation, served: Set<string> | null): SliceListEntry {

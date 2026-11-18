@@ -221,16 +221,16 @@ type QueueDerivedState = (typeof QUEUE_DERIVED_STATES)[number];
 
 const QUEUE_DERIVED_HELP = "blocked (an open item is blocked) > in-progress > pending (open items, in that precedence) | idle (matched items, none open; not \"nobody is working on it\") | none (no matched items) | unknown (counts could not be read)";
 
-function physicalSlicePath(slicePath: string): string {
+function physicalSlicePath(slicePath: string): string | null {
   try {
-    return fs.realpathSync(slicePath);
+    return fs.realpathSync.native(slicePath);
   } catch {
-    return path.resolve(slicePath);
+    return null;
   }
 }
 
 /** Why a listed slice shows `unknown`, when the daemon did answer for it. */
-type QueueStateCause = "missing" | "unrecognized" | "unreadable-counts";
+type QueueStateCause = "missing" | "unrecognized" | "unreadable-counts" | "unresolved-path";
 type QueueStateEntry = { state: QueueDerivedState; cause: QueueStateCause | null };
 
 /** Queue-derived state of each slice, read from the daemon's one `GET /api/slices` list. The join is by physical
@@ -245,7 +245,7 @@ async function readQueueDerivedStates(): Promise<{ states: Map<string, QueueStat
   try {
     const status = await getDaemonStatus(realDeps());
     if (!daemonMayAnswer(status)) return unreadable(statusGuardMessage(status).fact);
-    const client = new DaemonClient(getDaemonUrl(status));
+    const client = new DaemonClient();
     if (!(await client.isLocalInstance())) {
       return unreadable("Could not confirm that the daemon is this home's own daemon (this home's identity is missing, or the daemon's instance id did not match or could not be read), so its slice paths cannot be matched to local slices.");
     }
@@ -267,7 +267,11 @@ async function readQueueDerivedStates(): Promise<{ states: Map<string, QueueStat
         : !derived ? "unrecognized"
         : derived === "unknown" ? "unreadable-counts"
         : null;
-      states.set(physicalSlicePath(row.slicePath), { state: derived ?? "unknown", cause });
+      const physicalPath = physicalSlicePath(row.slicePath);
+      if (physicalPath === null) {
+        return unreadable("Could not establish the physical identity of a slice path in the daemon list.");
+      }
+      states.set(physicalPath, { state: derived ?? "unknown", cause });
     }
     return { states, warnings: [], listed: true };
   } catch (err) {
@@ -314,7 +318,7 @@ function buildSliceLsCommand(): Command {
         const lines: string[] = [];
         let considered = 0;
         let unlisted = 0;
-        const causes: Record<QueueStateCause, number> = { missing: 0, unrecognized: 0, "unreadable-counts": 0 };
+        const causes: Record<QueueStateCause, number> = { missing: 0, unrecognized: 0, "unreadable-counts": 0, "unresolved-path": 0 };
         for (const mission of missions) {
           const slices = listSlices(mission, state);
           for (const slice of slices) {
@@ -323,9 +327,11 @@ function buildSliceLsCommand(): Command {
             // derived filter), so one a filter hides is still explained and another mission's slices are not counted.
             let derivedState: QueueDerivedState | null = null;
             if (queue) {
-              const entry = queue.states.get(physicalSlicePath(slice.absPath));
+              const physicalPath = physicalSlicePath(slice.absPath);
+              const entry = physicalPath === null ? undefined : queue.states.get(physicalPath);
               considered++;
-              if (queue.listed) {
+              if (physicalPath === null) causes["unresolved-path"]++;
+              else if (queue.listed) {
                 if (!entry) unlisted++;
                 else if (entry.cause) causes[entry.cause]++;
               }
@@ -351,6 +357,7 @@ function buildSliceLsCommand(): Command {
           ...(causes.missing > 0 ? [`The daemon reported no queue state for ${causes.missing} ${of} (an older daemon does not report it). Those slices show unknown.`] : []),
           ...(causes.unrecognized > 0 ? [`The daemon reported a queue state this CLI does not know for ${causes.unrecognized} ${of} (a newer daemon?). Those slices show unknown.`] : []),
           ...(causes["unreadable-counts"] > 0 ? [`The daemon could not read the queue counts for ${causes["unreadable-counts"]} ${of}. Those slices show unknown.`] : []),
+          ...(causes["unresolved-path"] > 0 ? [`Could not establish the physical identity of ${causes["unresolved-path"]} ${of}. Those slices show unknown.`] : []),
           ...(unlisted > 0 ? [`${unlisted} ${of} are not in the daemon's list (a same-name slice can hide one, or the daemon can serve another workspace). Those slices show unknown.`] : []),
         ];
         if (!json) for (const warning of warnings) process.stderr.write(`Warning: ${warning}\n`);

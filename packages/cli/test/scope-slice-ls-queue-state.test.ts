@@ -14,6 +14,8 @@ const daemon = vi.hoisted(() => ({
   status: { state: "running", healthy: true, pid: 1234, port: 7433 } as Record<string, unknown>,
   respond: null as null | (() => { status: number; data: unknown } | Error),
   gets: [] as string[],
+  clientDefaultUrl: "http://localhost:7433",
+  clientUrls: [] as string[],
   /** The instance-identity check: true only when the daemon is this home's own daemon. */
   local: true,
   identityChecks: 0,
@@ -33,6 +35,9 @@ vi.mock("../src/client.js", async () => {
   return {
     ...actual,
     DaemonClient: class {
+      constructor(baseUrl?: string) {
+        daemon.clientUrls.push(baseUrl ?? daemon.clientDefaultUrl);
+      }
       async isLocalInstance(): Promise<boolean> {
         daemon.identityChecks++;
         return daemon.local;
@@ -117,6 +122,8 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     ws = seedWorkspace();
     daemon.status = { state: "running", healthy: true, pid: 1234, port: 7433 };
     daemon.gets.length = 0;
+    daemon.clientDefaultUrl = "http://localhost:7433";
+    daemon.clientUrls.length = 0;
     daemon.local = true;
     daemon.identityChecks = 0;
     daemon.respond = () => ({
@@ -180,6 +187,14 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     expect(parsed!.warnings![0]).toContain("reported no queue state for 1 of 5 slices");
     expect(parsed!.warnings![1]).toContain("1 of 5 slices are not in the daemon's list");
     expect(daemon.identityChecks, "one instance-identity check before the list is trusted").toBe(1);
+  });
+
+  it("keeps the selected HTTPS daemon URL after the status probe", async () => {
+    daemon.clientDefaultUrl = "https://daemon.example.test:7443";
+    const { result } = await ls("--with-queue");
+    expect(result.exitCode).toBe(0);
+    expect(daemon.clientUrls).toEqual(["https://daemon.example.test:7443"]);
+    expect(daemon.gets).toEqual(["/api/slices?filter=all"]);
   });
 
   it("gives no warning when the daemon lists every slice with a state", async () => {
@@ -282,7 +297,7 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
   });
 
   it("resolves slice paths only when queue state is asked for", async () => {
-    const spy = vi.spyOn(fs, "realpathSync");
+    const spy = vi.spyOn(fs.realpathSync, "native");
     const slicePathCalls = () => spy.mock.calls.filter(([p]) => typeof p === "string" && p.includes(`${path.sep}slices${path.sep}`));
     try {
       await ls();
@@ -291,6 +306,28 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
       await ls("--with-queue");
       expect(slicePathCalls().length).toBeGreaterThanOrEqual(SLICES.length);
     } finally { spy.mockRestore(); }
+  });
+
+  it("shows unknown with a warning when a local slice path has no physical identity", async () => {
+    const localPath = ws.slicePath("01-stuck");
+    const daemonAlias = path.join(ws.workRoot, "daemon-alias");
+    fs.symlinkSync(localPath, daemonAlias, "dir");
+    daemon.respond = () => ({ status: 200, data: { slices: [{ slicePath: daemonAlias, derivedState: "pending" }] } });
+    const originalRealpath = fs.realpathSync.native.bind(fs.realpathSync);
+    const realpath = vi.spyOn(fs.realpathSync, "native").mockImplementation(((input: fs.PathLike) => {
+      if (String(input) === localPath) {
+        const error = new Error("permission denied") as NodeJS.ErrnoException;
+        error.code = "EACCES";
+        throw error;
+      }
+      return originalRealpath(input);
+    }) as typeof fs.realpathSync.native);
+    try {
+      const { parsed } = await ls("--with-queue");
+      expect(derivedByName(parsed!.slices)["01-stuck"]).toBe("unknown");
+      expect(parsed!.warnings?.join(" ")).toContain("Could not establish the physical identity of 1 of 5 slices");
+      expect(realpath).toHaveBeenCalledWith(localPath);
+    } finally { realpath.mockRestore(); }
   });
 
   it("matches the daemon's slice by physical path when it reports the path through a symlink", async () => {
