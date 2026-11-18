@@ -162,7 +162,16 @@ export function seatPoolCanReceive(
   agents: readonly SeatPoolAgentFacts[],
   agent: SeatPoolAgentFacts,
 ): boolean {
-  return !spec.drain && isFree(agent) && !seatPoolAboveMax(spec, agents).has(agent.slotNumber);
+  return canReceive(spec, seatPoolAboveMax(spec, agents), agent);
+}
+
+/** The check behind seatPoolCanReceive, with the above-max set the planner computes once per plan. */
+function canReceive(
+  spec: Pick<SeatPoolPlanSpec, "drain">,
+  aboveMax: ReadonlySet<number>,
+  agent: SeatPoolAgentFacts,
+): boolean {
+  return !spec.drain && isFree(agent) && !aboveMax.has(agent.slotNumber);
 }
 
 /** How many more agents `max` leaves room for: every slot on record but a `drained` one takes room. */
@@ -187,8 +196,9 @@ export function planSeatPool(spec: SeatPoolPlanSpec, state: SeatPoolPlanState, n
     .sort((a, b) => Date.parse(a.waitingSince) - Date.parse(b.waitingSince) || compareIds(a.qitemId, b.qitemId));
 
   // Oldest row first, each to the lowest-numbered free agent not taken yet. Under `drain` nothing moves.
+  const aboveMax = seatPoolAboveMax(spec, agents);
   const receivers = agents
-    .filter((agent) => seatPoolCanReceive(spec, agents, agent))
+    .filter((agent) => canReceive(spec, aboveMax, agent))
     .sort((a, b) => a.slotNumber - b.slotNumber);
   const receiving = new Set<number>();
   for (const [index, row] of movable.entries()) {

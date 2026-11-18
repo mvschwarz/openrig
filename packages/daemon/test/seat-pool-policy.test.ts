@@ -57,11 +57,12 @@ beforeEach(() => {
 describe("seat-pool planner: dispatch", () => {
   it("moves rows waiting past dispatch_after_s to free agents oldest first, ignoring priority, and counts the rest as demand", () => {
     const free = agent();
-    const older = rows(1, MODEL, 900);
     // A newer row with a higher priority still waits behind the older one: the planner reads no priority.
     const urgent = rows(1, MODEL, 300).map((row) => ({ ...row, priority: "urgent" }));
     const newest = rows(1, MODEL, 120);
     const fresh = rows(1, MODEL, 30); // not waiting yet: still the model's to take
+    // Created last, so its id sorts last: it moves first by age alone.
+    const older = rows(1, MODEL, 900);
     const result = plan(spec({ max: 9 }), state({ agents: [free], pending: [...newest, ...fresh, ...urgent, ...older] }));
     expect(result.intents).toEqual<SeatPoolIntent[]>([
       { kind: "dispatch", qitemId: older[0]!.qitemId, from: MODEL, slotNumber: free.slotNumber },
