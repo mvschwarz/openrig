@@ -26,6 +26,7 @@ import { validateResumeToken, validateSessionFileFormat } from "../domain/resume
 import { loadCommunityHarnessPreset } from "../domain/community-harness-presets.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import { isClaudeRateLimitHook } from "../domain/provider/claude-interruption.js";
 import {
   PiUsageEntriesStore, hasPiUsageChargesTable, hasPiUsageEntriesTable, validPiProviderCharge, validPiUsageFact,
 } from "../domain/pi-usage-entries-store.js";
@@ -36,7 +37,7 @@ import {
 // ALREADY-NORMALIZED state is the input (one event-name parser, no twin).
 
 /** Translate a recorded hook activity into oracle evidence. Returns null for states the
- *  oracle should not consume (unknown = noise, never evidence). needs_input becomes
+ *  oracle should not consume (unknown = noise, never evidence), except a typed usage limit. needs_input becomes
  *  COUNT+reason on the hooks rung — never an activity value (the taxonomy's binding
  *  exclusion); the turn's working/idle stays whatever other evidence says. */
 export function evidenceFromHookActivity(input: {
@@ -75,6 +76,12 @@ export function evidenceFromHookActivity(input: {
   // A runner's exit report clears what its last turn said: the seat is no longer at a prompt or mid-turn.
   if (input.activity.rawEvent === "Stop" && isRunnerExit(input.activity.rawSubtype, input.runtime, input.activity.communityRunner === true)) {
     return { ...base, activity: "unknown", needsInput: { count: 0, reason: null } };
+  }
+  // A typed usage limit (#2917, #99) is evidence, not noise: it ends the turn, and it never counts as waiting on a person.
+  // The oracle holds it until a newer turn starts, so an older working report can't outlast it.
+  if (isClaudeRateLimitHook(input.runtime, input.activity.rawEvent, input.activity.rawSubtype)) {
+    return { ...base, activity: "unknown", needsInput: { count: 0, reason: null },
+      usageLimit: { resetsAt: input.activity.resetsAt ?? null } };
   }
   switch (input.activity.state) {
     case "running":

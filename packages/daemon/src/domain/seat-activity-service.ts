@@ -384,6 +384,7 @@ export class SeatActivityService {
     seat.permissions.clear();
     seat.claudeToolBatches.clear();
     seat.permissionEvidence = null;
+    seat.usageLimit = null;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
     seat.promotion.clear();
@@ -574,6 +575,12 @@ export class SeatActivityService {
       seat.permissionEvidence = null;
       seat.sources.delete(`${runtime}:permission-prompt`);
     }
+    // A typed usage limit holds until a strictly newer turn starts: a working boundary from the hooks or the seat's own
+    // status. An idle prompt, a redraw or the limit's own menu is not a new turn.
+    if (evidence.usageLimit) seat.usageLimit = { observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt };
+    else if (seat.usageLimit && evidence.activity === "working"
+        && (evidence.rung === "lifecycle-hooks" || evidence.rung === "self-report")
+        && Date.parse(evidence.observedAt) > Date.parse(seat.usageLimit.observedAt)) seat.usageLimit = null;
     seat.sources.set(evidence.sourceId, {
       latest: evidence,
       latestActivity: evidence.activity !== undefined ? evidence : prior?.latestActivity ?? null,
@@ -617,6 +624,7 @@ export class SeatActivityService {
     seat.permissions.clear();
     seat.claudeToolBatches.clear();
     seat.permissionEvidence = null;
+    seat.usageLimit = null;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
     seat.promotion.clear();
@@ -629,6 +637,7 @@ export class SeatActivityService {
       needsInput: { count: 0, reason: null },
       needsInputEvidence: null,
       backgroundWork: null, // a new occupant never inherits the old one's shell
+      usageLimit: null, // nor the old one's usage limit
       decidedBy: null,
       seq: seat.arbitrated.seq + 1, // the swap IS a visible event
       changedAt: at,
@@ -705,6 +714,7 @@ export class SeatActivityService {
         permissionRevision: 0,
         permissionPolling: false,
         permissionEvidence: null,
+        usageLimit: null,
         trust: new Map(),
         promotion: new Map(),
         contradictionSinceMs: null,
@@ -716,6 +726,7 @@ export class SeatActivityService {
           needsInput: { count: 0, reason: null },
           needsInputEvidence: null,
           backgroundWork: null,
+          usageLimit: null,
           decidedBy: null,
           seq: 0,
           changedAt: this.now().toISOString(),
@@ -976,6 +987,15 @@ export class SeatActivityService {
       }
     }
 
+    // A typed usage limit ended the last turn and no newer turn has started: nothing older says what the seat does now,
+    // and a limit is neither work nor rest, so the seat reads unknown with the limit and its stated reset beside it.
+    const usageLimit = seat.usageLimit && this.rungTrust(seat, "lifecycle-hooks") === "authoritative"
+      ? { rung: "lifecycle-hooks" as const, observedAt: seat.usageLimit.observedAt, resetsAt: seat.usageLimit.resetsAt } : null;
+    if (usageLimit) {
+      nextActivity = "unknown";
+      decidedBy = "lifecycle-hooks";
+    }
+
     // Codex permission hooks need probe confirmation after grace; Claude hooks latch
     // attention until a seen prompt disappears or the same actor's tool batch completes. Unavailable capture fails safe.
     // Other prompts retain their existing rung arbitration.
@@ -1013,13 +1033,15 @@ export class SeatActivityService {
     const changed = nextActivity !== seat.arbitrated.activity
       || needsInput.count !== seat.arbitrated.needsInput.count
       || needsInput.reason !== seat.arbitrated.needsInput.reason
-      || (needsInputEvidence?.rung ?? null) !== (seat.arbitrated.needsInputEvidence?.rung ?? null);
+      || (needsInputEvidence?.rung ?? null) !== (seat.arbitrated.needsInputEvidence?.rung ?? null)
+      || (usageLimit?.observedAt ?? null) !== (seat.arbitrated.usageLimit?.observedAt ?? null);
     seat.arbitrated = {
       ...seat.arbitrated,
       activity: nextActivity,
       needsInput,
       needsInputEvidence,
       backgroundWork,
+      usageLimit,
       decidedBy,
       seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,
@@ -1093,6 +1115,8 @@ interface SeatLadderState {
   permissionRevision: number;
   permissionPolling: boolean;
   permissionEvidence: ArbitratedSeatState["needsInputEvidence"];
+  /** The typed usage limit that ended the last turn, held until a newer turn starts (see reportEvidence). */
+  usageLimit: { observedAt: string; resetsAt: string | null } | null;
   sessionName: string;
   retired: boolean;
   inventory: AdapterRungInventory | null;
