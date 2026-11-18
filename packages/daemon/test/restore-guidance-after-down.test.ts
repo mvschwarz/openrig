@@ -385,9 +385,27 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       expect.objectContaining({ cwd }));
     expect(fs.existsSync(cwd), "after the restore").toBe(false);
     expect(result.warnings.join("\n")).toContain(`activity-hooks: not written, because ${cwd} doesn't exist on this machine`);
+    expect(result.nodes.find((n) => n.logicalId === "lead")?.restoreGaps).toEqual(
+      ["claude_activity_hooks: the saved hooks could not be reapplied: skipped activity-hooks."]);
     await new ContextMonitor(db, { readAndNormalize: () => null, readCodexAndNormalize: () => null } as never, claude).pollOnce();
     expect(provision).toHaveBeenCalledWith(expect.objectContaining({ cwd }));
     expect(fs.existsSync(cwd), "after one context poll").toBe(false);
+  });
+
+  // Saved hooks the restore couldn't reapply are a restore gap, as for the current selection: with its guidance whole, the
+  // seat would otherwise read fully restored although its saved hooks weren't reapplied. Here the install's relay is
+  // missing, so they're skipped.
+  it("saved activity hooks the restore skips are a restore gap, so the rig doesn't read fully restored", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const claude = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: { ...nodeFs, copyFile: replaceFile, homedir: os.homedir(), folderPresent },
+      stateDir: path.join(tmp, "openrig"), activityRelayPath: path.join(tmp, "no-relay.cjs"),
+      claudeHooksManifestPath: path.join(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json") });
+    const { result } = await downThenUpExisting(rigId, guidanceFile, { realClaude: claude });
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("resumed");
+    expect(lead?.guidanceGaps).toBeUndefined();
+    expect(lead?.restoreGaps).toEqual(["claude_activity_hooks: the saved hooks could not be reapplied: skipped activity-hooks."]);
+    expect(result.rigResult).toBe("partially_restored");
   });
 
   // The seat-skills line comes back only with the person's yes, as at a start: after a no, an exact resume leaves the file

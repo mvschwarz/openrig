@@ -627,7 +627,7 @@ export function hookMeansNeedsInput(rawEvent: string | null | undefined, rawSubt
 
 /** What the store's latest hook for a seat says: its current state, or, past the freshness window, what its
  *  retained raw event means. Generation-mismatched or unresolvable evidence says nothing ("unknown"). */
-function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
+export function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
   if (activity?.evidenceSource !== "runtime_hook") return "unknown";
   if (activity.stale !== true) return activity.state;
   return activity.reason === "stale_runtime_hook"

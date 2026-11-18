@@ -1096,3 +1096,22 @@ describe("a wake escalation about the seat's own prompt is not that seat's work"
     expect(seat.obligations.unhealthyHeldCount).toBe(1);
   });
 });
+
+describe("#3315 a parked owner on a tmux server the daemon can't reach", () => {
+  it("reserves nothing and skips quietly while the server is gone, whatever else the seat reads as, and reminds after", async () => {
+    const store = new RowStore();
+    let gone = true;
+    const policy = (seat = parkedSeat()) => makeParkedOwnerConsumerPolicy({ ...makeDeps([seat], store),
+      terminalServerUnreachable: () => gone } as ParkedOwnerConsumerDeps);
+    for (let i = 0; i < 100; i++) {
+      expect(await policy().evaluate(makeJob())).toMatchObject({ action: "skip", reason: "terminal-server-unreachable" });
+    }
+    // A seat whose process went with the server reads indeterminate: still the quiet terminal skip, not a loud one.
+    expect(await policy(parkedSeat({ parked: "indeterminate" })).evaluate(makeJob()))
+      .toMatchObject({ action: "skip", reason: "terminal-server-unreachable" });
+    expect(store.appended).toEqual([]);
+    expect(store.nudges).toEqual([]);
+    gone = false;
+    expect((await policy().evaluate(makeJob())).action).toBe("send");
+  });
+});

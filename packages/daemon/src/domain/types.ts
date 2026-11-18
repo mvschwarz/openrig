@@ -49,6 +49,9 @@ export interface Node {
   processLimitsError?: string;
   /** #2940: the seat declares keep_alive (resolved member > profile > agent defaults); present only when on. */
   keepAlive?: boolean;
+  /** #3416 (3): the seat's status line throttle in seconds (spec `statusline_throttle`, `rig seat set-statusline-throttle`);
+   *  null/absent = none. */
+  statuslineThrottle?: number | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -183,6 +186,10 @@ export type RigEvent =
   | { type: "binding.updated"; rigId: string; nodeId: string }
   | { type: "session.status_changed"; rigId: string; nodeId: string; status: string }
   | { type: "session.detached"; rigId: string; nodeId: string; sessionName: string }
+  // #3315 — the daemon's tmux server stopped or started answering (terminal-server-reachability.ts): one event per
+  // change, never per attempt. The daemon stays up through both; neither event says a seat's session is gone.
+  | { type: "tmux.server_gone"; socket: string; cause: string; since: string }
+  | { type: "tmux.server_back"; socket: string; since: string; goneSince: string }
   // S5 (OPR.0.5.4.7) — seat-lifecycle audit trail: the three supported seat verbs each persist
   // their mutation with actor + reason in the same transaction as the mutation itself.
   | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
@@ -192,6 +199,7 @@ export type RigEvent =
       slot: "account_home" | "member_env"; revision: number; operationId: string; original: string | null; occupantGeneration: string | null;
       reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
+  | { type: "node.statusline_throttle_changed"; rigId: string; nodeId: string; logicalId: string; from: number | null; to: number | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.claude_auto_mode_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -1290,6 +1298,8 @@ export interface LegacyRigSpecNode {
   launchWrapper?: string[];
   /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1420,6 +1430,14 @@ export interface RigSpecPodMember {
   launchWrapper?: string[];
   /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
   processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
+  /** #3395: the seat pool this member is the model of (`pool:`), stored on its node; `null` is `pool: {}`, which
+   *  clears a stored block on re-apply; absent leaves it unchanged. */
+  pool?: import("./seat-pool-spec.js").SeatPoolSpec | null;
+  /** #3395: a `pool:` block that can't be used, as authored. It raised an advisory, is stored on the node as it is (it
+   *  holds that pool rather than removing it) and is never serialized back into a spec. */
+  unusablePool?: { raw: unknown };
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;
