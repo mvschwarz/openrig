@@ -177,7 +177,7 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
       "01-stuck": "active", "02-moving": "active", "03-closed": "placeholder", "04-unlisted": "active", "05-older-daemon": "active",
     });
     expect(parsed!.warnings, "an absent state and an unlisted slice are each explained, not silent").toHaveLength(2);
-    expect(parsed!.warnings![0]).toContain("reported no queue state for 1 of 4 slices");
+    expect(parsed!.warnings![0]).toContain("reported no queue state for 1 of 5 slices");
     expect(parsed!.warnings![1]).toContain("1 of 5 slices are not in the daemon's list");
     expect(daemon.identityChecks, "one instance-identity check before the list is trusted").toBe(1);
   });
@@ -224,7 +224,7 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
 
   it.each([
     { label: "a relative path", slicePath: () => path.join("alpha", "slices", "01-stuck") },
-    { label: "a dot-relative path", slicePath: () => path.join(".", "alpha", "slices", "01-stuck") },
+    { label: "a dot-relative path", slicePath: () => "./alpha/slices/01-stuck" },
     { label: "an empty path", slicePath: () => "" },
   ])("rejects the whole list for $label, never resolving it against the CLI's working directory", async ({ slicePath }) => {
     // The daemon and the CLI share this home but start in different directories. The daemon's relative path named a
@@ -256,6 +256,29 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     const blocked = await ls("--derived", "blocked");
     expect(blocked.parsed!.slices).toEqual([]);
     expect(blocked.parsed!.warnings).toHaveLength(1);
+  });
+
+  it("warns only about the slices of the listing it shows, not about another mission's slices", async () => {
+    // A second mission whose slices the daemon cannot read must not put a warning on a clean listing of the first.
+    writeFile(path.join(ws.missionsRoot, "beta", "README.md"), "---\nid: OPR.2\n---\n# beta\n");
+    writeFile(path.join(ws.missionsRoot, "beta", "slices", "01-other", "README.md"), "---\nid: OPR.2.1\nstatus: active\n---\n# other\n");
+    writeFile(path.join(ws.missionsRoot, "beta", "slices", "02-other", "README.md"), "---\nid: OPR.2.2\nstatus: active\n---\n# other\n");
+    daemon.respond = () => ({ status: 200, data: { slices: [
+      ...fullList().data.slices,
+      { slicePath: path.join(ws.missionsRoot, "beta", "slices", "01-other"), derivedState: "unknown" },
+      { slicePath: path.join(ws.missionsRoot, "beta", "slices", "02-other") },
+    ] } });
+    const alpha = await ls("--with-queue", "--mission", "alpha");
+    expect(alpha.parsed!.count).toBe(SLICES.length);
+    expect(alpha.parsed!.warnings, "alpha's slices all have a known state").toBeUndefined();
+    const beta = await ls("--with-queue", "--mission", "beta");
+    expect(beta.parsed!.warnings).toHaveLength(2);
+    expect(beta.parsed!.warnings!.join(" ")).toContain("could not read the queue counts for 1 of 2 slices");
+    expect(beta.parsed!.warnings!.join(" ")).toContain("reported no queue state for 1 of 2 slices");
+    // A derived filter that hides the affected slices keeps their warning.
+    const hidden = await ls("--derived", "blocked", "--mission", "beta");
+    expect(hidden.parsed!.slices).toEqual([]);
+    expect(hidden.parsed!.warnings).toHaveLength(2);
   });
 
   it("resolves slice paths only when queue state is asked for", async () => {

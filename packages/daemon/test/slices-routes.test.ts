@@ -2452,6 +2452,50 @@ describe("GET /api/slices observed queue counts", () => {
       for (const entry of entries) expect(path.isAbsolute(entry.slicePath), entry.slicePath).toBe(true);
     });
 
+    describe("a configured root with a symlink followed by a parent component", () => {
+      // The kernel applies `..` to the directory the link points at; `path.resolve` drops it from the text first.
+      //   <root>/beta/link -> <root>/alpha/sub        (the link's target)
+      //   <root>/beta/link/../missions  names  <root>/alpha/missions   (physical, holds "physical-slice")
+      //   the same text collapsed        names  <root>/beta/missions    (a different directory, holds "lexical-slice")
+      let physicalDir: string;
+      const configured = () => `${root}/beta/link/../missions`;
+
+      beforeEach(() => {
+        physicalDir = addSlice("alpha", "shipping", "physical-slice");
+        addSlice("beta", "shipping", "lexical-slice");
+        fs.mkdirSync(path.join(root, "alpha", "sub"), { recursive: true });
+        fs.symlinkSync(path.join(root, "alpha", "sub"), path.join(root, "beta", "link"));
+        fs.writeFileSync(path.join(root, "alpha", "missions", "MARKER-PHYSICAL.txt"), "");
+        // Node's own fs.realpathSync collapses `..` as text first; the native call and the kernel's readdir do not.
+        expect(fs.realpathSync.native(configured()), "the fixture must make the two readings differ").toBe(path.join(root, "alpha", "missions"));
+        expect(fs.readdirSync(configured()), "the kernel reads the physical root").toContain("MARKER-PHYSICAL.txt");
+        expect(fs.readdirSync(path.resolve(configured())), "the text-collapsed root is another directory").not.toContain("MARKER-PHYSICAL.txt");
+        expect(path.resolve(configured())).toBe(path.join(root, "beta", "missions"));
+      });
+
+      it("walks, publishes and reports the physical root, not the text-collapsed one", async () => {
+        const { app, indexer } = route("alpha", false, configured());
+        const entries = await list(app);
+        expect(entries.map(s => [s.name, s.slicePath])).toEqual([["physical-slice", physicalDir]]);
+        expect(indexer.slicesRoot, "every consumer of the root field sees the same identity").toBe(path.join(root, "alpha", "missions"));
+      });
+
+      it("keeps the physical identity for an additional root and does not list the collapsed sibling", async () => {
+        const { app } = route("alpha", false, path.join(root, "alpha", "missions"), [configured()]);
+        const entries = await list(app);
+        expect(entries.map(s => s.name)).toEqual(["physical-slice"]);
+      });
+
+      it("preserves the missing-root outcome instead of falling back to the collapsed sibling", async () => {
+        // <root>/alpha/nothing does not exist; <root>/beta/nothing does, with a slice folder, and is where a
+        // collapsed reading would look.
+        fs.mkdirSync(path.join(root, "beta", "nothing", "shipping", "slices", "decoy"), { recursive: true });
+        const response = await route("alpha", false, `${root}/beta/link/../nothing`).app.request("/api/slices");
+        expect(response.status, "a missing root is not ready, as before").toBe(503);
+        expect(await response.json()).toMatchObject({ error: "slices_root_not_configured" });
+      });
+    });
+
     it("reports unknown, not none, when the queue table cannot be read", async () => {
       addSlice("alpha", "shipping", "live");
       row("live-0", "pending", scope("live"));

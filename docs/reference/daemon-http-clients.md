@@ -328,15 +328,20 @@ What reads these declarations:
   `idle` or `none`, when `queueCounts` is `null` because the counts could not be read. `?derived=blocked|in-progress|pending|idle|none|unknown`
   keeps only rows in that state, case-insensitively and after the `filter` status filter, so
   `?filter=active&derived=blocked` narrows the authored active slices to the blocked ones. An unknown value
-  answers 400 `derived_invalid`. Every row's `slicePath` is absolute (a root configured with a relative spelling is
-  resolved by the daemon). `rig scope slice ls --with-queue` and `--derived <state>` read this list once and
+  answers 400 `derived_invalid`. Every row's `slicePath` is absolute: the daemon identifies each configured root by
+  its filesystem identity (a relative spelling is made absolute, and a root containing `..` is resolved by the
+  filesystem, so `link/../missions` names `missions` beside the directory the link points at, not beside the
+  link), and uses that one identity to walk the root, to drop duplicates and to publish paths. A missing or
+  unreadable root behaves as before. `rig scope slice ls --with-queue` and `--derived <state>` read this list once and
   join by physical slice path, only when it can confirm the daemon is this home's own (its `/healthz` instance id
   matches this home's); a daemon it cannot confirm gives `unknown` for every slice, because the same absolute
   path can name different workspaces. It rejects the whole list if any row's path is empty or not absolute,
   because it would resolve against the CLI's working directory. Each reason for `unknown` has its own warning:
   an unreachable daemon or one it cannot confirm, a malformed list (discarded whole), a row without
   `derivedState` (an older daemon), a `derivedState` value the CLI does not know (a newer daemon), a row the
-  daemon itself reports as `unknown` (its counts could not be read), and a local slice absent from the list.
+  daemon itself reports as `unknown` (its counts could not be read), and a local slice absent from the list. The
+  per-slice warnings count only the slices of the listing the command shows (after `--mission` and `--state`,
+  before `--derived`), so another mission's slices never add a warning.
 
 
 ## Resume one banked original conversation

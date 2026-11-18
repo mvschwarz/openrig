@@ -85,6 +85,27 @@ function canonicalPhysicalPath(absPath: string): string | null {
   }
 }
 
+/** The absolute identity of a configured root, used for the walk, the duplicate check and every
+ *  published path. A relative spelling is made absolute from the working directory. The kernel
+ *  applies a `..` component to the directory a symlink points at, but `path.resolve` removes it
+ *  from the text first, so `/work/link/../missions` and `/work/missions` can be two directories.
+ *  A root with a `..` component is therefore identified by the operating system's realpath
+ *  (`fs.realpathSync.native`; the JavaScript `fs.realpathSync` also resolves the path as text
+ *  first, so it would repeat the error). A root without `..` is normalized as text only, which
+ *  is exact for it and keeps a symlinked root under its configured name. If a root with `..`
+ *  cannot be resolved (missing, unreadable) its absolute spelling is kept as written, so the
+ *  filesystem still decides what a read of it does, as before. */
+function configuredRootIdentity(root: string): string {
+  if (root.length === 0) return root;
+  const absolute = path.isAbsolute(root) ? root : process.cwd() + path.sep + root;
+  if (!absolute.split(/[\\/]+/).includes("..")) return path.resolve(absolute);
+  try {
+    return fs.realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
 function parseTypedQueueScope(rawTags: string | null | undefined): {
   projects: Set<string>;
   missions: Set<string>;
@@ -419,8 +440,8 @@ export class SliceIndexer {
   constructor(opts: SliceIndexerOpts) {
     this.projectId = opts.projectId;
     this.missionId = opts.missionId;
-    this.slicesRoot = opts.slicesRoot;
-    this.additionalSliceRoots = opts.additionalSliceRoots ?? [];
+    this.slicesRoot = configuredRootIdentity(opts.slicesRoot);
+    this.additionalSliceRoots = (opts.additionalSliceRoots ?? []).map(configuredRootIdentity);
     this.dogfoodEvidenceRoot = opts.dogfoodEvidenceRoot;
     this.db = opts.db;
     this.cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
@@ -1109,18 +1130,19 @@ export class SliceIndexer {
     }
   }
 
-  /** The distinct, absolute roots to scan. A root configured with a relative spelling (the legacy
-   *  `OPENRIG_SLICES_ROOT` string, for one) is resolved here once, so every slice path the indexer
-   *  produces is absolute and means the same slice to any client, whatever its working directory. */
+  /** The distinct, absolute roots to scan, each by its filesystem identity (see
+   *  `configuredRootIdentity`). Every slice path the indexer produces is built from
+   *  these, so the walk, the duplicate check and the published paths name the same
+   *  directory, and a client sees absolute paths whatever its working directory. */
   private sliceRoots(additionalRoots: readonly string[] = []): string[] {
     const roots = [this.slicesRoot, ...this.additionalSliceRoots, ...additionalRoots].filter((root) => root.length > 0);
     const seen = new Set<string>();
     const out: string[] = [];
     for (const root of roots) {
-      const resolved = path.resolve(root);
-      if (seen.has(resolved)) continue;
-      seen.add(resolved);
-      out.push(resolved);
+      const identity = configuredRootIdentity(root);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      out.push(identity);
     }
     return out;
   }
