@@ -83,7 +83,10 @@ export function deriveRestoreAttemptReceipt(
       return intendedIds.has(event.nodeId) ? [{ ...event, seq: row.seq, createdAt: row.created_at }] : [];
     });
     const recovered = new Set(reconciliations.map((event) => event.nodeId));
-    const currentNodes = intendedRoster.map((intended) => {
+    // #3395: a seat pool agent the restore kept down (drained) has no outcome on purpose; it is not an unrecorded failure.
+    // Restore matches it by logical id, as it launches seats, so the receipt does too.
+    const keptDown = new Set((originalResult.keptDown ?? []).map((node) => node.logicalId));
+    const currentNodes = intendedRoster.filter((intended) => !keptDown.has(intended.logicalId)).map((intended) => {
       const node = originalByNode.get(intended.nodeId) ?? {
         nodeId: intended.nodeId,
         logicalId: intended.logicalId,

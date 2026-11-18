@@ -184,6 +184,8 @@ async function renderExistingRestore(
     nodes: result.result.nodes,
     // Seats this restore didn't start, with why; rig up names the ones still in the rig.
     excludedNodes: result.result.excludedNodes,
+    // Seats this restore left stopped on purpose (a drained seat pool agent), outside `nodes` and the rig result.
+    keptDown: result.result.keptDown,
     warnings: [...joinedWarning, ...(capturedCurrentState
       ? [staleSnapshot
           ? "The selected restore snapshot did not match current occupant state; captured current DB state as auto-rehydrate snapshot for reboot recovery."
