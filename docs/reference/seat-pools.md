@@ -10,8 +10,9 @@ The daemon accepts `seat-pool` as a watchdog policy and has the code that regist
 code yet, and the watchdog engine does not run the policy:
 
 - launching a rig, re-applying a spec and starting the daemon register no `seat-pool` job;
-- a `seat-pool` job registered by hand (`rig watchdog register --policy seat-pool`) ends `terminal` with
-  `unknown_policy:seat-pool` at its first evaluation, without reading or changing anything.
+- a `seat-pool` job registered by hand (`rig watchdog register --policy seat-pool`) is marked `terminal` with
+  `unknown_policy:seat-pool` at its first evaluation, and that evaluation is recorded in the job's history; it does
+  not read the pool or touch its agents.
 
 The job is armed by a later change. Until then a `pool` block is stored and validated, and nothing else happens.
 
