@@ -31,7 +31,16 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       if (candidates.ids.length > 1) {
         targetId = undefined;
         for (const id of candidates.ids) {
-          const snapshot = await client.get(`/api/rigs/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`);
+          let snapshot: Awaited<ReturnType<typeof client.get>>;
+          try {
+            snapshot = await client.get(`/api/rigs/${encodeURIComponent(id)}/snapshots/${encodeURIComponent(snapshotId)}`);
+          } catch (err) {
+            // The lookup failed BEFORE any restore was submitted: nothing was
+            // restored, and the outcome is not unknown — say so plainly.
+            console.error(`Snapshot lookup failed before any restore was submitted (${(err as Error).message}). Nothing was restored; safe to retry.`);
+            process.exitCode = 1;
+            return;
+          }
           if (snapshot.status === 404) continue;
           if (snapshot.status >= 400) {
             console.error(`Failed to resolve snapshot (HTTP ${snapshot.status}). Nothing was restored.`);
