@@ -1159,8 +1159,6 @@ export class QueueRepository {
    *     best-effort {@link maybeNudge} when no store is attached (P34 made that
    *     fallback real code rather than a promise in a comment). */
   private outbox: OutboxHandler | undefined;
-  /** Whether queue_transitions has identity_provenance; once it does, it keeps it. */
-  private transitionsStamped = false;
   // A first clear may recover durable refusals observed before startup. Later clears need
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
@@ -1385,9 +1383,9 @@ export class QueueRepository {
       return Number(entry.outboxId.slice(CLAIM_OVERRIDDEN_WAKE_PREFIX.length)) === close?.transition_id;
     }
     if (row?.state !== "pending" || row.destination_session !== entry.destinationSession) return false;
-    // A reroute that stages a wake replaces the row's earlier wakes: its create wake, an earlier reroute's wake and an
-    // earlier unpark's wake. Without this, a row that comes back to a seat it was rerouted away from would get the old
-    // wake again beside the new one.
+    // A reroute that stages a wake replaces the row's earlier wakes for that seat: its create wake, an earlier reroute's
+    // wake and an earlier unpark's wake. Without this, a row that comes back to a seat it was rerouted away from would
+    // get the old wake again beside the new one.
     if (this.wakeReplacedByReroute(entry)) return false;
     const prefix = `${WAKE_INTENT_PREFIX}blocker-`;
     if (!entry.outboxId.startsWith(prefix)) return true;
@@ -1402,55 +1400,51 @@ export class QueueRepository {
 
   /** Whether a wake's outcome no longer belongs on its row, so the row's last wake result is left as it is (the wake's
    *  own outbox entry is still settled). Only once the row has been rerouted: the row now waits on another seat, or a
-   *  later reroute's wake has replaced this one. Any reroute counts, one that staged no wake included, so a send for
-   *  the seat the row left does not overwrite what the move recorded (a wake that was not retained, for one). A row
-   *  that was never rerouted keeps today's bookkeeping. */
+   *  later reroute's wake has replaced this one. Any reroute counts for the first, one that staged no wake included, so
+   *  a send for the seat the row left does not overwrite what the move recorded (a wake that was not retained, for one).
+   *  A row that was never rerouted keeps today's bookkeeping. */
   private wakeOutcomeStale(entry: Pick<OutboxEntry, "outboxId" | "auditPointer" | "destinationSession">): boolean {
-    if (!entry.auditPointer) return false;
-    const latest = this.latestReroute(entry.auditPointer);
-    if (latest === null) return false;
+    if (!entry.auditPointer || !this.wasRerouted(entry.auditPointer)) return false;
     const row = this.db.prepare("SELECT destination_session FROM queue_items WHERE qitem_id = ?")
       .get(entry.auditPointer) as { destination_session: string } | undefined;
     if (!row || row.destination_session !== entry.destinationSession) return true;
-    return this.wakeReplacedByReroute(entry, latest);
+    return this.wakeReplacedByReroute(entry);
   }
 
-  /** Whether a reroute has replaced this wake: the row's latest reroute staged a wake, after this wake was staged. Only
-   *  the create's wake and the wakes keyed on a transition (a reroute's, an unpark's) are ordered this way. A latest
-   *  reroute that staged no wake (no `wake` option, or a full held-message quota) replaces nothing, so after it the
-   *  wakes addressed to the seat the row waits on apply again, as they do on a row that was never rerouted. */
-  private wakeReplacedByReroute(
-    entry: Pick<OutboxEntry, "outboxId" | "auditPointer">,
-    latest?: { transitionId: number; stagedWake: boolean } | null,
-  ): boolean {
-    if (!entry.auditPointer) return false;
+  /** Whether a reroute has replaced this wake: a reroute staged a wake for the same seat after this wake was staged.
+   *  Only the create's wake and the wakes keyed on a transition (a reroute's, an unpark's) are ordered this way. Once
+   *  replaced, a wake stays replaced, whatever moves follow. A move that staged no wake (no `wake` option, or a full
+   *  held-message quota) replaces nothing, so a row it brings back to a seat finds that seat's wakes as they were. */
+  private wakeReplacedByReroute(entry: Pick<OutboxEntry, "outboxId" | "auditPointer" | "destinationSession">): boolean {
+    const qitemId = entry.auditPointer;
+    if (!qitemId) return false;
     // The create's wake comes before any transition of its row; the others carry the transition they are keyed on.
+    const createWake = `${WAKE_INTENT_PREFIX}${qitemId}`;
     let staged: number;
-    if (entry.outboxId === `${WAKE_INTENT_PREFIX}${entry.auditPointer}`) staged = 0;
+    if (entry.outboxId === createWake) staged = 0;
     else if (entry.outboxId.startsWith(FALLBACK_WAKE_PREFIX)) staged = Number(entry.outboxId.slice(FALLBACK_WAKE_PREFIX.length));
     else if (entry.outboxId.startsWith(BLOCKER_WAKE_PREFIX)) staged = Number(entry.outboxId.slice(BLOCKER_WAKE_PREFIX.length));
     else return false;
     if (!Number.isInteger(staged)) return false;
-    const reroute = latest === undefined ? this.latestReroute(entry.auditPointer) : latest;
-    return reroute !== null && reroute.stagedWake && staged < reroute.transitionId;
+    const reroutes = this.db.prepare(
+      "SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND destination_session = ? AND substr(outbox_id, 1, ?) = ?",
+    ).all(qitemId, entry.destinationSession, FALLBACK_WAKE_PREFIX.length, FALLBACK_WAKE_PREFIX) as Array<{ outbox_id: string }>;
+    return reroutes.some(({ outbox_id }) => {
+      if (outbox_id === createWake) return false; // the row's own create wake, whatever its id
+      const transition = Number(outbox_id.slice(FALLBACK_WAKE_PREFIX.length));
+      return Number.isInteger(transition) && transition > staged;
+    });
   }
 
-  /** The row's latest reroute, from its transitions (every routeToFallback move writes one, with a wake or not), and
-   *  whether that reroute staged a wake; null when the row was never rerouted. A reroute's transition is written
-   *  in-process, so it has no identity provenance; a transition the update route wrote with the same actor and note is
-   *  not a reroute (the rule fallbackLineStart uses). */
-  private latestReroute(qitemId: string): { transitionId: number; stagedWake: boolean } | null {
-    const stamped = this.transitionsStamped ||= (this.db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>)
-      .some((c) => c.name === "identity_provenance");
-    const move = this.db.prepare(
-      `SELECT transition_id FROM queue_transitions WHERE qitem_id = ? AND actor_session = ? AND substr(transition_note, 1, ?) = ?
-        ${stamped ? "AND identity_provenance IS NULL" : ""} ORDER BY transition_id DESC LIMIT 1`,
-    ).get(qitemId, FALLBACK_ACTOR, "fallback-routed: ".length, "fallback-routed: ") as { transition_id: number } | undefined;
-    if (!move) return null;
-    const wakeId = `${FALLBACK_WAKE_PREFIX}${move.transition_id}`;
-    const staged = wakeId !== `${WAKE_INTENT_PREFIX}${qitemId}`
-      && this.db.prepare("SELECT 1 FROM outbox_entries WHERE outbox_id = ? AND audit_pointer = ?").get(wakeId, qitemId) !== undefined;
-    return { transitionId: move.transition_id, stagedWake: staged };
+  /** Whether the row has been rerouted, from its transitions: every routeToFallback move writes one, with a wake or
+   *  not. A reroute's transition is written in-process, so it has no identity provenance; a transition the update route
+   *  wrote with the same actor and note is not a reroute (the rule fallbackLineStart uses). */
+  private wasRerouted(qitemId: string): boolean {
+    if (!this.hasQueueTransitionsTable) return false;
+    return this.db.prepare(
+      `SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND actor_session = ? AND substr(transition_note, 1, ?) = ?
+        ${this.hasTransitionProvenanceColumn ? "AND identity_provenance IS NULL" : ""} LIMIT 1`,
+    ).get(qitemId, FALLBACK_ACTOR, "fallback-routed: ".length, "fallback-routed: ") !== undefined;
   }
 
   /** A wake's source and urgency at the seat's level: the trigger decides the source; the row's priority (urgent or
