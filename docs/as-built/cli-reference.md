@@ -21,9 +21,12 @@ The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-The inventory includes groups and the hidden `restore apply` and `exec connector` commands.
-Aliases do not add command objects; short and long spellings of one option do not add option
-objects. Commander-generated help is additional. The snapshot covers the `exec`, `environment`
+There are **93 top-level registrations**, **457 registered command objects**
+below `rig` (including groups and the hidden `restore apply` and `exec connector` commands), and
+**1,535 explicitly registered option objects**, including the root version
+option. Aliases do not add command objects; short and long spellings of one option do not add option
+objects. Commander-generated help is additional. These counts were taken from `createProgram()` at
+`e16972d7`, not from a deployed release. The snapshot covers the `exec`, `environment`
 and `network` families, the `roster` and `telemetry` rows, `host edit`, `host remove`,
 `terminal attach`, the `terminal open --all` and `terminal close --all` flags, the herdr-app
 provider's `terminal close` row and `--app-home` options, and `scope slice close --in-place`.
