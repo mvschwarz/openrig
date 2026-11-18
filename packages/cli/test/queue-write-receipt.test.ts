@@ -333,19 +333,23 @@ describe("queue write receipt (output.compact)", () => {
     });
 
     it("an unconfirmed park stays a request in the compact receipt", async () => {
+      const id = "qitem-20261010180000-aaaa";
       const message = "An older receiving daemon may save this row as pending, where work can start early.";
       const data = row({
+        qitemId: id,
+        sourceSession: "stub@rig",
         state: "pending",
         parkReceipt: { confirmed: false, state: "pending", blockedOn: null, wakeKind: null, wakeAfterSeconds: null },
         parkWarning: { code: "qitem_park_not_confirmed", message },
       });
-      const out = await create(["--wake-after", "15m"], data);
+      const out = await create(["--id", id, "--wake-after", "15m"], data);
       expect(out).toContain("park: not confirmed");
       expect(out).toContain("wake: park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside");
       expect(out).toContain(`WARNING: ${message}`);
 
       logs = [];
-      const json = JSON.parse(await create(["--wake-after", "15m", "--json"], data)) as Row;
+      const json = JSON.parse(await create(["--id", id, "--wake-after", "15m", "--json"], data)) as Row;
+      expect(json).toMatchObject({ qitemId: id, persisted: true });
       expect(json.parkReceipt).toMatchObject({ confirmed: false, state: "pending" });
       expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
       expect(json.parkWarning.message).toContain(message);
@@ -354,6 +358,43 @@ describe("queue write receipt (output.compact)", () => {
         evidence: "suppressed",
         detail: "park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside",
       });
+    });
+
+    it("compact UNKNOWN create output contains only receipt fields and a body summary", async () => {
+      const id = "qitem-20261010180000-aaaa";
+      const rawBody = "RAW-RECEIVED-BODY-MUST-NOT-PRINT";
+      const rawRowMarker = "RAW-ROW-FIELD-MUST-NOT-PRINT";
+      const data = row({
+        qitemId: "qitem-20261010180100-bbbb",
+        body: rawBody,
+        rawRowMarker,
+        parkReceipt: { confirmed: true, state: "blocked", blockedOn: "raw-blocker", wakeKind: "raw-wake", wakeAfterSeconds: 15 },
+        parkWarning: { code: "raw-warning", message: "raw park warning" },
+      });
+
+      const out = await create(["--id", id, "--wake-after", "15m", "--json"], data);
+      const result = JSON.parse(out) as Row;
+      expect(Object.keys(result)).toEqual(["qitemId", "createOutcome", "createWarning", "parkReceipt", "parkWarning"]);
+      expect(result).toMatchObject({ qitemId: id, createOutcome: "unknown", parkReceipt: { confirmed: false } });
+      expect(Object.keys(result.parkReceipt as Row)).toEqual(["confirmed"]);
+      expect(Object.keys(result.parkWarning as Row)).toEqual(["code", "message", "fields", "observed"]);
+
+      const createWarning = result.createWarning as Row;
+      expect(Object.keys(createWarning)).toEqual(["code", "message", "fields", "observed"]);
+      expect(createWarning.fields).toEqual(expect.arrayContaining(["qitemId", "body"]));
+      const observed = createWarning.observed as Row;
+      expect(Object.keys(observed).every((key) => ["qitemId", "sourceSession", "destinationSession", "state", "body"].includes(key))).toBe(true);
+      expect(observed.body).toMatchObject({
+        byteLength: Buffer.byteLength(rawBody),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      expect(Object.keys(observed.body as Row)).toEqual(["byteLength", "sha256"]);
+      expect(out).not.toContain(rawBody);
+      expect(out).not.toContain(rawRowMarker);
+      expect(out).not.toContain(BODY);
+      expect(result).not.toHaveProperty("body");
+      expect(result).not.toHaveProperty("summary");
+      expect(process.exitCode).toBe(1);
     });
 
     it("staging failed: the row saved, the wake did not", async () => {
