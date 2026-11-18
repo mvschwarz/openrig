@@ -1748,8 +1748,8 @@ for a session the person keeps open.
 - **Only if the person asks for it.** They create the task, or ask you to, and they choose its permission mode.
 - **Create it by asking Claude in a Code-tab session,** for example: "Create a local scheduled task for this folder,
   named openrig-pickup, that runs every 2 minutes, with this prompt: …". Desktop's forms take nothing more often
-  than hourly, while Claude can set a schedule as often as every minute (Anthropic's docs). Claude's scheduling tool
-  has no working-folder field, so the prompt names the folder.
+  than hourly, while Claude can set a schedule as often as every minute (Anthropic's docs). In OpenRig's test, the
+  task Claude created had no folder setting, so name the folder in the prompt. The task's Edit form can also set it.
 - **The prompt**, with this seat's identity from the one-time attach:
 
 ```text
@@ -1763,8 +1763,8 @@ with the answer (rig queue update <id> --state done --closure-reason no-follow-o
 - **Then click Run now once** on the task's page, and answer its permission prompts with "always allow". A later run
   that stops at a prompt waits in its own session until someone answers it (Anthropic's docs).
 - **What OpenRig's test measured** (one test: Claude Desktop 5.11492.5 with Claude Code 2.1.325, OpenRig 0.7.13,
-  macOS, Auto permission mode): a task every 2 minutes picked up two items 51 s and 116 s after they were created,
-  each in a fresh session.
+  macOS, Auto permission mode): a task every 2 minutes closed two items 51 s and 116 s after they were created, each
+  in a fresh session.
 - **Its limits:**
   - Each run costs a model turn, even with nothing pending.
   - Runs happen only while the app is open and the computer is awake. A run is skipped while the previous one is
@@ -1777,8 +1777,9 @@ An agent whose app can run a shell command in the background, and starts a new t
 wait for its own work. Claude Code, including Claude Desktop's Code tab, does this.
 
 **In Claude Desktop, use it only in a session the person keeps open.** The scheduled task above is the default there.
-- **If the app runs this wait with its Monitor tool,** the watch ends after 30 minutes at most, even when asked for
-  longer. That's before this loop's own 55-minute deadline, so start it again when the app says the watch ended.
+- **If the app runs this wait with its Monitor tool,** the watch ends after 5 minutes unless it's given a longer
+  timeout, and after 30 minutes at most, even when asked for longer. Either is before this loop's own 55-minute
+  deadline, so start it again when the app says the watch ended.
   OpenRig's test saw Desktop end a one-hour Monitor watch at 30:00, and Anthropic's docs give the same cap.
 - **As a plain background command,** Anthropic's docs give it no time limit in the desktop app. OpenRig hasn't
   measured one past a few minutes.
