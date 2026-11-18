@@ -343,6 +343,16 @@ edges: []
     expect(RigSpecSchema.validate(again)).toEqual({ valid: true, errors: [] });
     expect(RigSpecSchema.normalize(again as Record<string, unknown>).pods[0]!.members[0]!.pool).toEqual(pool);
 
+    // every field away from its default, and dispatch_after_s != cooldown_s, so a swapped or fixed field shows
+    const full = RigSpecSchema.normalize(RigSpecCodec.parse(yamlWith(
+      "{ max: 5, min: 2, dispatch_after_s: 45, idle_grace_s: 120, cooldown_s: 90, dispatch_tag: \"role:qa\", cwd_template: \"/work/{slot}\", drain: true }",
+    )) as Record<string, unknown>);
+    const fullPool = full.pods[0]!.members[0]!.pool;
+    expect(fullPool).toEqual({ max: 5, min: 2, dispatchAfterSeconds: 45, idleGraceSeconds: 120, cooldownSeconds: 90,
+      dispatchTag: "role:qa", cwdTemplate: "/work/{slot}", drain: true });
+    const fullAgain = RigSpecCodec.parse(RigSpecCodec.serialize(full));
+    expect(RigSpecSchema.normalize(fullAgain as Record<string, unknown>).pods[0]!.members[0]!.pool).toEqual(fullPool);
+
     const malformed = RigSpecCodec.parse(yamlWith("{ max: 3, min: 5 }")) as Record<string, unknown>;
     let normalized!: RigSpec;
     expect(() => { normalized = RigSpecSchema.normalize(malformed); }).not.toThrow();

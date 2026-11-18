@@ -2465,6 +2465,15 @@ state: 2-named
         if (!mat.ok) return;
         const nodeId = rigRepo.getRig(mat.result.rigId)!.nodes[0]!.id;
         expect(rigRepo.getNodePool(nodeId)).toEqual(fullBlock({ dispatchTag: "role:impl" }));
+
+        // `rig up` (import) goes through instantiate: the block lands on the node there too, every field as written
+        const every = { max: 5, min: 2, dispatch_after_s: 45, idle_grace_s: 120, cooldown_s: 90, dispatch_tag: "role:qa", cwd_template: "/work/{slot}", drain: true };
+        const up = await inst.instantiate(yamlSpec(every, "up-rig"), RIG_ROOT);
+        expect(up.ok, JSON.stringify(up)).toBe(true);
+        if (!up.ok) return;
+        const upNode = rigRepo.getRig(up.result.rigId)!.nodes[0]!.id;
+        expect(rigRepo.getNodePool(upNode)).toEqual(fullBlock({ max: 5, min: 2, dispatchAfterSeconds: 45, idleGraceSeconds: 120,
+          cooldownSeconds: 90, dispatchTag: "role:qa", cwdTemplate: "/work/{slot}", drain: true }));
       } finally {
         db.close();
       }
