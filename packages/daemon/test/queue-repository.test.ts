@@ -706,6 +706,38 @@ describe("QueueRepository", () => {
       }
     });
 
+    it("A row that leaves a seat while its creation wake is still staged and comes back with a wake gets the new wake only, not the creation wake.", async () => {
+      // The recovery pass reads the whole outbox schema, so this case runs on a fully migrated database.
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const wakesOf = (qitemId: string) =>
+          (full.prepare("SELECT outbox_id, delivery_state FROM outbox_entries WHERE audit_pointer = ?").all(qitemId) as Array<{ outbox_id: string; delivery_state: string }>);
+        // No transport while the row moves: the create's wake to bob stays staged, undelivered.
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        const createWake = `wake-intent-${item.qitemId}`;
+        expect(wakesOf(item.qitemId).find((w) => w.outbox_id === createWake)?.delivery_state).not.toBe("delivered");
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        expect(reroutes).toHaveLength(2);
+        const latest = `wake-intent-fallback-${reroutes[1]!.transitionId}`;
+        const sends: string[] = [];
+        fullRepo.attachTransport({ send: async (session: string) => { sends.push(session); return { ok: true, verified: true }; } });
+
+        await fullRepo.drainPendingWakeIntents();
+
+        // The row waits on bob again, where the create's wake is addressed; only the reroute's wake reaches bob.
+        expect(sends).toEqual(["bob@rig"]);
+        expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([latest]);
+        expect(wakesOf(item.qitemId).find((w) => w.outbox_id === createWake)?.delivery_state).not.toBe("delivered");
+      } finally {
+        full.close();
+      }
+    });
+
     it("An older wake that finishes after a reroute with a wake does not overwrite the row's newer wake result.", async () => {
       const full = createDb();
       try {
@@ -787,13 +819,16 @@ describe("QueueRepository", () => {
       expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("failed:hook_bridge_not_delivered");
     });
 
-    it("A wake on a row that is not pending is refused with `wake_not_admitted`, and nothing moves.", async () => {
+    it.each(["in-progress", "blocked", "done"] as const)("A wake on a row that is not pending is refused with `wake_not_admitted`, and nothing moves (%s).", async (state) => {
       const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
-      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      if (state === "in-progress" || state === "done") repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      if (state === "blocked") repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked" });
+      if (state === "done") repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "done", closureReason: "no-follow-on" });
+      expect(repo.getById(item.qitemId)!.state).toBe(state);
       captured.length = 0;
       expect(() => repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { wake: true }))
         .toThrow(expect.objectContaining({ code: "wake_not_admitted" }));
-      expectUnchanged(item.qitemId, "in-progress", "bob@rig");
+      expectUnchanged(item.qitemId, state, "bob@rig");
     });
 
     it("A wake with no wake-intent store is refused before anything moves, and a move whose wake cannot be staged is rolled back.", async () => {
