@@ -243,27 +243,36 @@ async function readQueueDerivedStates(): Promise<{ byPath: Map<string, QueueDeri
     if (!daemonMayAnswer(status)) return unreadable(statusGuardMessage(status).fact);
     const client = new DaemonClient(getDaemonUrl(status));
     if (!(await client.isLocalInstance())) {
-      return unreadable("The daemon that answered is not this home's own daemon, so its slice paths cannot be matched to local slices.");
+      return unreadable("Could not confirm that the daemon is this home's own daemon (its instance id did not match, or it did not answer in time), so its slice paths cannot be matched to local slices.");
     }
     const res = await client.get<{ slices?: unknown }>("/api/slices?filter=all");
     if (res.status >= 400) return unreadable(`GET /api/slices answered ${res.status}.`);
     const listed = res.data?.slices;
     if (!Array.isArray(listed)) throw new Error("the slice list is missing or is not an array");
-    // Validate every entry before using any, so a bad entry leaves no partial result behind.
+    // Validate every entry before using any, so a bad entry leaves no partial result behind. A path must be
+    // absolute: a relative or empty one would be resolved against this shell's working directory and could
+    // name a different workspace's slice.
     const byPath = new Map<string, QueueDerivedState>();
-    let withoutState = 0;
+    let missing = 0;
+    let unrecognized = 0;
+    let unreadableCounts = 0;
     for (const entry of listed as unknown[]) {
       const row = entry as { slicePath?: unknown; derivedState?: unknown } | null;
-      if (row === null || typeof row !== "object" || typeof row.slicePath !== "string") {
-        throw new Error("a slice entry is malformed");
+      if (row === null || typeof row !== "object" || typeof row.slicePath !== "string" || !path.isAbsolute(row.slicePath)) {
+        throw new Error("a slice entry is malformed or has an empty or non-absolute path");
       }
       const derived = QUEUE_DERIVED_STATES.find((state) => state === row.derivedState);
-      if (!derived) withoutState++;
+      if (row.derivedState === undefined) missing++;
+      else if (!derived) unrecognized++;
+      else if (derived === "unknown") unreadableCounts++;
       byPath.set(physicalSlicePath(row.slicePath), derived ?? "unknown");
     }
-    const warnings = withoutState > 0
-      ? [`The daemon reported no queue state for ${withoutState} of ${listed.length} slices (an older daemon does not report it). Those slices show unknown.`]
-      : [];
+    const of = `of ${listed.length} slices`;
+    const warnings = [
+      ...(missing > 0 ? [`The daemon reported no queue state for ${missing} ${of} (an older daemon does not report it). Those slices show unknown.`] : []),
+      ...(unrecognized > 0 ? [`The daemon reported a queue state this CLI does not know for ${unrecognized} ${of} (a newer daemon?). Those slices show unknown.`] : []),
+      ...(unreadableCounts > 0 ? [`The daemon could not read the queue counts for ${unreadableCounts} ${of}. Those slices show unknown.`] : []),
+    ];
     return { byPath, warnings, listed: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -276,7 +285,7 @@ function buildSliceLsCommand(): Command {
     .description("List slices in a mission (or across all missions)")
     .option("--mission <name>", "Restrict to a single mission")
     .option("--state <state>", "Filter: active (in flight, blocked included) | shipped (delivered in place: shipped or done) | closed (in closed/, or superseded, retired or closed in place) | all", "active")
-    .option("--with-queue", `Add the queue-derived state beside the authored status, read from the daemon's queue rows. It needs this home's own daemon: a daemon on another host gives unknown. The authored status is unchanged. ${QUEUE_DERIVED_HELP}`)
+    .option("--with-queue", `Add the queue-derived state beside the authored status, read from the daemon's queue rows. It needs this home's own daemon: one it cannot confirm as that (a daemon on another host, say) gives unknown. The authored status is unchanged. ${QUEUE_DERIVED_HELP}`)
     .option("--derived <state>", `Keep only slices with this queue-derived state (reads the daemon like --with-queue): ${QUEUE_DERIVED_STATES.join(" | ")}`)
     .option("--json", "Machine-readable output")
     .action(async (opts, command) => {
@@ -312,10 +321,14 @@ function buildSliceLsCommand(): Command {
         for (const mission of missions) {
           const slices = listSlices(mission, state);
           for (const slice of slices) {
-            const physicalPath = physicalSlicePath(slice.absPath);
-            considered++;
-            if (queue?.listed && !queue.byPath.has(physicalPath)) unlisted++;
-            const derivedState = queue ? queue.byPath.get(physicalPath) ?? "unknown" : null;
+            // Resolve the physical path only when queue state was asked for: the default listing stays filesystem-light.
+            let derivedState: QueueDerivedState | null = null;
+            if (queue) {
+              const physicalPath = physicalSlicePath(slice.absPath);
+              considered++;
+              if (queue.listed && !queue.byPath.has(physicalPath)) unlisted++;
+              derivedState = queue.byPath.get(physicalPath) ?? "unknown";
+            }
             if (derivedFilter !== null && derivedState !== derivedFilter) continue;
             rows.push({
               mission: mission.name,

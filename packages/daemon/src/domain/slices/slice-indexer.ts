@@ -1109,6 +1109,9 @@ export class SliceIndexer {
     }
   }
 
+  /** The distinct, absolute roots to scan. A root configured with a relative spelling (the legacy
+   *  `OPENRIG_SLICES_ROOT` string, for one) is resolved here once, so every slice path the indexer
+   *  produces is absolute and means the same slice to any client, whatever its working directory. */
   private sliceRoots(additionalRoots: readonly string[] = []): string[] {
     const roots = [this.slicesRoot, ...this.additionalSliceRoots, ...additionalRoots].filter((root) => root.length > 0);
     const seen = new Set<string>();
@@ -1117,7 +1120,7 @@ export class SliceIndexer {
       const resolved = path.resolve(root);
       if (seen.has(resolved)) continue;
       seen.add(resolved);
-      out.push(root);
+      out.push(resolved);
     }
     return out;
   }

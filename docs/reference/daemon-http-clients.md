@@ -328,11 +328,15 @@ What reads these declarations:
   `idle` or `none`, when `queueCounts` is `null` because the counts could not be read. `?derived=blocked|in-progress|pending|idle|none|unknown`
   keeps only rows in that state, case-insensitively and after the `filter` status filter, so
   `?filter=active&derived=blocked` narrows the authored active slices to the blocked ones. An unknown value
-  answers 400 `derived_invalid`. `rig scope slice ls --with-queue` and `--derived <state>` read this list once and
-  join by physical slice path, only when the daemon is this home's own (its `/healthz` instance id matches this
-  home's); a daemon on another host gives `unknown` for every slice, because the same absolute path can name
-  different workspaces. A warning names each reason the CLI shows `unknown`: an unreachable or foreign daemon, a
-  malformed list (discarded whole), a row without `derivedState` (an older daemon), or a slice absent from the list.
+  answers 400 `derived_invalid`. Every row's `slicePath` is absolute (a root configured with a relative spelling is
+  resolved by the daemon). `rig scope slice ls --with-queue` and `--derived <state>` read this list once and
+  join by physical slice path, only when it can confirm the daemon is this home's own (its `/healthz` instance id
+  matches this home's); a daemon it cannot confirm gives `unknown` for every slice, because the same absolute
+  path can name different workspaces. It rejects the whole list if any row's path is empty or not absolute,
+  because it would resolve against the CLI's working directory. Each reason for `unknown` has its own warning:
+  an unreachable daemon or one it cannot confirm, a malformed list (discarded whole), a row without
+  `derivedState` (an older daemon), a `derivedState` value the CLI does not know (a newer daemon), a row the
+  daemon itself reports as `unknown` (its counts could not be read), and a local slice absent from the list.
 
 
 ## Resume one banked original conversation

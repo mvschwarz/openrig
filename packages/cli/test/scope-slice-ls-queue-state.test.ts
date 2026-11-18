@@ -200,7 +200,7 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     expect(all.result.exitCode).toBe(0);
     expect(Object.values(derivedByName(all.parsed!.slices))).toEqual(Array(SLICES.length).fill("unknown"));
     expect(all.parsed!.warnings).toHaveLength(1);
-    expect(all.parsed!.warnings![0]).toContain("not this home's own daemon");
+    expect(all.parsed!.warnings![0]).toContain("Could not confirm that the daemon is this home's own daemon");
     expect(daemon.gets, "the foreign slice list is never read").toEqual([]);
     for (const state of ["blocked", "idle", "none", "pending"]) {
       expect((await ls("--derived", state)).parsed!.slices, `--derived ${state} must not match another host's rows`).toEqual([]);
@@ -220,6 +220,54 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     expect(parsed!.warnings).toHaveLength(1);
     expect(parsed!.warnings![0]).toContain(failure);
     expect(parsed!.warnings![0]).toContain("unknown for every slice");
+  });
+
+  it.each([
+    { label: "a relative path", slicePath: () => path.join("alpha", "slices", "01-stuck") },
+    { label: "a dot-relative path", slicePath: () => path.join(".", "alpha", "slices", "01-stuck") },
+    { label: "an empty path", slicePath: () => "" },
+  ])("rejects the whole list for $label, never resolving it against the CLI's working directory", async ({ slicePath }) => {
+    // The daemon and the CLI share this home but start in different directories. The daemon's relative path named a
+    // slice under ITS directory. Resolved from the CLI's directory (the missions root here) it would name the local
+    // 01-stuck, and that slice would wrongly show the other workspace's state.
+    daemon.respond = () => ({ status: 200, data: { slices: [{ slicePath: slicePath(), derivedState: "blocked" }, ...fullList().data.slices.slice(1)] } });
+    const previous = process.cwd();
+    process.chdir(ws.missionsRoot);
+    try {
+      const all = await ls("--with-queue");
+      expect(all.result.exitCode).toBe(0);
+      expect(Object.values(derivedByName(all.parsed!.slices)), "no row of a rejected list may survive").toEqual(Array(SLICES.length).fill("unknown"));
+      expect(all.parsed!.warnings).toHaveLength(1);
+      expect(all.parsed!.warnings![0]).toContain("empty or non-absolute path");
+      expect((await ls("--derived", "blocked")).parsed!.slices, "the local slice must not match by working directory").toEqual([]);
+    } finally { process.chdir(previous); }
+  });
+
+  it.each([
+    { label: "an explicit unknown from the daemon", derivedState: "unknown", warning: "could not read the queue counts for 1 of 5 slices" },
+    { label: "a state this CLI does not know", derivedState: "paused", warning: "a queue state this CLI does not know for 1 of 5 slices" },
+  ])("warns, and still shows unknown, for $label", async ({ derivedState, warning }) => {
+    daemon.respond = () => ({ status: 200, data: { slices: [{ slicePath: ws.slicePath("01-stuck"), derivedState }, ...fullList().data.slices.slice(1)] } });
+    const all = await ls("--with-queue");
+    expect(derivedByName(all.parsed!.slices)["01-stuck"]).toBe("unknown");
+    expect(all.parsed!.warnings).toHaveLength(1);
+    expect(all.parsed!.warnings![0]).toContain(warning);
+    // A filter that leaves the unread slice out is explained by the same warning, not silent.
+    const blocked = await ls("--derived", "blocked");
+    expect(blocked.parsed!.slices).toEqual([]);
+    expect(blocked.parsed!.warnings).toHaveLength(1);
+  });
+
+  it("resolves slice paths only when queue state is asked for", async () => {
+    const spy = vi.spyOn(fs, "realpathSync");
+    const slicePathCalls = () => spy.mock.calls.filter(([p]) => typeof p === "string" && p.includes(`${path.sep}slices${path.sep}`));
+    try {
+      await ls();
+      expect(slicePathCalls(), "the default listing must not resolve any slice path").toEqual([]);
+      spy.mockClear();
+      await ls("--with-queue");
+      expect(slicePathCalls().length).toBeGreaterThanOrEqual(SLICES.length);
+    } finally { spy.mockRestore(); }
   });
 
   it("matches the daemon's slice by physical path when it reports the path through a symlink", async () => {

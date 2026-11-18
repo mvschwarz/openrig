@@ -2439,6 +2439,19 @@ describe("GET /api/slices observed queue counts", () => {
       }
     });
 
+    it("returns absolute slice paths when a root is configured with a relative spelling", async () => {
+      // The legacy OPENRIG_SLICES_ROOT string reaches the indexer as written. A relative slicePath would mean a
+      // different slice to a client that resolves it from another working directory.
+      const alphaDir = addSlice("alpha", "shipping", "rel-a");
+      const betaDir = addSlice("beta", "shipping", "rel-b");
+      const relativeAlpha = path.relative(process.cwd(), path.join(root, "alpha", "missions"));
+      const relativeBeta = path.relative(process.cwd(), path.join(root, "beta", "missions"));
+      expect([relativeAlpha, relativeBeta].map(p => path.isAbsolute(p))).toEqual([false, false]);
+      const entries = await list(route("alpha", false, relativeAlpha, [relativeBeta]).app);
+      expect(entries.map(s => s.slicePath).sort()).toEqual([alphaDir, betaDir].sort());
+      for (const entry of entries) expect(path.isAbsolute(entry.slicePath), entry.slicePath).toBe(true);
+    });
+
     it("reports unknown, not none, when the queue table cannot be read", async () => {
       addSlice("alpha", "shipping", "live");
       row("live-0", "pending", scope("live"));
@@ -2450,9 +2463,10 @@ describe("GET /api/slices observed queue counts", () => {
     });
 
     // Fault injection on the separate count read: the first matching row is read, then the iterator fails.
-    function failCountScanAfterFirstRow(): { hits: () => number; restore: () => void } {
+    function failCountScanAfterFirstRow(): { hits: () => number; yielded: () => number; restore: () => void } {
       const prepare = db.prepare.bind(db);
       let hits = 0;
+      let yielded = 0;
       const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
         const stmt = prepare(sql);
         if (!/^SELECT state, tags FROM queue_items WHERE tags LIKE/.test(sql)) return stmt;
@@ -2463,14 +2477,14 @@ describe("GET /api/slices observed queue counts", () => {
             const rows = (target.iterate(...args as []) as Iterable<unknown>)[Symbol.iterator]();
             try {
               const first = rows.next();
-              if (!first.done) yield first.value;
+              if (!first.done) { yielded++; yield first.value; }
               hits++;
               throw new Error("SQLITE_IOERR: disk I/O error while reading queue rows");
             } finally { rows.return?.(); }
           })();
         } });
       }) as typeof db.prepare);
-      return { hits: () => hits, restore: () => spy.mockRestore() };
+      return { hits: () => hits, yielded: () => yielded, restore: () => spy.mockRestore() };
     }
 
     it("returns the slice rows with unknown counts, and no partial counter, when the count scan fails after it starts", async () => {
@@ -2483,7 +2497,8 @@ describe("GET /api/slices observed queue counts", () => {
       try {
         const { app } = route();
         const entries = await list(app);
-        expect(fault.hits(), "the iterator must have produced a row and then failed").toBe(1);
+        expect(fault.yielded(), "a counted row must have been read before the failure, or the partial-count control proves nothing").toBe(1);
+        expect(fault.hits(), "the iterator must then have failed").toBe(1);
         expect(entries.map(s => [s.name, s.status, s.queueCounts, s.derivedState]).sort()).toEqual([
           ["first", "active", null, "unknown"], ["second", "active", null, "unknown"],
         ]);
