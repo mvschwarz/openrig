@@ -9,7 +9,7 @@ import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
-import { RestoreOrchestrator, type NarrowLaunchResult } from "../src/domain/restore-orchestrator.js";
+import { RestoreOrchestrator, type NarrowLaunchResult, type RestoreOrchestratorDeps } from "../src/domain/restore-orchestrator.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { KeepAliveSupervisor, keepAliveIncidentAdopts, type KeepAliveSupervisorDeps } from "../src/domain/keep-alive-supervisor.js";
@@ -17,7 +17,8 @@ import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { restoreExistingRigUnattended, automaticRestoreInProgress } from "../src/domain/existing-rig-restore.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ProcessTableRow } from "../src/domain/process-table.js";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import type { RigSpec } from "../src/domain/types.js";
 
 // #2940: a seat that declares keep_alive is relaunched when it falls while the daemon runs, through the one-seat launch,
 // within a durable attempt budget, and left alone when it was stopped on purpose.
@@ -51,6 +52,7 @@ describe("KeepAliveSupervisor (#2940)", () => {
     db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run(node.id);
     const session = sessionRegistry.registerSession(node.id, "dev-driver@r01");
     sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
     rigId = rig.id;
     nodeId = node.id;
     fallenId = session.id;
@@ -66,10 +68,11 @@ describe("KeepAliveSupervisor (#2940)", () => {
   } as unknown as TmuxAdapter;
   const reconciler = () => new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, readProcesses: async () => processes });
 
-  /** A launch that brings the seat back: a new running session, reported with a running status. */
+  /** A launch that brings the seat back: a new running session, its harness started, reported with a running status. */
   const relaunches = (status = "resumed") => vi.fn(async (): Promise<NarrowLaunchResult> => {
     const session = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
     sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
     probes.set("dev-driver@r01", "present");
     return { ok: true, launched: [{ nodeId, logicalId: "dev.driver", status } as never], alreadyRunning: [] };
   });
@@ -199,6 +202,67 @@ describe("KeepAliveSupervisor (#2940)", () => {
     await supervisor(launch).runTickNow();
     expect(events("seat.keep_alive.recovered")).toEqual([]);
     expect(budget()).toMatchObject({ attempts: 1, recovered_at: null, last_error: "the launch reported 'fresh' but started no session" });
+  });
+
+  it("a running status whose new session is a bare shell (its harness not started) is a failed launch, not a recovery", async () => {
+    let leftId = "";
+    const launch = vi.fn(async (): Promise<NarrowLaunchResult> => {
+      const session = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateStartupStatus(session.id, "attention_required");
+      probes.set("dev-driver@r01", "present");
+      leftId = session.id;
+      return { ok: true, launched: [{ nodeId, logicalId: "dev.driver", status: "fresh-primed" } as never] };
+    });
+    const keep = supervisor(launch);
+    await keep.runTickNow();
+    nowMs += STABLE + BACKOFF;
+    await keep.runTickNow();
+    expect(launch).toHaveBeenCalledOnce();
+    expect(events("seat.keep_alive.recovered")).toEqual([]);
+    expect(events("seat.keep_alive.exhausted")).toEqual([expect.objectContaining({ status: "fresh-primed",
+      lastError: expect.stringContaining("startup status 'attention_required'") })]);
+    expect(budget()).toMatchObject({ launched_session_id: leftId, recovered_at: null });
+  });
+
+  it("a running status whose new session's harness is still starting recovers once a tick sees its startup complete", async () => {
+    let leftId = "";
+    const launch = vi.fn(async (): Promise<NarrowLaunchResult> => {
+      const session = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
+      sessionRegistry.updateStatus(session.id, "running");
+      probes.set("dev-driver@r01", "present");
+      leftId = session.id;
+      return { ok: true, launched: [{ nodeId, logicalId: "dev.driver", status: "resumed" } as never] };
+    });
+    const keep = supervisor(launch);
+    await keep.runTickNow();
+    expect(budget()).toMatchObject({ launched_session_id: leftId, recovered_at: null, attempts: 1 });
+    nowMs += STABLE;
+    await keep.runTickNow();
+    expect(events("seat.keep_alive.recovered")).toEqual([]);
+    expect(budget()).toMatchObject({ launched_session_id: leftId, recovered_at: null });
+
+    sessionRegistry.updateStartupStatus(leftId, "ready");
+    nowMs += BACKOFF;
+    await keep.runTickNow();
+    expect(events("seat.keep_alive.recovered")).toEqual([expect.objectContaining({ attempts: 1 })]);
+    nowMs += STABLE;
+    await keep.runTickNow();
+    expect(budget()).toBeUndefined();
+    expect(launch).toHaveBeenCalledOnce();
+  });
+
+  it("a surviving latest session that is a bare shell doesn't reset the budget: the seat waits for a person", async () => {
+    const launch = vi.fn(async (): Promise<NarrowLaunchResult> => {
+      sessionRegistry.updateStatus(fallenId, "running");
+      sessionRegistry.updateStartupStatus(fallenId, "attention_required");
+      return { ok: true, launched: [], alreadyRunning: [{ nodeId, logicalId: "dev.driver" }] };
+    });
+    await supervisor(launch).runTickNow();
+    expect(budget()).toMatchObject({ attempts: 1 });
+    expect(budget()!.exhausted_at).not.toBeNull();
+    expect(events("seat.keep_alive.exhausted")).toEqual([expect.objectContaining({ status: "already_running",
+      lastError: expect.stringContaining("harness's startup hasn't completed") })]);
   });
 
   it("a recovered seat that runs for the stable period ends its incident; a fall before that continues it", async () => {
@@ -416,6 +480,7 @@ describe("KeepAliveSupervisor (#2940)", () => {
     const cut = vi.fn(async (): Promise<NarrowLaunchResult> => {
       const session = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
       sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateStartupStatus(session.id, "ready");
       createdAt(session.id, nowMs);
       probes.set("dev-driver@r01", "present");
       leftId = session.id;
@@ -622,6 +687,7 @@ describe("KeepAliveSupervisor (#2940)", () => {
     const restore = vi.fn(async (_snapshotId: string, opts: { onSessionLaunched?: (nodeId: string, sessionId: string) => void }) => {
       const session = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
       sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateStartupStatus(session.id, "ready");
       restoredId = session.id;
       opts.onSessionLaunched?.(nodeId, session.id);
       return { ok: true, result: { rigResult: "fully_restored", nodes: [] } };
@@ -697,6 +763,7 @@ describe("KeepAliveSupervisor (#2940)", () => {
 
     const restored = sessionRegistry.registerSession(nodeId, "dev-driver@r01");
     sessionRegistry.updateStatus(restored.id, "running");
+    sessionRegistry.updateStartupStatus(restored.id, "ready");
     keepAliveIncidentAdopts(db, nodeId, restored.id, new Date(nowMs));
     probes.set("dev-driver@r01", "present");
     nowMs += BACKOFF;
@@ -796,6 +863,104 @@ describe("KeepAliveSupervisor (#2940)", () => {
     });
   });
 
+  /** The real one-seat launch for the seat: in a pod, with a snapshot that starts it fresh (from its saved startup
+   *  context, or with none, through the recipe's fresh launch), over a tmux whose session stop the test decides. */
+  function realOrchestrator(killSession: (name: string) => Promise<unknown>,
+    opts: { startupContext?: boolean; onCreateSession?: () => void } = {}) {
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-1", rigId, "dev", "Dev");
+    db.prepare("UPDATE nodes SET pod_id = 'pod-1' WHERE id = ?").run(nodeId);
+    const snapshotRepo = new SnapshotRepository(db);
+    snapshotRepo.createSnapshot(rigId, "manual", {
+      rig: { id: rigId, name: "r01" },
+      nodes: [{ id: nodeId, logicalId: "dev.driver", rigId, runtime: "claude-code", podId: "pod-1" }],
+      sessions: [{ nodeId, id: fallenId, sessionName: "dev-driver@r01", status: "running", resumeType: "none", resumeToken: null, restorePolicy: "relaunch_fresh" }],
+      edges: [], checkpoints: {},
+      nodeStartupContext: opts.startupContext === false ? {}
+        : { [nodeId]: { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "claude-code" } },
+    } as never);
+    const fakeTmux = {
+      createSession: vi.fn(async () => { opts.onCreateSession?.(); return { ok: true as const }; }), hasSession: vi.fn(async () => false),
+      sendKeys: vi.fn(async () => {}), capturePaneContent: vi.fn(async () => ""), getPaneCommand: vi.fn(async () => null),
+      getPanePid: vi.fn(async () => null), listPanes: vi.fn(async () => []), getSessionStatus: vi.fn(async () => null),
+      waitForReady: vi.fn(async () => true), listSessions: vi.fn(async () => []), startPipePane: vi.fn(async () => true),
+      killSession: vi.fn(killSession),
+    };
+    const checkpointStore = new CheckpointStore(db);
+    const orchestrator = new RestoreOrchestrator({
+      db, rigRepo, sessionRegistry, eventBus, snapshotRepo,
+      snapshotCapture: new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore }),
+      checkpointStore, nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: fakeTmux as never }),
+      tmuxAdapter: fakeTmux as never, claudeResume: new ClaudeResumeAdapter(fakeTmux as never), codexResume: new CodexResumeAdapter(fakeTmux as never),
+      listProcesses: async () => [],
+    });
+    const launch = vi.fn((id: string, logicalId: string, launchOpts?: Parameters<RestoreOrchestrator["launchSingleNode"]>[2]) =>
+      orchestrator.launchSingleNode(id, logicalId, launchOpts));
+    return { orchestrator, fakeTmux, launch };
+  }
+  const readyHarness = () => ({
+    runtime: "claude-code", listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+    deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), launchHarness: vi.fn(async () => ({ ok: true as const })),
+    checkReady: vi.fn(async () => ({ ready: true })),
+  });
+  const ownShells = () => sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === nodeId && s.id !== fallenId);
+
+  // A shutdown that begins after the relaunch's shell exists: the real launch rolls the shell back, and only a stop
+  // tmux confirmed is a rollback. An unconfirmed stop leaves the shell's session and binding as they are, reported, and
+  // the attempt stays counted.
+  it.each([
+    ["returns false", async () => ({ ok: false as const, message: "server busy" })],
+    ["throws", async () => { throw new Error("tmux timed out"); }],
+  ])("a shutdown after the relaunch's shell exists whose stop %s keeps the attempt and reports the shell left in place", async (_how, kill) => {
+    let keep!: KeepAliveSupervisor;
+    const { fakeTmux, launch } = realOrchestrator(kill, { onCreateSession: () => { void keep.stop(); } });
+    const harness = readyHarness();
+    keep = supervisor(launch, { adapters: { "claude-code": harness } as never });
+    await keep.runTickNow();
+    expect(launch).toHaveBeenCalledOnce();
+    expect(harness.launchHarness).not.toHaveBeenCalled();
+    const shells = ownShells();
+    expect(shells).toHaveLength(1);
+    expect(fakeTmux.killSession).toHaveBeenCalledWith(shells[0]!.sessionName);
+    // The shell may still run: its session and binding stay, and the incident keeps it as its own.
+    expect(shells[0]!.status).toBe("running");
+    expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxSession).toBe(shells[0]!.sessionName);
+    expect(budget()).toMatchObject({ attempts: 1, launched_session_id: shells[0]!.id });
+    expect(budget()!.exhausted_at).not.toBeNull();
+    expect(budget()!.last_error).toContain(`couldn't be confirmed stopped`);
+    expect(budget()!.last_error).toContain(shells[0]!.sessionName);
+    expect(events("seat.keep_alive.attempted")).toHaveLength(1);
+    expect(events("seat.keep_alive.exhausted")).toEqual([expect.objectContaining({ attempts: 1, status: "shutting_down" })]);
+  });
+
+  it.each(["before", "shell", "retired"] as const)("a shutdown the relaunch undid (%s) gives its attempt back", async (when) => {
+    let keep!: KeepAliveSupervisor;
+    let kills = 0;
+    // The provisional shell's retire is the only stop that finds a session; a stop of a session already gone isn't confirmed.
+    const kill = async () => (++kills === 1 ? { ok: true as const } : { ok: false as const, message: "can't find session" });
+    const { orchestrator, fakeTmux, launch } = when === "retired"
+      ? realOrchestrator(async () => { const result = await kill(); void keep.stop(); return result; }, { startupContext: false })
+      : realOrchestrator(kill, { onCreateSession: () => { if (when === "shell") void keep.stop(); } });
+    const freshLaunch = vi.fn(async () => ({ status: "launched" as const }));
+    if (when === "retired") Object.assign(orchestrator as never, { freshLaunch, freshLaunchAvailable: () => true });
+    const harness = readyHarness();
+    const launching = when === "before"
+      ? vi.fn((...args: Parameters<typeof launch>) => { void keep.stop(); return launch(...args); })
+      : launch;
+    keep = supervisor(launching, { adapters: { "claude-code": harness } as never });
+    await keep.runTickNow();
+    expect(launch).toHaveBeenCalledOnce();
+    expect(harness.launchHarness).not.toHaveBeenCalled();
+    expect(freshLaunch).not.toHaveBeenCalled();
+    if (when === "before") {
+      expect(fakeTmux.createSession).not.toHaveBeenCalled();
+    } else {
+      expect(fakeTmux.killSession).toHaveBeenCalledOnce();
+      expect(ownShells().map((s) => s.status)).toEqual(["superseded"]);
+    }
+    expect(budget()).toBeUndefined();
+    expect(events("seat.keep_alive.exhausted")).toEqual([]);
+  });
+
   // A rig down that lands after the supervisor saw the fall, before its launch takes the seat's lease: the real
   // launchSingleNode re-reads the seat under the lease, refuses with stop_requested and starts nothing.
   it("a rig down racing a tick wins: the launch refuses under the lease and nothing is launched", async () => {
@@ -843,5 +1008,131 @@ describe("KeepAliveSupervisor (#2940)", () => {
     await keep.runTickNow();
     expect(racing).toHaveBeenCalledOnce();
     expect(budget()).toBeUndefined();
+  });
+});
+
+// #2940: daemon start's automatic restore isn't a person's start. These run the real restore, the real recipe-backed
+// fresh launch and the real supervisor: the session the restore leaves for a seat in an incident is the incident's, and
+// it ends the incident only once its harness's startup has completed and a tick has seen it run for the stable period.
+describe("KeepAliveSupervisor and daemon start's automatic restore (#2940)", () => {
+  let db: Database.Database;
+  afterEach(() => db.close());
+
+  const agentYaml = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\n  guidance: []\n  subagents: []\n  plugins: []\n  runtime_resources: []\nprofiles:\n  default: {}\n`;
+
+  /** A keep_alive seat in an incident (open, or exhausted) whose session fell while the daemon was down, restored by
+   *  daemon start. `recipe`: the seat has a launch recipe, so the restore replaces its provisional shell with the
+   *  recipe's fresh launch; without one, the restore leaves that shell as a bare shell, its harness not started. */
+  async function restoredIncident(incident: "open" | "exhausted", recipe: boolean) {
+    db = createFullTestDb();
+    let setup!: ReturnType<typeof createTestApp>;
+    const freshLaunch = vi.fn(async (id: string, node: string, launchOpts?: Parameters<NonNullable<RestoreOrchestratorDeps["freshLaunch"]>>[2]) =>
+      setup.podInstantiator.launchPersistedFresh(id, node, launchOpts));
+    // The harness the restore and the recipe's fresh launch both start.
+    const harness = { runtime: "codex", listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })) };
+    setup = createTestApp(db, {
+      adapters: { codex: harness } as never,
+      freshLaunch,
+      freshLaunchAvailable: (id, node) => setup.podInstantiator.canLaunchPersistedFresh(id, node),
+      podInstantiatorFsOps: { exists: (file) => file.replaceAll("\\", "/").endsWith("/agents/impl/agent.yaml"), readFile: () => agentYaml },
+    });
+    const rig = setup.rigRepo.createRig("ka-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-ka", rig.id, "dev", "Development");
+    const rigRoot = process.cwd();
+    const rigSpec: RigSpec = { version: "0.2", name: "ka-rig", edges: [], pods: [{ id: "dev", label: "Development",
+      members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: "." }], edges: [] }] };
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", agentRef: "local:agents/impl", profile: "default",
+      cwd: rigRoot, podId: "pod-ka", ...(recipe ? { launchRecipe: { version: 1, rigRoot, rigSpec } } : {}) });
+    db.prepare("UPDATE nodes SET keep_alive = 1 WHERE id = ?").run(node.id);
+    const fallen = setup.sessionRegistry.registerSession(node.id, "dev-impl@ka-rig");
+    setup.sessionRegistry.updateStatus(fallen.id, "running");
+    db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(fallen.id);
+    setup.sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@ka-rig", tmuxPane: "%7" });
+    setup.snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    setup.sessionRegistry.updateStatus(fallen.id, "detached");
+    db.prepare(`INSERT INTO node_keep_alive_budget (node_id, incident_id, fallen_session_id, attempts, last_attempt_at, last_error,
+        exhausted_at, last_outcome) VALUES (?, 'incident-1', ?, ?, ?, 'harness died', ?, ?)`)
+      .run(node.id, fallen.id, incident === "exhausted" ? 2 : 1, new Date(T0 - 60_000).toISOString(),
+        incident === "exhausted" ? new Date(T0 - 30_000).toISOString() : null, incident === "exhausted" ? "exhausted" : "failed");
+
+    const restored = await restoreExistingRigUnattended({ rigRepo: setup.rigRepo, snapshotRepo: setup.snapshotRepo,
+      snapshotCapture: setup.snapshotCapture, restoreOrchestrator: setup.restoreOrchestrator, runtimeAdapters: { codex: harness } as never },
+    rig.id, () => true);
+
+    let nowMs = T0;
+    const live = new Set(["dev-impl@ka-rig"]);
+    const tmux = { probeSession: async (name: string) => ({ state: live.has(name) ? "present" : "absent" }) } as unknown as TmuxAdapter;
+    const relaunch = vi.fn(async (): Promise<NarrowLaunchResult> => ({ ok: false, code: "no_matching_nodes", message: "not expected" }));
+    const keep = new KeepAliveSupervisor({
+      db, eventBus: setup.eventBus,
+      reconciler: new Reconciler({ db, sessionRegistry: setup.sessionRegistry, eventBus: setup.eventBus, tmuxAdapter: tmux, readProcesses: async () => [] }),
+      restoreOrchestrator: { launchSingleNode: relaunch as never }, backoffMs: BACKOFF, stableMs: STABLE, now: () => new Date(nowMs),
+      onTickError: (err) => { throw err; },
+    });
+    const sessions = () => setup.sessionRegistry.getSessionsForRig(rig.id).filter((s) => s.nodeId === node.id);
+    return {
+      setup, node, fallen, freshLaunch, harness, restored, keep, relaunch, sessions,
+      budget: () => db.prepare("SELECT * FROM node_keep_alive_budget WHERE node_id = ?").get(node.id) as
+        { incident_id: string; attempts: number; exhausted_at: string | null; recovered_at: string | null; launched_session_id: string | null;
+          last_outcome: string | null } | undefined,
+      recovered: () => (db.prepare("SELECT payload FROM events WHERE type = 'seat.keep_alive.recovered'").all() as { payload: string }[]).length,
+      tick: async (advanceMs = 0) => { nowMs += advanceMs; await keep.runTickNow(); },
+    };
+  }
+
+  // Item 2 of the review: the recipe-backed fresh replacement's own session is the one adopted, not the retired shell.
+  it.each(["open", "exhausted"] as const)("adopts the recipe-backed fresh replacement into an %s incident, and ends it only once a tick has seen it run stable", async (incident) => {
+    const r = await restoredIncident(incident, true);
+    expect(r.restored).toEqual({ errors: [] });
+    expect(r.freshLaunch).toHaveBeenCalledOnce();
+    expect(r.harness.launchHarness).toHaveBeenCalledOnce();
+    const [provisional, replacement] = r.sessions().filter((s) => s.id !== r.fallen.id);
+    expect(provisional!.status).toBe("superseded");
+    expect(replacement!.status).toBe("running");
+    expect(replacement!.startupStatus).toBe("ready");
+    expect(r.budget()).toMatchObject({ incident_id: "incident-1", launched_session_id: replacement!.id, last_outcome: "adopted",
+      attempts: incident === "exhausted" ? 2 : 1 });
+
+    // The first tick sees it running: the incident and its budget carry on until the stable period has been seen.
+    await r.tick(BACKOFF);
+    expect(r.budget()).toMatchObject({ incident_id: "incident-1", launched_session_id: replacement!.id,
+      attempts: incident === "exhausted" ? 2 : 1 });
+    expect(r.budget()!.recovered_at).not.toBeNull();
+    if (incident === "exhausted") expect(r.budget()!.exhausted_at).not.toBeNull();
+    await r.tick(STABLE - 1);
+    expect(r.budget()).toMatchObject({ incident_id: "incident-1" });
+    await r.tick(1);
+    expect(r.budget()).toBeUndefined();
+    expect(r.relaunch).not.toHaveBeenCalled();
+  });
+
+  // Item 3 of the review: a session left as a bare shell, its harness not started, is not a recovered agent.
+  it.each(["open", "exhausted"] as const)("a session the restore left as a bare shell neither recovers nor ends an %s incident until its startup completes", async (incident) => {
+    const r = await restoredIncident(incident, false);
+    expect(r.freshLaunch).not.toHaveBeenCalled();
+    const [shell] = r.sessions().filter((s) => s.id !== r.fallen.id);
+    expect(shell!.status).toBe("running");
+    expect(shell!.startupStatus).toBe("attention_required");
+    expect(r.budget()).toMatchObject({ launched_session_id: shell!.id, last_outcome: "adopted" });
+
+    for (let i = 0; i < 3; i++) await r.tick(STABLE);
+    expect(r.budget()).toMatchObject({ incident_id: "incident-1", launched_session_id: shell!.id, recovered_at: null,
+      attempts: incident === "exhausted" ? 2 : 1 });
+    expect(r.recovered()).toBe(0);
+    expect(r.relaunch).not.toHaveBeenCalled();
+
+    // Once its harness's startup has completed (a person brought the agent up in the pane and cleared the attention),
+    // the same session recovers, and ends the incident after a tick has seen it run for the stable period.
+    r.setup.sessionRegistry.updateStartupStatus(shell!.id, "ready", new Date().toISOString());
+    await r.tick(BACKOFF);
+    expect(r.budget()!.recovered_at).not.toBeNull();
+    expect(r.recovered()).toBe(incident === "open" ? 1 : 0);
+    await r.tick(STABLE - 1);
+    expect(r.budget()).toMatchObject({ incident_id: "incident-1" });
+    await r.tick(1);
+    expect(r.budget()).toBeUndefined();
+    expect(r.relaunch).not.toHaveBeenCalled();
   });
 });

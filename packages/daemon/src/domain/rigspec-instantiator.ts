@@ -2209,6 +2209,7 @@ export class PodRigInstantiator {
     createCwd?: boolean;
     launchCwd?: string;
     beforeNativeDispatch?: () => boolean;
+    onSessionRegistered?: (sessionId: string) => void;
   }) {
     return this.launchBinding(input);
   }
@@ -2244,6 +2245,8 @@ export class PodRigInstantiator {
     launchCwd?: string;
     /** #2940: an agent seat's last read before its native dispatch (startNode's beforeNativeLaunch); absent asks nothing. */
     beforeNativeDispatch?: () => boolean;
+    /** Told the new session's id as soon as its row is committed (NodeLauncher's onSessionRegistered). */
+    onSessionRegistered?: (sessionId: string) => void;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string;
     warnings?: string[]; retryable?: boolean; processLimits?: LaunchLimits }> {
     return input.member.agentRef === "builtin:terminal"
@@ -2268,6 +2271,9 @@ export class PodRigInstantiator {
       /** #2940: asked again just before the native dispatch into the new shell (after configuration, shell and startup
        *  preparation are awaited); false dispatches nothing and the launch fails as a refused native start does. */
       beforeNativeDispatch?: () => boolean;
+      /** #2940: told the new session's id as soon as its row is committed, as a restore's own launch is, so daemon start's
+       *  automatic restore follows the session this replacement leaves (a keep_alive incident adopts it). */
+      onSessionRegistered?: (sessionId: string) => void;
     },
   ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
     processLimits?: SeatProcessLimitsNotice }> {
@@ -2315,6 +2321,7 @@ export class PodRigInstantiator {
       // terminal starts (the launch otherwise starts in the saved folder), and it's created if it isn't there yet.
       ...(opts?.cwdOverride ? { launchCwd: opts.cwdOverride, createCwd: true } : {}),
       ...(opts?.beforeNativeDispatch ? { beforeNativeDispatch: opts.beforeNativeDispatch } : {}),
+      ...(opts?.onSessionRegistered ? { onSessionRegistered: opts.onSessionRegistered } : {}),
     });
     const advisories = resolveResult?.ok ? agentSpecAdvisoryWarnings(node.logicalId, resolveResult) : [];
     // #3253: the recovery notice is what a restore reports; a fresh refusal's problem stays in the code and message.
@@ -2544,6 +2551,7 @@ export class PodRigInstantiator {
     createCwd?: boolean;
     launchCwd?: string;
     beforeNativeDispatch?: () => boolean;
+    onSessionRegistered?: (sessionId: string) => void;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[];
     retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
@@ -2704,6 +2712,7 @@ export class PodRigInstantiator {
       env: input.envOverride,
       pluginPaths: selectedPluginPaths(configResult.config.selectedResources),
       ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}),
+      ...(input.onSessionRegistered ? { onSessionRegistered: input.onSessionRegistered } : {}),
     });
     if (!launchResult.ok) {
       // #3253: a refusal for the seat's limit says whether a retry may pass and why, also past this launcher.
@@ -3038,6 +3047,7 @@ export class PodRigInstantiator {
     processLimitsMode?: ProcessLimitsMode;
     createCwd?: boolean;
     launchCwd?: string;
+    onSessionRegistered?: (sessionId: string) => void;
   }): Promise<{ status: "launched" | "failed"; code?: string; error?: string; sessionName?: string; warnings?: string[];
     retryable?: boolean; processLimits?: LaunchLimits }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
@@ -3064,7 +3074,8 @@ export class PodRigInstantiator {
     }
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, ...(input.createCwd ? { createCwd: true } : {}),
       ...(input.launchCwd ? { cwd: input.launchCwd } : {}), env: input.envOverride,
-      ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}) });
+      ...(input.processLimitsMode ? { processLimitsMode: input.processLimitsMode } : {}),
+      ...(input.onSessionRegistered ? { onSessionRegistered: input.onSessionRegistered } : {}) });
     if (!launchResult.ok) {
       // #3253: a refusal for the seat's limit says whether a retry may pass and why, also past this launcher.
       return { status: "failed", code: launchResult.code, error: launchResult.message,

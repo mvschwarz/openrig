@@ -219,6 +219,11 @@ export function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtim
   return { kind: "resume" };
 }
 
+/** #2940: how a keep_alive relaunch refused for a daemon shutdown undid what it started. `compensated`: every shell it
+ *  started was stopped (tmux confirmed it) and the seat's prior state was put back. `unconfirmed`: the name of a shell
+ *  whose stop tmux didn't confirm, left in place with its session record and binding. */
+type ShutdownRollback = { compensated: boolean; unconfirmed?: string };
+
 export interface NarrowLaunchResult {
   ok: boolean;
   planOnly?: boolean;
@@ -270,6 +275,8 @@ export interface RestoreOrchestratorDeps {
     cwdOverride?: string;
     /** #2940: asked just before the native dispatch into the new shell; false dispatches nothing. Absent asks nothing. */
     beforeNativeDispatch?: () => boolean;
+    /** Told the new session's id as soon as its row is committed (NodeLauncher's onSessionRegistered). */
+    onSessionRegistered?: (sessionId: string) => void;
   }) => Promise<{
     status: "launched" | "failed" | "attention_required";
     error?: string;
@@ -738,8 +745,10 @@ export class RestoreOrchestrator {
    *  also read there, again just before the launch's first effect and its shell, and again just before the native dispatch
    *  into that shell, a false answer (the daemon began shutting down while the launch waited for the lease or prepared)
    *  refuses with `shutting_down`, so no recovery starts once shutdown has begun. A refusal after the shell exists rolls
-   *  that shell back. It asks for nothing fresh: the seat comes back as
-   *  any launch would bring it back. */
+   *  that shell back. The refusal carries the seat's own result in `launched`: `notStarted` when it stopped before its
+   *  first effect, `compensated` when every shell it started was stopped (tmux confirmed it) and the seat's prior state
+   *  was put back. Without either, its shell may still be running: that result names it, left in place with its session
+   *  record and binding. It asks for nothing fresh: the seat comes back as any launch would bring it back. */
   async launchSingleNode(rigId: string, logicalId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
@@ -841,7 +850,8 @@ export class RestoreOrchestrator {
           { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, keepClaudeLaunch: opts.keepClaudeLaunch, resumePeriodicCarry,
             ...(opts.keepEffort ? { keepEffort: opts.keepEffort } : {}), ...(opts.onLaunchEffort ? { onLaunchEffort: opts.onLaunchEffort } : {}),
             ...(beforeDispatch ? { beforeDispatch } : {}) }, subsetWarnings));
-        if (refusedForShutdown) return shuttingDown;
+        // The seat's own result goes with the refusal: it says whether the relaunch left anything behind.
+        if (refusedForShutdown) return { ...shuttingDown, launched };
         continue;
       }
       // An external CLI's claim has no tmux session to probe; restoreNodeWithCompensation leaves it attached.
@@ -948,8 +958,9 @@ export class RestoreOrchestrator {
         planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory, resumePeriodicCarry,
           ...(beforeDispatch ? { beforeDispatch } : {}) }, subsetWarnings,
       );
-      if (refusedForShutdown) return shuttingDown;
       launched.push(result);
+      // The seat's own result goes with the refusal: it says whether the relaunch left anything behind.
+      if (refusedForShutdown) return { ...shuttingDown, launched };
     }
 
     // Emit restore.subset_completed for launched targets only
@@ -1717,16 +1728,22 @@ export class RestoreOrchestrator {
 
     // A selected launch's own blank rolled back after the shell started (postLaunchRestore has many return points).
     const compensation = { ran: false };
+    // A fresh replacement refused for a shutdown undoes its own shells, and says how here.
+    const shutdownRollback: { outcome?: ShutdownRollback } = {};
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}), ...(claudeLaunch ? { claudeLaunch } : {}), compensation,
-        ...(beforeNativeDispatch ? { beforeNativeDispatch } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps, restoredSkillCatalog);
+        ...(beforeNativeDispatch ? { beforeNativeDispatch, shutdownRollback } : {}) }, warnings, priorState, seatRehydration, resumeSession,
+      activityHookGaps, restoredSkillCatalog);
     if (refusedBeforeNative) {
       // Shutdown began after the shell was created: nothing was dispatched into it, so it is rolled back as a blank one
-      // is, and the seat is left as it was.
-      const { rolledBack } = await this.rollbackToZeroSession(nodeId, launchResult.sessionName, launchResult.session.id, priorState,
-        undefined, keptPane !== null);
-      return { nodeId, logicalId: node.logicalId, status: "failed", error: "The daemon is shutting down; the seat wasn't relaunched.",
-        ...(rolledBack ? { notStarted: true as const } : {}) };
+      // is, and the seat is left as it was. A fresh replacement that retired this shell has already done that.
+      let outcome = shutdownRollback.outcome;
+      if (!outcome) {
+        const { rolledBack, terminalStopped, stopUnconfirmed } = await this.rollbackToZeroSession(nodeId, launchResult.sessionName,
+          launchResult.session.id, priorState, undefined, keptPane !== null);
+        outcome = { compensated: rolledBack && terminalStopped, ...(stopUnconfirmed ? { unconfirmed: launchResult.sessionName } : {}) };
+      }
+      return this.shutdownRefusal(rigId, data, nodeId, node.logicalId, outcome);
     }
     // Saved inputs stay keyed by the snapshot; the result names the seat that the launcher actually registered.
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings), nodeId: launchResult.session.nodeId,
@@ -1971,6 +1988,20 @@ export class RestoreOrchestrator {
     return { rolledBack: true, terminalStopped };
   }
 
+  /** #2940: the result of a keep_alive relaunch refused because the daemon began shutting down after its shell existed.
+   *  `compensated` only when every shell it started was stopped (tmux confirmed it) and the seat's prior state was put
+   *  back. A shell whose stop wasn't confirmed may still be running: the result names it, left in place with its session
+   *  record and binding, and says how to check and stop it. */
+  private shutdownRefusal(rigId: string, data: SnapshotData, nodeId: string, logicalId: string, outcome: ShutdownRollback): RestoreNodeResult {
+    if (outcome.unconfirmed) {
+      const name = outcome.unconfirmed;
+      return { nodeId, logicalId, status: "attention_required",
+        error: `The daemon is shutting down, so the seat wasn't relaunched, but the session '${name}' this launch started couldn't be confirmed stopped: it may still be running, so its session record and binding were left in place. Check it with rig capture ${name}, and stop it with ${this.stopSeatCommand(rigId, data, logicalId)}.` };
+    }
+    return { nodeId, logicalId, status: "failed", error: "The daemon is shutting down; the seat wasn't relaunched.",
+      ...(outcome.compensated ? { compensated: true as const } : {}) };
+  }
+
   /** The notice for the seats an attempt positively left as bare shells, each with its own cause. Its warnings join the
    *  attempt's, and a failure to send it is a warning too: it never changes or blocks the attempt's own result. Seats not
    *  positively left as shells stay in the roll call. */
@@ -2043,7 +2074,11 @@ export class RestoreOrchestrator {
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding;
       processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean }; beforeNativeDispatch?: () => boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; cwdOverride?: string; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; claudeLaunch?: ClaudeContinuationLaunch; keepPane?: boolean; keepClaudeLaunch?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; compensation?: { ran: boolean }; beforeNativeDispatch?: () => boolean;
+      onSessionLaunched?: (nodeId: string, sessionId: string) => void;
+      /** #2940: set by a fresh replacement refused for a shutdown, which undoes its own shells (the provisional one it
+       *  retired and its replacement's), so the caller doesn't stop the retired shell again. */
+      shutdownRollback?: { outcome?: ShutdownRollback } },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -2474,7 +2509,10 @@ export class RestoreOrchestrator {
         // Asked again after the retire's await, right before the replacement's native start: a shutdown that began
         // meanwhile wins, and the seat goes back to where it was (the retired shell can't be rolled back any more).
         if (nativeAllowed && !nativeAllowed()) {
-          if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
+          const putBack = !!priorState && !replacementExists();
+          if (putBack) this.restoreNodeState(node.id, priorState!);
+          // The retire's stop was confirmed: with the prior state put back, nothing this launch started is left.
+          if (opts?.shutdownRollback) opts.shutdownRollback.outcome = { compensated: putBack };
           return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: "The daemon is shutting down; the seat wasn't relaunched." };
         }
         // The same read once more inside the replacement launch, just before its native dispatch: configuration, its
@@ -2483,13 +2521,35 @@ export class RestoreOrchestrator {
         const replacementNativeAllowed = nativeAllowed
           ? () => { if (nativeAllowed()) return true; refusedInLaunch = true; return false; }
           : undefined;
+        // Nothing was dispatched into the replacement's shell: it is rolled back as any shell refused before its native
+        // dispatch is, and the seat goes back to where it was. Its stop counts only when tmux confirms it.
+        const rollBackRefusedReplacement = async (): Promise<void> => {
+          const replacement = this.sessionRegistry.getSessionsForRig(rigId)
+            .filter((candidate) => candidate.nodeId === node.id && candidate.status === "running" && candidate.id !== launchResult.session.id)
+            .at(-1);
+          let outcome: ShutdownRollback;
+          if (replacement) {
+            const { rolledBack, terminalStopped, stopUnconfirmed } = await this.rollbackToZeroSession(node.id, replacement.sessionName,
+              replacement.id, priorState);
+            outcome = { compensated: rolledBack && terminalStopped && !!priorState,
+              ...(stopUnconfirmed ? { unconfirmed: replacement.sessionName } : {}) };
+          } else {
+            if (priorState) this.restoreNodeState(node.id, priorState);
+            outcome = { compensated: !!priorState };
+          }
+          if (opts?.shutdownRollback) opts.shutdownRollback.outcome = outcome;
+        };
+        // The replacement's own session, when this restore follows the sessions it launches (daemon start's automatic
+        // restore adopts it into a keep_alive incident).
+        const onSessionLaunched = opts?.onSessionLaunched;
         try {
           // #3253: this replaces the provisional shell of a restore, so it is a recovery too: a limit that can't be
           // applied doesn't stop the seat, and its notice is the node's. The replacement launches where the provisional
           // shell did: this run's `--cwd`, else the saved folder.
           const fresh = await this.freshLaunch(rigId, node.id,
             { processLimitsMode: "recovery", ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}),
-              ...(replacementNativeAllowed ? { beforeNativeDispatch: replacementNativeAllowed } : {}) });
+              ...(replacementNativeAllowed ? { beforeNativeDispatch: replacementNativeAllowed } : {}),
+              ...(onSessionLaunched ? { onSessionRegistered: (sessionId: string) => onSessionLaunched(node.id, sessionId) } : {}) });
           if (fresh.warnings?.length) warnings?.push(...fresh.warnings);
           // The replacement's own outcome, also when it applied the limit (no notice): the retired provisional shell's
           // notice no longer describes the seat (the key is set either way, so the caller doesn't fall back to it).
@@ -2498,18 +2558,17 @@ export class RestoreOrchestrator {
             return { nodeId: node.id, logicalId: node.logicalId, status: "fresh-primed", ...limits };
           }
           if (refusedInLaunch) {
-            // Nothing was dispatched into the replacement's shell: it is rolled back as any shell refused before its
-            // native dispatch is, and the seat goes back to where it was.
-            const replacement = this.sessionRegistry.getSessionsForRig(rigId)
-              .filter((candidate) => candidate.nodeId === node.id && candidate.status === "running" && candidate.id !== launchResult.session.id)
-              .at(-1);
-            if (replacement) await this.rollbackToZeroSession(node.id, replacement.sessionName, replacement.id, priorState);
-            else if (priorState) this.restoreNodeState(node.id, priorState);
+            await rollBackRefusedReplacement();
             return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: "The daemon is shutting down; the seat wasn't relaunched.", ...limits };
           }
           if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
           return { nodeId: node.id, logicalId: node.logicalId, status: fresh.status, error: fresh.error, ...limits };
         } catch (err) {
+          if (refusedInLaunch) {
+            await rollBackRefusedReplacement();
+            return { nodeId: node.id, logicalId: node.logicalId, status: "failed", error: "The daemon is shutting down; the seat wasn't relaunched.",
+              processLimits: undefined };
+          }
           if (priorState && !replacementExists()) this.restoreNodeState(node.id, priorState);
           return {
             nodeId: node.id,

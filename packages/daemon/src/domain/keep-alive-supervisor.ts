@@ -35,18 +35,28 @@ import type { RigEvent } from "./types.js";
  * returned. Every session a launch leaves behind is recorded as the incident's, whatever the outcome, so it is never
  * taken for a person's start. Attempts are spaced by a growing wait; when they run out, or a launch outcome needs a
  * person (a terminal status or refusal, a failed launch whose session was left running, a survivor that isn't the seat's
- * latest session), the incident is exhausted once, with its event, and the seat shows attention until someone starts
- * or stops it. A launch refused because the daemon is shutting down gives its attempt back.
+ * latest session or whose harness isn't started), the incident is exhausted once, with its event, and the seat shows
+ * attention until someone starts or stops it. A launch refused because the daemon is shutting down gives its attempt
+ * back only when it started nothing that remains: it stopped before its first effect, or every shell it started was
+ * stopped (tmux confirmed it) and the seat's prior state put back. A refused launch whose stop wasn't confirmed keeps its
+ * attempt: the session it may have left running is recorded as the incident's and reported, and the incident waits for
+ * a person.
+ *
+ * A session counts as a recovered agent only once its harness's startup has completed (`startup_status` 'ready'): a
+ * bare shell, its harness not started, or a startup still running is never marked recovered, never starts or completes
+ * the stable period, and never ends an incident or resets its budget. It waits, and recovers once its startup completes
+ * (a person who brings the agent up in the pane and clears its attention).
  *
  * An incident ends when a tick has seen the recovered session run for the stable period, when a person's stop of the
  * seat is confirmed (a request still pending keeps it), or when a person starts it (a session that is neither the
  * incident's fallen nor its launched one). An automatic restore at daemon start isn't a person's start: the session it
  * launches for a seat in an incident is recorded as the incident's as it is registered (`keepAliveIncidentAdopts`), so
- * the incident and its budget carry on; in an exhausted incident it ends the incident only once a tick has seen it run
- * for the stable period. The other exception is a launch whose outcome was never written (the daemon stopped in the
- * middle of it): a session created after that attempt began is taken as that launch's, so the restart never resets the
- * budget. The stable period counts only what a tick saw: a recovered seat that falls while the daemon was down, without
- * a tick having seen it run for the stable period, stays in its incident.
+ * the incident and its budget carry on, also when that restore replaces its provisional shell with a fresh launch from
+ * the seat's recipe (the replacement's session is the one adopted); in an exhausted incident it ends the incident only
+ * once a tick has seen it run for the stable period. The other exception is a launch whose outcome was never written
+ * (the daemon stopped in the middle of it): a session created after that attempt began is taken as that launch's, so the
+ * restart never resets the budget. The stable period counts only what a tick saw: a recovered seat that falls while the
+ * daemon was down, without a tick having seen it run for the stable period, stays in its incident.
  *
  * Concurrency and shutdown follow the watchdog scheduler: one tick at a time, seats in sequence; stop() prevents any new
  * attempt at once and waits a bounded time for the tick in flight. A shutdown writes nothing to sessions.
@@ -102,10 +112,14 @@ export interface KeepAliveSupervisorDeps {
 interface Seat { nodeId: string; rigId: string; logicalId: string }
 interface LatestSession {
   id: string; session_name: string; status: string; origin: string | null; flag: number; stop_attempt: string | null; created_at: string;
+  /** The harness's startup: 'ready' once it completed; 'pending' while it runs; 'attention_required' or 'failed' when it
+   *  didn't (a bare shell, its harness not started). */
+  startup_status: string | null;
 }
 /** What the last attempt's launch came to; null while it runs, or when the daemon stopped before writing it.
  *  `adopted`: a session the supervisor didn't see launched taken as the incident's (a launch whose outcome was lost, or
- *  daemon start's automatic restore). */
+ *  daemon start's automatic restore). `recovered` without `recovered_at`: the launch reported its seat running, but its
+ *  harness's startup hadn't completed when it returned; a tick marks it recovered once it has. */
 type LaunchOutcome = "recovered" | "failed" | "exhausted" | "adopted";
 interface Budget {
   incident_id: string;
@@ -276,10 +290,19 @@ export class KeepAliveSupervisor {
     const open = !!budget && !budget.recovered_at && budget.attempts > 0;
     if (current.status === "running") {
       if (!budget || current.id !== budget.launched_session_id) return;
+      // A session running is a recovered agent only once its harness's startup has completed. A bare shell (its harness
+      // not started) or a startup still running recovers nothing and ends nothing: the incident and its budget stay as
+      // they are, and the stable period counts only from a tick that sees the startup complete.
+      const started = current.startup_status === "ready";
       if (budget.exhausted_at) {
-        // An automatic restore's session in an exhausted incident: the first tick that sees it running starts its stable
-        // period, and one that sees it still running after that period ends the incident.
-        if (!budget.recovered_at) {
+        // An automatic restore's session in an exhausted incident: the first tick that sees it running with its harness
+        // started begins its stable period, and one that sees it so after that period ends the incident.
+        if (!started) {
+          if (budget.recovered_at) {
+            this.db.prepare("UPDATE node_keep_alive_budget SET recovered_at = NULL, updated_at = ? WHERE node_id = ? AND incident_id = ?")
+              .run(this.now().toISOString(), seat.nodeId, budget.incident_id);
+          }
+        } else if (!budget.recovered_at) {
           const at = this.now().toISOString();
           this.db.prepare("UPDATE node_keep_alive_budget SET recovered_at = ?, updated_at = ? WHERE node_id = ? AND incident_id = ?")
             .run(at, at, seat.nodeId, budget.incident_id);
@@ -287,11 +310,15 @@ export class KeepAliveSupervisor {
           this.endIncident(seat.nodeId);
         }
       } else if (open) {
-        // Only a launch's own session counts. One whose outcome the daemon lost to a restart runs, so it recovered; one
-        // a failed launch left behind is a pane without its agent, and waits for a person.
-        if (budget.last_outcome === "adopted") this.markRecovered(seat, budget, current.id, "running");
-        else this.markExhausted(seat, budget, "failed", `${budget.last_error ?? "the launch failed"}; the failed launch left its session running`);
-      } else if (this.ranStable(budget)) {
+        // Only a launch's own session counts. One whose outcome the daemon lost to a restart, an automatic restore's, or
+        // one whose launch returned before its startup completed recovers once its harness has started; one a failed
+        // launch left behind is a pane without its agent, and waits for a person.
+        if (budget.last_outcome === "adopted" || budget.last_outcome === "recovered") {
+          if (started) this.markRecovered(seat, budget, current.id, "running");
+        } else {
+          this.markExhausted(seat, budget, "failed", `${budget.last_error ?? "the launch failed"}; the failed launch left its session running`);
+        }
+      } else if (started && this.ranStable(budget)) {
         this.endIncident(seat.nodeId);
       }
       return;
@@ -341,9 +368,16 @@ export class KeepAliveSupervisor {
   ): void {
     if (thrown !== null) return this.recordFailure(seat, budget, fallenId, "failed", thrown);
     if (!result!.ok) {
-      // The daemon began shutting down while the launch waited for the seat's lease: nothing started, so the attempt is
-      // given back and the next daemon start finds the incident as it was.
-      if (result!.code === "shutting_down") return this.revertAttempt(seat, before, budget);
+      if (result!.code === "shutting_down") {
+        // The daemon began shutting down. A launch that stopped before its first effect, or whose shells were stopped
+        // (tmux confirmed it) with the seat's prior state put back, started nothing that remains: the attempt is given
+        // back, and the next daemon start finds the incident as it was. A stop that wasn't confirmed may have left its
+        // session running: the attempt stays counted, and that session is recorded as the incident's and reported.
+        const own = (result!.launched ?? []).filter((entry) => entry.nodeId === seat.nodeId || entry.intendedNodeId === seat.nodeId);
+        const left = own.find((entry) => !entry.notStarted && !entry.compensated);
+        if (!left) return this.revertAttempt(seat, before, budget);
+        return this.recordFailure(seat, budget, fallenId, "shutting_down", left.error ?? result!.message ?? "the launch was refused for a shutdown");
+      }
       const error = result!.message ?? result!.code ?? "the launch was refused";
       return TERMINAL_REFUSALS.has(result!.code ?? "")
         ? this.markExhausted(seat, budget, result!.code, error)
@@ -353,7 +387,14 @@ export class KeepAliveSupervisor {
       // A live session survived. When it is the seat's latest session nothing is down: the incident closes and the
       // attempt isn't spent. An older session still running behind a fallen latest one is a state a relaunch can't
       // fix: the seat waits for a person, so the same fall doesn't open a new incident on every tick.
-      if (this.latestSession(seat.nodeId)?.status === "running") return this.endIncident(seat.nodeId);
+      const latest = this.latestSession(seat.nodeId);
+      if (latest?.status === "running") {
+        if (latest.startup_status === "ready") return this.endIncident(seat.nodeId);
+        // A live session whose harness's startup hasn't completed (a bare shell) isn't a running agent: the seat waits for
+        // a person rather than the budget being reset on it.
+        return this.markExhausted(seat, budget, "already_running",
+          `the seat's latest session '${latest.session_name}' is running, but its harness's startup hasn't completed (startup status '${latest.startup_status ?? "unknown"}')`);
+      }
       const live = this.db.prepare(
         "SELECT session_name FROM sessions WHERE node_id = ? AND status = 'running' ORDER BY created_at DESC, id DESC LIMIT 1",
       ).get(seat.nodeId) as { session_name: string } | undefined;
@@ -368,7 +409,20 @@ export class KeepAliveSupervisor {
       // A running status counts only with a new session running: a launch can report one without starting anything
       // (a seat whose continuity recovery is in progress), and then the seat is still down.
       const after = this.latestSession(seat.nodeId);
-      if (after && after.id !== fallenId && after.status === "running") return this.markRecovered(seat, budget, after.id, launched.status);
+      if (after && after.id !== fallenId && after.status === "running") {
+        // Recovered only once the harness's startup has completed. One still starting is recorded as the launch's, and a
+        // tick marks it recovered once it has; one left as a bare shell (its startup didn't complete) is a failed launch
+        // that left its session running, and waits for a person.
+        if (after.startup_status === "ready") return this.markRecovered(seat, budget, after.id, launched.status);
+        if (after.startup_status === "pending") {
+          this.db.prepare(
+            "UPDATE node_keep_alive_budget SET launched_session_id = ?, last_outcome = 'recovered', updated_at = ? WHERE node_id = ? AND incident_id = ?",
+          ).run(after.id, this.now().toISOString(), seat.nodeId, budget.incident_id);
+          return;
+        }
+        return this.recordFailure(seat, budget, fallenId, launched.status,
+          `the launch reported '${launched.status}' but its harness's startup didn't complete (startup status '${after.startup_status ?? "unknown"}')`);
+      }
       return this.recordFailure(seat, budget, fallenId, launched.status, `the launch reported '${launched.status}' but started no session`);
     }
     return this.recordFailure(seat, budget, fallenId, launched.status, error);
@@ -493,7 +547,7 @@ export class KeepAliveSupervisor {
       .some((column) => column.name === "stop_attempt");
     return (this.db.prepare(
       `SELECT id, session_name, status, origin, intentionally_stopped AS flag,
-         ${this.sessionsHaveStopAttempt ? "stop_attempt" : "NULL AS stop_attempt"}, created_at
+         ${this.sessionsHaveStopAttempt ? "stop_attempt" : "NULL AS stop_attempt"}, created_at, startup_status
        FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
     ).get(nodeId) as LatestSession | undefined) ?? null;
   }
@@ -522,9 +576,11 @@ export class KeepAliveSupervisor {
 
 /** #2940: an automatic restore at daemon start is not a person's start. The session it launches for a seat in a
  *  keep_alive incident becomes the incident's (`adopted`), so the budget carries on: an open incident takes it as its
- *  recovery, and an exhausted one keeps waiting for a person until a tick has seen that session run for the stable
- *  period, which ends the incident. Either way the stable period counts from a tick that sees it running. Called as the
- *  restore registers the session; never throws, so it can't fail a restore. */
+ *  recovery once its harness's startup has completed, and an exhausted one keeps waiting for a person until a tick has
+ *  seen that session run, started, for the stable period, which ends the incident. Either way the stable period counts
+ *  from a tick that sees it running with its harness started. Called as the restore registers each session, its
+ *  recipe-backed fresh replacement's included, so the last one registered is the incident's; never throws, so it can't
+ *  fail a restore. */
 export function keepAliveIncidentAdopts(db: Database.Database, nodeId: string, sessionId: string, now = new Date()): void {
   try {
     db.prepare(

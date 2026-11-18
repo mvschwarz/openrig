@@ -527,18 +527,21 @@ export class RigTeardownOrchestrator {
     return this.deps.sessionRegistry.getLatestLiveSessions(rigId);
   }
 
-  /** This rig's seats whose files may still be in use: each live session, each released one, and each seat whose latest
-   *  session reads detached, with or without a stop request (#2940: a request isn't a confirmed stop). A released session (claimed, then detached by rig unclaim or down)
-   *  is its owner's and may still be running, whether or not it's still its seat's latest. A detached latest session may
-   *  still be running too (this server didn't show it), as settledSkillSeats also holds. Either's folders stay in use
-   *  until recordAlreadyStoppedIntent sees tmux report it absent and records the stop. */
+  /** This rig's seats whose files may still be in use: each live session, each released one, each seat whose latest
+   *  session reads detached, with or without a stop request (#2940: a request isn't a confirmed stop), and each seat
+   *  whose latest session's stop is still pending, whatever it reads (a request recorded on a row that already read
+   *  exited or superseded). A released session (claimed, then detached by rig unclaim or down) is its owner's and may
+   *  still be running, whether or not it's still its seat's latest. A detached latest session, or one whose stop is
+   *  pending, may still be running too (this server didn't show it gone), as settledSkillSeats also holds. Their folders
+   *  stay in use until recordAlreadyStoppedIntent sees tmux report the session absent and records the stop. */
   private seatsInUse(rigId: string): Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd"> & { launchedCwd: string | null }> {
     const released = this.db.prepare(`
       SELECT n.id AS nodeId, n.runtime, n.cwd, s.id AS sessionId FROM nodes n JOIN sessions s ON s.node_id = n.id
-      WHERE n.rig_id = ? AND s.status = 'detached'
-        AND ((s.origin = 'claimed' AND s.intentionally_stopped = 0)
-          OR s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
-            ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1))
+      WHERE n.rig_id = ?
+        AND ((s.status = 'detached' AND s.origin = 'claimed' AND s.intentionally_stopped = 0)
+          OR (s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+                ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+            AND (s.status = 'detached' OR (s.stop_attempt IS NOT NULL AND s.status NOT IN ('running', 'idle', 'unknown')))))
     `).all(rigId) as Array<Pick<LatestNodeSession, "nodeId" | "runtime" | "cwd" | "sessionId">>;
     return [...this.getLatestLiveSessions(rigId), ...released]
       .map((session) => ({ ...session, launchedCwd: this.launchedCwdOf(session.sessionId) }));

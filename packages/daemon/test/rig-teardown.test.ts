@@ -759,6 +759,26 @@ describe("RigTeardownOrchestrator", () => {
     expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
   });
 
+  it.each(["exited", "superseded"])("#2940: keeps guidance while a keep_alive seat's stop on its latest %s session is only requested", async (status) => {
+    const { rigId } = seedRigWithNode({ runtime: "codex", cwd: tmpDir });
+    const kept = rigRepo.addNode(rigId, "kept", { runtime: "codex", cwd: tmpDir, keepAlive: true });
+    const keptSession = sessionRegistry.registerSession(kept.id, "kept@test-rig");
+    sessionRegistry.updateStatus(keptSession.id, status);
+    const guidance = path.join(tmpDir, "AGENTS.md");
+    const content = "<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nworking guidance\n<!-- END OpenRig MANAGED BLOCK: role -->\n";
+    fs.writeFileSync(guidance, content);
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async (name: string) => name === "kept@test-rig"
+      ? { state: "transport_unavailable", cause: "socket unavailable" } : { state: "present" });
+    await buildTeardown(tmux).teardown(rigId);
+    // The down recorded the request, but nothing proved the session gone: it may still use the file.
+    const row = db.prepare("SELECT status, intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(keptSession.id) as
+      { status: string; intentionally_stopped: number; stop_attempt: string | null };
+    expect(row).toMatchObject({ status, intentionally_stopped: 1 });
+    expect(row.stop_attempt).not.toBeNull();
+    expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
+  });
+
   describe("#2940: down records every selected seat's stop before the first kill", () => {
     function rigOfThree() {
       const rig = rigRepo.createRig("down-race");
