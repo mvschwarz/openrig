@@ -404,6 +404,70 @@ describe("Reconciler", () => {
     expect(result.detachedSessionIds).toEqual([]);
   });
 
+  it("#2940: a stop request withdrawn while the reconcile awaits its probe or census is no confirmed stop", async () => {
+    const withdrawnDuring = async (where: "probe" | "census", opts?: { absenceProof?: "positive" }) => {
+      const rigName = `r-${where}-${opts?.absenceProof ?? "boot"}`;
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, "dev1-impl", { role: "worker" });
+      const session = sessionRegistry.registerSession(node.id, `dev1-impl@${rigName}`);
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.requestStop(session.id, "attempt-a");
+      // A stop proven to have had no effect puts its request back while the reconcile waits.
+      const withdraw = () => sessionRegistry.revertStopRequest(session.id, "attempt-a", { flag: 0, attempt: null });
+      if (where === "census") {
+        new SeatIdentityStore(db).upsert({
+          nodeId: node.id, verdict: "verified", evidenceSource: null, reason: null,
+          evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
+          sessionName: session.sessionName, observedAt: new Date(Date.now() + 1_000).toISOString(),
+        });
+      }
+      const tmux = mockTmuxAdapter({});
+      tmux.probeSession = async () => { if (where === "probe") withdraw(); return { state: "absent" as const }; };
+      const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux,
+        readProcesses: async () => { if (where === "census") withdraw(); return []; } });
+      const result = await reconciler.reconcile(rig.id, { nodeIds: [node.id], ...opts });
+      return { session, result };
+    };
+    const flags = (id: string) => db.prepare("SELECT status, intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(id);
+
+    for (const [where, opts] of [["probe", undefined], ["census", undefined], ["census", { absenceProof: "positive" }]] as const) {
+      const { session, result } = await withdrawnDuring(where, opts);
+      expect(result.stopsConfirmed).toBeUndefined();
+      expect(result.detachedSessionIds).toEqual([session.id]);
+      expect(flags(session.id)).toEqual({ status: "detached", intentionally_stopped: 0, stop_attempt: null });
+    }
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'session.stopped'").get()).toEqual({ n: 0 });
+  });
+
+  it("#2940: a pending stop stays pending at boot when the process table can't be read for its seat's recorded process", async () => {
+    const { rig, nodes } = seedRigWithSessions([{ logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" }]);
+    const session = sessionRegistry.getSessionsForRig(rig.id)[0]!;
+    sessionRegistry.requestStop(session.id, "attempt-a");
+    sessionRegistry.updateBinding(nodes[0]!.id, { attachmentType: "tmux", tmuxSession: "r01-dev1-impl", tmuxPane: "%1" });
+    new SeatIdentityStore(db).upsert({
+      nodeId: nodes[0]!.id, verdict: "verified", evidenceSource: null, reason: null,
+      evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
+      sessionName: "r01-dev1-impl", observedAt: new Date(Date.now() + 1_000).toISOString(),
+    });
+    const tmux = mockTmuxAdapter({});
+    const flags = () => db.prepare("SELECT status, intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(session.id);
+
+    const unreadable = await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux,
+      readProcesses: async () => { throw new Error("ps failed"); } }).reconcile(rig.id);
+
+    expect(unreadable.undetermined).toEqual([{ sessionId: session.id, sessionName: "r01-dev1-impl", cause: "the process table couldn't be read" }]);
+    expect(unreadable.stopsConfirmed).toBeUndefined();
+    expect(flags()).toEqual({ status: "running", intentionally_stopped: 1, stop_attempt: "attempt-a" });
+    expect(sessionRegistry.getBindingForNode(nodes[0]!.id)).not.toBeNull();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'session.stopped'").get()).toEqual({ n: 0 });
+
+    // A readable table that doesn't list the recorded pids confirms the stop, as before.
+    const readable = await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, readProcesses: async () => [] }).reconcile(rig.id);
+    expect(readable.stopsConfirmed).toEqual([session.id]);
+    expect(flags()).toEqual({ status: "exited", intentionally_stopped: 1, stop_attempt: null });
+    expect(sessionRegistry.getBindingForNode(nodes[0]!.id)).toBeNull();
+  });
+
   it("#2940: with positive proof asked for, a detached row is probed again and a session tmux shows is no fall", async () => {
     const { rig } = seedRigWithSessions([
       { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "detached" },

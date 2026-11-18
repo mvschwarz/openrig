@@ -15,6 +15,7 @@ import { SeatLifecycleService, claimedSessionRoutes } from "../src/domain/seat-l
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { Reconciler } from "../src/domain/reconciler.js";
+import { KeepAliveSupervisor } from "../src/domain/keep-alive-supervisor.js";
 
 interface FakeTmux {
   adapter: TmuxAdapter;
@@ -553,6 +554,49 @@ describe("SeatLifecycleService", () => {
       tmux.setAlive(ext.sessionName, false);
       expect(await service.stopSeat({ seatRef: ext.sessionName, reason: "keep it down" })).toMatchObject({ ok: false });
       expect(flags(ext.session.id)).toEqual({ status: "running", intentionally_stopped: 0 });
+    });
+
+    it("puts back a refused stop's request on a detached latest session, so keep_alive can relaunch it", async () => {
+      // The latest session is recorded detached (a boot reconcile that couldn't reach tmux) yet tmux shows it again.
+      const seat = seatFixture("revert-detached", "dev.qa", { keepAlive: true });
+      seatFixture("revert-detached", "dev.impl");
+      sessionRegistry.markDetached(seat.session.id);
+      vi.spyOn(tmux.adapter, "killSession").mockImplementationOnce(async () =>
+        ({ ok: false, code: "tmux_error", message: "refused before detach", stopPhase: "none" }));
+
+      const refused = await service.stopSeat({ seatRef: seat.sessionName, reason: "pause review" });
+
+      expect(refused).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      expect(db.prepare("SELECT status, intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(seat.session.id))
+        .toEqual({ status: "detached", intentionally_stopped: 0, stop_attempt: null });
+      expect(getNodeInventory(db, seat.rig.id).find((entry) => entry.nodeId === seat.node.id)?.stopRequested).toBeUndefined();
+
+      // The session is lost later: keep_alive reads the fall as one and relaunches the seat.
+      tmux.setAlive(seat.sessionName, false);
+      const launchSingleNode = vi.fn(async () => ({ ok: true as const, launched: [], alreadyRunning: [] }));
+      await new KeepAliveSupervisor({
+        db, eventBus, restoreOrchestrator: { launchSingleNode: launchSingleNode as never }, onTickError: () => {},
+        reconciler: new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux.adapter, readProcesses: async () => [] }),
+      }).runTickNow();
+      expect(launchSingleNode).toHaveBeenCalledWith(seat.rig.id, "dev.qa", expect.anything());
+    });
+
+    it("says the request stays recorded when a refused stop's request was replaced meanwhile", async () => {
+      const seat = seatFixture("revert-replaced", "dev.qa");
+      seatFixture("revert-replaced", "dev.impl");
+      vi.spyOn(tmux.adapter, "killSession").mockImplementationOnce(async () => {
+        // Another stop records its own attempt while this one's kill is refused.
+        sessionRegistry.requestStop(seat.session.id, "concurrent-attempt");
+        return { ok: false, code: "tmux_error", message: "refused before detach", stopPhase: "none" };
+      });
+
+      const refused = await service.stopSeat({ seatRef: seat.sessionName, reason: "pause review" });
+
+      expect(refused).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      if (refused.ok) throw new Error("expected refusal");
+      expect(refused.message).toContain("The stop request stays recorded");
+      expect(db.prepare("SELECT intentionally_stopped, stop_attempt FROM sessions WHERE id = ?").get(seat.session.id))
+        .toEqual({ intentionally_stopped: 1, stop_attempt: "concurrent-attempt" });
     });
 
     it("confirms the stop when a keep_alive seat's session exits between the probe and the kill", async () => {

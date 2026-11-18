@@ -26,6 +26,11 @@ import type { RigSpec } from "../src/domain/types.js";
 const T0 = Date.parse("2026-11-17T08:00:00.000Z");
 const BACKOFF = 30_000;
 const STABLE = 10 * 60_000;
+/** A process start time as the process table gives it (`ps -o lstart`, local time). */
+const lstart = (d: Date) => `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} `
+  + `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]} `
+  + `${String(d.getDate()).padStart(2, " ")} `
+  + `${[d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":")} ${d.getFullYear()}`;
 
 describe("KeepAliveSupervisor (#2940)", () => {
   let db: Database.Database;
@@ -335,11 +340,7 @@ describe("KeepAliveSupervisor (#2940)", () => {
       sessionName: "dev-driver@r01", observedAt: observed.toISOString(),
     });
     const started = new Date(observed.getTime() - 10 * 60_000);
-    const lstart = `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][started.getDay()]} `
-      + `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][started.getMonth()]} `
-      + `${String(started.getDate()).padStart(2, " ")} `
-      + `${[started.getHours(), started.getMinutes(), started.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":")} ${started.getFullYear()}`;
-    processes = [{ pid: 4241, ppid: 1, pgid: 4241, tpgid: -1, executableName: "claude", startedAt: lstart, command: "claude" }];
+    processes = [{ pid: 4241, ppid: 1, pgid: 4241, tpgid: -1, executableName: "claude", startedAt: lstart(started), command: "claude" }];
     const launch = relaunches();
     await supervisor(launch).runTickNow();
     expect(launch).not.toHaveBeenCalled();
@@ -729,6 +730,50 @@ describe("KeepAliveSupervisor (#2940)", () => {
     }).runTickNow();
     expect(startServer).toHaveBeenCalledOnce();
     expect(launch).toHaveBeenCalledOnce();
+  });
+
+  describe("a missing tmux socket whose seat's recorded pid is held by a process again (a reboot reuses pids)", () => {
+    let startServer: ReturnType<typeof vi.fn>;
+    const run = async (holder: ProcessTableRow) => {
+      let serverUp = false;
+      startServer = vi.fn(async () => { serverUp = true; return { ok: true as const }; });
+      const rebooted = {
+        probeSession: async () => serverUp ? { state: "absent" as const }
+          : { state: "transport_unavailable" as const, cause: "error connecting to /tmp/tmux-1000/default (No such file or directory)" },
+        startServer,
+      } as unknown as TmuxAdapter;
+      createdAt(fallenId, T0 - 60_000);
+      new SeatIdentityStore(db).upsert({
+        nodeId, verdict: "verified", evidenceSource: null, reason: null,
+        evidence: { registeredPane: "%1", observedPid: 4242, observedPanePid: 4241, observedCommand: "claude", matchedLayer: 1 },
+        sessionName: "dev-driver@r01", observedAt: new Date(T0 - 30_000).toISOString(),
+      });
+      processes = [holder];
+      const launch = relaunches();
+      await supervisor(launch, {
+        reconciler: new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: rebooted, readProcesses: async () => processes }),
+      }).runTickNow();
+      return launch;
+    };
+    const holder = (startedAt: string): ProcessTableRow =>
+      ({ pid: 4241, ppid: 1, pgid: 4241, tpgid: -1, executableName: "bash", startedAt, command: "bash" });
+
+    it("is proven gone when that process started after the observation, and the seat is relaunched", async () => {
+      const launch = await run(holder(lstart(new Date(T0 - 10_000))));
+      expect(startServer).toHaveBeenCalledOnce();
+      expect(launch).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ["started at or before the observation (the seat's own process)", lstart(new Date(T0 - 10 * 60_000))],
+      ["whose start can't be dated", "not a start time"],
+    ])("holds the seat while that process %s", async (_label, startedAt) => {
+      const launch = await run(holder(startedAt));
+      expect(startServer).not.toHaveBeenCalled();
+      expect(launch).not.toHaveBeenCalled();
+      expect(latestStatus()).toBe("running");
+      expect(budget()).toBeUndefined();
+    });
   });
 
   it("a released claimed session still running in its owner's tmux doesn't hold back the seat's own proven fall", async () => {

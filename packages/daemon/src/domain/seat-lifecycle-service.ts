@@ -2223,8 +2223,11 @@ export class SeatLifecycleService {
       if (recorded && "code" in recorded) return recorded;
       if (recorded) request = { attemptId, prev: recorded };
     }
-    // Only a failure proven to have had no effect (nothing was detached or killed) puts back this attempt's request.
-    const undoRequest = () => { if (request) this.sessionRegistry.revertStopRequest(session.id, request.attemptId, request.prev); };
+    // Only a failure proven to have had no effect (nothing was detached or killed) puts back this attempt's request. The
+    // revert is refused when the row changed meanwhile (another stop recorded its own attempt, or confirmed one): that
+    // request stays recorded, and the result says so.
+    const undoRequest = () => !request || this.sessionRegistry.revertStopRequest(session.id, request.attemptId, request.prev);
+    const keptNote = " The stop request stays recorded: the row changed meanwhile, so this attempt's request couldn't be put back.";
     const kill = checked
       ? await this.tmuxAdapter.killSession(session.session_name, beforeEffect)
       : await this.tmuxAdapter.killSession(session.session_name);
@@ -2235,12 +2238,12 @@ export class SeatLifecycleService {
     if (checked && !kill.ok && !goneBeforeKill) {
       const partialEffect = kill.stopPhase !== undefined && kill.stopPhase !== "none";
       if (kill.code === "selection_changed" || kill.code === "guard_target_changed" || kill.code === "guard_target_unknown") {
-        if (!partialEffect) undoRequest();
-        return { ok: false, code: "selection_changed", message: kill.message, partialEffect, stopPhase: kill.stopPhase };
+        const kept = !partialEffect && !undoRequest();
+        return { ok: false, code: "selection_changed", message: `${kill.message}${kept ? keptNote : ""}`, partialEffect, stopPhase: kill.stopPhase };
       }
       if (!partialEffect && kill.code !== "session_not_found") {
-        undoRequest();
-        return { ok: false, code: "tmux_probe_failed", message: kill.message };
+        const kept = !undoRequest();
+        return { ok: false, code: "tmux_probe_failed", message: `${kill.message}${kept ? keptNote : ""}` };
       }
       return { ok: false, code: "stop_uncertain", message: `Checked stop did not complete: ${kill.message}${request ? " The stop request stays recorded." : ""}`, partialEffect, stopPhase: kill.stopPhase };
     }
@@ -2250,12 +2253,13 @@ export class SeatLifecycleService {
     if (kill && !kill.ok && kill.code !== "session_not_found") {
       // A timeout or a partial effect is no proof that nothing stopped: the request stays and the result says so.
       const partialEffect = kill.stopPhase !== undefined && kill.stopPhase !== "none";
-      if (!partialEffect) undoRequest();
+      const kept = !partialEffect && !undoRequest();
       return {
         ok: false,
         code: "tmux_probe_failed",
         message: `tmux kill-session for "${session.session_name}" failed: ${kill.message ?? kill.code}`
-          + (partialEffect && request ? ` It got as far as ${kill.stopPhase}; the stop request stays recorded.` : ""),
+          + (partialEffect && request ? ` It got as far as ${kill.stopPhase}; the stop request stays recorded.` : "")
+          + (kept ? keptNote : ""),
         ...(partialEffect ? { partialEffect, stopPhase: kill.stopPhase } : {}),
       };
     }

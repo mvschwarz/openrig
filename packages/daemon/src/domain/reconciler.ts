@@ -91,12 +91,12 @@ export class Reconciler {
     const positive = opts?.absenceProof === "positive";
     let table: Promise<ProcessTableRow[] | null> | null = null;
     const processes = () => (table ??= this.readProcesses().catch(() => null));
-    /** The seat's recorded process: still running, or, with positive proof asked for, unknowable because the process
-     *  table couldn't be read while there was a recorded process to look for. */
-    const census = async (session: { nodeId: string; sessionName: string }) => {
+    /** The seat's recorded process: still running, or, with `strict` (positive proof asked for, or a pending stop),
+     *  unknowable because the process table couldn't be read while there was a recorded process to look for. */
+    const census = async (session: { nodeId: string; sessionName: string }, strict: boolean) => {
       let consulted = false;
       const running = await recordedProcessStillRunning(this.db, session, () => { consulted = true; return processes(); });
-      return { running, unreadable: !running && positive && consulted && (await processes()) === null };
+      return { running, unreadable: !running && strict && consulted && (await processes()) === null };
     };
     // With positive proof asked for, terminal history is probed too: each session name is probed once per reconcile.
     const probes = new Map<string, Promise<SessionProbe>>();
@@ -182,8 +182,9 @@ export class Reconciler {
         // A session this server doesn't show isn't gone while its seat's recorded process still runs: the daemon is
         // looking at a different tmux server. Detaching it would have the kernel relaunch duplicates and supersede the
         // live seats. Without that evidence (after a reboot nothing recorded is running), it detaches as before. With
-        // positive proof asked for, a process table that couldn't be read proves nothing either.
-        const recorded = await census(session);
+        // positive proof asked for, or for a pending stop (confirmed only on proof), a process table that couldn't be
+        // read proves nothing either.
+        const recorded = await census(session, positive || requested);
         if (recorded.running) {
           unseen.push({ sessionId: session.id, sessionName: session.sessionName, ...recorded.running });
           continue;
@@ -194,7 +195,10 @@ export class Reconciler {
         }
         if (positive) provenAbsent.push(session.id);
         if (probeOnly) continue;
-        if (requested) {
+        // The request may have been withdrawn while the probe and the census were awaited (a stop proven to have had no
+        // effect puts it back): a session it no longer carries is a fall, not a confirmed stop. Read right before the
+        // write, with no await in between, as the stop and the clean do (stopStillRequested).
+        if (requested && (stopRequested.get(session.id) as { flag: number } | undefined)?.flag === 1) {
           try {
             const txn = this.db.transaction(() => {
               this.sessionRegistry.markIntentionallyStopped(session.id);
@@ -253,7 +257,9 @@ export class Reconciler {
 
 /** #2940: positive proof that the seat's process recorded for this very session is gone: the evidence names the session,
  *  was observed since the session began (to the second, the precision of its creation time), has pids, the process
- *  table can be read, and none of those pids runs (whatever process holds it now). Anything unknown is no proof. */
+ *  table can be read, and none of those pids is held by the observed process: a pid not listed, or held by a process
+ *  that started after the observation (a pid reused after a reboot), is gone. A holder whose start can't be dated, like
+ *  anything else unknown, is no proof. */
 async function recordedProcessProvenGone(
   db: Database.Database,
   session: { nodeId: string; sessionName: string; createdAt: string },
@@ -267,7 +273,20 @@ async function recordedProcessProvenGone(
   const pids = [evidence.panePid, evidence.pid].filter((pid): pid is number => typeof pid === "number" && pid > 0);
   if (!pids.length) return false;
   const rows = await processes();
-  return !!rows && !rows.some((row) => pids.includes(row.pid));
+  // A pid held by a process that started after the observation was reused (after a reboot, say): it isn't the seat's.
+  return !!rows && pids.every((pid) => {
+    const row = rows.find((r) => r.pid === pid);
+    return !row || isRecordedProcess(row, observed / 1000) === false;
+  });
+}
+
+/** Whether the process now holding a recorded pid is the one observed: true when it started at or before the
+ *  observation (`observedAt`, in seconds); false when it observably started after it, so the pid was reused; undefined
+ *  when its start can't be dated, which proves neither. Start times are whole seconds, so a pid reused within the
+ *  observation's second still counts as the observed process. */
+function isRecordedProcess(row: Pick<ProcessTableRow, "startedAt">, observedAt: number): boolean | undefined {
+  const started = lstartToMinTs(row.startedAt);
+  return started === undefined ? undefined : started <= observedAt;
 }
 
 /** #2940: positive proof that no tmux server runs: the process table can be read and shows none. Conservative: any
@@ -298,8 +317,7 @@ export async function recordedProcessStillRunning(
   if (!rows) return null;
   for (const pid of pids) {
     const row = rows.find((r) => r.pid === pid);
-    const started = row ? lstartToMinTs(row.startedAt) : undefined;
-    if (!row || started === undefined || started > observedAt) continue;
+    if (!row || isRecordedProcess(row, observedAt) !== true) continue;
     const parent = rows.find((r) => r.pid === row.ppid);
     return { pid, parent: parent ? { pid: parent.pid, command: parent.command } : null };
   }
@@ -339,8 +357,6 @@ export async function recordedProcessEnded(
   if (pids.some((pid) => table.permissionHiddenPids.includes(pid))) return false;
   return pids.every((pid) => {
     const row = table.rows.find((r) => r.pid === pid);
-    if (!row) return true;
-    const started = lstartToMinTs(row.startedAt);
-    return started !== undefined && started > observedAt;
+    return !row || isRecordedProcess(row, observedAt) === false;
   });
 }

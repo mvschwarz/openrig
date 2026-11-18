@@ -549,11 +549,12 @@ export class SessionRegistry {
   }
 
   /** #2940: put back the request this attempt replaced, only while the row still carries this attempt and is still
-   *  live (running, idle or unknown). An older or concurrent stop recorded its own attempt and is left alone, and a
-   *  replacement session is another row. Returns whether the row changed. */
+   *  live or detached (running, idle, unknown or detached: a detached row tmux shows again can be stopped too). An older
+   *  or concurrent stop recorded its own attempt and is left alone, a confirmed stop (exited) is kept, and a replacement
+   *  session is another row. Returns whether the row changed. */
   revertStopRequest(sessionId: string, attemptId: string, prev: { flag: number; attempt: string | null }): boolean {
     return this.db.prepare(
-      "UPDATE sessions SET intentionally_stopped = ?, stop_attempt = ? WHERE id = ? AND stop_attempt = ? AND status IN ('running', 'idle', 'unknown')",
+      "UPDATE sessions SET intentionally_stopped = ?, stop_attempt = ? WHERE id = ? AND stop_attempt = ? AND status IN ('running', 'idle', 'unknown', 'detached')",
     ).run(prev.flag, prev.attempt, sessionId, attemptId).changes > 0;
   }
 
