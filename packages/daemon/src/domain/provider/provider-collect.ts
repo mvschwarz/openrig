@@ -3,7 +3,7 @@
 // production read-model path is directly testable without a live daemon/db. It maps codex-auth
 // profiles → accounts[] (authState="unknown" per BR-3 validate-at-use — NEVER assert active/
 // needs_reauth from static disk), joins the seat universe to the codex seat-registry into
-// rawBindings[] (unregistered/claude seats → unbound, so the assembler emits seat_with_no_account),
+// rawBindings[] (unregistered/claude seats → unbound: no registry placement, which isn't an anomaly),
 // carries signals through (empty until the live signal-collection lane), and delegates all anomaly
 // computation to assembleFourBlock.
 
@@ -64,7 +64,7 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
     // Runtime-identity gate: bind ONLY when the LIVE inventory seat is actually a Codex seat. The
     // codex auth-seat-registry is keyed by session name, so a STALE row whose session name was
     // reused by a Claude seat must NOT bind that Claude seat to a Codex account — a Claude seat
-    // stays unbound (seat_with_no_account) regardless of any same-session registry row. The registry lives in
+    // stays unbound regardless of any same-session registry row. The registry lives in
     // the daemon's CODEX_HOME, so it binds nothing for a seat that launches with its own.
     if (reg && seat.runtime === "codex" && !seat.runtimeHome?.home) {
       return {
@@ -75,8 +75,8 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
         bindingSource: "codex_auth_seat_registry",
       };
     }
-    // Unregistered/non-codex (claude seats, codex seats with no registry row) → unbound. The assembler
-    // attaches the required seat_with_no_account anomaly; we never fabricate a sentinel account.
+    // Unregistered/non-codex (claude seats, codex seats with no registry row) → unbound: no applicable
+    // registry placement, never a missing account. We never fabricate a sentinel account.
     return {
       accountId: null,
       seatSession: seat.seatSession,

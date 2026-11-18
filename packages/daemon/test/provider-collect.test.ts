@@ -37,7 +37,7 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
     ]);
   });
 
-  it("a claude (or unregistered) seat has no registry placement: the locked anomaly says only that, beside what it's configured to use", () => {
+  it("a claude (or unregistered) seat has no registry placement and no anomaly, beside what it's configured to use", () => {
     const model = collectFourBlockReadModel(deps({
       auth: { profiles: ["work"], seats: [] },
       listSeats: () => [{ seatSession: "pm@rig-a", rigName: "rig-a", runtime: "claude-code", lifecycleState: "running", claudeToken: { label: "team-a" } }],
@@ -46,8 +46,7 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
     expect(model.bindings).toHaveLength(1);
     const b = model.bindings[0]!;
     expect(b.accountId).toBeNull();
-    expect(b.anomalies[0]).toMatchObject({ kind: "seat_with_no_account", seat: "pm@rig-a" });
-    expect(b.anomalies[0]!.evidence).toMatch(/has no Codex registry placement on this collection path; this says nothing about the account the seat uses/);
+    expect(b.anomalies).toEqual([]);
     expect(b).toMatchObject({ runtime: "claude-code", configured: { source: "claude_token", label: "team-a" }, launched: LAUNCHED_UNKNOWN, verified: VERIFIED_UNKNOWN });
   });
 
@@ -117,7 +116,35 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
     expect(model.bindings).toHaveLength(1);
     const b = model.bindings[0]!;
     expect(b.accountId).toBeNull(); // must NOT bind to the Codex account despite the stale same-session row
-    expect(b.anomalies[0]).toMatchObject({ kind: "seat_with_no_account", seat: "shared@rig" });
+    expect(b.anomalies).toEqual([]);
+  });
+
+  it("a null placement never produces seat_with_no_account: Claude, unregistered Codex, own-home Codex, unknown runtime", () => {
+    const model = collectFourBlockReadModel(deps({
+      auth: { profiles: ["work"], seats: [
+        { seat: "own@r", rig: "r", runtime: "codex", cwd: "/p", authProfile: "work", updatedTs: "t1" },
+        { seat: "a@r", rig: "r", runtime: "codex", cwd: "/p", authProfile: "work", updatedTs: "t1" },
+        { seat: "b@r", rig: "r", runtime: "codex", cwd: "/p", authProfile: "work", updatedTs: "t2" },
+      ] },
+      listSeats: () => [
+        { seatSession: "cl@r", rigName: "r", runtime: "claude-code", lifecycleState: "running" },
+        { seatSession: "cx@r", rigName: "r", runtime: "codex", lifecycleState: "running" },
+        { seatSession: "own@r", rigName: "r", runtime: "codex", lifecycleState: "running", runtimeHome: { home: "/homes/own", source: "member" } },
+        { seatSession: "t@r", rigName: "r", runtime: "terminal", lifecycleState: "running" },
+        { seatSession: "a@r", rigName: "r", runtime: "codex", lifecycleState: "running" },
+        { seatSession: "b@r", rigName: "r", runtime: "codex", lifecycleState: "running" },
+      ],
+    }));
+    const bySeat = new Map(model.bindings.map((b) => [b.seatSession, b]));
+    for (const seat of ["cl@r", "cx@r", "own@r", "t@r"]) {
+      expect(bySeat.get(seat)).toMatchObject({ accountId: null, boundAt: null, bindingSource: null, anomalies: [] });
+    }
+    // The registry joins are unchanged: two seats on one profile still share it, and nothing else does.
+    for (const seat of ["a@r", "b@r"]) {
+      expect(bySeat.get(seat)!.accountId).toBe("work");
+      expect(bySeat.get(seat)!.anomalies).toEqual([expect.objectContaining({ kind: "same_account_on_n_seats", count: 2, seats: ["a@r", "b@r"] })]);
+    }
+    expect(model.bindings.flatMap((b) => b.anomalies).map((a) => a.kind)).not.toContain("seat_with_no_account");
   });
 
   it("drops stale seat-keyed Claude cache signals and emits the live Claude seat's honest unknown", () => {

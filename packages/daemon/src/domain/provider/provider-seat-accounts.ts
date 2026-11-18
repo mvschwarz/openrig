@@ -80,7 +80,7 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
         if (row) notes.push(`the registry in the daemon's CODEX_HOME names profile ${row.authProfile} (recorded ${row.updatedTs}); not applied: this seat launches with its own CODEX_HOME`);
         return {
           ...base,
-          configured: { source: "default_login", home: own.home, homeFrom: own.source, homeNote: `the login active in this seat's own CODEX_HOME (from its ${own.source} env) when it launched` },
+          configured: { source: "default_login", home: own.home, homeFrom: own.source, homeNote: `the login active in this seat's own CODEX_HOME (from its ${own.source} env) when it next launches` },
           ...(notes.length ? { registryNotes: notes } : {}),
           allowance: { linked: false, reason: DEFAULT_LOGIN_NOT_LINKED },
           observed: { note: "no per-seat observation for Codex" },
@@ -116,7 +116,7 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
       }
       return {
         ...base,
-        configured: { source: "default_login", home: input.codexHome, homeNote: "the login active in the daemon's CODEX_HOME when this seat launched" },
+        configured: { source: "default_login", home: input.codexHome, homeNote: "the login active in the daemon's CODEX_HOME when this seat next launches" },
         ...ignored,
         allowance: { linked: false, reason: DEFAULT_LOGIN_NOT_LINKED },
         observed: { note: "no per-seat observation for Codex" },
@@ -161,7 +161,7 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
 }
 
 function claudeConfigHome(configDir: string | undefined, home: string | undefined): { home: string | null; note: string } {
-  const shared = "the login in the daemon's Claude config dir, shared by every Claude seat on this daemon";
+  const shared = "the login in the daemon's Claude config dir, shared by every Claude seat here without its own token or config dir";
   // As the launch resolver does (claude-managed-launch.ts:59, `CLAUDE_CONFIG_DIR ?? HOME/.claude`, resolved against
   // the seat's cwd): only an unset value falls back to HOME; an empty one resolves to each seat's working directory.
   if (configDir === undefined) {

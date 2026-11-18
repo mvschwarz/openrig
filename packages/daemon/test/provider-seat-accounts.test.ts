@@ -80,8 +80,8 @@ describe("configuredSeatAccounts — each state", () => {
 
   it("default login: a Codex seat with no row, and a Claude seat with no token reference, name the daemon's home", () => {
     const rows = configuredSeatAccounts(input({ seats: [seat("dev-qa@r", "codex"), seat("dev-build@r", "claude-code")] }));
-    expect(rows[0]!.configured).toEqual({ source: "default_login", home: "/h/.codex", homeNote: "the login active in the daemon's CODEX_HOME when this seat launched" });
-    expect(rows[1]!.configured).toEqual({ source: "default_login", home: "/h/.claude", homeNote: "the login in the daemon's Claude config dir, shared by every Claude seat on this daemon" });
+    expect(rows[0]!.configured).toEqual({ source: "default_login", home: "/h/.codex", homeNote: "the login active in the daemon's CODEX_HOME when this seat next launches" });
+    expect(rows[1]!.configured).toEqual({ source: "default_login", home: "/h/.claude", homeNote: "the login in the daemon's Claude config dir, shared by every Claude seat here without its own token or config dir" });
     for (const row of rows) expect(row.allowance).toEqual({ linked: false, reason: expect.stringContaining("active when it launched") });
   });
 
@@ -215,7 +215,7 @@ describe("configuredSeatAccounts — a seat's own home", () => {
       auth: { profiles: ["work-a"], seats: [reg("dev-qa@r", "codex", "work-a")] },
     }));
     expect(row!.configured).toEqual({ source: "default_login", home: "/homes/qa", homeFrom: "member",
-      homeNote: "the login active in this seat's own CODEX_HOME (from its member env) when it launched" });
+      homeNote: "the login active in this seat's own CODEX_HOME (from its member env) when it next launches" });
     expect(row!.registryNotes).toEqual(["the registry in the daemon's CODEX_HOME names profile work-a (recorded 2026-10-12T10:00:00Z); not applied: this seat launches with its own CODEX_HOME"]);
     expect(row!.allowance.linked).toBe(false);
   });
@@ -348,7 +348,7 @@ describe("seatAccounts through the provider service", () => {
       expect(build).toMatchObject({ accountId: null, runtime: "claude-code", configured: { source: "claude_token", label: "team-a" } });
       expect(build.launched).toEqual({ state: "unknown", reason: "OpenRig doesn't record which credential a seat's launch applied" });
       expect(build.verified).toMatchObject({ state: "unknown" });
-      expect(build.anomalies[0]!.evidence).toMatch(/no Codex registry placement .* says nothing about the account the seat uses/);
+      expect(build.anomalies).toEqual([]);
       expect(byBinding.get("dev-old@r")!.configured).toMatchObject({ source: "default_login" });
       expect(byBinding.get("dev-qa@r")).toMatchObject({ accountId: "work-a", runtime: "codex", configured: { source: "registry", profileRef: "work-a" } });
       // The read model names the operator's label, never the token file's path.

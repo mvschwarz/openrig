@@ -32,6 +32,9 @@ export type SameAccountOnNSeatsAnomaly = {
   evidence: string;
   asOf: string;
 };
+/** Historical: daemons before the seat account report emit it on every row with a null `accountId`. Kept so readers
+ *  still decode it; this daemon no longer emits it, because no applicable registry placement isn't evidence that a
+ *  seat has no usable account. */
 export type SeatWithNoAccountAnomaly = {
   kind: "seat_with_no_account";
   seat: string;
@@ -44,13 +47,14 @@ export type BindingAnomaly = SameAccountOnNSeatsAnomaly | SeatWithNoAccountAnoma
  * A `bindings[]` row — a discriminated bound/unbound union over the SAME locked §1 field names
  * (`accountId`, `seatSession`, `rigName`, `boundAt`, `bindingSource`, `anomalies`). A bound row
  * has a non-null `accountId` (+ `boundAt`/`bindingSource`); an unbound seat keeps the same field
- * names but `null` for the absent BINDING data and MUST carry a `seat_with_no_account` anomaly —
- * never a fabricated/sentinel account. Discriminant: `accountId` (string vs null).
+ * names but `null` for the absent BINDING data — never a fabricated/sentinel account.
+ * Discriminant: `accountId` (string vs null).
  *
  * The locked fields are the seat's Codex registry PLACEMENT (`rig auth seats set`): a null `accountId`
  * means no registry row applies to this seat on this collection path, never that the seat has no usable
- * account. The additive fields say what the seat uses: what it's configured to use at its next launch,
- * and what its launch and the provider observed, each unknown where nothing records it.
+ * account, so it carries no anomaly of its own. The additive fields say what the seat uses: what it's
+ * configured to use at its next launch, and what its launch and the provider observed, each unknown where
+ * nothing records it.
  */
 export type ProviderBinding = (
   | {
@@ -67,10 +71,8 @@ export type ProviderBinding = (
       rigName: string;
       boundAt: null;
       bindingSource: null;
-      // An unbound seat MUST carry a seat_with_no_account anomaly — enforced at the type
-      // level as a non-empty tuple whose first element is that anomaly, so the dishonest
-      // "unbound row with an empty/same-account-only anomaly list" cannot even compile.
-      anomalies: [SeatWithNoAccountAnomaly, ...BindingAnomaly[]];
+      // Empty from this daemon; an older one sends seat_with_no_account here.
+      anomalies: BindingAnomaly[];
     }
 ) & BindingSeatAccount;
 

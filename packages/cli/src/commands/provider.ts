@@ -111,11 +111,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
           const seats = (an["seats"] as string[]) ?? [];
           const key = `sa:${seats.join(",")}`;
           if (!seen.has(key)) { seen.add(key); flags.push(`  ! same account on ${an["count"]} seats: ${seats.join(", ")}`); }
-        } else if (an["kind"] === "seat_with_no_account" && (b["runtime"] === undefined || b["runtime"] === "codex")) {
-          // It means no Codex registry placement, so only a Codex seat (or a row from a daemon that doesn't say) is flagged.
-          const key = `sw:${an["seat"]}`;
-          if (!seen.has(key)) { seen.add(key); flags.push(`  ! no Codex registry placement: ${an["seat"]}`); }
         }
+        // An older daemon's seat_with_no_account marks every row with no Codex registry placement, which isn't
+        // evidence the seat has no account, so it isn't flagged. The row's null accountId still says it.
       }
     }
     if (flags.length) { console.log("ANOMALIES"); for (const f of flags) console.log(f); }

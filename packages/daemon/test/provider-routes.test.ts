@@ -92,10 +92,10 @@ describe("provider routes", () => {
       bindings: [
         { accountId: "cdx-a", seatSession: "cx@r", rigName: "r", boundAt: "t", bindingSource: "codex_auth_seat_registry", anomalies: [], runtime: "codex", launched: unknown, verified: unknown },
         { accountId: null, seatSession: "cl@r", rigName: "r", boundAt: null, bindingSource: null,
-          anomalies: [{ kind: "seat_with_no_account", seat: "cl@r", evidence: "e", asOf: "t" }], runtime: "claude-code",
+          anomalies: [], runtime: "claude-code",
           configured: { source: "claude_token", label: "team-a", note: "n" }, launched: unknown, verified: unknown },
         { accountId: null, seatSession: "cx2@r", rigName: "r", boundAt: null, bindingSource: null,
-          anomalies: [{ kind: "seat_with_no_account", seat: "cx2@r", evidence: "e", asOf: "t" }], runtime: "codex", launched: unknown, verified: unknown },
+          anomalies: [], runtime: "codex", launched: unknown, verified: unknown },
         { accountId: "cdx-a", seatSession: "older@r", rigName: "r", boundAt: "t", bindingSource: "adopt", anomalies: [] },
       ],
     };
