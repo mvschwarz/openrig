@@ -1408,6 +1408,12 @@ export interface RigSpecPodMember {
   processLimits?: import("./process-limits.js").SpecProcessLimits;
   /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
   statuslineThrottle?: number;
+  /** #3395: the seat pool this member is the model of (`pool:`), stored on its node; `null` is `pool: {}`, which
+   *  clears a stored block on re-apply; absent leaves it unchanged. */
+  pool?: import("./seat-pool-spec.js").SeatPoolSpec | null;
+  /** #3395: a `pool:` block that can't be used, as authored. It raised an advisory, is stored on the node as it is (it
+   *  holds that pool rather than removing it) and is never serialized back into a spec. */
+  unusablePool?: { raw: unknown };
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;

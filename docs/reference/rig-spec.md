@@ -939,6 +939,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `launch_wrapper` | string[] | no | — | Local `pi`, `codex`, `claude-code` and community-harness members; runner presets must declare wrapper support. Literal argument prefix applied to the native executable and its arguments on fresh launch, relaunch, rebuild, resume, fork, restore and handover; `[]` explicitly clears a stored wrapper when re-applying an authored spec, while omitting the key leaves an existing seat's stored choice unchanged. See [Launch wrapper](#launch-wrapper-runtime-pi-and-codex). |
 | `process_limits` | map | no | — | Linux/systemd hosts only, opt-in for this seat, each key on its own. `{ tasks_max: N }` (an integer from 1 to 4194304) and `{ memory_max: <size> }` (an integer number of bytes, or `<n>K`, `M`, `G` or `T`, base 1024; a whole number of MiB up to 2^53 − 2^20 bytes) put the seat's own processes in a systemd user scope of their own with `TasksMax=N` and `MemoryMax=<bytes>`; both keys together share that one scope. The other seats, the daemon and the terminal server stay outside it. Applies to the seat's new launches; a fresh launch the host can't cap is not started, and a recovery goes ahead with a warning. Any other key (a CPU limit) is refused. `{}` clears the stored limits when re-applying an authored spec, a mapping replaces them whole, and omitting the key leaves them unchanged. Valid on terminal members too. See [Process limits](#process-limits-linuxsystemd). |
 | `statusline_throttle` | integer | no | — | Claude members only, opt-in. Runs OpenRig's context collector from the status line at most once every N seconds (1 to 120); `0` clears a stored throttle when re-applying an authored spec, while omitting the key leaves it unchanged. Also settable with `rig seat set-statusline-throttle`. See [Status line throttle](#status-line-throttle-runtime-claude-code). |
+| `pool` | map | no | — | Makes this member the model of a seat pool: `{ max: N, … }`. Stored and validated; it has no runtime effect until the seat pool job is armed. Anything wrong inside the block is an advisory and the block is not used; the spec stays valid. `{}` clears a stored block when re-applying an authored spec, while omitting the key leaves it unchanged. A daemon from 0.7.18 or earlier refuses a spec with this key. See [Seat pool](#seat-pool-pool). |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
 | `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
@@ -1274,6 +1275,53 @@ members:
   the stored value. A launch rebuilt from the spec (a persisted fresh launch, or the fresh branch of a restore) writes
   the spec's `statusline_throttle` again over a later `rig seat set-statusline-throttle`, as it does for
   `process_limits`; change the spec too to keep the new value there.
+
+### Seat pool (`pool`)
+
+A `pool` block on a member makes that member the model of a seat pool: extra agents cloned from it, added when its
+work waits and drained when they sit idle.
+
+```yaml
+members:
+  - id: impl
+    agent_ref: local:agents/impl
+    profile: default
+    runtime: claude-code
+    cwd: .
+    pool:
+      max: 3                        # required
+      min: 0
+      dispatch_after_s: 60
+      idle_grace_s: 300
+      cooldown_s: 60
+      dispatch_tag: role:impl
+      cwd_template: /work/{rig}/{slot}
+      drain: false
+```
+
+Stored and validated; it has no runtime effect until the seat pool job is armed.
+
+| Field | Type and bounds | Default | Meaning |
+|-------|-----------------|---------|---------|
+| `max` | whole number, 0 or more, at least `min` | required | The most pool agents. `0` is valid: no extra agents. |
+| `min` | whole number, 0 or more | `0` | The fewest pool agents. |
+| `dispatch_after_s` | whole number, 0 or more | `60` | How long a row must wait before it can be moved to a pool agent. |
+| `idle_grace_s` | whole number, 0 or more | `300` | How long a pool agent must sit idle before it can be drained. |
+| `cooldown_s` | whole number, 0 or more | `60` | The gap between two add or drain steps. |
+| `dispatch_tag` | non-empty string | none: every row to the model | Move only the model's rows that carry this tag. |
+| `cwd_template` | absolute path; only `{rig}` and `{slot}` | none: the model's folder | Each pool agent's working folder, with `{rig}` and `{slot}` filled in. `{slot}` is optional: without it the agents share one folder. |
+| `drain` | `true` or `false` | `false` | Empties the pool. |
+
+- **Validation:** whatever is wrong inside the block is an advisory, never a spec error, reported as
+  `<pod>.<member> pool.<field>: <reason>; pool not used`: a wrong type, a value out of bounds, `max` below `min`, a
+  `cwd_template` that isn't absolute or uses another placeholder, or an unknown key. The whole block is then not used
+  (a pool never runs on part of its settings), the spec stays `valid` and the rest of the rig loads.
+- **Persistence and clear:** the block is stored on the model member's seat. Applying an authored spec to an existing
+  seat replaces a stored block whole, clears it with `pool: {}` and leaves it unchanged when the key is absent. A block
+  that can't be used is stored as written, with its error, rather than clearing the one before; it is not a removal.
+  A fresh launch of the seat from its recorded launch keeps the stored block.
+- **Older daemons:** `pool` is a new member key. A daemon from 0.7.18 or earlier refuses a spec that has it, as it
+  refuses any unknown member key.
 
 ### Pi (`runtime: pi`)
 
@@ -1709,6 +1757,7 @@ spec can pass `rig spec validate` and then fail at preflight or import. Run
 25. Non-idempotent actions must not include `restore` in `applies_on`.
 26. `applies_on` values must be from: `fresh_start`, `restore`.
 27. `launch_wrapper` is valid on `pi`, `codex`, `claude-code` and supported community-harness members (`[]` included); see the [runner contract](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch) for community capability requirements. It must be an array of strings without NUL/CR/LF, and `launch_wrapper[0]` (when non-empty) must be an absolute path or a bare command name on the daemon `PATH`.
+28. What is inside a member's `pool` block is checked as advisories only, never as errors; see [Seat pool](#seat-pool-pool).
 
 ---
 
