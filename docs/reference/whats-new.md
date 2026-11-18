@@ -1,5 +1,6 @@
 # What changed in OpenRig 0.7.19
 
+This note is for an agent on an install that was just upgraded to 0.7.19.
 OpenRig 0.7.19 improves how a team brings permission prompts to a person, reports interrupted recovery, and starts again after a failed launch. It also adds optional Claude hook delivery, per-seat Linux memory limits, and a versioned interface for apps answering human questions.
 
 ## Before you upgrade
