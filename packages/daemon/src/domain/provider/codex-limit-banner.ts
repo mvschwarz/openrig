@@ -3,6 +3,7 @@ import {
   AGENT_ACTIVITY_FRESHNESS_MS,
   type AgentActivityStore,
 } from "../agent-activity-store.js";
+import type { SeatActivityService } from "../seat-activity-service.js";
 
 /**
  * Codex usage-limit banner detector (#763).
@@ -185,4 +186,24 @@ export function recordCodexLimitBanner(deps: {
     if (!oldest.done) lastRecordedBySession.delete(oldest.value);
   }
   return true;
+}
+
+/**
+ * One sweep's banner reading: recorded as above, and held by the activity oracle too, so the seat reads unknown with its
+ * usage limit while the banner shows rather than idle, and a newer capture without it ends the limit. The banner is read
+ * from the pane, so the sampling rung holds it. It states no reset OpenRig can read, so resetsAt is null.
+ */
+export function observeCodexLimitBanner(deps: {
+  store: Pick<AgentActivityStore, "getLatestForNode" | "recordHookEvent">;
+  resolveGeneration: (sessionName: string) => string | null;
+  oracle: Pick<SeatActivityService, "holdUsageLimit" | "releaseUsageLimit">;
+  sessionName: string;
+  banner: CodexLimitBanner | null;
+  observedAt: Date;
+}): void {
+  recordCodexLimitBanner({ store: deps.store, resolveGeneration: deps.resolveGeneration, sessionName: deps.sessionName,
+    banner: deps.banner, now: () => deps.observedAt });
+  const at = deps.observedAt.toISOString();
+  if (deps.banner) deps.oracle.holdUsageLimit(deps.sessionName, { rung: "window-sampling", observedAt: at, resetsAt: null });
+  else deps.oracle.releaseUsageLimit(deps.sessionName, at);
 }

@@ -116,6 +116,23 @@ export function restoredRunnerHookEvidence(
     activity: { ...latest, state }, seq: 0 });
 }
 
+/** The typed usage limit a seat still held when the daemon stopped, as the oracle evidence its live report was, for
+ *  restoring after a restart: Claude's is its hook evidence again, and Codex's banner is held on the sampling rung that
+ *  read it from the pane. Null when none is in force; the store's own read throws when it can't be read. */
+export function restoredUsageLimitEvidence(
+  store: Pick<AgentActivityStore, "latestHeldUsageLimit">,
+  seat: { seatNodeId: string; sessionName: string },
+  runtime: string,
+): ActivityEvidence | null {
+  const held = store.latestHeldUsageLimit({ nodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime });
+  if (!held) return null;
+  if (runtime === "codex") {
+    return { seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, rung: "window-sampling", sourceId: "codex:limit-banner",
+      seq: 0, observedAt: held.eventAt ?? held.sampledAt, usageLimit: { resetsAt: null } };
+  }
+  return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime, activity: held, seq: 0 });
+}
+
 /** The relay route a hook post names: "plugin" or "managed". An untagged post (an older relay) stays untagged; any
  *  other value is "unrecognised", so a poster can't add promotion keys of its own. */
 export function hookRelayRoute(value: unknown): EvidenceRoute | undefined {

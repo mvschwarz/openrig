@@ -116,6 +116,9 @@ export interface SeatActivityServiceDeps {
   /** A runner seat's last recorded hook, restored when its inventory is declared with no hook evidence yet (after a
    *  daemon restart). Null when nothing qualifies: another generation or session, or nothing recorded. */
   restoreHookEvidence?: (seat: { seatNodeId: string; sessionName: string }, runtime: string) => ActivityEvidence | null;
+  /** The typed usage limit a seat still held when the daemon stopped, as the evidence its live report was, read when its
+   *  inventory is declared (after a restart). Null when none is in force; a throw means the store couldn't be read. */
+  restoreUsageLimitEvidence?: (seat: { seatNodeId: string; sessionName: string }, runtime: string) => ActivityEvidence | null;
 }
 
 export interface PollSeatOptions {
@@ -141,6 +144,8 @@ export class SeatActivityService {
 
   private readonly restoreHookEvidence: SeatActivityServiceDeps["restoreHookEvidence"] | null;
 
+  private readonly restoreUsageLimitEvidence: SeatActivityServiceDeps["restoreUsageLimitEvidence"] | null;
+
   constructor(deps: SeatActivityServiceDeps) {
     this.permissionPromptReader = deps.permissionPromptReader;
     this.permissionPromptChanged = deps.permissionPromptChanged;
@@ -151,6 +156,7 @@ export class SeatActivityService {
     this.now = deps.now ?? (() => new Date());
     this.selfReportReader = deps.selfReportReader ?? null;
     this.restoreHookEvidence = deps.restoreHookEvidence ?? null;
+    this.restoreUsageLimitEvidence = deps.restoreUsageLimitEvidence ?? null;
   }
 
   /**
@@ -446,6 +452,7 @@ export class SeatActivityService {
         if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
           this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory, r.runtime);
+          this.restoreUsageLimit({ seatNodeId: r.node_id, sessionName: r.session_name }, r.runtime);
         }
         if (r.runtime === "codex") {
           // The occupant as OpenRig records it, from the identity reconciler's last verdict for this session: the
@@ -577,7 +584,7 @@ export class SeatActivityService {
     }
     // A typed usage limit holds until a strictly newer turn starts: a working boundary from the hooks or the seat's own
     // status. An idle prompt, a redraw or the limit's own menu is not a new turn.
-    if (evidence.usageLimit) seat.usageLimit = { observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt };
+    if (evidence.usageLimit) seat.usageLimit = { rung: evidence.rung, observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt };
     else if (seat.usageLimit && evidence.activity === "working"
         && (evidence.rung === "lifecycle-hooks" || evidence.rung === "self-report")
         && Date.parse(evidence.observedAt) > Date.parse(seat.usageLimit.observedAt)) seat.usageLimit = null;
@@ -847,6 +854,49 @@ export class SeatActivityService {
         && evidence.rung === "lifecycle-hooks") this.reportEvidence({ ...evidence, seq: 0 });
   }
 
+  /** After a daemon restart, a typed usage limit still in force holds again, as it did live: a hook-rung limit is its hook
+   *  evidence again (seq 0, so any live hook outranks it), any other rung's is held directly. A store that can't be read
+   *  leaves the seat unknown until a newer turn, never working on an older report. */
+  private restoreUsageLimit(seat: { seatNodeId: string; sessionName: string }, seatRuntime: string | null): void {
+    const ladder = this.ladder.get(seat.seatNodeId);
+    if (!this.restoreUsageLimitEvidence || !seatRuntime || !ladder || ladder.usageLimit) return;
+    let evidence: ActivityEvidence | null;
+    try {
+      evidence = this.restoreUsageLimitEvidence(seat, seatRuntime);
+    } catch {
+      ladder.usageLimit = { rung: "lifecycle-hooks", observedAt: this.now().toISOString(), resetsAt: null, unread: true };
+      this.arbitrate(ladder);
+      return;
+    }
+    if (!evidence?.usageLimit || evidence.seatNodeId !== seat.seatNodeId || evidence.sessionName !== seat.sessionName) return;
+    if (evidence.rung !== "lifecycle-hooks") {
+      this.holdUsageLimit(seat.sessionName, { rung: evidence.rung, observedAt: evidence.observedAt, resetsAt: evidence.usageLimit.resetsAt });
+    } else if (!this.latestByRung(ladder, "lifecycle-hooks")) {
+      this.reportEvidence({ ...evidence, seq: 0 });
+    }
+  }
+
+  /** A typed usage limit read outside the hook relay (Codex's banner, which the pane shows), held as a hook-rung limit is:
+   *  the seat reads unknown with the limit until a strictly newer turn starts. A seat already holding one keeps it: the
+   *  same limit is still showing. */
+  holdUsageLimit(sessionName: string, limit: { rung: EvidenceRungId; observedAt: string; resetsAt: string | null }): void {
+    const seatNodeId = this.sessionToSeat.get(sessionName);
+    const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+    if (!seat || seat.retired || seat.sessionName !== sessionName || (seat.usageLimit && !seat.usageLimit.unread)) return;
+    seat.usageLimit = { rung: limit.rung, observedAt: limit.observedAt, resetsAt: limit.resetsAt };
+    this.arbitrate(seat);
+  }
+
+  /** A strictly newer observation that the limit is gone (Codex's banner no longer showing) ends the hold. */
+  releaseUsageLimit(sessionName: string, observedAt: string): void {
+    const seatNodeId = this.sessionToSeat.get(sessionName);
+    const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+    if (!seat || seat.retired || seat.sessionName !== sessionName || !seat.usageLimit
+        || !(Date.parse(observedAt) > Date.parse(seat.usageLimit.observedAt))) return;
+    seat.usageLimit = null;
+    this.arbitrate(seat);
+  }
+
   /** Whether the seat's declared inventory says this rung's last boundary holds until the next one. */
   private durableBoundaries(seat: SeatLadderState, rung: EvidenceRungId): boolean {
     return seat.inventory?.rungs.some((r) => r.rung === rung && r.durableBoundaries === true) ?? false;
@@ -989,11 +1039,13 @@ export class SeatActivityService {
 
     // A typed usage limit ended the last turn and no newer turn has started: nothing older says what the seat does now,
     // and a limit is neither work nor rest, so the seat reads unknown with the limit and its stated reset beside it.
-    const usageLimit = seat.usageLimit && this.rungTrust(seat, "lifecycle-hooks") === "authoritative"
-      ? { rung: "lifecycle-hooks" as const, observedAt: seat.usageLimit.observedAt, resetsAt: seat.usageLimit.resetsAt } : null;
-    if (usageLimit) {
+    // A limit that couldn't be read back after a restart (unread) says only that: unknown, with no limit to show.
+    const held = seat.usageLimit && (seat.usageLimit.unread || this.rungTrust(seat, seat.usageLimit.rung) === "authoritative")
+      ? seat.usageLimit : null;
+    const usageLimit = held && !held.unread ? { rung: held.rung, observedAt: held.observedAt, resetsAt: held.resetsAt } : null;
+    if (held) {
       nextActivity = "unknown";
-      decidedBy = "lifecycle-hooks";
+      decidedBy = usageLimit ? held.rung : null;
     }
 
     // Codex permission hooks need probe confirmation after grace; Claude hooks latch
@@ -1116,7 +1168,7 @@ interface SeatLadderState {
   permissionPolling: boolean;
   permissionEvidence: ArbitratedSeatState["needsInputEvidence"];
   /** The typed usage limit that ended the last turn, held until a newer turn starts (see reportEvidence). */
-  usageLimit: { observedAt: string; resetsAt: string | null } | null;
+  usageLimit: { rung: EvidenceRungId; observedAt: string; resetsAt: string | null; unread?: true } | null;
   sessionName: string;
   retired: boolean;
   inventory: AdapterRungInventory | null;

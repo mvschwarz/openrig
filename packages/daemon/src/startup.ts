@@ -112,7 +112,7 @@ import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bun
 import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
-import { restoredRunnerHookEvidence } from "./routes/activity.js";
+import { restoredRunnerHookEvidence, restoredUsageLimitEvidence } from "./routes/activity.js";
 import { readClaudeSelfReportEvidence } from "./adapters/claude-code-adapter.js";
 import { replaceFile } from "./adapters/replace-file.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
@@ -707,6 +707,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
     // pi and omp: after a restart, a runner seat takes its last recorded hook (current session and generation only).
     restoreHookEvidence: (seat, runtime) => restoredRunnerHookEvidence(agentActivityStore, seat, runtime),
+    // After a restart, a seat's typed usage limit still in force holds again (Claude's hook, Codex's banner).
+    restoreUsageLimitEvidence: (seat, runtime) => restoredUsageLimitEvidence(agentActivityStore, seat, runtime),
   });
   // 5b82324b — the STRUCTURAL activity cache (sibling of SeatActivityService). Captures pane TEXT once
   // per running seat per tick + classifies motion STRUCTURALLY, so the `rig ps` ACTIVITY column reflects
@@ -1586,14 +1588,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // structural sweep reports what the seat itself shows. Attached late (rather
   // than constructed with) so service construction order is untouched.
   {
-    const { recordCodexLimitBanner } = await import("./domain/provider/codex-limit-banner.js");
+    const { observeCodexLimitBanner } = await import("./domain/provider/codex-limit-banner.js");
     seatStructuralActivityService.attachCodexLimitBanner((sessionName, banner, observedAt) => {
-      recordCodexLimitBanner({
+      // Recorded for the tap and the wake as before, and held by the activity oracle, so the wall reads the limit.
+      observeCodexLimitBanner({
         store: agentActivityStore,
         resolveGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+        oracle: seatActivityService,
         sessionName,
         banner,
-        now: () => observedAt,
+        observedAt,
       });
     });
   }

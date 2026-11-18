@@ -464,6 +464,32 @@ export class AgentActivityStore {
     };
   }
 
+  /** The typed usage limit (Claude's StopFailure/rate_limit, Codex's at_limit) this occupant still held when the daemon
+   *  stopped, read once per seat on a restart, or null. Walks the session's recent records newest first by the emitter's
+   *  order: a newer turn (a running record) or Codex's usage_limit_cleared ends the limit first, and a limit of another or
+   *  an unresolved occupant isn't this one's. Throws when the store can't be read; the caller reads the seat as unknown. */
+  latestHeldUsageLimit(input: { nodeId: string; sessionName: string; runtime: string }): AgentActivity | null {
+    const rows = this.db.prepare(`
+      SELECT payload FROM (
+        SELECT payload, seq FROM events
+        WHERE node_id = ? AND type = 'agent.activity'
+        ORDER BY seq DESC LIMIT ${SOURCE_ORDER_WINDOW})
+      WHERE json_extract(payload, '$.sessionName') = ?
+      ORDER BY json_extract(payload, '$.activity.eventAt') DESC,
+        COALESCE(json_extract(payload, '$.activity.sourceSequence'), 0) DESC, seq DESC`).all(input.nodeId, input.sessionName) as EventPayloadRow[];
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      if (!activity) continue;
+      if (activity.state === "running" || (activity.rawEvent === "Notification" && activity.rawSubtype === "usage_limit_cleared")) return null;
+      const typed = input.runtime === "codex" ? activity.rawEvent === "at_limit"
+        : isClaudeRateLimitHook(input.runtime, activity.rawEvent, activity.rawSubtype);
+      if (!typed) continue;
+      const live = this.resolveOccupantGeneration?.(input.nodeId) ?? null;
+      return live !== null && activity.generation === live ? activity : null;
+    }
+    return null;
+  }
+
   /** The newest of a node's hook records by the emitter's order (time, then its sequence), for one session when named.
    *  Not by arrival: a runner's posts aren't awaited, so older ones can land after a newer one. Only the node's newest
    *  SOURCE_ORDER_WINDOW records to arrive are ordered, and the session is chosen from those: a runner's heartbeat grows
