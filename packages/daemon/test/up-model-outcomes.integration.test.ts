@@ -83,6 +83,7 @@ edges: []
     for (const json of [false, true]) {
       const result = await runRig(["up", spec, "--yes", ...(json ? ["--json"] : [])], daemon.readEnv, rigBin, 120_000);
       const text = result.stdout + result.stderr;
+      expect(text).not.toContain("unverified");
       // Then only the child's observed failure makes the launch unsuccessful.
       expect(result.code, text).toBe(fails ? 1 : 0);
       if (fails) {
@@ -91,7 +92,6 @@ edges: []
         expect(text).not.toContain("Status: completed");
       } else {
         expect(text).not.toMatch(/model-record-unavailable|invalid model|unknown model/i);
-        expect(text).toContain("unverified");
         expect(json ? JSON.parse(result.stdout).status : result.stdout).toContain("completed");
       }
       await runRig(["down", name, "--force", "--yes"], daemon.readEnv, rigBin);

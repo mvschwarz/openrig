@@ -458,6 +458,17 @@ describe("BootstrapOrchestrator", () => {
   });
 
   // T1: Plan mode returns plan, 0 bootstrap_actions rows
+  it("legacy plan reports configured models as unverified without launching", async () => {
+    // Given a legacy spec with a configured model.
+    const specPath = writeSpec(SIMPLE_SPEC_YAML.replace("runtime: claude-code", "runtime: claude-code\n    model: custom/model"));
+    // When planning through the legacy bootstrap path.
+    const result = await buildOrchestrator().bootstrap({ mode: "plan", sourceRef: specPath });
+    // Then the plan warns without changing readiness or creating launch actions.
+    expect(result.status).toBe("planned");
+    expect(result.warnings.some(w => w.includes("custom/model") && w.includes("unverified"))).toBe(true);
+    expect(db.prepare("SELECT * FROM bootstrap_actions WHERE bootstrap_id = ?").all(result.runId)).toHaveLength(0);
+  });
+
   it("plan mode returns plan with zero bootstrap_actions rows", async () => {
     const specPath = writeSpec(SIMPLE_SPEC_YAML);
     const orch = buildOrchestrator();

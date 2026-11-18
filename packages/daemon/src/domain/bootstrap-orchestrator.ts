@@ -31,6 +31,7 @@ import { bundleInstallContext, bundleInstallContextLines, isExistingBundleTarget
 import { confirmStoppedGenerations } from "./running-name-guard.js";
 import { inspectBundleBehaviour } from "./bundle-behaviour-inspect.js";
 import { getDaemonVersion } from "./daemon-version.js";
+import { unverifiedModelWarning } from "./rigspec-preflight.js";
 import { rigNameComposeProjectConflict, withRigName } from "./rig-name-override.js";
 
 /** Bootstrap mode */
@@ -390,6 +391,12 @@ export class BootstrapOrchestrator {
     seqCounter: number,
   ): Promise<BootstrapResult> {
     const { mode, autoApprove, approvedActionKeys } = opts;
+
+    if (mode === "plan") {
+      for (const node of spec.nodes) {
+        if (node.model) warnings.push(unverifiedModelWarning(node.id, node.model));
+      }
+    }
 
     // --- Stage 2: RESOLVE_PACKAGES ---
     const packageRefs = new Set<string>();
