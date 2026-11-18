@@ -2,8 +2,8 @@
 // PK identity handling. The load-bearing pins:
 //   - no-host / "local" create = today's local path byte-identical (FR-6);
 //   - a registered http host FORWARDS the whole body (minted id + provenance +
-//     nudge, hostId stripped) to /api/queue/create; origin response verbatim;
-//     NO local row ever written (FR-2, origin-owns-the-record);
+//     nudge, hostId stripped) to /api/queue/create; park responses are checked
+//     before they leave the forwarder; NO local row ever written (FR-2);
 //   - unknown / ssh / unreachable host = structured host-named failure, nothing
 //     written (FR-2 honest-failure taxonomy);
 //   - origin-side: a re-forwarded create with the SAME id absorbs on the PK when
@@ -46,6 +46,34 @@ function jsonResponse(payload: unknown, status = 201): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function forwardedRequest(init?: RequestInit): Record<string, unknown> {
+  return JSON.parse(String(init?.body)) as Record<string, unknown>;
+}
+
+function remoteParkPayload(
+  request: Record<string, unknown>,
+  changes: Record<string, unknown> = {},
+  receiptChanges: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const blockedOn = typeof request.blockedOn === "string" ? request.blockedOn : null;
+  const wakeAfterSeconds = typeof request.wakeAfterSeconds === "number" ? request.wakeAfterSeconds : null;
+  return {
+    ...request,
+    state: "blocked",
+    blockedOn,
+    parkReceipt: {
+      receiptVersion: 1,
+      confirmed: true,
+      state: "blocked",
+      blockedOn,
+      wakeKind: wakeAfterSeconds === null ? null : "timer",
+      wakeAfterSeconds,
+      ...receiptChanges,
+    },
+    ...changes,
+  };
 }
 
 function makeApp(opts: {
@@ -119,7 +147,7 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(forwarded).toBe(false);
   });
 
-  it("cross-host create: forwards the WHOLE body (minted id, provenance, nudge) with hostId STRIPPED; origin response verbatim; NO local row", async () => {
+  it("cross-host create: forwards the whole body with hostId stripped and keeps the origin record without a local write", async () => {
     const capture: { url?: string; body?: Record<string, unknown> } = {};
     const app = makeApp({
       db,
@@ -196,23 +224,23 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     const app = makeApp({
       db,
       bus,
-      fetchImpl: (async () => jsonResponse({
-        qitemId: "qitem-old-receiver-already-blocked",
-        destinationSession: "dev@rig-b",
-        state: "blocked",
-        blockedOn: "external:condition",
-      }, 201)) as unknown as typeof fetch,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        const response = remoteParkPayload(forwardedRequest(init));
+        delete response.parkReceipt;
+        return jsonResponse(response, 201);
+      }) as unknown as typeof fetch,
     });
     const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
 
     expect(res.status).toBe(201);
-    expect(await res.json()).toMatchObject({
-      qitemId: "qitem-old-receiver-already-blocked",
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({
       state: "blocked",
       blockedOn: "external:condition",
       parkReceipt: { confirmed: false, state: "blocked", blockedOn: "external:condition" },
       parkWarning: { code: "qitem_park_not_confirmed" },
     });
+    expect(returned.qitemId).toMatch(/^qitem-/);
     expect(rowCount(db)).toBe(0);
   });
 
@@ -223,11 +251,11 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
       db,
       bus,
       fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
-        forwarded.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        forwarded.body = forwardedRequest(init);
         return jsonResponse({
-          qitemId: "qitem-prior-forwarder-pending",
-          destinationSession: "dev@rig-b",
+          ...forwarded.body,
           state: "pending",
+          blockedOn: null,
           parkReceipt: { confirmed: false, state: "pending", blockedOn: null },
           parkWarning: { code: "qitem_park_not_confirmed", message: priorWarning },
         }, 201);
@@ -254,13 +282,9 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     const app = makeApp({
       db,
       bus,
-      fetchImpl: (async () => jsonResponse({
-        qitemId: "qitem-prior-forwarder-blocked",
-        destinationSession: "dev@rig-b",
-        state: "blocked",
-        blockedOn: "external:condition",
-        parkReceipt: { confirmed: true, state: "blocked", blockedOn: "external:condition", wakeKind: null, wakeAfterSeconds: null },
-      }, 201)) as unknown as typeof fetch,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(
+        remoteParkPayload(forwardedRequest(init), {}, { receiptVersion: undefined }), 201,
+      )) as unknown as typeof fetch,
     });
     const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
 
@@ -278,13 +302,7 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     const app = makeApp({
       db,
       bus,
-      fetchImpl: (async () => jsonResponse({
-        qitemId: "qitem-current-forwarder-blocked",
-        destinationSession: "dev@rig-b",
-        state: "blocked",
-        blockedOn: "external:condition",
-        parkReceipt: { receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: "external:condition", wakeKind: null, wakeAfterSeconds: null },
-      }, 201)) as unknown as typeof fetch,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(remoteParkPayload(forwardedRequest(init)), 201)) as unknown as typeof fetch,
     });
     const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
 
@@ -301,9 +319,8 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     const app = makeApp({
       db,
       bus,
-      fetchImpl: (async () => jsonResponse({
-        qitemId: "qitem-malformed-forwarder-blocked",
-        destinationSession: "dev@rig-b",
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse({
+        ...forwardedRequest(init),
         state: "blocked",
         blockedOn: "external:condition",
         parkReceipt: ["stale"],
@@ -321,8 +338,131 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
       parkWarning: { code: "qitem_park_not_confirmed" },
     });
     expect(returned.parkReceipt).not.toHaveProperty("0");
-    expect(returned.parkWarning.message).toMatch(/did not provide a current park receipt/i);
+    expect(returned.parkWarning.fields).toContain("parkReceipt");
+    expect(returned.parkWarning.fields).toContain("parkWarning");
+    expect(returned.parkWarning.message).toContain("The row is live and may start early.");
     expect(rowCount(db)).toBe(0);
+  });
+
+  const forwardedIdentityCases: Array<{
+    label: string;
+    response: (request: Record<string, unknown>) => unknown;
+    field: string;
+    status?: number;
+  }> = [
+    { label: "ID mismatch", response: (request) => remoteParkPayload(request, { qitemId: `${String(request.qitemId)}-other` }), field: "qitemId" },
+    { label: "ID missing", response: (request) => { const row = remoteParkPayload(request); delete row.qitemId; return row; }, field: "qitemId" },
+    { label: "ID malformed", response: (request) => remoteParkPayload(request, { qitemId: 4 }), field: "qitemId" },
+    { label: "destination mismatch", response: (request) => remoteParkPayload(request, { destinationSession: "other@rig-b" }), field: "destinationSession" },
+    { label: "source mismatch", response: (request) => remoteParkPayload(request, { sourceSession: "other@rig-a" }), field: "sourceSession" },
+    { label: "body mismatch", response: (request) => remoteParkPayload(request, { body: "private-body-text" }), field: "body" },
+    { label: "state missing", response: (request) => { const row = remoteParkPayload(request); delete row.state; return row; }, field: "state" },
+    { label: "state malformed", response: (request) => remoteParkPayload(request, { state: 5 }), field: "state" },
+    { label: "state unknown", response: (request) => remoteParkPayload(request, { state: "unknown" }), field: "state" },
+    { label: "no response body", response: () => undefined, field: "row", status: 204 },
+    { label: "null response body", response: () => null, field: "row" },
+    { label: "array response body", response: () => [], field: "row" },
+    { label: "string response body", response: () => "row", field: "row" },
+    { label: "number response body", response: () => 3, field: "row" },
+    { label: "boolean response body", response: () => true, field: "row" },
+  ];
+
+  it.each(forwardedIdentityCases)("does not pass a park result when forwarded identity fails: $label", async (testCase) => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(testCase.response(forwardedRequest(init)), testCase.status ?? 201)) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "external:condition", nudge: true });
+    expect(res.status).toBe(testCase.status === 204 ? 200 : 201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({ createOutcome: "unknown", parkReceipt: { confirmed: false }, parkWarning: { code: "qitem_park_not_confirmed" } });
+    expect(returned.qitemId).toMatch(/^qitem-/);
+    expect(returned.createWarning.fields).toContain(testCase.field);
+    expect(returned).not.toHaveProperty("persisted");
+    if (testCase.label === "ID missing") expect(returned.createWarning.observed).not.toHaveProperty("qitemId");
+    if (testCase.label === "ID malformed") expect(returned.createWarning.observed.qitemId).toBe(4);
+    if (testCase.label.includes("missing")) expect(JSON.stringify(returned.createWarning.observed)).not.toContain('"missing":true');
+    if (testCase.label === "body mismatch") {
+      expect(returned.createWarning.observed.body).toEqual({
+        byteLength: 17,
+        sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d",
+      });
+      expect(JSON.stringify(returned.createWarning)).not.toContain("private-body-text");
+    }
+    expect(rowCount(db)).toBe(0);
+  });
+
+  const forwardedParkFailureCases: Array<{
+    label: string;
+    request?: Record<string, unknown>;
+    response: (request: Record<string, unknown>) => unknown;
+    field: string;
+  }> = [
+    { label: "receipt state mismatch", response: (request) => remoteParkPayload(request, {}, { state: "pending" }), field: "state" },
+    { label: "receipt state missing", response: (request) => remoteParkPayload(request, {}, { state: undefined }), field: "state" },
+    { label: "receipt state malformed", response: (request) => remoteParkPayload(request, {}, { state: 9 }), field: "state" },
+    { label: "row blocker mismatch", response: (request) => remoteParkPayload(request, { blockedOn: "external:other" }), field: "blockedOn" },
+    { label: "row blocker missing", response: (request) => { const row = remoteParkPayload(request); delete row.blockedOn; return row; }, field: "blockedOn" },
+    { label: "row blocker malformed", response: (request) => remoteParkPayload(request, { blockedOn: 9 }), field: "blockedOn" },
+    { label: "row and receipt blocker differ", response: (request) => remoteParkPayload(request, {}, { blockedOn: "external:other" }), field: "blockedOn" },
+    { label: "receipt blocker missing", response: (request) => remoteParkPayload(request, {}, { blockedOn: undefined }), field: "blockedOn" },
+    { label: "receipt blocker malformed", response: (request) => remoteParkPayload(request, {}, { blockedOn: 9 }), field: "blockedOn" },
+    { label: "timer wake kind null", request: { wakeAfterSeconds: 90 }, response: (request) => remoteParkPayload(request, {}, { wakeKind: null }), field: "wakeKind" },
+    { label: "timer wake kind blocker", request: { wakeAfterSeconds: 90 }, response: (request) => remoteParkPayload(request, {}, { wakeKind: "blocker" }), field: "wakeKind" },
+    { label: "timer wake kind other", request: { wakeAfterSeconds: 90 }, response: (request) => remoteParkPayload(request, {}, { wakeKind: "watchdog" }), field: "wakeKind" },
+    { label: "no timer wake kind timer", response: (request) => remoteParkPayload(request, {}, { wakeKind: "timer" }), field: "wakeKind" },
+    { label: "no timer wake kind unsupported", response: (request) => remoteParkPayload(request, {}, { wakeKind: "watchdog" }), field: "wakeKind" },
+    { label: "timer wake kind blocker without blocker", request: { blockedOn: undefined, wakeAfterSeconds: 90 }, response: (request) => remoteParkPayload(request, {}, { wakeKind: "blocker" }), field: "wakeKind" },
+    { label: "wake kind missing", response: (request) => remoteParkPayload(request, {}, { wakeKind: undefined }), field: "wakeKind" },
+    { label: "wake kind malformed", response: (request) => remoteParkPayload(request, {}, { wakeKind: 7 }), field: "wakeKind" },
+    { label: "interval mismatch", request: { wakeAfterSeconds: 90 }, response: (request) => remoteParkPayload(request, {}, { wakeAfterSeconds: 91 }), field: "wakeAfterSeconds" },
+    { label: "interval missing", request: { wakeAfterSeconds: 90 }, response: (request) => remoteParkPayload(request, {}, { wakeAfterSeconds: undefined }), field: "wakeAfterSeconds" },
+    { label: "interval malformed", request: { wakeAfterSeconds: 90 }, response: (request) => remoteParkPayload(request, {}, { wakeAfterSeconds: "90" }), field: "wakeAfterSeconds" },
+    { label: "version mismatch", response: (request) => remoteParkPayload(request, {}, { receiptVersion: 2 }), field: "receiptVersion" },
+    { label: "version missing", response: (request) => remoteParkPayload(request, {}, { receiptVersion: undefined }), field: "receiptVersion" },
+    { label: "version malformed", response: (request) => remoteParkPayload(request, {}, { receiptVersion: "1" }), field: "receiptVersion" },
+    { label: "park receipt missing", response: (request) => { const row = remoteParkPayload(request); delete row.parkReceipt; return row; }, field: "parkReceipt" },
+    { label: "park receipt null", response: (request) => remoteParkPayload(request, { parkReceipt: null }), field: "parkReceipt" },
+    { label: "park receipt array", response: (request) => remoteParkPayload(request, { parkReceipt: ["stale"] }), field: "parkReceipt" },
+    { label: "park receipt primitive", response: (request) => remoteParkPayload(request, { parkReceipt: "stale" }), field: "parkReceipt" },
+    { label: "confirmation false", response: (request) => remoteParkPayload(request, {}, { confirmed: false }), field: "confirmed" },
+    { label: "confirmation missing", response: (request) => remoteParkPayload(request, {}, { confirmed: undefined }), field: "confirmed" },
+    { label: "confirmation malformed", response: (request) => remoteParkPayload(request, {}, { confirmed: "true" }), field: "confirmed" },
+    { label: "park warning present", response: (request) => remoteParkPayload(request, { parkWarning: { code: "old", message: "Remote warning." } }), field: "parkWarning" },
+    { label: "park warning null", response: (request) => remoteParkPayload(request, { parkWarning: null }), field: "parkWarning" },
+    { label: "park warning array", response: (request) => remoteParkPayload(request, { parkWarning: ["old"] }), field: "parkWarning" },
+    { label: "park warning primitive", response: (request) => remoteParkPayload(request, { parkWarning: "old" }), field: "parkWarning" },
+  ];
+
+  it.each(forwardedParkFailureCases)("keeps the forwarded create and marks the park UNKNOWN for: $label", async (testCase) => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(testCase.response(forwardedRequest(init)), 201)) as unknown as typeof fetch,
+    });
+    const requestBody = { ...BASE, hostId: "vps-b", blockedOn: "external:condition", ...testCase.request, nudge: true };
+    const res = await post(app, requestBody);
+    expect(res.status).toBe(201);
+    const returned = await res.json() as Record<string, any>;
+    expect(returned).toMatchObject({ persisted: true, parkReceipt: { confirmed: false } });
+    expect(returned.parkWarning.fields).toContain(testCase.field);
+    if (testCase.label.includes("missing")) expect(JSON.stringify(returned.parkWarning.observed)).not.toContain('"missing":true');
+    expect(returned).not.toHaveProperty("createOutcome");
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("accepts a no-timer blocker wake when the request sent a blocker string", async () => {
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => jsonResponse(
+        remoteParkPayload(forwardedRequest(init), {}, { wakeKind: "blocker" }), 201,
+      )) as unknown as typeof fetch,
+    });
+    const res = await post(app, { ...BASE, hostId: "vps-b", blockedOn: "qitem-dependency", nudge: true });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ persisted: true, parkReceipt: { confirmed: true, wakeKind: "blocker" } });
   });
 
   // 51-09 incr 4a correction — STAMP-AT-FORWARD: the forwarding daemon IS the

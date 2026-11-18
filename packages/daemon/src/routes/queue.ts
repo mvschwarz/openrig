@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import { Hono, type Context } from "hono";
 import { classifierOccupant } from "../domain/classification-sources.js";
@@ -71,29 +72,197 @@ const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
 /** A confirmed park needs this destination-generated marker; older forwarders only infer confirmation from row state. */
 const PARK_RECEIPT_VERSION = 1;
 const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
+const VALID_PARK_CREATE_STATES = new Set<QueueState>(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
 const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
 
-function unconfirmedParkWarning(value: unknown, state: unknown): Record<string, unknown> {
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function safeParkObserved(field: string, value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (field === "body") {
+    if (isObjectRecord(value) && typeof value.byteLength === "number" && typeof value.sha256 === "string") {
+      return { byteLength: value.byteLength, sha256: value.sha256 };
+    }
+    if (typeof value === "string") return { byteLength: Buffer.byteLength(value, "utf8"), sha256: createHash("sha256").update(value, "utf8").digest("hex") };
+    return { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+  }
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (isObjectRecord(value)) {
+    const safe: Record<string, unknown> = {};
+    for (const [key, received] of Object.entries(value)) {
+      const summary = safeParkObserved(key, received);
+      if (summary !== undefined) safe[key] = summary;
+    }
+    return safe;
+  }
+  return { type: Array.isArray(value) ? "array" : typeof value };
+}
+
+function mergeParkWarning(
+  value: unknown,
+  fallbackCode: string,
+  explanation: string,
+  fields: string[] = [],
+  observed: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const existing = isObjectRecord(value) ? value : {};
+  const originalMessage = typeof existing.message === "string" ? existing.message.trim() : "";
+  const oldFields = Array.isArray(existing.fields) ? existing.fields.filter((field): field is string => typeof field === "string") : [];
+  const oldObserved = isObjectRecord(existing.observed) ? existing.observed : {};
+  const mergedObserved: Record<string, unknown> = {};
+  for (const [field, received] of Object.entries(oldObserved)) {
+    const safe = safeParkObserved(field, received);
+    if (safe !== undefined) mergedObserved[field] = safe;
+  }
+  for (const [field, received] of Object.entries(observed)) {
+    const safe = safeParkObserved(field, received);
+    if (safe !== undefined) mergedObserved[field] = safe;
+  }
+  return {
+    ...existing,
+    code: typeof existing.code === "string" ? existing.code : fallbackCode,
+    message: [...new Set([originalMessage, explanation].filter(Boolean))].join(" "),
+    fields: [...new Set([...oldFields, ...fields])],
+    observed: mergedObserved,
+  };
+}
+
+function unconfirmedParkWarning(value: unknown, state: unknown, fields: string[] = [], observed: Record<string, unknown> = {}): Record<string, unknown> {
   const existing = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
   const originalMessage = typeof existing.message === "string" ? existing.message.trim() : "";
-  const messages = originalMessage ? [originalMessage] : [];
+  const messages: string[] = [];
   if (state === "pending") {
-    if (!/older receiving daemon.*start work early/i.test(originalMessage)) messages.push(EARLY_START_PARK_WARNING);
-    if (!/suppresses only the direct nudge/i.test(originalMessage)) messages.push("This request suppresses only the direct nudge.");
+    if (!originalMessage.includes("The row is live and may start early.")) messages.push("The row is live and may start early.");
+    if (!originalMessage.includes(EARLY_START_PARK_WARNING)) messages.push(EARLY_START_PARK_WARNING);
+    if (!originalMessage.includes("This request suppresses only the direct nudge.")) messages.push("This request suppresses only the direct nudge.");
+  } else if (state === "blocked") {
+    if (!originalMessage.includes("The row is live and may start early.")) messages.push("The row is live and may start early.");
+  } else if (state === "in-progress") {
+    if (!originalMessage.includes("The row is live and has already been claimed.")) messages.push("The row is live and has already been claimed.");
+  } else if (typeof state === "string" && ["done", "failed", "denied", "canceled", "handed-off"].includes(state)) {
+    const terminal = `The row exists in state ${state}; the park was not confirmed.`;
+    if (!originalMessage.includes(terminal)) messages.push(terminal);
   }
-  if (messages.length === 0) {
+  if (!originalMessage && messages.length === 0) {
     messages.push("The receiving daemon did not provide a current park receipt. The requested blocker and timer are not confirmed.");
   }
+  return mergeParkWarning(value, "qitem_park_not_confirmed", messages.join(" "), fields, observed);
+}
+
+function checkForwardedParkCreate(payload: unknown, forwardBody: Record<string, unknown>): {
+  row: Record<string, unknown> | null;
+  fields: string[];
+  observed: Record<string, unknown>;
+  reason: string;
+  existingRow?: Record<string, unknown>;
+} {
+  if (!isObjectRecord(payload)) {
+    return {
+      row: null,
+      fields: ["row"],
+      observed: { row: { type: payload === null ? "null" : Array.isArray(payload) ? "array" : typeof payload } },
+      reason: "The forwarded response did not contain a row object. The create outcome is unknown. Keep the sent ID for a read back.",
+    };
+  }
+  const fields: string[] = [];
+  const observed: Record<string, unknown> = {};
+  const fail = (field: string) => {
+    if (!fields.includes(field)) fields.push(field);
+    const summary = safeParkObserved(field, payload[field]);
+    if (summary !== undefined) observed[field] = summary;
+  };
+  if (typeof payload.qitemId !== "string" || payload.qitemId !== forwardBody.qitemId) fail("qitemId");
+  if (typeof payload.state !== "string" || !VALID_PARK_CREATE_STATES.has(payload.state as QueueState)) fail("state");
+  for (const field of ["destinationSession", "sourceSession", "body"] as const) {
+    if (payload[field] !== forwardBody[field] || (field === "body" && isObjectRecord(payload.createWarning) && payload.createWarning.code === "qitem_body_not_saved")) fail(field);
+  }
+  if (fields.length === 0) return { row: payload, fields, observed, reason: "" };
   return {
-    ...existing,
-    code: typeof existing.code === "string" ? existing.code : "qitem_park_not_confirmed",
-    message: [...new Set(messages)].join(" "),
+    row: null,
+    fields,
+    observed,
+    reason: `The forwarded row does not confirm this create (${fields.join(", ")}). The create outcome is unknown. Keep the sent ID for a read back.`,
+    ...(payload.qitemId === forwardBody.qitemId && typeof payload.state === "string" && VALID_PARK_CREATE_STATES.has(payload.state as QueueState)
+      ? { existingRow: {
+          qitemId: payload.qitemId,
+          state: payload.state,
+          destinationSession: payload.destinationSession,
+          sourceSession: payload.sourceSession,
+          ...(payload.body === undefined ? {} : { body: safeParkObserved("body", payload.body) }),
+        } } : {}),
+  };
+}
+
+function checkForwardedParkReceipt(
+  row: Record<string, unknown>,
+  requestedBlocker: string | null,
+  requestedWakeAfter: number | null,
+): { confirmed: boolean; fields: string[]; observed: Record<string, unknown>; receipt: Record<string, unknown> } {
+  const fields: string[] = [];
+  const observed: Record<string, unknown> = {};
+  const fail = (field: string, value: unknown, present = true) => {
+    if (!fields.includes(field)) fields.push(field);
+    if (present) {
+      const summary = safeParkObserved(field, value);
+      if (summary !== undefined) observed[field] = summary;
+    }
+  };
+  const raw = row.parkReceipt;
+  const has = (value: Record<string, unknown>, field: string) => Object.prototype.hasOwnProperty.call(value, field);
+  if (!isObjectRecord(raw)) {
+    fail("parkReceipt", raw, has(row, "parkReceipt"));
+    if (has(row, "parkWarning")) fail("parkWarning", row.parkWarning);
+    return {
+      confirmed: false,
+      fields,
+      observed,
+      receipt: { confirmed: false, state: row.state, ...(has(row, "blockedOn") ? { blockedOn: row.blockedOn } : {}) },
+    };
+  }
+  const pairMatches = (field: string, expected: unknown) => {
+    const rowHas = has(row, field), receiptHas = has(raw, field);
+    if (!rowHas || !receiptHas || row[field] !== expected || raw[field] !== expected) {
+      const observedPair: Record<string, unknown> = {};
+      if (rowHas) observedPair.row = row[field];
+      if (receiptHas) observedPair.receipt = raw[field];
+      fail(field, observedPair, Object.keys(observedPair).length > 0);
+    }
+  };
+  if (row.state !== "blocked" || raw.state !== row.state) {
+    const observedState: Record<string, unknown> = {};
+    if (has(row, "state")) observedState.row = row.state;
+    if (has(raw, "state")) observedState.receipt = raw.state;
+    fail("state", observedState, Object.keys(observedState).length > 0);
+  }
+  pairMatches("blockedOn", requestedBlocker);
+  if (!has(raw, "wakeKind")) fail("wakeKind", undefined, false);
+  else {
+    const validWakeKind = requestedWakeAfter !== null
+      ? raw.wakeKind === "timer"
+      : raw.wakeKind === null || (raw.wakeKind === "blocker" && requestedBlocker !== null);
+    if (!validWakeKind) fail("wakeKind", raw.wakeKind);
+  }
+  if (!has(raw, "wakeAfterSeconds") || raw.wakeAfterSeconds !== requestedWakeAfter) {
+    fail("wakeAfterSeconds", raw.wakeAfterSeconds, has(raw, "wakeAfterSeconds"));
+  }
+  if (!has(raw, "receiptVersion") || raw.receiptVersion !== PARK_RECEIPT_VERSION) {
+    fail("receiptVersion", raw.receiptVersion, has(raw, "receiptVersion"));
+  }
+  if (!has(raw, "confirmed") || raw.confirmed !== true) fail("confirmed", raw.confirmed, has(raw, "confirmed"));
+  if (has(row, "parkWarning")) fail("parkWarning", row.parkWarning);
+  return {
+    confirmed: fields.length === 0,
+    fields,
+    observed,
+    receipt: { ...raw, confirmed: fields.length === 0 },
   };
 }
 
@@ -853,37 +1022,56 @@ export function queueRoutes(): Hono {
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
       const payload = fwd.payload;
       // A same-id retry returns the row the receiver already stored: say the route wasn't carried only when it has none.
-      const returnedRoute = payload !== null && typeof payload === "object" && !Array.isArray(payload)
-        && typeof (payload as { returnRoute?: unknown }).returnRoute === "string";
+      const returnedRoute = isObjectRecord(payload) && typeof payload.returnRoute === "string";
       const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
         ...(routeNotCarried && !returnedRoute ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
-      if (payload === null || typeof payload !== "object" || Array.isArray(payload))
-        return c.json(payload, fwd.status as 200);
-      const objectPayload = payload as Record<string, unknown>;
+      if (!parkRequested) {
+        if (!isObjectRecord(payload)) return c.json(payload, fwd.status as 200);
+        const { parkReceipt: _parkReceipt, parkWarning: _parkWarning, ...ordinaryCreate } = payload;
+        const existingAdvisories = Array.isArray(ordinaryCreate.advisories) ? ordinaryCreate.advisories : [];
+        return added.length
+          ? c.json({ ...ordinaryCreate, advisories: [...existingAdvisories, ...added] }, fwd.status as 200)
+          : c.json(ordinaryCreate, fwd.status as 200);
+      }
+
+      const responseStatus = (fwd.status === 204 ? 200 : fwd.status) as 200;
+      const identity = checkForwardedParkCreate(payload, forwardBody);
+      if (!identity.row) {
+        const createWarning = mergeParkWarning(
+          isObjectRecord(payload) ? payload.createWarning : undefined,
+          "qitem_create_outcome_unknown",
+          identity.reason,
+          identity.fields,
+          identity.observed,
+        );
+        const parkWarning = unconfirmedParkWarning({
+          code: "qitem_park_not_confirmed",
+          message: "The create identity is unknown, so this response cannot confirm its park.",
+        }, undefined);
+        return c.json({
+          qitemId: mintedId,
+          createOutcome: "unknown",
+          createWarning,
+          parkReceipt: { confirmed: false },
+          parkWarning,
+          ...(identity.existingRow ? { existingRow: identity.existingRow } : {}),
+        }, responseStatus);
+      }
+
+      const objectPayload = identity.row;
       const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
-      if (!parkRequested) return added.length
-        ? c.json({ ...objectPayload, advisories: [...existingAdvisories, ...added] }, fwd.status as 200)
-        : c.json(payload, fwd.status as 200);
-      const remoteParkReceipt = objectPayload.parkReceipt && typeof objectPayload.parkReceipt === "object" && !Array.isArray(objectPayload.parkReceipt)
-        ? objectPayload.parkReceipt as Record<string, unknown> : null;
       const requestedBlocker = typeof body.blockedOn === "string" ? body.blockedOn : null;
-      const responseMatchesBlocker = objectPayload.state === "blocked" && (objectPayload.blockedOn ?? null) === requestedBlocker;
-      const timerConfirmed = body.wakeAfterSeconds == null || (remoteParkReceipt?.receiptVersion === PARK_RECEIPT_VERSION
-        && remoteParkReceipt.confirmed === true
-        && remoteParkReceipt.wakeAfterSeconds === body.wakeAfterSeconds);
-      const parkConfirmed = remoteParkReceipt?.receiptVersion === PARK_RECEIPT_VERSION
-        && remoteParkReceipt.confirmed === true
-        && !objectPayload.parkWarning && responseMatchesBlocker && timerConfirmed;
-      const parkReceipt = remoteParkReceipt ?? {
-        confirmed: parkConfirmed,
-        state: typeof objectPayload.state === "string" ? objectPayload.state : null,
-        blockedOn: typeof objectPayload.blockedOn === "string" ? objectPayload.blockedOn : null,
-        wakeKind: null,
-        wakeAfterSeconds: null,
-      };
-      const parkWarning = parkConfirmed ? objectPayload.parkWarning : unconfirmedParkWarning(objectPayload.parkWarning, objectPayload.state);
-      return c.json({ ...objectPayload, parkReceipt: { ...parkReceipt, confirmed: parkConfirmed }, ...(parkWarning ? { parkWarning } : {}),
-        ...(added.length ? { advisories: [...existingAdvisories, ...added] } : {}) }, fwd.status as 200);
+      const requestedWakeAfter = typeof body.wakeAfterSeconds === "number" ? body.wakeAfterSeconds : null;
+      const parkCheck = checkForwardedParkReceipt(objectPayload, requestedBlocker, requestedWakeAfter);
+      const parkWarning = parkCheck.confirmed ? undefined
+        : unconfirmedParkWarning(objectPayload.parkWarning, objectPayload.state, parkCheck.fields, parkCheck.observed);
+      return c.json({
+        ...objectPayload,
+        persisted: true,
+        parkReceipt: { ...parkCheck.receipt, confirmed: parkCheck.confirmed },
+        ...(parkWarning ? { parkWarning } : {}),
+        ...(added.length ? { advisories: [...existingAdvisories, ...added] } : {}),
+      }, responseStatus);
     }
 
     try {
