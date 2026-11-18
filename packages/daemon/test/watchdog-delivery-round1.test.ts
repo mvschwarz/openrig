@@ -15,7 +15,10 @@ import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
-import type { WatchdogUsageLimitState } from "../src/domain/watchdog-usage-limit.js";
+import { readWatchdogUsageLimitState, type WatchdogUsageLimitState } from "../src/domain/watchdog-usage-limit.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { hookOrPaneActivity } from "../src/domain/node-inventory.js";
+import type { StructuralObservation } from "../src/domain/seat-structural-activity-service.js";
 
 const seat = "worker@test", stores: Database.Database[] = [];
 const absent: SendResult = { ok: false, sessionName: seat, sent: false, inputPhase: "not_reached", reason: "tmux_unavailable", error: "Terminal service not yet listening" };
@@ -76,6 +79,47 @@ it.each([false, true])("records the usage reset, keeps the park owed across rest
     expect(resumed.repo.getById(row.qitemId)?.state).toBe("blocked");
   }
   expect(resumed.errors).toEqual([]);
+});
+
+it("reconsiders the same owed occurrence on a newer working frame despite a fresh limit hook, through the real fold and reader", async () => {
+  let result = interactive, structural: StructuralObservation | null = null;
+  let read = (_session: string): WatchdogUsageLimitState | null => null;
+  const send = vi.fn(async () => result), f = fixture(send, undefined, false, session => read(session));
+  const rig = new RigRepository(f.db).createRig("test");
+  const node = new RigRepository(f.db).addNode(rig.id, "worker", { runtime: "claude-code" });
+  const sessions = new SessionRegistry(f.db), session = sessions.registerSession(node.id, seat);
+  sessions.updateStatus(session.id, "running"); sessions.updateResumeToken(session.id, "claude_id", "conversation");
+  sessions.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%1" });
+  const generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
+  const activity = new AgentActivityStore({ db: f.db, eventBus: f.bus, now: () => new Date(),
+    resolveOccupantGeneration: id => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
+    isRegisteredOccupantGeneration: (id, gen) => sessions.isOccupantGenerationRegistered(id, gen) });
+  read = name => readWatchdogUsageLimitState({ db: f.db, activity, structuralActivity: () => structural }, name);
+  const row = await f.park(); later(3599);
+  const asOf = new Date().toISOString(), resetsAt = "2026-01-06T00:00:00.000Z";
+  expect(activity.recordHookEvent({ sessionName: seat, runtime: "claude-code", sessionId: "conversation", generation,
+    hookEvent: "StopFailure", subtype: "rate_limit", occurredAt: asOf, resetsAt }).ok).toBe(true);
+  later(1); await f.scheduler.runTickNow();
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(f.history.listForJob(row.jobId)[0]?.evaluationNotes?.retryAt).toBe(resetsAt);
+  const owedIds = f.outbox.listForSender("watchdog@system").map(entry => entry.outboxId);
+  const hook = () => activity.getLatestForNode({ nodeId: node.id, sessionName: seat, order: "source" });
+  later(1);
+  structural = { state: "agent_idle", reason: "idle_frame", evidence: null, observedAt: new Date().toISOString() };
+  await f.scheduler.runTickNow(); expect(send).toHaveBeenCalledTimes(1);
+  // Working must postdate the limit, not merely arrive in the cache later.
+  structural = { ...structural, state: "agent_active", reason: "working_frame", observedAt: asOf };
+  await f.scheduler.runTickNow(); expect(send).toHaveBeenCalledTimes(1);
+  structural = { ...structural, observedAt: new Date().toISOString() };
+  expect(hook()?.stale).not.toBe(true);
+  expect(hookOrPaneActivity(hook(), structural, false, "claude-code")?.source).toBe("limit");
+  expect(read(seat)?.clearedAt).toBe(structural.observedAt);
+  result = delivered; await f.scheduler.runTickNow();
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(f.outbox.listForSender("watchdog@system").map(entry => entry.outboxId)).toEqual(owedIds);
+  expect(f.repo.getParkWakeStatus(row.qitemId)).toMatchObject({ phase: "fired", deliveryStatus: "ok", live: false });
+  expect(hook()?.eventAt).toBe(asOf); // No later hook made the reader recover.
+  expect(f.errors).toEqual([]);
 });
 
 it.each(["occupant", "account", "activity", "clear"])("retries on positive %s evidence before reset, without reusing the old limit", async recovery => {

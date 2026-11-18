@@ -5,7 +5,8 @@ import { collectReactiveEventSignals } from "./provider/reactive-tap.js";
 import { resolveGuardTarget } from "./seat-delivery-guard.js";
 import { claudeConfigRootFor, seatRuntimeHome } from "./seat-runtime-home.js";
 import { latestRuntimeHomeRecord } from "./seat-runtime-home-record.js";
-import type { AgentActivity } from "./types.js";
+import { hookOrPaneActivity } from "./node-inventory.js";
+import type { StructuralObservation } from "./seat-structural-activity-service.js";
 
 export interface WatchdogUsageLimitState {
   /** Opaque comparison key, not an account path or credential. */
@@ -21,7 +22,8 @@ export interface WatchdogUsageLimitState {
 export function readWatchdogUsageLimitState(deps: {
   db: Database.Database;
   activity: Pick<AgentActivityStore, "getLatestForNode">;
-  currentActivity?: (session: string, hook: AgentActivity | null, runtime: string) => AgentActivity | null;
+  /** The existing current-observation cache; never capture a pane for this read. */
+  structuralActivity?: (session: string) => StructuralObservation | null;
   now?: () => Date;
 }, session: string): WatchdogUsageLimitState | null {
   try {
@@ -49,8 +51,14 @@ export function readWatchdogUsageLimitState(deps: {
       ? { asOf: signal.asOf, resetsAt: signal.resetsAt } : null;
     const state = latestHookState(activity, runtime);
     let clearedAt = state === "running" || state === "idle" ? activity?.eventAt ?? undefined : undefined;
-    const current = deps.currentActivity?.(session, activity, runtime);
-    if (current && !current.stale && (current.state === "running" || current.state === "idle")) {
+    const structural = deps.structuralActivity?.(session) ?? null;
+    // The general inventory fold deliberately keeps a fresh limit ahead of pane motion.
+    // For recovery of this owed wake, a strictly later working frame is positive evidence;
+    // reuse the fold's classification without that superseded hook. A redraw/idle frame is not recovery.
+    const workingAfterLimit = limit && structural?.state === "agent_active"
+      && Date.parse(structural.observedAt) > Date.parse(limit.asOf);
+    const current = hookOrPaneActivity(workingAfterLimit ? null : activity, structural, false, runtime)?.activity;
+    if (current && !current.stale && current.state === "running") {
       const at = current.eventAt ?? current.sampledAt;
       if (!clearedAt || Date.parse(at) > Date.parse(clearedAt)) clearedAt = at;
     }

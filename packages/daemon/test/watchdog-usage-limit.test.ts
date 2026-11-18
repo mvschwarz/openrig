@@ -7,7 +7,7 @@ import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { readWatchdogUsageLimitState } from "../src/domain/watchdog-usage-limit.js";
-import type { AgentActivity } from "../src/domain/types.js";
+import type { StructuralObservation } from "../src/domain/seat-structural-activity-service.js";
 
 const seat = "worker@test", asOf = "2026-01-01T01:00:00.000Z", resetsAt = "2026-01-06T00:00:00.000Z";
 const stores: Database.Database[] = [];
@@ -28,7 +28,7 @@ function fixture() {
     expect(activity.recordHookEvent({ sessionName: seat, runtime: "claude-code", sessionId: "conversation", generation: "gen-a",
       hookEvent: "StopFailure", subtype: "rate_limit", occurredAt: new Date().toISOString(), resetsAt, ...override }).ok).toBe(true);
   };
-  const read = (current?: AgentActivity) => readWatchdogUsageLimitState({ db, activity, currentActivity: () => current ?? null, now: () => new Date() }, seat);
+  const read = (current?: StructuralObservation) => readWatchdogUsageLimitState({ db, activity, structuralActivity: () => current ?? null, now: () => new Date() }, seat);
   return { db, activity, record, read };
 }
 
@@ -72,9 +72,9 @@ it("does not reuse a pre-move limit after a recorded home correction, even with 
 
 it("reads a newer hook clear or existing cached positive activity; an unreadable reader fails open", () => {
   const f = fixture(); f.record(); vi.setSystemTime(new Date("2026-01-01T01:00:01Z"));
-  const current: AgentActivity = { state: "running", reason: "motion", evidenceSource: "terminal_activity",
-    sampledAt: new Date().toISOString(), evidence: null };
-  expect(f.read(current)?.clearedAt).toBe(current.sampledAt);
+  const current: StructuralObservation = { state: "agent_active", reason: "motion",
+    observedAt: new Date().toISOString(), evidence: null };
+  expect(f.read(current)?.clearedAt).toBe(current.observedAt);
   f.record({ hookEvent: "UserPromptSubmit", subtype: null });
   expect(f.read()).toMatchObject({ limit: null, clearedAt: new Date().toISOString() });
   expect(readWatchdogUsageLimitState({ db: f.db, activity: { getLatestForNode: () => { throw new Error("read failed"); } } }, seat)).toBeNull();
@@ -82,5 +82,11 @@ it("reads a newer hook clear or existing cached positive activity; an unreadable
 
 it("wires the daemon's real activity store and cached seat activity into watchdog delivery", () => {
   const src = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
-  expect(src).toMatch(/deliver:\s*makeWatchdogDeliver\(\{[\s\S]*?readUsageLimitState:\s*session => readWatchdogUsageLimitState\(\{ db, activity: agentActivityStore,\s*currentActivity: \(name, hook, runtime\) => hookOrPaneActivity\(hook,\s*seatStructuralActivityService.getStructuralActivity\(name\)/);
+  expect(src).toMatch(/deliver:\s*makeWatchdogDeliver\(\{[\s\S]*?readUsageLimitState:\s*session => readWatchdogUsageLimitState\(\{ db, activity: agentActivityStore,\s*structuralActivity: name => seatStructuralActivityService.getStructuralActivity\(name\)/);
+});
+
+it.each([1, 301])("a cached idle/redraw frame does not clear the retained limit after %s seconds", seconds => {
+  const f = fixture(); f.record(); vi.setSystemTime(Date.now() + seconds * 1000);
+  const state = f.read({ state: "agent_idle", reason: "idle_frame", observedAt: new Date().toISOString(), evidence: null });
+  expect(state?.limit).toEqual({ asOf, resetsAt }); expect(state?.clearedAt).toBeUndefined();
 });
