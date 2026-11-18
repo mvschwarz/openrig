@@ -742,6 +742,22 @@ describe("queue-only seat: a watchdog reminder is never typed (#3076)", () => {
     expect(f.submissions).toEqual([]);
   });
 
+  it("noteParkedRows reads each job's parked rows once, however many notes it carries, and notes only that job's rows", async () => {
+    const { s, parkWith, notes } = queueOnly();
+    const a = await s.park("A's wait");
+    const b = await parkWith("B attached", { wakeWatchdogId: a.jobId });
+    const c = await s.park("C's own wait");
+    const read = vi.spyOn((s.repo as unknown as { wakeRepo: { findCurrentParkRowsByWatchdog: (j: string, o: string) => string[] } }).wakeRepo,
+      "findCurrentParkRowsByWatchdog");
+    const note = (qitemId: string, jobId: string) =>
+      ({ qitemId, jobId, note: `park wake noted on this row: watchdog ${jobId}; delivery=noted_on_parked_row; nothing typed` });
+    expect(s.repo.noteParkedRows(seat, [note(a.qitemId, a.jobId), note(b.qitemId, a.jobId), note(c.qitemId, a.jobId), note(c.qitemId, c.jobId)]))
+      .toEqual([a.qitemId, b.qitemId, c.qitemId]);
+    expect(read.mock.calls.map(([jobId]) => jobId)).toEqual([a.jobId, c.jobId]);
+    expect([notes(a.qitemId, a.jobId), notes(b.qitemId, a.jobId), notes(c.qitemId, a.jobId), notes(c.qitemId, c.jobId)].map(n => n.length))
+      .toEqual([1, 1, 0, 1]);
+  });
+
   it("a row that left its park and was parked again with no wake of its own is not that reminder's row: the fire is a cold row", async () => {
     const { f, s, wdRows, parkWith, notes, operatorReminder, tick } = queueOnly();
     const job = operatorReminder();
