@@ -501,6 +501,14 @@ export interface QueueCreateInput {
   returnRouteBasis?: string | null;
 }
 
+/** A qitem can be created directly into the existing blocked state. */
+export interface QueueCreateParkInput {
+  /** Uses the same live qitem, human seat and typed gate rules as a blocked update. */
+  blockedOn?: string;
+  /** The existing one-shot park timer, in seconds. */
+  wakeAfterSeconds?: number;
+}
+
 /** Tags to add to an existing row (`addTags`). */
 export interface QueueTagAddInput {
   qitemId: string;
@@ -2444,7 +2452,7 @@ export class QueueRepository {
     return row?.sourceSession === actorSession ? row : null;
   }
 
-  async create(input: QueueCreateInput, verifyBeforeCreate?: () => void): Promise<QueueItem & {
+  async create(input: QueueCreateInput & QueueCreateParkInput, verifyBeforeCreate?: () => void): Promise<QueueItem & {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };
   }> {
@@ -2458,13 +2466,26 @@ export class QueueRepository {
     }
 
     let wakeStaged = false;
+    const startsBlocked = input.blockedOn != null || input.wakeAfterSeconds != null;
     // A row OpenRig creates itself (a sweep finding, an escalation, a health or mode notice) keeps its source for the
     // record, but its wake comes from OpenRig: the seat named as source didn't send it.
     const wakeFrom = input.wakeTrigger === "openrig" && !isOpenRigSender(input.sourceSession) ? OPENRIG_SENDER : input.sourceSession;
     const txn = this.db.transaction(() => {
       verifyBeforeCreate?.();
       const created = this.createInTransactionalContext(input);
-      if (this.outbox && input.nudge !== false) {
+      const parkEvents = startsBlocked
+        ? this.updateInTransactionalContext({
+            qitemId: created.qitemId,
+            actorSession: input.sourceSession,
+            state: "blocked",
+            blockedOn: input.blockedOn,
+            wakeAfterSeconds: input.wakeAfterSeconds,
+            transitionNote: "created blocked",
+            identityProvenance: input.identityProvenance,
+            identityPrincipal: input.identityPrincipal,
+          }).persistedEvents
+        : [];
+      if (this.outbox && input.nudge !== false && !startsBlocked) {
         try {
           // A savepoint removes any partial intent when staging fails, while
           // preserving ordinary create's existing acceptance of the task.
@@ -2474,12 +2495,12 @@ export class QueueRepository {
           this.recordNudgeAttempt(created.qitemId, `${WAKE_NOT_RETAINED}${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      return created;
+      return { ...created, persistedEvents: [created.persistedEvent, ...parkEvents] };
     });
     let id: string;
-    let persistedEvent: PersistedEvent;
+    let persistedEvents: PersistedEvent[];
     try {
-      ({ qitemId: id, persistedEvent } = txn());
+      ({ qitemId: id, persistedEvents } = txn());
     } catch (err) {
       // OPR.0.4.6.MH3 Q-a (FR-5): at-least-once cross-host forwards retry with
       // the SAME minted qitemId, so a PK conflict on an EXISTING row is an
@@ -2523,14 +2544,14 @@ export class QueueRepository {
       }
       throw err;
     }
-    this.eventBus.notifySubscribers(persistedEvent);
+    for (const event of persistedEvents) this.eventBus.notifySubscribers(event);
     // The receipt acknowledges persistence, not terminal delivery. The intent
     // survives a crash before the scheduled wake if staging succeeded. A staging
     // failure is recorded on the row; callers without an outbox retain their
     // existing best-effort path without claiming durability.
     if (this.outbox) {
       if (wakeStaged) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${id}`);
-    } else {
+    } else if (!startsBlocked) {
       await this.maybeNudge(id, input.destinationSession, input.nudge, wakeFrom, undefined, input.wakeTrigger);
     }
     return this.getByIdOrThrow(id);

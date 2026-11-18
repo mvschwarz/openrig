@@ -43,27 +43,19 @@ Stop: after telling them once, or when they say stop.
 Unknown: not said yet.
 ```
 
-**2. Create it for yourself,** with a `watch` tag so it can be listed later (tags can't be changed after creation).
+**2. Create it for yourself, already blocked on the condition and timer.** The `watch` tag lets you list it later.
 `<your session>` is your session name from `rig whoami --json`:
 
 ```bash
 rig queue create --destination <your session> --tags watch \
-  --summary "Watch: tell <person> when the release PR merges (hourly)" --body-file <file>
+  --summary "Watch: tell <person> when the release PR merges (hourly)" --body-file <file> \
+  --blocked-on external:<what you check> --wake-after 1h
 ```
 
-**3. Set it aside with the timer.** A new pending task can be set aside directly; no claim is needed:
+`--blocked-on` uses the same blocker meaning as `queue block` and `queue update`. Here,
+`external:<what>` names the outside thing you are waiting on. The timer first fires after the interval, not now.
 
-```bash
-rig queue block <task> --on external:<what you check> --wake-after 1h \
-  --continuation "check <what>; tell <person> if met, else re-arm 1h"
-```
-
-`--on` is always required; `external:<what>` names the outside thing you're waiting on. The timer first fires after
-the interval, not now. Left without `--wake-after` (or `--wake-watchdog`), the task is still set aside, but nothing
-will wake you, and the reply says so with a `park_without_wake` advisory. Set it aside again with `--wake-after` to add
-the timer.
-
-**4. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
+**3. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
 it stops. For example: "I'll check the release PR every hour and message you here once it merges. Then I'll stop."
 
 A plain reminder ("remind me in 20 minutes to look at the release notes") is the same with no condition. Set it aside

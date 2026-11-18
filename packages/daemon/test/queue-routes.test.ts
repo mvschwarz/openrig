@@ -99,6 +99,25 @@ describe("queue routes", () => {
     temporaryWorkspace = undefined;
   });
 
+  it("creates a blocked queue row and timer through one create request without an immediate nudge", async () => {
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        destinationSession: "worker@rig",
+        body: "Wait for the remote task",
+        blockedOn: "external:remote-task",
+        wakeAfterSeconds: 90,
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result).toMatchObject({ state: "blocked", blockedOn: "external:remote-task" });
+    expect(queueRepo.getParkWakeStatus(result.qitemId)).toMatchObject({ kind: "timer", live: true });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM outbox_entries").get()).toMatchObject({ count: 0 });
+  });
+
   it.each(["create", "handoff", "handoff-and-complete"])("keeps committed %s successful when the destination advisory throws", async (verb) => {
     queueRepo = new QueueRepository(db, bus, {
       destinationAdvisory: () => { throw Object.assign(new Error("membership unavailable"), { code: "SQLITE_BUSY" }); },

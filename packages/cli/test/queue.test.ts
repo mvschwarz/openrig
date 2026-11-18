@@ -976,6 +976,38 @@ describe("rig queue CLI", () => {
       }
     });
 
+    it("create with --blocked-on and --wake-after sends one blocked create request", async () => {
+      const { deps, calls } = makeDeps({
+        routes: {
+          "POST /api/queue/create": {
+            status: 201,
+            data: { qitemId: "qitem-create-park", state: "blocked", blockedOn: "external:remote-work" },
+          },
+        },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--destination", "bob@rig",
+        "--body", "Wait for remote work",
+        "--summary", "Wait for remote work",
+        "--blocked-on", "external:remote-work",
+        "--wake-after", "15m",
+        "--json",
+      ]);
+
+      const creates = calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create");
+      expect(creates).toHaveLength(1);
+      expect(creates[0]?.body).toMatchObject({
+        destinationSession: "bob@rig",
+        body: "Wait for remote work",
+        blockedOn: "external:remote-work",
+        wakeAfterSeconds: 900,
+      });
+      expect(calls.some((call) => call.method === "POST" && /\/update$/.test(call.path))).toBe(false);
+    });
+
     it("create with both --body and --body-file errors with exit 1 + 3-part error + does NOT contact the daemon", async () => {
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "queue-create-conflict-"));
       const bodyPath = path.join(tmp, "body.txt");

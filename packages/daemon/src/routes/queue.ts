@@ -718,6 +718,8 @@ export function queueRoutes(): Hono {
       tier?: string;
       tags?: string[];
       expiresAt?: string;
+      blockedOn?: string;
+      wakeAfterSeconds?: number;
       chainOfRecord?: string[];
       targetRepo?: string;
       humanIntent?: "decision" | "update" | null;
@@ -843,6 +845,8 @@ export function queueRoutes(): Hono {
         tier: body.tier,
         tags: withRouteNotCarriedTag(body.tags, routeNotKept),
         expiresAt: body.expiresAt,
+        blockedOn: body.blockedOn,
+        wakeAfterSeconds: body.wakeAfterSeconds,
         chainOfRecord: body.chainOfRecord,
         targetRepo: body.targetRepo,
         humanIntent: body.humanIntent,
@@ -858,6 +862,7 @@ export function queueRoutes(): Hono {
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
       const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory,
+        parkWithoutWakeAdvisory(item),
         // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
         routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);

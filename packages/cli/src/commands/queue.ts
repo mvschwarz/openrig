@@ -1318,6 +1318,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--tier <tier>", "Tier (e.g. fast, routine, deep, critical) — drives SLA")
     .option("--tags <tags>", "Comma-separated tags (composes with --mission and --slice)")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
+    .option("--blocked-on <blocker>", "Create in state=blocked on a live qitem, a human seat, or a typed gate; uses the same blocker rules as queue update")
+    .option("--wake-after <duration>", "For a blocked create: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--id <qitemId>", "Retry identity: reuse for the same create after an unknown outcome; otherwise generated and printed before sending")
     .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
     .option("--summary <text>", "Short human-readable subject of the row, shown on every surface that lists it (RECENT, the story, the needs-you view). Say what the work is and why it needs this seat. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
@@ -1346,6 +1348,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       tier?: string;
       tags?: string;
       expiresAt?: string;
+      blockedOn?: string;
+      wakeAfter?: number;
       id?: string;
       targetRepo?: string;
       humanIntent?: string;
@@ -1502,6 +1506,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           tier: opts.tier,
           tags,
           expiresAt: opts.expiresAt,
+          blockedOn: opts.blockedOn,
+          wakeAfterSeconds: opts.wakeAfter,
           targetRepo: opts.targetRepo,
           nudge: opts.nudge,
           ...(opts.returnRoute !== undefined ? { returnRoute: opts.returnRoute } : {}),
