@@ -1731,7 +1731,7 @@ export class ClaudeCompactionEnforcer {
     let marked = false;
     try {
       const composed = composeManagedCompactCommand({ compactInstruction: attempt.compactInstruction, mapPath: attempt.mapPath });
-      prep = await this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
+      const send = () => this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
         overflowCompactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
         usedPercentage: input.usedPercentage ?? null, thresholdPercent: policy.thresholdPercent,
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
@@ -1743,6 +1743,12 @@ export class ClaudeCompactionEnforcer {
         // At the write, a retry included: from here a restart reads this prompt as possibly delivered and never resends it.
         if (!marked) { marked = true; this.persist(input.sessionName, attempt.attemptId, { delivery: "pending", sends: attempt.sends }); }
       } });
+      // At a queue-only seat the send takes the same lifecycle lease as managed compaction (an automatic attempt already
+      // holds it, so this joins it): a manual `rig compact` there is lifecycle work, not a notice to hold (#3076). At
+      // any other level the manual preparation keeps its ordinary send.
+      const guard = this.sessionTransport.deliveryGuard;
+      prep = guard && this.queueOnlySeat(input.sessionName)
+        ? await guard.lifecycle([guard.target(input.sessionName).nodeId], send) : await send();
     } catch (error) {
       if (error instanceof DeliveryGuardError) {
         const written = (error as { inputWritten?: boolean }).inputWritten === true;
@@ -2380,6 +2386,14 @@ export class ClaudeCompactionEnforcer {
 
   private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string, operatorInitiated?: boolean): void {
     this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now(), operatorInitiated });
+  }
+
+  /** Whether the seat is at the queue-only level (desired or effective). A seat the guard can't resolve isn't. */
+  private queueOnlySeat(sessionName: string): boolean {
+    const guard = this.sessionTransport.deliveryGuard;
+    const target = guard?.maybeTarget(sessionName);
+    if (!guard || !target) return false;
+    try { return guard.queueOnly(target.nodeId); } catch { return false; }
   }
 
   /** A draft-aware (protected) seat whose binding records no tmux pane. The input layer refuses every write to a
