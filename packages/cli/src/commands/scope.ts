@@ -376,7 +376,7 @@ function buildSliceShowCommand(): Command {
       const out = makeStdout();
       const json = Boolean(opts.json);
       try {
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const readme = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         const children = fs.readdirSync(slice.absPath, { withFileTypes: true })
@@ -596,7 +596,7 @@ function buildSliceShipCommand(): Command {
       const out = makeStdout();
       const json = Boolean(opts.json);
       try {
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const target = findMission(missionsRoot, releaseMission);
         if (target.name === slice.missionName) {
@@ -702,7 +702,7 @@ function buildSliceCloseCommand(): Command {
             action: `Pass --in-place with --reason delivered, or use rig scope slice ship, or pick a non-delivery reason (${NON_DELIVERY_CLOSE_REASONS.join(", ")}).`,
           });
         }
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const mission = findMission(missionsRoot, slice.missionName);
         const closedDir = path.join(mission.absPath, "closed");
@@ -944,7 +944,7 @@ function buildSliceMoveCommand(): Command {
       const out = makeStdout();
       const json = Boolean(opts.json);
       try {
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const target = findMission(missionsRoot, destMission);
         if (target.name === slice.missionName) {
@@ -1132,7 +1132,7 @@ function buildMissionShowCommand(): Command {
 
 function resolveMissionCreateRoot(override: string | null | undefined, advisories: string[]): string {
   const selected = override ?? process.env.OPENRIG_WORK_ROOT;
-  if (!selected) return resolveMissionsRoot();
+  if (!selected) return resolveMissionsRoot({ allowMissingProjectMissions: true });
 
   const candidate = path.isAbsolute(selected) ? selected : path.resolve(process.cwd(), selected);
   const childMissionsRoot = path.join(candidate, "missions");
@@ -1880,7 +1880,7 @@ function buildSliceProgressCommand(): Command {
       const out = makeStdout();
       const json = Boolean(opts.json);
       try {
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         runProgressUpdate(slice.absPath, "slice", slice.name, opts, out, json);
       } catch (err) {
@@ -2026,7 +2026,7 @@ function buildSliceStageCommand(): Command {
       const json = Boolean(opts.json);
       try {
         const stage = validateStage(newStage);
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         if (!slice.readmePath) {
           throw new ScopeCliError({
@@ -2094,7 +2094,7 @@ function buildSliceVerifiedCommand(): Command {
       const json = Boolean(opts.json);
       try {
         const source = validateAgainst(opts.against);
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         if (!slice.readmePath) {
           throw new ScopeCliError({
@@ -2261,7 +2261,7 @@ function buildSliceRepairCommand(): Command {
       const out = makeStdout();
       const json = Boolean(opts.json);
       try {
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, targetPath: slicePath });
         const legacySlice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const specPath = ensureCurrentSpec(legacySlice.absPath, legacySlice.readmePath, legacySlice.name);
         const slice = findSlice(missionsRoot, legacySlice.absPath, opts.mission ?? null);
@@ -2492,6 +2492,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         const missionsRoot = resolveMissionsRoot({
           override: getOpts(command).workspace,
           strictOverride: true,
+          ...(tier === "slice" ? { targetPath: target } : {}),
         });
         let scopeAbsPath: string;
         if (tier === "slice") {

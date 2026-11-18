@@ -3,7 +3,7 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node
 import path from "node:path";
 import net from "node:net";
 import { execSync } from "node:child_process";
-import { resolveDaemonPath } from "../daemon-lifecycle.js";
+import { readTerminalsEvidence, resolveDaemonPath } from "../daemon-lifecycle.js";
 import { DaemonClient, ForeignLocalDaemonError, formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
@@ -70,7 +70,7 @@ const CMUX_SOCKET_CONTROL_FIX = 'In cmux Settings > Automation, select "Automati
  *  looks the same and must keep working; it passes when OPENRIG_URL selects this endpoint on purpose. An owner that can't
  *  be compared, or a body that doesn't arrive in time, warns too. Nothing is stopped or refused here. */
 async function listenerOwnerCheck(where: string, base: string, res: { json?: () => Promise<unknown> }, release: () => void,
-  deps: DoctorDeps): Promise<DoctorCheck> {
+  deps: DoctorDeps, onBody: (body: unknown) => void = () => {}): Promise<DoctorCheck> {
   const env = deps.env ?? process.env;
   const at = `Port ${where} (${base}, OpenRig home ${getOpenRigHome(env)})`;
   const callerUid = deps.callerUid === undefined ? process.geteuid?.() : deps.callerUid ?? undefined;
@@ -87,6 +87,7 @@ async function listenerOwnerCheck(where: string, base: string, res: { json?: () 
       new Promise<null>(resolve => { timer = setTimeout(() => { late = true; resolve(null); }, boundMs); }),
     ]);
     if (body && typeof body === "object") reported = body as { pid?: unknown; euid?: unknown };
+    onBody(body);
   } catch { /* no readable body: the owner stays unknown */ }
   finally { clearTimeout(timer); release(); }
   const pid = Number.isSafeInteger(reported.pid) && (reported.pid as number) > 0 ? `, pid ${reported.pid as number}` : "";
@@ -312,6 +313,8 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       ]);
     } finally { clearTimeout(timer); }
   };
+  // #3315: the one /healthz body the port check reads also says whether the daemon reaches its tmux server.
+  let healthBody: unknown = null;
   const portCheck = deps.checkPort(daemonPort, daemonHost).then(async (available): Promise<DoctorCheck> => {
     if (available) {
       return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
@@ -326,7 +329,8 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
         reason: "Its /healthz response headers did not arrive in time, so doctor cannot identify it.",
         fix: `Check the listener on port ${daemonPort} or configure a free port for the daemon.`,
       };
-      if (res.ok) return await listenerOwnerCheck(`${daemonHost}:${daemonPort}`, daemonBase, res, () => owner.abort(), deps);
+      if (res.ok) return await listenerOwnerCheck(`${daemonHost}:${daemonPort}`, daemonBase, res, () => owner.abort(), deps,
+        body => { healthBody = body; });
     } catch { /* not our daemon */ }
     finally { owner.abort(); }
     return {
@@ -376,6 +380,7 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
   }
 
   asyncChecks.push(buildTmuxControlModeCheck(deps, daemonBase));
+  asyncChecks.push(portCheck.then(() => terminalServerCheck(healthBody)));
   asyncChecks.push(buildSpecConformanceCheck(deps));
 
   return { checks, portCheck, asyncChecks };
@@ -439,6 +444,40 @@ async function buildTmuxControlModeCheck(deps: DoctorDeps, daemonBase: string): 
     reason: "Starting a control client can crash a tmux server older than 3.7c, so the daemon spawns a tmux client for every command instead. The running server's version decides this, not the tmux binary on PATH.",
     fix: "Run the daemon's sessions on a tmux 3.7c or later server: rig context get reference/tmux-servers.md#moving-an-existing-team-onto-tmux-control-mode",
   };
+}
+
+/**
+ * #3315 — does the RUNNING daemon reach its own tmux server? The `tmux` check above runs this shell's tmux, on this
+ * shell's default socket, where "no server running" is a pass (nothing has started one yet). The daemon may use
+ * another socket, and once its seats run there, that server not answering means no seat can be reached. The daemon
+ * reports it on healthz (`terminals`), from what it observed, apart from being up itself; this reads the body the port
+ * check already fetched, so doctor makes no second request.
+ */
+function terminalServerCheck(healthBody: unknown): DoctorCheck {
+  const name = "terminal_server";
+  const terminals = readTerminalsEvidence((healthBody as { terminals?: unknown } | null)?.terminals);
+  if (!terminals) {
+    return { name, status: "skipped", message: "The daemon didn't say whether it reaches its tmux server: no daemon answered on its port, its report didn't arrive in time, or it's older than this check." };
+  }
+  const gone = terminals.servers.filter(server => server.state === "unreachable");
+  if (gone.length) {
+    return {
+      name, status: "fail",
+      message: gone.map(server => `The daemon is up but its tmux server on ${server.socket} has not answered since ${server.since}`
+        + `${server.cause ? ` (${server.cause})` : ""}.`).join(" "),
+      reason: "The seats on it can't currently be reached through tmux. Automatic wakes, reminders and retries through this server are currently held, without spending retries or escalating. The daemon does not restart the server.",
+      fix: "Find out why the tmux server stopped, then bring the seats back (rig up <rig>). Held work goes out once the server answers and the seats run again.",
+    };
+  }
+  const unread = terminals.servers.filter(server => server.state === "unknown");
+  if (unread.length) {
+    return { name, status: "skipped", message: unread.map(server => `The daemon couldn't read whether its tmux server on ${server.socket} answers`
+      + ` (since ${server.since}${server.cause ? `: ${server.cause}` : ""}); automatic delivery to its seats is not held.`).join(" ") };
+  }
+  if (terminals.state === "ok") {
+    return { name, status: "pass", message: `The daemon reaches its tmux server${terminals.servers.length === 1 ? ` on ${terminals.servers[0]!.socket}` : "s"}.` };
+  }
+  return { name, status: "skipped", message: "The daemon hasn't observed its tmux server yet: it does while a seat runs on it." };
 }
 
 /**

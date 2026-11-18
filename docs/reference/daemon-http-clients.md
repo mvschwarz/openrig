@@ -46,6 +46,7 @@ in the case named:
 | `slowOperations` | When the slow-operation recorder runs. |
 | `bind` | The bind plan: `mode` (`explicit` or `default`), `hosts` (the addresses bound), `tailscaleDetected`, and `ignoredRoutingHost` when a routing value was ignored. |
 | `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. In `stuckSweep`, `findingsRouted` counts the findings created since the daemon started (an open finding a later pass finds again is not counted again), `findingsOpen` is how many finding rows were still open after the last pass, and `lastOutcome` is `findings` when the last pass created, found again or closed one. |
+| `terminals` | Whether the daemon reaches its tmux server, from what it last observed (healthz doesn't call tmux). `state` is `ok`, `degraded` (a server doesn't answer) or `unknown` (none observed yet, or a server's last reading couldn't be made); each entry of `servers` has `socket`, `state` (`reachable`, `unreachable`, or `unknown` when the return probe couldn't be read: not held, with the loss it was watching in `lastLoss`), `since` (when that state began), `lastCheckedAt`, `transitions`, and in `cause` the tmux diagnostic while unreachable or why the reading is unknown. `status` stays `"ok"`: the daemon is up even when its terminals can't be reached. |
 
 ## Bearer tokens
 
@@ -310,9 +311,11 @@ What reads these declarations:
   table or its `tags` column cannot be read, or the count read itself fails part-way (any partial count is
   discarded and the slice rows still return). This is
   separate from the existing `qitemCount` display membership field. Counts match exact typed `project:`,
-  `mission:` and `slice:` tags in one shared queue scan. Physical candidates include configured indexer roots
-  and every catalog project's missions root. A row may omit `project:` or `mission:` only when its remaining
-  tags identify exactly one physical slice with a resolved project and mission. Ambiguous matches count nowhere,
+  `mission:` and `slice:` tags in one shared queue scan. A `project:` tag naming a former id a project declares
+  under `aliases:` counts as that project ([Project workspace](project-workspace.md#renaming-a-project)).
+  Physical candidates include configured indexer roots and every catalog project's missions root. A row may omit
+  `project:` or `mission:` only when its remaining tags identify exactly one physical slice with a resolved project
+  and mission. Ambiguous matches count nowhere,
   even if first-wins discovery or a list filter leaves only one row visible; an explicit mismatched project or
   mission never counts. Several `slice:` or `mission:` tags on one row count only when they all name the same
   physical slice or mission (a slice's folder name and its frontmatter `id:`, say); a row that names two distinct

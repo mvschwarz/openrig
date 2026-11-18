@@ -128,6 +128,31 @@ async function run(args: string[], workspace: string | null): Promise<CaptureRes
   };
 }
 
+it("creates a mission in the associated project and reports the default basis", async () => {
+  const root = mktemp();
+  const project = path.join(root, "alpha");
+  const shared = path.join(root, "shared", "missions");
+  fs.mkdirSync(project, { recursive: true });
+  fs.mkdirSync(shared, { recursive: true });
+  writeFile(path.join(root, "workspace.yaml"), "projects:\n  - id: alpha\n    root: alpha\n    rigs: [rig-a]\n");
+  vi.stubEnv("OPENRIG_WORKSPACE_CATALOG_PATH", path.join(root, "workspace.yaml"));
+  vi.stubEnv("OPENRIG_WORKSPACE_SLICES_ROOT", shared);
+  vi.stubEnv("OPENRIG_SESSION_NAME", "builder@rig-a");
+  vi.stubEnv("OPENRIG_WORK_ROOT", "");
+  const report = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const result = await run(["mission", "create", "new-work", "--id", "OPR.99.0.1", "--json"], null);
+    expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+    expect(report).toHaveBeenCalledWith(expect.stringContaining("selected by rig rig-a"));
+    expect(fs.existsSync(path.join(project, "missions", "new-work"))).toBe(true);
+    expect(fs.existsSync(path.join(shared, "new-work"))).toBe(false);
+  } finally {
+    report.mockRestore();
+    vi.unstubAllEnvs();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 describe("rig scope resolve-notes", () => {
   let root: string;
   beforeEach(() => { root = mktemp(); });

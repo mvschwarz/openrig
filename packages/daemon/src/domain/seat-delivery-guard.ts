@@ -3,7 +3,7 @@ import { hasOtherSeatHistory, isStoppedSeatPredecessor, resolveCurrentSessionAdd
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { composerPasteUncertainty, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
+import { COMPOSER_COLLAPSED_PASTE_PATTERN, composerPasteUncertainty, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
 
 /** A binding is captured before waiting. Never rebind an old operation to a new occupant. */
 export interface GuardTarget {
@@ -557,9 +557,13 @@ export class SeatDeliveryGuard {
     }
     if (submit) {
       // The TUI may render the collapsed label only after notePasted's read.
-      // If no label was recorded, recognize it in this same lease and original composer.
-      const collapsed = lease.staged && !lease.staged.collapsedPaste && !!lease.inputFrame
+      // If no label was recorded, recognize it in this same lease and original composer. A label without a line count
+      // (`[Pasted text #K]`, a single-line paste) says only its paste ID, and a person may have replaced our paste with
+      // their own single line by then: that one counts as ours only when notePasted recorded it (#2429).
+      const late = lease.staged && !lease.staged.collapsedPaste && !!lease.inputFrame
         && lease.inputFrame === input.frame && ownCollapsedPaste(input, lease.staged.text);
+      const label = late ? COMPOSER_COLLAPSED_PASTE_PATTERN.exec(late) : null;
+      const collapsed = !!late && !(label && label[1] === undefined);
       const owned = lease.staged && (composerContainsOwnedText(input, lease.staged.text)
         || !!collapsed || !!lease.staged.collapsedPaste && input.cursorAtEnd && input.collapsedPaste === lease.staged.collapsedPaste);
       if (!owned) throw new DeliveryGuardError("draft_input_changed", "The input no longer contains only this delivery's staged text. Enter was not sent.");
