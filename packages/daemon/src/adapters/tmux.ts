@@ -1718,8 +1718,11 @@ export class TmuxAdapter {
       this.noteServer({ reachable: true });
       return parseLines(output, parseSessionLine);
     } catch (err) {
-      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) {
-        this.noteServer({ reachable: false, cause: serverDiagnostic(err) });
+      // Classified from what tmux reported (its stderr when the exec kept it), as probeSession does: the wrapper's
+      // "Command failed:" line and stdout never decide it. Unknown and permission errors still throw the original.
+      const error = tmuxReportedError(err);
+      if (isNoServerError(error) || isTmuxTransportAbsentError(error)) {
+        this.noteServer({ reachable: false, cause: serverDiagnostic(error) });
         return [];
       }
       throw err;

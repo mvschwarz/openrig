@@ -465,7 +465,7 @@ function terminalServerCheck(healthBody: unknown): DoctorCheck {
       name, status: "fail",
       message: gone.map(server => `The daemon is up but its tmux server on ${server.socket} has not answered since ${server.since}`
         + `${server.cause ? ` (${server.cause})` : ""}.`).join(" "),
-      reason: "The seats on it can't be reached through tmux: automatic wakes, reminders and retries to them are held until the server answers again, without spending retries or escalating. The daemon does not restart the server.",
+      reason: "The seats on it can't currently be reached through tmux. Automatic wakes, reminders and retries through this server are currently held, without spending retries or escalating. The daemon does not restart the server.",
       fix: "Find out why the tmux server stopped, then bring the seats back (rig up <rig>). Held work goes out once the server answers and the seats run again.",
     };
   }

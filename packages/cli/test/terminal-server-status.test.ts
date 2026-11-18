@@ -40,7 +40,7 @@ describe("rig status: the daemon up and its terminals reachable are two facts", 
       expect(status.terminals?.state).toBe("degraded");
       expect(terminalsDegradedLine(status.terminals)).toBe("Terminals: the tmux server on /run/user/1000/openrig.sock has not answered "
         + "since 2026-11-15T15:59:58.000Z (no server running on /run/user/1000/openrig.sock). The daemon is up; automatic delivery "
-        + "to the seats on it is held until it answers again, and the daemon does not restart it.");
+        + "through this tmux server is currently held, and the daemon does not restart it.");
     } finally {
       delete process.env.OPENRIG_URL;
     }
@@ -93,8 +93,8 @@ describe("rig doctor: does the running daemon reach its tmux server?", () => {
     expect(result?.status).toBe("fail");
     expect(result?.message).toContain("/run/user/1000/openrig.sock");
     expect(result?.message).toContain("2026-11-15T15:59:58.000Z");
-    expect(result?.reason).toContain("does not restart the server");
-    expect(result?.reason).toContain("without spending retries or escalating");
+    expect(result?.reason).toBe("The seats on it can't currently be reached through tmux. Automatic wakes, reminders and retries "
+      + "through this server are currently held, without spending retries or escalating. The daemon does not restart the server.");
   });
 
   it("passes when it does", async () => {

@@ -240,6 +240,46 @@ describe("the tmux adapter reports each classified probe", () => {
     expect(seen).toEqual([{ reachable: true }, { reachable: true },
       { reachable: false, cause: NO_SERVER }, { reachable: false, cause: NO_SERVER }]);
   });
+
+  /** A real TmuxAdapter whose exec fails the way execTmuxCommand does: the "Command failed:" line with the output
+   *  appended for a reader, and tmux's own stderr kept apart as `execStderr`. */
+  function failingListing(socket: string, stderr: string, stdout = "") {
+    const seen: unknown[] = [];
+    const commands: string[] = [];
+    let thrown: Error | undefined;
+    const adapter = new TmuxAdapter(async command => {
+      commands.push(command);
+      thrown = Object.assign(new Error([`Command failed: ${command}`, stdout, stderr].filter(Boolean).join("\n")),
+        { stdout, stderr, execStderr: stderr });
+      throw thrown;
+    }, undefined, undefined, ["-S", socket]);
+    adapter.serverObserver = observation => { seen.push(observation); };
+    return { adapter, seen, commands, thrown: () => thrown };
+  }
+
+  it("classifies a listing from tmux's reported stderr: a refused custom socket is an empty listing and a loss", async () => {
+    const refused = "error connecting to /custom/openrig.sock (Connection refused)";
+    const terminal = failingListing("/custom/openrig.sock", `${refused}\n`);
+    expect(await terminal.adapter.listSessions()).toEqual([]);
+    expect(terminal.commands).toEqual([expect.stringMatching(/^tmux -S \/custom\/openrig\.sock list-sessions /)]);
+    expect(terminal.seen).toEqual([{ reachable: false, cause: refused }]);
+  });
+
+  it("rejects a listing on unknown or permission stderr with the original error and no loss, whatever the command or stdout say", async () => {
+    // The command (on a tmux-N socket) and stdout name a socket and an absence; only the stderr tmux reported may classify.
+    const looksAbsent = "no server running on /tmp/tmux-1000/default\nerror connecting to /tmp/tmux-1000/default (Connection refused)";
+    const cases: Array<[string, string]> = [
+      ["error connecting to /custom/openrig.sock (Permission denied)\n", looksAbsent],
+      ["open terminal failed: not a terminal\n", looksAbsent],
+      ["server version is too old for client\n", looksAbsent],
+      ["lost server: Connection refused\n", ""], // only the command's tmux-N socket resembles absence
+    ];
+    for (const [stderr, stdout] of cases) {
+      const terminal = failingListing("/tmp/tmux-1000/default", stderr, stdout);
+      await expect(terminal.adapter.listSessions()).rejects.toBe(terminal.thrown());
+      expect(terminal.seen).toEqual([]);
+    }
+  });
 });
 
 describe("delivery while the server is gone", () => {

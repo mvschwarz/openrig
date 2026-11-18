@@ -1585,8 +1585,8 @@ export function terminalsDegradedLine(terminals: DaemonTerminalsEvidence | undef
   const gone = terminals?.servers.filter(server => server.state === "unreachable") ?? [];
   if (!gone.length) return null;
   return gone.map(server => `Terminals: the tmux server on ${server.socket} has not answered since ${server.since}`
-    + `${server.cause ? ` (${server.cause})` : ""}. The daemon is up; automatic delivery to the seats on it is held until it `
-    + "answers again, and the daemon does not restart it.").join("\n");
+    + `${server.cause ? ` (${server.cause})` : ""}. The daemon is up; automatic delivery through this tmux server is currently `
+    + "held, and the daemon does not restart it.").join("\n");
 }
 
 async function fetchDaemonProbe(deps: LifecycleDeps, url: string, timeoutMs: number): Promise<{ ok: boolean; json?: () => Promise<unknown> }> {
