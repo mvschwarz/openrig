@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
@@ -577,6 +578,189 @@ describe("QueueRepository", () => {
     expect(rerouted.destinationSession).toBe("pod-fallback@rig");
     expect(rerouted.chainOfRecord).toEqual(["fallback-from:bob@rig"]);
     expect(captured.some((e) => e.type === "qitem.fallback_routed")).toBe(true);
+  });
+
+  describe("routeToFallback with an expected state, an expected destination and a wake", () => {
+    const fallbackTransitions = (qitemId: string) =>
+      repo.transitionLog.listForQitem(qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+    const fallbackWakes = (qitemId: string) =>
+      db.prepare("SELECT outbox_id, sender_session, destination_session, delivery_state FROM outbox_entries WHERE audit_pointer = ? AND outbox_id LIKE 'wake-intent-fallback-%'")
+        .all(qitemId) as Array<{ outbox_id: string; sender_session: string; destination_session: string; delivery_state: string }>;
+    const expectUnchanged = (qitemId: string, state: string, destination: string) => {
+      const row = repo.getById(qitemId)!;
+      expect(row.state).toBe(state);
+      expect(row.destinationSession).toBe(destination);
+      expect(row.chainOfRecord ?? []).toEqual([]);
+      expect(row.resolution).toBeNull();
+      expect(fallbackTransitions(qitemId)).toHaveLength(0);
+      expect(fallbackWakes(qitemId)).toHaveLength(0);
+      expect(captured.some((e) => e.type === "qitem.fallback_routed")).toBe(false);
+    };
+
+    it("A row claimed between the read and the move is refused with `fallback_state_mismatch` and left unchanged.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      captured.length = 0;
+      expect(() => repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig" }))
+        .toThrow(expect.objectContaining({ code: "fallback_state_mismatch", meta: { state: "in-progress", destinationSession: "bob@rig" } }));
+      expectUnchanged(item.qitemId, "in-progress", "bob@rig");
+    });
+
+    it("A row rerouted elsewhere between the read and the move is refused with `fallback_destination_mismatch` and left unchanged.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      repo.routeToFallback(item.qitemId, "dave@rig", "moved by someone else");
+      const before = repo.getById(item.qitemId)!;
+      captured.length = 0;
+      expect(() => repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig" }))
+        .toThrow(expect.objectContaining({ code: "fallback_destination_mismatch", meta: { state: "pending", destinationSession: "dave@rig" } }));
+      const after = repo.getById(item.qitemId)!;
+      expect(after).toMatchObject({ destinationSession: "dave@rig", chainOfRecord: before.chainOfRecord, resolution: before.resolution });
+      expect(fallbackTransitions(item.qitemId)).toHaveLength(1);
+      expect(captured.some((e) => e.type === "qitem.fallback_routed")).toBe(false);
+    });
+
+    it("The move's expected destination matches any of the row's session addresses, as a claim does.", async () => {
+      const aliasing = new QueueRepository(db, bus, { resolveSessionAddresses: (name) => (name === "bob" ? ["bob", "bob@rig"] : [name]) });
+      aliasing.attachOutbox(new OutboxHandler(db));
+      const item = await aliasing.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      // The claim takes the short address for the same row; the move's expected destination does too.
+      const second = await aliasing.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "y", nudge: false });
+      expect(aliasing.claim({ qitemId: second.qitemId, destinationSession: "bob" }).state).toBe("in-progress");
+      const moved = aliasing.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob" });
+      expect(moved.destinationSession).toBe("carol@rig");
+      expect(moved.chainOfRecord).toEqual(["fallback-from:bob@rig"]);
+      // An address that is not one of the row's is still a mismatch.
+      const third = await aliasing.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "z", nudge: false });
+      expect(() => aliasing.routeToFallback(third.qitemId, "carol@rig", "slot free", { expectDestination: "dave" }))
+        .toThrow(expect.objectContaining({ code: "fallback_destination_mismatch" }));
+    });
+
+    it("An unknown expected state is refused instead of being treated as a mismatch.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      captured.length = 0;
+      const refusal = (() => {
+        try { repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "in_progress" }); } catch (err) { return err; }
+        return null;
+      })();
+      expect(refusal).toBeInstanceOf(QueueRepositoryError);
+      expect(refusal).toMatchObject({ code: "invalid_state" });
+      expect((refusal as QueueRepositoryError).code).not.toBe("fallback_state_mismatch");
+      expectUnchanged(item.qitemId, "pending", "bob@rig");
+    });
+
+    it("A move stages the wake `wake-intent-fallback-<transitionId>` for the new destination, and the creation wake for the old destination is not delivered.", async () => {
+      // No transport yet: the create stages its wake to bob and it stays undelivered.
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", summary: "review the thing" });
+      const createWake = `wake-intent-${item.qitemId}`;
+      const stateOf = (outboxId: string) =>
+        (db.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string } | undefined)?.delivery_state;
+      expect(stateOf(createWake)).toBeDefined();
+      expect(stateOf(createWake)).not.toBe("delivered");
+      const sends: Array<{ session: string; text: string }> = [];
+      repo.attachTransport({ send: async (session: string, text: string) => { sends.push({ session, text }); return { ok: true, verified: true }; } });
+
+      repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+
+      const [move] = fallbackTransitions(item.qitemId);
+      const wakes = fallbackWakes(item.qitemId);
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toMatchObject({ outbox_id: `wake-intent-fallback-${move!.transitionId}`, sender_session: "daemon@kernel", destination_session: "carol@rig" });
+      await vi.waitFor(() => expect(fallbackWakes(item.qitemId)[0]!.delivery_state).toBe("delivered"));
+      expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
+      expect(sends[0]!.text).toContain(`Queue handoff: ${item.qitemId}`);
+
+      // The create's wake to bob is asked to deliver now: the row is no longer bob's, so bob gets nothing.
+      await repo.deliverWakeForSuccessor(item.qitemId, "bob@rig", true);
+      expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
+      expect(stateOf(createWake)).not.toBe("delivered");
+    });
+
+    it("A row rerouted back to a seat with a wake gets that reroute's wake only, not the create's or an earlier reroute's wake again.", async () => {
+      // The recovery pass reads the whole outbox schema, so this case runs on a fully migrated database.
+      const full = createDb();
+      try {
+        migrate(full, ALL_MIGRATIONS);
+        const fullRepo = new QueueRepository(full, new EventBus(full));
+        fullRepo.attachOutbox(new OutboxHandler(full));
+        const wakesOf = (qitemId: string) =>
+          (full.prepare("SELECT outbox_id, delivery_state FROM outbox_entries WHERE audit_pointer = ?").all(qitemId) as Array<{ outbox_id: string; delivery_state: string }>);
+        // No transport while the row moves: every wake is staged and none is sent.
+        const item = await fullRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+        fullRepo.routeToFallback(item.qitemId, "carol@rig", "again", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+        const reroutes = fullRepo.transitionLog.listForQitem(item.qitemId).filter((t) => t.transitionNote?.startsWith("fallback-routed: "));
+        expect(reroutes).toHaveLength(3);
+        const latest = `wake-intent-fallback-${reroutes[2]!.transitionId}`;
+        expect(wakesOf(item.qitemId).map((w) => w.outbox_id).sort()).toEqual(
+          [`wake-intent-${item.qitemId}`, ...reroutes.map((t) => `wake-intent-fallback-${t.transitionId}`)].sort());
+        const sends: string[] = [];
+        fullRepo.attachTransport({ send: async (session: string) => { sends.push(session); return { ok: true, verified: true }; } });
+
+        await fullRepo.drainPendingWakeIntents();
+
+        expect(sends).toEqual(["carol@rig"]);
+        expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([latest]);
+      } finally {
+        full.close();
+      }
+    });
+
+    it("A wake on a row that is not pending is refused with `wake_not_admitted`, and nothing moves.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      captured.length = 0;
+      expect(() => repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { wake: true }))
+        .toThrow(expect.objectContaining({ code: "wake_not_admitted" }));
+      expectUnchanged(item.qitemId, "in-progress", "bob@rig");
+    });
+
+    it("A wake with no wake-intent store is refused before anything moves, and a move whose wake cannot be staged is rolled back.", async () => {
+      const noStore = new QueueRepository(db, bus);
+      const item = await noStore.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      captured.length = 0;
+      expect(() => noStore.routeToFallback(item.qitemId, "carol@rig", "slot free", { wake: true }))
+        .toThrow(expect.objectContaining({ code: "wake_intent_store_unavailable" }));
+      expectUnchanged(item.qitemId, "pending", "bob@rig");
+
+      const outbox = new OutboxHandler(db);
+      const failing = new QueueRepository(db, bus);
+      failing.attachOutbox(outbox);
+      const other = await failing.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      vi.spyOn(outbox, "record").mockImplementation(() => { throw new Error("disk full"); });
+      expect(() => failing.routeToFallback(other.qitemId, "carol@rig", "slot free", { wake: true })).toThrow("disk full");
+      expectUnchanged(other.qitemId, "pending", "bob@rig");
+    });
+
+    it("A full held-message quota does not undo the reroute.", async () => {
+      // The wake would be held at carol's seat, and that seat's held-message quota is full: unlike a wake that cannot
+      // be staged at all (above), the move stands and the wake is recorded as not retained.
+      const outbox = new OutboxHandler(db);
+      const holding = new QueueRepository(db, bus);
+      holding.attachOutbox(outbox);
+      holding.attachTransport({
+        retentionTarget: (session: string) => ({ nodeId: "node-carol", session, occupant: null, pane: null }),
+        send: async () => ({ ok: true, verified: true }),
+      });
+      const item = await holding.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      vi.spyOn(outbox, "retain").mockImplementation(() => {
+        throw Object.assign(new Error("Held-message quota is full. Retire a specific held message to release active quota; no input was written."), { code: "retained_quota_full" });
+      });
+      const moved = holding.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", wake: true });
+      expect(moved.destinationSession).toBe("carol@rig");
+      expect(moved.chainOfRecord).toEqual(["fallback-from:bob@rig"]);
+      expect(fallbackTransitions(item.qitemId)).toHaveLength(1);
+      expect(fallbackWakes(item.qitemId)).toHaveLength(0);
+      expect(holding.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:wake not retained: Held-message quota is full/);
+    });
+
+    it("A caller that passes no options moves the row as before and stages no fallback wake.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      const moved = repo.routeToFallback(item.qitemId, "carol@rig", "seat-unreachable");
+      expect(moved).toMatchObject({ state: "in-progress", destinationSession: "carol@rig", chainOfRecord: ["fallback-from:bob@rig"] });
+      expect(fallbackWakes(item.qitemId)).toHaveLength(0);
+    });
   });
 
   it("list filters by destination + state", async () => {

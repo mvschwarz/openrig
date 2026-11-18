@@ -183,6 +183,8 @@ const WAKE_TRIGGER_OPENRIG_TAG = "queue:wake-trigger:openrig";
 const CLAIM_OVERRIDDEN_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}claim-overridden-`;
 /** The first id after every such wake's, so a range on the outbox's primary key finds them all and nothing else. */
 const CLAIM_OVERRIDDEN_WAKE_END = `${WAKE_INTENT_PREFIX}claim-overridden.`;
+/** A reroute's wake: `wake-intent-fallback-<transitionId>`, keyed on the reroute's transition (routeToFallback). */
+const FALLBACK_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}fallback-`;
 /** On a wake intent whose ring a hosted member's trigger accepted: recovery doesn't ring that intent again. */
 const HOSTED_WAKE_ACCEPTED_TAG = "queue:hosted-wake-accepted";
 /** A first failed intent with typed no-input proof permits one return retry; a claim consumes it. */
@@ -1379,6 +1381,13 @@ export class QueueRepository {
       return Number(entry.outboxId.slice(CLAIM_OVERRIDDEN_WAKE_PREFIX.length)) === close?.transition_id;
     }
     if (row?.state !== "pending" || row.destination_session !== entry.destinationSession) return false;
+    // A reroute that stages a wake replaces the row's earlier wakes: its create wake and any earlier reroute's wake.
+    // Without this, a row that comes back to a seat it was rerouted away from would get the old wake again beside the
+    // new one.
+    if (entry.outboxId.startsWith(FALLBACK_WAKE_PREFIX) || entry.outboxId === `${WAKE_INTENT_PREFIX}${entry.auditPointer}`) {
+      const latest = this.latestFallbackWake(entry.auditPointer!);
+      return latest === null || entry.outboxId === latest;
+    }
     const prefix = `${WAKE_INTENT_PREFIX}blocker-`;
     if (!entry.outboxId.startsWith(prefix)) return true;
     const expected = Number(entry.outboxId.slice(prefix.length));
@@ -1388,6 +1397,19 @@ export class QueueRepository {
       WHERE state='pending' AND previous_state IS NOT 'pending' ORDER BY transition_id DESC LIMIT 1`)
       .get(entry.auditPointer) as { transition_id: number } | undefined;
     return expected === latest?.transition_id;
+  }
+
+  /** The wake the row's latest reroute with a wake staged, or null when no reroute has staged one. */
+  private latestFallbackWake(qitemId: string): string | null {
+    const ids = this.db.prepare("SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND substr(outbox_id, 1, ?) = ?")
+      .all(qitemId, FALLBACK_WAKE_PREFIX.length, FALLBACK_WAKE_PREFIX) as Array<{ outbox_id: string }>;
+    let latest: { id: string; transition: number } | null = null;
+    for (const { outbox_id } of ids) {
+      if (outbox_id === `${WAKE_INTENT_PREFIX}${qitemId}`) continue; // the row's own create wake, whatever its id
+      const transition = Number(outbox_id.slice(FALLBACK_WAKE_PREFIX.length));
+      if (Number.isInteger(transition) && (!latest || transition > latest.transition)) latest = { id: outbox_id, transition };
+    }
+    return latest?.id ?? null;
   }
 
   /** A wake's source and urgency at the seat's level: the trigger decides the source; the row's priority (urgent or
@@ -6134,28 +6156,78 @@ export class QueueRepository {
   /**
    * Pod-fallback: redirect qitem to a fallback destination (e.g., when a seat
    * is unreachable). Emits qitem.fallback_routed; preserves chain_of_record.
+   *
+   * `opts` is for a caller that moves a row on an earlier read. `expectState` and `expectDestination` are checked
+   * against the row read inside the transaction that moves it, so a row claimed or rerouted since that read is
+   * refused (`fallback_state_mismatch`, `fallback_destination_mismatch`) and left unchanged. The expected destination
+   * matches any of the row's session addresses, as a claim does. `wake` stages a durable wake for the new destination
+   * in the same transaction, keyed on this reroute's transition; it is refused for a row that is not pending
+   * (`wake_not_admitted`), since delivery only wakes a pending row. A caller that passes no `opts` gets the move it
+   * always got.
    */
-  routeToFallback(qitemId: string, fallbackDestination: string, reason: string): QueueItem {
-    const qitem = this.getById(qitemId);
-    if (!qitem) {
-      throw new QueueRepositoryError("qitem_not_found", `qitem ${qitemId} not found`);
+  routeToFallback(
+    qitemId: string,
+    fallbackDestination: string,
+    reason: string,
+    opts: { expectState?: string; expectDestination?: string; wake?: boolean } = {},
+  ): QueueItem {
+    if (opts.expectState !== undefined && !isQueueState(opts.expectState)) {
+      throw new QueueRepositoryError(
+        "invalid_state",
+        `expectState=${opts.expectState} not valid; valid: ${QUEUE_STATES.join(", ")}`,
+      );
+    }
+    if (opts.wake && !this.outbox) {
+      throw new QueueRepositoryError(
+        "wake_intent_store_unavailable",
+        "a fallback with a wake requires an attached wake-intent store to make its wake durable — none attached",
+      );
     }
     const ts = new Date().toISOString();
-    const originalDestination = qitem.destinationSession;
-    const newChain = JSON.stringify([...(qitem.chainOfRecord ?? []), `fallback-from:${originalDestination}`]);
-
-    // The field held only a fallback line before a close could store an outcome. The line this method last
-    // wrote is replaced, as it always was; anything else in the field is an outcome (possibly after an
-    // earlier fallback line) and stays, with the new line after it. "The line it last wrote" comes from the
-    // row's own transitions, so no marker is stored in the text. When the row has closed since, the field may
-    // end with an outcome that reads like that line, so then only a field that is exactly the line (an
-    // appended outcome would make it longer) is replaced; with no such reroute transition the field is left whole.
-    const fallbackLine = `fallback: ${reason}`;
-    const start = qitem.resolution ? this.fallbackLineStart(qitemId, qitem.resolution) : null;
-    const kept = qitem.resolution && start !== null ? qitem.resolution.slice(0, Math.max(0, start - 1)) : qitem.resolution;
-    const nextResolution = kept ? `${kept}\n${fallbackLine}` : fallbackLine;
+    let wakeId: string | null = null;
 
     const txn = this.db.transaction(() => {
+      const qitem = this.getById(qitemId);
+      if (!qitem) {
+        throw new QueueRepositoryError("qitem_not_found", `qitem ${qitemId} not found`);
+      }
+      if (opts.expectState !== undefined && qitem.state !== opts.expectState) {
+        throw new QueueRepositoryError(
+          "fallback_state_mismatch",
+          `qitem ${qitemId} is ${qitem.state}, not ${opts.expectState}; it was not rerouted`,
+          { state: qitem.state, destinationSession: qitem.destinationSession },
+        );
+      }
+      if (
+        opts.expectDestination !== undefined
+        && !this.resolveSessionAddresses(opts.expectDestination).includes(qitem.destinationSession)
+      ) {
+        throw new QueueRepositoryError(
+          "fallback_destination_mismatch",
+          `qitem ${qitemId} is addressed to ${qitem.destinationSession}, not ${opts.expectDestination}; it was not rerouted`,
+          { state: qitem.state, destinationSession: qitem.destinationSession },
+        );
+      }
+      if (opts.wake && qitem.state !== "pending") {
+        throw new QueueRepositoryError(
+          "wake_not_admitted",
+          `qitem ${qitemId} is ${qitem.state}; a fallback wakes its new destination only for a pending row (omit the wake, or unclaim the row first)`,
+        );
+      }
+      const originalDestination = qitem.destinationSession;
+      const newChain = JSON.stringify([...(qitem.chainOfRecord ?? []), `fallback-from:${originalDestination}`]);
+
+      // The field held only a fallback line before a close could store an outcome. The line this method last
+      // wrote is replaced, as it always was; anything else in the field is an outcome (possibly after an
+      // earlier fallback line) and stays, with the new line after it. "The line it last wrote" comes from the
+      // row's own transitions, so no marker is stored in the text. When the row has closed since, the field may
+      // end with an outcome that reads like that line, so then only a field that is exactly the line (an
+      // appended outcome would make it longer) is replaced; with no such reroute transition the field is left whole.
+      const fallbackLine = `fallback: ${reason}`;
+      const start = qitem.resolution ? this.fallbackLineStart(qitemId, qitem.resolution) : null;
+      const kept = qitem.resolution && start !== null ? qitem.resolution.slice(0, Math.max(0, start - 1)) : qitem.resolution;
+      const nextResolution = kept ? `${kept}\n${fallbackLine}` : fallbackLine;
+
       this.db
         .prepare(
           `UPDATE queue_items
@@ -6173,13 +6245,38 @@ export class QueueRepository {
       const armedJob = armed?.kind === "timer" ? (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).getById(armed.ref) : null;
       if (!armedJob || !isQueueWait(armedJob.specYaml)) this.retireParkGeneratedTimer(qitemId, "park_rerouted");
 
-      this.transitionLog.append({
+      const transition = this.transitionLog.append({
         qitemId,
         state: qitem.state,
         actorSession: FALLBACK_ACTOR,
         transitionNote: `fallback-routed: ${originalDestination} → ${fallbackDestination} (${reason})`,
         closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(qitemId) : undefined,
       });
+
+      // The row keeps its id, so the wake is keyed on this reroute's transition rather than on the row. The wake its
+      // create staged for the old destination stays where it is and is not delivered, since the row no longer waits
+      // on that seat (currentWakeIntent). OpenRig moved the row, so the wake comes from OpenRig. A wake that cannot be
+      // staged undoes the move; a full held-message quota at the new destination does not: as with a handoff's wake,
+      // the wake is recorded as not retained and the reroute stands.
+      if (opts.wake) {
+        const outboxId = `${FALLBACK_WAKE_PREFIX}${transition.transitionId}`;
+        try {
+          this.db.transaction(() => this.recordWakeIntent({
+            outboxId,
+            auditPointer: qitemId,
+            qitemId,
+            fromSession: OPENRIG_SENDER,
+            toSession: fallbackDestination,
+            identityProvenance: null,
+            bareBody: renderQueueHandoffNudge(qitemId, qitem.summary),
+            tags: [WAKE_TRIGGER_OPENRIG_TAG],
+          }))();
+          wakeId = outboxId;
+        } catch (err) {
+          if ((err as { code?: string }).code !== "retained_quota_full") throw err;
+          this.recordNudgeAttempt(qitemId, `${WAKE_NOT_RETAINED}${(err as Error).message}`);
+        }
+      }
 
       return this.eventBus.persistWithinTransaction({
         type: "qitem.fallback_routed",
@@ -6192,6 +6289,7 @@ export class QueueRepository {
 
     const persistedEvent = txn();
     this.eventBus.notifySubscribers(persistedEvent);
+    if (wakeId) this.deliverWakeIntentAfterCommit(wakeId);
     return this.getByIdOrThrow(qitemId);
   }
 
