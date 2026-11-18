@@ -695,6 +695,22 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     }
   });
 
+  it("shows retained stopped evidence with the later unavailable reading beside it", async () => {
+    const node = { ...makeFatNode("rig-a", "openrig-build", "ops.retained", { sessionStatus: "detached", lifecycleState: "detached" }),
+      storedSessionStatus: "running", identityVerdict: { verdict: "pane_missing", reason: "session_missing_tmux_unavailable" } };
+    RIG_A_NODES.push(node as unknown as typeof RIG_A_NODES[number]);
+    try {
+      for (const extra of [[], ["--full"]]) {
+        const { logs } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-build", ...extra]);
+        });
+        const out = logs.join("\n");
+        expect(out).toContain("tmux session last observed missing; latest tmux reading unavailable; restore or relaunch the seat");
+        expect(out).not.toContain("Liveness (ops-retained@");
+      }
+    } finally { RIG_A_NODES.pop(); }
+  });
+
   it("discloses recorded running with tmux unavailable as liveness unconfirmed, and leaves other states alone", async () => {
     const at = "2026-06-19T11:58:00.000Z";
     const seat = (logicalId: string, verdict: Record<string, unknown>, opts?: Parameters<typeof makeFatNode>[3]) => ({
