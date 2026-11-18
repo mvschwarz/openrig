@@ -309,4 +309,22 @@ describe("cursor-bound composer input", () => {
     expect(composerContainsOwnedText(opaque, "one\ntwo\nthree")).toBe(false);
     expect(ownCollapsedPaste(inspectComposerInput(claude("[Pasted text #4 +2 lines] foreign")), "one\ntwo\nthree")).toBeNull();
   });
+
+  it("does not own a count-less label drawn beside the expected head unless the text spells it out (#2429)", () => {
+    const head = `reminder: ${"x".repeat(24)}`;
+    const quoting = `see [Pasted text #2] in ${head}`;
+    const matched = (drawn: string) => ({ ...inspectComposerInput(claude(drawn.replace("\n", ""))), collapsedPaste: drawn, pasteMatchesExpected: true });
+    // The base reads are the ones the transport would trust: text with the cursor at its end.
+    for (const drawn of [`[Pasted text #2] ${head}`, `[Pasted text #2] ${quoting}`]) expect(matched(drawn)).toMatchObject({ state: "text", cursorAtEnd: true });
+    expect(ownCollapsedPaste(matched(`[Pasted text #2] ${head}`), head)).toBeNull();
+    expect(ownCollapsedPaste(matched(`${head} [Pasted text #2]`), head)).toBeNull();
+    // A wrap may split the label.
+    expect(ownCollapsedPaste(matched(`[Pasted te\nxt #2] ${head}`), head)).toBeNull();
+    // A label our own text spells out is ours, but only as many times as it does.
+    expect(ownCollapsedPaste(matched(quoting), quoting)).toBe(quoting);
+    expect(ownCollapsedPaste(matched(`[Pasted text #2] ${quoting}`), quoting)).toBeNull();
+    // The bare label is still read by its count, and a counted label keeps the transport's identity check.
+    expect(ownCollapsedPaste(inspectComposerInput(claude("[Pasted text #1]")), `reminder: ${"x".repeat(1190)}`)).toBe("[Pasted text #1]");
+    expect(ownCollapsedPaste(matched(`[Pasted text #2 +3 lines] ${head}`), head)).toBe(`[Pasted text #2 +3 lines] ${head}`);
+  });
 });
