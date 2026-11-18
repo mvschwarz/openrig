@@ -2,7 +2,7 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
-import { acquireDaemonStartLock, bootedAtMs, currentBootId } from "../daemon-start-lock.js";
+import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBootId, processStartToken } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
@@ -105,8 +105,8 @@ export function realDeps(): LifecycleDeps {
       return lock;
     },
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
-    fetch: async (url) => {
-      const res = await fetchWithTimeout(globalThis.fetch, url, {}, {
+    fetch: async (url, init) => {
+      const res = await fetchWithTimeout(globalThis.fetch, url, init?.signal ? { signal: init.signal } : {}, {
         timeoutMs: 1_500,
         timeoutMessage: `Daemon health probe timed out for ${url}`,
       });
@@ -169,6 +169,10 @@ export function realDeps(): LifecycleDeps {
       if (process.platform !== "linux") return "host";
       try { return fs.readlinkSync("/proc/self/ns/pid"); } catch { return undefined; }
     },
+    // #3315: what the start records and stop checks to confirm a start reservation still names its child.
+    bootId: currentBootId,
+    processStartToken,
+    releaseStartReservation: archiveSpentReservation,
   };
 }
 
@@ -327,7 +331,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
   cmd
     .command("stop")
     .description("Stop the daemon (10s shutdown budget; 12s process wait; incomplete drain exits nonzero)")
-    .addHelpText("after", "\nSends at most one SIGTERM to a live target and verifies the original PID and listener. Repeated signals join shutdown.\nFor a recorded target, missing/stale receipts and incomplete drains exit nonzero, including retries.\nTarget state is retained until a matching clean receipt; status reads preserve unverified state.\nNo target is a distinct no-op, never clean-drain certification; unbound incomplete evidence stays unverified.\nInspect OPENRIG_HOME/daemon-shutdown.json and daemon.log for the phase and outcome.\nThe bound covers asynchronous shutdown; an event-loop wedge still requires operator recovery.\n")
+    .addHelpText("after", "\nSends at most one SIGTERM to a live target and verifies the original PID and listener. Repeated signals join shutdown.\nFor a recorded target, missing/stale receipts and incomplete drains exit nonzero, including retries.\nTarget state is retained until a matching clean receipt; status reads preserve unverified state.\nNo target is a distinct no-op, never clean-drain certification; unbound incomplete evidence stays unverified.\nInspect OPENRIG_HOME/daemon-shutdown.json and daemon.log for the phase and outcome.\nThe bound covers asynchronous shutdown; an event-loop wedge still requires operator recovery.\nWith no recorded target, the child of a start that ended pending is signalled only when its reservation still names it\n(same boot, launcher gone, same process, its endpoint checked) and its listener names it or does not answer in time.\n")
     .action(async () => {
       try {
         const outcome = await stopDaemon(getDeps());

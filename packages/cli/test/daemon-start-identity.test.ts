@@ -133,7 +133,7 @@ describe("child-bound startup", () => {
         await vi.advanceTimersByTimeAsync(25_000);
         expect(f.files.has(STATE_FILE)).toBe(false);
         expect(f.deps.spawn).toHaveBeenCalledTimes(1);
-        expect(f.lock.recordChild).toHaveBeenCalledWith(f.child.pid);
+        expect(f.lock.recordChild).toHaveBeenCalledWith(f.child.pid, expect.objectContaining({ host: "127.0.0.1", port: expect.any(Number) }));
         expect(f.lock.release).not.toHaveBeenCalled();
         expect(progress).toHaveBeenCalledWith(expect.stringContaining("Waiting for daemon child 12345 readiness"));
         await vi.runAllTimersAsync();
@@ -336,8 +336,8 @@ describe("local startup reservation", () => {
   it("excludes the second launcher and releases after the owner completes", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-start-lock-"));
     try {
-      const lock = acquireDaemonStartLock(home); lock.recordChild(1234);
-      expect(fs.readFileSync(path.join(home, "daemon-start.lock"), "utf8")).toContain('"childPid":1234');
+      const lock = acquireDaemonStartLock(home); lock.recordChild(1234, { startToken: "linux:42", pidNamespace: "host", host: "127.0.0.1", port: 7433 });
+      expect(fs.readFileSync(path.join(home, "daemon-start.lock"), "utf8")).toContain('{"childPid":1234,"startToken":"linux:42","pidNamespace":"host","host":"127.0.0.1","port":7433}');
       expect(() => acquireDaemonStartLock(home)).toThrow(/already reserved/);
       lock.release(); const next = acquireDaemonStartLock(home); next.release();
       expect(fs.existsSync(path.join(home, "daemon-start.lock"))).toBe(false);
@@ -499,7 +499,7 @@ it.each(["missing", "stale"] as const)("keeps a slow child discoverable with %s 
     expect(message).toContain("stop child PID 12345 and wait for exit");
     expect(message).toContain(path.join(path.dirname(STATE_FILE), "daemon-start.lock"));
     expect(message).toContain("only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'");
-    expect(message).toContain("'rig daemon stop' cannot target this unpublished child");
+    expect(message).toContain("Once this launcher has exited, 'rig daemon stop' can check this child against this reservation");
     expect(Date.now() - began).toBeLessThanOrEqual(180_000);
     expect(f.deps.kill).not.toHaveBeenCalled();
     expect(f.child.exitCode).toBeNull();
