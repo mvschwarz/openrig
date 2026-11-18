@@ -49,7 +49,8 @@ export interface DaemonEventLoopEvidence {
  *  `healthy`: the daemon can be up while its terminals cannot be reached. */
 export interface DaemonTerminalServerEvidence {
   socket: string;
-  state: "reachable" | "unreachable";
+  /** `unknown`: the daemon's last reading of it couldn't be made; delivery is not held then. */
+  state: "reachable" | "unreachable" | "unknown";
   since: string;
   cause?: string;
 }
@@ -1573,7 +1574,7 @@ export function readTerminalsEvidence(value: unknown): DaemonTerminalsEvidence |
   for (const server of servers) {
     if (!server || typeof server !== "object") continue;
     const s = server as Record<string, unknown>;
-    if (typeof s.socket !== "string" || (s.state !== "reachable" && s.state !== "unreachable") || typeof s.since !== "string") continue;
+    if (typeof s.socket !== "string" || (s.state !== "reachable" && s.state !== "unreachable" && s.state !== "unknown") || typeof s.since !== "string") continue;
     read.push({ socket: s.socket, state: s.state, since: s.since, ...(typeof s.cause === "string" ? { cause: s.cause } : {}) });
   }
   return { state, servers: read };

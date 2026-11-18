@@ -4,7 +4,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { OutboxEntry } from "./outbox-handler.js";
 import type { RigDeliveryDrainStore } from "./rig-delivery-drain.js";
 import { resolveGuardTarget } from "./seat-delivery-guard.js";
-import { TerminalServerReachability, type TerminalServerChange } from "./terminal-server-reachability.js";
+import { TerminalServerReachability, type TerminalServerChange, type TerminalServerObservation } from "./terminal-server-reachability.js";
 
 /**
  * #3315 — which seats a lost tmux server holds. A seat is on the daemon's tmux server when its binding is a tmux
@@ -45,7 +45,8 @@ export function runningTmuxSessions(db: Database.Database): string[] {
  * the adapter's classified probes feed the record; a loss counts only while a running tmux seat depends on the server;
  * each change becomes one event; delivery to the seats on it is held through the queue's delivery hold; a read-only
  * probe notices the return, and then owed work is offered again: pending wake intents go out as at a drain's END, and
- * the reachable-seat retry runs for the running tmux seats. Nothing here starts a server or a seat.
+ * the reachable-seat retry runs for the running tmux seats. A return probe that can't be read ends the hold the same
+ * way, without recording a return. Nothing here starts a server or a seat.
  */
 export function wireTerminalReachability(opts: {
   db: Database.Database;
@@ -59,25 +60,34 @@ export function wireTerminalReachability(opts: {
   probeMaxIntervalMs?: number;
 }): TerminalServerReachability {
   const { db, adapter, drains, socket } = opts;
-  const reach = new TerminalServerReachability({
+  // Owed work offered again once a hold ends: pending wake intents go out as at a drain's END, and the reachable-seat
+  // retry runs for the running tmux seats.
+  const offerOwedWork = () => {
+    void opts.drainPendingWakeIntents({ eligible: entry => entry.deliveryState === "pending"
+      && isTmuxBoundSession(db, entry.destinationSession) })
+      .catch(error => console.warn(`Terminal-server return wake pass: ${error instanceof Error ? error.name : typeof error}`));
+    for (const session of runningTmuxSessions(db)) {
+      try { opts.retryPromptWakes(session); } catch { /* one seat's retry never stops the others' */ }
+    }
+  };
+  const reach: TerminalServerReachability = new TerminalServerReachability({
     probeIntervalMs: opts.probeIntervalMs,
     probeMaxIntervalMs: opts.probeMaxIntervalMs,
     watched: () => runningTmuxSessions(db).length > 0,
     onChange: (change) => {
       try { opts.emit(change); } catch (error) { console.warn(`[tmux] Could not record ${change.type}: ${error instanceof Error ? error.message : String(error)}`); }
-      if (change.type !== "tmux.server_back") return;
-      void opts.drainPendingWakeIntents({ eligible: entry => entry.deliveryState === "pending"
-        && isTmuxBoundSession(db, entry.destinationSession) })
-        .catch(error => console.warn(`Terminal-server return wake pass: ${error instanceof Error ? error.name : typeof error}`));
-      for (const session of runningTmuxSessions(db)) {
-        try { opts.retryPromptWakes(session); } catch { /* one seat's retry never stops the others' */ }
-      }
+      if (change.type === "tmux.server_back") offerOwedWork();
     },
-    // The adapter's own probe reports to the record (serverObserver) with tmux's one-line diagnostic; the probe's
-    // result only says whether the server answered.
-    probe: async () => {
+    // The hold ended on an unreadable probe: owed work resumes through the same existing pass, with nothing proven.
+    onUnknown: () => offerOwedWork(),
+    // The adapter's own probe reports to the record (serverObserver) with tmux's one-line diagnostic. A classified
+    // no-server answer keeps the loss (with the diagnostic the observer just recorded); any other tmux error throws out
+    // of probeSession, which the record reads as an unreadable probe.
+    probe: async (): Promise<TerminalServerObservation> => {
       const probe = await adapter.probeSession(`openrig-reachability-${randomUUID()}`);
-      return probe.state === "transport_unavailable" ? null : { reachable: true };
+      return probe.state === "transport_unavailable"
+        ? { reachable: false, cause: reach.unreachable(socket)?.cause ?? probe.cause }
+        : { reachable: true };
     },
   });
   adapter.serverObserver = observation => reach.observe(socket, observation);

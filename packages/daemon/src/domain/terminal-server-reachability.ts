@@ -13,6 +13,9 @@
  * - The tracker notices the return on its own with a read-only probe on a backoff, and any probe the daemon makes
  *   for other reasons counts too. It never starts a server or a seat: a return is someone else's act (a launch, an
  *   operator, the init system).
+ * - A return probe that can't be read (it throws, or answers nothing) is no evidence the server is still gone, nor
+ *   that it is back: the reading becomes `unknown`, the loss is kept as history (`lastLoss`), and the hold ends, so
+ *   ordinary delivery resumes. A later classified probe records the loss again, or the return.
  * - An unreachable server is not, by itself, evidence that a given session is gone: this record marks no seat missing,
  *   stopped or detached (the seat readings follow their own evidence). One unreachable socket holds only its own seats.
  * - Only a server some running seat depends on counts: tmux exits with its last session, so an absent server with no
@@ -26,18 +29,22 @@ export type TerminalServerObservation =
 export interface TerminalServerState {
   /** The server's socket as the daemon addresses it (its `-S` path, or tmux's default socket). */
   socket: string;
-  state: "reachable" | "unreachable";
+  /** `unknown`: the last reading couldn't be made (a return probe that threw or answered nothing). Not held. */
+  state: "reachable" | "unreachable" | "unknown";
   /** When the current state began. For a server never seen unreachable: the daemon's first observation of it. */
   since: string;
-  /** The tmux diagnostic that showed the server unreachable; absent while reachable. */
+  /** The tmux diagnostic that showed the server unreachable, or why the reading is unknown; absent while reachable. */
   cause?: string;
+  /** While unknown: the loss that was being watched when the reading stopped (history; it holds nothing). */
+  lastLoss?: { since: string; cause?: string };
   lastCheckedAt: string;
   /** Changes since the daemon started (a flapping server shows here). */
   transitions: number;
 }
 
 export interface TerminalReachabilitySnapshot {
-  /** `ok`: every observed server answers; `degraded`: at least one does not; `unknown`: none observed yet. */
+  /** `ok`: every observed server answers; `degraded`: at least one does not; `unknown`: none observed yet, or a
+   *  server's last reading couldn't be made. */
   state: "ok" | "degraded" | "unknown";
   servers: TerminalServerState[];
 }
@@ -50,9 +57,12 @@ export interface TerminalServerReachabilityOptions {
   now?: () => Date;
   /** Called once per change, after the state is updated. */
   onChange?: (change: TerminalServerChange) => void;
-  /** A read-only presence check of one server. It must never start a server. A thrown error or null keeps the
-   *  server unreachable until the next try. */
+  /** A read-only presence check of one server. It must never start a server. A thrown error or null is an unreadable
+   *  probe: the reading becomes unknown and the hold ends (see the class comment). */
   probe?: (socket: string) => Promise<TerminalServerObservation | null>;
+  /** Called once when an unreadable return probe ends a hold, after the state is updated (no event: nothing is
+   *  proven). The daemon offers owed work again through the same pass as a return. */
+  onUnknown?: (state: TerminalServerState) => void;
   /** First delay before probing an unreachable server again; doubles per failed probe. */
   probeIntervalMs?: number;
   /** Ceiling for that delay. */
@@ -81,11 +91,13 @@ export class TerminalServerReachability {
     const at = this.now().toISOString();
     const current = this.servers.get(socket);
     if (observation.reachable) {
-      if (current?.state === "unreachable") {
+      if (current?.state === "unreachable" || current?.state === "unknown") {
+        // From unknown, the return closes the loss kept as history.
+        const goneSince = current.state === "unknown" ? current.lastLoss?.since ?? current.since : current.since;
         this.servers.set(socket, { socket, state: "reachable", since: at, lastCheckedAt: at, transitions: current.transitions + 1 });
         this.cancelProbe(socket);
-        console.warn(`[tmux] The terminal server on ${socket} answers again (unreachable since ${current.since}).`);
-        this.opts.onChange?.({ type: "tmux.server_back", socket, since: at, goneSince: current.since });
+        console.warn(`[tmux] The terminal server on ${socket} answers again (unreachable since ${goneSince}).`);
+        this.opts.onChange?.({ type: "tmux.server_back", socket, since: at, goneSince });
         return;
       }
       this.servers.set(socket, current ? { ...current, lastCheckedAt: at }
@@ -123,7 +135,8 @@ export class TerminalServerReachability {
   snapshot(): TerminalReachabilitySnapshot {
     const servers = [...this.servers.values()].map(s => ({ ...s }));
     if (!servers.length) return { state: "unknown", servers };
-    return { state: servers.some(s => s.state === "unreachable") ? "degraded" : "ok", servers };
+    if (servers.some(s => s.state === "unreachable")) return { state: "degraded", servers };
+    return { state: servers.some(s => s.state === "unknown") ? "unknown" : "ok", servers };
   }
 
   /** Stop the return probes (daemon shutdown). Observations still update the state. */
@@ -153,13 +166,30 @@ export class TerminalServerReachability {
     this.timers.delete(socket);
     if (this.stopped || this.servers.get(socket)?.state !== "unreachable") return;
     let observation: TerminalServerObservation | null = null;
+    let unreadable: string | null = null;
     try {
       observation = (await this.opts.probe?.(socket)) ?? null;
-    } catch {
-      observation = null; // an unexpected probe failure proves neither loss nor return
+    } catch (error) {
+      // The first line of what failed, past an exec error's "Command failed: …" wrapper line.
+      const message = error instanceof Error ? error.message.replace(/^Command failed:[^\r\n]*\r?\n/, "") : String(error);
+      unreadable = `the return probe failed: ${message.split(/\r?\n/, 1)[0]!.trim()}`;
     }
-    if (observation) this.observe(socket, observation);
-    else this.servers.set(socket, { ...this.servers.get(socket)!, lastCheckedAt: this.now().toISOString() });
+    const current = this.servers.get(socket);
+    if (!observation) {
+      // Neither loss nor return is proven: keep the loss as history, read as unknown, and stop holding. No event and
+      // no more probing; the next classified probe (a delivery's, or any other) records what it finds.
+      if (this.stopped || current?.state !== "unreachable") return;
+      const at = this.now().toISOString();
+      const state: TerminalServerState = { socket, state: "unknown", since: at,
+        cause: unreadable ?? "the return probe answered nothing", lastCheckedAt: at, transitions: current.transitions + 1,
+        lastLoss: { since: current.since, ...(current.cause ? { cause: current.cause } : {}) } };
+      this.servers.set(socket, state);
+      console.warn(`[tmux] The terminal server on ${socket} can't be read (${state.cause}); it was unreachable since `
+        + `${current.since}. Automatic delivery to its seats is no longer held; the server is not known to be back.`);
+      try { this.opts.onUnknown?.({ ...state }); } catch { /* reporting only */ }
+      return;
+    }
+    this.observe(socket, observation);
     if (this.servers.get(socket)?.state === "unreachable" && !this.isWatched(socket)) {
       // Its seats were stopped or detached meanwhile: an absent server with no seat on it is not a loss any more.
       this.servers.delete(socket);

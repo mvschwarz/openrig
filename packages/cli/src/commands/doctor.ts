@@ -469,6 +469,11 @@ function terminalServerCheck(healthBody: unknown): DoctorCheck {
       fix: "Find out why the tmux server stopped, then bring the seats back (rig up <rig>). Held work goes out once the server answers and the seats run again.",
     };
   }
+  const unread = terminals.servers.filter(server => server.state === "unknown");
+  if (unread.length) {
+    return { name, status: "skipped", message: unread.map(server => `The daemon couldn't read whether its tmux server on ${server.socket} answers`
+      + ` (since ${server.since}${server.cause ? `: ${server.cause}` : ""}); automatic delivery to its seats is not held.`).join(" ") };
+  }
   if (terminals.state === "ok") {
     return { name, status: "pass", message: `The daemon reaches its tmux server${terminals.servers.length === 1 ? ` on ${terminals.servers[0]!.socket}` : "s"}.` };
   }

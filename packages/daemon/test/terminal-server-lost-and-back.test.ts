@@ -29,12 +29,13 @@ const NO_SERVER = `no server running on ${SOCKET}`;
 /** A real TmuxAdapter over a modeled server the TEST takes away and brings back. `tmux -D` (a server start) is only
  *  recorded: if anything in the daemon tried to restart the server, the test would see it in `commands`. */
 function toggleableTerminal(sessions: string[] = []) {
-  let up = true;
+  let up = true, denied = false;
   const live = new Set(sessions);
   const commands: string[] = [];
   const adapter = new TmuxAdapter(async command => {
     commands.push(command);
     if (command.startsWith("tmux -D")) return "";
+    if (denied) throw new Error(`Command failed: ${command}\nerror connecting to ${SOCKET} (Permission denied)`);
     if (!up) throw new Error(`Command failed: ${command}\n${NO_SERVER}`);
     if (command.startsWith("tmux has-session")) {
       const name = /-t '?=([^' ]+)/.exec(command)?.[1] ?? "";
@@ -48,6 +49,8 @@ function toggleableTerminal(sessions: string[] = []) {
     adapter, commands,
     takeAway: () => { up = false; },
     bringBack: () => { up = true; },
+    /** tmux can't be read at all (not classified as a lost server): probeSession throws. */
+    deny: () => { denied = true; },
     starts: () => commands.filter(c => c.startsWith("tmux -D")).length,
     probes: () => commands.filter(c => c.startsWith("tmux has-session")).length,
   };
@@ -177,18 +180,50 @@ describe("the record of a lost tmux server", () => {
     expect(retryPromptWakes.mock.calls).toEqual([["worker@test"]]);
   });
 
-  it("keeps the server unreachable through a probe that fails unexpectedly", async () => {
-    const probe = vi.fn(async () => { throw new Error("permission denied"); });
-    const reach = new TerminalServerReachability({ probe });
-    reach.observe(SOCKET, { reachable: false, cause: NO_SERVER });
+  it("ends the hold on a return probe it can't read, keeps the loss as history, and claims no return", async () => {
+    const db = database(); seats(db);
+    const terminal = toggleableTerminal(), drains = new RigDeliveryDrainStore(db);
+    const { reach, changes, drainPendingWakeIntents, retryPromptWakes } = wire(db, terminal, drains);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    terminal.takeAway();
+    await terminal.adapter.probeSession("worker@test");
+    expect(drains.holds("worker@test")).toBe(true);
+    terminal.deny(); // e.g. a standing permission error, while the server may well be back
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(probe).toHaveBeenCalledTimes(1);
-    expect(reach.unreachable(SOCKET)).not.toBeNull();
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(probe).toHaveBeenCalledTimes(2);
-    reach.stop();
+    expect(drains.holds("worker@test")).toBe(false);
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone"]);
+    expect(eventCount(db, "tmux.server_back")).toBe(0);
+    expect(reach.snapshot()).toMatchObject({ state: "unknown", servers: [{ socket: SOCKET, state: "unknown",
+      since: "2026-01-01T00:00:05.000Z", lastLoss: { since: "2026-01-01T00:00:00.000Z", cause: NO_SERVER } }] });
+    expect(reach.snapshot().servers[0]!.cause).toMatch(/^the return probe failed: .*Permission denied/);
+    // Owed work resumes through the same pass as a return; no more probing and no new wait.
+    expect(drainPendingWakeIntents).toHaveBeenCalledTimes(1);
+    expect(retryPromptWakes.mock.calls).toEqual([["worker@test"]]);
+    const probes = terminal.probes();
     await vi.advanceTimersByTimeAsync(600_000);
-    expect(probe).toHaveBeenCalledTimes(2);
+    expect(terminal.probes()).toBe(probes);
+    expect(terminal.starts()).toBe(0);
+  });
+
+  it("from an unknown reading, the next classified probe records the loss again, or the return of the loss kept", async () => {
+    const changes: TerminalServerChange[] = [];
+    const reach = new TerminalServerReachability({ onChange: c => changes.push(c), probe: async () => null });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    reach.observe(SOCKET, { reachable: false, cause: NO_SERVER });
+    await vi.advanceTimersByTimeAsync(5_000); // a probe that answers nothing is unreadable too
+    expect(reach.unreachable(SOCKET)).toBeNull();
+    expect(reach.snapshot().servers[0]).toMatchObject({ state: "unknown", cause: "the return probe answered nothing" });
+    reach.observe(SOCKET, { reachable: false, cause: NO_SERVER }); // a delivery's own probe finds it gone: held again
+    expect(reach.unreachable(SOCKET)).not.toBeNull();
+    expect(changes.map(c => c.type)).toEqual(["tmux.server_gone", "tmux.server_gone"]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    vi.setSystemTime(new Date("2026-01-01T00:10:00Z"));
+    reach.observe(SOCKET, { reachable: true });
+    expect(changes.at(-1)).toEqual({ type: "tmux.server_back", socket: SOCKET, since: "2026-01-01T00:10:00.000Z",
+      goneSince: "2026-01-01T00:00:05.000Z" });
+    expect(reach.snapshot()).toMatchObject({ state: "ok", servers: [{ state: "reachable" }] });
+    expect(reach.snapshot().servers[0]).not.toHaveProperty("lastLoss");
+    reach.stop();
   });
 });
 

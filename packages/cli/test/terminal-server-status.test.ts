@@ -114,4 +114,15 @@ describe("rig doctor: does the running daemon reach its tmux server?", () => {
     expect((await check(undefined))?.status).toBe("skipped");
     expect((await check({ status: "ok", terminals: { state: "unknown", servers: [] } }))?.status).toBe("skipped");
   });
+
+  it("says when the daemon couldn't read its server: skipped, not held, and no Terminals line", async () => {
+    const unread = { state: "unknown", servers: [{ socket: "/run/user/1000/openrig.sock", state: "unknown",
+      since: "2026-11-15T16:00:05.000Z", cause: "the return probe failed: Permission denied",
+      lastLoss: { since: "2026-11-15T15:59:58.000Z" }, lastCheckedAt: "2026-11-15T16:00:05.000Z", transitions: 2 }] };
+    const result = await check({ status: "ok", terminals: unread });
+    expect(result?.status).toBe("skipped");
+    expect(result?.message).toContain("couldn't read whether its tmux server on /run/user/1000/openrig.sock answers");
+    expect(result?.message).toContain("is not held");
+    expect(terminalsDegradedLine(readTerminalsEvidence(unread))).toBeNull();
+  });
 });
