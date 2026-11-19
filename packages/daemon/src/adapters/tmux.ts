@@ -10,10 +10,10 @@ import type { TerminalServerObservation } from "../domain/terminal-server-reacha
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
-import { addSeatRuntimeDir, NO_SESSION_BUS, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
+import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
-import { TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS } from "../tmux-server-start.js";
+import { TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS, TMUX_SERVER_SESSION_BUS } from "../tmux-server-start.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -1594,9 +1594,10 @@ export class TmuxAdapter {
         throw error;
       }
     };
-    if (!startServer || !this.userScopePossible()) return source(startServer);
-    // #2710: `start-server` would start a missing server in the daemon's cgroup. Try on the running server first;
-    // only when there is none, start it as startServer does (in the user scope) and run the command as before.
+    if (!startServer || process.platform !== "linux") return source(startServer);
+    // #2710, #3253: on Linux, `start-server` would start a missing server outside a user scope and with the daemon's
+    // session bus in its own process. Try on the running server first; only when there is none, start it as startServer
+    // does (in the user scope where one can be made, without a session bus) and run the command as before.
     try {
       return await source(false);
     } catch (error) {
@@ -1652,8 +1653,11 @@ export class TmuxAdapter {
   /** #3253: the server this start made has no session bus in its own process (TMUX_SERVER_NO_SESSION_BUS), and tmux
    *  copied that value into its global environment, which panes inherit. This gives the global environment the daemon's
    *  value back (or unsets it, as before the start), so a pane keeps the real session bus. Only while the global still
-   *  holds the value the start gave it: a server someone else started is left as it is. The value goes in argv, unlike
-   *  the seat environment (runEnvironmentCommand): a bus address is not a credential, and it was in the global
+   *  holds this daemon process's own unusable address (TMUX_SERVER_SESSION_BUS), which no other process or tmux
+   *  configuration sets: a server someone else started, or a value set since, is left as it is. The read and the write
+   *  are two commands: tmux's one conditional on an environment value, a sourced `%if` with `$DBUS_SESSION_BUS_ADDRESS`,
+   *  puts the value into its format unescaped, so an address with a `}` would compare as equal. The value goes in argv,
+   *  unlike the seat environment (runEnvironmentCommand): a bus address is not a credential, and it was in the global
    *  environment before #3253 too. A failure is a warning, never a failed start, and the next startServer tries again.
    *  Panes and jobs the person's tmux configuration makes while the server starts (before this runs) keep no bus. */
   private async restoreSessionBusForPanes(): Promise<TmuxResult> {
@@ -1661,7 +1665,7 @@ export class TmuxAdapter {
     const key = "DBUS_SESSION_BUS_ADDRESS";
     const real = process.env[key];
     try {
-      if (real !== NO_SESSION_BUS && (await this.globalEnvironment())[key] === NO_SESSION_BUS) {
+      if ((await this.globalEnvironment())[key] === TMUX_SERVER_SESSION_BUS) {
         await this.run(real === undefined ? ["tmux", "set-environment", "-gu", key] : ["tmux", "set-environment", "-g", key, real]);
       }
       this.sessionBusRestorePending = false;
@@ -1722,15 +1726,11 @@ export class TmuxAdapter {
     }
   }
 
-  /** Before a command that would start a missing server itself (new-session), start it the way startServer does (#2710),
-   *  so that first start also lands in the systemd user scope. Only where such a scope can exist; the caller's start stays. */
+  /** Before a command that would start a missing server itself (new-session), start it the way startServer does, so that
+   *  first start also lands in the systemd user scope where one can be made (#2710) and its server process gets no
+   *  session bus (#3253). Linux only, with or without a user scope; elsewhere the caller's start stays. */
   private async startServerBeforeImplicitStart(): Promise<void> {
-    if (this.userScopePossible()) await this.startServer();
-  }
-
-  /** Where startServer may put the server in a systemd user scope (#2710). */
-  private userScopePossible(): boolean {
-    return this.userScopeUnavailable() === null;
+    if (process.platform === "linux") await this.startServer();
   }
 
   /** Why no systemd user scope is tried, or null. Only the environment is read. The scope is for a daemon that is itself

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NO_SESSION_BUS } from "./domain/seat-runtime-dir.js";
 
 /** tmux 3.3a–3.6 inherits its creating client's limits. This runs in that child only:
@@ -19,13 +20,20 @@ openrig_tmux_nofile() {
 openrig_tmux_nofile 2>/dev/null || printf '%s\\n' '${TMUX_SERVER_LIMIT_WARNING}' >&2
 `;
 
+/** #3253: the session bus address a terminal server this daemon process starts gets in its own process: one that can't
+ *  connect (the unknown `disabled:` transport, as NO_SESSION_BUS), carrying a value made once per daemon process. tmux
+ *  copies it into the new server's global environment, and the start gives the panes the real value back there only
+ *  while that environment still holds exactly this address: a server another process started, or whose global
+ *  environment a person's tmux configuration set (NO_SESSION_BUS included), is left as it is. */
+export const TMUX_SERVER_SESSION_BUS = `${NO_SESSION_BUS}openrig-server=${randomUUID().replaceAll("-", "")}`;
+
 /** #3253: the line that gives only OpenRig's own terminal-server process a session bus it can't reach. A systemd-enabled
  *  tmux moves every new pane into a tmux-spawn-*.scope through that bus (3.4: the server, right after the fork; 3.6: the
  *  child, before exec), which races the seat's own `systemd-run --scope` and takes an unlimited pane out of the server's
  *  cgroup. Without a bus the move is skipped; the requested seat limits still apply. tmux copies the starting process's
  *  environment into its global environment too, so the server start gives the panes the real value back there
  *  (TmuxAdapter.startServer). `export`: a bare assignment before `exec` isn't sure to reach a backgrounded command. */
-export const TMUX_SERVER_NO_SESSION_BUS = `export DBUS_SESSION_BUS_ADDRESS=${NO_SESSION_BUS}\n`;
+export const TMUX_SERVER_NO_SESSION_BUS = `export DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
 
 /** Whether a shell command is a bare server start, `tmux [global flags] -D …` with no tmux command (the -D of
  *  `select-pane -D` or `attach-session -D` is not one). Only such a start gets TMUX_SERVER_NO_SESSION_BUS. */

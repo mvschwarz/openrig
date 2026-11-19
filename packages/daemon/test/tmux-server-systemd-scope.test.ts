@@ -26,6 +26,7 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExecFn, TmuxAdapter as TmuxAdapterClass } from "../src/adapters/tmux.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
+import { TMUX_SERVER_SESSION_BUS } from "../src/tmux-server-start.js";
 
 type CreateDaemon = typeof import("../src/startup.js").createDaemon;
 type Daemon = Awaited<ReturnType<CreateDaemon>>;
@@ -467,7 +468,7 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
   it("#3253: in the scope, only the server goes without the session bus, and its panes get the daemon's bus back", async () => {
     await withDaemon("manager", true, async (daemon, host) => {
       // tmux copies the starting process's environment into its global environment: here, the unusable address.
-      host.globalEnv = "DBUS_SESSION_BUS_ADDRESS=disabled:\nHOME=/home/x\n";
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\nHOME=/home/x\n`;
       const result = await daemon.deps.tmuxAdapter.startServer();
       expect(result).toMatchObject({ ok: true });
       const run = host.calls.find(call => call.startsWith("systemd-run "));
@@ -475,7 +476,7 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
       const argv = words(run!);
       const script = argv[argv.indexOf("-c") + 1] ?? "";
       const segments = splitCommands(script).map(segment => parseSimple(segment.text).argv);
-      const noBus = segments.findIndex(a => a[0] === "export" && a[1] === "DBUS_SESSION_BUS_ADDRESS=disabled:");
+      const noBus = segments.findIndex(a => a[0] === "export" && a[1] === `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}`);
       const server = segments.findIndex(a => program(a).name === "tmux" && program(a).args.includes("-D"));
       expect(noBus >= 0 && noBus < server, script).toBe(true);
       // systemd-run itself keeps the daemon's bus: none of its options sets the address.
@@ -487,7 +488,7 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
   // G1e
   it("#3253: a daemon without a session bus address leaves its new server's global environment without one, as before", async () => {
     await withDaemon("no-manager", false, async (daemon, host) => {
-      host.globalEnv = "DBUS_SESSION_BUS_ADDRESS=disabled:\n";
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
       expect(await daemon.deps.tmuxAdapter.startServer()).toMatchObject({ ok: true });
       expect(host.setEnvironment).toEqual([["set-environment", "-gu", "DBUS_SESSION_BUS_ADDRESS"]]);
     });
@@ -511,7 +512,7 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
   it("#3253: when giving the bus back fails, the next start that finds the server up gives it back, once", async () => {
     await withDaemon("no-manager", false, async (daemon, host) => {
       vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
-      host.globalEnv = "DBUS_SESSION_BUS_ADDRESS=disabled:\n";
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
       host.showEnvironmentFailures = 1;
       expect(await daemon.deps.tmuxAdapter.startServer()).toMatchObject({ ok: true });
       expect(host.setEnvironment).toEqual([]);
@@ -528,12 +529,84 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
   it("#3253: concurrent starts share one start, so no caller goes on before the bus is given back", async () => {
     await withDaemon("no-manager", false, async (daemon, host) => {
       vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
-      host.globalEnv = "DBUS_SESSION_BUS_ADDRESS=disabled:\n";
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
       const adapter = daemon.deps.tmuxAdapter;
       const results = await Promise.all([adapter.startServer(), adapter.startServer(), adapter.startServer()]);
       expect(results).toEqual([{ ok: true }, { ok: true }, { ok: true }]);
       expect(host.looseStartAttempts, host.calls.join("\n")).toHaveLength(1);
       expect(host.setEnvironment).toHaveLength(1);
+    });
+  });
+
+  // G1i
+  it("#3253: the bus is given back only to this daemon's own unusable address, not to a plain disabled: set since", async () => {
+    await withDaemon("no-manager", false, async (daemon, host) => {
+      vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
+      host.showEnvironmentFailures = 1;
+      expect(await daemon.deps.tmuxAdapter.startServer()).toMatchObject({ ok: true });
+      expect(host.setEnvironment).toEqual([]);
+      // Before the retry, another start or a person's tmux configuration set the plain unusable address on purpose.
+      host.globalEnv = "DBUS_SESSION_BUS_ADDRESS=disabled:\n";
+      expect(await daemon.deps.tmuxAdapter.startServer()).toMatchObject({ ok: true });
+      expect(host.setEnvironment).toEqual([]);
+      host.calls.length = 0;
+      expect(await daemon.deps.tmuxAdapter.startServer()).toMatchObject({ ok: true });
+      expect(host.calls.filter(call => /show-environment|set-environment/.test(call))).toEqual([]);
+    });
+  });
+
+  // G1j
+  it("#3253: without a user manager, a launch that finds no server tries the running server, then starts it as startServer does", async () => {
+    vi.stubEnv("OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT", "1");
+    await withDaemon("no-manager", false, async (daemon, host) => {
+      vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
+      const adapter = daemon.deps.tmuxAdapter;
+      adapter.deliveryGuard = undefined;
+      const result = await adapter.createSession("seat-3253", undefined, { OPENRIG_NODE_ID: "node-3253" });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      // The server comes from startServer's `tmux -D` (no session bus in its process), never from start-server.
+      expect(host.starts, host.calls.join("\n")).toEqual([loose(TODAY_START)]);
+      const sourced = host.calls.filter(call => call.includes("source-file"));
+      expect(sourced, host.calls.join("\n")).toHaveLength(2);
+      expect(sourced[0]).not.toContain("start-server");
+      expect(sourced[1]).toMatch(/^tmux start-server ';' source-file /);
+      const order = (pattern: RegExp) => host.calls.findIndex(call => pattern.test(call));
+      expect(order(/source-file/)).toBeLessThan(order(/ -D /));
+      expect(order(/ -D /)).toBeLessThan(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/));
+      expect(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/)).toBeLessThan(order(/start-server/));
+      expect(host.setEnvironment).toEqual([["set-environment", "-g", "DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus"]]);
+    });
+  });
+
+  // G1k
+  it("#3253: without a user manager, a launch on a running server neither starts one nor touches its environment", async () => {
+    vi.stubEnv("OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT", "1");
+    await withDaemon("no-manager", false, async (daemon, host) => {
+      host.serverUp = true;
+      const adapter = daemon.deps.tmuxAdapter;
+      adapter.deliveryGuard = undefined;
+      const result = await adapter.createSession("seat-3253", undefined, { OPENRIG_NODE_ID: "node-3253" });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(host.starts, host.calls.join("\n")).toEqual([]);
+      const sourced = host.calls.filter(call => call.includes("source-file"));
+      expect(sourced, host.calls.join("\n")).toHaveLength(1);
+      expect(sourced[0]).toMatch(/^tmux source-file /);
+      expect(host.setEnvironment).toEqual([]);
+    });
+  });
+
+  // G1l
+  it("#3253: without a user manager, the probe session's first start is startServer's, not new-session's", async () => {
+    await withDaemon("no-manager", false, async (daemon, host) => {
+      vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
+      await daemon.deps.tmuxAdapter.createProbeSession("openrig-probe-3253");
+      expect(host.starts, host.calls.join("\n")).toEqual([loose(TODAY_START)]);
+      const order = (pattern: RegExp) => host.calls.findIndex(call => pattern.test(call));
+      expect(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/), host.calls.join("\n")).toBeGreaterThan(order(/ -D /));
+      expect(order(/new-session/)).toBeGreaterThan(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/));
     });
   });
 
@@ -581,6 +654,22 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
       // #3253: no session bus change outside Linux.
       expect(host.calls.filter(call => /show-environment|set-environment/.test(call))).toEqual([]);
       expect(fs.existsSync(marker), "systemd was called outside the daemon's exec").toBe(false);
+    });
+  });
+
+  // G4b
+  it("#3253: on macOS, a launch that finds no server still starts it with start-server ; source-file, as before", async () => {
+    Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+    vi.stubEnv("OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT", "1");
+    await withDaemon("systemd-run-missing", false, async (daemon, host) => {
+      const adapter = daemon.deps.tmuxAdapter;
+      adapter.deliveryGuard = undefined;
+      const result = await adapter.createSession("seat-3253", undefined, { OPENRIG_NODE_ID: "node-3253" });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      const sourced = host.calls.filter(call => call.includes("source-file"));
+      expect(sourced, host.calls.join("\n")).toHaveLength(1);
+      expect(sourced[0]).toMatch(/^tmux start-server ';' source-file /);
+      expect(host.looseStartAttempts, host.calls.join("\n")).toEqual([]);
     });
   });
 });

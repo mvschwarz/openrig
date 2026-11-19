@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 import type { SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
+import { TMUX_SERVER_SESSION_BUS } from "../src/tmux-server-start.js";
 
 // The daemon runs every `run(argv, legacy)` call as argv on POSIX. A legacy string that a shell would split
 // differently from its argv means the shell path and the argv path hand tmux different arguments. A real
@@ -73,7 +74,7 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
       if (/ -D /.test(cmd)) { serverUp = true; return ""; }
       throw new Error(`Command failed: ${cmd}\nno server running on /tmp/tmux-1000/default`);
     }
-    if (opts.freshServer && cmd === "tmux show-environment -g") return "DBUS_SESSION_BUS_ADDRESS=disabled:\nHOME=/h\n";
+    if (opts.freshServer && cmd === "tmux show-environment -g") return `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\nHOME=/h\n`;
     return respond(cmd, opts.failing ?? [], opts.composer);
   }, fileOps);
   if (opts.guard) {

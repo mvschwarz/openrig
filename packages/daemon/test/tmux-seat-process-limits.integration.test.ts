@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { TmuxAdapter, SEAT_SCOPE_SLICE, cgroupV2Path } from "../src/adapters/tmux.js";
 import { execArgvCommand, execTmuxCommand } from "../src/adapters/tmux-exec.js";
 import { seatRuntimeDir } from "../src/domain/seat-runtime-dir.js";
+import { TMUX_SERVER_SESSION_BUS } from "../src/tmux-server-start.js";
 
 const run = promisify(execFile);
 const enabled = process.platform === "linux" && process.env.OPENRIG_TEST_SEAT_SCOPE === "1";
@@ -187,4 +188,42 @@ describe.runIf(enabled)("seat process limits on a real user manager (#3253)", ()
       rmSync(dir, { recursive: true, force: true });
     }
   }, 90_000);
+
+  // #3253: a daemon started from a shell (no MANAGERPID) whose first server start is implicit: a seat launch that takes
+  // tmux's environment (terminal.inherit_tmux_environment, so no default-shell read starts the server first), or the
+  // probe session. Either goes through startServer, so the server process has no session bus and its panes stay out of
+  // tmux-spawn-*.scope, while the global environment keeps the bus this process has.
+  it.for(["a seat launch that takes tmux's environment", "a probe session"])("a server that %s starts has no bus in its own process, and its panes stay in its cgroup", async (how, ctx) => {
+    if (skipReason) ctx.skip(skipReason);
+    const dir = mkdtempSync(join(tmpdir(), "seat-implicit-"));
+    const sock = join(dir, "s");
+    const conf = join(dir, "tmux.conf");
+    writeFileSync(conf, "set -g default-shell /bin/sh\nset -g default-command 'exec sleep 60'\n");
+    const tmux = (...args: string[]) => run("tmux", ["-f", conf, "-S", sock, ...args], { timeout: 10_000 })
+      .then((result) => result.stdout.trim());
+    const cgroupOf = (pid: number | string) => cgroupV2Path(readFileSync(`/proc/${pid}/cgroup`, "utf8"));
+    const busOf = (pid: number | string) => /^DBUS_SESSION_BUS_ADDRESS=(.*)$/m.exec(readFileSync(`/proc/${pid}/environ`, "utf8").replace(/\0/g, "\n"))?.[1];
+    try {
+      const adapter = new TmuxAdapter(execTmuxCommand, undefined, execArgvCommand, ["-f", conf, "-S", sock]);
+      adapter.launchEnvironment = () => ({ inheritTmuxEnvironment: true, env: { PATH: process.env.PATH, HOME: process.env.HOME }, runtimeDir: undefined });
+      adapter.seatProcessLimits = () => undefined;
+      if (how === "a probe session") expect(await adapter.createProbeSession("openrig-it-probe")).toEqual({ ok: true });
+      else expect(await adapter.createSession("it-c@scope", dir, { OPENRIG_NODE_ID: "it-c", OPENRIG_SESSION_NAME: "it-c@scope" })).toMatchObject({ ok: true });
+      // A pane that takes the server's global environment as it is.
+      await tmux("new-session", "-d", "-s", "it-d");
+      const serverPid = await tmux("display-message", "-p", "#{pid}");
+      const serverCgroup = cgroupOf(serverPid)!;
+      expect(busOf(serverPid)).toBe(TMUX_SERVER_SESSION_BUS);
+      const panes = (await tmux("list-panes", "-a", "-F", "#{pane_pid}")).split("\n").filter(Boolean);
+      expect(panes.length).toBeGreaterThanOrEqual(2);
+      for (const pid of panes) expect(cgroupOf(pid), `pane ${pid}`).toBe(serverCgroup);
+      const paneD = await tmux("display-message", "-p", "-t", "=it-d:", "#{pane_pid}");
+      expect(busOf(paneD)).toBe(process.env.DBUS_SESSION_BUS_ADDRESS);
+      console.info(`${how}: tmux server's own DBUS_SESSION_BUS_ADDRESS ${busOf(serverPid)}; ${panes.length} panes in its cgroup ` +
+        `${serverCgroup}; a pane of the global environment has ${busOf(paneD) ?? "<unset>"}`);
+    } finally {
+      await tmux("kill-server").catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
