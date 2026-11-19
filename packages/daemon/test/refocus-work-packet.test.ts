@@ -73,6 +73,7 @@ const verb=args.slice(0,2).join(' ');
 if(verb==='queue whoami'){if(args.includes('--work-candidates')&&env.RIG_REJECT_CANDIDATES){process.stderr.write("error: unknown option '--work-candidates'");process.exit(1);}process.stdout.write(env.RIG_QUEUE_WHOAMI_STDOUT||'');process.exit(0);}
 if(verb==='whoami --json'){console.log(JSON.stringify({identity:{rigName:'demo',sessionName:'builder@demo'}}));process.exit(0);}
 if(verb==='config --json'){console.log('{}');process.exit(0);}
+if(args.slice(0,3).join(' ')==='scope mission show'){process.stdout.write(require('path').basename(args[3])==='release-a'&&env.RIG_PARENT_REPLY?env.RIG_PARENT_REPLY:JSON.stringify({mission:{parentChain:[],parentGap:null}}));process.exit(0);}
 if(verb==='scope resolve-notes'){const p=require('path').join(args[2],'NOTES.md');console.log(JSON.stringify({ok:true,resolution:fs.existsSync(p)?{path:p,name:'NOTES.md'}:null}));process.exit(0);}
 process.exit(1);
 `);

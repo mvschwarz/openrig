@@ -39,7 +39,7 @@ function resolveBareExecutable(file: string, cwd: string, env: NodeJS.ProcessEnv
 // Finite commands retain custody of descendants when their executable exits.
 // PROC_THREAD_ATTRIBUTE_JOB_LIST assigns the new process atomically, before it
 // can run. The helper alone owns the non-inherited kill-on-close Job handle.
-const HELPER = String.raw`
+const JOB_INTEROP = String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -249,6 +249,9 @@ public static class OpenRigProbeJob {
   }
 }
 '@
+`;
+
+const HELPER = JOB_INTEROP + String.raw`
 try {
   $encoded = ''
   for ($i=0; $i -lt [int]$env:OPENRIG_WINDOWS_PROBE_JOB_COUNT; $i++) {
@@ -262,9 +265,7 @@ try {
 
 /** The same native Job interop used by finite probes, without the probe entrypoint. */
 export function windowsJobInteropScript(): string {
-  const end = HELPER.indexOf("\ntry {\n  $encoded");
-  if (end < 0) throw new Error("Native Job interop boundary is unavailable");
-  return HELPER.slice(0, end);
+  return JOB_INTEROP;
 }
 
 /** Both the guardian and readback derive their name from the same prefix and

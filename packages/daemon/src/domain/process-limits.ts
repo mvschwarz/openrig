@@ -1,8 +1,10 @@
 /**
- * A seat's own process limits (rig spec member `process_limits`, #3253): opt-in, Linux/systemd hosts only, applied to
+ * A seat's own process limits (rig spec member `process_limits`, #3253): opt-in, applied to
  * the seat's new launches. Two limits exist, each opt-in on its own: the task limit (`tasks_max`, systemd's TasksMax=
  * on the seat's own scope) and the memory limit (`memory_max`, systemd's MemoryMax= on that same scope); any other key
- * (a CPU limit) is refused by name, never accepted and ignored.
+ * (a CPU limit) is refused by name, never accepted and ignored. Linux uses systemd/cgroup scopes; Windows memory-only
+ * seats use a Job's committed-memory limit, excluding its guardian. Windows cannot enforce the process-and-thread
+ * tasks_max guarantee; it rejects that request rather than replacing it with an active-process count.
  *
  * Spec shape: `process_limits: { tasks_max: <integer>, memory_max: <size> }`, either key alone or both. A mapping
  * replaces the stored limits whole; `process_limits: {}` clears them on re-apply; an absent key changes nothing.
@@ -12,7 +14,7 @@
 export interface ProcessLimits {
   /** systemd TasksMax= for the seat's own scope: the most tasks (processes and threads) the seat may hold at once. */
   tasksMax?: number;
-  /** systemd MemoryMax= for the seat's own scope, in bytes: the most memory the seat's processes may be charged. */
+  /** Bytes: Linux cgroup MemoryMax charge, or Windows Job committed memory. These are different accounting models. */
   memoryMax?: number;
 }
 

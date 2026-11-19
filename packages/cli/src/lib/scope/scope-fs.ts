@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { selectRigProject, rigFromSession } from "@openrig/daemon/project-catalog";
+import { powershellQuote } from "@openrig/daemon/windows-launch";
 import { ConfigStore } from "../../config-store.js";
 
 import type {
@@ -671,8 +672,9 @@ export function findSlice(
   });
 }
 
-/** POSIX single-quoting for a path shown in a command. */
+/** Quote a path for the operator's native shell. */
 function quoteArg(value: string): string {
+  if (process.platform === "win32") return powershellQuote(value);
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 

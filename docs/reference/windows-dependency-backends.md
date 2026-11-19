@@ -53,7 +53,7 @@ it. Release packaging still uses the existing Git-for-Windows build-shell
 contract; that build-time dependency is separate from native runtime launch.
 # Upstream refresh: 2026-11-19
 
-The Windows candidate is rebased onto upstream `02c5a7b26a5b525015bdccc7cafa821038fb4e75`.
+The Windows candidate is rebased onto upstream `2f637b78e9b57138f44de14213b5dcc822d5b047`.
 New upstream consumers retain the same native dependency boundaries:
 
 | Capability | Canonical Windows implementation | Consumer rule |
@@ -62,12 +62,19 @@ New upstream consumers retain the same native dependency boundaries:
 | Run-bound Pi/community reporting | `domain/runner-grant-launch.ts` with `adapters/windows-launch.ts` | Prepare the existing structured `ProcessStartInfo` launch after environment selection. Transfer the grant through the selected private psmux session environment and the child environment, never token argv or `/bin/sh`. |
 | Herdr live attachment reuse | `domain/terminal/herdr-live-workspace.ts` | CLI and daemon share the proof, including native per-session psmux client inventories and the existing tile-attach decoder. The CLI's compatibility export delegates to it. |
 | Herdr follow-close endpoint identity | `domain/terminal/herdr-viewer.ts` | Compare endpoints with `sameHerdrPath`; compare real private directories with `sameViewerCwd`. Named pipes are not directories. |
+| Seat committed-memory limits | `domain/windows-job-process.ts` and `domain/windows-seat-job-readback.ts` | Share the Job interop with finite probes, with a distinct persistent guardian lifecycle. Confirm current pane lineage, target membership and the actual limit; guardian loss or unprovable lineage is unknown. |
 | Native plugin projection | `domain/windows-claude-plugin-hooks.ts` | Accept the finite shipped Node command grammar with or without the upstream `exec` prefix; preserve binary plugin bytes outside the two hook manifests. Fork projection revision `0.1.35` advances older installed projections honestly. |
 
-The upstream `process_limits` contract is Linux/systemd-specific. A Windows Job
-active-process count does not count threads as `TasksMax` does, and Job commit
-charge is not cgroup `MemoryMax` accounting. This refresh must not silently
-accept either guarantee without enforcement and readback. Native seat-limit work
-is separate from the already implemented finite helper Job ownership; neither a
-successful build nor the latter's tests establish seat-limit parity.
+Windows memory-only seats use an atomic Job assignment before target code and a
+guardian outside that Job until the last member exits. `memory_max` means total
+Job committed memory on Windows; it is not cgroup RAM/page-cache accounting.
+Fresh launches require actual readback. Recovery retains structured diagnostics
+and never replays an uncertain launch. If the guardian dies, readback reports
+unknown and the seat can remain alive without its former limit; operator
+inspection is required. Orphaned descendants with an unprovable original lineage
+also remain unknown rather than receiving an inferred cap.
 
+A Windows active-process limit does not count threads as Linux `TasksMax` does.
+`tasks_max`, including a combined tasks-and-memory request, remains explicitly
+unsupported. The native implementation does not silently substitute a different
+resource count.

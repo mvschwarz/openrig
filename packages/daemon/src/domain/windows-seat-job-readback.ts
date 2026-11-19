@@ -31,8 +31,12 @@ export async function readWindowsSeatJob(pid: number, targetPid?: number): Promi
     if (!Number.isSafeInteger(memoryMax) || memoryMax <= 0 || !Number.isSafeInteger(activeProcesses)) throw new Error("Seat Job readback was out of range");
     return { memoryMax, activeProcesses };
   } finally {
-    await unlink(file).catch(() => {});
-    await rmdir(dir).catch(() => {});
+    await unlink(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") process.emitWarning(`Seat Job readback script retained at ${file}: ${error.message}`);
+    });
+    await rmdir(dir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") process.emitWarning(`Seat Job readback directory retained at ${dir}: ${error.message}`);
+    });
   }
 }
 
