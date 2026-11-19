@@ -35,6 +35,8 @@ describe("tmux argv exec path", () => {
     const exec = vi.fn(async () => { throw new Error("argv only"); });
     // The sourced new-session -P prints its pane.
     const adapter = new TmuxAdapter(exec, files, async args => { seen.push(args); return args.includes("source-file") ? "%1\n" : ""; });
+    // A daemon that has already checked its server's bus once (#3253; its first launch is the case below).
+    (adapter as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
     await adapter.createSession("r01-dev1-impl", "/home/user/my project/code", { PATH: "/a b:/c", EMPTY: "" });
     expect(exec).not.toHaveBeenCalled();
     // #3253: on Linux the create runs on the running server first (startServer starts a missing one); elsewhere it
@@ -61,6 +63,8 @@ describe("tmux argv exec path", () => {
         if (!up) throw new Error(`Command failed: ${args.join(" ")}\nno server running on /tmp/tmux-1000/default`);
         return args.includes("source-file") ? "%1\n" : "";
       });
+      // A daemon that has already checked its server's bus once: the server has gone since.
+      (adapter as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
       expect(await adapter.createSession("r01-dev1-impl", "/w", {})).toMatchObject({ ok: true });
       expect(exec.mock.calls.map(([cmd]) => cmd)).toEqual(["tmux -D </dev/null >/dev/null 2>&1 &"]);
       const creates = seen.filter(args => args.includes("source-file"));
@@ -68,6 +72,26 @@ describe("tmux argv exec path", () => {
       // The first private config was never read (no server), so it was removed; the second carries the create.
       expect(files.writeFile).toHaveBeenCalledTimes(2);
       expect(files.unlink).toHaveBeenCalledTimes(2);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
+  it("#3253: on Linux, a daemon's first launch runs startServer first, which checks the running server's bus once", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+    vi.stubEnv("XDG_RUNTIME_DIR", undefined);
+    vi.stubEnv("MANAGERPID", undefined);
+    try {
+      const seen: string[][] = [];
+      const exec = vi.fn(async () => { throw new Error("argv only"); });
+      const adapter = new TmuxAdapter(exec, memFs(), async args => { seen.push(args); return args.includes("source-file") ? "%1\n" : ""; });
+      expect(await adapter.createSession("r01-dev1-impl", "/w", {})).toMatchObject({ ok: true });
+      expect(seen.map(args => args[1])).toEqual(["has-session", "show-environment", "source-file", "show-environment"]);
+      expect(seen[2]).toEqual(["tmux", "source-file", "/tmp/text.txt"]);
+      seen.length = 0;
+      expect(await adapter.createSession("r01-dev1-impl-b", "/w", {})).toMatchObject({ ok: true });
+      expect(seen.map(args => args[1])).toEqual(["source-file", "show-environment"]);
     } finally {
       Object.defineProperty(process, "platform", platform);
     }

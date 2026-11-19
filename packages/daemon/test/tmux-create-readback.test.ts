@@ -16,6 +16,9 @@ const creates = (args: string[]) => args[1] === "new-session" || args.includes("
 function adapter(respond: (args: string[]) => Promise<string>) {
   const calls: string[][] = [];
   const a = new TmuxAdapter(async () => { throw new Error("argv only"); }, undefined, async args => { calls.push(args); return respond(args); });
+  // #3253: the calls pinned here are a daemon's that has already checked its server's bus once (on Linux, a daemon's
+  // first launch runs startServer first; tmux-server-systemd-scope.test.ts covers that).
+  (a as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
   return { a, calls };
 }
 

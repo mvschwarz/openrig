@@ -1603,7 +1603,10 @@ export class TmuxAdapter {
     if (!startServer || process.platform !== "linux") return source(startServer);
     // #2710, #3253: on Linux, `start-server` would start a missing server outside a user scope and with the daemon's
     // session bus in its own process. Try on the running server first; only when there is none, start it as startServer
-    // does (in the user scope where one can be made, without a session bus) and run the command as before.
+    // does (in the user scope where one can be made, without a session bus) and run the command as before. While the bus
+    // may still be owed (this daemon's first launch, as after a restart, or a give-back that failed), startServer runs
+    // first, once, so the server's global environment is checked before this pane takes it.
+    if (this.sessionBusRestorePending) await this.startServer();
     try {
       return await source(false);
     } catch (error) {
@@ -1659,9 +1662,9 @@ export class TmuxAdapter {
   /** #3253: the server this start made has no session bus in its own process (TMUX_SERVER_NO_SESSION_BUS), and tmux
    *  copied that value into its global environment, which panes inherit. This gives the global environment the daemon's
    *  value back (or unsets it, as before the start), so a pane keeps the real session bus. Only while the global still
-   *  holds OpenRig's own unusable address (TMUX_SERVER_SESSION_BUS), which no other process or tmux configuration sets:
-   *  a server someone else started, or a value set since, is left as it is. The read and the write
-   *  are two commands: a server-side check (`if-shell -F '#{==:#{DBUS_SESSION_BUS_ADDRESS},…}'`) reads the target
+   *  holds OpenRig's own unusable address (TMUX_SERVER_SESSION_BUS), which only OpenRig's own starts set: a server
+   *  another program started, or a value set since, is left as it is. The read and the write are two commands: a
+   *  server-side check (`if-shell -F '#{==:#{DBUS_SESSION_BUS_ADDRESS},…}'`) reads the target
    *  session's environment before the global one, so on a server that already has a session with its own address (a
    *  retry) it would compare that one and leave the global as it is. The value goes in argv,
    *  unlike the seat environment (runEnvironmentCommand): a bus address is not a credential, and it was in the global
