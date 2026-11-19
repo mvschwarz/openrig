@@ -1412,6 +1412,59 @@ describe("rig queue CLI", () => {
     });
 
     it.each([
+      ["empty", ""],
+      ["unrecognized", "queued"],
+    ])("reads back a create reply with a $1 lifecycle state before --verify", async (_label, state) => {
+      const id = `qitem-invalid-create-state-${state || "empty"}`;
+      const stored = {
+        qitemId: id, state: "pending", sourceSession: STUB_SENDER,
+        destinationSession: "bob@rig", body: "Wait", lastNudgeResult: "verified",
+      };
+      const { deps, calls } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: { ...stored, state } },
+        [`GET /api/queue/${id}`]: { status: 200, data: stored },
+      } });
+      deps.deliveryVerify = { timeoutMs: 0, intervalMs: 0, sleep: async () => {} };
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--verify", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({ qitemId: id, state: "pending", persisted: true, delivery: { outcome: "verified" } });
+      expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(2);
+    });
+
+    it.each([
+      ["missing", undefined],
+      ["unrecognized", "queued"],
+    ])("keeps a recovery row with a $1 lifecycle state unknown", async (_label, state) => {
+      const id = `qitem-invalid-recovery-state-${_label}`;
+      const response = {
+        qitemId: id, state: "queued", sourceSession: STUB_SENDER,
+        destinationSession: "bob@rig", body: "Wait",
+      };
+      const stored = {
+        qitemId: id, state, sourceSession: STUB_SENDER,
+        destinationSession: "bob@rig", body: "Wait", lastNudgeResult: "verified",
+      };
+      const { deps, calls } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: response },
+        [`GET /api/queue/${id}`]: { status: 200, data: stored },
+      } });
+      deps.deliveryVerify = { timeoutMs: 0, intervalMs: 0, sleep: async () => {} };
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--verify", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({ qitemId: id, outcome: "unknown", createOutcome: "unknown" });
+      expect(result).not.toHaveProperty("state");
+      expect(result).not.toHaveProperty("persisted");
+      expect(process.exitCode).toBe(1);
+      expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
+    });
+
+    it.each([
       ["negative byte length", { byteLength: -1, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }, { sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }],
       ["fractional byte length", { byteLength: 1.5, sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }, { sha256: "7a7b392dd406499b63167e891e2add60645d7cf99710a0661c0535b3d8f7da7d" }],
       ["non-hex digest", { byteLength: 17, sha256: "private-digest-text" }, { byteLength: 17 }],
@@ -1552,9 +1605,13 @@ describe("rig queue CLI", () => {
         body: savedBody,
         createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
         parkWarning: { code: "qitem_park_not_confirmed" },
+        delivery: {
+          receiptSource: "terminal",
+          outcome: "not-requested",
+          detail: expect.stringContaining("This request sent no immediate terminal wake. Earlier wake and claim details are row history."),
+        },
       });
       expect(result).not.toHaveProperty("persisted");
-      expect(result).not.toHaveProperty("delivery");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
       expect(process.exitCode).toBeUndefined();
@@ -1597,19 +1654,20 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
-    it("keeps a lost create unknown when the recovered source differs", async () => {
-      const id = "qitem-readback-source-mismatch";
+    it("accepts a recovered row with a different source without an identity lookup", async () => {
+      const id = "qitem-readback-source-differs";
       const { deps, calls } = makeDeps({
         postError: { path: "/api/queue/create", error: new DaemonConnectionError("connection dropped", "ECONNRESET") },
         routes: { [`GET /api/queue/${id}`]: { status: 200, data: validParkCreateResponse(id, { sourceSession: "other@rig" }) } },
       });
       await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
-      expect(result).toMatchObject({ qitemId: id, createOutcome: "unknown", createWarning: { fields: ["sourceSession"] } });
-      expect(result).not.toHaveProperty("persisted");
-      expect(process.exitCode).toBe(1);
+      expect(result).toMatchObject({ qitemId: id, state: "blocked", sourceSession: "other@rig" });
+      expect(result).not.toHaveProperty("createOutcome");
+      expect(process.exitCode).toBeUndefined();
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === "/api/queue/" + id)).toHaveLength(1);
+      expect(calls.filter((call) => call.method === "GET" && call.path === "/healthz")).toHaveLength(0);
     });
 
     it.each([
@@ -1638,6 +1696,48 @@ describe("rig queue CLI", () => {
       expect(process.exitCode).toBe(2);
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET" && call.path === "/api/queue/" + id)).toHaveLength(1);
+    });
+
+    it.each([
+      ["destination", { qitemId: "missing-field", state: "pending", body: "Wait" }],
+      ["body", { qitemId: "missing-field", state: "pending", destinationSession: "bob@rig" }],
+    ])("keeps a recovery row with missing %s evidence unknown", async (field, partial) => {
+      const id = `qitem-readback-missing-${field}`;
+      const row = { ...partial, qitemId: id };
+      const { deps, calls } = makeDeps({
+        routes: {
+          "POST /api/queue/create": { status: 201, data: { qitemId: id, surprise: true } },
+          [`GET /api/queue/${id}`]: { status: 200, data: row },
+        },
+      });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({ qitemId: id, outcome: "unknown", createOutcome: "unknown" });
+      expect(result.createWarning.fields).toEqual([field === "destination" ? "destinationSession" : "body"]);
+      expect(result).not.toHaveProperty("contradiction");
+      expect(result).not.toHaveProperty("state");
+      expect(process.exitCode).toBe(1);
+      expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
+    });
+
+    it("does not call absent direct-response destination or body fields a contradiction", async () => {
+      const id = "qitem-partial-direct-and-readback";
+      const { deps } = makeDeps({ routes: {
+        "POST /api/queue/create": { status: 201, data: { qitemId: id } },
+        [`GET /api/queue/${id}`]: { status: 200, data: { qitemId: "another-id", state: "pending" } },
+      } });
+
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
+
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).toMatchObject({ qitemId: id, outcome: "unknown", createOutcome: "unknown" });
+      expect(result.createWarning.fields).toEqual(["qitemId"]);
+      expect(result.createWarning.message).not.toContain("direct create response also differed");
+      expect(result).not.toHaveProperty("contradiction");
+      expect(process.exitCode).toBe(1);
     });
 
     it("does not treat a matching watchdog backstop as this request's live one-shot timer after readback", async () => {

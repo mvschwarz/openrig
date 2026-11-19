@@ -59,6 +59,7 @@ describe("forwarded queue response outcomes reach the CLI", () => {
     });
     app.route("/api/queue", queueRoutes());
     vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig");
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "true");
     const output = vi.spyOn(console, "log").mockImplementation(() => {});
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const deps: QueueDeps = {
@@ -76,7 +77,7 @@ describe("forwarded queue response outcomes reach the CLI", () => {
     program.addCommand(queueCommand(deps));
     await program.parseAsync([
       "node", "rig", "queue", "create", "--destination", "worker@rig", "--body", "proof",
-      "--summary", "proof", "--host", "edge", "--no-nudge", "--json", "--full",
+      "--summary", "proof", "--host", "edge", "--no-nudge", "--json",
     ]);
     const response = JSON.parse(String(output.mock.calls[0]?.[0]));
     const stderr = errors.mock.calls.map((call) => call.join(" ")).join("\n");
@@ -102,8 +103,10 @@ describe("forwarded queue response outcomes reach the CLI", () => {
         sourceSession: "seat@rig@edge",
         destinationSession: "worker@rig",
         state: "pending",
-        body: "proof",
+        host: "edge",
       });
+      expect(response).not.toHaveProperty("body");
+      expect(response.receipt.omitted).toContain("body");
       expect(stderr).not.toContain("INDETERMINATE");
       expect(process.exitCode).toBeUndefined();
     } else {

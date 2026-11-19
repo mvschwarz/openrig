@@ -341,12 +341,20 @@ export function queueRoutes(): Hono {
   function createInputRefusal(
     c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response },
     sourceSession: string,
-    body: { destinationSession?: string; body?: string; targetRepo?: string | null; blockedOn?: unknown },
+    body: { destinationSession?: string; body?: string; targetRepo?: string | null; blockedOn?: unknown; wakeAfterSeconds?: unknown },
   ): Response | null {
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
     if (body.blockedOn !== undefined && body.blockedOn !== null && typeof body.blockedOn !== "string") {
       return c.json({ error: "invalid_blocked_on", field: "blockedOn", message: "blockedOn must be a string when supplied." }, 400);
+    }
+    if (body.wakeAfterSeconds !== undefined && body.wakeAfterSeconds !== null
+      && (typeof body.wakeAfterSeconds !== "number" || !Number.isInteger(body.wakeAfterSeconds) || body.wakeAfterSeconds <= 0)) {
+      return c.json({
+        error: "wake_after_invalid",
+        field: "wakeAfterSeconds",
+        message: "wakeAfterSeconds must be a positive integer.",
+      }, 400);
     }
     if (body.targetRepo) {
       const validation = validateTargetRepo(c, sourceSession, body.targetRepo);

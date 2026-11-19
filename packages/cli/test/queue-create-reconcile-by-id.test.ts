@@ -128,7 +128,6 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     ["unreachable", new DaemonTimeoutError("remote receipt timed out")],
     ["wrong id", { status: 200, data: { ...REMOTE_ROW, qitemId: "another-id", lastNudgeResult: "verified" } }],
     ["wrong destination", { status: 200, data: { ...REMOTE_ROW, destinationSession: "other@rig-b", lastNudgeResult: "verified" } }],
-    ["wrong source", { status: 200, data: { ...REMOTE_ROW, sourceSession: "other@rig-a", lastNudgeResult: "verified" } }],
     ["wrong body", { status: 200, data: { ...REMOTE_ROW, body: "different", lastNudgeResult: "verified" } }],
   ] satisfies Array<[string, Reply]>)("create --verify keeps a %s remote receipt indeterminate without resending", async (_case, receipt) => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
@@ -141,6 +140,19 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([expect.objectContaining({ base: REMOTE })]);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "indeterminate" } });
+  });
+
+  it("create --verify accepts a remote receipt with the requested destination and body when source differs", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 201, data: REMOTE_ROW }], {
+      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
+      [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, sourceSession: "other@rig-a", lastNudgeResult: "verified" } },
+    }, ["--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: REMOTE })]);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "verified" } });
   });
 
   it("create --verify does not guess a receipt host missing from this CLI's registry", async () => {
@@ -164,16 +176,21 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     }, ["--verify"]);
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toHaveLength(1);
-    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "indeterminate" } });
+    expect(readBacks(calls)).toHaveLength(0);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({
+      delivery: {
+        outcome: "not-requested",
+        detail: expect.stringContaining("This request sent no immediate terminal wake. Earlier wake and claim details are row history."),
+      },
+    });
+    expect(JSON.parse(stdout.join("\n"))).not.toHaveProperty("persisted");
     expect(stderr.join("\n")).toContain("not saved");
   });
 
-  it("create --verify reads locally when --host names this daemon, without requiring a registry entry", async () => {
+  it("create --verify reads locally when --host is local", async () => {
     const { calls, error } = await run("dev@rig-b", [{ status: 201, data: ROW }], {
-      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
       [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, lastNudgeResult: "verified" } },
-    }, ["--host", "host-a", "--verify"]);
+    }, ["--host", "local", "--verify"]);
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
@@ -238,11 +255,9 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(process.exitCode).toBe(2);
   });
 
-  // The daemon returns the stored row for a same-ID create only when its destination and source match, and says when the body
-  // wasn't saved. The read-back holds a row to the same test: a row with this ID that isn't this create leaves it unknown.
+  // The read-back checks the sent ID, destination and body. It does not need to reconstruct the source stamp.
   it.each([
     ["destination", { ...ROW, destinationSession: "other@rig-c" }],
-    ["source", { ...ROW, sourceSession: "someone@rig-z" }],
     ["body", { ...ROW, body: "older work" }],
   ])("a row with this ID whose %s differs isn't this create: the outcome stays unknown, and the ID isn't for other work", async (field, row) => {
     const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
@@ -251,13 +266,6 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(readBacks(calls)).toHaveLength(1);
     const all = stderr.join("\n");
     expect(all).not.toContain("committed after all");
-    if (field === "source") {
-      expect(error).not.toBeNull();
-      expect(all).toContain(`Row ${ID} exists but isn't this create (its source differs)`);
-      expect(all).toContain("Don't reuse this ID for other work");
-      expect(all).toContain("The write outcome is INDETERMINATE");
-      return;
-    }
     expect(error).toBeNull();
     expect(all).toContain(`The row ID ${ID} exists, but its destination or body hash contradicts this request.`);
     expect(all).toContain("The write outcome stays unknown. Keep this ID for recovery.");
@@ -272,6 +280,17 @@ describe("a queue create that got no answer is read back once by its ID", () => 
       recovery: expect.stringContaining(`--id '${ID}'`),
     });
     expect(process.exitCode).toBe(2);
+  });
+
+  it("accepts a row with matching destination and body when its source differs", async () => {
+    const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
+      { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: "someone@rig-z" } } });
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ qitemId: ID, state: "pending" });
+    expect(process.exitCode ?? 0).toBe(0);
   });
 
   it("a create read back after it timed out keeps --verify: its delivery is reported as on any create", async () => {
@@ -294,48 +313,42 @@ describe("a queue create that got no answer is read back once by its ID", () => 
 
   // The source a row must carry is the one the daemon stores for this create: the sender this client sent, as that daemon
   // canonicalizes it, and on a forwarded create stamped with the forwarding daemon's own host id.
-  it("a forwarded create whose stored source names another origin host isn't this create", async () => {
+  it("a forwarded create accepts matching destination and body when the stored source differs", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
     const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN],
-      { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: "lead@rig-a@host-c" } }, [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } } });
+      { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: "lead@rig-a@host-c" } } });
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
-    const all = stderr.join("\n");
-    expect(all).not.toContain("committed after all");
-    expect(all).toContain(`Row ${ID} on host 'vps-b' exists but isn't this create (its source differs)`);
-    expect(process.exitCode).toBe(2);
+    expect(stderr.join("\n")).toContain(`committed after all: row ${ID} on host 'vps-b'`);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(process.exitCode ?? 0).toBe(0);
   });
 
-  it("a forwarded create whose forwarding daemon's host id can't be read stays unknown", async () => {
+  it("a forwarded create readback does not require the forwarding daemon's host id", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
     const { calls } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW } });
     expect(posts(calls)).toHaveLength(1);
-    const all = stderr.join("\n");
-    expect(all).not.toContain("committed after all");
-    expect(all).toContain("couldn't read this daemon's host id");
-    expect(process.exitCode).toBe(2);
+    expect(readBacks(calls)).toHaveLength(1);
+    expect(stderr.join("\n")).toContain(`committed after all: row ${ID} on host 'vps-b'`);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(process.exitCode ?? 0).toBe(0);
   });
 
   // The daemon forwards only to another host: a --host naming its own id is a local create, stored without a host suffix.
   it.each([
-    ["the bare seat, a local create's source, reads back as created", "lead@rig-a", true],
-    ["the source a forward would stamp isn't this create", "lead@rig-a@host-a", false],
-  ])("with --host naming the daemon's own id, %s", async (_case, stored, created) => {
+    ["bare session", "lead@rig-a"],
+    ["stamped session", "lead@rig-a@host-a"],
+  ])("with a registered host URL, reads back by ID regardless of the %s source", async (_case, stored) => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: host-a\n    transport: http\n    url: ${LOCAL}\n`);
     const { calls } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
-      { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: stored } }, [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } } },
+      { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: stored } } },
       ["--host", "host-a"]);
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
-    const all = stderr.join("\n");
-    if (created) {
-      expect(all).toContain(`committed after all: row ${ID}`);
-      expect(process.exitCode ?? 0).toBe(0);
-    } else {
-      expect(all).not.toContain("committed after all");
-      expect(all).toContain("isn't this create (its source differs)");
-    }
+    expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(process.exitCode ?? 0).toBe(0);
   });
 
   describe("with the real client's sender", () => {
@@ -360,8 +373,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
       } catch (err) { error = err; }
       return { requests, error };
     }
-    const lostCreate = (selfHostId: string, stored: string) => (method: string, url: URL): Response => {
-      if (url.pathname === "/healthz") return Response.json({ selfHostId });
+    const lostCreate = (stored: string) => (method: string, _url: URL): Response => {
       if (method === "POST") throw new TypeError("connection lost");
       return Response.json({ ...ROW, sourceSession: stored });
     };
@@ -374,17 +386,27 @@ describe("a queue create that got no answer is read back once by its ID", () => 
       afterEach(() => { vi.mocked(getDaemonUrl).mockReturnValue(LOCAL); });
 
       it("reads back as created when that daemon stored the sender with this host's id", async () => {
-        const { requests, error } = await runReal(lostCreate("host-b", "lead@rig-a@host-a"));
+        const { requests, error } = await runReal(lostCreate("lead@rig-a@host-a"));
         expect(requests.filter((r) => r.method === "POST")).toEqual([expect.objectContaining({ sender: "lead@rig-a@host-a" })]);
+        const createIndex = requests.findIndex((r) => r.method === "POST");
+        const healthzIndices = requests.flatMap((r, index) => r.path === "/healthz" ? [index] : []);
+        expect(healthzIndices).toHaveLength(1);
+        expect(healthzIndices[0]).toBeLessThan(createIndex);
+        expect(requests.slice(createIndex + 1).filter((r) => r.path === "/healthz")).toHaveLength(0);
         expect(error).toBeNull();
         expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
       });
 
-      it("isn't this create when the stored source names another origin host", async () => {
-        const { requests, error } = await runReal(lostCreate("host-b", "lead@rig-a@host-c"));
+      it("accepts matching destination and body when the stored source names another origin host", async () => {
+        const { requests, error } = await runReal(lostCreate("lead@rig-a@host-c"));
         expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
-        expect(error).not.toBeNull();
-        expect(stderr.join("\n")).toContain(`Row ${ID} exists but isn't this create (its source differs)`);
+        const createIndex = requests.findIndex((r) => r.method === "POST");
+        const healthzIndices = requests.flatMap((r, index) => r.path === "/healthz" ? [index] : []);
+        expect(healthzIndices).toHaveLength(1);
+        expect(healthzIndices[0]).toBeLessThan(createIndex);
+        expect(requests.slice(createIndex + 1).filter((r) => r.path === "/healthz")).toHaveLength(0);
+        expect(error).toBeNull();
+        expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);
       });
     });
 
@@ -393,7 +415,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
       ["has stray spaces", " lead@rig-a "],
     ])("a local create from a seat whose session name %s reads back as created: the daemon stores the bare seat", async (_case, session) => {
       vi.stubEnv("OPENRIG_SESSION_NAME", session);
-      const { requests, error } = await runReal(lostCreate("host-a", "lead@rig-a"));
+      const { requests, error } = await runReal(lostCreate("lead@rig-a"));
       expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
       expect(error).toBeNull();
       expect(stderr.join("\n")).toContain(`committed after all: row ${ID}`);

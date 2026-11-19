@@ -135,6 +135,69 @@ describe("queue routes", () => {
       advisories: [expect.objectContaining({ code: "park_without_wake" })] });
   });
 
+  it("does not confirm a stopped timer in the create response", async () => {
+    const getParkSnapshot = queueRepo.getParkSnapshot.bind(queueRepo);
+    vi.spyOn(queueRepo, "getParkSnapshot").mockImplementationOnce((qitemId) => {
+      const snapshot = getParkSnapshot(qitemId);
+      expect(snapshot.wake).toMatchObject({ kind: "timer", intervalSeconds: 90, live: true });
+      return { ...snapshot, wake: snapshot.wake ? { ...snapshot.wake, live: false } : null };
+    });
+
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        qitemId: "qitem-create-stopped-timer",
+        destinationSession: "worker@rig",
+        body: "Wait for the timer",
+        blockedOn: "external:condition",
+        wakeAfterSeconds: 90,
+        nudge: false,
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      qitemId: "qitem-create-stopped-timer",
+      state: "blocked",
+      blockedOn: "external:condition",
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+  });
+
+  it("does not combine an earlier blocker with a same-interval re-park timer", async () => {
+    const getParkSnapshot = queueRepo.getParkSnapshot.bind(queueRepo);
+    vi.spyOn(queueRepo, "getParkSnapshot").mockImplementationOnce((qitemId) => {
+      const snapshot = getParkSnapshot(qitemId);
+      expect(snapshot.wake).toMatchObject({ kind: "timer", intervalSeconds: 90, live: true });
+      return {
+        ...snapshot,
+        item: snapshot.item ? { ...snapshot.item, blockedOn: "external:earlier" } : null,
+      };
+    });
+
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        qitemId: "qitem-create-repark-same-interval",
+        destinationSession: "worker@rig",
+        body: "Wait for the current blocker",
+        blockedOn: "external:current",
+        wakeAfterSeconds: 90,
+        nudge: false,
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      qitemId: "qitem-create-repark-same-interval",
+      state: "blocked",
+      blockedOn: "external:earlier",
+      parkWarning: { code: "qitem_park_not_confirmed" },
+    });
+  });
+
   it("same-ID park retries return the saved row and warning without adding a timer", async () => {
     const create = (body: Record<string, unknown>) => app.request("/api/queue/create", {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify(body),

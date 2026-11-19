@@ -94,7 +94,7 @@ export interface DeliveryVerifyTarget {
 }
 
 type QueueRow = Record<string, unknown>;
-type CreateReadbackContradiction = { destinationMatches: boolean; bodyHashMatches: boolean };
+type CreateReadbackContradiction = { destinationMatches?: boolean; bodyHashMatches?: boolean };
 
 const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
 const QUEUE_STATES = new Set(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
@@ -120,6 +120,10 @@ function safeIdentitySessionValue(value: unknown): unknown {
 
 function isQueueRow(value: unknown): value is QueueRow {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isQueueState(value: unknown): value is string {
+  return typeof value === "string" && QUEUE_STATES.has(value);
 }
 
 function bodySummary(value: unknown): QueueRow {
@@ -754,14 +758,10 @@ async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext):
 /** How long the one read-back of a create with an unknown outcome waits for its answer. */
 const CREATE_READ_BACK_TIMEOUT_MS = 10_000;
 
-/** What a create sent, for telling its row from another with the same ID. `claimedSource` is the body's source, which the
- *  daemon records only when the request carries no sender; `remoteHost` is the host it was sent to with `--host`. */
+/** The request values used to check the destination and body of a stored create row. */
 interface SentCreate {
   destinationSession: string;
-  claimedSource: string | undefined;
-  issuedSource: string | undefined;
   body: string;
-  remoteHost: string | undefined;
 }
 
 /** The daemon's host id: null when it reports none, undefined when it can't be read. */
@@ -773,37 +773,6 @@ async function daemonSelfHostId(client: DaemonClient): Promise<string | null | u
   } catch {
     return undefined;
   }
-}
-
-/** The source the daemon this client reached stores for the create, by its own rules: the sender this client sent, trimmed and
- *  without a trailing `@<that daemon's host id>` (canonicalSenderSession), or with no sender the body's claimed source, trimmed.
- *  A forwarded create's source then gains the forwarding daemon's host id (stampSelfHostSuffix), unless its origin was marked
- *  unknown. Undefined when that host id is needed and can't be read. */
-async function storedSourceOf(client: DaemonClient, sent: SentCreate): Promise<string | undefined> {
-  const { session, originUnknown } = await client.senderIdentity();
-  const source = (session ?? sent.claimedSource ?? sent.issuedSource)?.trim();
-  if (!source) return undefined;
-  const parts = source.split("@");
-  const canonicalizes = session !== undefined && parts.length === 3 && parts.every(Boolean);
-  const stamps = sent.remoteHost !== undefined && !originUnknown;
-  if (!canonicalizes && !(stamps && parts.length === 2)) return source;
-  const selfId = await daemonSelfHostId(client);
-  if (selfId === undefined) return undefined;
-  const canonical = canonicalizes && parts[2] === selfId ? `${parts[0]}@${parts[1]}` : source;
-  // The daemon forwards only to another host (resolvesToLocalHost): a target naming its own id is a local create, unstamped.
-  const forwarded = stamps && sent.remoteHost !== selfId;
-  return forwarded && selfId && canonical.split("@").length === 2 ? `${canonical}@${selfId}` : canonical;
-}
-
-/** Which field shows a stored row isn't this create, by the rule the daemon applies to a create whose ID already exists
- *  (the same destination and source, compared exactly), plus the body, which that rule reports as not saved. "unread" when
- *  the source this create would have can't be established. Null when the row is this create. */
-function notThisCreate(row: Record<string, unknown>, sent: SentCreate, storedSource: string | undefined): "destination" | "unread" | "source" | "body" | null {
-  if (row.destinationSession !== sent.destinationSession) return "destination";
-  if (storedSource === undefined) return "unread";
-  if (row.sourceSession !== storedSource) return "source";
-  if (row.body !== sent.body) return "body";
-  return null;
 }
 
 interface ParkCreateIdentityCheck {
@@ -823,7 +792,7 @@ function mergeDirectCreateObservation(
   if (!isQueueRow(response)) return failure;
   const fields = new Set(failure.fields);
   const observed: QueueRow = { ...failure.observed };
-  for (const field of ["qitemId", "sourceSession", "destinationSession", "state", "body"]) {
+  for (const field of ["qitemId", "destinationSession", "state", "body"]) {
     if (!Object.prototype.hasOwnProperty.call(response, field)) continue;
     const value = observedValue(field, response[field]);
     if (value !== undefined) observed[field] = value;
@@ -833,13 +802,14 @@ function mergeDirectCreateObservation(
     fields.add("qitemId");
     mismatches.push("qitemId");
   }
-  if (response.destinationSession !== sent.destinationSession) {
+  if (typeof response.destinationSession === "string" && response.destinationSession !== sent.destinationSession) {
     fields.add("destinationSession");
     mismatches.push("destinationSession");
   }
-  const bodyMatches = typeof response.body === "string"
-    && createHash("sha256").update(response.body, "utf8").digest("hex") === createHash("sha256").update(sent.body, "utf8").digest("hex");
-  if (!bodyMatches) {
+  const bodyIsKnown = typeof response.body === "string";
+  const bodyMatches = bodyIsKnown
+    && createHash("sha256").update(response.body as string, "utf8").digest("hex") === createHash("sha256").update(sent.body, "utf8").digest("hex");
+  if (bodyIsKnown && !bodyMatches) {
     fields.add("body");
     mismatches.push("body");
   }
@@ -868,12 +838,7 @@ function existingRowSummary(row: QueueRow, expectedId: string, bodyIsSummary = f
 
 /** Both reconciliation and --verify read the daemon that holds the row, with its own bearer. */
 async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: string | undefined) {
-  let remote = remoteHostOf(hostId);
-  const requestedRemote = remote;
-  const selfHostId = requestedRemote ? await daemonSelfHostId(client) : undefined;
-  if (remote && selfHostId === remote) remote = undefined;
-  const remoteConfirmed = requestedRemote !== undefined && typeof selfHostId === "string"
-    && selfHostId.trim().length > 0 && selfHostId !== requestedRemote;
+  const remote = remoteHostOf(hostId);
   let reader = client;
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
   if (remote) {
@@ -888,7 +853,7 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
     reader = deps.clientFactory(match.host.url);
     if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
   }
-  return { reader, options, remote, remoteConfirmed };
+  return { reader, options, remote };
 }
 
 /** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
@@ -934,15 +899,16 @@ function hostFlag(target: QueueHostTarget): string {
 function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Pick<DaemonClient, "get"> {
   if (!remoteHostOf(hostId)) return client;
   let target: ReturnType<typeof queueReadTarget> | undefined;
-  let source: ReturnType<typeof storedSourceOf> | undefined;
   return {
     get: async <T>(path: string) => {
       const selected = await (target ??= queueReadTarget(deps, client, hostId));
       if ("error" in selected) throw new Error(`receipt could not be read ${selected.error}`);
       const response = await selected.reader.get<T>(path, selected.options);
       const row = response.data as Record<string, unknown> | undefined;
-      if (response.status === 200 && (!row || row.qitemId !== qitemId
-        || notThisCreate(row, sent, await (source ??= storedSourceOf(client, sent))) !== null)) {
+      const bodyMatches = typeof row?.body === "string"
+        && createHash("sha256").update(row.body, "utf8").digest("hex") === createHash("sha256").update(sent.body, "utf8").digest("hex");
+      if (response.status === 200 && (!row || row.qitemId !== qitemId || !isQueueState(row.state)
+        || row.destinationSession !== sent.destinationSession || !bodyMatches)) {
         throw new Error("receipt row does not match the created qitem");
       }
       return response;
@@ -955,7 +921,7 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
 async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Promise<{
   row: Record<string, unknown> | null;
   note: string;
-  remoteConfirmed?: boolean;
+  remote?: boolean;
   identityFailure?: ParkCreateIdentityCheck;
   contradiction?: CreateReadbackContradiction;
 }> {
@@ -982,61 +948,55 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
           },
         };
       }
-      const destinationMatches = res.data.destinationSession === sent.destinationSession;
+      const observed: QueueRow = {};
+      for (const field of ["qitemId", "state", "destinationSession", "body"]) {
+        if (!Object.prototype.hasOwnProperty.call(res.data, field)) continue;
+        const value = observedValue(field, res.data[field]);
+        if (value !== undefined) observed[field] = value;
+      }
+      const unreadableFields: string[] = [];
+      if (!isQueueState(res.data.state)) unreadableFields.push("state");
+      const destinationMatches = typeof res.data.destinationSession === "string"
+        ? res.data.destinationSession === sent.destinationSession
+        : undefined;
       const bodyHashMatches = typeof res.data.body === "string"
-        && createHash("sha256").update(res.data.body, "utf8").digest("hex") === expectedBodyHash;
-      if (!destinationMatches || !bodyHashMatches) {
-        return {
-          row: null,
-          note: `The row ID ${qitemId}${where} exists, but its destination or body hash contradicts this request. The write outcome stays unknown. Keep this ID for recovery.`,
-          remoteConfirmed: target.remoteConfirmed,
-          contradiction: { destinationMatches, bodyHashMatches },
-        };
-      }
-      let storedSource: string | undefined;
-      try {
-        storedSource = await storedSourceOf(client, sent);
-      } catch {
-        storedSource = undefined;
-      }
-      const differs = notThisCreate(res.data, sent, storedSource);
-      if (differs === "unread") {
-        const observed: QueueRow = {};
-        const safeSource = observedValue("sourceSession", res.data.sourceSession);
-        if (safeSource !== undefined) observed.sourceSession = safeSource;
-        return {
-          row: null,
-          note: `Row ${qitemId}${where} exists, but this CLI couldn't read this daemon's host id to tell whether its source is this create's, so the outcome is still unknown.`,
-          identityFailure: {
+        ? createHash("sha256").update(res.data.body, "utf8").digest("hex") === expectedBodyHash
+        : undefined;
+      if (destinationMatches === undefined) unreadableFields.push("destinationSession");
+      if (bodyHashMatches === undefined) unreadableFields.push("body");
+      const contradiction: CreateReadbackContradiction | undefined =
+        destinationMatches === false || bodyHashMatches === false
+          ? {
+              ...(destinationMatches === undefined ? {} : { destinationMatches }),
+              ...(bodyHashMatches === undefined ? {} : { bodyHashMatches }),
+            }
+          : undefined;
+      const identityFailure: ParkCreateIdentityCheck | undefined = unreadableFields.length > 0
+        ? {
             row: null,
-            fields: ["sourceSession"],
+            fields: unreadableFields,
             observed,
-            reason: "The stored source for the create could not be read. The create outcome is unknown. Keep the sent ID for a read back.",
-          },
-        };
-      }
-      if (differs) {
-        const field = differs === "source" ? "sourceSession" : differs === "destination" ? "destinationSession" : "body";
-        const observed: QueueRow = {};
-        const safeValue = observedValue(field, res.data[field]);
-        if (safeValue !== undefined) observed[field] = safeValue;
+            reason: `The read back row has missing or invalid ${unreadableFields.join(", ")} evidence. The create outcome is unknown. Keep the sent ID for a read back.`,
+            ...(isQueueState(res.data.state) ? { existingRow: existingRowSummary(res.data, qitemId) } : {}),
+          }
+        : undefined;
+      if (contradiction || identityFailure) {
         return {
           row: null,
-          note: `Row ${qitemId}${where} exists but isn't this create (its ${differs} differs), so the outcome is still unknown. Don't reuse this ID for other work.`,
-          identityFailure: {
-            row: null,
-            fields: [field],
-            observed,
-            reason: `The read back row does not match this create (${field}). The create outcome is unknown. Keep the sent ID for a read back.`,
-            ...(typeof res.data.state === "string" && QUEUE_STATES.has(res.data.state)
-              ? { existingRow: existingRowSummary(res.data, qitemId) } : {}),
-          },
+          note: contradiction
+            ? `The row ID ${qitemId}${where} exists, but its destination or body hash contradicts this request. The write outcome stays unknown. Keep this ID for recovery.`
+            : `Row ${qitemId}${where} exists, but the read back lacks valid state, destination, or body evidence. The outcome stays unknown.`,
+          ...(contradiction ? { contradiction } : {}),
+          ...(identityFailure ? { identityFailure } : {}),
         };
       }
       const recoveredRow = { ...res.data };
       delete recoveredRow.parkReceipt;
-      return { row: recoveredRow, note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
-        remoteConfirmed: target.remoteConfirmed };
+      return {
+        row: recoveredRow,
+        note: `The create committed after all: row ${qitemId}${where} (read back by its ID).`,
+        remote: target.remote !== undefined,
+      };
     }
     if (res.status === 404) return { row: null, note: `No row ${qitemId}${where} yet (read back once by its ID); it may still commit.` };
     return { row: null, note: `Reading row ${qitemId}${where} back answered ${res.status}, so the outcome is still unknown.` };
@@ -1865,10 +1825,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
         const sent: SentCreate = {
           destinationSession: hostResolved.destination,
-          claimedSource: managedSource === undefined ? source : undefined,
-          issuedSource: issuedActor ? issuedReturnAddress(qitemId) : undefined,
           body: resolvedBody,
-          remoteHost: remoteHostOf(hostResolved.hostId),
         };
         const emitScopeAdvisories = (created: Record<string, unknown>) => {
           const advisories = Array.isArray(created?.advisories) ? created.advisories : [];
@@ -1973,7 +1930,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
                 // The daemon returned an existing row for a same-ID retry.
                 // The retry did not create or deliver work, so do not query a
                 // delivery receipt for it.
-                await printWriteResult(client, opts.json ?? false, outputCreated, status, receipt);
+                const delivery = terminalDeliveryResult(qitemId, hostResolved.destination, outputCreated, "not-requested", null, true);
+                await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, receipt);
                 return;
               }
               const delivery = await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), qitemId, deps.deliveryVerify,
@@ -1994,6 +1952,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           delete outputCreated.parkReceipt;
           if (status < 400) delete outputCreated.parkWarning;
           if (status < 400) printCreateReturnRoute(created);
+          if (opts.verify && status < 400 && isQueueRow(outputCreated.createWarning) && outputCreated.createWarning.code === "qitem_body_not_saved") {
+            const delivery = terminalDeliveryResult(qitemId, hostResolved.destination, outputCreated, "not-requested", null, true);
+            await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, receipt);
+            return;
+          }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
           const advisories = Array.isArray(created?.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
           for (const advisory of advisories) {
@@ -2011,7 +1974,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           await printWriteResult(client, opts.json ?? false, outputCreated, status, receipt);
         };
         const usableCreateRow = (value: unknown): value is Record<string, unknown> =>
-          isQueueRow(value) && value.qitemId === qitemId && typeof value.state === "string" && value.createOutcome !== "unknown";
+          isQueueRow(value) && value.qitemId === qitemId && isQueueState(value.state) && value.createOutcome !== "unknown";
         const unknownCreate = (envelope?: unknown, contradiction?: CreateReadbackContradiction, identityFailure?: ParkCreateIdentityCheck) => {
           const received = isQueueRow(envelope) ? envelope : {};
           const createWarning = identityFailure
@@ -2062,11 +2025,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
             if (late.contradiction) {
-              unknownCreate(undefined, late.contradiction);
+              unknownCreate(undefined, late.contradiction, late.identityFailure);
               return;
             }
             if (late.row) {
-              await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
+              await finish(late.row, 200, late.remote ? "remote" : "neutral");
               return;
             }
             if (parkRequested && late.identityFailure) {
@@ -2087,11 +2050,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.contradiction) {
-            unknownCreate(res.data, late.contradiction);
+            unknownCreate(res.data, late.contradiction, late.identityFailure);
             return;
           }
           if (late.row) {
-            await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
+            await finish(late.row, 200, late.remote ? "remote" : "neutral");
             return;
           }
           if (parkRequested && late.identityFailure) {
@@ -2105,11 +2068,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
           if (late.contradiction) {
-            unknownCreate(res.data, late.contradiction);
+            unknownCreate(res.data, late.contradiction, late.identityFailure);
             return;
           }
           if (late.row) {
-            await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
+            await finish(late.row, 200, late.remote ? "remote" : "neutral");
             return;
           }
           if (late.identityFailure) {

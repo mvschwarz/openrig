@@ -157,10 +157,72 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect("hostId" in (capture.body ?? {})).toBe(false);
     // Whole body incl. nudge forwarded (FR-3).
     expect(capture.body?.["nudge"]).toBe(true);
+    expect(capture.body).not.toHaveProperty("wakeAfterSeconds");
     // Provenance appended, existing tag preserved (D-4).
     expect(capture.body?.["tags"]).toContain(CROSS_HOST_TAG);
     expect(capture.body?.["tags"]).toContain("existing");
     // NO local row (origin-owns-the-record).
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["string", "90"],
+    ["boolean", true],
+  ])("refuses a %s wakeAfterSeconds before cross-host forwarding", async (_label, wakeAfterSeconds) => {
+    let forwarded = false;
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async () => {
+        forwarded = true;
+        return jsonResponse({ qitemId: "qitem-invalid-wake" }, 201);
+      }) as unknown as typeof fetch,
+    });
+
+    const res = await post(app, {
+      ...BASE,
+      hostId: "vps-b",
+      blockedOn: "external:condition",
+      wakeAfterSeconds,
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: "wake_after_invalid",
+      message: expect.stringContaining("wakeAfterSeconds must be a positive integer"),
+    });
+    expect(forwarded).toBe(false);
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it.each([
+    ["omitted", undefined],
+    ["null", null],
+  ])("preserves a %s wakeAfterSeconds value when forwarding", async (_label, wakeAfterSeconds) => {
+    let forwardedBody: Record<string, unknown> | undefined;
+    const app = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        forwardedBody = forwardedRequest(init);
+        return jsonResponse({ qitemId: "qitem-null-wake", destinationSession: "dev@rig-b", state: "pending" }, 201);
+      }) as unknown as typeof fetch,
+    });
+    const request = {
+      ...BASE,
+      hostId: "vps-b",
+      ...(wakeAfterSeconds === undefined ? {} : { wakeAfterSeconds }),
+    };
+
+    const res = await post(app, request);
+
+    expect(res.status).toBe(201);
+    expect(forwardedBody).toBeDefined();
+    if (wakeAfterSeconds === undefined) expect(forwardedBody).not.toHaveProperty("wakeAfterSeconds");
+    else expect(forwardedBody).toHaveProperty("wakeAfterSeconds", null);
     expect(rowCount(db)).toBe(0);
   });
 
