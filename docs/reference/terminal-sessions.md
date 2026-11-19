@@ -213,6 +213,37 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 
 `--provider herdr-app` opens the view in the herdr-app window you run it in. Inside a herdr-app terminal, plain `rig terminal open <view>` does the same when that window is answering (finding the socket file is how OpenRig guesses you are in a herdr-app window, and whether the window is reachable is checked by asking it). `--window` always asks for a new desktop window. See [OpenRig views in herdr-app](herdr-app.md).
 
+## Orca (experimental)
+
+```sh
+# From within an Orca terminal, use its workspace:
+rig terminal open saved:kernel --provider orca
+
+# From another macOS shell, select an existing workspace explicitly:
+rig terminal open future-rig --provider orca --orca-workspace 'path:/path/to/worktree' --json
+```
+
+This experimental provider is macOS-only and was tested with **Orca 1.4.263**.
+Run it on the same Mac and under the same account as the running OpenRig daemon
+and Orca desktop. Register the [Orca CLI](https://orca.dev/docs/cli/reference)
+in Orca's settings if needed, and use `orca worktree ps --json` to find workspace
+selectors. The OpenRig for Orca plugin and Herdr are not required.
+
+It never creates a worktree or launches an agent. It opens one Orca tab per view page and splits it into panes for the
+existing local seats, preserving read-only views. Closing the Orca tab does not
+stop the seats. The provider is CLI-only: it does not change setup, provider
+selection defaults, or the daemon API. Remote seats and remote Orca workspaces
+are not supported.
+
+OpenRig does not pass `--focus` when creating a tab, but Orca may activate the
+tab when it splits a multi-seat page. A connected Orca pane confirms placement,
+not a working tmux view; check the tab in Orca. If the CLI, required commands,
+or workspace cannot be confirmed during preflight, no tab is opened. If a tab
+or split is unconfirmed after opening starts, inspect Orca before retrying.
+The CLI never retries a create or split automatically. `--window`, `--all`,
+`--follow`, named sessions, `--expected-plan`, and provider-specific
+`terminal status` or `close` are not supported for Orca yet.
+
 ## HTTP API
 
 - `POST /api/terminal/open`: `{ view, provider?: "herdr", session?: string, expectedPlan?: string }`.
@@ -239,7 +270,7 @@ to reuse an intact live workspace without rewriting an existing ownership record
 desktop `--window` with Herdr installed (opening one Herdr window once Herdr is
 preflighted, then applying per-rig workspaces), or `--provider tmux --window`
 (opening one tagged `openrig-view-<id>` tmux session per non-empty rig with an
-`@openrig_rig_viewer` nonce). `herdr-app`, `cmux`, and `rex` return
+`@openrig_rig_viewer` nonce). `herdr-app`, `cmux`, `rex`, and `orca` return
 `unsupported_provider`; plain `tmux` without `--window` returns
 `tmux_requires_window`. Seats on remote hosts (`host != null`) are reported under
 `skipped` when `TerminalService` receives hosted rows (the current single-host
