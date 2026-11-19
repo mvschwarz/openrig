@@ -580,6 +580,31 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
     });
   });
 
+  // G1j2
+  it("#3253: a launch that comes while a start is under way waits for the bus to be given back before its pane is made", async () => {
+    vi.stubEnv("OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT", "1");
+    await withDaemon("no-manager", false, async (daemon, host) => {
+      vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
+      const adapter = daemon.deps.tmuxAdapter;
+      adapter.deliveryGuard = undefined;
+      // The start's `tmux -D` answers at once; giving the bus back waits on startServer's own polling (awaitServer), so a
+      // launch that doesn't wait for the start sources its pane on the new server before set-environment.
+      const starting = adapter.startServer();
+      // The launch comes once the new server answers, before startServer's first poll (25 ms) gives the bus back.
+      while (!host.serverUp) await new Promise(resolve => setImmediate(resolve));
+      expect(host.setEnvironment).toEqual([]);
+      const launched = adapter.createSession("seat-3253", undefined, { OPENRIG_NODE_ID: "node-3253" });
+      const [started, result] = await Promise.all([starting, launched]);
+      expect(started).toMatchObject({ ok: true });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      const order = (pattern: RegExp) => host.calls.findIndex(call => pattern.test(call));
+      expect(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/), host.calls.join("\n")).toBeGreaterThanOrEqual(0);
+      expect(order(/source-file/), host.calls.join("\n")).toBeGreaterThan(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/));
+      expect(host.starts, host.calls.join("\n")).toEqual([loose(TODAY_START)]);
+    });
+  });
+
   // G1k
   it("#3253: without a user manager, a launch on a running server neither starts one nor touches its environment", async () => {
     vi.stubEnv("OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT", "1");

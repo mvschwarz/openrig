@@ -218,6 +218,8 @@ describe.runIf(enabled)("seat process limits on a real user manager (#3253)", ()
       expect(panes.length).toBeGreaterThanOrEqual(2);
       for (const pid of panes) expect(cgroupOf(pid), `pane ${pid}`).toBe(serverCgroup);
       const paneD = await tmux("display-message", "-p", "-t", "=it-d:", "#{pane_pid}");
+      // Until the pane's child has run its command, /proc shows the environment it was forked with (the server's).
+      await waitFor("pane it-d to run its command", 10_000, () => readFileSync(`/proc/${paneD}/cmdline`, "utf8").startsWith("sleep\0") ? true : null);
       expect(busOf(paneD)).toBe(process.env.DBUS_SESSION_BUS_ADDRESS);
       console.info(`${how}: tmux server's own DBUS_SESSION_BUS_ADDRESS ${busOf(serverPid)}; ${panes.length} panes in its cgroup ` +
         `${serverCgroup}; a pane of the global environment has ${busOf(paneD) ?? "<unset>"}`);

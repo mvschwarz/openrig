@@ -1595,6 +1595,9 @@ export class TmuxAdapter {
       }
     };
     if (!startServer || process.platform !== "linux") return source(startServer);
+    // #3253: a start in progress gives the panes the session bus back before it settles; a pane made before that would
+    // keep the unusable address for its whole life.
+    if (this.serverStarting) await this.serverStarting;
     // #2710, #3253: on Linux, `start-server` would start a missing server outside a user scope and with the daemon's
     // session bus in its own process. Try on the running server first; only when there is none, start it as startServer
     // does (in the user scope where one can be made, without a session bus) and run the command as before.
@@ -1655,9 +1658,9 @@ export class TmuxAdapter {
    *  value back (or unsets it, as before the start), so a pane keeps the real session bus. Only while the global still
    *  holds this daemon process's own unusable address (TMUX_SERVER_SESSION_BUS), which no other process or tmux
    *  configuration sets: a server someone else started, or a value set since, is left as it is. The read and the write
-   *  are two commands: a tmux format condition gets an environment value only through `$VAR` expansion while a sourced
-   *  config is parsed (`%if`, or `if-shell -F` there), which puts the value into the format unescaped (on tmux 3.4,
-   *  `%if "#{==:<this address>,$DBUS_SESSION_BUS_ADDRESS}"` is true for an address `a}b`). The value goes in argv,
+   *  are two commands: a server-side check (`if-shell -F '#{==:#{DBUS_SESSION_BUS_ADDRESS},…}'`) reads the target
+   *  session's environment before the global one, so on a server that already has a session with its own address (a
+   *  retry) it would compare that one and leave the global as it is. The value goes in argv,
    *  unlike the seat environment (runEnvironmentCommand): a bus address is not a credential, and it was in the global
    *  environment before #3253 too. A failure is a warning, never a failed start, and the next startServer tries again.
    *  Panes and jobs the person's tmux configuration makes while the server starts (before this runs) keep no bus. */
