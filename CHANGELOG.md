@@ -10,7 +10,7 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ## [0.7.20]
 
-OpenRig 0.7.20 tells a person's own agent the consent rules first and where a handed-over task's result is, holds automatic delivery while a seat's tmux server is gone, and waits for a seat's usage limit to reset before waking it. It also lets a workflow instance stay on one pod, adds an opt-in Claude status-line throttle, and fixes a run of smaller CLI, TUI, scope and workflow problems.
+OpenRig 0.7.20 tells a person's own agent the consent rules first and where a handed-over task's result is, holds automatic delivery while a seat's tmux server is gone, and, when a parked row's wake is refused at a Claude seat's usage limit, retries it at the stated reset. It also lets a workflow instance stay on one pod, adds an opt-in Claude status-line throttle, and fixes a run of smaller CLI, TUI, scope and workflow problems.
 
 ### Before you upgrade
 
@@ -40,7 +40,7 @@ Three additive migrations apply at the first start: `176_node_statusline_throttl
 
 ### A person's own agent
 
-The `rigs` skill puts the person's consent rules first, so an agent reading only the top of it still has every rule. It hands work over with a return route: most of the team's questions come back to the person's conversation, and the result is in the handed-over task's resolution, which the agent reads with `rig queue show <id> --full`. This release ships that guidance; it doesn't claim a measured change in how agents behave. `rig setup`'s next steps and the install reference say the same. ([#3500](https://github.com/mvschwarz/openrig/pull/3500))
+The `rigs` skill opens with the consent rules an agent must hold from its first handoff, even if it reads nothing else, and points to step 2 for the full rules. It hands work over with a return route: most of the team's questions come back to the person's conversation, and the result is in the handed-over task's resolution, which the agent reads with `rig queue show <id> --full`. This release ships that guidance; it doesn't claim a measured change in how agents behave. `rig setup`'s next steps and the install reference say the same. ([#3500](https://github.com/mvschwarz/openrig/pull/3500))
 
 The `openrig-user` skill says that Claude Desktop picks up the team's work with a scheduled task, in a fresh session, and that Monitor is for a session kept open. The `rigs` skill can be added to OMP (Oh My Pi), installing the shared skill only. ([#3503](https://github.com/mvschwarz/openrig/pull/3503), [#3509](https://github.com/mvschwarz/openrig/pull/3509))
 
@@ -48,7 +48,7 @@ The `openrig-user` skill says that Claude Desktop picks up the team's work with 
 
 When the tmux server a seat depends on goes away, the daemon records it once and holds automatic delivery to that server's seats. It probes read-only every 5 s, backing off to 60 s, without starting the server, and offers owed work again when the server answers. An explicit `rig send` is still attempted. `rig status`, `rig ps` and `rig doctor` report the outage. ([#3448](https://github.com/mvschwarz/openrig/pull/3448))
 
-A parked row's wake at a seat that has reached its usage limit says so and waits for the stated reset. A Codex seat's generation record is read from its declared home. `rig seat status` reads a seat left at a bare shell as needing attention, as `rig ps` does. `rig daemon stop` acts on a start reservation's child only after confirming the reservation still names it. Queue-only manual compaction prepares under the lifecycle lease. The draft guard recognizes its own collapsed paste. ([#3508](https://github.com/mvschwarz/openrig/pull/3508), [#3507](https://github.com/mvschwarz/openrig/pull/3507), [#3515](https://github.com/mvschwarz/openrig/pull/3515), [#3447](https://github.com/mvschwarz/openrig/pull/3447), [#3465](https://github.com/mvschwarz/openrig/pull/3465))
+When a parked row's wake is refused at a Claude seat that has reached its usage limit, the wake's record says so and retries at the stated reset; Codex states no reset, so a Codex seat's wake keeps its ordinary retry. A Codex seat's generation record is read from its declared home. `rig seat status` reads a seat left at a bare shell as needing attention, as `rig ps` does. `rig daemon stop` acts on a start reservation's child only after confirming the reservation still names it. Queue-only manual compaction prepares under the lifecycle lease. The draft guard recognizes its own collapsed paste. ([#3508](https://github.com/mvschwarz/openrig/pull/3508), [#3507](https://github.com/mvschwarz/openrig/pull/3507), [#3515](https://github.com/mvschwarz/openrig/pull/3515), [#3447](https://github.com/mvschwarz/openrig/pull/3447), [#3465](https://github.com/mvschwarz/openrig/pull/3465))
 
 These change how recovery and delivery decide. This release doesn't claim a measured recovery improvement on a running team.
 
