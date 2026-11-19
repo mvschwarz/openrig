@@ -25,6 +25,8 @@ A failure stops the following commands; fix it before continuing. Back up and in
 
 If the stop failed or had no recorded target, make sure the daemon is running on its original home and database (start it with `rig daemon start --db "$DB"` if `rig daemon status` does not say it is running), then run the whole block again. If the stop is still unconfirmed, use `daemon-shutdown.json` and `daemon.log` in your OpenRig home, together with `rig context get help`, to resolve the reported problem before retrying. Do not continue to the backup or install on an unconfirmed stop.
 
+A clean stop after restarting confirms only the new daemon’s shutdown, not whether earlier unfinished actions completed. Each stop replaces `daemon-shutdown.json`; look in `daemon.log` for earlier shutdown failures.
+
 Three additive migrations apply at the first start: `176_node_statusline_throttle` (the status-line throttle setting), `177_workflow_bound_pod` (a workflow instance's pod) and `178_seat_pool` (the seat pool's storage). Migration 178 applies whether or not you declare a pool. Keep the backup: downgrading the migrated database to 0.7.19 is not established. Bundled `openrig` is 0.7.20; `openrig-core` is 0.1.34.
 
 ## A person's own agent
@@ -65,7 +67,7 @@ The TUI degrades its control socket instead of ending the launcher, completes co
 
 ## Credits
 
-Thanks to billbenetti, Dery Ferdika, Devulapalli Naga Sri Vaishnavi, Edward Bowie, Mike Schwarz, Roberto Campos, Samuel Smith and Wu Shuwen. Their contributions also improve the daemon's memory-limit reasons, tests, CI on Ubuntu, the custom-view SQL contract, Claude readiness polling, startup probing, and documentation.
+Thanks to Ary Rabelo, Dery Ferdika, Devulapalli Naga Sri Vaishnavi, Edward Bowie, Mike Schwarz, Roberto Campos, Samuel Smith, Wu Shuwen, and billbenetti. Their contributions also improve the daemon's memory-limit reasons, tests, CI on Ubuntu, the custom-view SQL contract, Claude readiness polling, startup probing, and documentation.
 
 ## What changed in OpenRig 0.7.19
 
