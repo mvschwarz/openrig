@@ -532,6 +532,48 @@ describe("OMP runner over protocol v2 (#1275)", () => {
     r.line({ type: "agent_end", isTerminal: false });
     expect(r.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-70", id: "pi-runner-cursor-refresh:2" });
   });
+
+  it("a corrupt chunk drop on an unanchored full refresh does not deadlock subsequent completed turns, while unrelated drops still preserve valid pending replies", () => {
+    const r = ompRunner({ readLastEntryId: () => null });
+    r.core.start(READY_V2);
+    r.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    r.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/tmp/s.jsonl", sessionId: "s" } });
+
+    // Completed turn 1 issues an unanchored full read; its chunked reply has corrupt base64 and is dropped.
+    r.line({ type: "agent_end", isTerminal: true });
+    expect(r.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    const corruptFrames = chunk(entriesReply("pi-runner-cursor-refresh", history(2 * MiB)));
+    r.line(corruptFrames[0]);
+    r.line({ ...corruptFrames[1]!, data: "!!!!" });
+    for (const frame of corruptFrames.slice(2)) r.line(frame);
+    expect(r.cursor()).toBeUndefined();
+
+    // Completed turn 2 must not be blocked indefinitely by the dropped first full read; it dispatches a fresh full read.
+    r.line({ type: "agent_end", isTerminal: true });
+    expect(r.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+
+    // While #2 is genuinely in flight with no drop, turn 3 still coalesces instead of stacking a duplicate full read.
+    const countAfterSecond = r.rpc.length;
+    r.line({ type: "agent_end", isTerminal: true });
+    expect(r.rpc).toHaveLength(countAfterSecond);
+
+    // #2 succeeds and advances the cursor.
+    r.line(entriesReply("pi-runner-cursor-refresh:2", [{ type: "message", id: "e-80" }]));
+    expect(r.cursor()).toBe("e-80");
+
+    // Control: an unrelated corrupt drop still leaves a good pending unanchored full read intact if its own reply arrives.
+    const u = ompRunner({ readLastEntryId: () => null });
+    u.core.start(READY_V2);
+    u.line({ type: "response", id: "omp-runner-negotiate", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } });
+    u.line({ type: "response", id: "pi-runner-get-state", command: "get_state", success: true, data: { sessionFile: "/tmp/s.jsonl", sessionId: "s" } });
+    u.line({ type: "agent_end", isTerminal: true });
+    expect(u.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    const unrelatedCorrupt = chunk({ type: "message_end", text: "x".repeat(2 * MiB) }, "rpc-unrelated");
+    u.line(unrelatedCorrupt[0]);
+    u.line({ ...unrelatedCorrupt[1]!, data: "!!!!" });
+    u.line(entriesReply("pi-runner-cursor-refresh", [{ type: "message", id: "e-81" }]));
+    expect(u.cursor()).toBe("e-81");
+  });
 });
 
 // The production wiring: the real runner entry hands OMP's ready frame to the core. A fake `omp` answers

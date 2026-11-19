@@ -1122,6 +1122,7 @@ export class RunnerCore {
     anchorId?: string;
     isRecovery?: boolean;
     suspectedOversizedDrop?: boolean;
+    mayHaveBeenDropped?: boolean;
   }>();
   private readonly oversizedSinceIds = new Set<string>();
   private readonly rejectedSinceIds = new Set<string>();
@@ -1283,6 +1284,11 @@ export class RunnerCore {
       for (const pending of this.pendingRefreshes.values()) {
         if (pending.seq <= this.lastSettledRefreshSeq) continue;
         pending.suspectedOversizedDrop = true;
+      }
+    } else {
+      for (const pending of this.pendingRefreshes.values()) {
+        if (pending.seq <= this.lastSettledRefreshSeq) continue;
+        if (pending.requestSince === undefined) pending.mayHaveBeenDropped = true;
       }
     }
     this.diag(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
@@ -1960,7 +1966,7 @@ export class RunnerCore {
 
   private hasInFlightUnanchoredRefresh(): boolean {
     for (const pending of this.pendingRefreshes.values()) {
-      if (pending.requestSince === undefined && pending.seq > this.lastSettledRefreshSeq && !pending.suspectedOversizedDrop) return true;
+      if (pending.requestSince === undefined && pending.seq > this.lastSettledRefreshSeq && !pending.suspectedOversizedDrop && !pending.mayHaveBeenDropped) return true;
     }
     return false;
   }
@@ -2246,12 +2252,12 @@ export class RunnerCore {
         this.refreshPaneStatus();
       }
     }
-    // Durable cursor (#2117, #2870, #1275): any event carrying an explicit non-empty session-entry id
-    // advances it; on OMP, keep main's event-driven persistence for non-UI events carrying a non-empty
-    // event.id (Pi requires explicit entryId only).
-    const entryId = typeof event.entryId === "string" && event.entryId.length > 0
+    // Durable cursor (#2117, #2870, #1275): explicit entryId string takes precedence (empty string
+    // leaves cursor put, as on main); on OMP without entryId, non-empty event.id advances it
+    // (Pi requires explicit entryId only).
+    const entryId = typeof event.entryId === "string"
       ? event.entryId
-      : (this.runtime === "omp" && typeof event.id === "string" && event.id.length > 0 ? event.id : undefined);
+      : (this.runtime === "omp" && typeof event.id === "string" ? event.id : undefined);
     if (entryId) {
       this.lastEntryId = entryId;
       this.unheldSavedCursor = false;

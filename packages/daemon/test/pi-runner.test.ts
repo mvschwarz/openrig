@@ -2071,6 +2071,27 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
     expect(fUsage.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
   });
 
+  it("explicit empty OMP entryId takes precedence and leaves lastEntryId unchanged, matching main", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-empty-entry" }, { runtime: "omp", catchUpSince: "e-10" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s-empty" } }));
+    const beforeSidecars = f.sidecars.length;
+
+    // Explicit empty entryId string must not fall through to generic event.id on OMP (matches main).
+    core.handlePiLine(JSON.stringify({ type: "message_end", entryId: "", id: "e-ignored-on-empty-entry" }));
+    expect(f.sidecars).toHaveLength(beforeSidecars);
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-10");
+
+    // Without entryId, ordinary non-empty OMP event.id still advances and persists the cursor.
+    core.handlePiLine(JSON.stringify({ type: "message_end", id: "e-11-omp" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-11-omp");
+
+    // Explicit non-empty entryId overrides event.id when both are present.
+    core.handlePiLine(JSON.stringify({ type: "message_end", entryId: "e-12-explicit", id: "e-other" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-12-explicit");
+  });
+
   it.each([
     { label: "OMP unknown_since code", payload: { code: "unknown_since", error: "Cursor not in session" } },
     { label: "Entry not found message", payload: { error: "Entry not found: e-stale" } },
