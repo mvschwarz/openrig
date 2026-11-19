@@ -1146,6 +1146,9 @@ for producer/consumer wiring and launch-scoped state lifetime.
 | `rig seat retire-held-message <seat> <id>` | — | `--reason <text>` **required**<br>`--json` |
 | `rig seat status <seat>` | — | `--json` |
 | `rig seat cancel <seat>` | — | `--run-id <id>` **required**<br>`--native-turn-id <id>` **required**<br>`--request-id <id>` **required**<br>`--json` |
+| `rig seat set-input-route <seat>` | — | `--route <route>` **required**<br>`--reason <text>` **required**<br>`--json` |
+| `rig seat set-hook-bridge <seat>` | — | `--enabled <boolean>` **required**<br>`--reason <text>` **required**<br>`--json` |
+| `rig seat hook-bridge <seat>` | — | `--json` |
 | `rig seat handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--recover`<br>`--json` |
 | `rig seat switch-client <seat>` | — | `--to-window <n>`<br>`--client <id>`<br>`--json` |
 | `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |

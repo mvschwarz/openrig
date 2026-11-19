@@ -171,11 +171,10 @@ With no explicit project, `rig scope`, `rig proof add` and daemon-backed
 `rig proof show`/`judge` use the one project whose `workspace.yaml` entry lists
 the caller's rig under `rigs`, and say which. `rig scope` and `rig proof add`
 skip this for an explicit `--workspace`, `OPENRIG_WORK_ROOT` or absolute target
-path, and the proof commands for `--project` or a `<project>:` prefix;
-`rig proof show`/`judge` refuse `--workspace` and use the daemon's own
-workspace. When no project lists the rig, they use the configured default; when
-several do, or the one that does can't be used, they warn and use the configured
-default.
+path, and `rig proof show`/`judge` for `--project` or a `<project>:` prefix;
+those two refuse `--workspace` and use the daemon's own workspace. When no
+project lists the rig, they use the configured default; when several do, or the
+one that does can't be used, they warn and use the configured default.
 
 ## TUI project selection
 
