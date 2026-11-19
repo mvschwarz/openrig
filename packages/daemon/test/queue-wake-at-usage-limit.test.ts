@@ -1,0 +1,61 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type Database from "better-sqlite3";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+
+// A queue wake that reached a seat at its usage limit keeps its receipt word (`verified`, `delivered-ack-pending`), which
+// every reader knows, and the row gains one note saying the seat was at its limit and when it resets. The transport's
+// result carries the reading (session-transport `usageLimit`); a wake whose text never reached the input has none.
+
+const SEAT = "writer@demo";
+const LIMIT = { asOf: "2026-11-19T19:40:00.000Z", resetsAt: "2026-11-19T23:00:00.000Z" };
+
+describe("a queue wake at a seat's usage limit", () => {
+  let db: Database.Database;
+  let reply: Record<string, unknown>;
+  let repo: QueueRepository;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    reply = { ok: true, verified: true };
+    repo = new QueueRepository(db, new EventBus(db), { transport: { send: async () => reply as never } });
+    repo.attachOutbox(new OutboxHandler(db));
+  });
+  afterEach(() => db.close());
+
+  const wake = async () => {
+    const item = await repo.create({ sourceSession: "pm@demo", destinationSession: SEAT, body: "work", summary: "work" });
+    await vi.waitFor(() => expect(repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
+    const notes = repo.listTransitions(item.qitemId).map((t) => t.transitionNote ?? "").filter((note) => note.includes("usage limit"));
+    return { row: repo.getById(item.qitemId)!, notes };
+  };
+
+  it.each([
+    [{ ok: true, verified: true }, "verified"],
+    [{ ok: true, verified: false }, "delivered-ack-pending"],
+  ] as const)("a wake that reached the seat keeps its receipt word and the row says it won't be read before the reset", async (result, word) => {
+    reply = { ...result, usageLimit: { ...LIMIT, notice: "context" } };
+    const { row, notes } = await wake();
+    expect(row.lastNudgeResult).toBe(word);
+    expect(row.state).toBe("pending");
+    expect(notes).toEqual([`wake reached ${SEAT} at its usage limit (recorded ${LIMIT.asOf}; resets ${LIMIT.resetsAt}); delivery=${word}. Its agent isn't expected to read it before the reset.`]);
+  });
+
+  it("control: a wake with no usage-limit reading adds no note", async () => {
+    const { row, notes } = await wake();
+    expect(row.lastNudgeResult).toBe("verified");
+    expect(notes).toEqual([]);
+  });
+
+  it("control: a wake refused before any input adds no note, whatever the reply carries", async () => {
+    reply = { ok: false, sent: false, inputPhase: "not_reached", error: "target_needs_input", usageLimit: { ...LIMIT, notice: "context" } };
+    const { row, notes } = await wake();
+    expect(row.lastNudgeResult).toBe("failed:target_needs_input");
+    expect(notes).toEqual([]);
+  });
+});
