@@ -127,3 +127,9 @@ export function tmuxAttachCommand(session: string): string {
   const word = tmuxSessionWord(session);
   return `${tmuxOnDaemonServer()} attach -t ${shellWord(word, word.includes("="))}`;
 }
+
+/** `tmux set-window-option -t <window> -u window-size` on the daemon's server, for one window by its id (`@N`): drops
+ *  that window's own `window-size`, so it follows the value it inherits again. */
+export function tmuxUnsetWindowSizeCommand(window: string): string {
+  return `${tmuxOnDaemonServer()} set-window-option -t ${shellWord(window)} -u window-size`;
+}
