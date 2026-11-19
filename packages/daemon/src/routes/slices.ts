@@ -163,11 +163,12 @@ export function slicesRoutes(): Hono {
           missions: authored,
         };
       });
-      return { listing, slicesRoot: deps.indexer.slicesRoot, readPolicy };
+      if (listing instanceof Response) return listing;
+      const readinessRoot = tryRealpath(deps.indexer.slicesRoot) ?? deps.indexer.slicesRoot;
+      return { listing, slicesRoot: readinessRoot, readPolicy };
     });
     if (operation instanceof Response) return operation;
     const { listing, slicesRoot, readPolicy } = operation;
-    if (listing instanceof Response) return listing;
     // The membership batch is synchronous and request-local; finish it before yielding to other requests.
     const readiness = await readProjectReadinessAsync(slicesRoot, readPolicy);
     return c.json({ ...listing, missions: { ...listing.missions, ...Object.fromEntries(readiness.missions.map(m => [m.name, {
@@ -326,12 +327,20 @@ function getDeps(c: { get: (key: string) => unknown }): SlicesRoutesDeps | null 
   return { indexer, projector };
 }
 
-function safeRealpath(targetPath: string): string {
+type ResolvedPath = { ok: true; path: string } | { ok: false; missing: boolean };
+
+function resolveRealpath(targetPath: string): ResolvedPath {
+  if (!targetPath) return { ok: false, missing: true };
   try {
-    return fs.realpathSync.native(targetPath);
-  } catch {
-    return path.resolve(targetPath);
+    return { ok: true, path: fs.realpathSync.native(targetPath) };
+  } catch (err) {
+    return { ok: false, missing: (err as NodeJS.ErrnoException).code === "ENOENT" };
   }
+}
+
+function tryRealpath(targetPath: string): string | null {
+  const resolved = resolveRealpath(targetPath);
+  return resolved.ok ? resolved.path : null;
 }
 
 function isInsideDir(parentDir: string, childPath: string): boolean {
@@ -352,26 +361,35 @@ function resolveSliceProjectLookup(
   indexer: SliceIndexer,
 ): SliceProjectLookup {
   let catalogPath: string | null = null;
-  let projects: Array<{ id: string; root: string; missionsRoot: string; error?: string }> = [];
+  let projects: Array<{ id: string; root: string | null; missionsRoot: string | null; error?: string }> = [];
+  let rootUnreadable = false;
   let canonicalProjectId: ((id: string) => string) | undefined;
   try {
     const listed = listProjects(c as never);
     catalogPath = listed.catalogPath;
     const owners = new Map(listed.projects.flatMap((p) => (p.aliases ?? []).map((alias) => [alias, p.id] as const)));
     canonicalProjectId = (id) => owners.get(id) ?? id;
-    projects = listed.projects.map((p) => ({
-      id: p.id,
-      root: safeRealpath(p.root),
-      missionsRoot: safeRealpath(p.missionsRoot),
-      error: p.error,
-    }));
+    projects = listed.projects.map((p) => {
+      const resolvedRoot = resolveRealpath(p.root);
+      const resolvedMissionsRoot = resolveRealpath(p.missionsRoot);
+      if ((!resolvedRoot.ok && !resolvedRoot.missing) || (!resolvedMissionsRoot.ok && !resolvedMissionsRoot.missing)) {
+        rootUnreadable = true;
+      }
+      return {
+        id: p.id,
+        root: resolvedRoot.ok ? resolvedRoot.path : null,
+        missionsRoot: resolvedMissionsRoot.ok ? resolvedMissionsRoot.path : null,
+        error: p.error,
+      };
+    });
   } catch {
     return { resolveProjectId: () => null, additionalSliceRoots: [], complete: false };
   }
-  const additionalSliceRoots = projects.map((project) => project.missionsRoot);
-  const complete = projects.length > 0 && projects.every((project) => !project.error);
+  const additionalSliceRoots = projects
+    .map((project) => project.missionsRoot)
+    .filter((root): root is string => root !== null);
   if (projects.length === 0) {
-    return { resolveProjectId: () => null, additionalSliceRoots, complete, canonicalProjectId };
+    return { resolveProjectId: () => null, additionalSliceRoots, complete: false, canonicalProjectId };
   }
   // A project-scoped indexer's explicitly configured roots keep their existing
   // project identity, including compatible roots outside project.yaml. Extra
@@ -381,17 +399,26 @@ function resolveSliceProjectLookup(
     ? indexer.projectId
     : null;
   const explicitRoots = explicitProjectId
-    ? [indexer.slicesRoot, ...indexer.additionalSliceRoots].map(safeRealpath)
+    ? [indexer.slicesRoot, ...indexer.additionalSliceRoots].flatMap((root) => {
+        const resolved = resolveRealpath(root);
+        if (!resolved.ok) {
+          if (!resolved.missing) rootUnreadable = true;
+          return [];
+        }
+        return [resolved.path];
+      })
     : [];
+  const complete = !rootUnreadable && projects.every((project) => !project.error);
   // The resolver is request-local. Reuse inference only for the same canonical
   // project/mission-root matches, keeping the two containment relations distinct.
   const inferredByContainment = new Map<string, { id: string; root: string }>();
   const resolveProjectId = (slicePath: string): string | null => {
-    const actualSlicePath = safeRealpath(slicePath);
+    const actualSlicePath = tryRealpath(slicePath);
+    if (!actualSlicePath) return null;
     if (explicitProjectId && explicitRoots.some((root) => isInsideDir(root, actualSlicePath))) return explicitProjectId;
     const matching = projects.flatMap((project) => {
-      const projectRootContains = isInsideDir(project.root, actualSlicePath);
-      const missionsRootContains = isInsideDir(project.missionsRoot, actualSlicePath);
+      const projectRootContains = project.root !== null && isInsideDir(project.root, actualSlicePath);
+      const missionsRootContains = project.missionsRoot !== null && isInsideDir(project.missionsRoot, actualSlicePath);
       return projectRootContains || missionsRootContains
         ? [{ project, projectRootContains, missionsRootContains }]
         : [];
@@ -439,7 +466,7 @@ function resolveSliceProjectLookup(
         }
       }
     }
-    if (!selected || selected.error || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
+    if (!selected || selected.error || selected.missionsRoot === null || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;
     return selected.id;
   };
   return { resolveProjectId, additionalSliceRoots, complete, canonicalProjectId };

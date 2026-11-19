@@ -2576,6 +2576,83 @@ describe("GET /api/slices observed queue counts", () => {
         expect.soft(afterAlphaOnly.find((s) => s.name === "01-release")?.derivedState).toBe("pending");
         expect.soft(afterAlphaOnly.find((s) => s.name === "02-alpha-only")?.derivedState).toBe("none");
       });
+
+      it("does not assign explicit project ownership to an unresolved root and shares native realpath resolution with catalog roots", async () => {
+        const alphaExtra = path.join(root, "alpha-extra-missions");
+        write(path.join(alphaExtra, "shipping", "SPEC.md"), nodeBytes("M.ALPHA.SHIP", "active", "Mission"));
+        write(path.join(alphaExtra, "shipping", "slices", "01-release", "SPEC.md"), nodeBytes("SLICE.ALPHA.REL", "active", "Slice"));
+        addSlice("beta", "shipping", "01-release", "active", "SLICE.BETA.REL", { missionId: "M.BETA.SHIP" });
+
+        row("alpha-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-release"]);
+        row("beta-pending", "pending", ["project:beta", "mission:shipping", "slice:01-release"]);
+
+        const unresolvedRoot = `${path.join(root, "beta")}${path.sep}missing-link${path.sep}..${path.sep}missions`;
+        expect(fs.existsSync(unresolvedRoot)).toBe(false);
+        expect(path.resolve(unresolvedRoot)).toBe(path.join(root, "beta", "missions"));
+
+        const danglingLink = path.join(root, "beta", "dangling-link");
+        fs.symlinkSync(path.join(root, "nonexistent-target"), danglingLink, "dir");
+        const danglingUnresolvedRoot = `${danglingLink}${path.sep}..${path.sep}missions`;
+        expect(fs.existsSync(danglingUnresolvedRoot)).toBe(false);
+        expect(path.resolve(danglingUnresolvedRoot)).toBe(path.join(root, "beta", "missions"));
+
+        // Missing-component additional root must not claim Beta's lexical sibling as Alpha.
+        const { app: extraMissingApp } = route("alpha", true, alphaExtra, [unresolvedRoot]);
+        const extraMissingSlices = await list(extraMissingApp);
+        expect(extraMissingSlices.find((s) => s.name === "01-release")).toMatchObject({
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+        });
+        expect((await list(extraMissingApp, "?derived=blocked")).map((s) => s.name)).toEqual(["01-release"]);
+
+        // Dangling-symlink additional root must not claim Beta's lexical sibling either.
+        const { app: danglingExtraApp } = route("alpha", true, alphaExtra, [danglingUnresolvedRoot]);
+        const danglingExtraSlices = await list(danglingExtraApp);
+        expect(danglingExtraSlices.find((s) => s.name === "01-release")).toMatchObject({
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+        });
+        expect((await list(danglingExtraApp, "?derived=blocked")).map((s) => s.name)).toEqual(["01-release"]);
+
+        // Positive control: a valid symlink root outside the catalog still grants explicit project ownership to its target.
+        const validLink = path.join(root, "alpha-extra-link");
+        fs.symlinkSync(alphaExtra, validLink, "dir");
+        // Include a valid catalog project without a missions directory yet (ENOENT) to ensure it does not void counts.
+        const gammaRoot = path.join(root, "gamma");
+        write(path.join(gammaRoot, "SPEC.md"), nodeBytes("P.GAMMA", "active", "Gamma"));
+        catalog([{ id: "beta", root: "beta" }, { id: "gamma", root: "gamma" }]);
+        const { app: validLinkApp } = route("alpha", true, validLink);
+        const validLinkSlices = await list(validLinkApp);
+        expect(validLinkSlices.find((s) => s.name === "01-release")).toMatchObject({
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+        });
+        expect((await list(validLinkApp, "?derived=blocked")).map((s) => s.name)).toEqual(["01-release"]);
+
+        // Shared catalog root helper: a non-ENOENT native realpath failure on a catalog root must fail closed to unknown
+        // instead of falling back to path.resolve.
+        const origNative = fs.realpathSync.native;
+        let catalogFaultHits = 0;
+        const spy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((p: fs.PathLike, options?: fs.EncodingOption) => {
+          if (String(p) === gammaRoot) {
+            catalogFaultHits++;
+            throw Object.assign(new Error("injected catalog root EACCES"), { code: "EACCES" });
+          }
+          return origNative(p, options as never);
+        }) as typeof fs.realpathSync.native);
+        try {
+          const afterCatalogError = await list(validLinkApp);
+          expect(catalogFaultHits).toBeGreaterThan(0);
+          expect(afterCatalogError.find((s) => s.name === "01-release")).toMatchObject({
+            queueCounts: null,
+            derivedState: "unknown",
+          });
+          expect((await list(validLinkApp, "?derived=blocked")).map((s) => s.name)).toEqual([]);
+          expect((await list(validLinkApp, "?derived=unknown")).map((s) => s.name)).toEqual(["01-release"]);
+        } finally {
+          spy.mockRestore();
+        }
+      });
     });
 
     it("invalidates a warm listing when a configured symlink root changes target without refresh", async () => {
@@ -2606,6 +2683,115 @@ describe("GET /api/slices observed queue counts", () => {
       expect(secondBody.missions["new-mission"]?.readiness).toBeDefined();
       expect(secondBody.slices.map(slice => slice.name)).toEqual(["new-slice"]);
       expect(secondBody.missions["old-mission"]).toBeUndefined();
+    });
+
+    it("keeps list readiness bound to the captured native realpath when a symlink root retargets before readiness completes", async () => {
+      const oldRoot = path.join(root, "old-readiness-missions");
+      const newRoot = path.join(root, "new-readiness-missions");
+      const alias = path.join(root, "alpha", "readiness-alias");
+      write(path.join(oldRoot, "shipping", "SPEC.md"), nodeBytes("M.OLD", "active", "Old Mission"));
+      write(path.join(oldRoot, "shipping", "mission.yaml"), "metadata:\n  id: M.OLD\n  status: active\n");
+      write(path.join(oldRoot, "shipping", "slices", "01-old", "SPEC.md"), nodeBytes("OPR.OLD", "active", "Old Slice"));
+
+      write(path.join(newRoot, "shipping", "SPEC.md"), nodeBytes("M.NEW", "closed", "New Mission"));
+      write(path.join(newRoot, "shipping", "mission.yaml"), "metadata:\n  id: M.NEW\n  status: closed\n");
+      write(path.join(newRoot, "shipping", "slices", "01-new", "SPEC.md"), nodeBytes("OPR.NEW", "closed", "New Slice"));
+
+      fs.mkdirSync(path.dirname(alias), { recursive: true });
+      fs.symlinkSync(oldRoot, alias, "dir");
+      const { app } = route("alpha", false, alias);
+
+      // Start the request; the synchronous withResolvedRoots listing and initial readdirSync
+      // complete before readProjectReadinessAsync yields with setImmediate.
+      const pending = app.request("/api/slices");
+      fs.rmSync(alias);
+      fs.symlinkSync(newRoot, alias, "dir");
+
+      const first = await pending;
+      expect(first.status).toBe(200);
+      const firstBody = await first.json() as {
+        slices: Entry[];
+        missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+      };
+      expect(firstBody.slices.map((s) => s.name)).toEqual(["01-old"]);
+      expect(firstBody.missions["shipping"]?.authoredStatus).toBe("active");
+      expect(firstBody.missions["shipping"]?.readiness?.historicalStatus).toBe("active");
+
+      // A subsequent request observes the retargeted alias for both slices and readiness.
+      const second = await app.request("/api/slices");
+      expect(second.status).toBe(200);
+      const secondBody = await second.json() as {
+        slices: Entry[];
+        missions: Record<string, { authoredStatus?: string | null; readiness?: { historicalStatus?: string | null } }>;
+      };
+      expect(secondBody.slices.map((s) => s.name)).toEqual(["01-new"]);
+      expect(secondBody.missions["shipping"]?.authoredStatus).toBe("closed");
+      expect(secondBody.missions["shipping"]?.readiness?.historicalStatus).toBe("closed");
+    });
+
+    it("keeps captured snapshot roots unchanged in sliceRoots during withResolvedRoots", () => {
+      const alphaExtra = path.join(root, "alpha-snapshot-missions");
+      write(path.join(alphaExtra, "shipping", "SPEC.md"), nodeBytes("M.ALPHA", "active", "Mission"));
+      write(path.join(alphaExtra, "shipping", "slices", "01-release", "SPEC.md"), nodeBytes("SLICE.ALPHA", "active", "Slice"));
+
+      const lateTarget = path.join(root, "late-target");
+      fs.mkdirSync(path.join(lateTarget, "sub"), { recursive: true });
+      write(path.join(lateTarget, "missions", "late-mission", "SPEC.md"), nodeBytes("M.LATE", "active", "Late Mission"));
+      write(path.join(lateTarget, "missions", "late-mission", "slices", "02-late", "SPEC.md"), nodeBytes("SLICE.LATE", "active", "Late Slice"));
+
+      const lateLink = path.join(root, "beta", "late-link");
+      fs.mkdirSync(path.dirname(lateLink), { recursive: true });
+      const unresolvedRoot = `${lateLink}${path.sep}..${path.sep}missions`;
+      expect(fs.existsSync(unresolvedRoot)).toBe(false);
+
+      const indexer = new SliceIndexer({
+        db,
+        slicesRoot: unresolvedRoot,
+        additionalSliceRoots: [alphaExtra],
+        dogfoodEvidenceRoot: null,
+      });
+
+      const origNative = fs.realpathSync.native;
+      let unresolvedRealpathCalls = 0;
+      const spy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((p: fs.PathLike, options?: fs.EncodingOption) => {
+        if (String(p) === unresolvedRoot) unresolvedRealpathCalls++;
+        return origNative(p, options as never);
+      }) as typeof fs.realpathSync.native);
+      try {
+        indexer.withResolvedRoots(() => {
+          indexer.withMembershipBatch(() => {
+            const snapshotRoot = indexer.slicesRoot;
+            expect(snapshotRoot).toBe(unresolvedRoot);
+            expect(indexer.isReady()).toBe(true);
+            expect(indexer.list().map((s) => s.name)).toEqual(["01-release"]);
+            expect(indexer.missionAuthoredStatuses()).toEqual({ shipping: { authoredStatus: "active" } });
+
+            // Create the symlink mid-operation; sliceRoots must use the snapshot roots as captured
+            // rather than re-resolving unresolvedRoot to lateTarget/missions mid-request.
+            const callsBeforeLink = unresolvedRealpathCalls;
+            fs.symlinkSync(path.join(lateTarget, "sub"), lateLink, "dir");
+            indexer.invalidate();
+            const midOp = indexer.list();
+            expect(indexer.slicesRoot).toBe(snapshotRoot);
+            expect(midOp.find((s) => s.name === "02-late")).toBeUndefined();
+            expect(unresolvedRealpathCalls).toBe(callsBeforeLink);
+          });
+        });
+
+        // The next withResolvedRoots call captures the newly resolved physical root.
+        const callsBeforeNextOp = unresolvedRealpathCalls;
+        indexer.withResolvedRoots(() => {
+          expect(indexer.slicesRoot).toBe(path.join(lateTarget, "missions"));
+          expect(unresolvedRealpathCalls).toBe(callsBeforeNextOp + 1);
+          indexer.invalidate();
+          const nextOp = indexer.list();
+          expect(nextOp.find((s) => s.name === "02-late")?.slicePath).toBe(
+            path.join(lateTarget, "missions", "late-mission", "slices", "02-late"),
+          );
+        });
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it("keeps unrelated slice counts readable and preserves ambiguity checks when a cached folder moves in a README-only mission", async () => {
@@ -2643,14 +2829,21 @@ describe("GET /api/slices observed queue counts", () => {
       expect((await list(app, "?derived=unknown")).map((s) => s.name)).toEqual(["02-movable"]);
     });
 
-    it("still fails all counts to unknown when a cached entry lookup fails with a non-ENOENT error", async () => {
+    it("still fails all counts to unknown when a stale cached entry lookup fails with a non-ENOENT error", async () => {
+      const missionRoot = path.join(root, "alpha", "missions", "shipping");
       addSlice("alpha", "shipping", "01-stuck", "active", "SLICE.STUCK", { mission: "README.md", slice: "README.md" });
-      const otherDir = addSlice("alpha", "shipping", "02-other", "active", "SLICE.OTHER", { mission: "README.md", slice: "README.md" });
+      const otherDir = path.join(missionRoot, "slices", "02-other");
+      fs.mkdirSync(otherDir, { recursive: true });
+      fs.writeFileSync(path.join(otherDir, "README.md"), nodeBytes("SLICE.OTHER", "active", "Other"));
       row("stuck-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-stuck"]);
       row("other-pending", "pending", ["project:alpha", "mission:shipping", "slice:02-other"]);
 
       const { app } = route();
       expect(derivedByName(await list(app))).toEqual({ "01-stuck": "blocked", "02-other": "pending" });
+
+      // Move the folder away after priming the listing cache so the live walk no longer visits otherDir;
+      // only the visible cached-entry check sees the EACCES on the stale cached spelling.
+      fs.renameSync(otherDir, path.join(missionRoot, "slices", "02-other-moved"));
 
       const origNative = fs.realpathSync.native;
       let hits = 0;

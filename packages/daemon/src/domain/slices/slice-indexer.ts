@@ -1187,17 +1187,21 @@ export class SliceIndexer {
   /** The distinct, absolute roots to scan, each by its filesystem identity (see
    *  `configuredRootIdentity`). Every slice path the indexer produces is built from
    *  these, so the walk, the duplicate check and the published paths name the same
-   *  directory, and a client sees absolute paths whatever its working directory. */
+   *  directory, and a client sees absolute paths whatever its working directory.
+   *  Inside `withResolvedRoots`, the captured snapshot roots are used as they are
+   *  so one request does not re-resolve them mid-operation. */
   private sliceRoots(additionalRoots: readonly string[] = []): string[] {
     const configuredRoots = this.resolvedRootsForOperation ?? this.resolveConfiguredRoots();
-    const roots = [...configuredRoots, ...additionalRoots].filter((root) => root.length > 0);
+    const roots = [
+      ...configuredRoots,
+      ...additionalRoots.map(configuredRootIdentity),
+    ].filter((root) => root.length > 0);
     const seen = new Set<string>();
     const out: string[] = [];
     for (const root of roots) {
-      const identity = configuredRootIdentity(root);
-      if (seen.has(identity)) continue;
-      seen.add(identity);
-      out.push(identity);
+      if (seen.has(root)) continue;
+      seen.add(root);
+      out.push(root);
     }
     return out;
   }
