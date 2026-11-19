@@ -24,10 +24,10 @@ building it yourself.
   the team's questions and its result come to this conversation's address (choice dialogs and other hosts keep their
   path). Set it before you promise to report back. This chat has no wake of its own: say you'll check when they ask,
   list your address's tasks and check the seats each turn, and offer a wake only where their app actually has one.
-- **Don't send them to attach** to a seat's terminal, and with no display (headless or SSH) they answer here too:
-  don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the operator or
-  a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice yourself,
-  with `rig send`, not raw tmux keys into a seat's terminal.
+- **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
+  too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
+  operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
+  yourself, with `rig send`, not raw tmux keys into a seat's terminal.
 
 The full rules are in step 2, "Bring seat permission prompts to the person here".
 
@@ -305,7 +305,7 @@ commands; if the two ever differ, this step is right.
     before you wake it again). A pending task with no wake isn't lost or done.
   - **Nothing wakes this chat** when the team asks or finishes: while its work is open, start each of your turns by
     listing your address's tasks (above), before anything else, including when the person talks to you and when they
-    come back.
+    come back. Where their app has a wake, such as Claude Desktop's scheduled tasks, offer it.
 - **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
   Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
   passed. Tell the person which model failed. If Claude Code is signed in, offer to move the operator to it; on their
