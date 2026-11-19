@@ -59,6 +59,7 @@ describe("structured human questions (#193)", () => {
     const makeRouter = (seen: string) => new InboundRouter({
       queue: makeQueuePorts(repo, { loadHumanRegistry: () => registry }),
       seen: new SeenStore(join(home, seen)), deadLetter: new DeadLetterStore(join(home, "events.jsonl")),
+      actionDeadLetter: new DeadLetterStore(join(home, "actions.jsonl")),
       destination: request.sourceSession, resolveSender: () => ({ admitted: true, source: human, entityId: "human-founder" }),
       resolveRoute: () => ({ destination: request.sourceSession, correlationQitemId: qitemId }), acknowledgeAnswer,
       files: { transfer: async () => ({ stored: [{ localPath: "/fixture/report.pdf", name: "report.pdf", bytes: 7 }],
@@ -72,18 +73,35 @@ describe("structured human questions (#193)", () => {
     const f = await relayedSlack();
     const text = "  Next week, please.\n";
     await expect(f.makeRouter("seen").route(f.reply("2.1", text))).resolves.toMatchObject({ landed: true });
-    expect(repo.getById(f.qitemId)).toMatchObject({ state: "done", humanAnswers: { ship: { text } } });
+    expect(repo.getById(f.qitemId)).toMatchObject({ state: "done", humanAnswers: { ship: typedReply(text, 0) } });
   });
 
-  it("asks for an exact question instead of landing an ambiguous typed answer", async () => {
+  it("lands ambiguous replies without placing them, but allows explicit selection", async () => {
     const f = await relayedSlack(true);
     const router = f.makeRouter("seen");
-    await expect(router.route(f.reply("2.1", "Next week"))).resolves.toMatchObject({ disposition: "refused", reason: "question-selection-required" });
-    expect(f.acknowledgeAnswer).toHaveBeenCalledTimes(1);
-    expect(repo.list()).toHaveLength(1);
-    await expect(router.route(f.reply("2.15", "question:ship\n  "))).resolves.toMatchObject({ disposition: "refused" });
+    f.acknowledgeAnswer.mockRejectedValue(new Error("Slack unavailable"));
+    await expect(router.route(f.reply("2.1", "Next week"))).resolves.toMatchObject({ disposition: "accepted" });
+    await expect(router.route(f.reply("2.15", "question:ship\n  "))).resolves.toMatchObject({ disposition: "accepted" });
+    expect(repo.getById(f.qitemId)?.humanAnswers).toBeNull();
+    expect(repo.answersForAsk(f.qitemId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "unplaced-reply", text: "Next week", questionId: null }),
+      expect.objectContaining({ kind: "unplaced-reply", text: "question:ship\n  ", questionId: null }),
+    ]));
     await expect(router.route(f.reply("2.2", "question:ship\nNext week"))).resolves.toMatchObject({ landed: true });
-    expect(repo.getById(f.qitemId)).toMatchObject({ state: "pending", humanAnswers: { ship: { text: "question:ship\nNext week" } } });
+    expect(repo.getById(f.qitemId)).toMatchObject({ state: "pending", humanAnswers: { ship: { text: "question:ship\nNext week", placement: "explicit" } } });
+  });
+
+  it("delivers a dead-lettered typed reply without inferring a newly unique question", async () => {
+    const f = await relayedSlack(true);
+    const router = f.makeRouter("seen");
+    db.exec(`CREATE TRIGGER reject_reply BEFORE INSERT ON queue_items BEGIN SELECT RAISE(ABORT, 'injected'); END`);
+    const text = "  Next week.\n";
+    await expect(router.route(f.reply("2.1", text))).resolves.toMatchObject({ disposition: "dead-lettered" });
+    db.exec("DROP TRIGGER reject_reply");
+    repo.writeRelayedAnswer({ qitemId: f.qitemId, actorSession: human, nudge: false, direct: { questionId: "ship", optionId: "no" } });
+    await expect(f.makeRouter("seen").retryDeadLetters()).resolves.toEqual({ retried: 1, landed: 1 });
+    expect(repo.getById(f.qitemId)).toMatchObject({ state: "pending", humanAnswers: { ship: "no" } });
+    expect(repo.answersForAsk(f.qitemId)).toContainEqual(expect.objectContaining({ kind: "unplaced-reply", text }));
   });
 
   it("records a typed correction after close and retains one linked attachment row across redelivery", async () => {
@@ -110,6 +128,20 @@ describe("structured human questions (#193)", () => {
     await router.routeAction(click("2.2", "no"));
     await expect(f.makeRouter("fresh-seen").routeAction(older)).resolves.toMatchObject({ status: "accepted" });
     expect(repo.getById(f.qitemId)?.humanAnswers).toEqual({ ship: "no" });
+  });
+
+  it("delivers a failed click on retry without replacing a newer choice", async () => {
+    const f = await relayedSlack(true);
+    const router = f.makeRouter("seen");
+    const click = (ts: string, option: string) => ({ type: "block_actions", user: { id: "UFOUNDER" }, channel: { id: "C-TEST" },
+      container: { message_ts: "1.1" }, actions: [{ block_id: "or-q:ship", action_id: `or-opt:${option}`, action_ts: ts }] });
+    db.exec(`CREATE TRIGGER reject_answer BEFORE UPDATE OF human_answers ON queue_items BEGIN SELECT RAISE(ABORT, 'injected'); END`);
+    await expect(router.routeAction(click("2.1", "yes"))).resolves.toMatchObject({ status: "handler-failed" });
+    db.exec("DROP TRIGGER reject_answer");
+    await expect(router.routeAction(click("2.2", "no"))).resolves.toMatchObject({ status: "accepted" });
+    await expect(f.makeRouter("seen").retryDeadLetters()).resolves.toEqual({ retried: 1, landed: 1 });
+    expect(repo.getById(f.qitemId)?.humanAnswers).toEqual({ ship: "no" });
+    expect(repo.answersForAsk(f.qitemId)).toContainEqual(expect.objectContaining({ kind: "unplaced-reply", text: "Yes", optionId: "yes" }));
   });
 
   describe("create", () => {

@@ -72,6 +72,7 @@ it("keeps other questions open and commits one return across failures and repeat
   expect((await f.relay({ ...picked, questionId: "unknown" })).status).toBe(409);
   expect((await f.relay(picked)).status).toBe(200);
   expect((await f.relay(picked)).status).toBe(200);
+  expect((await f.relay({ ...picked, text: "Different words." })).status).toBe(409);
   expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "pending" });
   expect(f.history()).toEqual([expect.objectContaining({ questionId: "second", optionId: "no", answeredAt: picked.answeredAt, qitemId: null })]);
   const first = { questionId: "first", optionId: "yes", text: "Yes." };
@@ -109,6 +110,33 @@ it("includes an attributed direct word-for-word answer in the mixed history", as
   expect(f.history()).toEqual([
     expect.objectContaining({ kind: "relayed-answer", recordedBy: relaySeat }),
     expect.objectContaining({ kind: "direct-answer", questionId: "second", by: person, text: "  My own words.\n", at: "2026-02-03T04:05:07.000Z" }),
+  ]);
+});
+
+it("returns an unplaced app reply verbatim without settling an ambiguous question", async () => {
+  const f = await fixture(true, true);
+  expect((await f.relay({ questionId: "first" })).status).toBe(200);
+  const text = "  I need more time.\n";
+  expect((await f.correct({ decision: text })).status).toBe(200);
+  expect((await f.correct({ decision: text })).status).toBe(200);
+  expect(f.repo.getById(f.ask.qitemId)).toMatchObject({ state: "pending", humanAnswers: null });
+  const replies = f.history().filter(answer => "kind" in answer && answer.kind === "unplaced-reply");
+  expect(replies).toEqual([expect.objectContaining({ text, by: person, questionId: null })]);
+  expect(f.repo.getById(replies[0]?.qitemId ?? "")).toMatchObject({ replyTo: f.ask.qitemId, destinationSession: asker,
+    body: expect.stringContaining(text) });
+  const body = f.repo.getById(replies[0]?.qitemId ?? "")?.body;
+  for (const question of ["first: first", "second: second", "third: third"]) expect(body).toContain(question);
+});
+
+it("keeps the actual person's earlier click in the history when the first relay is written", async () => {
+  const f = await fixture(true);
+  const by = "another-reader@external";
+  f.repo.recordHumanAnswer({ qitemId: f.ask.qitemId, actorSession: by, primaryUser: true, questionId: "first", optionId: "yes" });
+  vi.setSystemTime(new Date("2026-02-03T04:05:07Z"));
+  expect((await f.relay({ questionId: "second" })).status).toBe(200);
+  expect(f.history()).toEqual([
+    expect.objectContaining({ kind: "direct-answer", questionId: "first", optionId: "yes", text: "Yes", by, at: "2026-02-03T04:05:06.000Z" }),
+    expect.objectContaining({ kind: "relayed-answer", questionId: "second", recordedBy: relaySeat }),
   ]);
 });
 

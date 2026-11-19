@@ -315,10 +315,10 @@ export class InboundRouter {
    * failure so callers dead-letter ONLY real failures. On success, marks seen
    * (durable qitem exists → safe).
    */
-  private async attemptLand(ev: SlackEvent, isCurrent: () => boolean = () => true): Promise<{
+  private async attemptLand(ev: SlackEvent, isCurrent: () => boolean = () => true, recovering = false): Promise<{
     landed: boolean;
     qitemId?: string;
-    reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered" | "question-selection-required";
+    reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered";
     correlationQitemId?: string;
     replyResolution?: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable";
   }> {
@@ -393,36 +393,13 @@ export class InboundRouter {
       const settles = route.correlationQitemId === undefined || this.deps.queue.routesToAsker?.(route.correlationQitemId, route.destination) !== false;
       const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined && settles;
       if (answerable && route.correlationQitemId && correlated?.relayedAnswers && ev.text?.trim() && this.deps.queue.answerRelayedAsk) {
-        const journal = correlated.relayedAnswers;
-        const questions = correlated.humanQuestions ?? [];
-        const relayed = new Set(journal.relays.map(answer => answer.questionId));
-        const open = correlated.state === "pending"
-          ? unansweredQuestions(questions.filter(q => !relayed.has(q.id)), correlated.humanAnswers ?? {}) : [];
-        const candidates = correlated.state === "pending" ? open : questions.filter(q => relayed.has(q.id));
-        // A retry must use its original question, even if the first write completed the ask.
-        const replay = [...journal.corrections, ...(journal.directAnswers ?? [])].find(answer => answer.eventId === eventId);
         const selection = /^question:([^\s]+)(?:\r?\n|$)/.exec(ev.text);
-        const named = selection?.[1];
-        const eligible = named && correlated.state === "pending" ? [...open, ...questions.filter(q => relayed.has(q.id))] : candidates;
-        const questionId = replay ? replay.questionId ?? undefined
-          : selection ? ev.text.slice(selection[0].length).trim() ? eligible.find(q => q.id === named)?.id : undefined
-          : candidates.length === 1 ? candidates[0]?.id : undefined;
-        if (questions.length && !questionId) {
-          // This message was refused, not queued for later inference against a different set of questions.
-          this.deps.seen.mark(eventId, "question-selection-required");
-          const ids = [...new Set(eligible.map(q => q.id))].map(id => `\`question:${id}\``).join(", ");
-          try {
-            await this.deps.acknowledgeAnswer?.({ channel: ev.channel, threadTs: ev.thread_ts ?? ts, text: ids
-              ? `Your reply wasn't recorded as an answer. Put the question on the first line (${ids}), then your answer on the next line, or use its buttons.`
-              : "Your reply wasn't recorded as an answer. No question is open for this reply." });
-          } catch (error) {
-            this.deps.log?.(`question selection notice failed qitem=${route.correlationQitemId}: ${String(error)}`);
-          }
-          return { landed: false, reason: "question-selection-required", correlationQitemId: route.correlationQitemId };
-        }
+        const questionId = selection && ev.text.slice(selection[0].length).trim() ? selection[1] : undefined;
         try {
           const correction = this.deps.queue.answerRelayedAsk({ qitemId: route.correlationQitemId, actorSession: who.source,
             identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId, direct: { text: ev.text, eventId, questionId,
+              recovering: recovering || Boolean(selection && !questionId)
+                || this.deps.deadLetter.readAll().some(entry => this.inboundEventId(entry.ev) === eventId),
               ...(attachments ? { attachments: { body: attachments, tag: `${SLACK_ATTACHMENTS_TAG_PREFIX}${attachments.length}` } } : {}) } });
           if (correction.replyQitemId && route.arrivalThread) {
             this.deps.recordArrivalThread?.({ qitemId: correction.replyQitemId, ...route.arrivalThread });
@@ -550,12 +527,12 @@ export class InboundRouter {
     correlationQitemId?: string;
     replyResolution?: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable";
   }> {
-    const r = await this.attemptLand(ev, isCurrent);
+    const r = await this.attemptLand(ev, isCurrent, attempts > 0);
     if (!r.landed && (r.reason === "create_failed" || r.reason === "resolve_failed")) {
       this.deps.deadLetter.append(ev, attempts + 1);
       this.deps.log?.(`dead-lettered ts=${ev.ts} (attempt ${attempts + 1})`);
     }
-    const disposition = r.landed ? "accepted" : r.reason === "unregistered" || r.reason === "question-selection-required" ? "refused" : (r.reason === "dup" || r.reason === "inflight" || r.reason === "inactive") ? "ignored" : "dead-lettered";
+    const disposition = r.landed ? "accepted" : r.reason === "unregistered" ? "refused" : (r.reason === "dup" || r.reason === "inflight" || r.reason === "inactive") ? "ignored" : "dead-lettered";
     return { landed: r.landed, qitemId: r.qitemId, disposition, reason: r.reason, correlationQitemId: r.correlationQitemId, replyResolution: r.replyResolution };
   }
 
@@ -625,12 +602,15 @@ export class InboundRouter {
     const ask = this.deps.queue.getQitem?.(qitemId);
     if (ask?.relayedAnswers && this.deps.queue.answerRelayedAsk) {
       try {
+        const clickKey = this.clickReplyKey(payload);
         const answer = this.deps.queue.answerRelayedAsk({ qitemId, actorSession: who.source,
           identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId,
-          direct: { ...picked, eventId: action?.action_ts ? `slack-click:${channel}:${rootTs}:${who.source}:${action.action_ts}` : undefined } });
-        if (live) await acknowledge(answer.corrected ? "Your direct correction was sent to the asking agent."
+          direct: { ...picked, eventId: action?.action_ts ? `slack-click:${channel}:${rootTs}:${who.source}:${action.action_ts}` : undefined,
+            recovering: !live || Boolean(clickKey && this.deps.actionDeadLetter?.readAll().some(entry => this.clickReplyKey(entry.ev) === clickKey)) } });
+        if (live) await acknowledge(answer.unplaced ? "Your choice was sent to the asking agent without changing any answer."
+          : answer.corrected ? "Your direct correction was sent to the asking agent."
           : answer.unanswered.length ? "Answer recorded; other questions are still open." : "All answered and sent back.");
-        return { status: "accepted", reason: answer.unanswered.length ? "answer-recorded" : "answers-complete" };
+        return { status: "accepted", reason: answer.unplaced ? "reply-delivered" : answer.unanswered.length ? "answer-recorded" : "answers-complete" };
       } catch (error) {
         this.deps.log?.(`relay answer continuation failed qitem=${qitemId}: ${String(error)}`);
         if (live) await acknowledge("This answer was not recorded. Check that the question is still open or corrects a relayed answer.");
@@ -1092,7 +1072,7 @@ export class InboundRouter {
         continue;
       }
       if (e.ev.ts && seen.has(this.inboundEventId(e.ev))) continue; // already landed → recovered, drop from set
-      const r = await this.attemptLand(e.ev);
+      const r = await this.attemptLand(e.ev, undefined, true);
       if (r.landed) landed++;
       else if (r.reason === "create_failed" || r.reason === "resolve_failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
       else if (r.reason === "inflight") stillFailing.push(e); // owner has not proved durable landing yet

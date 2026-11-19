@@ -1,4 +1,4 @@
-import { formatHumanAnswers, type HumanAnswers, type HumanQuestion } from "./human-questions.js";
+import { formatHumanAnswers, type HumanAnswers, type HumanQuestion, type TypedHumanReply } from "./human-questions.js";
 
 export interface RelaySubmission {
   readonly attributedTo: string;
@@ -26,11 +26,19 @@ export interface RelayedAnswer extends AnswerRecord {
 
 export interface DirectAnswer extends AnswerRecord {
   readonly kind: "direct-answer";
+  readonly placement?: TypedHumanReply["placement"];
   readonly eventId?: string;
 }
 
 export interface DirectCorrection extends AnswerRecord {
   readonly kind: "direct-correction";
+  readonly placement?: TypedHumanReply["placement"];
+  readonly qitemId: string;
+  readonly eventId?: string;
+}
+
+export interface UnplacedReply extends AnswerRecord {
+  readonly kind: "unplaced-reply";
   readonly qitemId: string;
   readonly eventId?: string;
 }
@@ -39,6 +47,7 @@ export interface RelayJournal {
   readonly relays: readonly RelayedAnswer[];
   readonly corrections: readonly DirectCorrection[];
   readonly directAnswers?: readonly DirectAnswer[];
+  readonly unplacedReplies?: readonly UnplacedReply[];
   readonly returnId: string | null;
 }
 
@@ -47,6 +56,7 @@ export interface RelayedAnswerReceipt {
   readonly replyQitemId: string | null;
   readonly unanswered: string[];
   readonly corrected?: boolean;
+  readonly unplaced?: boolean;
 }
 
 export type RelayAnswerWrite = {
@@ -62,11 +72,12 @@ export type RelayAnswerWrite = {
     readonly text?: string;
     readonly primaryUser?: boolean;
     readonly eventId?: string;
+    readonly recovering?: boolean;
     readonly attachments?: { readonly body: string; readonly tag: string };
   };
 });
 
-export type ReturnedRelayAnswer = ((RelayedAnswer | DirectAnswer) & { readonly qitemId: string | null }) | DirectCorrection;
+export type ReturnedRelayAnswer = ((RelayedAnswer | DirectAnswer) & { readonly qitemId: string | null }) | DirectCorrection | UnplacedReply;
 
 export function renderRelayedAnswers(journal: RelayJournal, questions: readonly HumanQuestion[], direct: HumanAnswers): string {
   return [...journal.relays.filter(relay => !journal.corrections.some(answer => answer.questionId === relay.questionId)).map(relay => {

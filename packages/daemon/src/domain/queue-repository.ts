@@ -88,7 +88,7 @@ import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { isEpisodeRelay, RELAY_CLAIMED_PREFIX, RELAY_FOR_PREFIX, RELAY_KEY_PREFIX, RELAY_TAG } from "./return-route.js";
 import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { isHostPairingAsk } from "./hosts/pairing-ask.js";
-import { renderRelayedAnswers, type RelayJournal, type RelayAnswerWrite, type RelayedAnswerReceipt, type ReturnedRelayAnswer } from "./relayed-answers.js";
+import { renderRelayedAnswers, type DirectAnswer, type RelayJournal, type RelayAnswerWrite, type RelayedAnswerReceipt, type ReturnedRelayAnswer } from "./relayed-answers.js";
 import { parseReplyToChoice, parseArrivalThread, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, recordsNoWakeRoute, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
@@ -2409,15 +2409,15 @@ export class QueueRepository {
     const ask = this.getById(askId);
     if (!this.hasReplyToColumn || !ask || ask.humanIntent === "update" || !this.isPersonAddress(ask.destinationSession)) return [];
     if (ask.relayedAnswers) {
-      const { relays, corrections, directAnswers = [], returnId } = ask.relayedAnswers;
-      return [...[...relays, ...directAnswers].map(answer => ({ ...answer, qitemId: returnId })), ...corrections].sort((a, b) => a.at.localeCompare(b.at));
+      const { relays, corrections, directAnswers = [], unplacedReplies = [], returnId } = ask.relayedAnswers;
+      return [...[...directAnswers, ...relays].map(answer => ({ ...answer, qitemId: returnId })), ...corrections, ...unplacedReplies].sort((a, b) => a.at.localeCompare(b.at));
     }
     const candidates = (this.db.prepare(`SELECT qitem_id, source_session, ts_created,
         EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer') AS tagged
       FROM queue_items
       WHERE reply_to = ? AND destination_session = ?
         AND (EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')
-          OR (qitem_id LIKE 'qitem-slack-inbound-%' AND COALESCE(summary, '') NOT LIKE '[Recovered after gap] %'))
+          ${this.hasSummaryColumn ? "OR (qitem_id LIKE 'qitem-slack-inbound-%' AND COALESCE(summary, '') NOT LIKE '[Recovered after gap] %')" : ""})
       ORDER BY ts_created, rowid`).all(askId, ask.sourceSession) as Array<{ qitem_id: string; source_session: string; ts_created: string; tagged: number }>)
       .filter((row) => !this.isSharedChannel(row.source_session)
         && (this.answersAsk(ask, row.source_session) || (row.tagged === 1 && row.source_session === UNATTRIBUTED_ACTOR)));
@@ -2469,18 +2469,19 @@ export class QueueRepository {
       }
       const questions = ask.humanQuestions ?? [];
       const submission = "relay" in input ? input.relay : input.direct;
-      const question = questions.find(q => q.id === submission.questionId);
-      if ((questions.length ? !question : submission.questionId !== undefined)
-        || (submission.optionId !== undefined && !question?.options.some(option => option.id === submission.optionId))) {
+      const named = questions.find(q => q.id === submission.questionId);
+      const option = named?.options.find(option => option.id === submission.optionId);
+      if (("relay" in input && (questions.length ? !named : submission.questionId !== undefined))
+        || (submission.optionId !== undefined && !option)) {
         refuse("Name the exact question and, for a choice, a valid option on that question.");
       }
-      const questionId = question?.id ?? null;
       let journal: RelayJournal = ask.relayedAnswers ?? { relays: [], corrections: [], returnId: null };
       let direct = ask.humanAnswers ?? {};
-      const unanswered = () => unansweredQuestions(questions.filter(q => !journal.relays.some(r => r.questionId === q.id)), direct).map(q => q.id);
-      const prior = journal.relays.find(answer => answer.questionId === questionId);
-      const receipt = (replyQitemId = journal.returnId, corrected = false): RelayedAnswerReceipt => ({
-        item: this.getByIdOrThrow(input.qitemId), replyQitemId, unanswered: unanswered(), ...(corrected ? { corrected } : {}),
+      const relayedQuestions = () => questions.filter(q => journal.relays.some(answer => answer.questionId === q.id));
+      const openQuestions = () => unansweredQuestions(questions.filter(q => !journal.relays.some(r => r.questionId === q.id)), direct);
+      const unanswered = () => ask.state === "pending" ? openQuestions().map(q => q.id) : [];
+      const receipt = (replyQitemId = journal.returnId, disposition?: "corrected" | "unplaced"): RelayedAnswerReceipt => ({
+        item: this.getByIdOrThrow(input.qitemId), replyQitemId, unanswered: unanswered(), ...(disposition ? { [disposition]: true } : {}),
       });
       const at = new Date().toISOString();
       const identity = { identityProvenance: input.identityProvenance, identityPrincipal: input.identityPrincipal };
@@ -2493,8 +2494,11 @@ export class QueueRepository {
         wakes.push(create);
       };
       let correctionId: string | undefined;
+      let unplacedId: string | undefined;
       if ("relay" in input) {
         const relay = input.relay;
+        const questionId = named?.id ?? null;
+        const prior = journal.relays.find(answer => answer.questionId === questionId);
         if (parseSessionName(input.actorSession).kind !== "canonical" || !this.answersAsk(ask, relay.attributedTo)
           || !this.isPersonAddress(relay.attributedTo)) refuse("Record as an agent seat and attribute the answer to a registered person.");
         if (prior) {
@@ -2502,9 +2506,20 @@ export class QueueRepository {
             && prior.channel === relay.channel && prior.optionId === relay.optionId && prior.answeredAt === relay.answeredAt) return receipt();
           refuse("This question already has a relay; a direct answer can correct it.");
         }
-        if (ask.state !== "pending" || ask.blockedOn || (question && Object.hasOwn(direct, question.id))
+        if (ask.state !== "pending" || ask.blockedOn || (named && Object.hasOwn(direct, named.id))
           || this.getById(humanAnswerId(ask.qitemId)) || (!ask.relayedAnswers && this.answersForAsk(ask.qitemId).length > 0)) {
           refuse("This question is not waiting for a relayed answer.");
+        }
+        if (!ask.relayedAnswers && Object.keys(direct).length) {
+          // Partial clicks predate the journal. Recover their real actor and time from the click transitions.
+          const choices = new Map<string, Omit<DirectAnswer, "by" | "at">>(questions.flatMap(q => q.options.map(o => [
+            `human-answer-recorded: ${JSON.stringify({ questionId: q.id, optionId: o.id })}`,
+            { kind: "direct-answer" as const, questionId: q.id, optionId: o.id, text: o.label },
+          ] as const)));
+          journal = { ...journal, directAnswers: this.transitionLog.listForQitem(ask.qitemId).flatMap(transition => {
+            const choice = choices.get(transition.transitionNote ?? "");
+            return choice ? [{ ...choice, by: transition.actorSession, at: transition.ts }] : [];
+          }) };
         }
         journal = { ...journal, relays: [...journal.relays, { kind: "relayed-answer", by: relay.attributedTo, at,
           recordedBy: input.actorSession, questionId, channel: relay.channel, text: relay.text,
@@ -2512,36 +2527,61 @@ export class QueueRepository {
       } else {
         if (!ask.relayedAnswers || this.isSharedChannel(input.actorSession)
           || (!input.direct.primaryUser && !this.answersAsk(ask, input.actorSession))) refuse("Only a direct human answer can correct a relay.");
-        const text = input.direct.text ?? question?.options.find(option => option.id === input.direct.optionId)?.label ?? "";
+        const text = input.direct.text ?? option?.label ?? "";
         if (!text.trim()) refuse("Supply the direct answer's words or option.");
-        const { eventId, optionId, attachments } = input.direct;
-        const history = [...journal.corrections, ...(journal.directAnswers ?? [])];
+        const { eventId, optionId, attachments, recovering } = input.direct;
+        const history = [...journal.corrections, ...(journal.directAnswers ?? []), ...(journal.unplacedReplies ?? [])];
         const replay = eventId ? history.find(answer => answer.eventId === eventId)
-          : history.filter(answer => answer.questionId === questionId).at(-1);
-        if (replay && replay.questionId === questionId && replay.by === input.actorSession && replay.text === text && replay.optionId === optionId) {
-          return replay.kind === "direct-correction" ? receipt(replay.qitemId, true) : receipt();
+          : history.filter(answer => named ? answer.questionId === named.id
+            : answer.questionId === null || (submission.questionId === undefined && "placement" in answer && answer.placement === "first-unanswered"))
+            .sort((a, b) => a.at.localeCompare(b.at)).at(-1);
+        if (replay && (!named || replay.questionId === named.id || (eventId && replay.kind === "unplaced-reply"))
+          && replay.by === input.actorSession && replay.text === text && replay.optionId === optionId) {
+          if (replay.kind === "direct-correction") return receipt(replay.qitemId, "corrected");
+          if (replay.kind === "unplaced-reply") return receipt(replay.qitemId, "unplaced");
+          return receipt();
         }
         if (eventId && replay) refuse("This event was already recorded with a different answer.");
-        if (ask.state !== "pending" && !(ask.state === "done" && ask.closureReason === "relayed-answer" && prior)) {
+        const waiting = ask.state === "pending" && !ask.blockedOn;
+        const closedByRelay = ask.state === "done" && ask.closureReason === "relayed-answer";
+        const candidates = waiting ? openQuestions() : closedByRelay ? unansweredQuestions(relayedQuestions(), direct) : [];
+        const question = named ?? (!recovering && submission.questionId === undefined && candidates.length === 1 ? candidates[0] : undefined);
+        const questionId = question?.id ?? null;
+        const prior = journal.relays.find(answer => answer.questionId === questionId);
+        const canPlace = (waiting || (closedByRelay && prior !== undefined))
+          && (question !== undefined || (questions.length === 0 && submission.questionId === undefined));
+        if (!canPlace && optionId !== undefined && !recovering) {
           refuse("This ask is not waiting for an answer or a correction to that question.");
         }
-        if (question) direct = { ...direct, [question.id]: optionId ?? { kind: "typed-reply", text, placement: "explicit", unansweredCount: 0 } };
+        const typedReply: TypedHumanReply = { kind: "typed-reply", text, placement: named ? "explicit" : "first-unanswered",
+          unansweredCount: Math.max(0, openQuestions().length - (prior ? 0 : 1)) };
         const answer = { by: input.actorSession, at, text, questionId,
           ...(optionId === undefined ? {} : { optionId }), ...(eventId ? { eventId } : {}) };
-        if (prior) {
+        const placedAnswer = { ...answer, ...(question && optionId === undefined ? { placement: typedReply.placement } : {}) };
+        if (!canPlace || recovering) {
+          unplacedId = humanAnswerId(ask.qitemId, `relay-unplaced:${journal.unplacedReplies?.length ?? 0}`);
+          journal = { ...journal, unplacedReplies: [...(journal.unplacedReplies ?? []),
+            { kind: "unplaced-reply", qitemId: unplacedId, ...answer, questionId: null }] };
+          const describe = (items: HumanQuestion[]) => items.map(q => `${q.id}: ${q.question}`).join("; ") || "none";
+          deliver(unplacedId, `Direct reply (not placed): ${ask.summary ?? ask.qitemId}`,
+            `Direct reply from ${input.actorSession} on ${ask.qitemId}; no answer was changed.${named ? ` Selected question: ${named.id}.` : ""}\nOpen questions: ${describe(waiting ? openQuestions() : [])}\nQuestions with a relay: ${describe(relayedQuestions())}\n\n${text}`, "human-reply-unplaced");
+        } else if (question) {
+          direct = { ...direct, [question.id]: optionId ?? typedReply };
+        }
+        if (!unplacedId && prior) {
           correctionId = humanAnswerId(ask.qitemId, `relay-correction:${journal.corrections.length}`);
-          journal = { ...journal, corrections: [...journal.corrections, { kind: "direct-correction", qitemId: correctionId, ...answer }] };
+          journal = { ...journal, corrections: [...journal.corrections, { kind: "direct-correction", qitemId: correctionId, ...placedAnswer }] };
           deliver(correctionId, `Direct correction to a RELAYED answer: ${ask.summary ?? ask.qitemId}`,
-            `Direct correction from ${input.actorSession} to the RELAYED answer on ${ask.qitemId}${question ? `, question ${question.id}${input.direct.optionId ? `, option ${input.direct.optionId}` : ""}` : ""}. The relay stays in history. Do not repeat work already performed.\n\n${text}`, "human-answer-correction");
-        } else {
-          journal = { ...journal, directAnswers: [...(journal.directAnswers ?? []), { kind: "direct-answer", ...answer }] };
+            `Direct correction from ${input.actorSession} to the RELAYED answer on ${ask.qitemId}${question ? `, question ${question.id}${optionId ? `, option ${optionId}` : ""}` : ""}. The relay stays in history. Do not repeat work already performed.\n\n${question && !named ? `${describeTypedReplyPlacement(question, typedReply)}:\n` : ""}${text}`, "human-answer-correction");
+        } else if (!unplacedId) {
+          journal = { ...journal, directAnswers: [...(journal.directAnswers ?? []), { kind: "direct-answer", ...placedAnswer }] };
         }
         if (eventId && attachments) {
           deliver(humanAnswerId(ask.qitemId, `relay-attachments:${eventId}`), `Attachments to a direct answer on ${ask.qitemId}`,
             attachments.body, attachments.tag);
         }
       }
-      const completed = ask.state === "pending" && unanswered().length === 0;
+      const completed = !unplacedId && ask.state === "pending" && unanswered().length === 0;
       if (completed) {
         const returnId = humanAnswerId(ask.qitemId, "relayed-answer");
         deliver(returnId, `Answers recorded with a RELAY: ${ask.summary ?? ask.qitemId}`,
@@ -2551,10 +2591,10 @@ export class QueueRepository {
       this.db.prepare("UPDATE queue_items SET relayed_answers = ?, human_answers = ?, ts_updated = ? WHERE qitem_id = ?")
         .run(JSON.stringify(journal), Object.keys(direct).length ? JSON.stringify(direct) : null, at, ask.qitemId);
       events.push(...this.updateInTransactionalContext({ qitemId: ask.qitemId, actorSession: input.actorSession, ...identity,
-        transitionNote: completed ? "RELAYED answer set returned to the asking seat" : correctionId ? "Direct correction to a RELAYED answer" : "relay" in input ? "RELAYED answer recorded" : "Direct answer recorded",
+        transitionNote: completed ? "RELAYED answer set returned to the asking seat" : correctionId ? "Direct correction to a RELAYED answer" : unplacedId ? "Direct reply returned without placing it" : "relay" in input ? "RELAYED answer recorded" : "Direct answer recorded",
         ...(completed ? { state: "done", closureReason: "relayed-answer", resolution: renderRelayedAnswers(journal, questions, direct) } : {}),
       }, completed).persistedEvents);
-      return receipt(correctionId ?? journal.returnId, correctionId !== undefined);
+      return unplacedId ? receipt(unplacedId, "unplaced") : correctionId ? receipt(correctionId, "corrected") : receipt();
     })();
     const deliverWakes = () => {
       for (const wake of wakes) {
