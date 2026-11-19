@@ -9,6 +9,7 @@ import { migrate } from "../src/db/migrate.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -2008,7 +2009,7 @@ describe("managed Pi input and attributed wake", () => {
 });
 
 describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and tail reader", () => {
-  it("uses since saved cursor, persists live entryId (ignoring OMP event.id), falls back to local tail, and keeps full reads for Pi --usage-facts", () => {
+  it("uses since saved cursor, restores main live event persistence (OMP event.id vs Pi entryId-only), falls back to local tail, and keeps full reads for Pi --usage-facts", () => {
     const f = fakeIo();
     const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-1" }, { runtime: "omp", catchUpSince: "e-10" });
     core.start();
@@ -2017,14 +2018,33 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
     core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
     expect(f.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-10", id: "pi-runner-cursor-refresh" });
 
-    // Generic OMP event.id must not overwrite lastEntryId, while explicit event.entryId persists immediately (main behavior).
+    // extension_ui_request returns early before cursor selection and must not overwrite lastEntryId.
     core.handlePiLine(JSON.stringify({ type: "extension_ui_request", id: "ui-99", method: "setStatus" }));
     expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-10");
-    core.handlePiLine(JSON.stringify({ type: "message_end", entryId: "e-11" }));
-    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-11");
 
+    // Restores main's OMP event-driven persistence: non-UI OMP events carrying event.id advance and persist the cursor.
+    core.handlePiLine(JSON.stringify({ type: "message_end", id: "e-11-omp" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-11-omp");
     core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
-    expect(f.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-11", id: "pi-runner-cursor-refresh:2" });
+    expect(f.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-11-omp", id: "pi-runner-cursor-refresh:2" });
+
+    // Explicit event.entryId also advances and persists immediately.
+    core.handlePiLine(JSON.stringify({ type: "message_end", entryId: "e-12" }));
+    expect(f.sidecars.at(-1)?.lastEntryId).toBe("e-12");
+    core.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(f.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-12", id: "pi-runner-cursor-refresh:3" });
+
+    // Pi control (#2117): generic event.id never becomes the cursor on Pi, while explicit event.entryId still does.
+    const fPi = fakeIo();
+    const piCore = new RunnerCore(fPi.io, { sessionName: SESSION, launchId: "launch-pi" }, { runtime: "pi", catchUpSince: "e-pi-1" });
+    piCore.start();
+    piCore.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s-pi" } }));
+    piCore.handlePiLine(JSON.stringify({ type: "message_end", id: "pi-generic-99" }));
+    expect(fPi.sidecars.at(-1)?.lastEntryId).toBe("e-pi-1");
+    piCore.handlePiLine(JSON.stringify({ type: "message_end", entryId: "e-pi-2" }));
+    expect(fPi.sidecars.at(-1)?.lastEntryId).toBe("e-pi-2");
+    piCore.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(fPi.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-pi-2", id: "pi-runner-cursor-refresh" });
 
     // Unseeded runner uses local session tail for a bounded refresh and confirms anchorId on an empty success reply.
     const fTail = fakeIo();
@@ -2084,6 +2104,55 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
     expect(fFallback.rpc).toHaveLength(countAfterRecovery);
   });
 
+  it("remembers a rejected file-tail position instead of repeating it on every turn, and allows one eligible fallback", () => {
+    // Case 1: unseeded runner selects local file tail "e-bad-tail", which the child rejects with unknown_since.
+    let tailId: string | null = "e-bad-tail";
+    const fFresh = fakeIo();
+    fFresh.io.readLastEntryId = () => tailId;
+    const fresh = new RunnerCore(fFresh.io, { sessionName: SESSION, launchId: "launch-fresh" }, { runtime: "omp" });
+    fresh.start();
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s-fresh" } }));
+    fresh.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fFresh.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-bad-tail", id: "pi-runner-cursor-refresh" });
+
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, code: "unknown_since", error: "Cursor not in session" }));
+    expect(fFresh.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+
+    // If the recovery read fails transiently, the next turn still skips the refused "e-bad-tail" rather than repeating it.
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: false, error: "temporarily busy" }));
+    fresh.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fFresh.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+
+    // Once a new tail entry appears in the file, bounded refresh resumes from the new tail.
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:3", command: "get_entries", success: false, error: "temporarily busy" }));
+    tailId = "e-good-tail";
+    fresh.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fFresh.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-good-tail", id: "pi-runner-cursor-refresh:4" });
+    fresh.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:4", command: "get_entries", success: true, data: { entries: [] } }));
+    expect(fFresh.sidecars.at(-1)?.lastEntryId).toBe("e-good-tail");
+
+    // Case 2: seeded runner rejects saved "e-stale", recovers with distinct file tail "e-bad-tail", and child rejects that tail too.
+    let recoveryTail: string | null = "e-bad-tail";
+    const fSeeded = fakeIo();
+    fSeeded.io.readLastEntryId = () => recoveryTail;
+    const seeded = new RunnerCore(fSeeded.io, { sessionName: SESSION, launchId: "launch-seeded" }, { runtime: "omp", catchUpSince: "e-stale" });
+    seeded.start();
+    seeded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s-seeded" } }));
+    seeded.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fSeeded.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-stale", id: "pi-runner-cursor-refresh" });
+    seeded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false, code: "unknown_since", error: "Cursor not in session" }));
+    expect(fSeeded.rpc.at(-1)).toEqual({ type: "get_entries", since: "e-bad-tail", id: "pi-runner-cursor-refresh:2" });
+
+    // Rejecting the recovery tail must not recurse immediately, and the next turn skips both "e-stale" and "e-bad-tail".
+    const rpcCountAfterRecovery = fSeeded.rpc.length;
+    seeded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: false, code: "unknown_since", error: "Cursor not in session" }));
+    expect(fSeeded.rpc).toHaveLength(rpcCountAfterRecovery);
+    seeded.handlePiLine(JSON.stringify({ type: "agent_end", isTerminal: true }));
+    expect(fSeeded.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:3" });
+    seeded.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh:3", command: "get_entries", success: true, data: { entries: [{ id: "e-recovered" }] } }));
+    expect(fSeeded.sidecars.at(-1)?.lastEntryId).toBe("e-recovered");
+  });
+
   it("out-of-order refreshes, live entryId updates, and late startup catch-up replies never regress lastEntryId", () => {
     const f = fakeIo();
     const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-1" }, { runtime: "omp", catchUpSince: "e-1" });
@@ -2116,14 +2185,13 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-tail-reader-"));
     try {
       expect(SESSION_TAIL_READ_LIMIT_BYTES).toBe(8 * 1024 * 1024);
-      // Multi-chunk (> 64 KiB) file with earlier invalid JSONL prefix: tail reader still returns the last entry id.
+      // Multi-chunk (> 64 KiB) multibyte UTF-8 final entry crossing read blocks with earlier invalid JSONL prefix.
       const multiChunk = path.join(dir, "multi.jsonl");
-      const pad = "x".repeat(70 * 1024);
-      fs.writeFileSync(
-        multiChunk,
-        `not-json-prefix-${pad}\n${JSON.stringify({ type: "message", id: "e-tail", text: "ok" })}\n`,
-      );
-      expect(readSessionTailEntryId(multiChunk)).toBe("e-tail");
+      const header = JSON.stringify({ type: "session", id: "sess-1" });
+      const multiChunkRecord = JSON.stringify({ type: "message", id: "utf8-tail-id", text: "é".repeat(45_000) });
+      fs.writeFileSync(multiChunk, `${header}\nnot-json-prefix\n${multiChunkRecord}\n`);
+      expect(Buffer.byteLength(multiChunkRecord, "utf8")).toBeGreaterThan(64 * 1024);
+      expect(readSessionTailEntryId(multiChunk)).toBe("utf8-tail-id");
 
       // Header-only session file returns null.
       const headerOnly = path.join(dir, "header.jsonl");
@@ -2149,8 +2217,13 @@ describe("#1275: bounded turn-end cursor refresh, unknown-position recovery, and
       fs.writeFileSync(oversized, `${JSON.stringify({ type: "message", id: "e-big", pad: "a".repeat(2048) })}\n`);
       expect(readSessionTailEntryId(oversized, 512)).toBeNull();
 
-      // Directory (!isFile()) returns null.
+      // Directory and non-regular FIFO (!isFile()) return null without blocking.
       expect(readSessionTailEntryId(dir)).toBeNull();
+      if (process.platform !== "win32") {
+        const fifo = path.join(dir, "pipe.jsonl");
+        execFileSync("mkfifo", [fifo]);
+        expect(readSessionTailEntryId(fifo)).toBeNull();
+      }
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
