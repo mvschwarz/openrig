@@ -6081,9 +6081,11 @@ export class QueueRepository {
       )
       .run(ts, result, qitemId);
     if (usageLimit) {
-      // The receipt's words stay as every reader knows them; the row says what they can't.
+      // The receipt's words stay as every reader knows them; the row says what they can't. Delivery bookkeeping, so a
+      // reserved daemon actor: it isn't a change to the row for the wake ladder, the stuck sweep or recovery
+      // (lastMeaningfulTransition), as closure-overdue's note isn't.
       const row = this.getById(qitemId);
-      if (row) this.transitionLog.append({ qitemId, state: row.state, actorSession: "queue@system",
+      if (row) this.transitionLog.append({ qitemId, state: row.state, actorSession: "daemon@system",
         transitionNote: `wake reached ${row.destinationSession} at its usage limit (recorded ${usageLimit.asOf}; resets ${usageLimit.resetsAt}); delivery=${result}. Its agent isn't expected to read it before the reset.` });
     }
     // The transport's definite no-write refusal establishes the episode even when a
