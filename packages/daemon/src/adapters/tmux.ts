@@ -1655,8 +1655,9 @@ export class TmuxAdapter {
    *  value back (or unsets it, as before the start), so a pane keeps the real session bus. Only while the global still
    *  holds this daemon process's own unusable address (TMUX_SERVER_SESSION_BUS), which no other process or tmux
    *  configuration sets: a server someone else started, or a value set since, is left as it is. The read and the write
-   *  are two commands: tmux's one conditional on an environment value, a sourced `%if` with `$DBUS_SESSION_BUS_ADDRESS`,
-   *  puts the value into its format unescaped, so an address with a `}` would compare as equal. The value goes in argv,
+   *  are two commands: a tmux format condition gets an environment value only through `$VAR` expansion while a sourced
+   *  config is parsed (`%if`, or `if-shell -F` there), which puts the value into the format unescaped (on tmux 3.4,
+   *  `%if "#{==:<this address>,$DBUS_SESSION_BUS_ADDRESS}"` is true for an address `a}b`). The value goes in argv,
    *  unlike the seat environment (runEnvironmentCommand): a bus address is not a credential, and it was in the global
    *  environment before #3253 too. A failure is a warning, never a failed start, and the next startServer tries again.
    *  Panes and jobs the person's tmux configuration makes while the server starts (before this runs) keep no bus. */
