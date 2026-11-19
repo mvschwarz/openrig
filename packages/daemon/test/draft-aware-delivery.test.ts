@@ -107,6 +107,44 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean; a
 }
 
 
+it.each([false, true])("keeps reserved Pi compaction on its guarded typed path with native preference (held=%s)", async held => {
+  const f = fixture(undefined, { runtime: "pi" });
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  if (held) await f.guard.set("a", { mode: "hold" }, "human@test", "quiet");
+  const { PiCompactionService } = await import("../src/domain/pi-compaction-service.js");
+  const service = new PiCompactionService({ readSidecar: () => ({ launchId: "launch" }) as never,
+    newAttemptId: () => "native-preference-compact", send: (session, text, opts) => f.transport.send(session, text, opts) });
+  const result = await service.trigger({ nodeId: "a", sessionName: "worker@test", runtime: "pi" });
+  if (held) {
+    expect(result).toMatchObject({ triggered: false, reason: "held" });
+    const item = f.outbox.heldForNode("a").items[0]!;
+    expect(item.body).toBe("/openrig-compact native-preference-compact");
+    expect(f.outbox.inputRoute(item.outboxId)).toBe("typed");
+    expect(f.submissions).toEqual([]);
+  } else {
+    expect(result).toMatchObject({ triggered: true, stage: "submitted_unconfirmed" });
+    expect(f.submissions).toEqual(["/openrig-compact native-preference-compact"]);
+  }
+});
+
+it("submit-only with native preference presses Enter only onto the existing staged text", async () => {
+  const f = fixture();
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  f.bodies.a = "staged command";
+  expect(await f.send("submit-native", "", { submitOnly: true, expectedStagedText: "staged command", verify: false }))
+    .toMatchObject({ ok: true, submitOnly: true });
+  expect(f.writes.some(write => write.startsWith("paste:"))).toBe(false);
+  expect(f.submissions).toEqual(["staged command"]);
+});
+
+it("a terminal seat's exact text stays terminal input with native preference", async () => {
+  const f = fixture();
+  f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+  expect(await f.send("exact-native", "enveloped input", { exactText: "printf exact", verify: false }))
+    .toMatchObject({ ok: true, envelopeOmitted: true });
+  expect(f.submissions).toEqual(["printf exact"]);
+});
+
 // Retained D1 geometry: empty Codex 0.164 at 65x9; after paste the editor
 // shows only the envelope's reply footer and an upward scroll indicator.
 function codexViewport(body: string, width: number, height: number, renderedRows?: string[]): ComposerSnapshot {
@@ -662,6 +700,24 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(oldPrerequisite).not.toHaveBeenCalled();
   });
 
+  it("at queue-only, a deliberate send never types over a person's draft and is delivered once the input is empty; OpenRig's own notice is held (#3076)", async () => {
+    const f = fixture(); await f.guard.set("a", { mode: "queue-only" }, "human@test", "a person types here");
+    f.bodies.a = "a person's draft";
+    for (const urgent of [undefined, { by: "lead@test" }]) {
+      expect(await f.send(`qo-draft-${urgent ? "urgent" : "plain"}`, "deliberate send", { verify: false, ...(urgent ? { urgent } : {}) }))
+        .toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    }
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("a person's draft");
+    f.bodies.a = "";
+    expect(await f.send("qo-empty", "deliberate send", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["deliberate send"]);
+    const notice = await f.send("qo-notice", "OpenRig notice", { verify: false, openrigNotice: true, urgent: { by: "OpenRig" } });
+    // Held for the seat, not refused nor failed: retained in its outbox, nothing written.
+    expect(notice).toMatchObject({ ok: true, outcome: "retained", sent: false, reason: "typing_guard_enabled", outboxIds: ["qo-notice"] });
+    expect(f.submissions).toEqual(["deliberate send"]);
+  });
+
   it("delivers at an ordinary empty prompt when receipt bookkeeping is unavailable", async () => {
     const f = fixture(); await f.enable();
     f.db.exec("CREATE TRIGGER fail_delivery_receipt BEFORE UPDATE OF guard_delivery ON outbox_entries BEGIN SELECT RAISE(ABORT, 'fixture receipt unavailable'); END;");
@@ -741,8 +797,11 @@ describe("current draft-aware delivery through the real transport", () => {
     const first = fixture(); await first.enable(); first.bodies.a = "draft"; await first.send("crash");
     first.db.exec("UPDATE outbox_entries SET delivery_state='sending',guard_delivery=json_remove(guard_delivery,'$.result');");
     const resumed = fixture(first.db.serialize());
+    const interrupted = resumed.outbox.listForSender("human@test")[0]!.outboxId;
+    expect(resumed.guarded.lookup(interrupted)).toMatchObject({ state: "sending", reason: "delivery_in_progress" });
     if (genericFirst) resumed.outbox.reconcileAbandonedSending("crash");
     resumed.guarded.recover();
+    expect(resumed.guarded.lookup(interrupted)).toMatchObject({ state: "indeterminate", reason: "interrupted_write" });
     expect(await resumed.send("crash")).toMatchObject({ ok: true, sent: true });
     expect(resumed.submissions).toEqual(["incoming message"]);
     expect(resumed.db.prepare("SELECT count(*) AS n FROM outbox_entries WHERE delivery_state='indeterminate'").get()).toEqual({ n: 1 });
@@ -996,6 +1055,36 @@ describe("supported seat and queue integration", () => {
     expect(f.submissions).toEqual(["http message"]);
   });
 
+  it.each(["typed", "native"])("%s route retention alone does not project a delivery attempt through HTTP", async route => {
+    const f = fixture();
+    await f.guard.set("a", { mode: "hold" }, "human@test", "quiet seat");
+    f.db.prepare("UPDATE nodes SET input_route=? WHERE id='a'").run(route);
+    const result = await f.send("route-only", "held by level");
+    expect(result).toMatchObject({ outcome: "retained", sent: false, reason: "typing_guard_enabled" });
+    const id = result.outboxIds![0]!;
+    expect(f.outbox.getById(id)).toMatchObject({ deliveryState: "retained", body: "held by level" });
+    expect(f.outbox.inputRoute(id)).toBe(route);
+    expect(f.guarded.lookup(id)).toBeNull();
+    const page = await (await f.app.request("/api/seat/held-messages/worker@test")).json();
+    expect(page.items[0].delivery).toBeUndefined();
+    const detail = await (await f.app.request(`/api/seat/held-messages/worker@test?id=${id}`)).json();
+    expect(detail.delivery).toBeUndefined();
+    expect(f.writes).toEqual([]);
+  });
+
+  it("native admission and lost receiver ownership remain visible in delivery history", () => {
+    const f = fixture();
+    const input = { outboxId: "native-attempt", senderSession: "human@test", destinationSession: "worker@test", body: "native input" };
+    f.outbox.retain(input, f.guard.target("worker@test"));
+    f.outbox.admitRunner({ ...input, nodeId: "a", runId: "projection-run", kind: "input", inputRoute: "native", payload: { text: input.body } });
+    expect(f.guarded.lookup(input.outboxId)).toMatchObject({ state: "sending", reason: "delivery_in_progress" });
+    f.outbox.updateRunner("a", "projection-run", input.outboxId, 1, "offered");
+    f.outbox.forgetRunnerMap("a", "projection-run");
+    expect(f.guarded.lookup(input.outboxId)).toMatchObject({ state: "indeterminate", reason: "interrupted_write" });
+    expect(f.outbox.runnerReceipt(input.outboxId)).toMatchObject({ reconciliation: "receiver_state_lost" });
+    expect(f.writes).toEqual([]);
+  });
+
   it("attempts each explicit HTTP request despite a reused caller ID", async () => {
     const f = fixture(); await f.enable();
     const send = () => f.post("/api/transport/send", { session: "worker@test", text: "http success", deliveryId: "http-success", verify: true });
@@ -1071,7 +1160,16 @@ describe("supported seat and queue integration", () => {
 
 describe("deliberate override preserves existing input", () => {
   const override = { dangerouslyInteract: true, reason: "fixture interaction", verify: false };
-  it.each(["off", "draft-aware", "hold", "openrig-urgent", "urgent-only", "sends-only"])("stops and shows typed input under %s without retaining it", async mode => {
+  it("keeps explicit terminal interaction draft protection with a native input preference", async () => {
+    const f = fixture();
+    f.db.prepare("UPDATE nodes SET input_route='native' WHERE id='a'").run();
+    f.bodies.a = "person draft";
+    expect(await f.send("override-native", "incoming", override)).toMatchObject({ ok: false, sent: false,
+      reason: "override_input_present", existingInput: { classification: "typed_or_pasted" } });
+    expect(f.writes).toEqual([]);
+  });
+
+  it.each(["off", "draft-aware", "hold", "openrig-urgent", "urgent-only", "sends-only", "queue-only"])("stops and shows typed input under %s without retaining it", async mode => {
     const f = fixture();
     await f.guard.set("a", { mode }, "human@test", "fixture policy");
     const draft = "私の下書き😀\n  second line U3-private";
@@ -1399,4 +1497,107 @@ describe("#3076: a draft typed between the guard's read and the paste", () => {
     expect(f.submissions).toEqual([notice]);
     expect(f.bodies.a).toBe("");
   });
+});
+
+// #2429: does the guard recognize its own paste once Claude Code has collapsed it? The labels and footer notices below
+// are the strings Claude Code 2.1.326 builds (read from its bundle, not from a pane capture): a paste with N line breaks
+// shows `[Pasted text #K +N lines]`, and one with none (a single line over 800 characters) shows `[Pasted text #K]`;
+// the paste hint takes the mode bar's place for 8 s while the footer's right side keeps its notices, such as the context
+// warning (`N% until auto-compact`, `auto-compact is next`, `N% context used`, `Context low (N% remaining)`).
+describe("#2429: the guard's own paste after Claude Code collapses it", () => {
+  const collapsedUnder = (f: ReturnType<typeof fixture>, text: string, label: string, hint = "paste again to expand", modeBar = "⏵⏵ bypass permissions on (shift+tab to cycle)") =>
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => {
+      const staged = f.bodies.a === text;
+      const snapshot = frame(staged ? label : f.bodies.a ?? "");
+      snapshot.screen = snapshot.screen.replace("? for shortcuts\n", `${staged ? hint : modeBar}\n`);
+      return snapshot;
+    });
+
+  it("submits its own multi-line envelope collapsed to [Pasted text #1 +N lines]", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = wrapPaneEnvelope("sender@test", "worker@test", "Body line one.\nBody line two.");
+    collapsedUnder(f, text, `[Pasted text #1 +${text.split("\n").length - 1} lines]`);
+    const result = await f.send("collapsed-envelope", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it("submits its own single-line paste collapsed to [Pasted text #1], with no line count", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `reminder: ${"x".repeat(1190)}`;
+    collapsedUnder(f, text, "[Pasted text #1]");
+    const result = await f.send("collapsed-one-line", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  // The label carries only its paste ID, so one drawn after notePasted's read could be a person's replacement single
+  // line: it is held, as on main, while a counted label drawn late is still recognized (the delayed-label test above).
+  it("holds a count-less label first drawn after notePasted's read, with no Enter", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `reminder: ${"x".repeat(1190)}`;
+    let readsAfterPaste = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      frame(f.bodies.a === text ? (readsAfterPaste++ === 0 ? "" : "[Pasted text #1]") : f.bodies.a ?? ""));
+    const result = await f.send("late-count-less", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe(text);
+  });
+
+  // A count-less label beside literal text is a person's single-line paste, not ours: our own single line collapses to the
+  // bare label, and an inline paste draws no label. The text after it matching our head proves nothing, whether the
+  // composite is first drawn after notePasted's read or already at it.
+  it.each([["after notePasted's read", true], ["at notePasted's read", false]])(
+    "holds an unrecorded count-less label followed by our own text, drawn %s, with no Enter", async (_case, late) => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = `reminder: ${"x".repeat(24)}`;
+      let readsAfterPaste = 0;
+      vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+        frame(f.bodies.a === text ? (late && readsAfterPaste++ === 0 ? text : `[Pasted text #2] ${text}`) : f.bodies.a ?? ""));
+      const result = await f.send("count-less-composite", text, { verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed" });
+      expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+      expect(f.submissions).toEqual([]);
+    });
+
+  it("submits its own inline text that spells out a count-less label", async () => {
+    const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+    const text = `see [Pasted text #2] in the reminder ${"x".repeat(24)}`;
+    const result = await f.send("quotes-a-label", text, { verify: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it.each([["a single-line label for a multi-line paste", "one\ntwo\nthree", "[Pasted text #1]"],
+    ["a counted label for a single-line paste", `reminder: ${"x".repeat(1190)}`, "[Pasted text #1 +2 lines]"]])(
+    "does not submit %s", async (_case, text, label) => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      collapsedUnder(f, text, label);
+      expect(await f.send("collapsed-mismatch", text, { verify: false })).toMatchObject({ ok: false, sent: true });
+      expect(f.submissions).toEqual([]);
+    });
+
+  it.each(["12% until auto-compact", "auto-compact is next", "40% context used", "Context low (8% remaining)",
+    "Context low (8% remaining) · /compact to free up space"])(
+    "submits its own collapsed paste when the hint shares the footer with the context notice %s", async notice => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = "first line\nsecond line\nlast line";
+      collapsedUnder(f, text, "[Pasted text #1 +2 lines]", `paste again to expand${" ".repeat(60)}${notice}`,
+        `⏵⏵ bypass permissions on (shift+tab to cycle)${" ".repeat(40)}${notice}`);
+      const result = await f.send("context-notice", text, { verify: false });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, sent: true });
+      expect(f.submissions).toEqual([text]);
+    });
+
+  it.each(["12% until auto-compact soon", "Context low (8% remaining) · run /compact", "12 % until auto-compact"])(
+    "still holds its paste under an unknown notice beside the hint: %s", async notice => {
+      const f = fixture(undefined, { runtime: "claude-code" }); await f.enable();
+      const text = "first line\nsecond line\nlast line";
+      collapsedUnder(f, text, "[Pasted text #1 +2 lines]", `paste again to expand  ${notice}`);
+      expect(await f.send("unknown-notice", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+      expect(f.submissions).toEqual([]);
+    });
 });

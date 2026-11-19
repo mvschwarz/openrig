@@ -378,6 +378,23 @@ describe("Down CLI", () => {
     expect(exitCode).toBeUndefined();
   });
 
+  it("names each Claude seat whose launch folder wasn't recorded, and keeps the exit code", async () => {
+    const seat = "dev-impl@rig-1: /work/project";
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", sessionsKilled: 1, snapshotId: null, deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+        launchFolderUnrecorded: [seat],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("The launch folder was not recorded for 1 Claude seat(s). Only saved and recorded folders can be checked automatically; if one was started elsewhere (rig up --existing --cwd), check that folder's .claude/settings.local.json and .openrig by hand:");
+    expect(logs).toContain(`  ${seat}`);
+    expect(exitCode).toBeUndefined();
+  });
+
   it.each([
     { rigName: "workshop", isUniqueName: false },
     {},
@@ -662,5 +679,17 @@ describe("Down CLI", () => {
     expect(downCallCount).toBe(0); // name path excludes archived -> no match -> halt
     expect(logs.join("\n")).toContain("old-team");
     expect(exitCode).toBe(2);
+  });
+});
+
+describe("rig down help", () => {
+  it("says an external CLI seat keeps its claim only without --delete", () => {
+    let out = "";
+    const cmd = downCommand();
+    cmd.configureOutput({ writeOut: (text) => { out += text; } });
+    cmd.outputHelp();
+    const help = out.replace(/\s+/g, " ");
+    expect(help).toContain("A seat joined with rig attach as an external CLI, outside tmux, is never stopped, and rig down lists it as not stopped.");
+    expect(help).toContain("It keeps its claim, unless --delete removes the rig record, and the claim with it.");
   });
 });

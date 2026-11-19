@@ -33,7 +33,7 @@ export interface CardShellProps {
   leadingAccessory?: ReactNode;
 }
 
-export type CardKind = "shipped" | "incident" | "progress" | "approval" | "concept";
+export type CardKind = "shipped" | "closed" | "incident" | "progress" | "approval" | "concept";
 
 interface CardAccent {
   stripe: string; // legacy — preserved for backwards compatibility
@@ -44,6 +44,7 @@ interface CardAccent {
 
 export const ACCENTS: Record<CardKind, CardAccent> = {
   shipped:  { stripe: "border-l-emerald-600", pill: "bg-emerald-50 border-emerald-300", ink: "text-emerald-800", label: "SHIPPED" },
+  closed:   { stripe: "border-l-stone-500",   pill: "bg-stone-100 border-stone-300",    ink: "text-stone-700",   label: "CLOSED" },
   incident: { stripe: "border-l-red-600",     pill: "bg-red-50 border-red-300",         ink: "text-red-800",     label: "INCIDENT" },
   progress: { stripe: "border-l-sky-600",     pill: "bg-sky-50 border-sky-300",         ink: "text-sky-800",     label: "PROGRESS" },
   approval: { stripe: "border-l-amber-600",   pill: "bg-amber-50 border-amber-300",     ink: "text-amber-800",   label: "APPROVAL NEEDED" },
@@ -55,6 +56,7 @@ export const ACCENTS: Record<CardKind, CardAccent> = {
 // on the kind tag; the rest is mono black for legibility.
 const KIND_DOT: Record<CardKind, string> = {
   shipped:  "bg-success",
+  closed:   "bg-outline",
   incident: "bg-tertiary",
   progress: "bg-secondary",
   approval: "bg-warning",
@@ -63,6 +65,7 @@ const KIND_DOT: Record<CardKind, string> = {
 
 const KIND_LABEL: Record<CardKind, string> = {
   shipped:  "Shipped",
+  closed:   "Closed",
   incident: "Incident",
   progress: "Progress",
   approval: "Approval",
@@ -207,6 +210,30 @@ export function ShippedCard({ source }: { source: ShippedCardSource }) {
           <div className="text-[11px] text-on-surface-variant">{source.oneLiner}</div>
         )
       }
+    />
+  );
+}
+
+// -----------------------------------------------------------------------------
+// ClosedCard — non-delivery closure summary (wontfix, deferred, superseded, stale)
+// -----------------------------------------------------------------------------
+
+export interface ClosedCardSource {
+  sliceId: string;
+  title: string;
+  oneLiner: string;
+}
+
+export function ClosedCard({ source }: { source: ClosedCardSource }) {
+  return (
+    <CardShell
+      testId={`feed-card-closed-${source.sliceId}`}
+      kind="closed"
+      title={source.title}
+      oneLiner={source.oneLiner}
+      accent={ACCENTS.closed}
+      drillInHref={`/project/slice/${source.sliceId}`}
+      expanded={<div className="text-[11px] text-on-surface-variant">{source.oneLiner}</div>}
     />
   );
 }
@@ -472,6 +499,7 @@ export function ConceptCard({ source }: { source: ConceptCardSource }) {
 
 export type FeedCardItem =
   | { kind: "shipped"; source: ShippedCardSource }
+  | { kind: "closed"; source: ClosedCardSource }
   | { kind: "incident"; source: IncidentCardSource }
   | { kind: "progress"; source: ProgressCardSource }
   | { kind: "approval"; source: ApprovalCardSource }
@@ -639,6 +667,8 @@ export function buildStorytellingFeedItems(
     const status = (slice.status ?? "").toLowerCase();
     if (status === "shipped" || status === "complete" || status === "done") {
       items.push({ kind: "shipped", source: { sliceId, title, oneLiner } });
+    } else if (status === "closed" || status.startsWith("closed-")) {
+      items.push({ kind: "closed", source: { sliceId, title, oneLiner } });
     } else if (status === "blocked" || status === "danger" || status === "failed") {
       items.push({
         kind: "incident",
@@ -707,6 +737,7 @@ export function StorytellingFeed({
         // (rawStatus === "candidate"); the switch routes them to
         // ConceptCard. Other 4 kinds unchanged (HG-5).
         if (item.kind === "shipped")  return <ShippedCard key={i}  source={item.source} />;
+        if (item.kind === "closed")   return <ClosedCard key={i}   source={item.source} />;
         if (item.kind === "incident") return <IncidentCard key={i} source={item.source} />;
         if (item.kind === "progress") return <ProgressCard key={i} source={item.source} onMarkComplete={onMarkMissionComplete} />;
         if (item.kind === "approval") return <ApprovalCard key={i} source={item.source} />;

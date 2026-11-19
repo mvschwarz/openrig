@@ -188,6 +188,7 @@ export class ContextMonitor {
           cwd: session.cwd,
           runtime: session.runtime,
           usedPercentage: usage.usedPercentage,
+          sampledAt: usage.sampledAt,
           transcriptPath: usage.transcriptPath,
           sessionId: usage.sessionId,
           isObservationCurrent: () => this.isCurrentSession(session),
@@ -343,8 +344,7 @@ export class ContextMonitor {
         updatedAt: "",
         cwd: session.cwd ?? "",
         ...(claude && session.generation_uuid ? { launchGeneration: session.generation_uuid } : {}),
-      }, ...(claude && session.resume_token ? [{ resumeToken: session.resume_token, ...(rotation ? { resumeRotation: rotation } : {}) }]
-        // Only the Codex adapter takes its process listings from the pass; the others are called as before.
+      }, ...(claude ? [{ observationPass: pass, ...(session.resume_token ? { resumeToken: session.resume_token } : {}), ...(rotation ? { resumeRotation: rotation } : {}) }]
         : session.runtime === "codex" ? [{ observationPass: pass }] : []));
       // Hold no database lock while observing the runtime. Revalidation and
       // the write share an immediate transaction, reserving the writer before the

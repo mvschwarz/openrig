@@ -14,7 +14,7 @@ import { fetchWithTimeout } from "../fetch-with-timeout.js";
  * Attach race (arch R2, snapshot-first-then-stream): the stream is
  * OPENED first, then a state snapshot (`/trace`) is rendered, then
  * live events flow. Events that duplicate a trail row already in the
- * snapshot are deduped by priorQitemId, so fast early steps that
+ * snapshot are deduped by priorQitemId (poll rows by trailId), so fast early steps that
  * close before attach are still shown exactly once.
  *
  * Exit codes (arch n1 — outcome codes DISTINCT from error codes):
@@ -41,9 +41,16 @@ export interface FollowTrailRow {
   stepRole?: string;
   closedAt?: string;
   closureReason: string;
+  closureEvidence?: Record<string, unknown> | null;
   actorSession: string;
   nextQitemId?: string | null;
   priorQitemId: string;
+  trailId?: string;
+}
+
+/** A trail row's identity: its trailId (a resume row shares its priorQitemId with another row). */
+function trailKey(row: FollowTrailRow): string {
+  return row.trailId ?? `${row.priorQitemId}:${row.closureReason}`;
 }
 
 interface WorkflowEvent {
@@ -105,9 +112,13 @@ function glyphFor(status: string): string {
 }
 
 function renderTrailRow(row: FollowTrailRow): string {
-  const exitGlyph = row.closureReason === "failed" ? "✖" : "✔";
+  const exitGlyph = row.closureReason === "failed" ? "✖" : row.closureReason === "resumed" ? "↻" : "✔";
   const next = row.nextQitemId ? ` → ${row.nextQitemId}` : "";
-  return `  ${exitGlyph} ${row.stepId}  ${row.closureReason}  by ${row.actorSession}${next}`;
+  const resume = row.closureEvidence?.["resume"] as { ownerSession?: unknown; ownerSource?: unknown } | undefined;
+  const owner = row.closureReason === "resumed" && typeof resume?.ownerSession === "string"
+    ? `  owner ${resume.ownerSession} (${resume.ownerSource === "named" ? "named" : "resolved"})`
+    : "";
+  return `  ${exitGlyph} ${row.stepId}  ${row.closureReason}  by ${row.actorSession}${owner}${next}`;
 }
 
 function renderEvent(event: WorkflowEvent): string | null {
@@ -219,7 +230,11 @@ export async function followInstance(
 
     // Dedup guard: trail rows already rendered by the snapshot must not
     // re-render when the (already-open) stream replays their events.
-    const seenClosures = new Set(snap.snapshot.trail.map((row) => row.priorQitemId));
+    // Stream step_closed events carry only priorQitemId, so that set holds closures, never
+    // resume rows: a resume row reuses the failed (or the redrive's own) packet id and would
+    // otherwise hide a later closure of that packet. The poll path skips by trail row identity.
+    const seenClosures = new Set(snap.snapshot.trail.filter((row) => row.closureReason !== "resumed").map((row) => row.priorQitemId));
+    const seenRows = new Set(snap.snapshot.trail.map(trailKey));
 
     let reconnectsLeft = maxReconnects;
     // 3. Stream loop with honest degradation.
@@ -258,8 +273,14 @@ export async function followInstance(
       }
       // Render only trail rows not yet seen, preserving exactly-once.
       for (const row of poll.snapshot.trail) {
-        if (seenClosures.has(row.priorQitemId)) continue;
-        seenClosures.add(row.priorQitemId);
+        const key = trailKey(row);
+        if (seenRows.has(key)) continue;
+        seenRows.add(key);
+        if (row.closureReason !== "resumed") {
+          // A closure the stream already printed renders once.
+          if (seenClosures.has(row.priorQitemId)) continue;
+          seenClosures.add(row.priorQitemId);
+        }
         if (opts.json) io.out(JSON.stringify({ type: "trail", row }));
         else io.out(renderTrailRow(row));
       }

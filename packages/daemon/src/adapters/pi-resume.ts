@@ -111,10 +111,8 @@ export class PiResumeAdapter {
     let authority: RunnerGrantLaunch | undefined;
     let authorityUnavailable = false;
     let dispatchedWithoutAuthority = false;
-    if (this.runtime === "pi") {
-      try { authority = await this.options.runnerGrant?.(tmuxSessionName, launchId, cwd); }
-      catch { authorityUnavailable = true; }
-    }
+    try { authority = await this.options.runnerGrant?.(tmuxSessionName, launchId, cwd); }
+    catch { authorityUnavailable = true; }
     let launchSucceeded = false;
     try {
       const prior = this.fs.exists(seat.runnerStatePath) ? parsePiRunnerState(this.readSafe(seat.runnerStatePath)) : null;

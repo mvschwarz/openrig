@@ -74,6 +74,7 @@ export interface OutboundMessageOpts {
   /** The machine this post comes from, shown after the sender ("from lead@my-rig on vps04") when
    *  the sender's session doesn't already name a host. Absent: the sender line is unchanged. */
   machine?: string;
+  machineFallback?: string;
   /** S10 interim loudness rule: an escalation MENTIONS its human (`<@Uxxx>`); everything else
    *  stays quiet-threaded. The value is the Slack USER ID (mention semantics require the id,
    *  never a display name). */
@@ -153,6 +154,10 @@ export function parseQuestionAction(blockId: unknown, actionId: unknown): { ques
   return questionId && optionId ? { questionId, optionId } : null;
 }
 
+export function recommendationLabel(label: string, recommended = false): string {
+  return recommended && !/\(recommended\)/i.test(label) ? `${label} (recommended)` : label;
+}
+
 /** #193 — the questions as blocks (a section, then a button row, per question) plus the
  *  complete text they must also appear as in the accessible fallback. Without buttons (a shared channel, where a click
  *  records nothing), each question's options are a list and the reader is asked to reply in the thread. */
@@ -161,7 +166,7 @@ function buildQuestionBlocks(questions: readonly HumanQuestion[], buttons = true
   const lines: string[] = [];
   for (const q of questions) {
     const question = bounded(`*${inert(q.question)}*`, SLACK_SECTION_CAP, "question");
-    const options = q.options.map((o) => `• ${inert(o.label)}${o.recommended ? " (recommended)" : ""}`);
+    const options = q.options.map((o) => `• ${recommendationLabel(inert(o.label), o.recommended)}`);
     blocks.push({ type: "section", text: { type: "mrkdwn", text: question } });
     lines.push(question, ...options);
     // A resolved decision keeps its questions as history: options as text, no live buttons, no reply hint.
@@ -593,8 +598,9 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     : bounded(markdownToSlackMrkdwn(String(q.body || ""), q.bodyOpenFence ?? ""), SLACK_SECTION_CAP, "body");
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> :rotating_light: ` : "";
   const headline = bounded(`${mention}*${summary}*`, SLACK_SECTION_CAP, "subject");
-  const machine = opts.attribution && !opts.attribution.host && opts.machine ? ` on ${inert(opts.machine)}` : "";
-  const attr = bounded(`From ${inert(opts.attribution?.session || opts.sourceLabel)}${machine}`, 2000, "sender");
+  const sender = `From ${inert(opts.attribution?.session || opts.sourceLabel)}`;
+  const machineSeg = (value: string | undefined) =>
+    opts.attribution && !opts.attribution.host && value ? ` on ${inert(value)}` : "";
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
   const attachmentText = imageBlocks.map((b) => `Image: ${(b as { alt_text: string }).alt_text}`).join("\n");
   const evidence = buildEvidenceLink(opts.evidenceLink);
@@ -605,21 +611,39 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   }
   const replyHint = q.ownerNotificationKind === "human-required"
     ? HUMAN_REQUIRED_REPLY_HINT : null;
-  const fallback = (context: string | null, repeat: string | null = null) => [attr, headline, repeat, context, body, questionParts?.text, replyHint, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
-  // The gate context line is supplementary: when it alone would push the complete fallback over
-  // budget, the instance part alone is tried, and the line is left out only when even that
-  // doesn't fit, rather than refusing the gate.
-  let shownContext = gateContext;
-  if (gateContext && fallback(gateContext).length > SLACK_TEXT_CAP && fallback(null).length <= SLACK_TEXT_CAP) {
-    const instanceLine = buildGateContextLine(q.tags ?? [], true);
-    shownContext = fallback(instanceLine).length <= SLACK_TEXT_CAP ? instanceLine : null;
-  }
-  // The repeat, state and quiet-hours notes are supplementary too: left out rather than refusing a message they would push
-  // over a limit.
-  const notes = [opts.possibleRepeat ? POSSIBLE_REPEAT_NOTE : null, opts.stateUnconfirmed ? STATE_UNCONFIRMED_NOTE : null,
-    opts.quietUnreadable ? QUIET_UNREADABLE_NOTE : null].filter(Boolean).join(" ");
-  const shownRepeat = notes && fallback(shownContext, notes).length <= SLACK_TEXT_CAP ? notes : null;
-  const text = bounded(fallback(shownContext, shownRepeat), SLACK_TEXT_CAP, "complete fallback");
+  // The tail is computed per machine label: the sender line, the supplementary
+  // context/repeat decisions that depend on it, and the complete fallback. A
+  // configured display name must never refuse a delivery (reviewer on #3265):
+  // when the complete fallback overflows the text cap even though the sender
+  // line fits, the tail is recomputed once with the durable host ID, keeping
+  // the chosen label whenever it fits.
+  const computeTail = (machineValue: string | undefined) => {
+    let machine = machineSeg(machineValue);
+    if (sender.length + machine.length > 2000 && machine && opts.machineFallback) machine = machineSeg(opts.machineFallback);
+    const attrFor = bounded(`${sender}${machine}`, 2000, "sender");
+    const fallback = (context: string | null, repeat: string | null = null) => [attrFor, headline, repeat, context, body, questionParts?.text, replyHint, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
+    // The gate context line is supplementary: when it alone would push the complete fallback over
+    // budget, the instance part alone is tried, and the line is left out only when even that
+    // doesn't fit, rather than refusing the gate.
+    let shownContext = gateContext;
+    if (gateContext && fallback(gateContext).length > SLACK_TEXT_CAP && fallback(null).length <= SLACK_TEXT_CAP) {
+      const instanceLine = buildGateContextLine(q.tags ?? [], true);
+      shownContext = fallback(instanceLine).length <= SLACK_TEXT_CAP ? instanceLine : null;
+    }
+    // The repeat, state and quiet-hours notes are supplementary too: left out rather than refusing a message they would push
+    // over a limit.
+    const notes = [opts.possibleRepeat ? POSSIBLE_REPEAT_NOTE : null, opts.stateUnconfirmed ? STATE_UNCONFIRMED_NOTE : null,
+      opts.quietUnreadable ? QUIET_UNREADABLE_NOTE : null].filter(Boolean).join(" ");
+    const shownRepeat = notes && fallback(shownContext, notes).length <= SLACK_TEXT_CAP ? notes : null;
+    return { attr: attrFor, shownContext, shownRepeat, text: fallback(shownContext, shownRepeat) };
+  };
+  // A configured display name that fits the sender line can still push the
+  // COMPLETE fallback over the text cap: the durable host ID is tried before
+  // anything refuses, and the chosen label stays whenever it fits.
+  let tail = computeTail(opts.machine);
+  if (tail.text.length > SLACK_TEXT_CAP && opts.machineFallback) tail = computeTail(opts.machineFallback);
+  const { attr, shownContext, shownRepeat } = tail;
+  const text = bounded(tail.text, SLACK_TEXT_CAP, "complete fallback");
   const blocks: unknown[] = [{ type: "context", elements: [{ type: "mrkdwn", text: attr }] }, { type: "section", text: { type: "mrkdwn", text: headline } }];
   const repeatBlock = shownRepeat ? { type: "context", elements: [{ type: "mrkdwn", text: shownRepeat }] } : null;
   if (repeatBlock) blocks.push(repeatBlock);

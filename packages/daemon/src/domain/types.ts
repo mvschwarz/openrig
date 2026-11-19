@@ -29,6 +29,7 @@ export interface ContinuityState {
 }
 
 export interface Node {
+  inputRoute?: "typed" | "native";
   id: string;
   rigId: string;
   logicalId: string;
@@ -42,6 +43,13 @@ export interface Node {
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches; null/absent = none. */
   launchWrapper?: string[] | null;
+  /** The seat's own process limits (spec `process_limits`, #3253): applied to its new launches; null/absent = none. */
+  processLimits?: import("./process-limits.js").ProcessLimits | null;
+  /** #3253: the stored process_limits can't be read (kept as stored; only this seat's launch and status are affected). */
+  processLimitsError?: string;
+  /** #3416 (3): the seat's status line throttle in seconds (spec `statusline_throttle`, `rig seat set-statusline-throttle`);
+   *  null/absent = none. */
+  statuslineThrottle?: number | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -170,11 +178,16 @@ export type RigEvent =
       channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
     }
   | { type: "rig.deleted"; rigId: string }
+  | { type: "node.input_route_changed"; rigId: string; nodeId: string; from: "typed" | "native"; to: "typed" | "native"; reason: string; actor: string | null }
   | { type: "node.added"; rigId: string; nodeId: string; logicalId: string }
   | { type: "node.removed"; rigId: string; nodeId: string }
   | { type: "binding.updated"; rigId: string; nodeId: string }
   | { type: "session.status_changed"; rigId: string; nodeId: string; status: string }
   | { type: "session.detached"; rigId: string; nodeId: string; sessionName: string }
+  // #3315 — the daemon's tmux server stopped or started answering (terminal-server-reachability.ts): one event per
+  // change, never per attempt. The daemon stays up through both; neither event says a seat's session is gone.
+  | { type: "tmux.server_gone"; socket: string; cause: string; since: string }
+  | { type: "tmux.server_back"; socket: string; since: string; goneSince: string }
   // S5 (OPR.0.5.4.7) — seat-lifecycle audit trail: the three supported seat verbs each persist
   // their mutation with actor + reason in the same transaction as the mutation itself.
   | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
@@ -184,8 +197,10 @@ export type RigEvent =
       slot: "account_home" | "member_env"; revision: number; operationId: string; original: string | null; occupantGeneration: string | null;
       reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
+  | { type: "node.statusline_throttle_changed"; rigId: string; nodeId: string; logicalId: string; from: number | null; to: number | null; reason: string; operator: string | null }
   | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
+  | { type: "node.claude_auto_mode_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only"; replaced?: unknown }
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -224,7 +239,19 @@ export type RigEvent =
       terminalObserved: DeliveryEvidenceObserved; inputBoundary: "unknown"; source: "send_result";
       wireSha256: string | null; wireBytes: number | null; writtenAt: string | null;
       /** The attempt's outcome in the shared words, from the same result: which fact, who established it, and the route. */
-      outcome: ReturnType<typeof readSendOutcome> }
+      outcome: ReturnType<typeof readSendOutcome>;
+      /** Slice 13: the seat routes through its hook bridge, which couldn't take this send (its waiter expired, say), so it
+       *  went to typed delivery: why, as the sender's warning said it. A message queued for the bridge and typed later is
+       *  named by `transport.hook_bridge_fallback` instead. */
+      hookBridgeUnavailable?: string }
+  /** Slice 13: a Claude seat's hook bridge. A waiter armed at a turn boundary; a batch was delivered into the seat's
+   *  context (one model turn on the seat's login; delivered, not acted on); a waiter expired before its hook's timeout; or
+   *  queued messages were handed back to typed delivery because the bridge had no live arm. */
+  | { type: "transport.hook_bridge_armed"; nodeId: string; sessionName: string; armId: string; hookEvent: string; generation: string | null }
+  | { type: "transport.hook_bridge_wake"; nodeId: string; sessionName: string; armId: string; outboxIds: string[]; hookEvent: string }
+  | { type: "transport.hook_bridge_expired"; nodeId: string; sessionName: string; armId: string }
+  | { type: "transport.hook_bridge_fallback"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
+  | { type: "transport.hook_bridge_uncertain"; nodeId: string; sessionName: string; outboxIds: string[]; reason: string }
   /** A harness's own prompt hook, as it reported: a fingerprint and byte length of the prompt it received, its own session
    *  and prompt or turn id, and the generation the hook ran as. A raw observation, never a message's attribution: neither
    *  harness reports a prompt's origin, so which message (if any) it was isn't established, and each delivery record's
@@ -238,6 +265,10 @@ export type RigEvent =
   | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null; input?: { classification: string; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false } }
   // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
   // from the pi-runner's RPC get_state / typed events, never pane scraping.
+  | { type: "agent.runner_turn"; nodeId: string; runId: string; sequence: number; nativeTurnId: string;
+      state: "opened" | "closed"; acceptedTurnIds: string[] }
+  | { type: "agent.runner_turn_fenced"; nodeId: string; generation: string; runId: string; nativeTurnId: string }
+  | { type: "agent.runner_map_lost"; nodeId: string; runId: string }
   | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" | "launcher" }
   // OPR.0.4.0.22 — append-only audit of a managed resume-token write. Emitted
   // on an operator set (`operator_set`) and on reconcile capture-on-adopt
@@ -318,7 +349,9 @@ export type RigEvent =
   | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
   | { type: "node.startup_model_passed"; rigId: string; nodeId: string; sessionId: string; model: string; resume: boolean }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
-  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; guidanceLaunchInstructions?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
+  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; guidanceLaunchInstructions?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence;
+      /** A readiness failure's last readiness code; `returned_to_shell` means the harness left the pane as a proven idle shell. */
+      readinessCode?: string }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
   // `node.startup_challenged` freezes this launch's challenge ground truth
   // (challengeId + contractHash; the expected answer is recomputed, never
@@ -383,7 +416,9 @@ export type RigEvent =
   // edge-artifact-required); workflow-keepalive deferred to Phase D.
   // Pure `not_due` polls are NOT recorded in history and NOT emitted
   // as events; only meaningful evaluations + lifecycle transitions are.
-  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string }
+  | { type: "watchdog.evaluation_fired"; jobId: string; policy: string; targetSession: string; deliveryStatus: string;
+      /** With a queue-only status (queued_as_row, noted_on_queued_row): the queue row the reminder became or was noted on. */
+      queuedQitemId?: string }
   | { type: "watchdog.evaluation_skipped"; jobId: string; policy: string; skipReason: string }
   | { type: "watchdog.evaluation_terminal"; jobId: string; policy: string; terminalReason: string }
   | { type: "watchdog.job_registered"; jobId: string; policy: string; targetSession: string; registeredBy: string }
@@ -399,7 +434,7 @@ export type RigEvent =
   | { type: "workflow.next_qitem_projected"; instanceId: string; nextQitemId: string; nextOwner: string; nextStepId: string }
   | { type: "workflow.completed"; instanceId: string; workflowName: string }
   | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
-  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number }
+  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number; ownerSession?: string; ownerSource?: "named" | "resolved" }
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.
@@ -582,6 +617,8 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** Saved intended seat when this attempt launched a recreated node; nodeId names the registered current node. */
+  intendedNodeId?: string;
   /** `harness_not_started`: restore left this seat's pane as a bare shell (no harness started), and marked it so. */
   stage?: "harness_not_started";
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
@@ -636,6 +673,9 @@ export interface RestoreNodeResult {
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
+  /** #3253: the seat was launched without its requested process limit (the request stays stored; a fresh launch
+   *  applies it). */
+  processLimits?: import("../adapters/tmux.js").SeatProcessLimitsNotice;
 }
 
 export type RestoreOutcome =
@@ -832,6 +872,8 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  /** Configured Claude account label, not an observation of the active login. */
+  configuredAccount?: string | null;
   /** Present only on a community harness's seat: its label, maintainer and declared limits. */
   communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
   /** Effective current status; confirmed session absence projects as detached. */
@@ -1227,12 +1269,17 @@ export interface LegacyRigSpecNode {
   effort?: string;
   advisor?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1353,6 +1400,7 @@ export interface RigSpecPodMember {
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeAutoMode?: import("./claude-auto-mode.js").ClaudeAutoMode;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
   claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
@@ -1360,6 +1408,16 @@ export interface RigSpecPodMember {
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Optional argv prefix wrapping local built-in Pi, Codex and Claude Code launches (`[]` explicitly clears). */
   launchWrapper?: string[];
+  /** The seat's own process limits (`process_limits: { tasks_max?, memory_max? }`, #3253); `{}` explicitly clears. */
+  processLimits?: import("./process-limits.js").SpecProcessLimits;
+  /** #3416 (3): Claude members only, the status line throttle in seconds (`statusline_throttle`); 0 explicitly clears. */
+  statuslineThrottle?: number;
+  /** #3395: the seat pool this member is the model of (`pool:`), stored on its node; `null` is `pool: {}`, which
+   *  clears a stored block on re-apply; absent leaves it unchanged. */
+  pool?: import("./seat-pool-spec.js").SeatPoolSpec | null;
+  /** #3395: a `pool:` block that can't be used, as authored. It raised an advisory, is stored on the node as it is (it
+   *  holds that pool rather than removing it) and is never serialized back into a spec. */
+  unusablePool?: { raw: unknown };
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
    *  as paths beside the spec. Copied into the seat's own storage at launch. */
   agentFile?: string;
@@ -1652,6 +1710,7 @@ export interface ExpansionPodFragment {
     effort?: unknown;
     codexConfigProfile?: string;
     claudePermissions?: unknown;
+    claudeAutoMode?: unknown;
     claudeToken?: unknown;
     claudeMcp?: unknown;
     codexPermissions?: unknown;

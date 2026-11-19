@@ -84,6 +84,34 @@ describe("selected-history startup", () => {
     expect(JSON.stringify(await response.json())).not.toContain(tokenA);
   });
 
+  it("says the seat's conversation changed since it was saved, not to refresh, when its history moved on", async () => {
+    const f = fixture();
+    // A /clear, /resume or new conversation records a new native id for the seat.
+    db.prepare("UPDATE sessions SET resume_token='after-clear' WHERE id=?").run(f.old.id);
+    const { response, body } = await review(f);
+    expect(response.status).toBe(409);
+    expect(body).toMatchObject({ code: "selection_changed" });
+    expect(body.message).toContain("changed since it was saved");
+    expect(body.message).toContain(`rig snapshot ${f.rig.name}`);
+    expect(body.message).not.toContain("Refresh the history list");
+  });
+
+  it("gives the same next step when the seat's current conversation moved on, so no saved source matches it", async () => {
+    const f = fixture();
+    // A /clear on the running seat records a new native id on its CURRENT session: the list and the review both find no
+    // compatible source, before the branch above is reached.
+    db.prepare("UPDATE sessions SET resume_token='after-clear' WHERE id=?").run(f.active.id);
+    const list = await request(`${f.path}/history`);
+    const listed = await list.json() as Record<string, unknown>;
+    const { response, body } = await review(f);
+    for (const [res, json] of [[list, listed], [response, body]] as const) {
+      expect(res.status).toBe(409);
+      expect(json).toMatchObject({ code: "source_unavailable" });
+      expect(json.message).toContain(`rig snapshot ${f.rig.name}`);
+      expect(json.message).toContain("rig seat launch <seat> --fresh --reason <why>");
+    }
+  });
+
   it.each(["token", "type", "provenance", "policy", "harness", "removed"] as const)("refuses a captured history whose live %s already disagrees before review", async change => {
     const f = fixture();
     if (change === "token") db.prepare("UPDATE sessions SET resume_token='other-native-id' WHERE id=?").run(f.old.id);
@@ -622,6 +650,25 @@ describe("selected-history startup", () => {
     vi.spyOn(setup.tmuxAdapter, "createSession").mockResolvedValue({ ok: false, code: "session_not_created", message: "fixture: no session" });
     const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
     expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+  });
+
+  it("#3253: puts B's home back when the launch is refused for its limit before tmux made a terminal", async () => {
+    const { f, refs } = await appliedFixture("limits-refused");
+    const { body } = await review({ ...f, refs });
+    vi.spyOn(setup.tmuxAdapter, "createSession").mockResolvedValue({ ok: false, code: "process_limits_setup", message: "fixture: not started",
+      retryable: false, processLimits: { kind: "setup", reason: "fixture" } });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ runtimeHome: { attempted: { revision: 4 }, putBack: { home: "/homes/codex-b", revision: 5 } } });
+  });
+
+  it("#3253: a resume that went on without the seat's limit returns the notice", async () => {
+    const { f, refs } = await appliedFixture("limits-notice");
+    const { body } = await review({ ...f, refs });
+    const notice = { state: "not_applied" as const, kind: "unverified" as const, retryable: true, reason: "fixture: user manager timed out" };
+    vi.spyOn(setup.restoreOrchestrator, "launchSingleNode").mockResolvedValue({ ok: false, launched: [{ nodeId: f.node.id,
+      logicalId: "desk.lead", status: "failed", error: "fixture: resume not confirmed", processLimits: notice }] });
+    const result = await (await request(f.path, { action: "resume", ...refs, revision: body.revision })).json() as Record<string, unknown>;
+    expect(result).toMatchObject({ processLimits: notice });
   });
 
   it("keeps the selected home when tmux can't confirm whether the terminal was created", async () => {

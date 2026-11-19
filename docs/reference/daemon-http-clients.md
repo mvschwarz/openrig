@@ -46,6 +46,7 @@ in the case named:
 | `slowOperations` | When the slow-operation recorder runs. |
 | `bind` | The bind plan: `mode` (`explicit` or `default`), `hosts` (the addresses bound), `tailscaleDetected`, and `ignoredRoutingHost` when a routing value was ignored. |
 | `stuckSweep`, `wakeLadder` | The heartbeats of the stuck sweep and the wake ladder, when they run. In `stuckSweep`, `findingsRouted` counts the findings created since the daemon started (an open finding a later pass finds again is not counted again), `findingsOpen` is how many finding rows were still open after the last pass, and `lastOutcome` is `findings` when the last pass created, found again or closed one. |
+| `terminals` | Whether the daemon reaches its tmux server, from what it last observed (healthz doesn't call tmux). `state` is `ok`, `degraded` (a server doesn't answer) or `unknown` (none observed yet, or a server's last reading couldn't be made); each entry of `servers` has `socket`, `state` (`reachable`, `unreachable`, or `unknown` when the return probe couldn't be read: not held, with the loss it was watching in `lastLoss`), `since` (when that state began), `lastCheckedAt`, `transitions`, and in `cause` the tmux diagnostic while unreachable or why the reading is unknown. `status` stays `"ok"`: the daemon is up even when its terminals can't be reached. |
 
 ## Bearer tokens
 
@@ -183,6 +184,12 @@ With `needs-me.read` supported:
   read. `about` lists the requests it concerns by id: a row parked on the person is itself the request, and an ask is
   about the open rows blocked on it (the newest 100, with `aboutTruncated: true` when there are more). An empty `about`
   isn't proof that it's about nothing: a request that names it only in its text isn't counted.
+- **Only the asks, for a badge you poll:** add `kind=action`
+  (`GET /api/attention?view=<person-id>&kind=action`). It reads only the queue's asks and parks, the items with
+  `kind: "action"`, and gives exactly the ones the full read gives for that view, with the same `revision` and `about`.
+  It skips the updates, proof judgments, mission outcomes and health the full read also builds, and `sources` says so
+  with a `kind` entry marked `partial`. `kind=update` reads the rest. A `view` naming no registered person returns its
+  `perspective` with no items, without reading anything else.
 - **A snapshot watermark:** the response's `watermark` is the newest event `seq` read before the snapshot. Follow
   `GET /api/events` from it with `Last-Event-ID: <watermark>`: every event after the snapshot is replayed, some possibly
   already reflected in it. A click that records or changes an answer emits `queue.answer_recorded` even while the set
@@ -252,8 +259,8 @@ What reads these declarations:
   seats, newest first; `?senderSession=<session>` still returns one sender's. One of the two is required; with
   both, `senderSession` is used and `rig` is ignored. `limit` defaults to 100. No event is sent when a message is delivered, so read this list to see delivery
   states.
-- **`GET /api/queue/recent-transitions`** returns at most 20 rows. A positive `limit` above 20 is capped at 20;
-  a missing, zero, negative or unparseable `limit` means 20.
+- **`GET /api/queue/recent-transitions`** returns at most 1,000 rows. A positive `limit` above 1,000 is capped at 1,000;
+  a missing, zero, negative or unparseable `limit` defaults to 20.
 - **`POST /api/transport/send`** takes `urgent: true`, the same as `rig send --urgent`. The daemon records who
   marked it from the sender identity, not from the body.
 - **`POST /api/scope/approve`** is what `rig scope slice approve` and `rig scope mission approve` call. The body
@@ -302,9 +309,11 @@ What reads these declarations:
   `pending`, `in-progress`, `done`, `blocked`, `failed`, `denied`, `canceled` and `handed-off`; it is `null` when
   the row's project/mission scope cannot be resolved or catalog/candidate-root discovery is incomplete. This is
   separate from the existing `qitemCount` display membership field. Counts match exact typed `project:`,
-  `mission:` and `slice:` tags in one shared queue scan. Physical candidates include configured indexer roots
-  and every catalog project's missions root. A row may omit `project:` or `mission:` only when its remaining
-  tags identify exactly one physical slice with a resolved project and mission. Ambiguous matches count nowhere,
+  `mission:` and `slice:` tags in one shared queue scan. A `project:` tag naming a former id a project declares
+  under `aliases:` counts as that project ([Project workspace](project-workspace.md#renaming-a-project)).
+  Physical candidates include configured indexer roots and every catalog project's missions root. A row may omit
+  `project:` or `mission:` only when its remaining tags identify exactly one physical slice with a resolved project
+  and mission. Ambiguous matches count nowhere,
   even if first-wins discovery or a list filter leaves only one row visible; an explicit mismatched project or
   mission never counts. Several `slice:` or `mission:` tags on one row count only when they all name the same
   physical slice or mission (a slice's folder name and its frontmatter `id:`, say); a row that names two distinct
@@ -332,6 +341,14 @@ These routes use the existing terminal bearer token.
    `historySessionId`, that `revision`, an `operationId` UUID, and `expectedOriginal` containing the banked
    `nodeId`, `sessionName`, `runtime` (`claude-code` or `codex`) and `nativeId`.
    Keep native conversation IDs in the private bank and request body. They are not returned in diagnostics.
+
+It resumes only while the seat's recorded session still names the banked conversation. A `/clear`, `/resume`
+or new conversation in that seat normally records a different one, and so does a changed resume type or
+restore policy. After that, the preview answers `selection_changed` with "This seat's record changed since it
+was saved", naming `rig snapshot <rig>` to save the current conversation, and a resume request returns a
+partial `selection_changed` result. A changed runtime is refused earlier: the preview answers
+`source_unavailable`, also naming `rig snapshot <rig>`, and a resume request returns a partial
+`original_changed` result.
 
 The operation keeps the current model, cwd, effort and permission choices. The reviewed
 `settingsSource.runtimeHome.uses` plan can first apply the selected original's recorded home as a new

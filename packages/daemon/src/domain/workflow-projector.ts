@@ -541,7 +541,7 @@ export class WorkflowProjector {
     // absorption guards above returned/threw for replays — guard B1's
     // zero-inventory-reads-on-replays pin holds by construction).
     // undefined for unbound instances (tier 3 does not exist for them).
-    const roleCtx = roleResolutionContext(this.db, instance.boundRig);
+    const roleCtx = roleResolutionContext(this.db, instance.boundRig, instance.boundPod);
 
     let nextQitemId: string | null = null;
     let nextOwnerSession: string | null = null;
@@ -1005,7 +1005,7 @@ export class WorkflowProjector {
     const packet = this.queueRepo.getById(input.currentPacketId);
     if (!packet || !isTerminalState(packet.state)) return null;
     const entry = this.trailLog.listForInstanceInAppendOrder(instance.instanceId)
-      .filter((candidate) => candidate.priorQitemId === input.currentPacketId).at(-1);
+      .filter((candidate) => candidate.priorQitemId === input.currentPacketId && candidate.closureReason !== "resumed").at(-1);
     const recorded = readAlreadyClosedRecord(entry?.closureEvidence);
     if (!entry || !recorded || !sameIntent(recorded, input)) return null;
     const nextQitemId = recorded.next_qitem_ids[0] ?? null;
@@ -1053,7 +1053,7 @@ export class WorkflowProjector {
       // and roll back the close. Fresh decision per episode.
       resolveRoleTarget: (role) =>
         spec.roles?.[role]?.preferred_targets?.[0] ??
-        tryResolveRoleByCapability(roleResolutionContext(this.db, instance.boundRig), role),
+        tryResolveRoleByCapability(roleResolutionContext(this.db, instance.boundRig, instance.boundPod), role),
       humanFallbackSeat: this.exceptionDial?.humanFallbackSeat,
     });
     const evidenceRef = `rig workflow trace ${instance.instanceId}`;
@@ -1111,9 +1111,9 @@ export class WorkflowProjector {
   private planSuccessors(instance: WorkflowInstance, spec: WorkflowSpec, steps: WorkflowStepSpec[]): SuccessorPlan[] {
     return steps.map((step) => {
       const gate = step.gate
-        ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig))
+        ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod))
         : null;
-      const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig));
+      const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
       if (!owner) {
         throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve next owner for dependency step "${step.id}"`, { instanceId: instance.instanceId, stepId: step.id });
       }
@@ -1687,6 +1687,11 @@ function resolveRoleOnBoundRig(
 /** Preserve the old topology gate for template-looking rig names. Registered
  * literal names, including archived rigs, remain recordable as on main. */
 export function assertBoundWorkflowTarget(target: string, queue: Pick<QueueRepository, "acceptsDestination">): void {
+  if (target.startsWith("{pod}-")) {
+    throw new QueueRepositoryError("unbound_destination_pod",
+      `Workflow target ${target} requires a pod binding. Start the workflow with --pod <namespace> and --rig <name>, or use a concrete destination.`,
+      { destinationSession: target });
+  }
   const at = target.indexOf("@");
   if (at >= 0 && target.slice(at + 1).includes("{rig}") && !queue.acceptsDestination(target)) {
     throw new QueueRepositoryError("unknown_destination_rig",
@@ -1750,6 +1755,8 @@ export function resolveDefaultOwner(
   const candidates = targets.map((t) => ({ session: t, runtime: runtimeOf(t) }));
   const match = candidates.find((c) => c.runtime === step.harness);
   if (match) return match.session;
+  const unresolvedPod = targets.find((target) => target.startsWith("{pod}-"));
+  if (unresolvedPod) return unresolvedPod;
   throw new WorkflowProjectorError(
     "harness_pin_unsatisfied",
     `step "${step.id}" pins harness "${step.harness}" but no preferred_target of role "${step.actor_role}" runs it. Candidates: ${
@@ -1989,7 +1996,8 @@ export function compileGate(
   if (gatedStep.harness) {
     const candidates = handlerTargets.map((t) => ({ session: t, runtime: runtimeOf(t) }));
     const match = candidates.find((c) => c.runtime === gatedStep.harness);
-    if (!match) {
+    const unresolvedPod = handlerTargets.find((target) => target.startsWith("{pod}-"));
+    if (!match && !unresolvedPod) {
       throw new WorkflowProjectorError(
         "harness_pin_unsatisfied",
         `step "${gatedStep.id}" pins harness "${gatedStep.harness}" and gates on handler role "${gate.target}", but no preferred_target of that role runs it. Candidates: ${candidates.map((c) => `${c.session} → ${c.runtime ?? "unknown"}`).join(", ")}. Add a ${gatedStep.harness} seat to the handler role's preferred_targets, or change/remove the pin.`,
@@ -2001,7 +2009,7 @@ export function compileGate(
         },
       );
     }
-    seat = match.session;
+    seat = match?.session ?? unresolvedPod!;
   } else {
     seat = handlerTargets[0]!;
   }

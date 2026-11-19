@@ -17,6 +17,7 @@ import type { AgentRow, ExplorerRow, FleetSnapshot } from "./types.js";
 import type { MarkSeg } from "./topology/runtime-marks.js";
 import { rowStatusGlyph } from "./topology/glyphs.js";
 import { hostExplorerLabel } from "./topology/host-label.js";
+import { columns } from "./visual-layout.js";
 
 interface KeyParts {
   kind: string;
@@ -85,7 +86,7 @@ function contentOf(row: ExplorerRow, parsed: KeyParts, snap: FleetSnapshot, widt
 }
 
 export interface NavigatorMeta {
-  /** column (within the DISPLAY label) where this run begins */
+  /** String index within the display label where this run begins. */
   start: number;
   /** token segments — a run's own colors (status role; formerly the mark's
    * bg channel) survive the paint layer through this channel (guard finding 2;
@@ -198,9 +199,10 @@ function navigatorLabelsInner(rows: ExplorerRow[], snap: FleetSnapshot, width: n
     // S19 re-sealed width policy (guard NOT-CLEAR finding 1): the NAME renders
     // FIRST and UNTRUNCATED — when the full name leaves no room, the META
     // yields entirely (never an ellipsised identity).
-    const room = width - prefix.length - content.length - 1;
+    const available = width - prefix.length - columns(content);
+    const room = available - 1;
     if (room < meta.text.length) { metasOut.push(runs.length ? runs : null); return `${prefix}${content}`; }
-    const gap = Math.max(width - prefix.length - content.length - meta.text.length, 1);
+    const gap = available - meta.text.length;
     runs.push({ start: prefix.length + content.length + gap, segs: meta.segs });
     metasOut.push(runs);
     return `${prefix}${content}${" ".repeat(gap)}${meta.text}`;

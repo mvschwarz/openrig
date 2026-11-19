@@ -70,7 +70,7 @@ export interface SlackBlockActions {
   actions?: Array<{ block_id?: string; action_id?: string; value?: string; action_ts?: string }>;
 }
 
-export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string; clickedTs?: string }) => RecordHumanAnswerResult;
+export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string; clickedTs?: string; onlyIfUnanswered?: boolean; identityProvenance?: string; identityPrincipal?: string }) => RecordHumanAnswerResult;
 
 /** What a person reads in the thread when OpenRig refuses a click or can't record it. Plain words: what happened, and
  *  who may answer or what to do instead. The same clicks are refused as before; they just aren't silent. */
@@ -171,7 +171,7 @@ export function shouldIngest(ev: SlackEvent): boolean {
  *  `source` is that human's canonical ref (never a raw platform id). An unregistered sender — or a
  *  registry that itself failed to load — is REFUSED with LOUD teaching, never a fabricated seat. */
 export type InboundSenderResolution =
-  | { admitted: true; source: string; sharedChannel?: SharedChannelContext }
+  | { admitted: true; source: string; entityId?: string; sharedChannel?: SharedChannelContext }
   | { admitted: false; teaching: string };
 
 /** A message in a registered shared channel (0.7.3). `asChannel`: the sender isn't a registered person, so the row's
@@ -425,6 +425,7 @@ export class InboundRouter {
         qitemId = replayedAnswer ? replayedAnswer.qitemId : await this.deps.queue.createQitem({
           qitemId: this.inboundQitemId(ev),
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
+          ...(who.entityId ? { identityPrincipal: who.entityId } : {}),
           destination: route.destination,
           priority: "routine",
           tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : []), ...(who.sharedChannel?.tags ?? []),
@@ -598,7 +599,16 @@ export class InboundRouter {
         return { status: "handler-failed", reason: "answer-continuation-failed" };
       }
     }
-    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts });
+    let recorded: RecordHumanAnswerResult | undefined;
+    try {
+      recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts,
+        onlyIfUnanswered: !live,
+        ...(who.entityId ? { identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId } : {}) });
+    } catch (e) {
+      this.deps.log?.(`answer recording failed qitem=${qitemId}: ${(e as Error).message}`);
+      if (live) await acknowledge("Your answer reached OpenRig but wasn't recorded yet. OpenRig will retry it if this question has no answer yet; to change an answer you already gave, click it again.");
+      return { status: "handler-failed", reason: "answer-recording-failed" };
+    }
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
       // Another person's committed answer is the answer: a park on the person resumes with it through the resolver.
@@ -628,6 +638,7 @@ export class InboundRouter {
       await this.deps.queue.createQitem({
         qitemId: `qitem-slack-answers-${createHash("sha256").update(qitemId).digest("hex").slice(0, 20)}`,
         source: who.source,
+        ...(who.entityId ? { identityPrincipal: who.entityId } : {}),
         destination: route.destination,
         priority: "routine",
         tags: [...route.tags ?? ["founder-slack", "inbound"], "human-answer"],
@@ -704,6 +715,7 @@ export class InboundRouter {
       await this.deps.queue.createQitem({
         qitemId: `qitem-slack-reaction-${createHash("sha256").update(eventId).digest("hex").slice(0, 20)}`,
         source: who.source,
+        ...(who.entityId ? { identityPrincipal: who.entityId } : {}),
         destination: route.destination,
         priority: "routine",
         tags: [...route.tags ?? ["founder-slack", "inbound"], "human-reaction"],

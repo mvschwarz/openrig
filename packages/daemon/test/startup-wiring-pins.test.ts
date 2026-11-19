@@ -11,7 +11,7 @@
 // TODAY — those are it.todo ledger entries at the bottom (routed to the desk as
 // findings; a passing pin would freeze the defect). When a finding's fix lands,
 // its todo graduates to a real pin.
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
@@ -25,6 +25,23 @@ import type Database from "better-sqlite3";
 import type { ContextMonitor } from "../src/domain/context-monitor.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { getActiveRotationCount, startTranscriptRotation, stopTranscriptRotation } from "../src/domain/transcript-rotation.js";
+import type { makeWatchdogDeliver } from "../src/domain/watchdog-delivery.js";
+
+// What production startup hands the watchdog's delivery and two of its policies, recorded on the way through to the
+// real factories (nothing else changes): their queue-only seams are closures with no other handle.
+const composed = vi.hoisted(() => ({ deliver: [] as unknown[], idleGate: [] as unknown[], parkedOwner: [] as unknown[] }));
+vi.mock("../src/domain/watchdog-delivery.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/domain/watchdog-delivery.js")>();
+  return { ...real, makeWatchdogDeliver: (deps: Parameters<typeof real.makeWatchdogDeliver>[0]) => { composed.deliver.push(deps); return real.makeWatchdogDeliver(deps); } };
+});
+vi.mock("../src/domain/policies/idle-gate-qitem.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/domain/policies/idle-gate-qitem.js")>();
+  return { ...real, makeIdleGateQitemPolicy: (deps: Parameters<typeof real.makeIdleGateQitemPolicy>[0]) => { composed.idleGate.push(deps); return real.makeIdleGateQitemPolicy(deps); } };
+});
+vi.mock("../src/domain/policies/parked-owner-consumer.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/domain/policies/parked-owner-consumer.js")>();
+  return { ...real, makeParkedOwnerConsumerPolicy: (deps: Parameters<typeof real.makeParkedOwnerConsumerPolicy>[0]) => { composed.parkedOwner.push(deps); return real.makeParkedOwnerConsumerPolicy(deps); } };
+});
 
 let db: Database.Database;
 let deps: AppDeps;
@@ -160,6 +177,55 @@ describe("P16 — domain-internal safety injections (the recurred class, pinned 
     } finally {
       for (const name of names) stopTranscriptRotation(name);
     }
+  });
+});
+
+describe("a queue-only seat's watchdog reminders go through its queue, as startup composes them (#3076)", () => {
+  type DeliverDeps = Parameters<typeof makeWatchdogDeliver>[0];
+  type SeatCheck = { isQueueOnlySeat?: (sessionName: string) => boolean };
+  const deliverDeps = () => composed.deliver.at(-1) as DeliverDeps;
+  const typist = "typist@pin-rig";
+  beforeAll(async () => {
+    db.exec(`INSERT INTO rigs(id,name) VALUES ('pin-rig','pin-rig');
+      INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('pin-node','pin-rig','typist','claude-code');
+      INSERT INTO bindings(id,node_id,tmux_session,tmux_pane) VALUES ('pin-binding','pin-node','${typist}','%9');
+      INSERT INTO sessions(id,node_id,session_name,status) VALUES ('pin-session','pin-node','${typist}','running');`);
+    await deps.tmuxAdapter.deliveryGuard!.set("pin-node", { mode: "queue-only" }, "person@pin-rig", "a person types here");
+  });
+
+  it("the delivery, the idle-gate policy and the parked-owner policy each read the seat's typing guard", () => {
+    expect(composed.deliver).toHaveLength(1);
+    for (const check of [deliverDeps(), composed.idleGate.at(-1) as SeatCheck, composed.parkedOwner.at(-1) as SeatCheck]) {
+      expect(check.isQueueOnlySeat?.(typist)).toBe(true);
+      expect(check.isQueueOnlySeat?.("nobody@pin-nowhere")).toBe(false);
+    }
+  });
+
+  it("a reminder's cold row is OpenRig's, with no nudge: nothing wakes the seat", async () => {
+    const create = vi.spyOn(deps.queueRepo!, "create");
+    try {
+      const row = await deliverDeps().createQueueRow!({ qitemId: "qitem-watchdog-pin", destinationSession: typist, body: "Check the deploy.",
+        summary: "Watchdog (periodic-reminder): Check the deploy.", tags: ["watchdog", "queue-only"] });
+      expect(create).toHaveBeenCalledWith(expect.objectContaining({ sourceSession: "watchdog@system", nudge: false, wakeTrigger: "openrig" }));
+      expect(row).toEqual({ qitemId: "qitem-watchdog-pin", state: "pending" });
+      expect(deps.queueRepo!.getById(row.qitemId)).toMatchObject({ sourceSession: "watchdog@system", destinationSession: typist });
+      expect(deps.queueRepo!.getById(row.qitemId)!.lastNudgeAttempt ?? null).toBeNull();
+    } finally { create.mockRestore(); }
+  });
+
+  it("the parked rows a reminder is noted on, and the notes, are the queue repository's", () => {
+    const parked = vi.spyOn(deps.queueRepo!, "parkedRowsOwnedBy").mockReturnValue(["qitem-parked-pin"]);
+    const noted = vi.spyOn(deps.queueRepo!, "noteParkedRows").mockReturnValue(["qitem-parked-pin"]);
+    const again = vi.spyOn(deps.queueRepo!, "noteOpenWatchdogRow").mockReturnValue("qitem-watchdog-pin");
+    try {
+      expect(deliverDeps().resolveParkedRows!({ jobId: "pin-job", targetSession: typist })).toEqual(["qitem-parked-pin"]);
+      expect(parked).toHaveBeenCalledWith("pin-job", typist);
+      const notes = [{ qitemId: "qitem-parked-pin", jobId: "pin-job", note: "n" }];
+      expect(deliverDeps().noteParkedRows!({ owner: typist, notes })).toEqual(["qitem-parked-pin"]);
+      expect(noted).toHaveBeenCalledWith(typist, notes);
+      expect(deliverDeps().noteQueuedRow!({ jobId: "pin-job", destinationSession: typist, note: "again" })).toBe("qitem-watchdog-pin");
+      expect(again).toHaveBeenCalledWith("pin-job", typist, "again");
+    } finally { parked.mockRestore(); noted.mockRestore(); again.mockRestore(); }
   });
 });
 

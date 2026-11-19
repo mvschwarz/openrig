@@ -56,6 +56,22 @@ describe("the grouped notice for seats left as bare shells", () => {
     expect(report.warnings).toEqual([]);
   });
 
+  it("names the seat's current session as node inventory does, by its id, even when the clock moved back", async () => {
+    const lead = seat("crew", "lead", "lead@crew");
+    const rig = lead.rig;
+    const a = rigs.addNode(rig.id, "a", { runtime: "claude-code" });
+    rigs.addEdge(rig.id, lead.node.id, a.id, "delegates_to");
+    // Session ids are monotonic; created_at is the clock's, to the second. The newer shell has the earlier time.
+    const insert = db.prepare("INSERT INTO sessions (id,node_id,session_name,status,created_at) VALUES (?,?,?,'running',?)");
+    insert.run("01KXAAAAAAAAAAAAAAAAAAAAA1", a.id, "a-before@crew", "2026-11-16 08:00:00");
+    insert.run("01KXAAAAAAAAAAAAAAAAAAAAA2", a.id, "a@crew", "2026-11-16 07:59:00");
+    const report = await noticeHarnessNotStarted(db, queue, { rigId: rig.id, attempt: "restore attempt 9", seats: [{ nodeId: a.id, logicalId: "a" }] });
+
+    expect(report.notices).toEqual([expect.objectContaining({ owner: "lead@crew", seats: ["a@crew"] })]);
+    expect(notices()[0]!.body).toContain("- a@crew");
+    expect(notices()[0]!.body).not.toContain("a-before@crew");
+  });
+
   it("gives each seat's own cause and a remedy that doesn't repeat the launch", async () => {
     const lead = seat("crew", "lead", "lead@crew");
     const a = seat("crew", "a", "a@crew");

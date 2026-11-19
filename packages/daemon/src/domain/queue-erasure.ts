@@ -1,3 +1,5 @@
+import { OutboxHandler } from "./outbox-handler.js";
+import { redactCoreAppSubmissions } from "./core-app-access.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, openSync, readSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
@@ -10,7 +12,9 @@ import { isOpenRigSender, OPENRIG_SENDER } from "../lib/pane-envelope.js";
  *   (`content_erased_at` set). The create path's retry identity still finds it, so a retried create makes no new work.
  *   A later note, summary or reclose makes it eligible again.
  * - delete: the row and everything linked to it go. Only its id is kept, in `queue_erased_ids` (no endpoints, no
- *   content), and the create path refuses that id (`qitem_erased`).
+ *   content), and the create path refuses that id (`qitem_erased`). Native delivery receipts additionally retain
+ *   opaque custody tombstones (IDs, run order, binding hash and erased marker), with no native payload or result:
+ *   their deletion would permit blind replay or sequence reuse. Legacy outbox deletion stays physical.
  * The row's own copies follow it: its transitions, live and archived; events whose payload names it; its
  * mission-control audit rows. Copies another party holds (outbox and inbox entries, stream reader actions and
  * dispositions) go only when they're the owner's: both endpoints the account's (members scope) or the row's own
@@ -95,8 +99,8 @@ export interface EraseReport {
   scope: EraseScope["kind"];
   /** false when the run stopped at maxBatches or on an error; rerun to continue */
   complete: boolean;
-  /** complete, and nothing was left: no mixed rows or copies, gaps, unreadable events, or left-over entries or rig
-   *  records */
+  /** Complete with nothing needing further content erasure: no mixed rows/copies, gaps, unreadable events or
+   * leftover entries/rig records. Opaque native custody tombstones are intentional and counted separately. */
   clean: boolean;
   /** why the run stopped early, and where; everything listed in qitems was committed before it */
   error?: { stage: Stage; message: string };
@@ -122,11 +126,12 @@ export interface EraseReport {
   /** events naming a selected row whose payload can't be read: kept, since what they hold can't be inspected. The
    *  rows they name are kept too (gap unreadable-event), so every rerun finds them again until they're resolved */
   unreadableEvents: Array<{ seq: number; qitemIds: string[] }>;
-  /** copies erased with the rows, or that would be */
-  linked: { transitions: number; archivedTransitions: number; outbox: number; inbox: number; events: number; streamActions: number; missionControl: number };
-  /** members scope: entries no queue row owns between members, or a member and OpenRig; mixed ones are counted and
-   *  left */
-  unlinked?: { outbox: number; inbox: number; streamItems: number; mixedEntries: number; referencedStreamItems: number };
+  /** Copies whose content is erased with the rows, or would be. nativeCustodyRetained is the outbox subset kept
+   * as opaque native tombstones rather than physically deleted (legacy outbox delete remains physical). */
+  linked: { transitions: number; archivedTransitions: number; outbox: number; nativeCustodyRetained?: number; inbox: number; events: number; streamActions: number; missionControl: number };
+  /** Members scope: unlinked entries between members, or a member and OpenRig; mixed entries are left. outbox counts physical legacy
+   * deletions; nativeCustodyRetained separately counts native content erasure retaining opaque custody. */
+  unlinked?: { outbox: number; nativeCustodyRetained?: number; inbox: number; streamItems: number; mixedEntries: number; referencedStreamItems: number };
   /** members scope with rig: whether the rig was found and verified, its records erased and left per table, the
    *  tables whose records can't be counted (an unverified removed rig), and when its erasure completed */
   rig?: { id: string; found: boolean; verified: boolean; erased: Record<string, number>; left: Record<string, number>; unknown: string[];
@@ -227,9 +232,15 @@ const COPY_KEY: Record<CopyTable, string> = {
   outbox_entries: "outbox_id", inbox_entries: "inbox_id", stream_reader_actions: "action_id", stream_dispositions: "stream_item_id",
 };
 
-function eraseCopies(st: Statements, copies: Copy[], action: EraseAction): void {
+function eraseCopies(st: Statements, copies: Copy[], action: EraseAction, outbox: OutboxHandler, at: string): void {
   for (const table of Object.keys(COPY_KEY) as CopyTable[]) {
-    const keys = copies.filter((copy) => copy.table === table).map((copy) => copy.id);
+    let keys = copies.filter((copy) => copy.table === table).map((copy) => copy.id);
+    if (table === "outbox_entries") {
+      const native = keys.filter(id => outbox.eraseRunner(id, at));
+      // Native-only opaque custody survives physical deletion. Original content is removed at the requested scope;
+      // composed group content/results were scrubbed atomically above, including copies owned by another member.
+      keys = keys.filter(id => !native.includes(id));
+    }
     if (keys.length === 0) continue;
     const params = { keys: JSON.stringify(keys) };
     const where = `${COPY_KEY[table]} IN (SELECT value FROM json_each(@keys))`;
@@ -562,6 +573,7 @@ function reconcileLedger(st: Statements, path: string, nowIso: string): { reconc
 /** Erase queue rows in one scope. With apply false it reports exactly what an apply would erase and writes nothing. */
 export async function eraseQueue(db: Database.Database, opts: EraseOptions): Promise<EraseReport> {
   const st = new Statements(db);
+  const erasureOutbox = new OutboxHandler(db);
   const batchSize = opts.batchSize ?? DEFAULT_BATCH;
   const maxBatches = opts.maxBatches ?? DEFAULT_MAX_BATCHES;
   const { scope } = opts;
@@ -931,10 +943,11 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
         ledger([...planned.rows, ...planned.absent.map((qitemId) => ({ qitemId, action: "delete" as const }))], batch);
         for (const [payload, seq] of planned.events.rewrite) rewriteEvent.run(payload, seq);
         for (const seq of planned.events.remove) removeEvent.run(seq);
-        eraseCopies(st, planned.owned.scrub, "scrub");
-        eraseCopies(st, planned.owned.delete, "delete");
+        eraseCopies(st, planned.owned.scrub, "scrub", erasureOutbox, opts.nowIso);
+        eraseCopies(st, planned.owned.delete, "delete", erasureOutbox, opts.nowIso);
         const scrub = planned.rows.filter((row) => row.action === "scrub").map((row) => row.qitemId);
         const remove = [...planned.rows.filter((row) => row.action === "delete").map((row) => row.qitemId), ...planned.absent];
+        if (scrub.length > 0 || remove.length > 0) redactCoreAppSubmissions(db, [...scrub, ...remove], opts.nowIso);
         if (scrub.length > 0) scrubRows(st, scrub, opts.nowIso);
         if (remove.length > 0) deleteRows(st, remove, opts.nowIso, reason);
         return planned;
@@ -944,6 +957,9 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       report.linked.archivedTransitions += plan.counts.archivedTransitions;
       report.linked.missionControl += plan.counts.missionControl;
       report.linked.outbox += all.filter((copy) => copy.table === "outbox_entries").length;
+      const nativeRetained = all.filter(copy => copy.table === "outbox_entries"
+        && (erasureOutbox.runnerPrimary(copy.id) || erasureOutbox.inputRoute(copy.id) === "native")).length;
+      if (nativeRetained) report.linked.nativeCustodyRetained = (report.linked.nativeCustodyRetained ?? 0) + nativeRetained;
       report.linked.inbox += all.filter((copy) => copy.table === "inbox_entries").length;
       report.linked.streamActions += all.filter((copy) => copy.table === "stream_reader_actions" || copy.table === "stream_dispositions").length;
       for (const seq of plan.events.seqs) eventSeqs.add(seq);
@@ -982,7 +998,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
       stage = "unlinked";
       report.unlinked = eraseUnlinked(db, st, {
         members, plannedActions, plannedDispositions, erasedRows: report.qitems.map((row) => row.qitemId),
-      }, opts.apply);
+      }, opts.apply, opts.nowIso);
       if (rig !== null) {
         stage = "rig";
         report.rig = { id: rig.id, found: rig.found, verified: rig.verified, erased: {}, left: {}, unknown: [] };
@@ -1009,7 +1025,7 @@ export async function eraseQueue(db: Database.Database, opts: EraseOptions): Pro
  *  left. Rows and references this run erases are counted as they were before it, so a dry run and an apply report the
  *  same set. */
 function eraseUnlinked(db: Database.Database, st: Statements,
-  plan: { members: string; plannedActions: string[]; plannedDispositions: string[]; erasedRows: string[] }, apply: boolean): NonNullable<EraseReport["unlinked"]> {
+  plan: { members: string; plannedActions: string[]; plannedDispositions: string[]; erasedRows: string[] }, apply: boolean, at: string): NonNullable<EraseReport["unlinked"]> {
   // A row this run erased still owns its copies here: they were reported with it (keptCopies), not as unowned.
   const rows = "(SELECT qitem_id FROM queue_items UNION ALL SELECT value FROM json_each(@rows))";
   // COALESCE: an entry with no pointer is unowned, not unknown (NULL IN (...) would drop it from both counts).
@@ -1040,24 +1056,32 @@ function eraseUnlinked(db: Database.Database, st: Statements,
   const referenced = `stream_item_id IN (${references.join(" UNION ")})`;
   const params = { members: plan.members, actions: JSON.stringify(plan.plannedActions), dispositions: JSON.stringify(plan.plannedDispositions),
     rows: JSON.stringify(plan.erasedRows) };
-  const result = {
-    outbox: st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}`, params),
-    inbox: st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${both} AND NOT ${ownedInbox}`, params),
-    streamItems: st.count(`SELECT COUNT(*) AS n FROM stream_items WHERE source_session IN ${MEMBERS} AND NOT ${referenced}`, params),
-    // A row's own copies are reported with that row (mixed, keptCopies); these are the entries no row owns.
-    mixedEntries: [fromMember, toMember].reduce((sum, where) =>
-      sum + st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${where} AND NOT ${ownedOutbox}`, params)
-      + st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${where} AND NOT ${ownedInbox}`, params), 0),
-    referencedStreamItems: st.count(`SELECT COUNT(*) AS n FROM stream_items WHERE source_session IN ${MEMBERS} AND ${referenced}`, params),
-  };
-  if (apply) {
-    db.transaction(() => {
+  // Select and erase under the same snapshot: a native source cannot cross account ownership between them.
+  return db.transaction(() => {
+    const outbox = new OutboxHandler(db);
+    const nativeIds = (st.get(`SELECT outbox_id AS id FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}
+      AND (json_extract(guard_delivery,'$.runner') IS NOT NULL OR json_extract(guard_delivery,'$.nativeRequestId') IS NOT NULL OR json_extract(guard_delivery,'$.inputRoute')='native')`)
+      .all(params) as { id: string }[]).map(row => row.id);
+    const result = {
+      ...(nativeIds.length ? { nativeCustodyRetained: nativeIds.length } : {}),
+      outbox: st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}`, params) - nativeIds.length,
+      inbox: st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${both} AND NOT ${ownedInbox}`, params),
+      streamItems: st.count(`SELECT COUNT(*) AS n FROM stream_items WHERE source_session IN ${MEMBERS} AND NOT ${referenced}`, params),
+      // A row's own copies are reported with that row (mixed, keptCopies); these are the entries no row owns.
+      mixedEntries: [fromMember, toMember].reduce((sum, where) =>
+        sum + st.count(`SELECT COUNT(*) AS n FROM outbox_entries WHERE ${where} AND NOT ${ownedOutbox}`, params)
+        + st.count(`SELECT COUNT(*) AS n FROM inbox_entries WHERE ${where} AND NOT ${ownedInbox}`, params), 0),
+      referencedStreamItems: st.count(`SELECT COUNT(*) AS n FROM stream_items WHERE source_session IN ${MEMBERS} AND ${referenced}`, params),
+    };
+    if (apply) {
+      for (const id of nativeIds) outbox.eraseRunner(id, at);
+      // Native sources now have empty endpoints; only legacy rows still match this physical-delete scope.
       st.get(`DELETE FROM outbox_entries WHERE ${both} AND NOT ${ownedOutbox}`).run(params);
       st.get(`DELETE FROM inbox_entries WHERE ${both} AND NOT ${ownedInbox}`).run(params);
       st.get(`DELETE FROM stream_items WHERE source_session IN ${MEMBERS} AND NOT ${referenced}`).run(params);
-    })();
-  }
-  return result;
+    }
+    return result;
+  })();
 }
 
 // The account rig's own records that outlive the rig (no cascading key to it), in delete order: dependents first.

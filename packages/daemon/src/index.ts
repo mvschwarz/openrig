@@ -20,6 +20,8 @@ import {
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
+  makePermissionPromptReader,
+  makePromptKindReader,
   makePromptStateReader,
   resolveWakeRetryIntervalSeconds,
   runWakeLadderTick,
@@ -248,6 +250,10 @@ export function startWakeLadderScheduler(deps: {
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
       ...(deps.tmuxAdapter ? { readHookReviews: makeKernelHookReviewReader({ db, tmux: deps.tmuxAdapter }) } : {}),
+      readPermissionPrompts: makePermissionPromptReader({ db,
+        getLatestHook: (sessionName, runtime) => deps.agentActivityStore?.getLatestForNode({ sessionName,
+          order: runtime === "claude-code" ? "source" : "arrival" }),
+      }),
       readPromptState: makePromptStateReader({
         db,
         getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
@@ -256,6 +262,7 @@ export function startWakeLadderScheduler(deps: {
           order: runtime === "claude-code" ? "source" : "arrival",
         }),
       }),
+      readPromptKind: makePromptKindReader({ db, getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId) }),
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
         : {}),
@@ -297,6 +304,10 @@ export async function startServer(port?: number) {
   });
   if (!initialization.ok) {
     throw new Error(`OpenRig instance initialization blocked: ${formatInstanceInitializationConflicts(initialization)}`);
+  }
+  if (initialization.workspaceExistingProject) {
+    console.log(`[openrig] workspace.root holds a project of its own (${initialization.workspaceExistingProject}); `
+      + "OpenRig left it as it is and reads that project's own id.");
   }
 
   // bug-fix slice auth-bearer-tailscale-trust: distinguish "explicit
@@ -460,6 +471,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["terminal-reachability", () => deps.terminalReachability?.stop()],
       ["network-connector", () => deps.networkConnector?.stop()],
       ["stream-intake", () => deps.streamIntakeCoordinator?.stop()],
       ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],

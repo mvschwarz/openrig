@@ -1,4 +1,6 @@
 import { recordedRunner, sessionCommunityRunnerSelect } from "./session-registry.js";
+import { configuredAccount } from "./configured-account.js";
+import { restoreOutcomesByIntendedNode } from "./restore-topology.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -58,6 +60,9 @@ interface InventoryRow {
   pod_namespace: string | null;
   role: string | null;
   runtime: string | null;
+  claude_token_ref: string | null;
+  has_claude_token_ref: number;
+  account_home: string | null;
   model: string | null;
   effort: string | null;
   effort_choice: string | null;
@@ -562,11 +567,8 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
         && typeof start?.snapshotId === "string"
         && event?.snapshotId === start.snapshotId && result?.snapshotId === start.snapshotId
         && Array.isArray(result?.nodes) && Array.isArray(roster)) {
-        const intended = new Set(roster.map((node: any) => node?.nodeId));
-        for (const node of result.nodes) {
-          if (typeof node?.nodeId === "string" && intended.has(node.nodeId)) {
-            attempt.outcomes.set(node.nodeId, node.status);
-          }
+        for (const node of restoreOutcomesByIntendedNode(roster, result.nodes).values()) {
+          attempt.outcomes.set(node.nodeId, node.status);
         }
       }
     }
@@ -873,6 +875,9 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       p.namespace as pod_namespace,
       n.role,
       n.runtime,
+      ${nodeColumnOrNull("claude_token_ref")} as claude_token_ref,
+      ${nodeColumns.has("claude_token_ref") ? 1 : 0} as has_claude_token_ref,
+      ${nodeColumnOrNull("account_home")} as account_home,
       n.model,
       ${nodeColumnOrNull("effort")} as effort,
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
@@ -1071,6 +1076,7 @@ function buildInventoryItem(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
+    configuredAccount: configuredAccount(row.runtime, Boolean(row.has_claude_token_ref), row.claude_token_ref, row.account_home),
     ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: recordedRunner(row.session_community_runner) }) } : {}),
     ...(launchWrapper ? { launchWrapper } : {}),
     sessionStatus,
@@ -1637,6 +1643,11 @@ export function attachTerminalActivityAndWork(
           }
         : null;
     }
+    // A seat whose tmux this sweep couldn't reach may be gone: an idle at its prompt is the last thing it said, as
+    // attachAgentActivity reads it. Working and waiting readings stay.
+    if (activityState && unseenByTmux(entry) && activityState.activity === "idle-at-prompt" && activityState.needsInput.count === 0) {
+      activityState = { ...activityState, activity: "unknown", display: "unknown" };
+    }
     const work = countAssignedWorkForEntry(entry, assignedByDest);
     const arbitratedNeedsInput = arbitratedNeedsInputSignal(arb);
     const hook = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
@@ -1861,7 +1872,7 @@ export async function attachAgentActivity(
 ): Promise<NodeInventoryEntry[]> {
   const sampledAt = deps.now ?? new Date();
   const captureFallback = deps.captureFallback ?? false;
-  return Promise.all(entries.map(async (entry) => {
+  const attached = await Promise.all(entries.map(async (entry): Promise<NodeInventoryEntry> => {
     // A cached hook, pane sample or motion cannot revive a confirmed absent executor.
     // Preserve the applicable missing-session or exited-pane observation without probing.
     if (identityVerdictConfirmsExecutorStopped(entry.identityVerdict)) {
@@ -2035,4 +2046,18 @@ export async function attachAgentActivity(
     })),
     };
   }));
+  return attached.map(unseenIdleIsUnknown);
+}
+
+/** This sweep couldn't reach the seat's tmux, so whether it still runs is unknown. */
+function unseenByTmux(entry: NodeInventoryEntry): boolean {
+  return entry.identityVerdict?.reason === "tmux_unavailable";
+}
+
+/** A seat whose tmux this sweep couldn't reach may be gone: an idle reading is the last thing it said, not what it is
+ *  now, so it reads unknown. Working and waiting readings stay, as the agent's own report of work. */
+function unseenIdleIsUnknown(entry: NodeInventoryEntry): NodeInventoryEntry {
+  if (!unseenByTmux(entry) || entry.agentActivity?.state !== "idle") return entry;
+  return { ...entry, agentActivity: { ...entry.agentActivity, state: "unknown", reason: "tmux_unavailable",
+    evidenceSource: "tmux_session", sampledAt: entry.identityVerdict?.observedAt ?? entry.agentActivity.sampledAt } };
 }

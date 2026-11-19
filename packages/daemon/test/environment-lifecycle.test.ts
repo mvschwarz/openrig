@@ -8,12 +8,18 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { EnvironmentPlatform, sha256 } from "../src/domain/environment-platform.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { RunnerChannel } from "../src/domain/runner-channel.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
-async function fixture(attached = false, automatic = true, beforeGeneration = false) {
+async function fixture(attached = false, automatic = true, beforeGeneration = false, nativeChannelSchema = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "environment-lifecycle-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
-  const db = createFullTestDb(); cleanup.push(() => db.close());
+  const db = nativeChannelSchema ? createDb() : createFullTestDb(); cleanup.push(() => db.close());
+  if (nativeChannelSchema) migrate(db, ALL_MIGRATIONS);
   const resource = { id: "compute-one", name: "worker-one", workspace: "workspace", phase: "Ready", operationId: "create-one" };
   let present = attached, running = true, unavailable = false, loseStop = false, stopCalls = 0, deleteCalls = 0, creates = 0;
   let dependents = { workload: false, supervisor: false, volumes: false };
@@ -49,9 +55,25 @@ async function fixture(attached = false, automatic = true, beforeGeneration = fa
   }
   const effect = (name: string, operationId = "effect-one") => request("/binding-one/effect", { operationId, generation: "generation-one", effect: name });
   const lifecycle = new EnvironmentLifecycle(new EnvironmentPlatform(db, driver), queue, join(root, "retained"));
-  return { root, db, driver, queue, lifecycle, request, effect, app: f.app, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
+  return { root, db, node, driver, queue, lifecycle, request, effect, app: f.app, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
 }
 describe("owned and attached environment effects", () => {
+  it.each([false, true])("an existing contained execution does not become a hosted native runner (attached=%s)", async attached => {
+    const f = await fixture(attached, true, false, true), grants = new ActivityGrantStore(f.db), channel = new RunnerChannel(grants, new OutboxHandler(f.db));
+    const counts = f.counts();
+    expect(f.db.prepare("SELECT input_route FROM nodes WHERE id=?").get(f.node.id)).toEqual({ input_route: "typed" });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM environment_operations WHERE kind='launch' AND state='confirmed'").get()).toEqual({ n: 1 });
+    expect(f.db.prepare("SELECT COUNT(*) AS n FROM bindings WHERE node_id=?").get(f.node.id)).toEqual({ n: 0 });
+    expect(grants.activeForNode(f.node.id)).toBeNull();
+    for (const kind of ["input", "wake", "cancel"] as const) expect(channel.capable(f.node.id, kind)).toBe(false);
+    for (const kind of ["input", "wake"] as const) expect(() => channel.admit(f.node.id, { outboxId: kind, senderSession: "sender", destinationSession: "worker@lifecycle",
+      body: "never offered", kind, inputRoute: "native", payload: kind === "wake" ? { question: "never offered" } : { text: "never offered" } })).toThrow(/capable/);
+    expect(() => channel.cancel(f.node.id, { requestId: "cancel-refusal", sender: "sender", destination: "worker@lifecycle",
+      target: { runId: "absent-hosted-run", nativeTurnId: "absent-invocation" } }))
+      .toThrow(expect.objectContaining({ code: "runner_unavailable", status: 409 }));
+    expect(channel.outbox.runnerReceipt("cancel-refusal")).toBeNull();
+    expect(f.counts()).toEqual(counts);
+  });
   async function failedProjection(attached = false) {
     const f = await fixture(attached, true, true), platform = new EnvironmentPlatform(f.db, f.driver);
     vi.spyOn(f.driver, "read").mockRejectedValueOnce(new Error("guest root read denied"));

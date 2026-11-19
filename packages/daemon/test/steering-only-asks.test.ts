@@ -574,7 +574,7 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
     expect(onSteering()).toContain(finding!.qitemId);
     await runGateway();
     expect(posts).toHaveLength(1);
-    expect(JSON.stringify(posts)).toContain(`Stuck sweep: undelivered-wake on ${work.qitemId}`);
+    expect(JSON.stringify(posts)).toContain(`Checked on ${work.qitemId}: its owner couldn't be woken`);
   });
 
   it("--alert decides per item: an alerted ask handed to another person without --alert posts to them with no mention", async () => {

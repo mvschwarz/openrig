@@ -64,6 +64,10 @@ interface AgentActivityStoreDeps {
   /** Confirm that a carried generation is registered for this node. A side-effect-free reservation
    * that never committed must remain unresolvable, not become positive mismatch evidence. */
   isRegisteredOccupantGeneration?: (nodeId: string, generation: string) => boolean;
+  /** Whether a registered generation was followed only by no-launch adoptions (reconcile, bind, self-attach). Adoption
+   * registers the same live process again, so its hooks, still carrying the launch-time generation, are the current
+   * occupant's, as the session-identity route already reads them (#2796). A launch after it makes it earlier. */
+  isOccupantContinuedByAdoption?: (nodeId: string, generation: string) => boolean;
 }
 
 interface SessionLookupRow {
@@ -91,6 +95,7 @@ export class AgentActivityStore {
   readonly freshnessMs: number;
   private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
   private readonly isRegisteredOccupantGeneration?: (nodeId: string, generation: string) => boolean;
+  private readonly isOccupantContinuedByAdoption?: (nodeId: string, generation: string) => boolean;
 
   constructor(deps: AgentActivityStoreDeps) {
     this.db = deps.db;
@@ -100,6 +105,7 @@ export class AgentActivityStore {
     this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
     this.resolveOccupantGeneration = deps.resolveOccupantGeneration;
     this.isRegisteredOccupantGeneration = deps.isRegisteredOccupantGeneration;
+    this.isOccupantContinuedByAdoption = deps.isOccupantContinuedByAdoption;
   }
 
   /** Bound at ingress, then checked again here and at read. No event or oracle mutation. */
@@ -245,10 +251,10 @@ export class AgentActivityStore {
           { session_name: string; resume_token: string | null };
         // Known Core references are never replaced or re-verified by a runner claim, including matching repeats.
         const runtime = grant.binding!.runtime;
-        const sessionFile = runtime === "pi" || grant.binding!.runner === AGENT_RUNNER_HOSTED_PI_RPC;
+        const sessionFile = runtime === "pi" || runtime === "omp" || grant.binding!.runner === AGENT_RUNNER_HOSTED_PI_RPC;
         // Reporting a path is not authority to persist a token the owning adapter cannot resume.
         if (!row.resume_token && (!sessionFile || validateSessionFileFormat(observations.session.nativeRef).ok)) {
-          const resumeType = runtime === "pi" ? "pi_session_file" : `community:${runtime}`;
+          const resumeType = runtime === "pi" || runtime === "omp" ? `${runtime}_session_file` : `community:${runtime}`;
           new SessionRegistry(this.db).recordLauncherReportedToken(session.sessionId, resumeType, observations.session.nativeRef);
           register(this.eventBus.persistWithinTransaction({ type: "agent.session_identity", rigId: session.rigId,
             nodeId: grant.nodeId, sessionName: row.session_name, runtime, sessionId: observations.session.nativeRef, provenance: "launcher" }));
@@ -296,6 +302,56 @@ export class AgentActivityStore {
     } catch { return unknown("binding_unverified"); }
   }
 
+  /** #3389: the seat's own report of a compaction: the earliest SessionStart hook with source `compact` recorded for it
+   *  at or after `sinceMs` that came from this occupant, read from the persisted events (a daemon that restarted between
+   *  the hook and the read still finds it). "This occupant" is the asked generation, or one that only no-launch adoptions
+   *  have followed: an adoption mints a new generation for the same live process, whose hooks keep the one it launched
+   *  with (#2796, as the activity read and the session-identity route treat it). A report with no generation, or one
+   *  from an occupant a later launch replaced, is stored as such and is never returned, so it cannot stand in front of
+   *  a later report from this occupant. The generation it carried is returned.
+   *
+   *  The read is bounded at the write, not by how much the seat has recorded: a report is recorded after it is made, so
+   *  one recorded before the second the write started cannot be the report asked for, and the scan starts after the
+   *  newest such record. `events.created_at` has whole-second precision, so the bound is the second before the write's
+   *  second. The hook's own `eventAt` is still checked on every row that is read. */
+  findCompactSessionStart(input: { sessionName: string; sinceMs: number; generation: string }): { observedAt: number; generation: string } | null {
+    if (!input.generation || !Number.isFinite(input.sinceMs)) return null;
+    const nodeId = this._resolveSession({ sessionName: physicalSessionName(this.db, input.sessionName) })?.node_id;
+    if (!nodeId) return null;
+    const recordedBefore = new Date(Math.floor(input.sinceMs / 1000) * 1000 - 1000).toISOString().slice(0, 19).replace("T", " ");
+    const rows = this.db.prepare(`
+      SELECT payload FROM events
+      WHERE node_id = ? AND type = 'agent.activity'
+        AND seq > COALESCE((SELECT seq FROM events WHERE node_id = ? AND type = 'agent.activity' AND created_at < ?
+                            ORDER BY seq DESC LIMIT 1), 0)
+        AND json_extract(payload, '$.activity.rawEvent') = 'SessionStart'
+        AND json_extract(payload, '$.activity.rawSubtype') = 'compact'
+        AND json_extract(payload, '$.activity.generation') IS NOT NULL
+        AND json_extract(payload, '$.activity.eventAt') >= ?
+      ORDER BY seq DESC LIMIT 200`).all(nodeId, nodeId, recordedBefore, new Date(input.sinceMs).toISOString()) as EventPayloadRow[];
+    const same = new Map<string, boolean>();
+    const fromThisOccupant = (generation: string): boolean => {
+      if (generation === input.generation) return true;
+      let known = same.get(generation);
+      if (known === undefined) {
+        try {
+          known = !!this.isRegisteredOccupantGeneration?.(nodeId, generation) && !!this.isOccupantContinuedByAdoption?.(nodeId, generation);
+        } catch { known = false; }
+        same.set(generation, known);
+      }
+      return known;
+    };
+    let earliest: { observedAt: number; generation: string } | null = null;
+    for (const row of rows) {
+      const activity = parseActivityPayload(row.payload)?.activity;
+      const observedAt = activity?.eventAt ? Date.parse(activity.eventAt) : NaN;
+      const generation = activity?.generation;
+      if (!(observedAt >= input.sinceMs) || typeof generation !== "string" || !fromThisOccupant(generation)) continue;
+      if (!earliest || observedAt < earliest.observedAt) earliest = { observedAt, generation };
+    }
+    return earliest;
+  }
+
   getLatestForNode(input: {
     nodeId?: string | null;
     sessionName?: string | null;
@@ -326,7 +382,9 @@ export class AgentActivityStore {
     //  (1) the carried generation is REGISTERED FOR THIS NODE and differs from live ⇒ MISMATCH:
     //      positive evidence the claim belongs to a prior, dead tenure ⇒ unknown +
     //      `generation_mismatch`, stale:true, provenance RESOLVED. An unregistered prelaunch
-    //      reservation is absence of evidence and stays UNRESOLVABLE, never mismatch.
+    //      reservation is absence of evidence and stays UNRESOLVABLE, never mismatch. A generation followed
+    //      only by no-launch adoptions isn't a prior tenure: adoption re-registered the same live process,
+    //      so it reads as (2) (#2796, as the session-identity route reads it).
     //  (2) both known and EQUAL (incl. a same-native-session relaunch — the ledger treats it as a
     //      continuation with no new generation) ⇒ provenance RESOLVED, deliver normally (fresh).
     //  (3) null on EITHER side ⇒ UNRESOLVABLE: ABSENCE of evidence, not a dead-tenure finding. State
@@ -363,7 +421,15 @@ export class AgentActivityStore {
           }
         }
         if (recordedGeneration !== liveGeneration) {
-          return this.generationMismatch(activity, referenceTime);
+          // A generation followed only by no-launch adoptions is still the live process's (#2796); a launch after it
+          // is what makes it a prior tenure.
+          let continued: boolean;
+          try {
+            continued = this.isOccupantContinuedByAdoption?.(nodeId, recordedGeneration) === true;
+          } catch {
+            return this.generationDegraded(activity, referenceTime);
+          }
+          if (!continued) return this.generationMismatch(activity, referenceTime);
         }
         generationProvenance = "resolved";
       } else {
@@ -561,7 +627,7 @@ export function hookMeansNeedsInput(rawEvent: string | null | undefined, rawSubt
 
 /** What the store's latest hook for a seat says: its current state, or, past the freshness window, what its
  *  retained raw event means. Generation-mismatched or unresolvable evidence says nothing ("unknown"). */
-function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
+export function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
   if (activity?.evidenceSource !== "runtime_hook") return "unknown";
   if (activity.stale !== true) return activity.state;
   return activity.reason === "stale_runtime_hook"
@@ -669,8 +735,8 @@ function normalizeRunnerObservations(raw: unknown, grant: ActivityGrant): Runner
   if (raw.session !== undefined) {
     if (!object(raw.session) || !only(raw.session, ["nativeRef"])) return null;
     const ref = raw.session.nativeRef;
-    if (grant.binding?.runtime === "pi" || grant.binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) {
-      const valid = validateSessionFileFormat(ref, "Pi", { allowFormatCharacters: true });
+    if (grant.binding?.runtime === "pi" || grant.binding?.runtime === "omp" || grant.binding?.runner === AGENT_RUNNER_HOSTED_PI_RPC) {
+      const valid = validateSessionFileFormat(ref, grant.binding?.runtime, { allowFormatCharacters: true });
       if (!valid.ok) return null;
       out.session = { nativeRef: valid.token };
     } else {

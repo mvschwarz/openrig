@@ -134,6 +134,7 @@ function getStartupContext(db: Database.Database, nodeId: string): StartupContex
           category: typeof candidate["category"] === "string" ? candidate["category"] : null,
           sourcePath: typeof candidate["sourcePath"] === "string" ? candidate["sourcePath"] : null,
           resourceType: typeof candidate["resourceType"] === "string" ? candidate["resourceType"] : null,
+          resourcePath: typeof candidate["resourcePath"] === "string" ? candidate["resourcePath"] : null,
         }];
       }),
     };

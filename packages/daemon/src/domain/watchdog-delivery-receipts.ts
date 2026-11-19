@@ -2,14 +2,26 @@ import { OutboxHandler } from "./outbox-handler.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { resolveWakeRetryCap, resolveWakeRetryIntervalSeconds } from "./queue-wake-ladder.js";
 import type { DeliveryFn, DeliveryOutcome, WatchdogDeliverySource } from "./watchdog-policy-engine.js";
+import { isQueueOnlyDeliveryCode, QUEUED_AS_ROW, type QueueOnlyDeliveryCode } from "./watchdog-history-log.js";
 
 const PREFIX = "watchdog-occurrence-";
-type Receipt = { attempts: number; retryAt?: string; message: string; nextAction?: string; terminalReason?: string; ended?: boolean; error?: string; heldIds?: string[] };
+
+/** The id of the cold row a reminder occurrence becomes at a queue-only seat: a retried occurrence (or digest) finds the
+ *  same row. */
+export function queueOnlyRowId(occurrenceId: string): string {
+  return `qitem-watchdog-${occurrenceId.replace(/[^A-Za-z0-9-]/g, "-")}`;
+}
+type Receipt = { attempts: number; retryAt?: string; message: string; nextAction?: string; terminalReason?: string; ended?: boolean; error?: string; heldIds?: string[];
+  /** At a queue-only seat (#3076), what the occurrence became; its outbox `delivered` is custody, not typed input. */
+  queueOnly?: { code: QueueOnlyDeliveryCode; qitemId?: string };
+  /** The attempt was to a queue-only seat: it writes a queue row or note, never terminal input. */
+  queueOnlyTarget?: boolean };
 
 /** Occurrence custody uses the existing outbox. The watchdog's own loop is its only retry driver.
  * Condition policies keep their existing receipts; this is for scheduled periodic reminders, including digests. */
 export function withWatchdogReceipts(send: DeliveryFn, deps: {
   outbox: OutboxHandler; now?: () => Date; retryIntervalSeconds?: number; retryCap?: number;
+  isQueueOnlySeat?: (sessionName: string) => boolean;
 }): DeliveryFn {
   const { outbox } = deps;
   const wakes = new QueueWakeRepository(outbox.db);
@@ -31,7 +43,9 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
     if (!selected.length) return null;
     const entries = selected.map(m => outbox.getById(m.id));
     if (entries.every(e => e?.deliveryState === "delivered")) {
-      return { status: "ok", occurrenceTracked: true, reconciled: true, outboxIds: selected.map(m => m.id), sentMessage: read(selected[0]!.id)?.message };
+      const first = read(selected[0]!.id);
+      return { status: "ok", occurrenceTracked: true, reconciled: true, outboxIds: selected.map(m => m.id), sentMessage: first?.message,
+        ...(first?.queueOnly ? { code: first.queueOnly.code, ...(first.queueOnly.qitemId ? { queuedQitemId: first.queueOnly.qitemId } : {}) } : {}) };
     }
     if (entries.every(e => e?.deliveryState === "retained" || e?.deliveryState === "retired")) {
       return { status: "retained", occurrenceTracked: true, reconciled: true,
@@ -46,6 +60,25 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
           error: receipt.error ?? receipt.terminalReason, occurrenceComplete: true, terminalReason: receipt.terminalReason, nextAction: receipt.nextAction };
       if (entry.deliveryState === "sending" || entry.deliveryState === "indeterminate") {
         if (selected.length > 1) return { status: "failed", occurrenceTracked: true, deferred: true };
+        // At a queue-only seat the interrupted write was a queue row or note: nothing could have been typed, so the
+        // occurrence isn't ended. Its own open row is its delivery; without one it's owed again, under the same id (the
+        // row is created idempotently by that id), so a park's one-shot wake isn't spent without a row or note.
+        if (receipt?.queueOnlyTarget) {
+          const qitemId = queueOnlyRowId(selected[0]!.occurrenceId);
+          // One transaction, as a normal completion's finalize and receipt are: a stop between them can't leave the entry
+          // delivered without its queue receipt (the row pointer).
+          const queued = outbox.db.transaction(() => {
+            const row = outbox.db.prepare("SELECT state FROM queue_items WHERE qitem_id=?").get(qitemId) as { state: string } | undefined;
+            const open = !!row && ["pending", "in-progress", "blocked"].includes(row.state);
+            if (entry.deliveryState === "indeterminate") outbox.claimForDelivery(entry.outboxId);
+            outbox.finalizeDelivery(entry.outboxId, open ? "delivered" : "failed");
+            if (open) save(entry.outboxId, { ...receipt, queueOnly: { code: QUEUED_AS_ROW, qitemId } });
+            return open;
+          })();
+          if (!queued) return null;
+          return { status: "ok", occurrenceTracked: true, reconciled: true, outboxIds: [entry.outboxId], sentMessage: receipt.message,
+            code: QUEUED_AS_ROW, queuedQitemId: qitemId };
+        }
         return { status: "failed", occurrenceTracked: true, occurrenceComplete: true,
           inputPhase: "attempted", error: "Prior scheduled input is unconfirmed; no replay was attempted.",
           outboxIds: selected.map(m => m.id),
@@ -75,10 +108,11 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
       }
       // Synchronous transaction: no other drainer can claim a subset between the check and these writes.
       if (selected.some(m => !["pending", "failed"].includes(outbox.getById(m.id)!.deliveryState))) return false;
+      const queueOnlyTarget = deps.isQueueOnlySeat?.(request.targetSession) === true;
       for (const member of selected) {
         outbox.claimForDelivery(member.id);
         const receipt = read(member.id)!;
-        save(member.id, { attempts: (receipt?.attempts ?? 0) + 1, message: request.message });
+        save(member.id, { attempts: (receipt?.attempts ?? 0) + 1, message: request.message, ...(queueOnlyTarget ? { queueOnlyTarget } : {}) });
       }
       return true;
     })();
@@ -119,6 +153,8 @@ export function withWatchdogReceipts(send: DeliveryFn, deps: {
         const ended = result.status === "failed" && (!noInput || unavailable || exhausted);
         outbox.finalizeDelivery(member.id, state);
         save(member.id, { ...receipt, ...(ended ? { ended: true, error: result.error } : {}), ...(result.status === "retained" ? { heldIds: result.outboxIds ?? [] } : {}),
+          ...(result.status === "ok" && isQueueOnlyDeliveryCode(result.code)
+            ? { queueOnly: { code: result.code, ...(result.queuedQitemId ? { qitemId: result.queuedQitemId } : {}) } } : {}),
           ...(retryAt ? { retryAt } : {}), ...(nextAction ? { nextAction } : {}),
           ...(terminalReason ? { terminalReason } : {}) });
         memberOutcomes[member.jobId] = { ...result, occurrenceTracked: true, ...(ended ? { occurrenceComplete: true } : {}),

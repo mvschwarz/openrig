@@ -600,6 +600,25 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
       expect(queueSnapshot()).toEqual(queueBefore);
     });
 
+    // The adopted successor is itself handed off again to the same target: the next route without --packet selects it,
+    // and its own successor is the one to adopt, not the earlier adoption replayed.
+    it("adopts a second queue handoff to the same target after the first, without --packet, and absorbs that retry", async () => {
+      const { instanceId, reviewPacket, successor } = await handedOffReview(false);
+      await runtime.route({ instanceId, toSession: "reviewer2@rig", actorSession: "orch@rig" });
+      const { created: next } = await queueRepo.handoff({ qitemId: successor, fromSession: "reviewer2@rig", toSession: "reviewer2@rig" });
+      expect(next.qitemId).not.toBe(reviewPacket);
+
+      const routed = await runtime.route({ instanceId, toSession: "reviewer2@rig", actorSession: "orch@rig" });
+
+      expect(routed).toMatchObject({ closedPacketId: successor, newPacketId: next.qitemId, adoptedHandoff: { successorState: "pending" } });
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId).currentFrontier).toEqual([next.qitemId]);
+      const version = runtime.instanceStore.getByIdOrThrow(instanceId).version;
+      const queueBefore = queueSnapshot();
+      expect(await runtime.route({ instanceId, toSession: "reviewer2@rig", actorSession: "orch@rig" })).toEqual(routed);
+      expect(runtime.instanceStore.getByIdOrThrow(instanceId)).toMatchObject({ version, currentFrontier: [next.qitemId] });
+      expect(queueSnapshot()).toEqual(queueBefore);
+    });
+
     // No queue transition records an adoption, so its event says who adopted, why, and which packet it replaced.
     it("records the actor, reason and replaced packet in the adoption event", async () => {
       const { instanceId, reviewPacket, successor } = await handedOffReview();
