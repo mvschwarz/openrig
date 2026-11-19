@@ -341,6 +341,8 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        // An update's expected state (--expect-state) no longer matches the row; nothing was written.
+        : err.code === "qitem_state_changed" ? 409
         // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
         // caller id-reuse (a bug, not an idempotent retry) — surface as a
         // conflict, never overwrite.
@@ -1036,6 +1038,7 @@ export function queueRoutes(): Hono {
       actorSession?: string;
       classificationBinding?: unknown;
       state?: QueueState;
+      expectState?: QueueState | null;
       reopen?: boolean;
       closureRequiredAt?: string;
       transitionNote?: string;
@@ -1064,6 +1067,8 @@ export function queueRoutes(): Hono {
         qitemId,
         actorSession,
         state: body.state,
+        // Optional compare-and-set: the repository checks it inside the update's transaction.
+        expectState: body.expectState,
         reopen: body.reopen,
         closureRequiredAt: body.closureRequiredAt,
         transitionNote: body.transitionNote,
