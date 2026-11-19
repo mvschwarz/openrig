@@ -10,10 +10,10 @@ import type { TerminalServerObservation } from "../domain/terminal-server-reacha
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import { isTmuxCredentialEnvKey } from "./tmux-credential-env.js";
-import { addSeatRuntimeDir, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
+import { addSeatRuntimeDir, NO_SESSION_BUS, seatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { tmuxOnDaemonServer } from "./tmux-server.js";
-import { TMUX_SERVER_LIMIT_PREFIX } from "../tmux-server-start.js";
+import { TMUX_SERVER_LIMIT_PREFIX, TMUX_SERVER_NO_SESSION_BUS } from "../tmux-server-start.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -1548,6 +1548,11 @@ export class TmuxAdapter {
   private readonly serverArgs: readonly string[];
   /** #2710: the "no scope tried" reason is logged once per adapter, not at every server start. */
   private scopeSkipLogged = false;
+  /** #3253: a server start in progress, so concurrent callers wait for it, the global environment's bus included. */
+  private serverStarting?: Promise<TmuxResult>;
+  /** #3253: a server this adapter started may still hold the unusable bus in its global environment (the start ran
+   *  past its wait, or giving the bus back failed): the next startServer that finds it up gives it back first. */
+  private sessionBusRestorePending = false;
 
   /** Prefix one adapter-owned tmux invocation, including its chained commands.
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
@@ -1608,6 +1613,11 @@ export class TmuxAdapter {
 
   /** Start an empty native terminal server, without inventing a seat/session. */
   async startServer(): Promise<TmuxResult> {
+    this.serverStarting ??= this.startServerOnce().finally(() => { this.serverStarting = undefined; });
+    return this.serverStarting;
+  }
+
+  private async startServerOnce(): Promise<TmuxResult> {
     const probeName = `openrig-startup-${randomUUID()}`;
     const serverUp = async () => (await this.probeSession(probeName)).state !== "transport_unavailable";
     const awaitServer = async () => {
@@ -1618,11 +1628,12 @@ export class TmuxAdapter {
       return false;
     };
     try {
-      if (await serverUp()) return { ok: true };
+      if (await serverUp()) return this.sessionBusRestorePending ? await this.restoreSessionBusForPanes() : { ok: true };
       // #2710: on Linux, the server (and with it every seat) goes into a transient systemd --user scope of its own,
       // so stopping or restarting the daemon's unit no longer takes the seats with it. Any failure keeps the start below.
+      this.sessionBusRestorePending = process.platform === "linux";
       if (await this.startServerInUserScope()) {
-        if (await awaitServer()) return { ok: true };
+        if (await awaitServer()) return await this.restoreSessionBusForPanes();
         console.warn("[tmux] The systemd user scope was made but the seat terminal server did not answer in time; starting it in the daemon's cgroup as before.");
       }
       // tmux -D keeps an empty server alive. Stays on the shell-string path
@@ -1631,11 +1642,33 @@ export class TmuxAdapter {
       // Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
       await this.exec(this.onServer("tmux -D </dev/null >/dev/null 2>&1 &"));
-      if (await awaitServer()) return { ok: true };
+      if (await awaitServer()) return await this.restoreSessionBusForPanes();
       return { ok: false, code: "tmux_unavailable", message: "The terminal server did not become available. Check tmux and its socket permissions." };
     } catch (error) {
       return { ok: false, code: "tmux_unavailable", message: `Terminal server unavailable: ${(error as Error).message}` };
     }
+  }
+
+  /** #3253: the server this start made has no session bus in its own process (TMUX_SERVER_NO_SESSION_BUS), and tmux
+   *  copied that value into its global environment, which panes inherit. This gives the global environment the daemon's
+   *  value back (or unsets it, as before the start), so a pane keeps the real session bus. Only while the global still
+   *  holds the value the start gave it: a server someone else started is left as it is. The value goes in argv, unlike
+   *  the seat environment (runEnvironmentCommand): a bus address is not a credential, and it was in the global
+   *  environment before #3253 too. A failure is a warning, never a failed start, and the next startServer tries again.
+   *  Panes and jobs the person's tmux configuration makes while the server starts (before this runs) keep no bus. */
+  private async restoreSessionBusForPanes(): Promise<TmuxResult> {
+    if (process.platform !== "linux") return { ok: true };
+    const key = "DBUS_SESSION_BUS_ADDRESS";
+    const real = process.env[key];
+    try {
+      if (real !== NO_SESSION_BUS && (await this.globalEnvironment())[key] === NO_SESSION_BUS) {
+        await this.run(real === undefined ? ["tmux", "set-environment", "-gu", key] : ["tmux", "set-environment", "-g", key, real]);
+      }
+      this.sessionBusRestorePending = false;
+    } catch (error) {
+      console.warn(`[tmux] Could not give the new terminal server's panes the session bus back: ${(error as Error).message}`);
+    }
+    return { ok: true };
   }
 
   /** Linux only: run `tmux -D` as the command of a transient `systemd-run --user --scope`. systemd-run exits once the
@@ -1654,7 +1687,9 @@ export class TmuxAdapter {
       this.scopeSkipLogged = true;
       return fallback(unavailable);
     }
-    const server = TMUX_SERVER_LIMIT_PREFIX + posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
+    // #3253: systemd-run itself needs the session bus (it reaches the manager through it or the runtime directory);
+    // only the server inside the scope goes without.
+    const server = TMUX_SERVER_LIMIT_PREFIX + TMUX_SERVER_NO_SESSION_BUS + posixJoinArgv(["tmux", ...this.serverArgs, "-D"]);
     // systemd-run 254+ expands ${VAR} in the command's arguments (by default from 258, also for --scope): the
     // socket path must reach /bin/sh exactly as given, so expansion is turned off where the option exists.
     const scoped = (oomPolicy: boolean, literal: boolean) => posixJoinArgv(["systemd-run", "--user", "--scope",
