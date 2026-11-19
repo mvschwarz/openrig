@@ -1773,8 +1773,9 @@ it. If there are none, end the run.
   - Each run costs a model turn, even with nothing pending.
   - Runs happen only while the app is open and the computer is awake. A run is skipped while the previous one is
     still going (Anthropic's docs).
-  - The prompt takes an in-progress item as one an earlier run left, which holds because runs don't overlap. Don't
-    also run the open-session wait below for the same seat.
+  - The prompt takes an in-progress item as one an earlier run left, which holds only while no other session uses
+    this seat (runs of one task don't overlap). While the task is active, don't use the seat elsewhere, including
+    the open-session wait below.
   - Not tested with the app quit or the Mac asleep.
 
 #### Wake on new work (opt-in; off unless the person turns it on)
