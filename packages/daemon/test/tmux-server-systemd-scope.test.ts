@@ -661,6 +661,10 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
       host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
       const adapter = daemon.deps.tmuxAdapter;
       adapter.deliveryGuard = undefined;
+      // A daemon past its first launch (no bus owed), so the launch takes the running-server path, and no server yet:
+      // only the check after the write can see the other caller's start.
+      (adapter as unknown as { sessionBusRestorePending: boolean }).sessionBusRestorePending = false;
+      expect(host.serverUp).toBe(false);
       // The launch's private config write waits until another caller's start has the new server answering.
       let release!: () => void;
       let entered!: () => void;
@@ -679,6 +683,8 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
       expect(started).toMatchObject({ ok: true });
       expect(result.ok, JSON.stringify(result)).toBe(true);
       const order = (pattern: RegExp) => host.calls.findIndex(call => pattern.test(call));
+      // One start, one give-back: the order below compares the launch with that give-back.
+      expect(host.setEnvironment, host.calls.join("\n")).toHaveLength(1);
       expect(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/), host.calls.join("\n")).toBeGreaterThanOrEqual(0);
       expect(order(/source-file/), host.calls.join("\n")).toBeGreaterThan(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/));
       expect(host.starts, host.calls.join("\n")).toEqual([loose(TODAY_START)]);
