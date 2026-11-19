@@ -11,6 +11,29 @@ export interface RigDeps extends StatusDeps {
   readFile: (path: string) => string;
 }
 
+/** The daemon's error message from a failed response body (JSON `{ error }`, or its text). */
+export function daemonErrorText(data: unknown): string {
+  let body = data;
+  if (typeof data === "string") {
+    try { body = JSON.parse(data); } catch { return data.trim() || "no detail from the daemon"; }
+  }
+  const error = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+  return typeof error === "string" && error ? error : JSON.stringify(body);
+}
+
+/** The daemon's X-OpenRig-Export-Warnings header: seats whose settings a JSON export leaves out (#3253). */
+function exportWarnings(headers: Headers | undefined): Array<{ logicalId: string; reason: string }> {
+  const raw = headers?.get("X-OpenRig-Export-Warnings");
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(decodeURIComponent(raw)) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((w): w is { logicalId: string; reason: string } =>
+      !!w && typeof w.logicalId === "string" && typeof w.reason === "string") : [];
+  } catch {
+    return [{ logicalId: "export", reason: "its warnings header can't be read" }];
+  }
+}
+
 export function rigCommand(depsOverride?: RigDeps): Command {
   const cmd = new Command("spec").description("Manage rig specs");
   const getDeps = (): RigDeps => depsOverride ?? {
@@ -33,17 +56,18 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       if (opts.json && !opts.asTemplate) {
         const res = await client.get<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(rigId)}/spec.json`);
         if (res.status >= 400) {
-          console.error(`Rig ${rigId} was not found.`);
+          console.error(res.status === 404 ? `Rig ${rigId} was not found.` : `Export of rig ${rigId} failed: ${daemonErrorText(res.data)}`);
           process.exitCode = 1;
           return;
         }
         console.log(JSON.stringify(res.data, null, 2));
+        for (const { logicalId, reason } of exportWarnings(res.headers)) console.error(`Warning: ${logicalId}: ${reason}`);
         return;
       }
 
       const res = await client.getText(`/api/rigs/${encodeURIComponent(rigId)}/spec`);
       if (res.status >= 400) {
-        console.error(`Rig ${rigId} was not found.`);
+        console.error(res.status === 404 ? `Rig ${rigId} was not found.` : `Export of rig ${rigId} failed: ${daemonErrorText(res.data)}`);
         process.exitCode = 1;
         return;
       }
@@ -67,6 +91,10 @@ export function rigCommand(depsOverride?: RigDeps): Command {
         }
       }
       console.log(opts.json ? JSON.stringify(template, null, 2) : stringifyYaml(template).trimEnd());
+      // The template drops the export's comments, so what it left out goes to stderr.
+      for (const line of res.data.split("\n")) {
+        if (line.startsWith("# Not carried: ") || line.startsWith("# Member startup not carried for ")) console.error(`Warning: ${line.slice(2)}`);
+      }
     });
 
   cmd

@@ -43,6 +43,9 @@ export function initWorkspaceCommand(configPath?: string): Command {
           for (const file of result.files) {
             console.log(`  ${file.created ? "+" : " "} ${file.relPath}${file.skipped ? `  (skipped: ${file.skipped})` : ""}`);
           }
+          if (result.existingProject) {
+            console.log(`This folder already holds a project of its own (${result.existingProject}); nothing was written, and OpenRig reads that project's own id.`);
+          }
           if (result.dryRun) console.log("(dry-run; no files written.)");
         }
       } catch (err) {

@@ -160,9 +160,14 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   `:780`; if `status === "restoring"` the node is skipped with a warning and
   reported as `fresh`, `:783–785`; `degraded` only adds a warning).
 - Reuses the seat's durably bound tmux session name when the prior binding
-  has a usable one, and otherwise falls back to the derived name. A missing
-  binding after the latest session's recorded intentional exit is quiet;
-  unclean/legacy missing bindings and incomplete or invalid binding rows still warn.
+  has a usable one: a canonical or legacy name, or any other name that tmux
+  creates and finds as given and OpenRig's address readers read back
+  unchanged, such as an adopted seat's own session name
+  (`boundSessionNameProblem`, `session-name.ts`). Otherwise it launches the
+  derived name and says so before the launch, old name to planned name, with
+  the reason. A missing binding after the latest session's recorded
+  intentional exit is quiet; unclean/legacy missing bindings and incomplete
+  binding rows still warn.
 - Replays restore-safe startup using persisted startup context;
   prefilters missing optional artifacts into warnings; **hard-fails a node if
   a required startup file is missing** (`:1161` — status `"failed"`, error
@@ -319,7 +324,10 @@ cited here by number with the code that carries them):
   samples, unchanged PID, with the launch's executable as readiness has it),
   takes the conversation that process holds now from Claude's
   `sessions/<pid>.json` (`readClaudePidSessionId`, as the resume refresher
-  does; a `/clear` rotates it) as the seat's resume target, even when it is the
+  does; a `/clear` rotates it, and the conversation title is not compared)
+  as the seat's resume target. Recovery also reads the fork parent's process
+  file, checking that its pane belongs to the parent session before and after
+  the read. This applies even when the conversation is the
   retiring occupant's or a fork parent's (`recoveredConversation`: the result
   says so, and a fork on its parent's conversation reports `forkId: "none"`,
   not a distinct fork; the token is written to the successor's session row only,

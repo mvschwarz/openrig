@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 
-const runner = fileURLToPath(new URL("../../../node_modules/vite-node/vite-node.mjs", import.meta.url));
+const tsxLoader = new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url).href;
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 
 it("--demo draws its fixture with no daemon and never runs the daemon-down probe", async () => {
@@ -22,7 +22,7 @@ else process.exitCode = 2;
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (/^(OPENRIG_|RIGGED_)/.test(key)) delete env[key];
   Object.assign(env, { HOME: root, OPENRIG_HOME: root, OPENRIG_TUI_CLI_ENTRY: cli, OPENRIG_TUI_SOCKET: join(root, "t.sock") });
-  const child = spawn(process.execPath, [runner, "--script", main, "--demo", "--no-color"], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["--import", tsxLoader, main, "--demo", "--no-color"], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
   const ended = new Promise(resolve => child.once("exit", resolve));
   let output = "", errors = "";
   child.stdout.on("data", chunk => { output += String(chunk); });

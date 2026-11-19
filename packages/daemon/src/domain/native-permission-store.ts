@@ -1,4 +1,5 @@
 import { readClaudePermissionRules, type ClaudePermissionRules } from "./claude-permission-rules.js";
+import { readClaudeAutoModeForLaunch, type ClaudeAutoModeChoice } from "./claude-auto-mode.js";
 import { parseStoredCodexMemberPermissions, type CodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import type { NodeBinding } from "./runtime-adapter.js";
@@ -41,6 +42,7 @@ export interface LaunchOverrideFacts {
   codexEnvelopeReadError?: unknown;
   codexPermissions?: CodexMemberPermissions;
   claudePermissions?: ClaudePermissionRules;
+  claudeAutoMode?: ClaudeAutoModeChoice;
   launchDefaultMetadata?: LaunchDefaultMetadata | null;
   target?: { selection: NativePermissionSelection | null; codexProfile: string | null };
 }
@@ -77,8 +79,9 @@ function resolveLaunchDefaultFromMetadata(
 /** Pure launch-permission decision over already-read facts, shared by NativePermissionStore.launchOverride and batched node inventory. */
 export function resolveLaunchOverrideFromFacts(
   facts: LaunchOverrideFacts,
-): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault" | "claudePermissions" | "codexPermissions"> {
-  const ruleBinding = facts.claudePermissions === undefined ? {} : { claudePermissions: facts.claudePermissions };
+): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault" | "claudePermissions" | "claudeAutoMode" | "codexPermissions"> {
+  const ruleBinding = { ...(facts.claudePermissions === undefined ? {} : { claudePermissions: facts.claudePermissions }),
+    ...(facts.claudeAutoMode === undefined ? {} : { claudeAutoMode: facts.claudeAutoMode }) };
   let selection: NativePermissionSelection | null;
   if (facts.target) {
     selection = facts.target.selection;
@@ -118,6 +121,12 @@ export function resolveLaunchOverrideFromFacts(
   return { ...ruleBinding, kernelAuthority: false, teamPermissionDefault: launchDefault === "team", ...permissionBindingOverride(selection) };
 }
 
+/** Why a seat whose policy asks for auto launches at the floor: only Claude Code has an auto mode. */
+export function noAutoModeFallback(runtime: string): string {
+  const runtimeName = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime;
+  return `${runtimeName} has no auto mode and launches at the floor`;
+}
+
 /** The stable node owns the desired setting. Native history and current processes are untouched. */
 export class NativePermissionStore {
   constructor(private readonly db: Database.Database) {}
@@ -154,8 +163,9 @@ export class NativePermissionStore {
    *  `target`: the target runtime's explicit selection (or none, to inherit policy) and its Codex profile, since the
    *  stored ones belong to the runtime being left. A Codex envelope, like Claude rules, stays with the seat and applies
    *  whenever it runs Codex, until an explicit mode replaces it. */
-  launchOverride(nodeId: string, runtime: string, target?: { selection: NativePermissionSelection | null; codexProfile: string | null }): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault" | "claudePermissions" | "codexPermissions"> {
+  launchOverride(nodeId: string, runtime: string, target?: { selection: NativePermissionSelection | null; codexProfile: string | null }): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault" | "claudePermissions" | "claudeAutoMode" | "codexPermissions"> {
     const claudePermissions = runtime === "claude-code" ? readClaudePermissionRules(this.db, nodeId) : undefined;
+    const claudeAutoMode = runtime === "claude-code" ? readClaudeAutoModeForLaunch(this.db, nodeId) : undefined;
     let selection: LaunchOverrideSelectionFact;
     if (target) {
       selection = { state: "available", value: target.selection };
@@ -191,6 +201,7 @@ export class NativePermissionStore {
       codexPermissionsJson,
       codexEnvelopeReadError,
       claudePermissions,
+      claudeAutoMode,
       launchDefaultMetadata: this.readLaunchDefaultMetadata(nodeId, runtime),
       target,
     });
@@ -282,12 +293,11 @@ export class NativePermissionStore {
 
       if (effectivePosture === "auto") {
         if (runtime !== "claude-code") {
-          const runtimeName = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime;
           return {
             effectiveMode: "floor",
             source: "member_spec",
             launchPosture: "floor",
-            fallbackReason: `${runtimeName} has no auto mode and launches at the floor`,
+            fallbackReason: noAutoModeFallback(runtime),
           };
         }
         return {
@@ -332,12 +342,11 @@ export class NativePermissionStore {
 
       if (posture === "auto") {
         if (runtime !== "claude-code") {
-          const runtimeName = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime;
           return {
             effectiveMode: "floor",
             source: "rig_spec",
             launchPosture: "floor",
-            fallbackReason: `${runtimeName} has no auto mode and launches at the floor`,
+            fallbackReason: noAutoModeFallback(runtime),
           };
         }
         return {

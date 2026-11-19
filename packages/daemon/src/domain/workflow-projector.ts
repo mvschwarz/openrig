@@ -220,12 +220,15 @@ const QUEUE_ROW_ALREADY_CLOSED = "queue_row_already_closed";
 type QueueRowAlreadyClosed = {
   state: string; exit: WorkflowExitKind; actor: string; result_note: string | null; blocked_on: string | null;
   next_owner: string | null; evidence: Record<string, unknown> | null; next_qitem_ids: string[]; next_step_ids: string[];
+  /** The owner each next packet was projected to, as resolved then (absent from a record written before it was kept). */
+  next_owners?: string[];
 };
 
-function alreadyClosedRecord(input: ProjectStepInput, state: string, nextQitemIds: string[], nextStepIds: string[]): QueueRowAlreadyClosed {
+function alreadyClosedRecord(input: ProjectStepInput, state: string, nextQitemIds: string[], nextStepIds: string[],
+  nextOwners: string[]): QueueRowAlreadyClosed {
   return { state, exit: input.exit, actor: input.actorSession, result_note: input.resultNote ?? null,
     blocked_on: input.blockedOn ?? null, next_owner: input.nextOwnerSession ?? null, evidence: input.closureEvidence ?? null,
-    next_qitem_ids: nextQitemIds, next_step_ids: nextStepIds };
+    next_qitem_ids: nextQitemIds, next_step_ids: nextStepIds, next_owners: nextOwners };
 }
 
 /** The record, when the trail evidence holds a well-formed one; anything else reads as none. */
@@ -239,7 +242,7 @@ function readAlreadyClosedRecord(evidence: Record<string, unknown> | null | unde
   const objectOrNull = (v: unknown) => v === null || (typeof v === "object" && !Array.isArray(v));
   return text(r.state) && isTerminalState(r.state) && text(r.exit) && text(r.actor) && textOrNull(r.result_note)
     && textOrNull(r.blocked_on) && textOrNull(r.next_owner) && objectOrNull(r.evidence) && ids(r.next_qitem_ids)
-    && ids(r.next_step_ids) ? r as unknown as QueueRowAlreadyClosed : null;
+    && ids(r.next_step_ids) && (r.next_owners === undefined || ids(r.next_owners)) ? r as unknown as QueueRowAlreadyClosed : null;
 }
 
 /** The caller repeats the recorded projection exactly: the same exit, actor, result note, blocker, next owner and evidence. */
@@ -538,7 +541,7 @@ export class WorkflowProjector {
     // absorption guards above returned/threw for replays — guard B1's
     // zero-inventory-reads-on-replays pin holds by construction).
     // undefined for unbound instances (tier 3 does not exist for them).
-    const roleCtx = roleResolutionContext(this.db, instance.boundRig);
+    const roleCtx = roleResolutionContext(this.db, instance.boundRig, instance.boundPod);
 
     let nextQitemId: string | null = null;
     let nextOwnerSession: string | null = null;
@@ -763,7 +766,8 @@ export class WorkflowProjector {
       // 4. Append step trail entry (prior + next ids).
       if (alreadyClosed) {
         effectiveClosureEvidence = { ...(effectiveClosureEvidence ?? {}), [QUEUE_ROW_ALREADY_CLOSED]:
-          alreadyClosedRecord(input, alreadyClosed, nextQitemId ? [nextQitemId] : [], nextStepId ? [nextStepId] : []) };
+          alreadyClosedRecord(input, alreadyClosed, nextQitemId ? [nextQitemId] : [], nextStepId ? [nextStepId] : [],
+            nextQitemId && nextOwnerSession ? [nextOwnerSession] : []) };
       }
       this.trailLog.record({
         instanceId: instance.instanceId,
@@ -1001,7 +1005,7 @@ export class WorkflowProjector {
     const packet = this.queueRepo.getById(input.currentPacketId);
     if (!packet || !isTerminalState(packet.state)) return null;
     const entry = this.trailLog.listForInstanceInAppendOrder(instance.instanceId)
-      .filter((candidate) => candidate.priorQitemId === input.currentPacketId).at(-1);
+      .filter((candidate) => candidate.priorQitemId === input.currentPacketId && candidate.closureReason !== "resumed").at(-1);
     const recorded = readAlreadyClosedRecord(entry?.closureEvidence);
     if (!entry || !recorded || !sameIntent(recorded, input)) return null;
     const nextQitemId = recorded.next_qitem_ids[0] ?? null;
@@ -1010,7 +1014,9 @@ export class WorkflowProjector {
       closurePriorPacketId: input.currentPacketId,
       closureReason: entry.closureReason as WorkflowExitKind,
       nextQitemId,
-      nextOwnerSession: nextQitemId ? this.queueRepo.getById(nextQitemId)?.destinationSession ?? null : null,
+      // The owner recorded at projection, not the row's current one; an older record without it reads the row.
+      nextOwnerSession: recorded.next_owners ? recorded.next_owners[0] ?? null
+        : nextQitemId ? this.queueRepo.getById(nextQitemId)?.destinationSession ?? null : null,
       nextStepId: recorded.next_step_ids[0] ?? null,
       nextQitemIds: recorded.next_qitem_ids,
       nextStepIds: recorded.next_step_ids,
@@ -1047,7 +1053,7 @@ export class WorkflowProjector {
       // and roll back the close. Fresh decision per episode.
       resolveRoleTarget: (role) =>
         spec.roles?.[role]?.preferred_targets?.[0] ??
-        tryResolveRoleByCapability(roleResolutionContext(this.db, instance.boundRig), role),
+        tryResolveRoleByCapability(roleResolutionContext(this.db, instance.boundRig, instance.boundPod), role),
       humanFallbackSeat: this.exceptionDial?.humanFallbackSeat,
     });
     const evidenceRef = `rig workflow trace ${instance.instanceId}`;
@@ -1105,9 +1111,9 @@ export class WorkflowProjector {
   private planSuccessors(instance: WorkflowInstance, spec: WorkflowSpec, steps: WorkflowStepSpec[]): SuccessorPlan[] {
     return steps.map((step) => {
       const gate = step.gate
-        ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig))
+        ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod))
         : null;
-      const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig));
+      const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig, instance.boundPod));
       if (!owner) {
         throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve next owner for dependency step "${step.id}"`, { instanceId: instance.instanceId, stepId: step.id });
       }
@@ -1452,7 +1458,8 @@ export class WorkflowProjector {
           ...(effectiveClosureEvidence ?? {}),
           next_qitem_ids: createdPackets.map((packet) => packet.qitemId),
           ...(alreadyClosed ? { [QUEUE_ROW_ALREADY_CLOSED]: alreadyClosedRecord(input, alreadyClosed,
-            createdPackets.map((packet) => packet.qitemId), createdPackets.map((packet) => packet.step.id)) } : {}),
+            createdPackets.map((packet) => packet.qitemId), createdPackets.map((packet) => packet.step.id),
+            createdPackets.map((packet) => packet.owner)) } : {}),
         },
         actorSession: input.actorSession,
         nextQitemId: createdPackets[0]?.qitemId ?? null,
@@ -1680,6 +1687,11 @@ function resolveRoleOnBoundRig(
 /** Preserve the old topology gate for template-looking rig names. Registered
  * literal names, including archived rigs, remain recordable as on main. */
 export function assertBoundWorkflowTarget(target: string, queue: Pick<QueueRepository, "acceptsDestination">): void {
+  if (target.startsWith("{pod}-")) {
+    throw new QueueRepositoryError("unbound_destination_pod",
+      `Workflow target ${target} requires a pod binding. Start the workflow with --pod <namespace> and --rig <name>, or use a concrete destination.`,
+      { destinationSession: target });
+  }
   const at = target.indexOf("@");
   if (at >= 0 && target.slice(at + 1).includes("{rig}") && !queue.acceptsDestination(target)) {
     throw new QueueRepositoryError("unknown_destination_rig",
@@ -1743,6 +1755,8 @@ export function resolveDefaultOwner(
   const candidates = targets.map((t) => ({ session: t, runtime: runtimeOf(t) }));
   const match = candidates.find((c) => c.runtime === step.harness);
   if (match) return match.session;
+  const unresolvedPod = targets.find((target) => target.startsWith("{pod}-"));
+  if (unresolvedPod) return unresolvedPod;
   throw new WorkflowProjectorError(
     "harness_pin_unsatisfied",
     `step "${step.id}" pins harness "${step.harness}" but no preferred_target of role "${step.actor_role}" runs it. Candidates: ${
@@ -1982,7 +1996,8 @@ export function compileGate(
   if (gatedStep.harness) {
     const candidates = handlerTargets.map((t) => ({ session: t, runtime: runtimeOf(t) }));
     const match = candidates.find((c) => c.runtime === gatedStep.harness);
-    if (!match) {
+    const unresolvedPod = handlerTargets.find((target) => target.startsWith("{pod}-"));
+    if (!match && !unresolvedPod) {
       throw new WorkflowProjectorError(
         "harness_pin_unsatisfied",
         `step "${gatedStep.id}" pins harness "${gatedStep.harness}" and gates on handler role "${gate.target}", but no preferred_target of that role runs it. Candidates: ${candidates.map((c) => `${c.session} → ${c.runtime ?? "unknown"}`).join(", ")}. Add a ${gatedStep.harness} seat to the handler role's preferred_targets, or change/remove the pin.`,
@@ -1994,7 +2009,7 @@ export function compileGate(
         },
       );
     }
-    seat = match.session;
+    seat = match?.session ?? unresolvedPod!;
   } else {
     seat = handlerTargets[0]!;
   }

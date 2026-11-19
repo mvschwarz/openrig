@@ -133,8 +133,8 @@ export const WORKFLOW_STEP_KEYS = [
   "acceptance",
 ] as const;
 /** A spec row with `{rig}` targets resolved against `boundRig`. */
-export function bindRowToRig(row: WorkflowSpecRow, boundRig: string | null): WorkflowSpecRow {
-  const spec = bindSpecToRig(row.spec, boundRig);
+export function bindRowToRig(row: WorkflowSpecRow, boundRig: string | null, boundPod: string | null = null): WorkflowSpecRow {
+  const spec = bindSpecToRig(row.spec, boundRig, boundPod);
   return spec === row.spec ? row : { ...row, spec };
 }
 
@@ -888,7 +888,7 @@ export class WorkflowSpecCache {
    *  The cache row is the instance's spec while it still comes from the file the instance started from, so an edit to
    *  that file reaches the run (a resume re-resolves its owner from it). Once another file with the same id and version
    *  has replaced the row, the instance runs the spec it started with instead (#2607). */
-  getForInstance(instance: { workflowName: string; workflowVersion: string; boundRig: string | null; startedSpec?: StartedWorkflowSpec | null }): WorkflowSpecRow | null {
+  getForInstance(instance: { workflowName: string; workflowVersion: string; boundRig: string | null; boundPod?: string | null; startedSpec?: StartedWorkflowSpec | null }): WorkflowSpecRow | null {
     const row = this.getByNameVersion(instance.workflowName, instance.workflowVersion);
     const started = instance.startedSpec;
     if (started && (!row || !sameSourceFile(row.sourcePath, started.sourcePath))) {
@@ -898,9 +898,9 @@ export class WorkflowSpecCache {
         purpose: spec.objective ?? null, targetRig: spec.target?.rig ?? null, spec,
         coordinationTerminalTurnRule: spec.coordination_terminal_turn_rule ?? "hot_potato",
         sourcePath: started.sourcePath, sourceHash: "", cachedAt: "",
-      }, instance.boundRig);
+      }, instance.boundRig, instance.boundPod ?? null);
     }
-    return row ? bindRowToRig(row, instance.boundRig) : null;
+    return row ? bindRowToRig(row, instance.boundRig, instance.boundPod ?? null) : null;
   }
 
   /**

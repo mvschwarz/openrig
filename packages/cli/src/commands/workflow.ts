@@ -319,6 +319,7 @@ line it prints, then rig workflow show WF01ABC to confirm the adoption.
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
+    .option("--pod <name>", "Bind role selection and {pod} targets to a pod on the bound rig")
     .option("--project <id>", "Catalogued project this run works for; stamped as project:<id> on every packet it creates. A project the daemon does not know creates the instance UNSCOPED, with an advisory naming it")
     .option("--mission <id>", "Mission this run works for; stamped as mission:<id> on every packet")
     .option("--slice <id>", "Slice this run works for; stamped as slice:<id> on every packet. They show on the slice's Queue tab when the Projects view is scoped to the same project, so pass --project too")
@@ -346,6 +347,7 @@ Examples:
       createdBy: string;
       entryOwner?: string;
       rig?: string;
+      pod?: string;
       project?: string;
       mission?: string;
       slice?: string;
@@ -366,6 +368,7 @@ Examples:
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,
+          targetPod: opts.pod,
           ...scopeBody,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -835,6 +838,7 @@ Examples:
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
     .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
+    .option("--pod <name>", "Bind role selection and {pod} targets to a pod on the bound rig")
     .option("--project <id>", "Catalogued project this run works for; stamped as project:<id> on every packet it creates. A project the daemon does not know creates the instance UNSCOPED, with an advisory naming it")
     .option("--mission <id>", "Mission this run works for; stamped as mission:<id> on every packet")
     .option("--slice <id>", "Slice this run works for; stamped as slice:<id> on every packet. They show on the slice's Queue tab when the Projects view is scoped to the same project, so pass --project too")
@@ -857,6 +861,7 @@ Examples:
       createdBy: string;
       entryOwner?: string;
       rig?: string;
+      pod?: string;
       project?: string;
       mission?: string;
       slice?: string;
@@ -876,6 +881,7 @@ Examples:
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
           targetRig: opts.rig,
+          targetPod: opts.pod,
           ...scopeBody,
         });
         printWorkflowAdvisories(res.data?.advisories);
@@ -937,6 +943,10 @@ work should continue from the SAME step under a new owner. The old
 owner's stale close attempts are structurally rejected afterwards
 (packet_not_on_frontier).
 
+If the step's packet was already passed on with rig queue handoff to that
+same seat, route adopts the one successor there onto the frontier, with or
+without --packet, and writes no queue row; running it again writes nothing.
+
 Examples:
   $ rig workflow route WF01ABC --to dev2-driver@my-rig --reason "owner seat dead"
 `)
@@ -971,7 +981,7 @@ Examples:
           printOutcomeSummary(opts.json ?? false, res.status, {
             what: `Adopted the queue handoff of step ${body.stepId ?? "?"} to ${body.toSession ?? opts.to}: packet ${body.closedPacketId ?? "?"} was already handed off, and its successor ${body.newPacketId ?? "?"} (${state}) now holds the step`,
             state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step; no queue row closed or created; no step advanced`,
-            next: state === "done" || state === "handed-off"
+            next: !["pending", "in-progress", "blocked"].includes(state)
               ? `The successor is already ${state}; its outcome is on rig queue show ${body.newPacketId ?? "<packet>"}, and the step's exit is the workflow owner's to project`
               : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
           });
@@ -995,11 +1005,13 @@ Examples:
     .option("--actor-session <session>", "Your session, only when it can't be derived from the caller (a managed seat's is): recorded as claimed")
     .option("--occurrence <failed-qitem-id>", "Failure occurrence to redrive (required when more than one is unresolved)")
     .option("--decision <text>", "Durable instruction for the step owner (lands in the redrive packet)")
+    .option("--owner <session>", "Send the redrive to this seat instead of re-resolving the step's owner from its role")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Use after diagnosing an exception item: the instance returns to active,
 REBOUND to the step that failed, with a fresh packet routed to that
-step's re-resolved owner. The trail is preserved and extended; the
+step's re-resolved owner, or to --owner when you name one (recorded as
+named). The trail is preserved and extended; the
 resolved exception occurrence closes; a NEW failure of the same step
 raises a NEW occurrence honestly.
 
@@ -1011,6 +1023,7 @@ Examples:
       actorSession?: string;
       occurrence?: string;
       decision?: string;
+      owner?: string;
       json?: boolean;
     }) => {
       const deps = getDeps();
@@ -1019,19 +1032,31 @@ Examples:
           stepId?: string;
           newPacketId?: string;
           ownerSession?: string;
+          ownerSource?: "named" | "resolved";
+          ownerNote?: string;
+          currentOwnerSession?: string;
           resumeCount?: number;
           exceptionItemsClosed?: number;
+          absorbedReplay?: boolean;
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/resume`, {
           actorSession: opts.actorSession,
           occurrenceId: opts.occurrence,
           decision: opts.decision,
+          ownerSession: opts.owner,
         });
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
+        const owner = `${body.ownerSession ?? "?"}${body.ownerSource ? ` (${body.ownerSource})` : ""}`
+          + (body.currentOwnerSession && body.currentOwnerSession !== body.ownerSession ? `, now owned by ${body.currentOwnerSession}` : "");
         printOutcomeSummary(opts.json ?? false, res.status, {
-          what: `Redrove instance ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${body.ownerSession ?? "?"}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)`,
-          state: `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
-          next: `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
+          what: `${body.absorbedReplay ? "Replay absorbed, nothing redriven: instance" : "Redrove instance"} ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${owner}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)${body.ownerNote ? `; ${body.ownerNote}` : ""}`,
+          // An absorbed replay changed nothing, and the redrive it points at may already be closed.
+          state: body.absorbedReplay
+            ? `unchanged by this replay; this failure occurrence was already resumed (packet ${body.newPacketId ?? "?"})`
+            : `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
+          next: body.absorbedReplay
+            ? `Check where the instance stands: rig workflow show ${instanceId}`
+            : `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit>`,
         });
       });
     });

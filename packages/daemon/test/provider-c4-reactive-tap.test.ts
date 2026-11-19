@@ -465,7 +465,7 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
       agentActivityStore: testApp.agentActivityStore,
       warn: (message: string) => warnings.push(message),
     });
-    return { app: testApp.app, service, warnings };
+    return { app: testApp.app, service, warnings, db };
   }
 
   async function postHook(
@@ -505,6 +505,22 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
       staleAfter: STALE_AFTER,
       automationUse: "allow_switch_decision",
     }]);
+  });
+
+  // An adopted seat (rig adopt, reconcile-session, attach --self): its process keeps carrying the launch-time
+  // generation after a no-launch adoption minted a newer tenure. Its rows stay resolved and actionable; a launch after
+  // the adoption makes them a prior tenure's, refused at the tap.
+  it("an adopted seat's launch-time generation through the public hook path yields one actionable row until a launch replaces it", async () => {
+    const fx = publicFixture();
+    const tenure = fx.db.prepare(
+      "INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind, native_session_id_at_boot) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    tenure.run("tenure-node-1-adopt", "node-1", 2, "gen-uuid-node-1-adopt", "adopt", null);
+    expect((await postHook(fx.app, { runtime: "codex", hookEvent: "rate_limit" })).status).toBe(200);
+    expect(reactiveRows(await fx.service.getReadModel())).toHaveLength(1);
+
+    tenure.run("tenure-node-1-fresh", "node-1", 3, "gen-uuid-node-1-fresh", "fresh", "boot-fresh");
+    expect(reactiveRows(await fx.service.getReadModel())).toEqual([]);
   });
 
   // W2a tap follow-on — explicit per-path absence. The unresolved observation remains non-actionable

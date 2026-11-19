@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { DaemonClient, DaemonConnectionError, formatDaemonHostForUrl } from "../src/client.js";
+import { runRemoteHttpOp } from "../src/remote-host-ops.js";
 
 // Lightweight test server that echoes request info as JSON
 function createEchoServer(): { server: http.Server; port: number; close: () => Promise<void> } {
@@ -78,6 +79,18 @@ describe("DaemonClient", () => {
   it("constructs correct URLs from base", () => {
     const client = new DaemonClient("http://localhost:9999");
     expect(client.baseUrl).toBe("http://localhost:9999");
+  });
+
+  it.each(["/", "//", "/prefix/"])("registered remote URLs ending in %s reach the intended API route", async (suffix) => {
+    const url = `${baseUrl}${suffix}`;
+    const prefix = suffix.startsWith("/prefix") ? "/prefix" : "";
+    for (const method of ["GET", "POST"] as const) {
+      const result = await runRemoteHttpOp("remote", method, "/api/rigs", method === "POST" ? { name: "team" } : undefined, {
+        clientFactory: (base) => new DaemonClient(base),
+        hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "remote", transport: "http", url }] } }),
+      }, {});
+      expect(result).toMatchObject({ ok: true, data: { method, path: `${prefix}/api/rigs` } });
+    }
   });
 
   // Issue #425: bare IPv6 literals must bracket for URL hosts.

@@ -6,6 +6,7 @@
 // through ctx (harness/case-context.mjs) and records checks on ctx.verdict. A check states what was seen, so a FAIL
 // reads as evidence, not a bare verdict.
 
+import { NotRun } from "../harness/case-context.mjs";
 import { arrivedAs, conversation, markersIn, orderAndMerge, partWith } from "../harness/oracle.mjs";
 
 const ACK = "ack {{marker}}";
@@ -290,7 +291,16 @@ export const CASES = [
       }
       const input = await ctx.readComposer();
       verdict.check("nothing was left unsubmitted in the input", !input.includes("still-text"), input);
-      verdict.info("#2800 control (unreadable input: --dangerously-interact pastes with a warning and no Enter) is not run in this cell: it needs an unreadable-input state the harness doesn't produce yet", null);
+      verdict.info("#2800 control (unreadable input: --dangerously-interact pastes with a warning and no Enter) is its own case, D15-2800-unreadable", null);
     },
+  },
+  {
+    // The oracle's #2800 control for D15 (expected.yaml:119), registered on its own so D15 can't read as covering it.
+    id: "D15-2800-unreadable",
+    title: "multi-line paste, #2800 control: with an unreadable input box, rig send --dangerously-interact pastes with a warning and doesn't press Enter",
+    programs: ["claude", "codex"],
+    notRun: "the harness can't produce an unreadable input box: on this OpenRig the clipped and full auto-update footers read as empty since #3016, and copy mode is D08's own state, which OpenRig leaves or holds by mode rather than reading as unknown (as D12-C, d12.mjs:336)",
+    script: () => ({ rules: [{ say: "ack {{marker}}" }] }),
+    async run() { throw new NotRun(this.notRun); },
   },
 ];

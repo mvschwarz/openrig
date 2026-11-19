@@ -38,9 +38,15 @@ export interface ScopeReadiness {
   /** Input for S04 attention consumers; no timer or delivery is implied. */
   attention: { scope: string; revision: string };
 }
+export type DependsOnBasis = "slice.yaml" | "frontmatter-advisory" | "frontmatter-unparsed" | "not-recorded";
 export interface MissionReadiness {
   revision: string; state: ScopeReadiness["state"]; issues: string[];
-  slices: Array<{ scope: string; id: string; readiness: ScopeReadiness; dependsOn: string[]; eligible: boolean | null }>;
+  /** `dependsOnBasis` says where `dependsOn` came from (EC-1): `slice.yaml` is its recorded list, `[]` included;
+   *  `frontmatter-advisory` means only the SPEC frontmatter lists edges, which readiness treats as advisory build order;
+   *  `frontmatter-unparsed` means only the SPEC frontmatter lists them, in a form EC-1 doesn't define (not an inline JSON
+   *  array); `not-recorded` means no order is recorded (INDETERMINATE). In the last three, eligibility assumes no recorded
+   *  edges. */
+  slices: Array<{ scope: string; id: string; readiness: ScopeReadiness; dependsOn: string[]; dependsOnBasis: DependsOnBasis; eligible: boolean | null }>;
   historicalStatus: string | null;
 }
 export class JudgmentError extends Error {
@@ -304,8 +310,13 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   try {
     try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.linkSync(temporary, target);
-    const directory = fs.openSync(home, "r");
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    // Node cannot fsync an opened directory on Windows (EPERM). The receipt's
+    // contents are already synced before exclusive publication; Windows does
+    // not provide the directory durability guarantee used on POSIX here.
+    if (process.platform !== "win32") {
+      const directory = fs.openSync(home, "r");
+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new JudgmentError("revision_conflict", "Another writer committed first; inspect current readiness", 409);
     throw e;
@@ -338,7 +349,10 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
       if (!Array.isArray(depends) || depends.some(x => typeof x !== "string")) throw new JudgmentError("dependencies_invalid", `${member.path}: execution.depends_on must be a list`);
       const id = (data?.metadata as { id?: unknown } | undefined)?.id ?? path.basename(dir);
       if (typeof id !== "string" || !id || slices.some(s => s.id === id)) throw new JudgmentError("dependency_identity", `${member.path}: missing or repeated slice identity`);
-      const slice = { scope: path.basename(dir), id, readiness: readSliceReadiness(dir, io, readPolicy, root, observe), dependsOn: depends as string[], eligible: null };
+      const listed = execution?.depends_on != null ? null : frontmatterDependsOn(dir, io);
+      const dependsOnBasis: DependsOnBasis = execution?.depends_on != null ? "slice.yaml"
+        : listed === "json" ? "frontmatter-advisory" : listed === "other" ? "frontmatter-unparsed" : "not-recorded";
+      const slice = { scope: path.basename(dir), id, readiness: readSliceReadiness(dir, io, readPolicy, root, observe), dependsOn: depends as string[], dependsOnBasis, eligible: null };
       slices.push(slice);
       dirs.set(slice, dir);
     }
@@ -372,6 +386,23 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
   } catch (e) { issues.push(e instanceof Error ? e.message : String(e)); for (const s of slices) s.eligible = null; }
   const state = issues.length || slices.some(s => ["unknown", "legacy"].includes(s.readiness.state)) ? "unknown" : slices.length && slices.every(s => s.readiness.state === "ready") ? "ready" : "not-ready";
   return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus };
+}
+
+/** How a work node's authored file lists `depends_on:`: as EC-1's inline JSON array (`[]` included), in another form (a
+ *  non-empty value that isn't a JSON array, or `- item` lines under an empty value), or not at all. Only reports the
+ *  form; nothing here reads it as edges. */
+function frontmatterDependsOn(dir: string, io: ScopeFsDeps): "json" | "other" | null {
+  try {
+    const node = resolveNodeFileVia(dir, p => io.readFile(p));
+    const raw = node ? parseFrontmatter(node.content)["depends_on"] : undefined;
+    if (typeof raw !== "string") return null;
+    try { if (Array.isArray(JSON.parse(raw))) return "json"; } catch { /* not JSON */ }
+    if (raw.trim() !== "") return "other";
+    const frontmatter = node!.content.split(/\n---/)[0] ?? "";
+    return /^[ \t]*depends_on:[ \t]*\r?\n[ \t]*-[ \t]*\S/m.test(frontmatter) ? "other" : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The `id:` a work node's authored file declares, or null when it declares none or can't be read. */

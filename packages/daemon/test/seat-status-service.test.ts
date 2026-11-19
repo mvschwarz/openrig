@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -32,6 +32,20 @@ describe("SeatStatusService", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it("reads only the selected node input route and observes route changes", () => {
+    const rig = rigRepo.createRig("routes");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "pi" });
+    const other = rigRepo.addNode(rig.id, "other", { runtime: "pi" });
+    const session = sessionRegistry.registerSession(node.id, "worker@routes");
+    rigRepo.setNodeInputRoute(other.id, "native");
+    const graph = vi.spyOn(rigRepo, "getRig");
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: { inputRoute: "typed" } });
+    rigRepo.setNodeInputRoute(node.id, "native");
+    expect(service.getStatus(session.sessionName)).toMatchObject({ ok: true, status: { inputRoute: "native" } });
+    expect(graph).not.toHaveBeenCalled();
+    graph.mockRestore();
   });
 
   it("does not attach a last tool, another actor's prompt or completed activity to a permission diagnostic", () => {
@@ -122,6 +136,33 @@ describe("SeatStatusService", () => {
       occupant_lifecycle: "unknown", current_occupant: session.sessionName,
     });
     expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id)).toEqual(stored);
+  });
+
+  // #3185 (C14 native): a seat a restore left as a bare shell read `att` on rig ps and `running` on rig seat status.
+  it.each([
+    ["the pane's process identity is ambiguous (a bare shell)", "ready", "mismatch", "process_identity_ambiguous", "attention_required"],
+    ["startup needs attention (restore's own bare-shell marker)", "attention_required", null, null, "attention_required"],
+    ["pane process is verified (control)", "ready", "verified", null, "running"],
+  ] as const)("reads a seat whose %s on seat status as rig ps does", async (_case, startup, verdict, reason, lifecycle) => {
+    const { app, rigRepo: repo, sessionRegistry: registry } = createTestApp(db);
+    const rig = repo.createRig("bare-shell");
+    const node = repo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = registry.registerSession(node.id, "dev-impl@bare-shell");
+    registry.updateStatus(session.id, "running");
+    registry.updateStartupStatus(session.id, startup);
+    registry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%1", attachmentType: "tmux" });
+    if (verdict) new SeatIdentityStore(db).upsert({
+      nodeId: node.id, sessionName: session.sessionName,
+      verdict, reason, evidenceSource: reason ? "pane_process" : null,
+      evidence: { registeredPane: "%1", observedPid: 4242, observedCommand: reason ? "bash" : "claude", matchedLayer: reason ? null : 1 },
+      observedAt: new Date(Date.now() + 1).toISOString(),
+    });
+    const ps = await (await app.request(`/api/rigs/${rig.id}/nodes`)).json() as Array<{ logicalId: string; lifecycleState: string }>;
+    expect(ps.find(entry => entry.logicalId === "dev.impl")?.lifecycleState).toBe(lifecycle);
+    const res = await app.request(`/api/seat/status/${encodeURIComponent(session.sessionName)}`);
+    expect(res.status).toBe(200);
+    // The session record stays running (handover and the process-limit read use it); the seat reads as rig ps reads it.
+    expect(await res.json()).toMatchObject({ session_status: "running", lifecycle_state: lifecycle });
   });
 
   it("reports the runtime home a Claude or Codex seat's launches use, and where it comes from", () => {

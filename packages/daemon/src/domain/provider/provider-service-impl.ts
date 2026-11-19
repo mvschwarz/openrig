@@ -14,6 +14,7 @@ import {
 } from "../agent-activity-store.js";
 import { getNodeInventory } from "../node-inventory.js";
 import { RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "../seat-runtime-home.js";
+import { readClaudeSeatTokenRef } from "../claude-seat-token.js";
 import { readCodexAuthMetadata, type CodexAuthMetadata } from "./codex-auth-reader.js";
 import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
 import { configuredSeatAccounts } from "./provider-seat-accounts.js";
@@ -120,6 +121,11 @@ export class ProviderServiceImpl implements ProviderService {
     let seats: ProviderSeat[] | undefined;
     const readAuth = () => auth ??= readCodexAuthMetadata(env);
     const listSeats = () => seats ??= this.listSeats();
+    const homes = {
+      codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
+      claudeConfigDir: env.CLAUDE_CONFIG_DIR,
+      home: env.HOME ?? os.homedir(),
+    };
     const collectReactiveSignals = (): ProviderSignal[] => {
       if (!this.deps.agentActivityStore) return [];
       const result = collectReactiveEventSignals({
@@ -142,6 +148,9 @@ export class ProviderServiceImpl implements ProviderService {
         ...(this.deps.collectClaudeSignals?.() ?? []),
         ...collectReactiveSignals(),
       ],
+      // Configuration only (names and references, no usage or samples), so it's computed on every read.
+      configuredAccounts: (all) => configuredSeatAccounts({ seats: all, auth: readAuth(), usage: [], claudeSamples: null, ...homes })
+        .map((seat) => seat.configured),
       now: () => asOf,
     });
     // Slice 01: memory only. A read never starts a native probe (the wake ladder reads this every tick).
@@ -162,9 +171,7 @@ export class ProviderServiceImpl implements ProviderService {
       auth: readAuth(),
       usage: allUsage,
       claudeSamples: this.deps.usageWindows!.claude?.seatSamples() ?? null,
-      codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
-      claudeConfigDir: env.CLAUDE_CONFIG_DIR,
-      home: env.HOME ?? os.homedir(),
+      ...homes,
     });
     return { ...model, usage: allUsage, seatAccounts };
   }
@@ -194,12 +201,15 @@ export class ProviderServiceImpl implements ProviderService {
         const runtimeHome = Object.hasOwn(RUNTIME_HOME_VAR, runtime)
           ? seatRuntimeHome(this.deps.db, entry.nodeId, runtime as HomeRuntime)
           : {};
+        // The launch's own reader says whether the seat has a token reference; #3148's resolver names its label.
+        const tokenRef = runtime === "claude-code" ? readClaudeSeatTokenRef(this.deps.db, entry.nodeId) : null;
         seats.push({
           seatSession: entry.canonicalSessionName,
           rigName: entry.rigName ?? "",
           runtime,
           lifecycleState: entry.lifecycleState,
           ...(runtimeHome.home || runtimeHome.ignored ? { runtimeHome } : {}),
+          ...(tokenRef && entry.configuredAccount ? { claudeToken: { label: entry.configuredAccount, ...(tokenRef.kind ? { kind: tokenRef.kind } : {}) } } : {}),
         });
       }
     }
