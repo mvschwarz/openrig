@@ -11,6 +11,7 @@
 //     structured qitem_id_reuse conflict, never a silent overwrite.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -39,7 +40,12 @@ const REGISTRY: HostRegistry = {
     { id: "ssh-1", transport: "ssh", target: "x.local" },
   ],
 };
+const QUEUE_TARGET_HEADER = "X-OpenRig-Queue-Target-Sha256";
 process.env["MH3B"] = "remote-token";
+
+function queueTargetFingerprint(url: string): string {
+  return createHash("sha256").update(url.replace(/\/+$/, ""), "utf8").digest("hex");
+}
 
 function jsonResponse(payload: unknown, status = 201): Response {
   return new Response(JSON.stringify(payload), {
@@ -492,6 +498,7 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
       const body = "Please check the result.\nKeep my words.";
       const response = await post(app, { ...BASE, sourceSession: "human@kernel", body, hostId: "vps-b" });
       expect(response.status).toBe(201);
+      expect(response.headers.get(QUEUE_TARGET_HEADER)).toBe(queueTargetFingerprint("http://vps-b:7433"));
       expect(forwarded).toHaveLength(1);
       expect(forwarded[0]).toMatchObject({ sourceSession: "human@kernel@host-origin", body });
       expect(forwarded[0]).not.toHaveProperty("hostId");

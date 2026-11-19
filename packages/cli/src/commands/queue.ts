@@ -327,7 +327,7 @@ function terminalDestinationKind(destination: string | null, gatewaySide: boolea
 
 /** The gateway (Slack connector) receipt on the row, in one place for both result shapes. */
 interface GatewayReceipt {
-  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending";
+  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "not-alerted";
   connectorAccepted: boolean | null;
   detail?: string;
 }
@@ -339,7 +339,19 @@ function gatewayReceiptOf(row: QueueRow): GatewayReceipt {
     const detail = stringField(row, "deliveryFailureDetail");
     return { outcome, connectorAccepted: false, ...(detail ? { detail } : {}) };
   }
+  if (outcome === null && stringField(row, "ownerNotificationLevel") === "RECORD") {
+    return { outcome: "not-alerted", connectorAccepted: null };
+  }
   return { outcome: "still-pending", connectorAccepted: null };
+}
+
+function isAbsorbedCreateRetry(row: QueueRow): boolean {
+  const createWarning = isQueueRow(row.createWarning) ? row.createWarning : undefined;
+  if (createWarning?.code === "qitem_body_not_saved") return true;
+  const parkWarning = isQueueRow(row.parkWarning) ? row.parkWarning : undefined;
+  return parkWarning?.code === "qitem_park_not_confirmed"
+    && typeof parkWarning.message === "string"
+    && parkWarning.message.includes("already exists. The existing row is returned unchanged; this retry cannot confirm");
 }
 
 function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
@@ -432,6 +444,7 @@ function absorbedCreateRetryDeliveryResult(
   destination: string | null,
   row: QueueRow,
   parked: boolean,
+  hostId?: string,
 ): VerifiedDeliveryResult {
   if (receiptSourceOf(destination, row) !== "gateway") {
     return terminalDeliveryResult(qitemId, destination, row, "not-requested", null, parked);
@@ -439,7 +452,10 @@ function absorbedCreateRetryDeliveryResult(
   const previous = gatewayReceiptOf(row);
   const history = previous.outcome === "posted"
     ? "Prior row history: Slack receipt was posted."
-    : `Prior row history: Slack delivery ${previous.outcome}${previous.detail ? `: ${previous.detail}` : ""}.`;
+    : previous.outcome === "not-alerted"
+      ? "Prior row history: Slack delivery not-alerted."
+      : `Prior row history: Slack delivery ${previous.outcome}${previous.detail ? `: ${previous.detail}` : ""}.`;
+  const remote = remoteHostOf(hostId);
   return {
     receiptSource: "gateway",
     destinationKind: "human",
@@ -447,8 +463,24 @@ function absorbedCreateRetryDeliveryResult(
     outcome: "not-requested",
     connectorAccepted: null,
     detail: `This request sent no new work. ${history}${parked ? " The requested park is reported separately." : ""}`,
-    nextAction: `rig queue show ${qitemId} --json`,
+    nextAction: `rig queue show ${qitemId}${remote ? ` --host ${shellQuote(remote)}` : ""} --json`,
   };
+}
+
+function keepAbsorbedRetryDeliveryAsHistory(
+  row: QueueRow,
+  qitemId: string,
+  destination: string | null,
+  parked: boolean,
+  hostId?: string,
+): QueueRow {
+  if (!isAbsorbedCreateRetry(row)) return row;
+  if (receiptSourceOf(destination, row) !== "gateway" && !gatewayAlsoPosts(row)) return row;
+  const delivery = absorbedCreateRetryDeliveryResult(qitemId, destination, row, parked, hostId);
+  delete row.deliveryOutcome;
+  delete row.deliveryFailureDetail;
+  row.delivery = delivery;
+  return row;
 }
 
 /** The receipt could not be read or correlated: say which part is unknown, nothing more. */
@@ -768,6 +800,19 @@ function sameQueueEndpoint(left: string, right: string): boolean {
   return left.replace(/\/+$/, "") === right.replace(/\/+$/, "");
 }
 
+const QUEUE_TARGET_FINGERPRINT_HEADER = "X-OpenRig-Queue-Target-Sha256";
+
+function queueTargetFingerprint(url: string): string {
+  return createHash("sha256").update(url.replace(/\/+$/, ""), "utf8").digest("hex");
+}
+
+function responseQueueTargetFingerprint(response: unknown): string | undefined {
+  if (typeof response !== "object" || response === null) return undefined;
+  const headers = (response as { headers?: Headers }).headers;
+  const value = headers?.get(QUEUE_TARGET_FINGERPRINT_HEADER)?.toLowerCase();
+  return value && /^[0-9a-f]{64}$/.test(value) ? value : undefined;
+}
+
 /** Resolve create receipt labels from the selected endpoint and local registry. No daemon identity request is needed. */
 function createReceiptHostContext(client: DaemonClient, receipt: ReceiptContext | null, hostId: string | undefined): ReceiptContext | null {
   if (!receipt) return null;
@@ -823,6 +868,7 @@ const CREATE_READ_BACK_TIMEOUT_MS = 10_000;
 interface SentCreate {
   destinationSession: string;
   body: string;
+  targetFingerprint?: string;
 }
 
 /** The daemon's host id: null when it reports none, undefined when it can't be read. */
@@ -917,12 +963,12 @@ async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: st
     return { error: `from host '${remote}' (${why})` };
   }
   if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
-    return { reader: client, options, remote: undefined, targetEstablished: true };
+    return { reader: client, options, remote: undefined, targetEstablished: true, targetFingerprint: queueTargetFingerprint(match.host.url) };
   }
   const bearer = resolveRemoteBearer(match.host);
   if (!bearer.ok) return { error: `from host '${remote}' (${bearer.error})` };
   if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
-  return { reader: (deps.receiptReadClientFactory ?? deps.clientFactory)(match.host.url), options, remote, targetEstablished: true };
+  return { reader: (deps.receiptReadClientFactory ?? deps.clientFactory)(match.host.url), options, remote, targetEstablished: true, targetFingerprint: queueTargetFingerprint(match.host.url) };
 }
 
 /** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
@@ -972,8 +1018,11 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
     get: async <T>(path: string) => {
       const selected = await (target ??= queueReadTarget(deps, client, hostId));
       if ("error" in selected) throw new Error(`receipt could not be read ${selected.error}`);
-      const response = await selected.reader.get<T>(path, selected.options);
       if (!selected.targetEstablished) throw new Error("the requested host is not established by this CLI's host registry");
+      if (hostWasRequested && (!sent.targetFingerprint || sent.targetFingerprint !== selected.targetFingerprint)) {
+        throw new Error("the receipt target does not match the queue endpoint used for this write");
+      }
+      const response = await selected.reader.get<T>(path, selected.options);
       const row = response.data as Record<string, unknown> | undefined;
       const bodyMatches = typeof row?.body === "string"
         && createHash("sha256").update(row.body, "utf8").digest("hex") === createHash("sha256").update(sent.body, "utf8").digest("hex");
@@ -1000,17 +1049,24 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   if ("error" in target) {
     return { row: null, note: `This CLI couldn't read the row back ${target.error}.` };
   }
+  if (!target.targetEstablished) {
+    const requestedHost = remoteHostOf(hostId);
+    return {
+      row: null,
+      note: `The CLI could not establish the queue for requested host '${requestedHost}'. The write outcome is still unknown. Keep this ID for recovery.`,
+    };
+  }
+  if (remoteHostOf(hostId) && (!sent.targetFingerprint || sent.targetFingerprint !== target.targetFingerprint)) {
+    const requestedHost = remoteHostOf(hostId);
+    return {
+      row: null,
+      note: `The CLI could not bind the recovery read to the queue used for requested host '${requestedHost}'. The write outcome is still unknown. Keep this ID for recovery.`,
+    };
+  }
   const remote = target.remote;
   const where = remote ? ` on host '${remote}'` : "";
   try {
     const res = await target.reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, target.options);
-    if (!target.targetEstablished) {
-      const requestedHost = remoteHostOf(hostId);
-      return {
-        row: null,
-        note: `The CLI could not establish the queue for requested host '${requestedHost}'. The write outcome is still unknown. Keep this ID for recovery.`,
-      };
-    }
     if (res.status === 200 && isQueueRow(res.data)) {
       if (typeof res.data.qitemId !== "string" || res.data.qitemId.length === 0) {
         return {
@@ -1892,6 +1948,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         const receipt = createReceiptHostContext(client, writeReceipt(opts.full, {
           verb: "create", nudgeSuppressed: opts.nudge === false, parked: parkRequested, idGiven: opts.id !== undefined, remoteHost: remoteHostOf(hostResolved.hostId),
         }), hostResolved.hostId);
+        const sent: SentCreate = {
+          destinationSession: hostResolved.destination,
+          body: resolvedBody,
+        };
         const res: DaemonResponse<Record<string, unknown>> | Error = await client.post<Record<string, unknown>>("/api/queue/create", {
           ...(managedSource === undefined ? { sourceSession: source } : {}),
           qitemId,
@@ -1917,10 +1977,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         }, crossHostWriteOptions(hostResolved.hostId)).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
-        const sent: SentCreate = {
-          destinationSession: hostResolved.destination,
-          body: resolvedBody,
-        };
+        sent.targetFingerprint = responseQueueTargetFingerprint(res);
         const emitScopeAdvisories = (created: Record<string, unknown>) => {
           const advisories = Array.isArray(created?.advisories) ? created.advisories : [];
           for (const value of advisories) {
@@ -2034,11 +2091,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               if (advisory.code === "shared_channel_correspondence" && typeof advisory.message === "string") console.error(`Warning: ${advisory.message}`);
             }
             if (opts.verify) {
-              if (isQueueRow(created.createWarning) && created.createWarning.code === "qitem_body_not_saved") {
+              if (isAbsorbedCreateRetry(created)) {
                 // The daemon returned an existing row for a same-ID retry.
                 // The retry did not create or deliver work, so do not query a
                 // delivery receipt for it.
-                const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested);
+                const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested, hostResolved.hostId);
+                delete outputCreated.deliveryOutcome;
+                delete outputCreated.deliveryFailureDetail;
                 await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, resultReceipt);
                 return;
               }
@@ -2047,6 +2106,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, resultReceipt);
               return;
             }
+            keepAbsorbedRetryDeliveryAsHistory(outputCreated, qitemId, hostResolved.destination, parkRequested, hostResolved.hostId);
             await printWriteResult(client, opts.json ?? false, receipt ? { ...outputCreated, persisted: true } : outputCreated, status, resultReceipt);
             return;
           }
@@ -2060,8 +2120,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           delete outputCreated.parkReceipt;
           if (status < 400) delete outputCreated.parkWarning;
           if (status < 400) printCreateReturnRoute(created);
-          if (opts.verify && status < 400 && isQueueRow(outputCreated.createWarning) && outputCreated.createWarning.code === "qitem_body_not_saved") {
-            const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested);
+          if (opts.verify && status < 400 && isAbsorbedCreateRetry(outputCreated)) {
+            const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested, hostResolved.hostId);
+            delete outputCreated.deliveryOutcome;
+            delete outputCreated.deliveryFailureDetail;
             await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, resultReceipt);
             return;
           }
@@ -2079,6 +2141,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId: createdId, persisted: true, delivery }, status, resultReceipt);
             return;
           }
+          keepAbsorbedRetryDeliveryAsHistory(outputCreated, qitemId, hostResolved.destination, parkRequested, hostResolved.hostId);
           await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt);
         };
         const usableCreateRow = (value: unknown): value is Record<string, unknown> =>

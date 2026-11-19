@@ -1,4 +1,5 @@
 import type { SessionRegistry } from "../domain/session-registry.js";
+import { createHash } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { classifierOccupant } from "../domain/classification-sources.js";
 import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
@@ -73,7 +74,20 @@ const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as
 const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
 const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
+const QUEUE_TARGET_FINGERPRINT_HEADER = "X-OpenRig-Queue-Target-Sha256";
 const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
+
+function queueTargetFingerprint(url: string): string {
+  return createHash("sha256").update(url.replace(/\/+$/, ""), "utf8").digest("hex");
+}
+
+function queueRequestBaseUrl(requestUrl: string): string {
+  const url = new URL(requestUrl);
+  url.pathname = url.pathname.replace(/\/api\/queue\/create\/?$/, "");
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/+$/, "");
+}
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -454,6 +468,7 @@ export function queueRoutes(): Hono {
   async function forwardQueueWrite(
     c: {
       get: (key: string) => unknown;
+      header: (name: string, value: string) => void;
       json: (body: unknown, status?: number) => Response;
       req: { header: (name: string) => string | undefined };
     },
@@ -495,6 +510,7 @@ export function queueRoutes(): Hono {
         "unsupported-transport",
       );
     }
+    c.header(QUEUE_TARGET_FINGERPRINT_HEADER, queueTargetFingerprint(resolved.host.url));
     const res = await remoteJsonRequest(resolved.host, path, {
       method: "POST",
       body: forwardBody,
@@ -831,6 +847,10 @@ export function queueRoutes(): Hono {
     if (refusal) return refusal;
 
     const parkRequested = body.blockedOn != null || body.wakeAfterSeconds != null;
+
+    if (typeof body.hostId === "string" && resolvesToLocalHost(body.hostId, getSelfHostId())) {
+      c.header(QUEUE_TARGET_FINGERPRINT_HEADER, queueTargetFingerprint(queueRequestBaseUrl(c.req.url)));
+    }
 
     // OPR.0.4.6.MH3 FR-2 (C1): cross-host CREATE. A registered remote host id
     // forwards the write to that host's daemon; the qitem lives in the origin

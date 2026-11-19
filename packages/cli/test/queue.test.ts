@@ -1689,6 +1689,78 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
     });
 
+    it("reports an earlier Slack failure as history on a same-ID retry without verify", async () => {
+      const id = "qitem-same-id-slack-history-no-verify";
+      const row = validParkCreateResponse(id, {
+        deliveryOutcome: "transport-failed",
+        deliveryFailureDetail: "old connector failure",
+        createWarning: { code: "qitem_body_not_saved", message: "The existing row body was not saved." },
+      });
+      const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: row } } });
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--json"]);
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).not.toHaveProperty("deliveryOutcome");
+      expect(result).not.toHaveProperty("deliveryFailureDetail");
+      expect(result.delivery).toMatchObject({
+        outcome: "not-requested",
+        detail: expect.stringContaining("Prior row history: Slack delivery transport-failed: old connector failure."),
+      });
+      expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
+    });
+
+    it("reports a recorded-only Slack row as not alerted in same-ID retry history", async () => {
+      const id = "qitem-same-id-record-only-history";
+      const row = validParkCreateResponse(id, {
+        destinationClass: "gateway-routable",
+        ownerNotificationLevel: "RECORD",
+        deliveryOutcome: null,
+        createWarning: { code: "qitem_body_not_saved", message: "The existing row body was not saved." },
+      });
+      const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: row } } });
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--verify", "--json"]);
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result.delivery).toMatchObject({
+        outcome: "not-requested",
+        detail: expect.stringContaining("Prior row history: Slack delivery not-alerted."),
+      });
+      expect(result.delivery.detail).not.toContain("still-pending");
+      expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
+    });
+
+    it.each([
+      {
+        label: "a previous Slack transport failure",
+        extra: { deliveryOutcome: "transport-failed", deliveryFailureDetail: "old connector failure" },
+        history: "Prior row history: Slack delivery transport-failed: old connector failure.",
+      },
+      {
+        label: "a recorded-only Slack row",
+        extra: { ownerNotificationLevel: "RECORD", deliveryOutcome: null },
+        history: "Prior row history: Slack delivery not-alerted.",
+      },
+    ])("keeps $label as history for an exact same-body parked retry without verify", async ({ extra, history }) => {
+      const id = "qitem-same-body-parked-slack-history";
+      const row = validParkCreateResponse(id, {
+        destinationClass: "gateway-routable",
+        ...extra,
+        parkWarning: {
+          code: "qitem_park_not_confirmed",
+          message: `qitem ${id} already exists. The existing row is returned unchanged; this retry cannot confirm that its original blocker or timer matches the supplied park options. No second timer or delivery was created.`,
+        },
+      });
+      const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: row } } });
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--json"]);
+      const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+      expect(result).not.toHaveProperty("deliveryOutcome");
+      expect(result).not.toHaveProperty("deliveryFailureDetail");
+      expect(result.delivery).toMatchObject({
+        outcome: "not-requested",
+        detail: expect.stringContaining(history),
+      });
+      expect(result.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
+      expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
+    });
+
     it("accepts a recovered row with a different source without an identity lookup", async () => {
       const id = "qitem-readback-source-differs";
       const { deps, calls } = makeDeps({

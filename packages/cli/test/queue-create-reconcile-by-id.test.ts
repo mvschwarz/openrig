@@ -2,6 +2,7 @@
 // by the ID it sent, from the daemon that holds it. A row found there is reported as created; anything else stays
 // INDETERMINATE, with the ID to reconcile by. The create is never sent again.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +24,8 @@ vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "host-a" }));
 
 const LOCAL = "http://localhost:7433";
 const REMOTE = "http://vps-b.example:7433";
+const OTHER_REMOTE = "http://other-vps.example:7433";
+const QUEUE_TARGET_HEADER = "X-OpenRig-Queue-Target-Sha256";
 const ID = "qitem-20261025050000-0123456789abcdef";
 const AUTH_VALUE = "fixture-only-value";
 // What the daemon stores for this create: the destination and body sent, and the sender's session as its source (stamped
@@ -31,8 +34,23 @@ const ROW = { qitemId: ID, destinationSession: "dev@rig-b", sourceSession: "lead
 const REMOTE_ROW = { ...ROW, sourceSession: "lead@rig-a@host-a" };
 const FORWARD_UNKNOWN = { status: 502, data: { error: "remote_queue_write_failed", failureClass: "unreachable", outcome: "indeterminate" } };
 
-type Reply = { status: number; data: unknown } | Error;
+type Reply = { status: number; data: unknown; headers?: Headers } | Error;
 type Call = { base: string; method: "get" | "post"; path: string; options?: { timeoutMs?: number; headers?: Record<string, string> } };
+
+function queueTargetFingerprint(url: string): string {
+  return createHash("sha256").update(url.replace(/\/+$/, ""), "utf8").digest("hex");
+}
+
+function boundReplyFor(url: string, reply: Reply): Reply {
+  if (reply instanceof Error) return reply;
+  return { ...reply, headers: new Headers({ [QUEUE_TARGET_HEADER]: queueTargetFingerprint(url) }) };
+}
+
+function boundRemoteReply(reply: Reply): Reply {
+  return boundReplyFor(REMOTE, reply);
+}
+
+const FORWARD_UNKNOWN_BOUND: Reply = boundRemoteReply(FORWARD_UNKNOWN);
 
 function makeDeps(posts: Reply[], gets: Record<string, Reply>): { deps: QueueDeps; calls: Call[] } {
   // --verify reads the row once and reports what it holds, without waiting.
@@ -112,7 +130,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   ])("create --verify reads the remote receipt with %s and its bearer, never the local row", async (_case, destination, extra) => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n    bearer_env: XH_AUTH\n`);
     vi.stubEnv("XH_AUTH", AUTH_VALUE);
-    const { calls, error } = await run(destination, [{ status: 201, data: REMOTE_ROW }], {
+    const { calls, error } = await run(destination, [boundRemoteReply({ status: 201, data: REMOTE_ROW })], {
       [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
       [`${LOCAL}/api/queue/${ID}`]: { status: 404, data: { error: "qitem_not_found" } },
       [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
@@ -134,7 +152,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     ["wrong body", { status: 200, data: { ...REMOTE_ROW, body: "different", lastNudgeResult: "verified" } }],
   ] satisfies Array<[string, Reply]>)("create --verify keeps a %s remote receipt indeterminate without resending", async (_case, receipt) => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
-    const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 201, data: REMOTE_ROW }], {
+    const { calls, error } = await run("dev@rig-b@vps-b", [boundRemoteReply({ status: 201, data: REMOTE_ROW })], {
       [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
       [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
       [`${REMOTE}/api/queue/${ID}`]: receipt,
@@ -147,7 +165,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
 
   it("create --verify accepts a remote receipt with the requested destination and body when source differs", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
-    const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 201, data: REMOTE_ROW }], {
+    const { calls, error } = await run("dev@rig-b@vps-b", [boundRemoteReply({ status: 201, data: REMOTE_ROW })], {
       [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
       [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, sourceSession: "other@rig-a", lastNudgeResult: "verified" } },
     }, ["--verify"]);
@@ -158,13 +176,13 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "verified" } });
   });
 
-  it("create --verify checks the selected endpoint once when the requested host is missing from this CLI's registry", async () => {
+  it("does not read a remote receipt when the requested host is missing from this CLI's registry", async () => {
     const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 201, data: REMOTE_ROW }], {
       [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, lastNudgeResult: "verified" } },
     }, ["--verify"]);
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(readBacks(calls)).toEqual([]);
     expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "indeterminate" } });
   });
@@ -175,9 +193,21 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     });
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(readBacks(calls)).toEqual([]);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ outcome: "indeterminate" });
     expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID}`);
+  });
+
+  it("does not read the CLI registry endpoint when the forwarder reports a different write target", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    const { calls, error } = await run("dev@rig-b@vps-b", [boundReplyFor(OTHER_REMOTE, FORWARD_UNKNOWN)], {
+      [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
+    }, ["--verify"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([]);
+    expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID}`);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ outcome: "indeterminate" });
   });
 
   it("does not verify an older stored body returned by a successful colliding create", async () => {
@@ -214,7 +244,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
 
   it("a reconciled remote create still verifies its remote receipt without another write", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
-    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], {
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN_BOUND], {
       [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
       [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
     }, ["--verify"]);
@@ -250,7 +280,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   it("a cross-host create the destination committed late reads back from that host, with its bearer, never printed", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n    bearer_env: XH_AUTH\n`);
     vi.stubEnv("XH_AUTH", AUTH_VALUE);
-    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN],
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN_BOUND],
       { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW }, [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } } });
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
@@ -263,7 +293,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   it("keeps a cross-host create indeterminate when its host is missing from this CLI's registry", async () => {
     const { calls } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN]);
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(readBacks(calls)).toEqual([]);
     const all = stderr.join("\n");
     expect(all).toContain("The write outcome is INDETERMINATE");
     expect(all).toContain(`The CLI could not establish the queue for requested host 'vps-b'. The write outcome is still unknown. Keep this ID for recovery.`);
@@ -275,7 +305,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     const receiptFactory = vi.fn((base: string) => {
       throw new Error(`receipt reader must reuse the selected client for ${base}`);
     });
-    const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)], {
+    const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`, new Headers({ [QUEUE_TARGET_HEADER]: queueTargetFingerprint(LOCAL) }))], {
       [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: ROW },
     }, ["--host", "host-a", "--tags", "mission:local"], (deps) => { deps.receiptReadClientFactory = receiptFactory; });
     expect(error).toBeNull();
@@ -299,7 +329,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(error).toBeNull();
     expect(receiptFactory).not.toHaveBeenCalled();
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(readBacks(calls)).toEqual([]);
     expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ delivery: { outcome: "indeterminate" } });
   });
@@ -318,8 +348,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     }, ["--host", "host-b"]);
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toHaveLength(1);
-    expect(readBacks(calls)[0]).toMatchObject({ base: LOCAL });
+    expect(readBacks(calls)).toEqual([]);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ outcome: "indeterminate" });
     expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID}`);
   });
@@ -352,7 +381,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   it("reads a forwarded create once without a separate healthz identity request", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
     const remoteRequests: Array<{ url: string; method?: string }> = [];
-    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], {}, [], (deps, recordedCalls) => {
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN_BOUND], {}, [], (deps, recordedCalls) => {
       const ordinaryFactory = deps.clientFactory;
       deps.clientFactory = (base) => {
         const client = ordinaryFactory(base) as unknown as { get: (requestPath: string, options?: Call["options"]) => Promise<unknown> };
@@ -481,7 +510,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   // canonicalizes it, and on a forwarded create stamped with the forwarding daemon's own host id.
   it("a forwarded create accepts matching destination and body when the stored source differs", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
-    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN],
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN_BOUND],
       { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: "lead@rig-a@host-c" } } });
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
@@ -493,7 +522,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
 
   it("a forwarded create readback does not require the forwarding daemon's host id", async () => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
-    const { calls } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW } });
+    const { calls } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN_BOUND], { [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW } });
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
     expect(stderr.join("\n")).toContain(`committed after all: row ${ID} on host 'vps-b'`);
@@ -507,7 +536,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     ["stamped session", "lead@rig-a@host-a"],
   ])("with a registered host URL, reads back by ID regardless of the %s source", async (_case, stored) => {
     fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: host-a\n    transport: http\n    url: ${LOCAL}\n`);
-    const { calls } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
+    const { calls } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`, new Headers({ [QUEUE_TARGET_HEADER]: queueTargetFingerprint(LOCAL) }))],
       { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, sourceSession: stored } } },
       ["--host", "host-a"]);
     expect(posts(calls)).toHaveLength(1);
