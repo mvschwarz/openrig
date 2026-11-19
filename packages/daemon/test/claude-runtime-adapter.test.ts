@@ -13,6 +13,7 @@ import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 import { resolveReadinessTimeoutMs } from "../src/domain/readiness-timeout.js";
 import { claudeCommandSessionToken } from "../src/domain/native-process-lineage.js";
 import { ObservationPass } from "../src/domain/process-observation-pass.js";
+import { CLAUDE_PROCESS_ONLY_RESUME } from "../src/domain/native-resume-probe.js";
 
 const probeEvidence = expect.objectContaining({
   status: expect.any(String), code: expect.any(String),
@@ -1060,6 +1061,18 @@ describe("Claude Code runtime adapter", () => {
       return { result, reads, tmux };
     };
 
+    it("doesn't end the wait on Claude's process alone, and lets it stand with a note when the first window ends", async () => {
+      const { result, reads } = await run({ paneCommand: "claude" });
+      expect(result).toMatchObject({ ok: true, resumeToken: "abc-123", warnings: expect.arrayContaining([CLAUDE_PROCESS_ONLY_RESUME]) });
+      expect(reads).toBe(17);
+    });
+
+    it("meets the trust dialog Claude draws after its process starts, instead of reporting a resume", async () => {
+      const dialog = fs.readFileSync(new URL("./fixtures/claude-trust-2.1.310.txt", import.meta.url), "utf8");
+      const { result } = await run({ paneCommand: "claude", screen: (read) => (read < 2 ? "" : dialog) });
+      expect(result).toMatchObject({ ok: false });
+    });
+
     it("marks the seat resumed when Claude draws its screen after the first window", async () => {
       const { result, reads } = await run({ screen: (read) => (read < 24 ? "" : tui) });
       expect(result).toMatchObject({ ok: true, resumeToken: "abc-123" });
@@ -1252,6 +1265,13 @@ describe("Claude Code runtime adapter", () => {
           const { result, tmux } = await run({ autoDrive: true, rows: () => booting, screen: (read) => (read < 20 ? "" : trust) });
           expect(result).toEqual(timedOut);
           expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+        });
+
+        it("drawn heading first, from this launch's own Claude, is answered once its options are drawn", async () => {
+          const heading = "Accessing workspace:\n/fixture";
+          const { result, tmux } = await run({ autoDrive: true, screen: (read) => (read < 20 ? "" : read < 22 ? heading : read < 25 ? trust : tui) });
+          expect(result).toMatchObject({ ok: true });
+          expect((tmux.sendKeys as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
         });
 
         it("from this launch's own Claude is answered, and the seat resumes", async () => {

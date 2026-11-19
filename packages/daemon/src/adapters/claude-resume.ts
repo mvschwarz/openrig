@@ -13,7 +13,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
-import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, CLAUDE_PROCESS_ONLY_RESUME } from "../domain/native-resume-probe.js";
 import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -31,8 +31,6 @@ export type ResumeResult =
   | { ok: false; code: string; message: string };
 
 const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
-const CLAUDE_PROCESS_ONLY_RESUME = "Claude was running when the resume's wait ended, but nothing on its screen was recognized "
-  + "yet (no prompt, reply or dialog), so this resume rests on the process alone.";
 
 /** The legacy name and native ID are both supported Claude resume inputs. */
 export function isClaudeResumeType(resumeType: string | null | undefined): boolean {

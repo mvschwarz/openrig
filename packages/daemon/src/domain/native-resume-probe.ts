@@ -36,6 +36,13 @@ export interface NativeResumeProbeResult {
   basis?: "process";
 }
 
+/** The note a resume's result carries when its wait ended on a `basis: "process"` verdict. */
+export const CLAUDE_PROCESS_ONLY_RESUME = "Claude was running when the resume's wait ended, but nothing on its screen was recognized "
+  + "yet (no prompt, reply or dialog), so this resume rests on the process alone.";
+
+// Claude's auto-mode footer row, which Claude draws under its composer.
+const CLAUDE_AUTO_MODE_FOOTER = /^[ \t]*⏵⏵ auto mode on \(shift\+tab to cycle\)(?:[ \t]+·[^\r\n]*)?[ \t]*$/m;
+
 export interface ProbeShellReadyInput {
   paneCommand: string | null;
   paneContent: string | null;
@@ -439,16 +446,17 @@ export function assessNativeResumeProbe(
         detail: "Claude is at its interactive prompt and the exact managed resume process was verified.",
       };
     }
+    const autoModeScreen = /(^|\n)\s*❯/.test(paneContent) && CLAUDE_AUTO_MODE_FOOTER.test(paneContent);
     if (paneCommand === "claude" && input.claudeResumeIdentityVerified !== false) {
       return {
         status: "resumed",
         code: "active_runtime",
         detail: "Claude is the active foreground process in the probe pane.",
-        basis: "process",
+        // An auto-mode composer whose header scrolled out is Claude's drawn screen, not the process alone.
+        ...(autoModeScreen ? {} : { basis: "process" as const }),
       };
     }
-    if (/(^|\n)\s*❯/.test(paneContent)
-      && /^[ \t]*⏵⏵ auto mode on \(shift\+tab to cycle\)(?:[ \t]+·[^\r\n]*)?[ \t]*$/m.test(paneContent)) {
+    if (autoModeScreen) {
       return input.claudeAutoIdentityVerified
         ? { status: "resumed", code: "active_runtime", detail: "Claude auto-mode TUI and the exact managed native identity were verified." }
         : { status: "inconclusive", code: "claude_auto_identity_required", detail: "Auto-mode screen text requires proof of the launched Claude identity." };
@@ -741,6 +749,14 @@ export function currentClaudeTrustDialog(paneContent: string): string | null {
   if (heading) return heading.trim();
   if (!hasClaudeGatedGrantsMark(current)) return null;
   return current.find(row => CLAUDE_GATED_GRANTS_MARK_ROW.test(row))?.trim() ?? "This folder pre-approves tool permissions";
+}
+
+/** Whether Claude is still drawing its plain workspace trust prompt: the heading is on its current screen and none of
+ *  the prompt's options is drawn below it yet. */
+export function claudeTrustPromptDrawing(paneContent: string): boolean {
+  const current = claudeCurrentRows(paneContent);
+  const heading = current.findIndex(isClaudeTrustHeading);
+  return heading >= 0 && !current.slice(heading + 1).some(row => CLAUDE_TRUST_OPTION_ROW.test(row));
 }
 
 // Claude's resume-selection prompt appears when `claude --resume` finds multiple
