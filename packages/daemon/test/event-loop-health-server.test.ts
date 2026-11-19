@@ -19,6 +19,16 @@ function seedRigWithNodes(db: Database.Database, name: string, nodeCount: number
 }
 
 describe("OPR.0.4.3.21 — /healthz enrichment", () => {
+  it("reports missing-pane background work as unknown without changing daemon health", async () => {
+    const db = createFullTestDb();
+    const backgroundWork = [{ sessionName: "worker@rig", state: "unknown", reason: "pane_pid_gone", observedAt: "2026-11-19T00:00:00.000Z" }];
+    const { app } = createTestApp(db, { appDeps: { seatIdentityReconciler: { backgroundWorkUnknown: () => backgroundWork } as never } });
+    const body = await (await app.request("/healthz")).json() as Record<string, unknown>;
+    expect(body.status).toBe("ok");
+    expect(body.backgroundWork).toEqual(backgroundWork);
+    db.close();
+  });
+
   it("reports process identity without requiring the event-loop monitor", async () => {
     const db = createFullTestDb();
     const { app } = createTestApp(db);

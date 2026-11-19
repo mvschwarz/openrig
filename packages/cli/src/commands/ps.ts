@@ -1584,8 +1584,10 @@ async function handleNodes(
   await printConnectedAssistants(client, opts.rig, requestHeaders);
   for (const n of humanList as NodeEntry[]) {
     if (livenessUnconfirmed(n)) console.log(livenessLine(n.canonicalSessionName ?? n.logicalId, n));
-    if (!n.intentionallyStopped && n.identityVerdict?.reason === "session_missing") {
-      console.log(`Background work (${n.canonicalSessionName ?? n.logicalId}): unknown; a missing tmux session does not prove its processes have exited.`);
+    if (!n.intentionallyStopped && n.identityVerdict?.verdict === "pane_missing"
+      && ["session_missing", "pane_pid_gone", "pane_exited"].includes(n.identityVerdict.reason ?? "")) {
+      const missing = n.identityVerdict.reason === "session_missing" ? "session" : "pane";
+      console.log(`Background work (${n.canonicalSessionName ?? n.logicalId}): unknown; a missing tmux ${missing} does not prove its processes have exited.`);
     }
   }
   if (humanTruncated) {

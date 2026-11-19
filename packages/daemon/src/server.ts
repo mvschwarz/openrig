@@ -799,8 +799,9 @@ export function createApp(deps: AppDeps): Hono {
     // #3315 — the daemon answering (status "ok") is not its terminals answering: `terminals` says whether its tmux
     // server is reachable, from memory, without calling tmux. ADDITIVE; absent = legacy body.
     const terminals = deps.terminalReachability ? { terminals: deps.terminalReachability.snapshot() } : {};
+    const backgroundWork = deps.seatIdentityReconciler ? { backgroundWork: deps.seatIdentityReconciler.backgroundWorkUnknown() } : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals });
+      return c.json({ status: "ok", ...processIdentity, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminals, ...backgroundWork });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -814,6 +815,7 @@ export function createApp(deps: AppDeps): Hono {
       ...bind,
       ...stuckSweep,
       ...wakeLadder,
+      ...backgroundWork,
       ...terminals,
     });
   });

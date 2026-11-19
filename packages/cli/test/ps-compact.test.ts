@@ -108,7 +108,7 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
     startupStatus: opts?.startupStatus ?? "ready",
     restoreOutcome: "n-a",
     lifecycleState: opts?.lifecycleState ?? "running",
-    identityVerdict: opts?.identityReason ? { reason: opts.identityReason } : null,
+    identityVerdict: opts?.identityReason ? { verdict: "pane_missing", reason: opts.identityReason } : null,
     tmuxAttachCommand: `tmux attach -t ${logicalId.replace(".", "-")}@${rigName}`,
     resumeCommand: `claude --resume /path/to/session/${logicalId}`,
     latestError: opts?.latestError ?? null,
@@ -696,6 +696,21 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
       });
       expect(logs.join("\n")).toContain("tmux session missing; restore or relaunch the seat");
       expect(logs.join("\n")).toContain("Background work (ops-missing@openrig-build): unknown; a missing tmux session does not prove its processes have exited.");
+    }
+  });
+
+  it("reports unknown background work for a confirmed lost pane, but not an intentional stop", async () => {
+    const lost = { ...makeFatNode("rig-a", "openrig-build", "ops.lost"), identityVerdict: { verdict: "pane_missing", reason: "pane_pid_gone" } };
+    const stopped = { ...makeFatNode("rig-a", "openrig-build", "ops.stopped"), identityVerdict: { verdict: "pane_missing", reason: "pane_exited" }, intentionallyStopped: true };
+    RIG_A_NODES.push(...([lost, stopped] as unknown as typeof RIG_A_NODES));
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]);
+      });
+      expect(logs.join("\n")).toContain("Background work (ops-lost@openrig-build): unknown; a missing tmux pane does not prove its processes have exited.");
+      expect(logs.join("\n")).not.toContain("Background work (ops-stopped@openrig-build)");
+    } finally {
+      RIG_A_NODES.splice(RIG_A_NODES.length - 2);
     }
   });
 

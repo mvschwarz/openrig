@@ -160,6 +160,16 @@ export class SeatIdentityReconciler {
     `).all() as RunningSeatRow[];
   }
 
+  /** A missing pane is not evidence that work it started has ended. These are unknowns, not a process inventory. */
+  backgroundWorkUnknown(): Array<{ sessionName: string; state: "unknown"; reason: string; observedAt: string }> {
+    return this.runningSeats().flatMap((seat) => {
+      const verdict = this.store.getForNode(seat.node_id);
+      if (!verdict || verdict.sessionName !== seat.session_name || verdict.verdict !== "pane_missing"
+        || !["session_missing", "pane_pid_gone", "pane_exited"].includes(verdict.reason ?? "")) return [];
+      return [{ sessionName: seat.session_name, state: "unknown" as const, reason: verdict.reason!, observedAt: verdict.observedAt }];
+    });
+  }
+
   /** Nodes whose latest session `rig unclaim` released (detached, origin claimed). Unclaim leaves the process running,
    *  so the node's last recorded process stays on record: a fresh launch reads it before reopening a tmux server, and
    *  must not start a second occupant beside a process that still runs. An older schema without `origin` keeps none. */

@@ -360,6 +360,7 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     expect(v?.verdict).toBe("pane_missing");
     expect(v?.reason).toBe("pane_pid_gone");
     expect(v?.evidenceSource).toBe("pane_process");
+    expect(rec.backgroundWorkUnknown()).toEqual([{ sessionName: "s1@rig", state: "unknown", reason: "pane_pid_gone", observedAt: NOW().toISOString() }]);
     db.close();
   });
 
@@ -376,6 +377,7 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     expect(v?.verdict).toBe("pane_missing");
     expect(v?.reason).toBe("session_missing");
     expect(v?.evidenceSource).toBe("tmux_session");
+    expect(rec.backgroundWorkUnknown()).toEqual([{ sessionName: "s1@rig", state: "unknown", reason: "session_missing", observedAt: NOW().toISOString() }]);
     db.close();
   });
 
