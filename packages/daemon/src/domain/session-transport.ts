@@ -4556,7 +4556,10 @@ export class SessionTransport {
       // Fresh hook (within the 15s send window): authoritative for any state, except a current Claude
       // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
       // hook gets the same current-dialog check as a fresh running one.
-      if (this.hookFreshForSend(hookActivity, now)) {
+      // A fresh usage-limit hook is the exception: a limit menu may be open, and some of its options spend money. It
+      // takes the full pane read below, whose numbered-row scan refuses any current menu whatever its layout; an
+      // ordinary input box at a limit wall still delivers.
+      if (this.hookFreshForSend(hookActivity, now) && hookActivity.reason !== "usage_limit") {
         // These fresh-hook dialog and picker checks run only on a runtime declared to support reading a dialog
         // (member-connection.v1, observe.dialog); the runtime then says which screen reader it is. The stale-idle veto and
         // the pane probe below don't read the declaration.

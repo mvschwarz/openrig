@@ -84,6 +84,29 @@ it.each([
   expect(f.enter).not.toHaveBeenCalled();
 });
 
+// Shapes the footer recognizer doesn't cover: a row drawn after the footer, and an option wrapped onto two rows with
+// the footer changed. The menu's layout at the installed Claude Code isn't verified, so after a usage-limit hook the
+// refusal mustn't depend on it.
+const AFTER_FOOTER = `${LIMIT_MENU.trimEnd()}\n   Usage credit balance: $0.00\n`;
+const WRAPPED = LIMIT_MENU.replace("     2. Switch to usage credits", "     2. Add funds to continue with usage\n        credits").replace("Enter to confirm · Esc to cancel", "Enter to select · Esc to go back");
+
+it.each([["a row after the footer", AFTER_FOOTER], ["a wrapped option and another footer", WRAPPED]] as const)(
+  "after a fresh usage-limit hook the full read refuses a menu with %s, before any write", async (_name, frame) => {
+    const f = fixture(frame);
+    await f.hook("StopFailure", "rate_limit", 1_000);
+    const sent = await f.transport.send(f.name, MESSAGE);
+    expect(sent).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  });
+
+it("control: after a fresh usage-limit hook, an ordinary input box at a limit wall still delivers", async () => {
+  const f = fixture(["You've hit your limit · resets 11pm (UTC)", "", "─".repeat(80), "❯\u00a0", "─".repeat(80), "  ? for shortcuts", ""].join("\n"));
+  await f.hook("StopFailure", "rate_limit", 1_000);
+  expect(await f.transport.send(f.name, MESSAGE)).toMatchObject({ ok: true });
+  expect(f.paste).toHaveBeenCalled();
+});
+
 it("control: a fresh Stop over an ordinary idle composer still delivers", async () => {
   const f = fixture(["✻ Brewed for 1s", "", "─".repeat(80), "❯ ", "─".repeat(80), "  ? for shortcuts", ""].join("\n"));
   await f.hook("Stop", null, 1_000);
