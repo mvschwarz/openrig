@@ -74,20 +74,27 @@ describe("#3529 orphaned sweep findings", () => {
     expect(queue.getById(row.qitemId)?.state).toBe("pending");
   });
 
-  it("reuses an existing #3531 grouped notice without filing a second notice to the source", async () => {
+  it("still selects a handed-off finding whose source rig is deleted before pickup", async () => {
+    queue.attachOutbox(new OutboxHandler(db));
     await work();
-    const notice = await queue.create({
-      qitemId: "qitem-unroutable-1234567890abcdef", sourceSession: destination, destinationSession: source,
-      body: `STUCK SWEEP FINDING (unroutable-notice)\ndestination: ${destination}\nsource: ${source}\ncount: 1 unclaimed row from ${source} to ${destination}\nlist: rig queue list --destination ${destination} --state pending`,
-      evidenceRef: `rig queue list --destination ${destination} --state pending`,
-      tags: [STUCK_SWEEP_FINDING_TAG, `stuck-sweep:unroutable-notice:${source}~>${destination}`], nudge: false,
-    });
+    await sweep();
+    const [original] = openFindings();
+    if (!original) throw new Error("fixture: expected the original finding");
     removeRig("archived");
 
-    await sweep();
-    await sweep();
+    await sweep(); // hands the finding back to sender@origin under an ordinary qitem id
+    const [handedOff] = openFindings();
+    if (!handedOff) throw new Error("fixture: expected the handed-off finding");
+    expect(handedOff.qitemId).not.toMatch(/^qitem-recovery-/);
+    expect(handedOff.handedOffFrom).toBe(original.qitemId);
+    removeRig("origin");
 
-    expect(openFindings().map((row) => row.qitemId)).toEqual([notice.qitemId]);
+    const recovered = await sweep();
+    expect(recovered.findings).toContainEqual(expect.objectContaining({
+      qitemId: handedOff.qitemId, kind: "unclaimed-obligation", destination: source, action: "unreported",
+    }));
+    expect(recovered.outcome).toBe("partial");
+    expect(status.snapshot().findingsUndelivered).toBe(1);
   });
 
   it("records a gap once and recovers when the missing rig returns without touching the work", async () => {

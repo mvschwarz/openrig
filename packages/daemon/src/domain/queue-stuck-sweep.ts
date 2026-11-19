@@ -1496,34 +1496,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       log(`[stuck-sweep] ${message}`);
       failedCreates.push(message);
     };
-    // Match #3531's open-root key and provenance; leave its notice lifecycle to that sweep path.
-    const groupedNoticeCovers = (source: string, destination: string): boolean => {
-      if (source === destination) return false;
-      const tagPrefix = "stuck-sweep:unroutable-notice:";
-      const tag = `${tagPrefix}${source}~>${destination}`;
-      const candidates = deps.db.prepare<[string, string, string], { qitem_id: string; body: string }>(`SELECT q.qitem_id, q.body FROM queue_items q
-        WHERE q.source_session = ? AND q.destination_session <> q.source_session AND q.handed_off_from IS NULL
-          AND q.state IN ('pending', 'in-progress', 'blocked') AND q.qitem_id GLOB 'qitem-unroutable-*'
-          AND q.evidence_ref = ('rig queue list --destination ' || q.source_session || ' --state pending')
-          AND json_valid(q.tags) AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
-          AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
-          AND 1 = (SELECT COUNT(*) FROM json_each(q.tags) WHERE value GLOB 'stuck-sweep:unroutable-notice:*')`)
-        .all(destination, STUCK_SWEEP_FINDING_TAG, tag);
-      return candidates.some(({ qitem_id, body }) => {
-        const [heading, dest, author, count, list, ...extra] = body.split("\n");
-        if (heading !== "STUCK SWEEP FINDING (unroutable-notice)" || dest !== `destination: ${destination}`
-          || author !== `source: ${source}` || !count?.startsWith("count: ") || !count.endsWith(` from ${source} to ${destination}`)
-          || list !== `list: rig queue list --destination ${destination} --state pending` || extra.length) return false;
-        const history = deps.queueRepo.listTransitions(qitem_id);
-        const created = history.filter((t) => t.transitionNote === "created");
-        return created.length > 0 && created.every((t) => t.actorSession === destination && t.identityProvenance === null)
-          && !history.some((t) => t.transitionNote?.startsWith("tags added: ")
-            && (t.transitionNote.includes(STUCK_SWEEP_FINDING_TAG) || t.transitionNote.includes(tagPrefix)));
-      });
-    };
+    // Selected by the finding tag alone: a handoff gives its successor an ordinary qitem id while keeping the tags, so
+    // an id-prefix filter would miss a finding handed to a source whose origin rig is later deleted.
     const pendingFindings = deps.db.prepare<[string], { qitem_id: string; destination_session: string }>(`
       SELECT qitem_id, destination_session FROM queue_items
-      WHERE state = 'pending' AND claimed_at IS NULL AND qitem_id GLOB 'qitem-recovery-*' AND tags LIKE ?`)
+      WHERE state = 'pending' AND claimed_at IS NULL AND tags LIKE ?`)
       .all(`%"${STUCK_SWEEP_FINDING_TAG}"%`);
     const perRowKinds: readonly StuckFindingKind[] = ["overdue-claim", "undelivered-wake", "undelivered-human-notice",
       "unclaimed-obligation", "dangling-closure", "stalled-after-claim", "unconsumed-wait", "parked-owner-no-input"];
@@ -1534,7 +1511,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!row || row.state !== "pending" || row.claimedAt || row.destinationSession !== ref.destination_session || deliveryHeld(row)) continue;
       const kind = perRowKinds.find((kind) => kind === findingKindOf(row));
       if (!kind || !isFindingRow(row)) continue;
-      if (kind === "unclaimed-obligation" && groupedNoticeCovers(row.sourceSession, row.destinationSession)) continue;
       const target = sourceAgent(row.sourceSession, row.destinationSession);
       if (target) {
         try {
@@ -1717,9 +1693,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         const now_ = freshCandidate(c.kind, c.row.qitemId, c.jobId);
         if (!now_) continue;
         routeCandidate(now_); // its destination, reason and targets as they are now
-        // An open #3531 notice already covers this pair. Do not mint a parallel per-row notice.
-        if (now_.kind === "unclaimed-obligation" && missingRig(now_.row.destinationSession)
-          && groupedNoticeCovers(now_.row.sourceSession, now_.row.destinationSession)) continue;
         const input = {
           // A finding folded into a parent's notice (#2988) holds its id without owning the row: a new one gets its own.
           qitemId: freshRecoveryId(deps.db, c.row.qitemId, renewedDeadline ? c.row.closureRequiredAt! : undefined),
@@ -2130,7 +2103,6 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const dedupTag = tags.find((t) => t.startsWith("stuck-sweep:"));
       if (!dedupTag || liveDedupTags.has(dedupTag)) continue;
       const [, kind, stuckId] = dedupTag.match(/^stuck-sweep:([a-z-]+):(.+)$/) ?? [];
-      if (kind === "unroutable-notice") continue;
       // A retry marker only suppresses reporting. Other reporting filters (a new
       // unconfirmed send, a fresh post window, or a larger unclaimed age) do not
       // prove resolution either: delivery/pickup findings need source evidence.
