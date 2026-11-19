@@ -392,7 +392,7 @@ export function resolveMissionsRoot(opts: {
         }
       } catch (error) {
         const problem = error instanceof Error ? error.message : String(error);
-        console.error(`warning: rig project selection failed: ${problem}; using configured workspace. Fix the catalog or select explicitly with --project, --workspace, or a project: prefix.`);
+        console.error(`warning: rig project selection failed: ${problem}; using configured workspace. Fix the catalog or select a workspace explicitly with --workspace or OPENRIG_WORK_ROOT.`);
       }
     }
   }
