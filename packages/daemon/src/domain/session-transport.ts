@@ -305,6 +305,22 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
   return null;
 }
 
+// Claude's confirm-style select, such as its usage-limit menu ("What do you want to do?", seen 2026-08-10) or the folder-trust
+// dialog: the footer is the last drawn row, and a numbered option with the cursor sits in the block adjoining it. The
+// usage-limit menu's second option spends money ("Switch to usage credits"), so it refuses even in the dialogue-only read,
+// whose fresh hook (StopFailure rate_limit reads unknown) can't tell a menu is open.
+const CLAUDE_CONFIRM_FOOTER = "Enter to confirm · Esc to cancel";
+function findCurrentClaudeConfirmMenu(paneContent: string): string | null {
+  const lines = paneContent.split("\n").map(line => line.trim()).filter(line => line.length > 0);
+  if (lines.at(-1) !== CLAUDE_CONFIRM_FOOTER) return null;
+  for (let i = lines.length - 2; i >= 0; i--) {
+    const line = lines[i]!;
+    if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
+    if (!/^\d+\.\s+\S/.test(line)) break;
+  }
+  return null;
+}
+
 // Claude can leave these noninteractive warnings BELOW the input box and mode bar.
 // Recognize the complete input block, never a warning or historical prompt alone.
 const CLAUDE_STATUS_WARNINGS = [
@@ -872,7 +888,8 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   // The program's own /model picker: its highlighted row can sit above the scan window, and Enter there confirms it.
   const modelPicker = options.runtime === "codex" ? currentCodexModelPicker(paneContent)
     : options.runtime === undefined || options.runtime === "claude-code" ? currentClaudeModelMenu(paneContent) : null;
-  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
+  const confirmMenu = options.runtime === undefined || options.runtime === "claude-code" ? findCurrentClaudeConfirmMenu(paneContent) : null;
+  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ?? confirmMenu ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {

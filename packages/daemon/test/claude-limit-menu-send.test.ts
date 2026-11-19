@@ -1,0 +1,92 @@
+// Claude's usage-limit menu offers to spend money ("Switch to usage credits"), so a send must never type into it.
+// The frame is a real one, from two Claude seats on 2026-08-10. Claude's StopFailure hook for a rate limit reads
+// unknown with reason usage_limit, and a fresh hook (within the send window) sends the read to the dialogue-only
+// check, which skips the generic numbered-row scan. These cells pin that the menu is refused there too, before any
+// write, whatever the fresh hook says.
+//
+// Pieces: the real hook route, SQLite activity store and SessionTransport; tmux is a fixture that shows the frame.
+import { afterEach, expect, it, vi } from "vitest";
+import { Hono } from "hono";
+import type Database from "better-sqlite3";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
+import { SeatActivityService } from "../src/domain/seat-activity-service.js";
+import { activityRoutes } from "../src/routes/activity.js";
+
+const LIMIT_MENU = [
+  "✻ Brewed for 1s",
+  "",
+  "▔".repeat(80),
+  "   What do you want to do?",
+  "",
+  "   ❯ 1. Stop and wait for limit to reset",
+  "     2. Switch to usage credits",
+  "     3. Switch to Team plan",
+  "",
+  "   Enter to confirm · Esc to cancel",
+  "",
+].join("\n");
+
+const databases: Database.Database[] = [];
+afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+
+function fixture(pane = LIMIT_MENU) {
+  const db = createFullTestDb(); databases.push(db);
+  const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), bus = new EventBus(db);
+  const rig = rigRepo.createRig("r1001"), node = rigRepo.addNode(rig.id, "worker.a", { role: "worker", runtime: "claude-code" });
+  const name = "worker-a@r1001", session = sessionRegistry.registerSession(node.id, name);
+  sessionRegistry.updateStatus(session.id, "running"); sessionRegistry.updateBinding(node.id, { tmuxSession: name });
+  const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+  const now = () => new Date();
+  const store = new AgentActivityStore({ db, eventBus: bus, now, resolveOccupantGeneration: () => generation,
+    isRegisteredOccupantGeneration: (id, g) => Boolean(db.prepare("SELECT 1 FROM occupant_tenures WHERE node_id=? AND generation_uuid=?").get(id, g)) });
+  const paste = vi.fn(async () => ({ ok: true as const })), enter = vi.fn(async () => ({ ok: true as const }));
+  const tmux = { hasSession: async () => true, probeSession: async () => ({ state: "present" as const }),
+    getPaneCommand: async () => "claude", getPanePid: async () => null, listPanes: async () => [], hasSessionEnv: async () => false,
+    capturePaneContent: async () => pane, sendText: paste, sendKeys: enter, readPaneLastActivity: async () => now().getTime() / 1000 - 120 };
+  const oracle = new SeatActivityService({ tmux: tmux as never, defaultWindowSeconds: 3, now });
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    for (const [key, value] of Object.entries({ agentActivityStore: store, seatActivityService: oracle,
+      activityHookToken: "local-fixture-token", sessionRegistry, eventBus: bus })) c.set(key as never, value as never);
+    await next();
+  });
+  app.route("/activity", activityRoutes);
+  const hook = async (event: string, subtype: string | null, ageMs: number) => {
+    const r = await app.request("/activity/hooks", { method: "POST", headers: { "content-type": "application/json",
+      "x-openrig-activity-token": "local-fixture-token" }, body: JSON.stringify({ runtime: "claude-code", sessionName: name,
+        generation, hookEvent: event, subtype, occurredAt: new Date(now().getTime() - ageMs).toISOString() }) });
+    expect(r.status).toBe(200);
+  };
+  const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux as never, agentActivityStore: store,
+    now, sleep: async () => undefined, activityEndpointFile: () => null });
+  return { name, hook, transport, paste, enter };
+}
+
+// A message envelope carries digits ("Sent: 11-19 21:43Z"); in a selection menu a digit can pick an option.
+const MESSAGE = "From: planner@r1001\nSent: 11-19 21:43Z\n---\nsynthetic work for this seat";
+
+it.each([
+  ["a fresh rate-limit StopFailure (reads unknown)", "StopFailure", "rate_limit", 1_000],
+  ["a fresh Stop (reads idle)", "Stop", null, 1_000],
+  ["a fresh idle_prompt Notification (reads idle)", "Notification", "idle_prompt", 1_000],
+  ["a stale hook (the pane probe reads it)", "StopFailure", "rate_limit", 120_000],
+] as const)("the usage-limit menu is refused before any write after %s", async (_name, event, subtype, ageMs) => {
+  const f = fixture();
+  await f.hook(event, subtype, ageMs);
+  const sent = await f.transport.send(f.name, MESSAGE);
+  expect(sent).toMatchObject({ ok: false, reason: "target_needs_input" });
+  expect(f.paste).not.toHaveBeenCalled();
+  expect(f.enter).not.toHaveBeenCalled();
+});
+
+it("control: a fresh Stop over an ordinary idle composer still delivers", async () => {
+  const f = fixture(["✻ Brewed for 1s", "", "─".repeat(80), "❯ ", "─".repeat(80), "  ? for shortcuts", ""].join("\n"));
+  await f.hook("Stop", null, 1_000);
+  expect(await f.transport.send(f.name, MESSAGE)).toMatchObject({ ok: true });
+  expect(f.paste).toHaveBeenCalled();
+});
