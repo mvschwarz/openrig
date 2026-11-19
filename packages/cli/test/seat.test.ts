@@ -584,7 +584,7 @@ describe("rig seat status", () => {
 
   // #3185 (C14 native): a bare shell's session record stayed running, so seat status said running while rig ps said att.
   it.each([
-    [{ lifecycle_state: "attention_required" }, "Session: needs attention (its tmux session is up; rig ps shows it as att)"],
+    [{ lifecycle_state: "attention_required" }, "Session: needs attention (its session record is running; rig ps shows it as att)"],
     [{ lifecycle_state: "running" }, "Session: running"],
     [{}, "Session: running"],
   ])("says a seat rig ps shows as att needs attention, never running (case %#)", async (extra, expected) => {

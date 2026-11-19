@@ -320,7 +320,7 @@ function printHuman(status: SeatStatusResponse): void {
   }
   // #3185: a bare shell or an unconfirmed pane process keeps the session record running; read the seat as rig ps does.
   console.log(`Session: ${status.session_status === "running" && status.lifecycle_state === "attention_required"
-    ? "needs attention (its tmux session is up; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
+    ? "needs attention (its session record is running; rig ps shows it as att)" : display(status.session_status, "unknown")}`);
   const stop = status.permission_stop;
   if (stop && stop.state !== "unavailable") {
     console.log(`Latest permission observation at ${stop.observed_at}: ${stop.command}; harness permission request (${stop.source}, ${stop.actor})`);
