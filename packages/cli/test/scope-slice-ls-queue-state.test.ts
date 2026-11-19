@@ -478,6 +478,80 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     }
   });
 
+  it("preserves an unrelated blocked slice across the real daemon listing cache when a folder moves in a README-only mission", async () => {
+    const root = fs.realpathSync.native(ws.workRoot);
+    const projRoot = path.join(root, "cache-proj");
+    const missionsRoot = path.join(projRoot, "missions");
+    const missionDir = path.join(missionsRoot, "alpha");
+    writeFile(path.join(projRoot, "README.md"), "---\nid: cache-proj\n---\n# cache-proj\n");
+    writeFile(path.join(projRoot, "project.yaml"), "id: cache-proj\nmissions:\n  root: missions\n");
+    writeFile(path.join(missionDir, "README.md"), "---\nid: M.ALPHA\nstatus: active\n---\n# alpha\n");
+    writeFile(path.join(missionDir, "slices", "01-stuck", "README.md"), "---\nid: OPR.1\nstatus: active\n---\n# stuck\n");
+    writeFile(path.join(missionDir, "slices", "02-movable", "README.md"), "---\nid: OPR.2\nstatus: active\n---\n# movable\n");
+    expect(fs.existsSync(path.join(missionDir, "mission.yaml"))).toBe(false);
+
+    const catalogPath = path.join(root, "cache-workspace.yaml");
+    writeFile(catalogPath, JSON.stringify({ projects: [{ id: "cache-proj", root: "cache-proj" }] }));
+    const settingsPath = path.join(root, "cache-settings.json");
+    writeFile(settingsPath, JSON.stringify({ workspace: { root, catalogPath, slicesRoot: missionsRoot } }));
+
+    const db = createDb();
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const insert = db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, tags)
+         VALUES (?, '2026-11-18T00:00:00.000Z', '2026-11-18T00:00:00.000Z', 'writer@rig', 'worker@rig', ?, 'routine', 'work', ?)`,
+      );
+      insert.run("alpha-stuck", "blocked", JSON.stringify(["project:cache-proj", "mission:alpha", "slice:01-stuck"]));
+      insert.run("alpha-movable", "pending", JSON.stringify(["project:cache-proj", "mission:alpha", "slice:02-movable"]));
+
+      const indexer = new SliceIndexer({ db, slicesRoot: missionsRoot, dogfoodEvidenceRoot: null });
+      const projector = new SliceDetailProjector({ db, indexer });
+      const settings = new SettingsStore(settingsPath);
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        c.set("sliceIndexer" as never, indexer);
+        c.set("sliceDetailProjector" as never, projector);
+        c.set("settingsStore" as never, settings);
+        await next();
+      });
+      app.route("/api/slices", slicesRoutes());
+      daemon.respond = async (reqPath) => {
+        const res = await app.request(reqPath);
+        return { status: res.status, data: await res.json() };
+      };
+
+      const primed = await run(["slice", "ls", "--state", "all", "--with-queue", "--json"], projRoot);
+      expect(primed.exitCode).toBe(0);
+      const primedParsed = JSON.parse(primed.stdout) as { slices: Row[]; warnings?: string[] };
+      expect(derivedByName(primedParsed.slices)).toEqual({ "01-stuck": "blocked", "02-movable": "pending" });
+      expect(primedParsed.warnings).toBeUndefined();
+
+      fs.renameSync(path.join(missionDir, "slices", "02-movable"), path.join(missionDir, "slices", "02-moved"));
+
+      const afterMove = await run(["slice", "ls", "--state", "all", "--with-queue", "--json"], projRoot);
+      expect(afterMove.exitCode).toBe(0);
+      const afterParsed = JSON.parse(afterMove.stdout) as { slices: Row[]; warnings?: string[] };
+      expect(derivedByName(afterParsed.slices)).toEqual({ "01-stuck": "blocked", "02-moved": "unknown" });
+      expect(afterParsed.warnings).toHaveLength(1);
+      expect(afterParsed.warnings?.[0]).toContain("1 of 2 slices are not in the daemon's list");
+
+      const blockedOnly = await run(["slice", "ls", "--derived", "blocked", "--json"], projRoot);
+      expect(blockedOnly.exitCode).toBe(0);
+      const blockedParsed = JSON.parse(blockedOnly.stdout) as { slices: Row[]; warnings?: string[] };
+      expect(blockedParsed.slices.map((s) => s.name)).toEqual(["01-stuck"]);
+      expect(blockedParsed.warnings).toHaveLength(1);
+      expect(blockedParsed.warnings?.[0]).toContain("1 of 2 slices are not in the daemon's list");
+
+      const unknownOnly = await run(["slice", "ls", "--derived", "unknown", "--json"], projRoot);
+      expect(unknownOnly.exitCode).toBe(0);
+      expect((JSON.parse(unknownOnly.stdout) as { slices: Row[] }).slices.map((s) => s.name)).toEqual(["02-moved"]);
+      expect(daemon.gets.every((reqPath) => !reqPath.includes("refresh="))).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
   it.each([
     { derived: "blocked", expected: ["01-stuck"] },
     { derived: "IDLE", expected: ["03-closed"] },

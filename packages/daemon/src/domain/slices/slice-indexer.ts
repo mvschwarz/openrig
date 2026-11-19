@@ -77,14 +77,23 @@ function zeroQueueCounts(): SliceQueueCounts {
   };
 }
 
+type PhysicalPathResolution =
+  | { ok: true; path: string }
+  | { ok: false; missing: boolean };
+
 /** Physical path for queue-count keys. A symlinked root without `..` keeps its alias spelling,
  *  and its target can itself contain `..` after another symlink, so use the native realpath. */
-function canonicalPhysicalPath(absPath: string): string | null {
+function resolveCanonicalPhysicalPath(absPath: string): PhysicalPathResolution {
   try {
-    return fs.realpathSync.native(absPath);
-  } catch {
-    return null;
+    return { ok: true, path: fs.realpathSync.native(absPath) };
+  } catch (err) {
+    return { ok: false, missing: (err as NodeJS.ErrnoException).code === "ENOENT" };
   }
+}
+
+function canonicalPhysicalPath(absPath: string): string | null {
+  const resolved = resolveCanonicalPhysicalPath(absPath);
+  return resolved.ok ? resolved.path : null;
 }
 
 /** The absolute identity of a configured root, used for the walk, the duplicate check and every
@@ -710,14 +719,19 @@ export class SliceIndexer {
     const targetsBySliceToken = new Map<string, TargetScope[]>();
     const visibleCountsByPath = new Map<string, SliceQueueCounts | null>();
     const projectIdsByPath = new Map<string, string | null>();
-    const canonicalPathsByInput = new Map<string, string | null>();
+    const canonicalPathsByInput = new Map<string, PhysicalPathResolution>();
     let physicalIdentityComplete = true;
-    const canonicalizeCountPath = (slicePath: string): string | null => {
+    const resolveCountPath = (slicePath: string): PhysicalPathResolution => {
       const inputPath = path.resolve(slicePath);
-      if (!canonicalPathsByInput.has(inputPath)) {
-        canonicalPathsByInput.set(inputPath, canonicalPhysicalPath(slicePath));
-      }
-      return canonicalPathsByInput.get(inputPath) ?? null;
+      const cached = canonicalPathsByInput.get(inputPath);
+      if (cached) return cached;
+      const resolved = resolveCanonicalPhysicalPath(slicePath);
+      canonicalPathsByInput.set(inputPath, resolved);
+      return resolved;
+    };
+    const canonicalizeCountPath = (slicePath: string): string | null => {
+      const resolved = resolveCountPath(slicePath);
+      return resolved.ok ? resolved.path : null;
     };
     const projectForPath = (slicePath: string): string | null => {
       const physicalPath = canonicalizeCountPath(slicePath);
@@ -732,12 +746,13 @@ export class SliceIndexer {
     };
 
     for (const entry of entries) {
-      const physicalPath = canonicalizeCountPath(entry.slicePath);
-      if (!physicalPath) {
-        physicalIdentityComplete = false;
+      const resolved = resolveCountPath(entry.slicePath);
+      if (!resolved.ok) {
+        if (!resolved.missing) physicalIdentityComplete = false;
         result.set(entry.slicePath, null);
         continue;
       }
+      const physicalPath = resolved.path;
       const projectId = entry.missionId ? projectForPath(entry.slicePath) : null;
       const counts = entry.missionId && projectId ? zeroQueueCounts() : null;
       if (!visibleCountsByPath.has(physicalPath)) {

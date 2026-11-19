@@ -2608,6 +2608,73 @@ describe("GET /api/slices observed queue counts", () => {
       expect(secondBody.missions["old-mission"]).toBeUndefined();
     });
 
+    it("keeps unrelated slice counts readable and preserves ambiguity checks when a cached folder moves in a README-only mission", async () => {
+      const missionRoot = path.join(root, "alpha", "missions", "shipping");
+      addSlice("alpha", "shipping", "01-stuck", "active", "SLICE.SHARED", { mission: "README.md", slice: "README.md" });
+      const movableDir = path.join(missionRoot, "slices", "02-movable");
+      fs.mkdirSync(movableDir, { recursive: true });
+      fs.writeFileSync(path.join(movableDir, "README.md"), nodeBytes("SLICE.SHARED", "active", "Movable"));
+      expect(fs.existsSync(path.join(missionRoot, "mission.yaml"))).toBe(false);
+
+      row("stuck-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-stuck"]);
+      row("movable-pending", "pending", ["project:alpha", "mission:shipping", "slice:02-movable"]);
+      row("shared-id-ambiguous", "in-progress", ["slice:SLICE.SHARED"]);
+
+      const { app } = route();
+      const primed = await list(app);
+      expect(derivedByName(primed)).toEqual({ "01-stuck": "blocked", "02-movable": "pending" });
+      expect(primed.find((s) => s.name === "01-stuck")?.queueCounts).toEqual({ ...ZERO, blocked: 1 });
+
+      const movedDir = path.join(missionRoot, "slices", "02-moved");
+      fs.renameSync(movableDir, movedDir);
+
+      // Next ordinary request hits the warm 60s listing cache without ?refresh=1.
+      const afterMove = await list(app);
+      expect(afterMove.map((s) => s.name).sort()).toEqual(["01-stuck", "02-movable"]);
+      expect(afterMove.find((s) => s.name === "01-stuck")).toMatchObject({
+        queueCounts: { ...ZERO, blocked: 1 },
+        derivedState: "blocked",
+      });
+      expect(afterMove.find((s) => s.name === "02-movable")).toMatchObject({
+        queueCounts: null,
+        derivedState: "unknown",
+      });
+      expect((await list(app, "?derived=blocked")).map((s) => s.name)).toEqual(["01-stuck"]);
+      expect((await list(app, "?derived=unknown")).map((s) => s.name)).toEqual(["02-movable"]);
+    });
+
+    it("still fails all counts to unknown when a cached entry lookup fails with a non-ENOENT error", async () => {
+      addSlice("alpha", "shipping", "01-stuck", "active", "SLICE.STUCK", { mission: "README.md", slice: "README.md" });
+      const otherDir = addSlice("alpha", "shipping", "02-other", "active", "SLICE.OTHER", { mission: "README.md", slice: "README.md" });
+      row("stuck-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-stuck"]);
+      row("other-pending", "pending", ["project:alpha", "mission:shipping", "slice:02-other"]);
+
+      const { app } = route();
+      expect(derivedByName(await list(app))).toEqual({ "01-stuck": "blocked", "02-other": "pending" });
+
+      const origNative = fs.realpathSync.native;
+      let hits = 0;
+      const spy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((p: fs.PathLike, options?: fs.EncodingOption) => {
+        if (String(p) === otherDir) {
+          hits++;
+          throw Object.assign(new Error("injected realpath EACCES"), { code: "EACCES" });
+        }
+        return origNative(p, options as never);
+      }) as typeof fs.realpathSync.native);
+      try {
+        const afterError = await list(app);
+        expect(hits).toBeGreaterThan(0);
+        expect(afterError.map((s) => [s.name, s.queueCounts, s.derivedState]).sort()).toEqual([
+          ["01-stuck", null, "unknown"],
+          ["02-other", null, "unknown"],
+        ]);
+        expect((await list(app, "?derived=blocked")).map((s) => s.name)).toEqual([]);
+        expect((await list(app, "?derived=unknown")).map((s) => s.name).sort()).toEqual(["01-stuck", "02-other"]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("reports unknown, not none, when the queue table cannot be read", async () => {
       addSlice("alpha", "shipping", "live");
       row("live-0", "pending", scope("live"));
