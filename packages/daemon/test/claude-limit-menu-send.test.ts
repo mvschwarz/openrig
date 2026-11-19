@@ -158,6 +158,19 @@ it.each(FRESH_HOOKS.filter(([, event]) => event !== "StopFailure"))(
     expect(f.enter).not.toHaveBeenCalled();
   });
 
+// The sibling spend-limit dialog (same title, unnumbered rows, read from the 2.1.282 bundle), after every fresh hook.
+const SPEND_LIMIT_MENU = ["✻ Brewed for 1s", "", "▔".repeat(80), "   What do you want to do?                     Usage credit balance: $0.00", "",
+  "   ❯ Adjust monthly spend limit: $50       ← or → to adjust · Del to remove limit",
+  "     Wait for limit to reset               Resets 11pm (UTC)",
+  "     Upgrade to Max for higher session limits every month", "", "   Enter to confirm · Esc to cancel", ""].join("\n");
+it.each(FRESH_HOOKS)("after a fresh %s, the spend-limit menu is refused before any write", async (_name, event, subtype) => {
+  const f = fixture(SPEND_LIMIT_MENU);
+  await f.hook(event, subtype, 1_000);
+  expect(await f.transport.send(f.name, MESSAGE)).toMatchObject({ ok: false, reason: "target_needs_input" });
+  expect(f.paste).not.toHaveBeenCalled();
+  expect(f.enter).not.toHaveBeenCalled();
+});
+
 // Controls: option text that isn't a current menu still delivers after a fresh Stop.
 const COMPOSER = ["─".repeat(80), "❯\u00a0", "─".repeat(80), "  ? for shortcuts", ""];
 it.each([

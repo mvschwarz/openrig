@@ -329,9 +329,9 @@ function findCurrentClaudeConfirmMenu(paneContent: string): string | null {
   return null;
 }
 
-// The option labels of Claude Code's usage-limit menu (its rate-limit options dialog, read from the 2.1.282 bundle),
-// with or without the cursor and number.
-const CLAUDE_LIMIT_MENU_OPTION = /^(?:❯\s*)?(?:\d+\.\s+)?(?:Stop and wait for limit to reset|Switch to usage(?: credits)?\b|Add funds to continue with\b|Upgrade your plan\b|Ask your admin for more usage|Wait here, then continue automatically\b|Don.t continue automatically\b)/;
+// The option labels of Claude Code's usage-limit menus, read from the 2.1.282 bundle: the rate-limit options dialog and
+// its sibling spend-limit dialog (same title; unnumbered rows), with or without the cursor and number.
+const CLAUDE_LIMIT_MENU_OPTION = /^(?:❯\s*)?(?:\d+\.\s+)?(?:Stop and wait for limit to reset|Switch to usage(?: credits)?\b|Add funds to continue with\b|Upgrade your plan\b|Ask your admin for more usage|Wait here, then continue automatically\b|Don.t continue automatically\b|Adjust monthly spend limit:|Wait for limit to reset\b|Upgrade to Max(?: 20x)? for higher session limits every month)/;
 /** A usage-limit menu option in the screen's bottom block: up to 40 non-blank rows, ending at one of Claude's output or
  *  timer rows (⏺, ●, ✻), so a reply that came after a dismissed menu isn't read as the menu. */
 function findClaudeLimitMenuInBottomBlock(paneContent: string): string | null {
