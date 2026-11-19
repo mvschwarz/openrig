@@ -742,6 +742,32 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
+  it("reports a fresh parked create's current Slack failure as current delivery", async () => {
+    const id = "qitem-park-current-slack-failure";
+    const row = validParkCreateResponse(id, {
+      destinationClass: "pane-bound",
+      ownerNotificationLevel: "ALERT",
+      deliveryOutcome: "transport-failed",
+      deliveryFailureDetail: "connector timeout",
+      lastNudgeResult: null,
+    });
+    const { deps, calls } = makeDeps({ routes: {
+      "POST /api/queue/create": { status: 201, data: row },
+      [`GET /api/queue/${id}`]: { status: 200, data: row },
+    } });
+    await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait",
+      "--blocked-on", "external:condition", "--verify", "--json"]);
+    const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
+    expect(result.delivery).toMatchObject({
+      receiptSource: "terminal",
+      outcome: "not-requested",
+      gateway: { outcome: "transport-failed", connectorAccepted: false, detail: "connector timeout" },
+    });
+    expect(result.delivery.detail).toContain("Slack delivery transport-failed: connector timeout.");
+    expect(result.delivery.detail).not.toContain("This is not a failed handoff.");
+    expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
+  });
+
     it("--no-nudge to a registered person's alias keeps the bounded gateway wait (daemon destinationClass)", async () => {
       const { result, reads } = await verify([{ destinationClass: "gateway-routable" }], { destinationSession: "mike@kernel", nudge: false });
       expect(result).toMatchObject({ receiptSource: "gateway", destinationKind: "human", outcome: "still-pending", connectorAccepted: null, humanReadership: "unknown" });
@@ -1609,7 +1635,7 @@ describe("rig queue CLI", () => {
         body: savedBody,
         createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
         delivery: {
-          receiptSource: "terminal",
+          receiptSource: "gateway",
           outcome: "not-requested",
           detail: expect.stringContaining("Prior row history: Slack receipt was posted."),
         },
@@ -1619,6 +1645,10 @@ describe("rig queue CLI", () => {
       expect(result).not.toHaveProperty("persisted");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);
+      if (label === "unparked") {
+        expect(result.delivery.detail).toContain("This request sent no new work.");
+        expect(result.delivery.detail).not.toContain("blocker and live timer");
+      }
       expect(process.exitCode).toBeUndefined();
     });
 

@@ -60,7 +60,7 @@ interface DeliveryResultBase {
 export interface GatewayDeliveryResult extends DeliveryResultBase {
   receiptSource: "gateway";
   /** not-alerted: an ask created without --alert to a person whose Slack subscription is urgent-only, so it's on Steering and the TUI and never sent to Slack. */
-  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted";
+  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate" | "not-alerted" | "not-requested";
   /** null means no receipt can presently settle connector acceptance. */
   connectorAccepted: boolean | null;
   /** #96: present for a --reply-to update once posted; false = it posted top-level instead. */
@@ -370,7 +370,8 @@ function terminalDeliveryResult(
   const claim = { observed: claimedAt !== null, claimedAt, pickup: pickupState };
   const currentOutcome = parked ? "not-requested" : outcome;
   const bodyNotSaved = isQueueRow(row.createWarning) && row.createWarning.code === "qitem_body_not_saved";
-  const rowHistoryOnly = parked || bodyNotSaved;
+  const terminalHistoryOnly = parked || bodyNotSaved;
+  const gatewayHistoryOnly = bodyNotSaved;
   const seat = destination ?? "<destination>";
   const receipt: Record<TerminalDeliveryResult["outcome"], string> = {
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
@@ -391,14 +392,14 @@ function terminalDeliveryResult(
         ? "This request sent no new work. Earlier wake and claim details are row history."
         : "No terminal wake was requested (--no-nudge).",
   };
-  const claimPrefix = rowHistoryOnly ? "Row history: this item was claimed at " : "Claimed at ";
+  const claimPrefix = terminalHistoryOnly ? "Row history: this item was claimed at " : "Claimed at ";
   const claimText = claim.observed
     ? claimPrefix + claimedAt + (pickupState ? " (pickup " + pickupState + ")" : "") + ". A claim shows the seat took the item; it does not prove the body was read."
     : waitedMs === null ? "No claim observed yet." : `No claim observed within ${waitedMs}ms.`;
   const gatewaySide = gatewayAlsoPosts(row);
   const gateway = gatewaySide ? gatewayReceiptOf(row) : null;
-  const gatewayHistory = rowHistoryOnly ? gateway : null;
-  const currentGateway = rowHistoryOnly ? null : gateway;
+  const gatewayHistory = gatewayHistoryOnly ? gateway : null;
+  const currentGateway = gatewayHistoryOnly ? null : gateway;
   const slackText = gatewayHistory !== null
     ? gatewayHistory.outcome === "posted" ? " Prior row history: Slack receipt was posted."
       : ` Prior row history: Slack delivery ${gatewayHistory.outcome}${gatewayHistory.detail ? `: ${gatewayHistory.detail}` : ""}.`
@@ -407,9 +408,10 @@ function terminalDeliveryResult(
         : currentGateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
           : ` Slack delivery ${currentGateway.outcome}${currentGateway.detail ? `: ${currentGateway.detail}` : ""}.`;
   const gatewayFailed = currentGateway !== null && currentGateway.connectorAccepted === false;
-  const notFailed = !claim.observed && !gatewayFailed && isKnownUnconfirmed(wakeResult, currentOutcome) ? " This is not a failed handoff." : "";
+  const gatewayHistoryFailed = gatewayHistory !== null && gatewayHistory.connectorAccepted === false;
+  const notFailed = !claim.observed && !gatewayFailed && !gatewayHistoryFailed && isKnownUnconfirmed(wakeResult, currentOutcome) ? " This is not a failed handoff." : "";
   const destinationKind = terminalDestinationKind(destination, gatewaySide);
-  const settled = !rowHistoryOnly && claim.observed && (currentGateway === null || currentGateway.outcome === "posted");
+  const settled = !terminalHistoryOnly && claim.observed && (currentGateway === null || currentGateway.outcome === "posted");
   return {
     receiptSource: "terminal",
     destinationKind,
@@ -420,6 +422,32 @@ function terminalDeliveryResult(
     ...(currentGateway ? { gateway: currentGateway } : {}),
     detail: `The qitem is saved. ${receipt[currentOutcome]}${slackText} ${claimText}${notFailed}`,
     nextAction: settled ? null : currentOutcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
+  };
+}
+
+/** A same-ID retry that did not save its supplied body started no new delivery. Keep a gateway-only row
+ *  in the gateway receipt class, while showing its prior connector result as history. */
+function absorbedCreateRetryDeliveryResult(
+  qitemId: string,
+  destination: string | null,
+  row: QueueRow,
+  parked: boolean,
+): VerifiedDeliveryResult {
+  if (receiptSourceOf(destination, row) !== "gateway") {
+    return terminalDeliveryResult(qitemId, destination, row, "not-requested", null, parked);
+  }
+  const previous = gatewayReceiptOf(row);
+  const history = previous.outcome === "posted"
+    ? "Prior row history: Slack receipt was posted."
+    : `Prior row history: Slack delivery ${previous.outcome}${previous.detail ? `: ${previous.detail}` : ""}.`;
+  return {
+    receiptSource: "gateway",
+    destinationKind: "human",
+    humanReadership: "unknown",
+    outcome: "not-requested",
+    connectorAccepted: null,
+    detail: `This request sent no new work. ${history}${parked ? " The requested park is reported separately." : ""}`,
+    nextAction: `rig queue show ${qitemId} --json`,
   };
 }
 
@@ -746,7 +774,9 @@ function createReceiptHostContext(client: DaemonClient, receipt: ReceiptContext 
   const remote = remoteHostOf(hostId);
   if (!remote) return receipt;
   const registry = loadHostRegistry();
-  const match = registry.ok ? resolveHost(registry.registry, remote, loadHostBindings().bindings) : undefined;
+  const learned = loadHostBindings();
+  const eligible = registry.ok ? eligibleQueueBindings(registry.registry, learned) : {};
+  const match = registry.ok ? resolveHost(registry.registry, remote, eligible) : undefined;
   if (match?.ok && match.host.transport === "http") {
     if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
       const local = { ...receipt };
@@ -825,11 +855,12 @@ function mergeDirectCreateObservation(
   const observed: QueueRow = { ...failure.observed };
   for (const field of ["qitemId", "destinationSession", "state", "body"]) {
     if (!Object.prototype.hasOwnProperty.call(response, field)) continue;
+    if (field === "qitemId" && (typeof response.qitemId !== "string" || response.qitemId.length === 0)) continue;
     const value = observedValue(field, response[field]);
     if (value !== undefined) observed[field] = value;
   }
   const mismatches: string[] = [];
-  if (typeof response.qitemId === "string" && response.qitemId !== qitemId) {
+  if (typeof response.qitemId === "string" && response.qitemId.length > 0 && response.qitemId !== qitemId) {
     fields.add("qitemId");
     mismatches.push("qitemId");
   }
@@ -871,25 +902,27 @@ function existingRowSummary(row: QueueRow, expectedId: string, bodyIsSummary = f
 async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: string | undefined) {
   const remote = remoteHostOf(hostId);
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
-  if (!remote) return { reader: client, options, remote: undefined };
+  if (!remote) return { reader: client, options, remote: undefined, targetEstablished: true };
   const registry = loadHostRegistry();
-  const match = registry.ok ? resolveHost(registry.registry, remote, loadHostBindings().bindings) : undefined;
+  if (!registry.ok) return { reader: client, options, remote: undefined, targetEstablished: false };
+  const learned = loadHostBindings();
+  const match = resolveHost(registry.registry, remote, eligibleQueueBindings(registry.registry, learned));
   if (!match?.ok) {
-    // When the ID is absent from this CLI's registry, the selected write endpoint is the only
-    // destination this command can read without a separate identity lookup.
-    return { reader: client, options, remote: undefined };
+    // The selected endpoint can read its own row, but without an eligible host mapping it cannot
+    // establish that this is the requested destination queue.
+    return { reader: client, options, remote: undefined, targetEstablished: false };
   }
   if (match.host.transport !== "http") {
     const why = "its entry in this CLI's host registry is SSH, not a daemon URL";
     return { error: `from host '${remote}' (${why})` };
   }
   if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
-    return { reader: client, options, remote: undefined };
+    return { reader: client, options, remote: undefined, targetEstablished: true };
   }
   const bearer = resolveRemoteBearer(match.host);
   if (!bearer.ok) return { error: `from host '${remote}' (${bearer.error})` };
   if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
-  return { reader: (deps.receiptReadClientFactory ?? deps.clientFactory)(match.host.url), options, remote };
+  return { reader: (deps.receiptReadClientFactory ?? deps.clientFactory)(match.host.url), options, remote, targetEstablished: true };
 }
 
 /** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
@@ -940,6 +973,7 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
       const selected = await (target ??= queueReadTarget(deps, client, hostId));
       if ("error" in selected) throw new Error(`receipt could not be read ${selected.error}`);
       const response = await selected.reader.get<T>(path, selected.options);
+      if (!selected.targetEstablished) throw new Error("the requested host is not established by this CLI's host registry");
       const row = response.data as Record<string, unknown> | undefined;
       const bodyMatches = typeof row?.body === "string"
         && createHash("sha256").update(row.body, "utf8").digest("hex") === createHash("sha256").update(sent.body, "utf8").digest("hex");
@@ -970,6 +1004,13 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   const where = remote ? ` on host '${remote}'` : "";
   try {
     const res = await target.reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, target.options);
+    if (!target.targetEstablished) {
+      const requestedHost = remoteHostOf(hostId);
+      return {
+        row: null,
+        note: `The CLI could not establish the queue for requested host '${requestedHost}'. The write outcome is still unknown. Keep this ID for recovery.`,
+      };
+    }
     if (res.status === 200 && isQueueRow(res.data)) {
       if (typeof res.data.qitemId !== "string" || res.data.qitemId.length === 0) {
         return {
@@ -1997,7 +2038,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
                 // The daemon returned an existing row for a same-ID retry.
                 // The retry did not create or deliver work, so do not query a
                 // delivery receipt for it.
-                const delivery = terminalDeliveryResult(qitemId, hostResolved.destination, outputCreated, "not-requested", null, true);
+                const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested);
                 await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, resultReceipt);
                 return;
               }
@@ -2020,7 +2061,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           if (status < 400) delete outputCreated.parkWarning;
           if (status < 400) printCreateReturnRoute(created);
           if (opts.verify && status < 400 && isQueueRow(outputCreated.createWarning) && outputCreated.createWarning.code === "qitem_body_not_saved") {
-            const delivery = terminalDeliveryResult(qitemId, hostResolved.destination, outputCreated, "not-requested", null, true);
+            const delivery = absorbedCreateRetryDeliveryResult(qitemId, hostResolved.destination, outputCreated, parkRequested);
             await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, resultReceipt);
             return;
           }

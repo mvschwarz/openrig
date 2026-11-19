@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
@@ -49,6 +50,8 @@ function row(over: Row = {}, waiting: Row = {}): Row {
   };
 }
 
+let requestPaths: string[] = [];
+
 function makeDeps(routes: Record<string, { status: number; data: unknown } | Array<{ status: number; data: unknown }>>): QueueDeps {
   const transitions: Array<{ transitionId: number; transitionNote: string | null; actorSession: string }> =
     [{ transitionId: 1, transitionNote: null, actorSession: "stub@rig" }];
@@ -58,10 +61,12 @@ function makeDeps(routes: Record<string, { status: number; data: unknown } | Arr
   };
   return {
     lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
-    clientFactory: () => ({
+    clientFactory: (baseUrl: string) => ({
+      baseUrl,
       // The sender this stub stamps; the transitions it records carry it as their actor, as the daemon does.
       senderIdentity: async () => ({ session: "stub@rig", originUnknown: false }),
       get: vi.fn(async (p: string) => {
+        requestPaths.push(p);
         const explicit = routes[`GET ${p}`];
         if (explicit) return Array.isArray(explicit) ? explicit.shift()! : explicit;
         if (p.endsWith("/transitions")) return { status: 200, data: transitions };
@@ -96,6 +101,7 @@ function makeDeps(routes: Record<string, { status: number; data: unknown } | Arr
 let logs: string[];
 let errors: string[];
 let stderr: string[];
+let home: string;
 
 async function run(argv: string[], routes: Parameters<typeof makeDeps>[0]): Promise<string> {
   const program = createProgram({ queueDeps: makeDeps(routes) });
@@ -132,14 +138,17 @@ const VERBS: Array<{ verb: string; argv: string[]; route: string; data: unknown;
 describe("queue write receipt (output.compact)", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "queue-write-receipt-"));
+    vi.stubEnv("OPENRIG_HOME", home);
     vi.stubEnv("OPENRIG_SESSION_NAME", "worker@r");
+    requestPaths = [];
     logs = []; errors = []; stderr = [];
     vi.spyOn(console, "log").mockImplementation((...a) => { logs.push(a.join(" ")); });
     vi.spyOn(console, "error").mockImplementation((...a) => { errors.push(a.join(" ")); });
     vi.spyOn(process.stderr, "write").mockImplementation(((s: string) => { stderr.push(String(s)); return true; }) as typeof process.stderr.write);
     process.exitCode = undefined;
   });
-  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = undefined; });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(home, { recursive: true, force: true }); process.exitCode = undefined; });
 
   describe("unchanged unless the switch is on", () => {
     for (const v of VERBS) {
@@ -512,43 +521,54 @@ describe("queue write receipt (output.compact)", () => {
       expect(json).toMatchObject({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-10T18:00:01.000Z" });
     });
 
-    const createVia = async (extra: string[], data: Row, health: { status: number; data: unknown }) =>
+    const createVia = async (extra: string[], data: Row) =>
       run(["create", "--destination", "worker@r", "--body", BODY, "--summary", "s", "--id", DEFAULT_ROW_ID, ...extra],
-        { "POST /api/queue/create": { status: 201, data }, "GET /healthz": health });
+        { "POST /api/queue/create": { status: 201, data } });
 
-    it("a --host create to another daemon names the host and the remote read", async () => {
-      const out = await createVia(["--host", "far"], row(), { status: 200, data: { selfHostId: "here" } });
+    const writeHosts = (content: string) => fs.writeFileSync(path.join(home, "hosts.yaml"), content);
+
+    it("a --host create names a registered remote from registry evidence", async () => {
+      writeHosts("hosts:\n  - id: far\n    transport: http\n    url: https://far.example:7433\n");
+      const out = await createVia(["--host", "far"], row());
       expect(out).toContain("host: far (the row lives on that daemon)");
       expect(out).toContain("rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json");
+      expect(requestPaths).not.toContain("/healthz");
     });
 
-    it("a --host naming this daemon's own host id is local, as the daemon resolves it: no remote host, a local read", async () => {
-      const out = await createVia(["--host", "here"], row(), { status: 200, data: { selfHostId: "here" } });
+    it("a --host naming a registry entry at the selected URL is local", async () => {
+      writeHosts("hosts:\n  - id: here\n    transport: http\n    url: http://localhost:7433\n");
+      const out = await createVia(["--host", "here"], row());
       expect(out).not.toContain("host:");
       expect(out).not.toContain("OPENRIG_URL");
       expect(out).toContain("full row: rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(requestPaths).not.toContain("/healthz");
       logs = [];
-      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row())) as Row;
       expect(json).not.toHaveProperty("host");
       expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      expect(requestPaths).not.toContain("/healthz");
     });
 
-    it("a --host whose locality can't be confirmed says so rather than assert the row is remote", async () => {
-      const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
+    it("an unknown --host stays unconfirmed without a host registry entry", async () => {
+      const out = await createVia(["--host", "far"], row());
       expect(out).toContain("host: far (this daemon's own host id could not be read; if it is not far, the row lives on that daemon)");
+      expect(requestPaths).not.toContain("/healthz");
       logs = [];
-      const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 503, data: {} })) as Row;
+      const json = JSON.parse(await createVia(["--host", "far", "--json"], row())) as Row;
       expect(json).toMatchObject({ host: "far", hostUnconfirmed: true });
+      expect(requestPaths).not.toContain("/healthz");
     });
 
     it("an unconfirmed --host offers both reads as alternatives, in the footer and in --json, for a create and a handoff's new row", async () => {
       const local = "rig queue show 'qitem-20261010180000-aaaa' --full --json";
       const remote = "rig queue show 'qitem-20261010180000-aaaa' --host 'far' --full --json";
-      const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
+      const out = await createVia(["--host", "far"], row());
       expect(out).toContain(`full row: ${local} if this daemon is host far, otherwise ${remote}, or add --full to the create`);
+      expect(requestPaths).not.toContain("/healthz");
       logs = [];
-      const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 503, data: {} })) as Row;
+      const json = JSON.parse(await createVia(["--host", "far", "--json"], row())) as Row;
       expect(json.receipt).toMatchObject({ fullCommand: local, fullCommandOnHost: remote });
+      expect(requestPaths).not.toContain("/healthz");
 
       const v = VERBS.find((x) => x.verb === "handoff")!;
       const newId = ((v.data as Row).created as Row).qitemId as string;

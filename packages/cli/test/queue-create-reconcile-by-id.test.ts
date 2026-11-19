@@ -160,13 +160,24 @@ describe("a queue create that got no answer is read back once by its ID", () => 
 
   it("create --verify checks the selected endpoint once when the requested host is missing from this CLI's registry", async () => {
     const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 201, data: REMOTE_ROW }], {
-      [`${LOCAL}/api/queue/${ID}`]: { status: 404, data: { error: "not_found" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, lastNudgeResult: "verified" } },
     }, ["--verify"]);
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
     expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "indeterminate" } });
+  });
+
+  it("does not recover a cross-host create from a matching selected-endpoint row when the host is unknown", async () => {
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], {
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, lastNudgeResult: "verified" } },
+    });
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ outcome: "indeterminate" });
+    expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID}`);
   });
 
   it("does not verify an older stored body returned by a successful colliding create", async () => {
@@ -182,8 +193,9 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(readBacks(calls)).toHaveLength(0);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({
       delivery: {
+        receiptSource: "terminal",
         outcome: "not-requested",
-        detail: expect.stringContaining("This request sent no immediate terminal wake. Earlier wake and claim details are row history."),
+        detail: expect.stringContaining("This request sent no new work. Earlier wake and claim details are row history."),
       },
     });
     expect(JSON.parse(stdout.join("\n"))).not.toHaveProperty("persisted");
@@ -254,15 +266,12 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
     const all = stderr.join("\n");
     expect(all).toContain("The write outcome is INDETERMINATE");
-    expect(all).toContain(`No row ${ID} yet (read back once by its ID); it may still commit.`);
+    expect(all).toContain(`The CLI could not establish the queue for requested host 'vps-b'. The write outcome is still unknown. Keep this ID for recovery.`);
     expect(process.exitCode).toBe(2);
   });
 
-  it.each([
-    { label: "without a registry entry", hasRegistryEntry: false },
-    { label: "with a registry entry at the selected endpoint", hasRegistryEntry: true },
-  ])("recovers a selected-daemon create named by its host ID $label", async ({ hasRegistryEntry }) => {
-    if (hasRegistryEntry) fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: host-a\n    transport: http\n    url: ${LOCAL}\n`);
+  it("recovers a selected-daemon create named by its host ID when the registry maps to the selected endpoint", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: host-a\n    transport: http\n    url: ${LOCAL}\n`);
     const receiptFactory = vi.fn((base: string) => {
       throw new Error(`receipt reader must reuse the selected client for ${base}`);
     });
@@ -280,7 +289,7 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(process.exitCode ?? 0).toBe(0);
   });
 
-  it("verifies a selected-daemon create named by its host ID without a registry entry", async () => {
+  it("keeps delivery unknown when a matching selected-endpoint row cannot be tied to the requested host", async () => {
     const receiptFactory = vi.fn((base: string) => {
       throw new Error(`receipt reader must reuse the selected client for ${base}`);
     });
@@ -292,7 +301,42 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
     expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
-    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ delivery: { outcome: "verified" } });
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ delivery: { outcome: "indeterminate" } });
+  });
+
+  it.each([
+    ["stale", { observedUrl: "http://old-vps-b.example:7433" }],
+    ["conflicting", { observedUrl: REMOTE, conflict: { hostId: "different-host", observedAt: "2026-11-19T00:00:00Z" } }],
+  ])("does not route a requested host through a %s learned binding", async (_label, binding) => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    fs.writeFileSync(path.join(home, "host-bindings.json"), JSON.stringify({ version: 1, bindings: {
+      "vps-b": { hostId: "host-b", firstObservedAt: "2026-11-01T00:00:00Z", lastObservedAt: "2026-11-07T00:00:00Z", ...binding },
+    } }));
+    const { calls, error } = await run("dev@rig-b", [FORWARD_UNKNOWN], {
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: ROW },
+      [`${REMOTE}/api/queue/${ID}`]: { status: 200, data: REMOTE_ROW },
+    }, ["--host", "host-b"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    expect(readBacks(calls)[0]).toMatchObject({ base: LOCAL });
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ outcome: "indeterminate" });
+    expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID}`);
+  });
+
+  it.each([
+    ["stale", { observedUrl: "http://old-vps-b.example:7433" }],
+    ["conflicting", { observedUrl: REMOTE, conflict: { hostId: "different-host", observedAt: "2026-11-19T00:00:00Z" } }],
+  ])("labels a %s learned host binding as unconfirmed", async (_label, binding) => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    fs.writeFileSync(path.join(home, "host-bindings.json"), JSON.stringify({ version: 1, bindings: {
+      "vps-b": { hostId: "host-b", firstObservedAt: "2026-11-01T00:00:00Z", lastObservedAt: "2026-11-07T00:00:00Z", ...binding },
+    } }));
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "true");
+    const { calls, error } = await run("dev@rig-b", [{ status: 201, data: ROW }], {}, ["--host", "host-b"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ host: "host-b", hostUnconfirmed: true });
   });
 
   it("prints a compact local create receipt without a healthz read for a registered self host", async () => {
@@ -378,9 +422,30 @@ describe("a queue create that got no answer is read back once by its ID", () => 
       fields: expect.arrayContaining(["qitemId"]),
       message: expect.stringContaining("missing or invalid qitemId evidence"),
     });
-    expect(output.createWarning.message).not.toContain("different");
+    expect(output.createWarning.message).not.toMatch(/differ(?:ent|ed)/);
     expect(stderr.join("\n")).toContain("did not include a valid ID");
     expect(stderr.join("\n")).not.toContain("returned a different ID");
+  });
+
+  it("treats an empty direct-response ID as unreadable instead of calling it a different ID", async () => {
+    const noIdRow: Record<string, unknown> = { ...ROW };
+    delete noIdRow.qitemId;
+    const directResponse = { qitemId: "", state: "pending", destinationSession: "dev@rig-b", body: "b" };
+    const { calls, error } = await run("dev@rig-b", [{ status: 201, data: directResponse }], {
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: noIdRow },
+    });
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    const output = JSON.parse(stdout.join("\n")) as Record<string, any>;
+    expect(output).toMatchObject({ error: "queue_create_outcome_unknown", outcome: "unknown", qitemId: ID });
+    expect(output.createWarning).toMatchObject({
+      fields: expect.arrayContaining(["qitemId"]),
+      message: expect.stringContaining("missing or invalid qitemId evidence"),
+    });
+    expect(output.createWarning.message).not.toMatch(/differ(?:ent|ed)/);
+    expect(stderr.join("\n")).toContain("did not include a valid ID");
+    expect(stderr.join("\n")).not.toMatch(/differ(?:ent|ed)/);
   });
 
   it("accepts a row with matching destination and body when its source differs", async () => {
