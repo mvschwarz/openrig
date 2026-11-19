@@ -392,6 +392,21 @@ export class InboundRouter {
       // words for whoever it reached.
       const settles = route.correlationQitemId === undefined || this.deps.queue.routesToAsker?.(route.correlationQitemId, route.destination) !== false;
       const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined && settles;
+      if (answerable && route.correlationQitemId && correlated?.relayedAnswers?.returnId
+        && !correlated.humanQuestions?.length && ev.text?.trim() && this.deps.queue.answerRelayedAsk) {
+        try {
+          const correction = this.deps.queue.answerRelayedAsk({ qitemId: route.correlationQitemId, actorSession: who.source,
+            identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId, direct: { text: ev.text, eventId } });
+          if (correction.replyQitemId && route.arrivalThread) {
+            this.deps.recordArrivalThread?.({ qitemId: correction.replyQitemId, ...route.arrivalThread });
+          }
+          this.deps.seen.mark(eventId, "landed");
+          return { landed: true, qitemId: correction.replyQitemId ?? undefined, correlationQitemId: route.correlationQitemId };
+        } catch (error) {
+          this.deps.log?.(`relay correction failed qitem=${route.correlationQitemId}: ${String(error)}`);
+          return { landed: false, reason: "create_failed" };
+        }
+      }
       // An absorbed event has its own identity even when the first answer came from a button or Steering.
       const consumedKey = (answerId: string) => `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, answerId])}`;
       // A closed ask can hold several returned answers (one per park). A replay finds the one this event returned, or the
@@ -433,14 +448,14 @@ export class InboundRouter {
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(askOpen && answerable ? { humanAnswer: true } : {}),
+          ...(askOpen && answerable && !correlated?.relayedAnswers ? { humanAnswer: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable" | undefined;
-      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && answerable) {
+      if (!closed && route.correlationQitemId && this.deps.resolveHumanReply && answerable && !correlated?.relayedAnswers) {
         try {
           // Reusing the durable answer consumed this event's words. Record that before close, but
           // keep the raw event unmarked until completion so an interrupted close can still retry.
@@ -579,6 +594,21 @@ export class InboundRouter {
     if (!rootTs || !route || !qitemId) {
       if (live) await acknowledge(CLICK_REPLIES.unmapped);
       return { status: "ignored", reason: "unmapped-message" };
+    }
+    const ask = this.deps.queue.getQitem?.(qitemId);
+    if (ask?.relayedAnswers && this.deps.queue.answerRelayedAsk) {
+      try {
+        const answer = this.deps.queue.answerRelayedAsk({ qitemId, actorSession: who.source,
+          identityProvenance: "gateway:slack:v1", identityPrincipal: who.entityId,
+          direct: { ...picked, eventId: action?.action_ts ? `slack-click:${channel}:${rootTs}:${who.source}:${action.action_ts}` : undefined } });
+        if (live) await acknowledge(answer.corrected ? "Your direct correction was sent to the asking agent."
+          : answer.unanswered.length ? "Answer recorded; other questions are still open." : "All answered and sent back.");
+        return { status: "accepted", reason: answer.unanswered.length ? "answer-recorded" : "answers-complete" };
+      } catch (error) {
+        this.deps.log?.(`relay answer continuation failed qitem=${qitemId}: ${String(error)}`);
+        if (live) await acknowledge("This answer was not recorded. Check that the question is still open or corrects a relayed answer.");
+        return { status: "handler-failed", reason: "answer-recording-failed" };
+      }
     }
     // A decision parked on this person takes the current question's answer, as a typed reply does: a re-park gets its own.
     const parkOpen = this.deps.queue.getQitem?.(qitemId)?.state === "blocked"
