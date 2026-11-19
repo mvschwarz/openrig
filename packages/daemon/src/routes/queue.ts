@@ -585,6 +585,7 @@ export function queueRoutes(): Hono {
   async function crossHostHandoff(
     c: {
       get: (key: string) => unknown;
+      header: (name: string, value: string) => void;
       json: (body: unknown, status?: number) => Response;
       req: { header: (name: string) => string | undefined };
     },

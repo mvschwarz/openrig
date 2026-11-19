@@ -232,11 +232,12 @@ describe("queue create scope advisories preserve admission and output", () => {
     stdout.length = 0;
     stderr.length = 0;
     handoffResponses = [];
+    const fixtureBase = "http://queue-handoff.fixture.invalid";
     const client = {
       post: async (url: string, body: unknown, options?: { headers?: Record<string, string> }) => {
         handoffTransportHeaders = options?.headers;
         handoffRequestBody = body as Record<string, unknown>;
-        const response = await app.request(new URL(url, base).toString(), { method: "POST",
+        const response = await app.request(new URL(url, fixtureBase).toString(), { method: "POST",
           headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope", ...(options?.headers ?? {}) },
           body: JSON.stringify(body) });
         const data = await response.json() as Record<string, unknown>;
@@ -1189,7 +1190,8 @@ describe("queue create scope advisories preserve admission and output", () => {
   }
 
   function recoveredClient(app: Hono, target: Fixture, typedLoss: boolean, readHealth?: (observation: number) => string | null) {
-    const calls = { posts: [] as string[], readbacks: [] as Array<{ base: string; url: string }>, postStatuses: [] as number[],
+    const calls = { posts: [] as string[], writeTargets: [] as Array<{ base: string; url: string }>,
+      readbacks: [] as Array<{ base: string; url: string }>, postStatuses: [] as number[],
       postBodies: [] as unknown[], committedBeforeLoss: [] as unknown[], healthReads: 0,
       healthResults: [] as Array<string | null> };
     const factory: QueueDeps["clientFactory"] = (base: string) => ({
@@ -1197,8 +1199,9 @@ describe("queue create scope advisories preserve admission and output", () => {
       senderIdentity: async () => ({ session: "writer@scope", originUnknown: false }),
       post: async (url: string, body: unknown) => {
         calls.posts.push(url);
+        calls.writeTargets.push({ base, url });
         calls.postBodies.push(body);
-        const response = await app.request(url, { method: "POST",
+        const response = await app.request(new URL(url, base).toString(), { method: "POST",
           headers: { "Content-Type": "application/json", "X-OpenRig-Session": "writer@scope" },
           body: JSON.stringify(body) });
         calls.postStatuses.push(response.status);
@@ -1222,7 +1225,8 @@ describe("queue create scope advisories preserve admission and output", () => {
           }
         }
         calls.readbacks.push({ base, url });
-        const row = target.daemon.deps.queueRepo.getById(decodeURIComponent(url.slice("/api/queue/".length)));
+        const resolved = new URL(url, base);
+        const row = target.daemon.deps.queueRepo.getById(decodeURIComponent(resolved.pathname.slice("/api/queue/".length)));
         return row ? { status: 200, data: row } : { status: 404, data: { error: "not_found" } };
       },
     }) as unknown as ReturnType<QueueDeps["clientFactory"]>;
@@ -1347,6 +1351,8 @@ describe("queue create scope advisories preserve admission and output", () => {
     expect(source.daemon.db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE body = ?").get("scope contract body")).toEqual({ n: 1 });
     expect(calls.posts).toEqual(["/api/queue/create"]);
     expect(calls.postStatuses).toEqual([201]);
+    expect(calls.writeTargets.map(call => call.base)).toEqual(calls.readbacks.map(call => call.base));
+    expect(calls.writeTargets.map(call => call.url)).toEqual(["/api/queue/create"]);
     expect(calls.postBodies).toEqual([expect.objectContaining({ hostId: source.hostId,
       destinationSession: "worker@scope", qitemId: "qitem-create-contract", tags })]);
     expect(calls.committedBeforeLoss).toEqual([stored]);
