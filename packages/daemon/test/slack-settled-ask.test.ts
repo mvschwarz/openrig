@@ -178,6 +178,32 @@ describe("posted asks follow settlement outside Slack", () => {
     expect(postCount).toBe(1);
   });
 
+  // C8 (0.7.18, 0.7.19): a person scanning the channel sees what was chosen on the settled card itself.
+  it("names the clicked option on the settled card, and only says a typed reply was given for one", async () => {
+    const clicked = await postAsk();
+    expect(repo.recordHumanAnswer({ qitemId: clicked.qitemId, actorSession: human, questionId: "ship", optionId: "hold" }))
+      .toMatchObject({ status: "recorded", complete: true });
+    // As the click handler continues a complete set: its formatted answers resolve the ask.
+    expect(repo.resolveDirectHumanReply({ qitemId: clicked.qitemId, actorSession: human, decision: "Ship now?: Hold" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    const chose = String(updates[0]!.text).split("\n")[0]!;
+    expect(chose.split(" · ")[0]).toBe("Answered: Hold");
+    expect(chose).toContain(`by ${human}`);
+
+    const typed = await postAsk();
+    expect(repo.resolveDirectHumanReply({ qitemId: typed.qitemId, actorSession: human, decision: "Hold it until Friday" })).toBe(true);
+    await vi.waitFor(() => expect(updates).toHaveLength(2));
+    const replied = String(updates[1]!.text).split("\n")[0]!;
+    expect(replied.split(" · ")[0]).toBe("Answered with a typed reply");
+    expect(replied).not.toContain("Hold it until Friday");
+
+    // Each card's status is stable: a restart re-reads both and edits neither again.
+    wire.stop(); start();
+    await new Promise((r) => setTimeout(r, 25));
+    expect(updates).toHaveLength(2);
+    expect(postCount).toBe(2);
+  });
+
   it.each(["Ship", "Ship (recommended)", "Ship (Recommended)"])("keeps the recommendation once when %s becomes settled history", async (label) => {
     const item = await postAsk(undefined, label);
     expect(repo.resolveDirectHumanReply({ qitemId: item.qitemId, actorSession: human, decision: "Ship it" })).toBe(true);

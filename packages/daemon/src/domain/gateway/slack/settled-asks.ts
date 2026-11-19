@@ -8,6 +8,7 @@ import { callWebApi, type FetchImpl, type WebApiResult } from "./slack-api.js";
 import { budgetLeft, HISTORY, REPLIES, MethodBackoff, newRecoveryBudget } from "./recovery-budget.js";
 import { parsePostedStamp } from "./thread-seat-map.js";
 import { TYPED_REPLY_HINT, CHANNEL_REPLY_HINT, HUMAN_REQUIRED_REPLY_HINT, QUESTION_BLOCK_PREFIX, recommendationLabel, escapeSlackText, redactSecrets } from "./message.js";
+import { chosenAnswers } from "../../human-questions.js";
 
 const UPDATE = "chat.update";
 const EDITED = "slack-ask-settled";
@@ -47,9 +48,16 @@ function handledMessage(message: { text: string; blocks: Block[] }, status: stri
     blocks: [{ type: "context", block_id: STATUS_BLOCK, elements: [{ type: "mrkdwn", text: status }] }, ...blocks] };
 }
 
-function statusLine(t: QueueTransition, label?: string): string {
+/** An answered card names what was chosen (C8); a typed reply's words stay in the thread, so the card says only that. */
+function answeredLine(chosen: ReadonlyArray<string | null>): string {
+  if (!chosen.length) return "Answered";
+  return chosen.every((c) => c === null) ? "Answered with a typed reply"
+    : `Answered: ${chosen.map((c) => c ?? "a typed reply").join("; ")}`;
+}
+
+function statusLine(t: QueueTransition, label?: string, chosen: ReadonlyArray<string | null> = []): string {
   const what = label ?? (t.closureReason === "denied" ? "Denied"
-    : t.ownerNotificationKind === "human-decision-resolved" ? "Answered" : t.state === "done" ? "Done"
+    : t.ownerNotificationKind === "human-decision-resolved" ? answeredLine(chosen) : t.state === "done" ? "Done"
     : t.state === "canceled" ? "Canceled" : terminal.has(t.state) ? t.state : "Handled");
   const note = redactSecrets((t.transitionNote ?? "").replace(/\s+/g, " ")).slice(0, 1000);
   return escapeSlackText([what, t.ts, `by ${t.actorSession}`, note].filter(Boolean).join(" · "));
@@ -169,8 +177,9 @@ export class SlackAskSettlement {
     const after = transitions.filter((t) => t.transitionId > episode.transitionId && ![
       "slack-posted ", "slack-owner-notification-posted ", EDITED + " ", RATE_LIMIT + " ", UNAVAILABLE + " ",
     ].some((prefix) => (t.transitionNote ?? "").startsWith(prefix)));
+    const chosen = chosenAnswers(item.humanQuestions ?? [], item.humanAnswers ?? {});
     const make = (t: QueueTransition, label?: string) => {
-      const status = statusLine(t, label);
+      const status = statusLine(t, label, chosen);
       return { status, revision: createHash("sha256").update(status).digest("hex").slice(0, 24) };
     };
     const exit = after.find((t) => terminal.has(t.state) || t.ownerNotificationKind === "human-decision-resolved"
