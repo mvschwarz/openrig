@@ -87,7 +87,9 @@ function shellWord(value: string, force = false): string {
 
 /** `tmux`, with the daemon's server flags when it isn't on the default server. */
 export function tmuxOnDaemonServer(): string {
-  const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
+  // A server name or socket path with `=` is quoted, as tmuxAttachCommand quotes a session word: zsh reads a word that
+  // starts with `=` as a command lookup.
+  const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg, arg.includes("=")))).join(" ");
   return `tmux${server ? ` ${server}` : ""}`;
 }
 
@@ -126,4 +128,10 @@ function tmuxSessionWord(session: string): string {
 export function tmuxAttachCommand(session: string): string {
   const word = tmuxSessionWord(session);
   return `${tmuxOnDaemonServer()} attach -t ${shellWord(word, word.includes("="))}`;
+}
+
+/** `tmux set-window-option -t <window> -u window-size` on the daemon's server, for one window by its id (`@N`): drops
+ *  that window's own `window-size`, so it follows the value it inherits again. */
+export function tmuxUnsetWindowSizeCommand(window: string): string {
+  return `${tmuxOnDaemonServer()} set-window-option -t ${shellWord(window)} -u window-size`;
 }

@@ -39,6 +39,7 @@ import type { RigRepository } from "./rig-repository.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { claudeResumeRotation, sessionCommunityHarnessSelect, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter, TmuxResult } from "../adapters/tmux.js";
+import { tmuxUnsetWindowSizeCommand } from "../adapters/tmux-server.js";
 import { newPinHolder, readPinSizing, recordPin, releasePin, WINDOW_SIZE_PRIOR_OPTION, withWindowPin, type PinRelease } from "../terminal/window-pin.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
@@ -4933,8 +4934,12 @@ export class SessionTransport {
       const pin = await withWindowPin(window, async () => {
         const sizing = await readPinSizing(this.tmuxAdapter, window);
         if (!sizing) return "the window's sizing couldn't be read, so it couldn't be given back";
-        if (sizing.live === "manual" && (sizing.prior === "manual" || sizing.holders.length > 0)) {
-          return "the window's size is pinned (its window-size is manual)";
+        if (sizing.live === "manual" && sizing.holders.length > 0) return "the window's size is pinned (its window-size is manual)";
+        // No OpenRig reader holds it: a deliberate fixed size or a pin something else left. Say how to drop it, for a reader
+        // who wants the window to follow its inherited sizing again; it isn't changed here.
+        if (sizing.live === "manual" && sizing.prior === "manual") {
+          return `the window's size is pinned (its own window-size is manual); to drop that setting so the window follows `
+            + `its inherited window-size again, run ${tmuxUnsetWindowSizeCommand(sizing.window)} on the daemon's host`;
         }
         // Still manual here: a pin whose holders are gone (a capture or a web terminal that ended without giving it back).
         // It's taken over, and given back after this read even when the pane is already big enough.
