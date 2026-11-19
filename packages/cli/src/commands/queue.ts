@@ -1867,7 +1867,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         const target = await queueHostTarget(deps, local, opts.host, true);
         if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
         // Wake/refocus readers require the continuation prefix at the start of the park note.
-        const transitionNote = opts.continuation
+        const transitionNote = opts.continuation?.trim()
           ? [`continuation: ${opts.continuation}`, opts.note].filter(Boolean).join("\n\n")
           : (opts.note ?? `parked on ${opts.on}`);
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {

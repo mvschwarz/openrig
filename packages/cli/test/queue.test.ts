@@ -1331,6 +1331,8 @@ describe("rig queue CLI", () => {
     { label: "note and continuation", flags: ["--note", "checked the source", "--continuation", "resume the review"], expected: "continuation: resume the review\n\nchecked the source" },
     { label: "multiline note and continuation", flags: ["--note", "checked the source\nkept the evidence", "--continuation", "resume the review"], expected: "continuation: resume the review\n\nchecked the source\nkept the evidence" },
     { label: "empty continuation", flags: ["--note", "checked the source", "--continuation", ""], expected: "checked the source" },
+    { label: "whitespace-only continuation with note", flags: ["--note", "checked the source", "--continuation", " \t\n "], expected: "checked the source" },
+    { label: "whitespace-only continuation without note", flags: ["--continuation", " \t\n "], expected: "parked on external:cooldown" },
     { label: "neither flag", flags: [], expected: "parked on external:cooldown" },
   ])("block preserves the audit note: $label", async ({ flags, expected }) => {
     const { deps, calls } = makeDeps();

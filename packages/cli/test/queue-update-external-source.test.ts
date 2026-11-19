@@ -97,6 +97,19 @@ const transitions = (id: string) => db.prepare(
 describe("rig queue block audit note and continuation readback", () => {
   afterEach(() => { vi.unstubAllEnvs(); });
 
+  it("keeps the audit note out of the resume plan for a whitespace-only continuation", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev-x@rig");
+    const item = await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "review" });
+    const blocker = await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-y@rig", body: "dependency" });
+    const note = "source checked; no resume plan supplied";
+    const { out, exit } = await runCli([
+      "block", item.qitemId, "--on", blocker.qitemId, "--note", note, "--continuation", " \t\n ", "--json",
+    ]);
+    expect(exit, out).toBeFalsy();
+    expect(repo.transitionLog.listForQitem(item.qitemId).at(-1)?.transitionNote).toBe(note);
+    expect(repo.currentParkContinuation(item.qitemId)).toBeNull();
+  });
+
   it.each([false, true])("keeps the audit note with continuation=%s in the real transition store", async (withContinuation) => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "dev-x@rig");
     const item = await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "review" });
