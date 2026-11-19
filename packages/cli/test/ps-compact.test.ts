@@ -7,6 +7,7 @@ import http from "node:http";
 import { Command } from "commander";
 import { psCommand } from "../src/commands/ps.js";
 import { DaemonClient } from "../src/client.js";
+import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -226,10 +227,12 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
 
   afterAll(() => {
     server.close();
+    resetFetchAllowlist();
     if (savedSessionName !== undefined) process.env.OPENRIG_SESSION_NAME = savedSessionName;
   });
 
@@ -692,6 +695,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
         await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--session", "ops-missing@openrig-build", ...extra]);
       });
       expect(logs.join("\n")).toContain("tmux session missing; restore or relaunch the seat");
+      expect(logs.join("\n")).toContain("Background work (ops-missing@openrig-build): unknown; a missing tmux session does not prove its processes have exited.");
     }
   });
 
