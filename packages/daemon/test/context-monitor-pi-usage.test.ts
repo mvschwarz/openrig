@@ -8,6 +8,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { UsageSamplesStore } from "../src/domain/usage-samples-store.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
 import { computeTopBurn } from "../src/domain/usage-series.js";
@@ -95,7 +96,7 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
 
     const observed = store.readPiUsageAndNormalize({ nodeId: nodeIdRef.value, seatSession: seat, sessionStartedAt: "2026-11-14 08:30:00" });
     expect(observed.availability).toBe("known");
-    expect(observed.source).toBe("runner_reported");
+    expect(observed.source).toBe("pi_usage_entries");
     expect(observed.sessionId).toBe(piSession);
     expect(observed.totalInputTokens).toBe(1_000 + 40_000 + 500 + 60_000);
     expect(observed.totalOutputTokens).toBe(150);
@@ -113,7 +114,7 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
       .prepare("SELECT availability, source, total_input_tokens, total_output_tokens FROM context_usage WHERE node_id = ?")
       .get(nodeIdRef.value) as { availability: string; source: string; total_input_tokens: number; total_output_tokens: number };
     expect(pointInTime.availability).toBe("known");
-    expect(pointInTime.source).toBe("runner_reported");
+    expect(pointInTime.source).toBe("pi_usage_entries");
     expect(pointInTime.total_input_tokens).toBe(41_000);
     expect(pointInTime.total_output_tokens).toBe(100);
 
@@ -121,7 +122,7 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
       .prepare("SELECT lane, source, native_session_id, total_input_tokens FROM usage_samples WHERE seat_session = ?")
       .all(seat) as Array<{ lane: string; source: string; native_session_id: string; total_input_tokens: number }>;
     expect(series).toHaveLength(1);
-    expect(series[0]).toMatchObject({ lane: "context", source: "runner_reported", native_session_id: piSession, total_input_tokens: 41_000 });
+    expect(series[0]).toMatchObject({ lane: "context", source: "pi_usage_entries", native_session_id: piSession, total_input_tokens: 41_000 });
   });
 
   it("puts the Pi seat in the ranked burn view once two turns land", async () => {
@@ -189,5 +190,16 @@ describe("ContextMonitor — Pi usage entries (context lane + burn series)", () 
       occupant_generation: sessionRegistry.currentOccupantTenure(nodeIdRef.value)?.generationUuid,
     });
     expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE seat_session = ?").get(seat)).toEqual({ n: 2 });
+  });
+  it("findContextUsageForSession accepts a pi_usage_entries sample (a runner_reported row alone would not)", async () => {
+    entry({ entryId: "thr-1", entryTimestamp: "2026-11-14T09:05:00.000Z", inputTokens: 2_000, outputTokens: 100, cacheReadTokens: 0 });
+    await monitor.pollOnce();
+    // The threshold reader requires the sample to postdate the occupant's boot;
+    // the fixture's frozen entry times must not predate the (real-now) tenure.
+    db.prepare("UPDATE occupant_tenures SET boot_at = '2026-11-14 08:00:00' WHERE node_id = ?").run(nodeIdRef.value);
+    const repo = new WatchdogJobsRepository(db);
+    const tenure = sessionRegistry.currentOccupantTenure(nodeIdRef.value)!;
+    const sample = repo.findContextUsageForSession(seat, tenure.generationUuid);
+    expect(sample).toMatchObject({ usedTokens: 2_100 });
   });
 });

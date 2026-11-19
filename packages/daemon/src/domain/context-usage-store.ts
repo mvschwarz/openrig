@@ -244,7 +244,7 @@ export class ContextUsageStore {
     return {
       availability: "known",
       reason: null,
-      source: "runner_reported",
+      source: "pi_usage_entries",
       usedPercentage: null,
       remainingPercentage: null,
       contextWindowSize: null,
