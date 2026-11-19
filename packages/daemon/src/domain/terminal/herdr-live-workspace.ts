@@ -176,14 +176,17 @@ export async function findLiveHerdrWorkspace(view: HerdrViewKey, readers: LiveWo
   });
   const search: LiveWorkspaceSearch = { unconfirmed: [], stale: [...new Set(stale.map(tab => tab.workspace_id))], fixedSize: [] };
   const clients = candidates.length || search.stale.length ? await readClients(readers) : null;
+  let live: HerdrTab | undefined;
   for (const candidate of candidates) {
-    if (await hasLiveAttachments(candidate, tabs, view.pages, pageLabel(candidate), readers.herdr, clients)) return { ...search, live: candidate };
+    if (await hasLiveAttachments(candidate, tabs, view.pages, pageLabel(candidate), readers.herdr, clients)) { live = candidate; break; }
     search.unconfirmed.push(candidate.workspace_id);
   }
+  // Also beside a reused current copy: an old workspace next to the numbered copy an earlier open added is the usual
+  // state after an upgrade. The reused workspace itself is never named for closing.
   if (clients) {
     for (const id of new Set([...search.unconfirmed, ...search.stale])) {
-      if (await showsFixedSizeTile(id, clients, readers.herdr)) search.fixedSize.push(id);
+      if (id !== live?.workspace_id && await showsFixedSizeTile(id, clients, readers.herdr)) search.fixedSize.push(id);
     }
   }
-  return search;
+  return live ? { ...search, live } : search;
 }

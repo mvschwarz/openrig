@@ -35,7 +35,8 @@ function herdr(launch?: { socketPath: string }) {
   const panes: Pane[] = [];
   const socket: string[] = [];
   const cli: string[][] = [];
-  const state: { attached: boolean; focus: "ok" | "throws" | "other-tab"; flags: string; readOnly: "0" | "1" } = { attached: true, focus: "ok", flags: "attached,focused", readOnly: "0" };
+  const state: { attached: boolean; focus: "ok" | "throws" | "other-tab"; flags: string; readOnly: "0" | "1"; flagsFor: Record<string, string> } =
+    { attached: true, focus: "ok", flags: "attached,focused", readOnly: "0", flagsFor: {} };
   const transport: HerdrTransport = {
     probe: async () => ({ alive: true, version: "0.9.5", protocol: 22 }),
     request: async (method, raw): Promise<HerdrResult> => {
@@ -66,7 +67,8 @@ function herdr(launch?: { socketPath: string }) {
       return { type: "ok" };
     },
   };
-  const pid = (paneId: string) => 101 + SEATS.findIndex(seat => paneId.endsWith(`-${seat}`));
+  // One tmux client per seat tile, numbered by workspace: w1's are 101 and 102, w2's 201 and 202.
+  const pid = (paneId: string) => 100 * Number(paneId.slice(1, paneId.indexOf(":"))) + 1 + SEATS.findIndex(seat => paneId.endsWith(`-${seat}`));
   const liveWorkspace = {
     herdr: async (args: string[]) => {
       cli.push(args);
@@ -80,7 +82,8 @@ function herdr(launch?: { socketPath: string }) {
     exec: async (file: string, args: string[]) => {
       if (file === "/bin/sh" && args[1] === "command -v tmux") return `${TMUX}\n`;
       if (file === TMUX && args.join(" ") === [...SERVER, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}\t#{client_flags}"].join(" ")) {
-        return state.attached ? SEATS.map((seat, i) => `${101 + i}\tfixture-${seat}\t${state.readOnly}\t${state.flags}`).join("\n") : "";
+        return state.attached ? panes.filter(pane => SEATS.includes(pane.label))
+          .map(pane => `${pid(pane.pane_id)}\tfixture-${pane.label}\t${state.readOnly}\t${state.flagsFor[pane.workspace_id] ?? state.flags}`).join("\n") : "";
       }
       throw new Error(`unexpected exec ${file} ${args.join(" ")}`);
     },
@@ -162,6 +165,20 @@ describe("#3052 --provider herdr reuses a live workspace for the same view", () 
       ? fixedSizeWorkspaceNote("w1", "env -u HERDR_SESSION HERDR_SOCKET_PATH='/daemon home/herdr.sock' herdr workspace close 'w1'")
       : "Workspace w1 has an older or different plan for this view and was kept.");
     expect(second.notes?.filter(note => note.startsWith("Workspace w1"))).toHaveLength(1);
+  });
+
+  it("names an older plan's fixed-size workspace beside the current copy it reuses (review50-r3 R1)", async () => {
+    const h = herdr();
+    await h.adapter.openView({ ...demoView(), planId: "fedcba9876543210".repeat(4) }, { reuseLive: true });
+    await h.adapter.openView(demoView(), { reuseLive: true }); // main's numbered current copy, w2
+    h.state.flagsFor = { w1: "attached,ignore-size" };
+
+    const third = await h.adapter.openView(demoView(), { reuseLive: true });
+    expect(third.reusedWorkspace).toEqual({ id: "w2", tabId: "w2:t1", view: "demo" });
+    expect(third.notes).toEqual([
+      fixedSizeWorkspaceNote("w1", "herdr workspace close 'w1'"),
+      "Workspace w2 already shows this view with live attachments, so it was reused; its contents were kept and no new tiles were opened.",
+    ]);
   });
 
   it("a read-only tile's client is not a fixed-size tile", async () => {

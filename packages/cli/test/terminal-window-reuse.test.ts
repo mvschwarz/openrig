@@ -396,6 +396,24 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(f.exec.mock.calls.some(([, args]) => args.includes("close"))).toBe(false);
   });
 
+  it("names an older plan's fixed-size workspace beside the live copy it reuses (review50-r3 R1)", async () => {
+    const f = fixture([
+      { workspace_id: "old-space", tab_id: "old-tab", label: "openrig:kernel#fedcba9876543210#l1" },
+      { workspace_id: "live", tab_id: "fresh", label: label() },
+    ]);
+    const seats = ["tui", "advisor", "operator"];
+    f.processInfo.mockImplementation(async paneId => JSON.stringify({ result: { process_info: { pane_id: paneId,
+      foreground_processes: [{ pid: (paneId.startsWith("old-tab-") ? 901 : 101) + seats.findIndex(seat => paneId.endsWith(seat)) }] } } }));
+    f.clients.mockResolvedValue([...seats.map((seat, i) => `${101 + i}\tfixture-${seat}\t0\tattached`),
+      ...seats.map((seat, i) => `${901 + i}\tfixture-${seat}\t0\tattached,ignore-size`)].join("\n"));
+    await f.run();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("fresh");
+    expect(f.post).not.toHaveBeenCalled();
+    const notes: string[] = JSON.parse(logs[0]!).notes;
+    expect(notes.filter(note => note.includes("old-space"))).toEqual([expect.stringMatching(/^Workspace old-space shows this view with tiles an OpenRig before 0\.7\.10 opened, .+: herdr workspace close 'old-space'$/)]);
+    expect(notes.some(note => note.includes("'live'"))).toBe(false);
+  });
+
   it("retains the current preview's absent and degraded members when reusing a partial view", async () => {
     const f = fixture([{ workspace_id: "partial", tab_id: "first", label: label() }]);
     f.composed.opened = f.composed.opened.slice(0, 1);
