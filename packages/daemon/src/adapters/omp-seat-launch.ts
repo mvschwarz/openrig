@@ -6,7 +6,7 @@ import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { observeOmpApprovalMode, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import {
-  OMP_LAUNCH_CONFIG, OMP_SESSION_NOT_FOUND, buildOmpLaunchCommand, buildPendingOmpSeatState, ompSeatPaths,
+  OMP_LAUNCH_CONFIG, buildOmpLaunchCommand, buildPendingOmpSeatState, ompSeatPaths,
   parseOmpSeatState, type OmpSeatPaths, type OmpSeatState,
 } from "./omp-seat-protocol.js";
 
@@ -15,6 +15,10 @@ export const OMP_SHELL_COMMANDS: ReadonlySet<string> = new Set(["bash", "fish", 
 
 export function paneAtShell(command: string | null | undefined): boolean {
   return OMP_SHELL_COMMANDS.has((command ?? "").replace(/^-/, ""));
+}
+
+function wellFormedPluginName(id: string): boolean {
+  try { return encodeURIComponent(decodeURIComponent(id)) === id; } catch { return false; }
 }
 
 export interface OmpLaunchFsOps {
@@ -107,7 +111,7 @@ export class OmpSeatLauncher {
       const ids: unknown = JSON.parse(this.fs.readFile(selectedPluginsPath));
       if (!Array.isArray(ids)) return [];
       return [...new Set(ids.filter((id): id is string => typeof id === "string" && id.length > 0
-        && id !== "." && id !== ".." && nodePath.basename(id) === id
+        && id !== "." && id !== ".." && nodePath.basename(id) === id && wellFormedPluginName(id)
         && this.fs.exists(nodePath.join(pluginsDir, id, "package.json"))))]
         .sort().map(id => nodePath.join(pluginsDir, id));
     } catch {
@@ -172,6 +176,8 @@ export class OmpSeatLauncher {
       return { ok: false, reason: "send_failed", message: "OMP launch environment unavailable; no agent started." };
     }
     // Always staged: /bin/sh runs it from a private script, whatever shell the pane has, and exec replaces that sh.
+    const wanted = request.sessionFile ?? request.forkRef;
+    const priorPane = wanted ? await this.tmux.capturePaneContent(sessionName, 40).catch(() => null) : null;
     if (request.beforeNativeDispatch && !request.beforeNativeDispatch()) {
       return { ok: false, reason: "send_failed", message: "OMP launch selection changed before dispatch." };
     }
@@ -179,12 +185,12 @@ export class OmpSeatLauncher {
     const sent = await this.tmux.sendShellCommand(sessionName, command, undefined, { execInScript: true });
     if (!sent.ok) return { ok: false, reason: "send_failed", message: `Failed to send launch command: ${sent.message}` };
 
-    return this.waitForSeat(sessionName, launchId, appliedLaunch);
+    return this.waitForSeat(sessionName, launchId, appliedLaunch, wanted, priorPane);
   }
 
   /** Wait for THIS attempt's sidecar. A pane that returns to its shell first means OMP exited without loading the
    *  extension: a session it couldn't find, a bad flag, or a binary that isn't there. */
-  private async waitForSeat(sessionName: string, launchId: string, appliedLaunch: AppliedLaunchObservation): Promise<OmpLaunchOutcome> {
+  private async waitForSeat(sessionName: string, launchId: string, appliedLaunch: AppliedLaunchObservation, wanted: string | undefined, priorPane: string | null): Promise<OmpLaunchOutcome> {
     const pollMs = this.deps.pollMs ?? 250;
     const attempts = Math.max(1, Math.floor((this.deps.maxWaitMs ?? 20_000) / Math.max(pollMs, 1)) + 1);
     // The staged script needs a moment to replace the shell; before that a shell in the foreground is expected.
@@ -203,7 +209,8 @@ export class OmpSeatLauncher {
         if (shellSeen >= 2) {
           const pane = (await this.tmux.capturePaneContent(sessionName, 40)) ?? "";
           const evidence = pane.split("\n").filter((line) => line.trim()).slice(-12).join("\n");
-          return OMP_SESSION_NOT_FOUND.test(pane)
+          const diagnostic = wanted ? `Error: Session "${wanted}" not found.` : null;
+          return diagnostic && priorPane !== null && !priorPane.includes(diagnostic) && pane.includes(diagnostic)
             ? { ok: false, reason: "session_not_found", message: "OMP reports that the requested session does not exist", evidence }
             : { ok: false, reason: "exited", message: "OMP exited during startup, before it reported ready", evidence };
         }

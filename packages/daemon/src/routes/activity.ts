@@ -462,9 +462,26 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
   if (switchRole) {
     if (switchRole.role === "staged_successor" && body.eventFamily === "session_identity" && typeof body.sessionId === "string"
       && !reportedByAnotherRuntime(body)) {
+      const runtime = stringOrNull(body.runtime);
+      let token = body.sessionId;
+      let type = runtime;
+      if (switchRole.targetRuntime === "omp" || switchRole.targetRuntime === "omp-tui" || runtime === "omp" || runtime === "omp-tui") {
+        if (runtime !== switchRole.targetRuntime) return c.json({ ok: true, ignored: switchRole.role, tokenPersisted: false });
+        const validation = validateResumeToken(runtime, stringOrNull(body.sessionFile));
+        const adapters = c.get("runtimeAdapters" as never) as Record<string, {
+          readSessionFile?(session: string, stagedGeneration?: string): { ok: boolean; sessionFile?: string };
+        }> | undefined;
+        const own = runtime === "omp-tui" ? adapters?.[runtime]?.readSessionFile?.(switchRole.stagingSession, body.generation as string)
+          : adapters?.[runtime!]?.readSessionFile?.(body.sessionName as string, body.generation as string);
+        if (!validation.ok || !own?.ok || own.sessionFile !== validation.token || !existsSync(validation.token)) {
+          return c.json({ ok: true, ignored: switchRole.role, tokenPersisted: false });
+        }
+        type = validation.resumeType;
+        token = validation.token;
+      }
       store.db.prepare(`UPDATE seat_runtime_switches SET successor_resume_type = ?, successor_resume_token = ?,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND committed_at IS NULL`)
-        .run(stringOrNull(body.runtime), body.sessionId, switchRole.id);
+        .run(type, token, switchRole.id);
     }
     return c.json({ ok: true, ignored: switchRole.role, switchId: switchRole.id, tokenPersisted: false });
   }
@@ -503,12 +520,14 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       // Same occupant-generation gate as Pi below, before any file eligibility.
       const generation = stringOrNull(body.generation);
       let reason: string | null = null;
+      let retained = false;
       try {
         const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
+        retained = !!current && current.generationUuid !== generation;
         if (!generation) reason = "generation_unverifiable";
         else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
           reason = "generation_unresolvable";
-        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+        } else if (retained && (runtime !== "omp-tui" || !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation))) reason = "generation_mismatch";
       } catch {
         return c.json({
           ok: false, code: "generation_resolver_error", tokenPersisted: false,
@@ -525,8 +544,14 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       // OMP reports a path before its first turn is written. Persist only
       // materialized history; the runner can re-announce identity later.
       const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
-      const omp = adapters?.[runtime!] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
-      const ownFile = typeof omp?.readSessionFile === "function" ? omp.readSessionFile(resolved.sessionName) : null;
+      type FileRead = { ok: true; sessionFile: string } | { ok: false; reason: string };
+      const omp = adapters?.[runtime!] as { readSessionFile?: (session: string, generation?: string) => FileRead;
+        readLiveSessionFile?: (session: string, generation?: string) => Promise<FileRead> } | undefined;
+      const ownFile = retained ? await omp?.readLiveSessionFile?.(resolved.sessionName, generation!)
+        : omp?.readSessionFile?.(resolved.sessionName, runtime === "omp-tui" ? generation! : undefined);
+      if (retained && (!generation || !sessionRegistry.isOccupantContinuedByAdoption(resolved.nodeId, generation))) {
+        return c.json({ ok: false, code: "generation_mismatch", tokenPersisted: false }, 409);
+      }
       const tokenPersisted = validation.ok && ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)
         ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
           || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token)

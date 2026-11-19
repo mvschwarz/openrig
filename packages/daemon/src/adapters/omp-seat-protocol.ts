@@ -19,8 +19,7 @@ export interface OmpSeatPaths {
   seatRoot: string;
   agentDir: string;
   sessionsDir: string;
-  /** The seat sidecar. It keeps the layout an OMP seat had under the RPC runner, so a seat started before the native
-   *  launch keeps its login, its skills, its sessions and its resume token. */
+  /** Native seat sidecar. The RPC runner uses a separate state root and resume-token type. */
   statePath: string;
   launchConfigPath: string;
   pluginsDir: string;
@@ -47,7 +46,6 @@ export function ompSeatPaths(stateRoot: string, sessionName: string): OmpSeatPat
 export interface OmpSeatState extends PiRunnerState {
   nodeId?: string;
   generation?: string;
-  capabilities?: { approvalDecisions: boolean; subagentStop: boolean; hookTimeoutMs: number; shutdownHookTimeoutMs: number };
   inputProtocol?: number;
   inputReceipt?: { sequence: number; requestId: string; sha256: string };
   /** The extension's contract version, for diagnosis. */
@@ -157,6 +155,22 @@ export function ompThinkingValue(thinking: string | null | undefined): string | 
   return value && EFFORT_SHAPE.test(value) ? value : undefined;
 }
 
+/** Resolve the reporting PID through the bound pane, including wrappers that fork the OMP child. */
+export function ompProcessInPane<T extends { pid: number; ppid: number; startedAt?: string; state?: string }>(
+  rows: readonly T[], panePid: number, state: OmpSeatState,
+): T | undefined {
+  if (!state.ready || state.exited || !state.pid || !state.launchId) return undefined;
+  const processes = new Map(rows.map(row => [row.pid, row]));
+  const writer = processes.get(state.pid);
+  if (!writer || writer.state === "Z") return undefined;
+  const seen = new Set<number>();
+  for (let row: T | undefined = writer; row && !seen.has(row.pid); row = processes.get(row.ppid)) {
+    if (row.pid === panePid || row.ppid === panePid) return writer;
+    seen.add(row.pid);
+  }
+  return undefined;
+}
+
 /** OMP's own arguments (argv-style, unquoted), for tests and for the command below. */
 export function buildOmpArgs(opts: OmpLaunchOpts): string[] {
   const args = [
@@ -222,9 +236,6 @@ export function buildOmpLaunchCommand(opts: OmpLaunchOpts): string {
 /** The folder a selected plugin is copied to under the seat's plugins directory. A plugin's id can carry a source
  *  prefix (`shared:openrig-core`); the folder name keeps to characters every path reader takes literally. */
 export function ompPluginDirName(effectiveId: string): string {
-  return effectiveId.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "plugin";
+  if (!effectiveId || effectiveId === "." || effectiveId === "..") throw new Error("Invalid OMP plugin ID");
+  return encodeURIComponent(effectiveId);
 }
-
-/** OMP's own message when `--session` names a session it doesn't have. It prints this and exits before any
- *  extension loads, so it is the one thing a launch reads from the pane. */
-export const OMP_SESSION_NOT_FOUND = /Error: Session ".*" not found\./s;

@@ -5,7 +5,7 @@ import { realpathSync, statSync } from "node:fs";
 import type { SessionRegistry } from "../session-registry.js";
 import type { SeatIdentityStore } from "../seat-identity-store.js";
 import type { ContextUsageStore } from "../context-usage-store.js";
-import type { OmpSeatState } from "../../adapters/omp-seat-protocol.js";
+import { ompProcessInPane, type OmpSeatState } from "../../adapters/omp-seat-protocol.js";
 import { parseSqliteUtcMs } from "../sqlite-time.js";
 import { ProcessCensus } from "../process-census.js";
 import {
@@ -36,7 +36,7 @@ export function unknownModelObservation(reason: string, generation: string | nul
 interface Seat { nodeId: string; sessionName: string; runtime: string | null; generation: string | null }
 interface Deps {
   runnerObservations?: Pick<AgentActivityStore, "getRunnerObservation">;
-  sessions: Pick<SessionRegistry, "currentOccupantTenure" | "getBindingForNode" | "currentOccupantGenerationForSession">;
+  sessions: Pick<SessionRegistry, "currentOccupantTenure" | "getBindingForNode" | "currentOccupantGenerationForSession" | "isOccupantContinuedByAdoption">;
   identities: Pick<SeatIdentityStore, "getForNode">;
   context: Pick<ContextUsageStore, "readSidecar">;
   codexRollout: (threadId: string, sessionName: string, reporting: boolean) => string | null;
@@ -249,9 +249,9 @@ export class CurrentModelReader {
       if (node.runtime === "omp-tui") {
         const read = () => this.deps.ompTuiState?.(sessionName);
         const state = read();
-        if (!state?.ready || state.exited || !state.launchId || !state.pid || state.nodeId !== node.nodeId || state.generation !== generation)
+        if (!state?.ready || state.exited || !state.launchId || !state.pid || state.nodeId !== node.nodeId || (!state.generation || (state.generation !== generation && !this.deps.sessions.isOccupantContinuedByAdoption(node.nodeId, state.generation))))
           return unknown("record-identity-missing-or-ambiguous");
-        const process = (await native.listProcesses()).find(row => row.pid === state.pid && (row.pid === pid || row.ppid === pid));
+        const process = ompProcessInPane(await native.listProcesses(), pid, state);
         const started = Date.parse(process?.startedAt ?? "");
         if (!Number.isFinite(started)) return unknown("record-identity-missing-or-ambiguous");
         return { pane: binding.tmuxPane, finish: (finalPid, unavailableReason = "pane-unavailable") => {
@@ -259,7 +259,7 @@ export class CurrentModelReader {
           if (!finalPid) return unknown(unavailableReason);
           const latest = read();
           if (!latest?.ready || latest.exited || latest.pid !== state.pid || latest.launchId !== state.launchId ||
-              latest.nodeId !== node.nodeId || latest.generation !== generation) return unknown("occupant-changed-during-read");
+              latest.nodeId !== node.nodeId || latest.generation !== state.generation) return unknown("occupant-changed-during-read");
           if (typeof latest.model !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+\-]{0,199}$/.test(latest.model)) return unknown("model-identifier-unreadable");
           const at = Date.parse(latest.updatedAt), now = (this.deps.now ?? Date.now)();
           if (!Number.isFinite(at) || at < Math.max(boot, started) || at > now || now - at >= FRESHNESS_THRESHOLD_MS) return unknown("model-sample-not-current");

@@ -811,7 +811,7 @@ describe("member launch_wrapper (#2328)", () => {
     expect("launchWrapper" in member).toBe(false);
   });
 
-  it.each(["terminal", "stub", "openshell-claude"])("rejects launch_wrapper (including []) on unsupported runtime %s", (runtime) => {
+  it.each(["omp", "terminal", "stub", "openshell-claude"])("rejects launch_wrapper (including []) on unsupported runtime %s", (runtime) => {
     for (const value of [["mtn", "--"], []]) {
       const result = RigSpecSchema.validate(withMember(runtime, { launch_wrapper: value }));
       expect(result.valid).toBe(false);
@@ -929,7 +929,7 @@ describe("legacy flat node launch_wrapper (#2328)", () => {
     expect("launchWrapper" in node).toBe(false);
   });
 
-  it.each(["terminal", "stub", "openshell-claude"])("rejects launch_wrapper (including []) on unsupported flat runtime %s", (runtime) => {
+  it.each(["omp", "terminal", "stub", "openshell-claude"])("rejects launch_wrapper (including []) on unsupported flat runtime %s", (runtime) => {
     for (const value of [["mtn", "--"], []]) {
       const result = LegacyRigSpecSchema.validate(withLegacyNode(runtime, { launch_wrapper: value }));
       expect(result.valid).toBe(false);

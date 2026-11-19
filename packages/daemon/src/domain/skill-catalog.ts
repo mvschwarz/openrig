@@ -731,7 +731,7 @@ function planGitIgnoreFile(input: {
   const originalExists = existsSync(input.path);
   const originalContent = originalExists ? readFileSync(input.path, "utf8") : "";
   const hasManagedBlock = originalContent.includes(input.begin) || originalContent.includes(input.end);
-  const hasOtherManagedBlock = (["claude-code", "codex"] as const).some((runtime) =>
+  const hasOtherManagedBlock = (["claude-code", "codex", "omp-tui"] as const).some((runtime) =>
     originalContent.includes(`# BEGIN OpenRig managed skill loadout ${runtime}`)
     && originalContent.includes(`# END OpenRig managed skill loadout ${runtime}`));
   if (!hasManagedBlock && !hasOtherManagedBlock) {

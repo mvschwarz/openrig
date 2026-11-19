@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { hookEventState } from "../src/domain/agent-activity-store.js";
 import { createHash } from "node:crypto";
 // The seat extension is plain ESM that runs inside OMP (under Bun). It uses only Node built-ins, so it loads here too.
 // @ts-expect-error — a JavaScript asset without declarations
@@ -89,7 +90,7 @@ describe("OMP seat extension: what the daemon reads from a seat", () => {
     const { reporter, posts, files, state } = harness();
     reporter.sessionStart(ompContext());
     await reporter.settled();
-    expect(state()).toMatchObject({ ready: true, launchId: "attempt-1", nodeId: seat.nodeId, generation: seat.generation, sessionFile, sessionId: "s1", auth: "ok", model: "anthropic/claude-example", pid: 4242, capabilities: { approvalDecisions: false, subagentStop: false, hookTimeoutMs: 25000, shutdownHookTimeoutMs: 1500 } });
+    expect(state()).toMatchObject({ ready: true, launchId: "attempt-1", nodeId: seat.nodeId, generation: seat.generation, sessionFile, sessionId: "s1", auth: "ok", model: "anthropic/claude-example", pid: 4242 });
     expect(posts.find((post) => post.hookEvent)).toMatchObject({
       hookEvent: "Stop", subtype: "idle_heartbeat", livenessSeconds: IDLE_LIVENESS_SECONDS,
       sessionName: "dev-omp@rig", nodeId: "node-1", generation: "gen-1", runtime: "omp-tui", sequence: 1,
@@ -206,7 +207,9 @@ describe("OMP seat extension: what the daemon reads from a seat", () => {
     reporter.sessionStart(ompContext());
     await reporter.shutdown();
     tick(IDLE_LIVENESS_SECONDS * 1000);
-    expect(posts.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "omp_exited" });
+    const stopped = posts.at(-1)!;
+    expect(stopped).toMatchObject({ hookEvent: "Stop", subtype: "omp-tui_exited" });
+    expect(hookEventState(String(stopped.hookEvent), String(stopped.subtype), "omp-tui")).toBe("unknown");
     expect(posts.at(-1)).not.toHaveProperty("livenessSeconds");
     expect(state()).toMatchObject({ ready: false, launchId: "attempt-1", exited: { code: 0 } });
   });
@@ -283,6 +286,17 @@ describe("OMP seat extension: wired into OMP", () => {
       await new Promise(resolve => setImmediate(resolve));
       expect(editor).toBe(text);
       expect(state().inputReceipt).toMatchObject({ requestId: "one", sha256: createHash("sha256").update(text).digest("hex") });
+
+      for (const changedEditor of [false, true]) {
+        editor = "";
+        arm("cancelled", "next");
+        dispatch("\x1b[200~next\x1b[201~");
+        if (changedEditor) editor = "human draft";
+        arm("replacement", "different input");
+        await new Promise(resolve => setImmediate(resolve));
+        expect(editor).toBe(changedEditor ? "human draft" : "");
+        expect(state().inputReceipt.requestId).toBe("one");
+      }
 
       // A selector or another extension consuming the marker never acknowledges the detached composer.
       editor = "";

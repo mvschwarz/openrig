@@ -48,14 +48,14 @@ export class OmpTuiResumeAdapter {
       }
       return {
         ok: false,
-        code: "resume_failed",
+        code: outcome.reason === "timeout" ? "attention_required" : "resume_failed",
         message: outcome.reason === "send_failed" ? outcome.message : `OMP resume failed: ${outcome.message}`,
         ...(outcome.evidence ? { evidence: outcome.evidence } : {}),
-      } as ResumeResult;
+      };
     }
     // Resumed means this attempt's OMP is ready and names exactly the requested session file.
     if (outcome.state.sessionFile !== sessionFile) {
-      return { ok: false, code: "resume_failed", message: "OMP resume failed: OMP is ready but does not report the requested session file" };
+      return { ok: false, code: "attention_required", message: "OMP resume failed: OMP is ready but does not report the requested session file" };
     }
     return { ok: true, appliedLaunch: outcome.appliedLaunch };
   }

@@ -249,6 +249,22 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
     expect(fs._store[`${target}/${skill}`]).toContain("The daemon publishes");
   });
 
+  it("upgrades the 0.1.32 core install with the shipped native OMP extension", async () => {
+    const source = "/asset-root/openrig-core";
+    const target = "/home/test/.openrig/plugins/openrig-core";
+    const manifests = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json", "package.json"];
+    const bundle = [...manifests, "omp/index.js"].map(rel =>
+      [source + "/" + rel, readFileSync(new URL("../assets/plugins/openrig-core/" + rel, import.meta.url), "utf8")]);
+    const fs = mockFs({ ...Object.fromEntries(bundle), ...Object.fromEntries(manifests.map(rel =>
+      [target + "/" + rel, JSON.stringify({ name: "openrig-core", version: "0.1.32" })])) });
+    const svc = new PluginVendorService({ vendoredAssetsDir: "/asset-root", userPluginsDir: "/home/test/.openrig/plugins", fs, httpClient: vi.fn() });
+    await svc.ensureVendored("openrig-core");
+    const versions = manifests.map(rel => JSON.parse(fs._store[target + "/" + rel]!).version);
+    expect(new Set(versions).size).toBe(1);
+    expect(versions[0]).not.toBe("0.1.32");
+    expect(fs._store[target + "/omp/index.js"]).toBe(fs._store[source + "/omp/index.js"]);
+  });
+
   // #1077 — the relay forwards SessionStart's source, the occupant generation and the resume launch
   // marker. An install at the previous version must receive it rather than keep the old relay.
   it("the shipped core upgrades 0.1.8 installs to the relay that forwards resume launch evidence", async () => {

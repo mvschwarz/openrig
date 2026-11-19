@@ -299,6 +299,20 @@ describe("ContextMonitor", () => {
     });
   });
 
+  it("publishes native OMP extension usage through single and inventory reads with runner observations enabled", async () => {
+    const { node, sessionName } = seedClaudeNode();
+    db.prepare("UPDATE nodes SET runtime = 'omp-tui' WHERE id = ?").run(node.id);
+    const runnerObservations = { getRunnerObservation: vi.fn() };
+    store = new ContextUsageStore(db, { stateDir: tmpDir, codexHomeDir, runnerObservations });
+    monitor = new ContextMonitor(db, store);
+    writeSidecar(sessionName, { ...VALID_SIDECAR, source: "omp_extension", sampled_at: new Date().toISOString() });
+    await monitor.pollOnce();
+    const usage = store.getForNode(node.id, sessionName);
+    expect(usage).toMatchObject({ availability: "known", usedPercentage: 67, source: "omp_extension_json" });
+    expect(store.getForNodes([{ nodeId: node.id, currentSessionName: sessionName }]).get(node.id)).toEqual(usage);
+    expect(runnerObservations.getRunnerObservation).not.toHaveBeenCalled();
+  });
+
   // T2: pollOnce discovers running Codex sessions and persists usage from token_count events
   it("pollOnce discovers running Codex sessions and persists context usage", async () => {
     const { node: codexNode, sessionName, threadId } = seedCodexNode();

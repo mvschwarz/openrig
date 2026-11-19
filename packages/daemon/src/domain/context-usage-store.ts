@@ -358,7 +358,7 @@ export class ContextUsageStore {
     const seat = this.db.prepare(`SELECT n.runtime,s.session_name FROM nodes n JOIN sessions s ON s.node_id=n.id
       WHERE n.id=? ORDER BY s.id DESC LIMIT 1`).get(nodeId) as { runtime: string | null; session_name: string } | undefined;
     // Preserve all existing built-in collectors; Pi has no native context collector here.
-    if (!seat || !seat.runtime || ["claude-code", "codex", "omp", "terminal", "stub"].includes(seat.runtime)) return null;
+    if (!seat || !seat.runtime || ["claude-code", "codex", "omp", "omp-tui", "terminal", "stub"].includes(seat.runtime)) return null;
     if (seat.session_name !== sessionName) return this.unknownUsage("session_mismatch");
     const read = this.runnerObservations.getRunnerObservation(nodeId, "context", { freshnessMs: FRESHNESS_THRESHOLD_MS, runtime: seat.runtime });
     if (!read.report) return this.unknownUsage(read.reason === "stale" || read.reason === "session_mismatch" ? read.reason : "no_data");

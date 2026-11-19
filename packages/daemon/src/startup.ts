@@ -953,6 +953,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // OMP runs its own terminal UI natively in the seat's pane. One launcher starts it for the runtime adapter (fresh,
   // resume, fork) and for legacy restore's resume adapter, with the seat extension the daemon ships loaded into it.
   const ompFsOps = {
+    readBytes: (p: string) => fs.readFileSync(p),
     folderPresent,
     copyFile: (source: string, destination: string) => fs.copyFileSync(source, destination),
     readFile: (p: string) => fs.readFileSync(p, "utf-8"),
@@ -1608,7 +1609,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader (the adapter exposes it).
     piRunnerStateStore: piAdapter,
     ompRunnerStateStore: ompAdapter,
-    ompTuiStateStore: ompTuiAdapter,
+    ompTuiStateStore: { readSessionFile: session => ompTuiAdapter.readLiveSessionFile(session) },
   });
   const selfAttachService = new SelfAttachService({
     db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter, transcriptStore,

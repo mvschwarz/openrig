@@ -1,3 +1,4 @@
+import { memoryProjectionFiles } from "./helpers/omp-files.js";
 // Test suite for plugin-primitive Phase 3a slice 3.1 — adapter plugin
 // directory projection. Per velocity-guard cadence boundary (c)
 // 2026-05-10: prove the runtime adapters copy a real plugin tree
@@ -117,6 +118,7 @@ describe.each(["claude-code", "codex", "omp-tui"] as const)("shared plugin contr
       "/p/openrig-core/hooks/codex.json": JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: 'node "${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"' }] }] } }),
     };
     const fs = mockClaudeFs(files);
+    Object.assign(fs, memoryProjectionFiles(fs._store));
     fs.exists = p => p in fs._store || Object.keys(fs._store).some(file => file.startsWith(`${p}/`));
     fs.copyFile = (src, dest) => { fs._store[dest] = fs.readFile(src); };
     const tmux = mockTmux();

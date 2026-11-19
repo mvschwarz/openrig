@@ -819,7 +819,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     const choiceLabel = (row: string) => row.replace(/^[^\p{L}\p{N}]+|[\s│┃║]+$/gu, "");
     let lastChoice = footer - 1;
     if (/^├─+┤$/u.test(rows[lastChoice] ?? "")) lastChoice--;
-    if (lastChoice >= 1 && choiceLabel(rows[lastChoice]!) === "Deny" &&
+    if (footer >= 0 && rows.slice(footer + 1).every(row => /^╰─+╯$/u.test(row)) && lastChoice >= 1 && choiceLabel(rows[lastChoice]!) === "Deny" &&
         rows.slice(Math.max(0, lastChoice - 11), lastChoice).some(row => /^Approve(?: Once)?$/.test(choiceLabel(row)))) {
       return { state: "attention", reason: "permission_prompt", evidence: "OMP approval menu" };
     }
@@ -3892,11 +3892,11 @@ export class SessionTransport {
       // Only bypassing a positive picker requires a successful audit; other states already sent.
       if (opts?.dangerouslyInteract) {
         overrideAtPrompt = readiness.state === "needs_input";
-        if (ompArrow && (!arrowKey || !overrideAtPrompt || !["permission_prompt", "permission_request", "selection_prompt"].includes(readiness.reason))) {
+        if (ompArrow && !arrowKey) {
           return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "omp_menu_navigation_unavailable",
-            error: "OMP menu navigation requires a visible interactive prompt and one Up or Down key per send. Inspect the native terminal." };
+            error: "OMP navigation takes exactly one Up or Down key per send." };
         }
-        if (readiness.state === "needs_input" && (!opts.reason || opts.reason.trim().length === 0)) {
+        if ((arrowKey || readiness.state === "needs_input") && (!opts.reason || opts.reason.trim().length === 0)) {
           return {
             ok: false,
             sessionName,
@@ -3908,7 +3908,7 @@ export class SessionTransport {
         const target = this.tmuxAdapter.deliveryGuard?.maybeTarget(sessionName);
         // Native menus retain their audited key-driving path. Otherwise inspect under the same lease,
         // after buffer preparation, immediately before the adapter's final identity check and paste.
-        if (target && readiness.state !== "needs_input") {
+        if (target && !arrowKey && readiness.state !== "needs_input") {
           overrideBeforePaste = async () => {
             const unchecked = opts.typeWithoutChecking === true;
             const snapshot = unchecked ? null : await this.readWithinDeadline("session_transport.override_input",
@@ -4129,7 +4129,7 @@ export class SessionTransport {
     }
     if (arrowKey) return observe({ ok: true, sessionName, sent: true, verified: false,
       outcome: "rendered-unconfirmed", promptInteraction: "unverified",
-      warning: `Sent the ${arrowKey} key once. Inspect the highlighted OMP choice in the terminal. No Enter was sent.` });
+      warning: [sendAdvisory, `Sent the ${arrowKey} key once. Inspect the result in the OMP terminal. No Enter was sent.`].filter(Boolean).join(" ") });
     try { opts?.onInputEffect?.("pasted", { text }); } catch { /* Observation cannot change a completed paste. */ }
 
     // From the successful paste to Enter the text may sit in the seat's input. Any throw in this span is
@@ -4590,7 +4590,7 @@ export class SessionTransport {
         // the pane probe below don't read the declaration.
         const dialogRead = declaredCapabilities("typed", input.runtime).observe.dialog === "supported";
         // A fresh SessionStart reads unknown, and a picker can open after it just as after Stop.
-        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && dialogRead && input.runtime === "claude-code") {
+        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && ((dialogRead && input.runtime === "claude-code") || input.runtime === "omp-tui")) {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,

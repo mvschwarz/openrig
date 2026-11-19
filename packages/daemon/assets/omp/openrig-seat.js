@@ -146,7 +146,6 @@ export function createSeatReporter(options) {
         sessionFile: session.file ?? undefined,
         sessionId: session.id ?? undefined,
         protocol: SEAT_PROTOCOL,
-        capabilities: options.capabilities ?? { approvalDecisions: false, subagentStop: false, hookTimeoutMs: 25000, shutdownHookTimeoutMs: 1500 },
         pid,
         auth,
         inputProtocol: inputAvailable ? 1 : undefined,
@@ -376,7 +375,7 @@ export function createSeatReporter(options) {
       identityTimer = stopTimer(identityTimer);
       writeState({ ready: false, exited: { code: 0, at: now() } });
       // OMP's own exit: the seat is no longer at a prompt, so this reads unknown, never idle.
-      return activity("Stop", "omp_exited");
+      return activity("Stop", "omp-tui_exited");
     },
 
     /** Test seam: resolves when every queued post has been sent. */
@@ -444,14 +443,20 @@ export default function openrigSeat(pi) {
         // detached composer while a selector owns Enter, so it cannot prove that this paste reached the editor.
         const marker = `OPENRIG_INPUT_${request.id}`;
         setImmediate(() => {
+          let staged = false;
           try {
             const current = JSON.parse(fs.readFileSync(`${seat.statePath}.input.json`, "utf8"));
             if (current.id !== request.id || current.expiresAt < Date.now() || ctx.ui.getEditorText() !== marker) return;
             // Only a focused editor that received our exact marker is replaced. This bypasses large-paste menus
             // and collapsed attachments for managed input, retaining the exact text the sender provided.
             ctx.ui.setEditorText(text);
-            if (ctx.ui.getEditorText() === text) reporter.inputReceived(text, request.id);
+            staged = ctx.ui.getEditorText() === text;
+            if (staged) reporter.inputReceived(text, request.id);
           } catch { /* No acknowledgement: the sender withholds Enter. */ }
+          finally {
+            // Cancellation or an expired request can leave our focus probe in the live editor.
+            try { if (!staged && ctx.ui.getEditorText() === marker) ctx.ui.setEditorText(""); } catch { /* Editor disposed. */ }
+          }
         });
         return { data: `\x1b[200~${marker}\x1b[201~` };
       });

@@ -171,6 +171,18 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     "╭─ Allow tool: bash ─────╮", "│ Command: pwd │",
     "│ ❯ Approve │", "│   Approve bash for this session │", "│   Deny │",
   ];
+  it("checks a visible native approval after an idle hook and permits a menu quoted above the editor", async () => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    let pane = [...ompApprovalChoices, "├────────────────────────┤", ompApprovalFooter, "╰────────────────────────╯"].join("\n");
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys }));
+    expect(await transport.send(seat, "first")).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    pane += "\nThe operator quoted the old menu above.\n❯ ";
+    expect(await transport.send(seat, "second")).toMatchObject({ ok: true });
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
+
   it.each([15_001, 84_903])("navigates the framed OMP menu with a %d ms old permission event", async (age) => {
     const seat = seedOmp();
     const occurredAt = new Date();
@@ -193,7 +205,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   it.each([
     ["├────────────────────────┤", "│ ⏎ deny and send · Ctrl+Q approve · ⎋ deny │"],
     ["│ unrelated output │", ompApprovalFooter],
-  ])("refuses a delayed OMP arrow when the pane no longer shows navigable choices (%s, %s)", async (separator, footer) => {
+  ])("sends an explicit delayed OMP arrow even when the pane no longer shows navigable choices (%s, %s)", async (separator, footer) => {
     const seat = seedOmp();
     agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification", subtype: "permission_prompt" });
     const menu = [...ompApprovalChoices, separator, footer, "╰────────────────────────╯"].join("\n");
@@ -201,9 +213,10 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const transport = makeTransport(mockTmux({ capturePaneContent: async () => menu, sendText, sendKeys }),
       { now: () => new Date(Date.now() + 84_903) });
     expect(await transport.send(seat, "\x1b[B", { dangerouslyInteract: true, reason: "Inspect next choice" }))
-      .toMatchObject({ ok: false, sent: false, reason: "omp_menu_navigation_unavailable" });
+      .toMatchObject({ ok: true, sent: true, warning: expect.any(String) });
     expect(sendText).not.toHaveBeenCalled();
-    expect(sendKeys).not.toHaveBeenCalled();
+    expect(sendKeys).toHaveBeenCalledExactlyOnceWith(seat, ["Down"], expect.any(Function), expect.any(Object));
+    expect(overrideEvents()).toHaveLength(1);
   });
 
   it("keeps OMP navigation out of ordinary sends, non-menu prompts and combined input", async () => {
@@ -211,10 +224,14 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const { sendText, sendKeys } = spies();
     const transport = makeTransport(mockTmux({ sendText, sendKeys }));
     const opts = { dangerouslyInteract: true, reason: "Inspect a menu choice" };
-    expect(await transport.send(seat, "\x1b[B", opts)).toMatchObject({ ok: false, sent: false });
+    expect(await transport.send(seat, "\x1b[B", opts)).toMatchObject({ ok: true, sent: true });
+    expect(overrideEvents()).toHaveLength(1);
+    sendKeys.mockClear();
     agentActivityStore.recordHookEvent({ runtime: "omp-tui", sessionName: seat, hookEvent: "Notification", subtype: "permission_prompt" });
     expect(await transport.send(seat, "\x1b[B")).toMatchObject({ ok: false, reason: "target_needs_input" });
-    expect(await transport.send(seat, "\x1b[B\r", opts)).toMatchObject({ ok: false, sent: false });
+    for (const input of ["\x1b[B\r", "\x1b[B\x1b[A", "x\x1b[B", "\x1b[Bx"]) {
+      expect(await transport.send(seat, input, opts)).toMatchObject({ ok: false, sent: false, reason: "omp_menu_navigation_unavailable" });
+    }
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
   });
@@ -254,7 +271,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const cancel = vi.fn();
     const receipt = Object.assign(vi.fn(async () => {}), { cancel });
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
-    const transport = makeTransport(mockTmux({ sendText: async () => ({ ok: false, message: "pane gone" }), sendKeys }), {
+    const transport = makeTransport(mockTmux({ sendText: async () => ({ ok: false, code: "tmux_error", message: "pane gone" }), sendKeys }), {
       prepareInput: () => receipt,
     });
     expect((await transport.send(seat, "text")).ok).toBe(false);

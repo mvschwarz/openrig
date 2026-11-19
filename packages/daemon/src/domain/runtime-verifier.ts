@@ -130,7 +130,7 @@ export class RuntimeVerifier {
 
   /** OMP is an independent executable; do not inherit Pi's Node engine check. */
   async verifyOmp(runtime: "omp" | "omp-tui" = "omp"): Promise<RuntimeVerification> {
-    const result = await this.verifyVersionOrHelp(runtime, "omp");
+    const result = await this.verifyVersionOrHelp("omp", runtime);
     this.persist(result);
     return result;
   }

@@ -165,7 +165,8 @@ describe("live seat runtime switch", () => {
         seatLocation: session => ompSeatLocation(db, session), contextSidecarPath: session => path.join(home, `${session}.context.json`),
       });
       const launcher = makeLauncher();
-      const target = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles, launcher, sleep: async () => {} });
+      const target = new OmpTuiRuntimeAdapter({ tmux: fakeTmux as unknown as TmuxAdapter, fsOps: ompFiles, launcher, sleep: async () => {},
+        listProcesses: async () => [{ pid: 902, ppid: 901, command: "omp", startedAt: "2020-01-01T00:00:00Z" }] });
       const originalPaths = launcher.paths(SEAT);
       fs.mkdirSync(originalPaths.agentDir, { recursive: true });
       fs.writeFileSync(path.join(originalPaths.agentDir, "auth.json"), "original seat credentials");
@@ -173,6 +174,7 @@ describe("live seat runtime switch", () => {
       let staging = "";
       let started = false;
       Object.assign(fakeTmux, {
+        getPanePid: async () => 901,
         hasSession: async (session: string) => panes.has(session),
         sendShellCommand: async (session: string, command: string) => {
           staging = session;
@@ -182,7 +184,7 @@ describe("live seat runtime switch", () => {
           expect(command).toContain(`${SEAT}.context.json`);
           const pending = JSON.parse(fs.readFileSync(files.statePath, "utf8"));
           const sessionFile = path.join(files.sessionsDir, "conversation.jsonl"); fs.writeFileSync(sessionFile, "{}");
-          fs.writeFileSync(files.statePath, JSON.stringify({ ...pending, ready: true, sessionFile,
+          fs.writeFileSync(files.statePath, JSON.stringify({ ...pending, ready: true, pid: 902, sessionFile,
             sessionId: "omp-conversation", auth: "ok", inputProtocol: 1 }));
           started = true;
           return { ok: true };
@@ -244,6 +246,10 @@ describe("live seat runtime switch", () => {
         await fakeTmux.sendText(SEAT, "Next operator message");
         await received();
         await fakeTmux.sendKeys();
+        sessionRegistry.registerClaimedSession(nodeId, SEAT, "adopt");
+        expect(ompSeatLocation(db, SEAT).storageSession).toBe(staging);
+        sessionRegistry.registerSession(nodeId, SEAT);
+        expect(ompSeatLocation(db, SEAT).storageSession).toBe(SEAT);
       }
     });
 

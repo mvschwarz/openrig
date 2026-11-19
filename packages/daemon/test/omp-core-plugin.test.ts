@@ -45,6 +45,18 @@ describe("OMP core refocus", () => {
     child.emit("close", code);
     expect(await result).toBe(code === 0 ? "context" : null);
   });
+  it("keeps split UTF-8 and limits the helper budget inside the handler deadline", async () => {
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stdin: { on: vi.fn(), end: vi.fn() } });
+    const spawn = vi.fn(() => child);
+    const result = runRefocus({}, { spawn, env: { OPENRIG_REFOCUS_BUDGET_MS: "30000" } });
+    expect(spawn).toHaveBeenCalledWith(expect.any(String), expect.any(Array),
+      expect.objectContaining({ env: { OPENRIG_REFOCUS_BUDGET_MS: "24000" } }));
+    const output = Buffer.from(JSON.stringify({ hookSpecificOutput: { additionalContext: "å🌍" } }));
+    const split = output.indexOf(Buffer.from("🌍")) + 2;
+    child.stdout.emit("data", output.subarray(0, split)); child.stdout.emit("data", output.subarray(split));
+    child.emit("close", 0);
+    expect(await result).toBe("å🌍");
+  });
   it("settles timeout even if the child never closes", async () => {
     const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stdin: { on: vi.fn(), end: vi.fn() }, kill: vi.fn() });
     expect(await runRefocus({}, { spawn: () => child, timeoutMs: 5 })).toBeNull();

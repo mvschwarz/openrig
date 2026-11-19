@@ -159,10 +159,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   /** The pi-runner sidecar reader shape resume-token-capture consumes
    *  (deriveResumeToken's piRunnerStateStore dep). */
-  readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string } {
-    const state = this.readRunnerState(sessionName);
+  readSessionFile(sessionName: string, stagedGeneration?: string): { ok: true; sessionFile: string } | { ok: false; reason: string } {
+    const root = stagedGeneration ? piAccountSwitchStateRoot(this.stateRoot, stagedGeneration) : this.stateRootForSession(sessionName);
+    const state = this.readRunnerState(sessionName, root);
     if (state === null) {
-      const { runnerStatePath } = piSeatPaths(this.stateRootForSession(sessionName), sessionName);
+      const { runnerStatePath } = piSeatPaths(root, sessionName);
       return this.fs.exists(runnerStatePath)
         ? { ok: false, reason: "parse_error" }
         : { ok: false, reason: "missing_sidecar" };

@@ -79,6 +79,50 @@ describe("OMP managed skill writes on real storage", () => {
     expect(fs.readFileSync(path.join(outside, "SKILL.md"), "utf8")).toBe("Operator skill");
   });
 
+  it("removes deselected portable skills and preserves additions and edits", async () => {
+    const plugin = path.join(root, "plugin");
+    for (const id of ["untouched", "edited", "extra"]) write(path.join(plugin, "skills", id, "SKILL.md"), "original");
+    const selected = { entries: [{ category: "plugin", effectiveId: "portable", absolutePath: plugin }] } as never;
+    expect((await adapter.project(selected, binding())).failed).toEqual([]);
+    write(path.join(skills, "edited/SKILL.md"), "mine");
+    write(path.join(skills, "extra/notes"), "mine too");
+    await adapter.project(selected, binding());
+    await adapter.project({ entries: [] } as never, binding());
+    expect(fs.existsSync(path.join(skills, "untouched"))).toBe(false);
+    expect(fs.readFileSync(path.join(skills, "edited/SKILL.md"), "utf8")).toBe("mine");
+    expect(fs.readFileSync(path.join(skills, "extra/notes"), "utf8")).toBe("mine too");
+  });
+
+  it("keeps distinct plugin IDs and replaces a selected package's whole tree", async () => {
+    const plugin = path.join(root, "plugin");
+    write(path.join(plugin, "package.json"), JSON.stringify({ omp: { extensions: ["./index.js"] } }));
+    write(path.join(plugin, "index.js"), "v1");
+    write(path.join(plugin, "obsolete.js"), "old helper");
+    const plan = { entries: ["shared:core", "shared-core"].map(effectiveId => ({ category: "plugin", effectiveId, absolutePath: plugin })) } as never;
+    expect((await adapter.project(plan, binding())).failed).toEqual([]);
+    const installed = (await adapter.listInstalled(binding())).filter(e => e.category === "plugin");
+    expect(installed.map(e => e.effectiveId).sort()).toEqual(["shared-core", "shared:core"]);
+    expect(new Set(installed.map(e => e.installedPath)).size).toBe(2);
+    fs.unlinkSync(path.join(plugin, "obsolete.js"));
+    write(path.join(plugin, "index.js"), "v2");
+    expect((await adapter.project(plan, binding())).failed).toEqual([]);
+    for (const { installedPath } of installed) {
+      expect(fs.existsSync(path.join(installedPath, "obsolete.js"))).toBe(false);
+      expect(fs.readFileSync(path.join(installedPath, "index.js"), "utf8")).toBe("v2");
+    }
+  });
+
+  it("refuses a hard-linked destination before changing contents or permissions", async () => {
+    const target = path.join(skills, "linked/helpers/run.sh");
+    write(path.join(outside, "operator"), "preserve"); fs.chmodSync(path.join(outside, "operator"), 0o600);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.linkSync(path.join(outside, "operator"), target);
+    const result = await adapter.project({ entries: [{ category: "skill", effectiveId: "linked", absolutePath: source }] } as never, binding());
+    expect(result.failed).toHaveLength(1);
+    expect(fs.readFileSync(target, "utf8")).toBe("preserve");
+    expect(fs.statSync(target).mode & 0o777).toBe(0o600);
+  });
+
   it("projects a portable skill without the obsolete no-extension warning", async () => {
     const plugin = path.join(root, "plugin");
     write(path.join(plugin, "skills/research/SKILL.md"), "Research instructions");

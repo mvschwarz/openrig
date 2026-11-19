@@ -1,3 +1,4 @@
+import { memoryProjectionFiles } from "./helpers/omp-files.js";
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import * as realFs from "node:fs";
@@ -24,6 +25,7 @@ type Omp = (launchId: string, command: string) => Record<string, unknown> | null
 
 function fakeSeat(files: Record<string, string>, omp: Omp = (launchId) => ({ ready: true, launchId, sessionFile: currentFile, auth: "ok", updatedAt: "t" })) {
   const fs = {
+    ...memoryProjectionFiles(files),
     copyFile: (source: string, dest: string) => { files[dest] = files[source]!; },
     readFile: (path: string) => files[path]!,
     writeFile: (path: string, content: string) => { files[path] = content; },
@@ -40,11 +42,12 @@ function fakeSeat(files: Record<string, string>, omp: Omp = (launchId) => ({ rea
     sendShellCommand: vi.fn(async (_session: string, command: string) => {
       const launchId = /OPENRIG_OMP_LAUNCH_ID=([^' ]+)/.exec(command)?.[1] ?? "";
       const written = omp(launchId, command);
-      if (written) { files[paths.statePath] = JSON.stringify(written); paneCommand = "omp"; }
+      if (written) { files[paths.statePath] = JSON.stringify({ ...written, pid: 102, updatedAt: "2026-11-11T00:00:00Z" }); paneCommand = "omp"; }
       return { ok: true };
     }),
     sendText: vi.fn(async () => ({ ok: true })),
     sendKeys: vi.fn(async () => ({ ok: true })),
+    getPanePid: vi.fn(async () => 101),
     hasSession: vi.fn(async () => true),
     getPaneCommand: vi.fn(async () => paneCommand),
     capturePaneContent: vi.fn(async () => ""),
@@ -53,7 +56,8 @@ function fakeSeat(files: Record<string, string>, omp: Omp = (launchId) => ({ rea
     tmux: tmux as unknown as TmuxAdapter, fsOps: fs, stateRoot, seatExtensionPath: extension, sleep: async () => {},
     newLaunchId: () => "attempt-1", now: () => "2026-11-11T00:00:00.000Z",
   });
-  const adapter = new OmpTuiRuntimeAdapter({ tmux: tmux as unknown as TmuxAdapter, fsOps: fs, launcher, sleep: async () => {} });
+  const adapter = new OmpTuiRuntimeAdapter({ tmux: tmux as unknown as TmuxAdapter, fsOps: fs, launcher, sleep: async () => {},
+    listProcesses: async () => [{ pid: 102, ppid: 101, command: "omp", startedAt: "2026-11-10T00:00:00Z" }] });
   const sent = () => vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[1] ?? "";
   return { fs, tmux, launcher, adapter, sent, setPaneCommand: (command: string) => { paneCommand = command; } };
 }
@@ -154,7 +158,7 @@ describe("OMP exact session tokens", () => {
     const requested = `${paths.sessionsDir}/requested.jsonl`;
     const { adapter } = fakeSeat({ [requested]: "history", [currentFile]: "other session" });
     const result = await adapter.launchHarness(binding(), { name: seat, resumeToken: requested });
-    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/does not report the requested session file/) });
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required", error: expect.stringMatching(/does not report the requested session file/) });
   });
 
   it("refuses to resume a session file that is gone, without typing, as a missing conversation", async () => {
@@ -166,9 +170,22 @@ describe("OMP exact session tokens", () => {
 
   it("reads OMP's own not-found line when it exits before loading the extension", async () => {
     const { adapter, tmux } = fakeSeat({ [currentFile]: "session" }, () => null);
-    vi.mocked(tmux.capturePaneContent).mockResolvedValue(`Error: Session "${currentFile}" not found.\nRun \`omp --resume\` without an argument to pick from recent sessions.\n$ `);
+    vi.mocked(tmux.capturePaneContent).mockResolvedValueOnce("").mockResolvedValue(`Error: Session "${currentFile}" not found.\nRun \`omp --resume\` without an argument to pick from recent sessions.\n$ `);
     const result = await adapter.launchHarness(binding(), { name: seat, resumeToken: currentFile });
     expect(result).toMatchObject({ ok: false, recovery: "retry_fresh", missingConversation: true });
+  });
+
+  it.each(["historical", "wrong-file"])("keeps a %s not-found message from authorizing a fresh conversation", async kind => {
+    const { adapter, tmux } = fakeSeat({ [currentFile]: "session" }, () => null);
+    const line = 'Error: Session "' + (kind === "historical" ? currentFile : parentFile) + '" not found.';
+    tmux.capturePaneContent.mockResolvedValueOnce(kind === "historical" ? line : "").mockResolvedValue(line);
+    expect(await adapter.launchHarness(binding(), { name: seat, resumeToken: currentFile })).toMatchObject({ ok: false, recovery: "attention_required" });
+  });
+
+  it("rejects an ID-form fork that still reports the parent conversation", async () => {
+    const { adapter } = fakeSeat({}, launchId => ({ ready: true, launchId, sessionId: "parent-id", sessionFile: currentFile, updatedAt: "t" }));
+    expect(await adapter.launchHarness(binding(), { name: seat, forkSource: { kind: "native_id", value: "parent-id" } }))
+      .toMatchObject({ ok: false, recovery: "attention_required" });
   });
 
   it("reports an OMP that exits during startup as needing attention, with the pane's last lines", async () => {
@@ -188,7 +205,7 @@ describe("OMP exact session tokens", () => {
   it("refuses a fork that reports the parent's own file", async () => {
     const { adapter } = fakeSeat({ [parentFile]: "session" }, (launchId) => ({ ready: true, launchId, sessionFile: parentFile, updatedAt: "t" }));
     const result = await adapter.launchHarness(binding(), { name: seat, forkSource: { kind: "native_id", value: parentFile } });
-    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/parent session file instead of the post-fork child/) });
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/parent session file or ID instead of the post-fork child/) });
   });
 
   it("reports a ready fresh seat without claiming an unwritten resume token", async () => {
@@ -298,7 +315,7 @@ describe("OMP projection into the seat's own home", () => {
     ]));
   });
 
-  it.each(["removed", "foreign", "failed"])("does not load retained plugin files after selection is %s", async change => {
+  it.each(["removed", "foreign", "failed"])("keeps the last working copy only for a still-selected plugin when projection is %s", async change => {
     const { adapter, fs, launcher } = fakeSeat({
       "/plugins/core/package.json": JSON.stringify({ omp: { extensions: ["./index.js"] } }),
       "/plugins/core/index.js": "export default function () {}",
@@ -312,8 +329,8 @@ describe("OMP projection into the seat's own home", () => {
     ]), binding());
     expect(result.failed).toHaveLength(change === "failed" ? 1 : 0);
     expect(fs.exists(`${paths.pluginsDir}/core/index.js`)).toBe(true);
-    expect(launcher.pluginRoots(seat)).toEqual([]);
-    expect((await adapter.listInstalled(binding())).filter(item => item.category === "plugin")).toEqual([]);
+    expect(launcher.pluginRoots(seat)).toEqual(change === "failed" ? [paths.pluginsDir + "/core"] : []);
+    expect((await adapter.listInstalled(binding())).filter(item => item.category === "plugin")).toHaveLength(change === "failed" ? 1 : 0);
   });
 
   it("uses OMP's whole-manifest precedence instead of borrowing Pi extensions", async () => {
@@ -363,7 +380,7 @@ describe("OMP projection into the seat's own home", () => {
     await adapter.project(plan([entry({ category: "plugin", effectiveId: "portable-plugin", absolutePath: "/src/plugin", pluginType: "claude" })]), binding());
     expect(fs.readFile(`${paths.agentDir}/skills/portable/SKILL.md`)).toBe("updated instructions");
     await adapter.project(plan([entry({ category: "plugin", effectiveId: "competing-plugin", absolutePath: "/src/plugin", pluginType: "claude" })]), binding());
-    expect(fs.readFile(`${paths.agentDir}/skills/portable/.openrig-plugin`)).toBe("portable-plugin");
+    expect(JSON.parse(fs.readFile(paths.agentDir + "/skills/portable/.openrig-plugin")).id).toBe("portable-plugin");
     await adapter.launchHarness(binding(), { name: seat });
     expect(sent()).not.toContain("portable-plugin");
   });
@@ -385,21 +402,33 @@ describe("OMP projection into the seat's own home", () => {
 });
 
 describe("OMP paste completion", () => {
-  it("waits past 200ms and rejects stale or partial acknowledgements before allowing Enter", async () => {
+  it("waits for the matching composer acknowledgement before submitting", async () => {
     const text = "small input";
+    const digest = createHash("sha256").update(text).digest("hex");
     const state = { ready: true, launchId: "attempt-1", updatedAt: "t", inputProtocol: 1,
-      inputReceipt: { sequence: 4, sha256: createHash("sha256").update(text).digest("hex") } };
-    const { fs, launcher, tmux } = fakeSeat({ [paths.statePath]: JSON.stringify(state) });
-    let elapsed = 0;
-    const adapter = new OmpTuiRuntimeAdapter({ fsOps: fs, launcher, tmux: tmux as never, sleep: async ms => {
-      elapsed += ms;
-      if (elapsed === 300) fs.writeFile(paths.statePath, JSON.stringify({ ...state,
-        inputReceipt: { sequence: 5, sha256: createHash("sha256").update("small").digest("hex") } }));
-      if (elapsed === 650) fs.writeFile(paths.statePath, JSON.stringify({ ...state,
-        inputReceipt: { ...state.inputReceipt, sequence: 6, requestId: JSON.parse(fs.readFile(`${paths.statePath}.input.json`)).id } }));
+      inputReceipt: { sequence: 4, sha256: digest } };
+    const { fs, launcher, tmux } = fakeSeat({ [paths.statePath]: JSON.stringify(state), "/src/input": text });
+    const observed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let polls = 0;
+    const adapter = new OmpTuiRuntimeAdapter({ fsOps: fs, launcher, tmux: tmux as never, sleep: async () => {
+      if (++polls === 1) {
+        fs.writeFile(paths.statePath, JSON.stringify({ ...state, inputReceipt: { sequence: 5, sha256: "partial" } }));
+        return;
+      }
+      observed.resolve();
+      await release.promise;
+      const { id } = JSON.parse(fs.readFile(paths.statePath + ".input.json"));
+      fs.writeFile(paths.statePath, JSON.stringify({ ...state, inputReceipt: { sequence: 6, requestId: id, sha256: digest } }));
     } });
-    await adapter.prepareInput(seat, text)();
-    expect(elapsed).toBe(650);
+    const sending = adapter.deliverStartup([{ path: "input", absolutePath: "/src/input", ownerRoot: "/src",
+      deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }], binding());
+    await observed.promise;
+    expect(tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    release.resolve();
+    expect(await sending).toMatchObject({ delivered: 1, failed: [] });
+    expect(tmux.sendKeys.mock.calls).toEqual([[seat, ["Enter"]]]);
   });
 
   it("does not submit incomplete startup input on timeout", async () => {

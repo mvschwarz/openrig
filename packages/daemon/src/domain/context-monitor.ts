@@ -281,7 +281,7 @@ export class ContextMonitor {
       LEFT JOIN bindings b ON b.node_id = n.id
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
-          OR (n.runtime = 'stub' AND s.status = 'running')
+          OR (n.runtime IN ('stub', 'omp-tui') AND s.status = 'running')
           OR (
             n.runtime = 'codex'
             AND (

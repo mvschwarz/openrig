@@ -94,6 +94,16 @@ describe("RuntimeVerifier", () => {
     expect(result.runtime).toBe("claude-code");
   });
 
+  it("records each OMP mode separately using the installed omp executable", async () => {
+    const exec = createMockExec({ "omp --version": "18.22.0" });
+    const verifier = new RuntimeVerifier({ exec, db });
+    for (const runtime of ["omp", "omp-tui"] as const) {
+      expect(await verifier.verifyOmp(runtime)).toMatchObject({ runtime, version: "18.22.0", status: "verified" });
+    }
+    expect(db.prepare("SELECT runtime FROM runtime_verifications WHERE runtime LIKE 'omp%' ORDER BY runtime").all())
+      .toEqual([{ runtime: "omp" }, { runtime: "omp-tui" }]);
+  });
+
   // T6: codex --version succeeds -> verified
   it("codex --version succeeds -> verified", async () => {
     const exec = createMockExec({ "codex --version": "codex 0.5.1" });

@@ -244,6 +244,15 @@ it("reads an OMP RPC response only from the verified OMP runner and its own file
   expect(await f.reader.observe(f.input)).toMatchObject({ model: null, reason: "record-identity-missing-or-ambiguous" });
 });
 
+it("reads the native writer through nested wrappers and rejects an unrelated live pane", async () => {
+  const f = fixture("omp-tui");
+  f.processRows[1]!.ppid = 30;
+  f.processRows.push({ pid: 30, ppid: 10, command: "wrapper", startedAt: new Date(f.boot).toISOString() });
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "observed", model: f.ompState.model });
+  f.processRows[2]!.ppid = 31;
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", model: null });
+});
+
 it("reads the native OMP model from the current pane's extension, fencing replacements and stale samples", async () => {
   const f = fixture("omp-tui");
   const read = async () => (await f.reader.observeInventory([f.input]))[0];

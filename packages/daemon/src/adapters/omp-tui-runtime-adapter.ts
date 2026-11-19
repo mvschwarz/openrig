@@ -1,6 +1,7 @@
 // The Oh My Pi (OMP) runtime adapter: OMP's own terminal UI, launched natively in the seat's tmux pane.
 
 import nodePath from "node:path";
+import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile, InstalledResource, ProjectionResult, StartupDeliveryResult,
@@ -11,16 +12,20 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { isPerSeatRoleGuidance, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
-import { guidanceFileSharedByLink } from "../domain/restore-guidance.js";
+import { guidanceFileSharedByLink, lstatLinkInfo } from "../domain/restore-guidance.js";
 import { insideMissingFolder } from "../domain/cwd-resolution.js";
 import type { TmuxAdapter } from "./tmux.js";
 import { paneAtShell, type OmpLaunchFsOps, type OmpSeatLauncher } from "./omp-seat-launch.js";
-import { ompPluginDirName, type OmpSeatState } from "./omp-seat-protocol.js";
+import { listNativeProcesses } from "../domain/native-process-lineage.js";
+import { ompProcessInPane, ompPluginDirName, type OmpSeatState } from "./omp-seat-protocol.js";
 import { insideSeatStorageFolder, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 
 
 export interface OmpAdapterFsOps extends OmpLaunchFsOps {
   folderPresent?(path: string): boolean;
+  rename?(source: string, destination: string): void;
+  remove?(path: string): void;
+  readBytes?(path: string): Buffer;
   copyFile(source: string, destination: string): void;
   statMode?(path: string): number;
   chmod?(path: string, mode: number): void;
@@ -35,6 +40,7 @@ export interface OmpTuiRuntimeAdapterDeps {
   launcher: OmpSeatLauncher;
   /** With it, every guidance block this adapter writes is checked against the record and recorded. */
   managedBlockRecords?: ManagedBlockRecords;
+  listProcesses?: typeof listNativeProcesses;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -46,6 +52,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
   private readonly fs: OmpAdapterFsOps;
   private readonly launcher: OmpSeatLauncher;
   private readonly managedBlockRecords: ManagedBlockRecords | undefined;
+  private readonly listProcesses: typeof listNativeProcesses;
   private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(deps: OmpTuiRuntimeAdapterDeps) {
@@ -53,20 +60,43 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     this.fs = deps.fsOps;
     this.launcher = deps.launcher;
     this.managedBlockRecords = deps.managedBlockRecords;
+    this.listProcesses = deps.listProcesses ?? listNativeProcesses;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   /** The seat's resumable conversation, as the extension last reported it. OMP names a new session's file before it
    *  writes the first turn; a file that isn't on disk yet has no history to resume and is not a token. */
-  readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string } {
+  readSessionFile(sessionName: string, expectedGeneration?: string): { ok: true; sessionFile: string } | { ok: false; reason: string } {
     const state = this.launcher.readState(sessionName);
     if (state === null) {
       return this.fs.exists(this.launcher.paths(sessionName).statePath)
         ? { ok: false, reason: "parse_error" }
         : { ok: false, reason: "missing_sidecar" };
     }
-    if (!state.sessionFile || !this.fs.exists(state.sessionFile)) return { ok: false, reason: "missing_sidecar" };
+    if (expectedGeneration && state.generation !== expectedGeneration) return { ok: false, reason: "generation_mismatch" };
+    if (state.exited || !state.sessionFile || !this.fs.exists(state.sessionFile)) return { ok: false, reason: "missing_sidecar" };
     return { ok: true, sessionFile: state.sessionFile };
+  }
+
+  /** A retained file can outlive its process. Adoption and readiness need the current pane's writer. */
+  private async liveState(session: string, target = session): Promise<OmpSeatState | null> {
+    const initial = this.launcher.readState(session);
+    if (!initial?.ready || initial.exited) return null;
+    try {
+      const panePid = await this.tmux.getPanePid(target);
+      if (!panePid) return null;
+      const writer = ompProcessInPane(await this.listProcesses(), panePid, initial);
+      if (!writer || !(Date.parse(writer.startedAt ?? "") <= Date.parse(initial.updatedAt))) return null;
+      if (await this.tmux.getPanePid(target) !== panePid) return null;
+      const latest = this.launcher.readState(session);
+      return latest?.ready && !latest.exited && latest.launchId === initial.launchId && latest.pid === initial.pid ? latest : null;
+    } catch { return null; }
+  }
+
+  async readLiveSessionFile(session: string, expectedGeneration?: string): Promise<{ ok: true; sessionFile: string } | { ok: false; reason: string }> {
+    const state = await this.liveState(session);
+    return state?.sessionFile && (!expectedGeneration || state.generation === expectedGeneration) && this.fs.exists(state.sessionFile)
+      ? { ok: true, sessionFile: state.sessionFile } : { ok: false, reason: "process_unreadable" };
   }
 
   /** The seat's sidecar, for readers that report what the seat's OMP said about itself. */
@@ -124,7 +154,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
       results.push({ effectiveId: id, category: "skill", installedPath: nodePath.join(skillsDir, id) });
     }
     for (const root of this.launcher.pluginRoots(binding.tmuxSession)) {
-      results.push({ effectiveId: nodePath.basename(root), category: "plugin", installedPath: root });
+      results.push({ effectiveId: decodeURIComponent(nodePath.basename(root)), category: "plugin", installedPath: root });
     }
     return results;
   }
@@ -153,9 +183,12 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     const failed: Array<{ effectiveId: string; error: string }> = [];
     const selectedPlugins: string[] = [];
     const paths = binding.tmuxSession ? this.launcher.paths(binding.tmuxSession) : null;
+    const previousPlugins = new Set(binding.tmuxSession ? this.launcher.pluginRoots(binding.tmuxSession).map(root => nodePath.basename(root)) : []);
+    const skills = binding.seatSkillsRoot ?? (paths && nodePath.join(paths.agentDir, "skills"));
+    const selectedSkills = new Set(plan.entries.filter(entry => entry.category === "skill").map(entry => entry.effectiveId));
     if (paths) {
+      this.requireWritable(paths.seatRoot, paths.selectedPluginsPath);
       this.fs.mkdirp(paths.seatRoot);
-      this.fs.writeFile(paths.selectedPluginsPath, "[]");
     }
 
     if (binding.seatSkillsRoot && !insideSeatStorageFolder(nodePath.dirname(binding.seatSkillsRoot), binding.seatSkillsRoot)) {
@@ -182,18 +215,20 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
           for (const id of this.topLevelEntries(root)) {
             if (!binding.tmuxSession || !this.fs.exists(nodePath.join(root, id, "SKILL.md"))) continue;
             if (plan.entries.some(other => other.category === "skill" && other.effectiveId === id)) continue;
-            const target = nodePath.join(binding.seatSkillsRoot ?? nodePath.join(this.launcher.paths(binding.tmuxSession).agentDir, "skills"), id);
+            if (!skills) continue;
+            selectedSkills.add(id);
+            const target = nodePath.join(skills, id);
             const owner = nodePath.join(target, ".openrig-plugin");
-            if (this.fs.exists(target) && (!this.fs.exists(owner) || this.fs.readFile(owner) !== entry.effectiveId)) {
+            this.requireWritable(skills, owner);
+            if (this.fs.exists(target) && !this.ownsSkill(target, entry.effectiveId, nodePath.join(root, id))) {
               warnings.push(`omp: kept existing skill ${id}; plugin ${entry.effectiveId} did not overwrite it`);
               continue;
             }
-            if (binding.seatSkillsRoot) {
-              const refusal = seatSkillWriteRefusal(binding.seatSkillsRoot, owner);
-              if (refusal) throw new Error(refusal);
-            }
-            this.copyResource(nodePath.join(root, id), target, binding.seatSkillsRoot);
-            this.fs.writeFile(owner, entry.effectiveId);
+            this.replaceDirectory(target, stage => {
+              this.copyResource(nodePath.join(root, id), stage);
+              const digest = this.treeDigest(stage);
+              this.fs.writeFile(nodePath.join(stage, ".openrig-plugin"), JSON.stringify({ id: entry.effectiveId, digest }));
+            });
             copied = true;
           }
           (copied ? projected : skipped).push(entry.effectiveId);
@@ -203,12 +238,25 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
         }
         else skipped.push(entry.effectiveId);
       } catch (err) {
+        if (entry.category === "plugin" && this.pluginAppliesToOmp(entry)) {
+          const dir = ompPluginDirName(entry.effectiveId);
+          if (previousPlugins.has(dir)) selectedPlugins.push(dir);
+        }
         failed.push({ effectiveId: entry.effectiveId, error: (err as Error).message });
       }
     }
 
     if (paths) {
-      this.fs.writeFile(paths.selectedPluginsPath, JSON.stringify(selectedPlugins));
+      const selection = paths.selectedPluginsPath + "." + randomUUID();
+      this.fs.writeFile(selection, JSON.stringify(selectedPlugins));
+      this.rename(selection, paths.selectedPluginsPath);
+      if (skills) for (const id of this.topLevelEntries(skills)) {
+        const target = nodePath.join(skills, id);
+        const owner = nodePath.join(target, ".openrig-plugin");
+        if (selectedSkills.has(id) || !this.fs.exists(owner)) continue;
+        if (this.ownsSkill(target)) this.remove(target);
+        else warnings.push("omp: kept edited or unverified portable skill " + id);
+      }
     }
     return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
   }
@@ -237,8 +285,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
             const { agentDir } = this.launcher.paths(binding.tmuxSession);
             const targetDir = nodePath.join(binding.seatSkillsRoot ?? nodePath.join(agentDir, "skills"), nodePath.basename(nodePath.dirname(file.absolutePath)));
             const destination = nodePath.join(targetDir, nodePath.basename(file.path));
-            const refusal = binding.seatSkillsRoot ? seatSkillWriteRefusal(binding.seatSkillsRoot, destination) : undefined;
-            if (refusal) throw new Error(refusal);
+            this.requireWritable(binding.seatSkillsRoot ?? nodePath.join(agentDir, "skills"), destination);
             this.fs.mkdirp(targetDir);
             this.fs.writeFile(destination, content);
             break;
@@ -342,11 +389,11 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     if (opts.resumeToken && sessionFile !== opts.resumeToken) {
       // An exact resume must continue the requested history; an OMP that came up on any other file started a
       // different session.
-      return { ok: false, error: "omp resume: OMP is ready but does not report the requested session file" };
+      return { ok: false, recovery: "attention_required", error: "omp resume: OMP is ready but does not report the requested session file" };
     }
-    if (forkRef && sessionFile === forkRef) {
+    if (forkRef && (sessionFile === forkRef || outcome.state.sessionId === forkRef)) {
       // The contract requires the new post-fork token, never the parent's.
-      return { ok: false, error: "omp fork: OMP reported the parent session file instead of the post-fork child" };
+      return { ok: false, recovery: "attention_required", error: "omp fork: OMP reported the parent session file or ID instead of the post-fork child" };
     }
     const validation = validateResumeToken(this.runtime, sessionFile);
     if (!validation.ok) {
@@ -378,7 +425,9 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     if (atShell) {
       return { ready: false, reason: "the seat sidecar says ready but the pane is back at a shell (the omp process is gone)", code: "runner_exited" };
     }
-    if (state.auth === "missing") {
+    const current = await this.liveState(binding.tmuxSession, binding.tmuxPane ?? binding.tmuxSession);
+    if (!current) return { ready: false, code: "awaiting_runtime", reason: "the native OMP writer could not be verified in the bound pane" };
+    if (current.auth === "missing") {
       // OMP is at its prompt, but it has no credentials for its model and would fail the first message.
       return {
         ready: false,
@@ -425,7 +474,8 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     const paths = this.launcher.paths(binding.tmuxSession);
 
     if (entry.category === "skill") {
-      this.copyResource(entry.absolutePath, nodePath.join(binding.seatSkillsRoot ?? nodePath.join(paths.agentDir, "skills"), entry.effectiveId), binding.seatSkillsRoot);
+      const skills = binding.seatSkillsRoot ?? nodePath.join(paths.agentDir, "skills");
+      this.copyResource(entry.absolutePath, nodePath.join(skills, entry.effectiveId), skills);
       return true;
     }
 
@@ -433,7 +483,9 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
       // OMP loads a plugin as an extension package: a directory whose package.json declares its extension entries,
       // with its skills beside them. Foreign plugins' portable skills are handled separately.
       if (!this.pluginAppliesToOmp(entry)) return false;
-      this.copyResource(entry.absolutePath, nodePath.join(paths.pluginsDir, ompPluginDirName(entry.effectiveId)));
+      const target = nodePath.join(paths.pluginsDir, ompPluginDirName(entry.effectiveId));
+      this.requireWritable(paths.seatRoot, nodePath.join(target, "package.json"));
+      this.replaceDirectory(target, stage => this.copyResource(entry.absolutePath, stage));
       return true;
     }
 
@@ -456,6 +508,67 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
+  private rename(source: string, dest: string): void {
+    (this.fs.rename ?? fs.renameSync)(source, dest);
+  }
+
+  private remove(target: string): void {
+    if (this.fs.remove) this.fs.remove(target);
+    else fs.rmSync(target, { recursive: true, force: true });
+  }
+
+  private requireWritable(root: string, target: string): void {
+    if (!nodePath.resolve(target).startsWith(nodePath.resolve(root) + nodePath.sep)) throw new Error("OMP projection escaped its root");
+    const refusal = seatSkillWriteRefusal(root, target);
+    if (refusal) throw new Error(refusal);
+    if (((this.fs.linkInfo ?? lstatLinkInfo)(target)?.nlink ?? 0) > 1) {
+      throw new Error(target + " is hard-linked; not written");
+    }
+  }
+
+  // Copy before displacing a working tree. Synchronous renames keep concurrent daemon projections serialized.
+  private replaceDirectory(target: string, fill: (stage: string) => void): void {
+    const scratch = nodePath.join(nodePath.dirname(nodePath.dirname(target)), ".omp-projection-" + randomUUID());
+    const stage = nodePath.join(scratch, "new");
+    const backup = nodePath.join(scratch, "previous");
+    this.fs.mkdirp(stage);
+    try { fill(stage); } catch (error) { this.remove(scratch); throw error; }
+    this.fs.mkdirp(nodePath.dirname(target));
+    const exists = this.fs.exists(target);
+    if (exists) this.rename(target, backup);
+    try { this.rename(stage, target); } catch (error) {
+      if (exists) this.rename(backup, target);
+      this.remove(scratch);
+      throw error;
+    }
+    this.remove(scratch);
+  }
+
+  private treeDigest(target: string): string {
+    const hash = createHash("sha256");
+    if (!this.fs.listFiles) throw new Error("Cannot verify portable skill contents");
+    for (const file of this.fs.listFiles(target).sort()) {
+      if (file === ".openrig-plugin") continue;
+      const path = nodePath.join(target, file);
+      this.requireWritable(target, path);
+      const bytes = this.fs.readBytes ? this.fs.readBytes(path) : this.fs.readFile(path);
+      hash.update(JSON.stringify([file, this.fs.statMode?.(path), createHash("sha256").update(bytes).digest("hex")]));
+    }
+    return hash.digest("hex");
+  }
+
+  private ownsSkill(target: string, pluginId?: string, source?: string): boolean {
+    const marker = nodePath.join(target, ".openrig-plugin");
+    try {
+      this.requireWritable(target, marker);
+      const raw = this.fs.readFile(marker);
+      // Older installs recorded only the ID. Upgrade their receipt when all installed files still match the source.
+      if (source && raw === pluginId) return this.treeDigest(target) === this.treeDigest(source);
+      const owner = JSON.parse(raw);
+      return typeof owner.id === "string" && (!pluginId || pluginId === owner.id) && owner.digest === this.treeDigest(target);
+    } catch { return false; }
+  }
+
   /** Copy a file or a directory tree into `targetDir`, keeping each file's mode. */
   private copyResource(source: string, targetDir: string, skillsRoot?: string): void {
     let files: string[] = [];
@@ -468,8 +581,7 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     }
     // Preflight every destination before the first copy, including nested helper links.
     if (skillsRoot) for (const file of files.length ? files : [nodePath.basename(source)]) {
-      const refusal = seatSkillWriteRefusal(skillsRoot, nodePath.join(targetDir, file));
-      if (refusal) throw new Error(refusal);
+      this.requireWritable(skillsRoot, nodePath.join(targetDir, file));
     }
     this.fs.mkdirp(targetDir);
     if (files.length === 0) {

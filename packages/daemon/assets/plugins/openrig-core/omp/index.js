@@ -1,5 +1,6 @@
 // openrig-core for Oh My Pi (OMP).
 
+import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,24 +36,26 @@ export function runRefocus(input, options = {}) {
   let child;
   try {
     child = (options.spawn ?? spawn)(command, [options.script ?? REFOCUS_SCRIPT, "--runtime", "omp"], {
-      env: { ...env, ...(options.now ? { OPENRIG_REFOCUS_NOW: "1" } : {}) },
+      env: { ...env, ...(Number(env.OPENRIG_REFOCUS_BUDGET_MS) > HOOK_TIMEOUT_MS - 1000
+        ? { OPENRIG_REFOCUS_BUDGET_MS: String(HOOK_TIMEOUT_MS - 1000) } : {}), ...(options.now ? { OPENRIG_REFOCUS_NOW: "1" } : {}) },
       stdio: ["pipe", "pipe", "ignore"],
     });
   } catch {
     return Promise.resolve(null);
   }
+  const decoder = new StringDecoder("utf8");
   let stdout = "";
   const timer = setTimeout(() => {
     resolve(null);
     try { child.kill("SIGKILL"); } catch { /* already gone */ }
   }, options.timeoutMs ?? HOOK_TIMEOUT_MS);
-  child.stdout?.on("data", (chunk) => { stdout += chunk; });
+  child.stdout?.on("data", (chunk) => { stdout += typeof chunk === "string" ? chunk : decoder.write(chunk); });
   child.on("error", () => { clearTimeout(timer); resolve(null); });
   child.on("close", (code) => {
     clearTimeout(timer);
     if (code !== 0) { resolve(null); return; }
     try {
-      resolve(text(JSON.parse(stdout || "{}")?.hookSpecificOutput?.additionalContext));
+      resolve(text(JSON.parse((stdout + decoder.end()) || "{}")?.hookSpecificOutput?.additionalContext));
     } catch {
       resolve(null);
     }
