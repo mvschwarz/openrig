@@ -950,7 +950,14 @@ export class TmuxAdapter {
       return fail(problem);
     };
     const fixed = this.seatScopeStaticProblem(policy, seatEnv.OPENRIG_NODE_ID, seatEnv.OPENRIG_SESSION_NAME);
-    if (fixed) return positive(fixed);
+    if (fixed) {
+      if (process.platform === "win32" && fixed.kind === "unsupported") {
+        return positive(limits.tasksMax !== undefined
+          ? { kind: "unsupported", limit: "tasks_max", reason: "Windows Job active-process limits do not enforce the requested process-and-thread task count" }
+          : { kind: "unsupported", limit: "memory_max", reason: "Windows seat Job commit-memory enforcement and persistent readback are not available; Job commit charge is not Linux cgroup memory accounting" });
+      }
+      return positive(fixed);
+    }
     const tools = this.seatScopeTools();
     if ("problem" in tools) return positive(tools.problem);
     const runtimeDir = this.scopeRuntimeDir()!;
@@ -1172,6 +1179,10 @@ export class TmuxAdapter {
     const fixed = this.seatScopeStaticProblem(policy, nodeId);
     // A guest seat's pane holds only a local viewer: its readback says nothing of the agent's processes.
     if (nodeId && this.seatInEnvironmentGuest?.(nodeId)) return { ...base, state: "not_applied", reason: fixed!.reason };
+    // A Windows process might have an externally imposed Job. Until the seat
+    // backend can read that Job, neither its presence nor its absence is known.
+    if (process.platform === "win32") return { ...base, state: "unknown",
+      reason: "Windows seat Job membership and limits cannot currently be read back; no applied limit is claimed" };
     // The last positive answer counts only for a request that asks a limit it was about: a failed memory probe says
     // nothing of a tasks-only seat (nor a pids answer of a memory-only one); no cgroup v2 is about every limit.
     const recent = this.seatScopeLastPositive && Date.now() - this.seatScopeLastPositive.at < SEAT_SCOPE_RETRY_MS

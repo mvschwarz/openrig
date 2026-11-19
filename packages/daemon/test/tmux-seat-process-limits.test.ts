@@ -547,6 +547,24 @@ async function freshRefused(h: ReturnType<typeof makeAdapter>, code: string) {
 }
 
 describe("a positive inability: the fresh launch is not started, process_limits_unsupported", () => {
+  it.each([
+    [{ tasksMax: 256 }, "tasks_max", /process-and-thread task count/],
+    [{ memoryMax: 268435456 }, "memory_max", /commit-memory enforcement and persistent readback/],
+    [{ tasksMax: 256, memoryMax: 268435456 }, "tasks_max", /process-and-thread task count/],
+  ] as const)("refuses unsupported Windows limits and gives recovery the same reason: %j", async (limits, key, reason) => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const h = makeAdapter({ limits: { "node-a": limits } });
+    const fresh = await h.adapter.createSession("impl-a@demo", "/work", A);
+    expect(fresh).toMatchObject({ ok: false, code: "process_limits_unsupported", retryable: false,
+      processLimits: { kind: "unsupported", limit: key, reason: expect.stringMatching(reason), requested: limits } });
+    expect(h.newSessions()).toEqual([]);
+    expect(await h.adapter.seatProcessLimitsRecoveryPlan("node-a")).toMatchObject({ state: "not_applied",
+      kind: "unsupported", limit: key, reason: expect.stringMatching(reason), requested: limits });
+    expect(await h.adapter.readSeatProcessLimits("impl-a@demo", limits, "node-a")).toMatchObject({
+      state: "unknown", requested: limits, reason: expect.stringMatching(/Job membership and limits cannot currently be read back/),
+    });
+    expect(systemdCalls(h.shellCalls)).toEqual([]);
+  });
   const cases: Array<[string, () => ReturnType<typeof makeAdapter>, RegExp]> = [
     ["not Linux", () => { Object.defineProperty(process, "platform", { value: "darwin" }); return makeAdapter({ limits: { "node-a": 256 } }); }, /not Linux/],
     ["systemd-run is missing", () => makeAdapter({ limits: { "node-a": 256 }, probe: { scope: fail("/bin/sh: 1: systemd-run: not found", 127) } }), /not installed/],
