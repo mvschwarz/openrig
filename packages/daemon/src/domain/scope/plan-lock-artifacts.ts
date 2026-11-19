@@ -93,7 +93,7 @@ export function isContentlessPlanLockSet(nodeContent: string | null, artifacts: 
  *  only the untouched scaffold (and emptiness) does not. */
 function prdHasAuthoredContent(prd: string): boolean {
   const body = prd
-    .replace(/^---\n[\s\S]*?\n---\n?/, "") // frontmatter
+    .replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "") // frontmatter
     .replace(/<!--[\s\S]*?-->/g, ""); // scaffold guidance comments
   for (const rawLine of body.split("\n")) {
     let line = rawLine.trim();
