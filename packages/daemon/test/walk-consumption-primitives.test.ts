@@ -418,7 +418,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
     vi.spyOn(ProcessCensus.prototype, "list").mockResolvedValue([
       { pid: 10, ppid: 1, command: "zsh" }, { pid: 20, ppid: 10, command: "codex", startedAt: "start" },
     ]);
-    vi.spyOn(CodexThreadIdResolver.prototype, "resolve").mockResolvedValue(threadId);
+    vi.spyOn(CodexThreadIdResolver.prototype, "resolveWithHome").mockResolvedValue({ thread: threadId, codexHome: join(stateDir, ".codex") });
     mkdirSync(join(stateDir, ".codex"));
     const nativeDb = new Database(join(stateDir, ".codex", "state_5.sqlite"));
     const record = join(stateDir, "rollout.jsonl");
@@ -448,7 +448,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
     const metadata = await response.json();
     expect(metadata).toMatchObject({ runtime: "codex", sessionId: threadId, totalBytes: Buffer.byteLength(readFileSync(record)) });
     expect(metadata.suffix).toBeUndefined();
-    expect(CodexThreadIdResolver.prototype.resolve).toHaveBeenCalledWith(20, "start");
+    expect(CodexThreadIdResolver.prototype.resolveWithHome).toHaveBeenCalledWith(20, "start");
 
     const suffix = JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "fixture-turn" } }) + "\n";
     appendFileSync(record, suffix);
@@ -480,7 +480,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
       ...(native === "unresolved" ? [{ pid: 20, ppid: 10, command: "codex", startedAt: "verified" }] : []),
       { pid: 30, ppid: 10, command: "codex", startedAt: "replacement" },
     ]);
-    vi.mocked(CodexThreadIdResolver.prototype.resolve).mockImplementation(async pid => pid === 30 ? threadId : undefined);
+    vi.mocked(CodexThreadIdResolver.prototype.resolveWithHome).mockImplementation(async pid => pid === 30 ? { thread: threadId, codexHome: join(stateDir, ".codex") } : {});
     const response = await app.request(url);
     expect(response.status).toBe(409);
     // Not a binding change: `rig walk` prints this message as it is.
@@ -490,11 +490,11 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
 
   it.each(["pane", "binding", "occupant"])("Codex still refuses a %s change during wrapped-thread resolution", async (changed) => {
     const { url, node } = seedCodex(threadId, 20, 10);
-    vi.mocked(CodexThreadIdResolver.prototype.resolve).mockImplementation(async () => {
+    vi.mocked(CodexThreadIdResolver.prototype.resolveWithHome).mockImplementation(async () => {
       if (changed === "pane") livePanePid = 99;
       else if (changed === "binding") registry.updateBinding(node.id, { tmuxPane: "%43" });
       else registry.mintOccupantTenure(node.id, "handover", "successor-native-id");
-      return threadId;
+      return { thread: threadId, codexHome: join(stateDir, ".codex") };
     });
     const response = await app.request(url);
     expect(response.status).toBe(409);
@@ -535,7 +535,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
       { pid: 20, ppid: 10, command: "codex", startedAt: "a" },
       { pid: 21, ppid: 10, command: "codex", startedAt: "b" },
     ]);
-    vi.mocked(CodexThreadIdResolver.prototype.resolve).mockImplementation(async pid => pid === 20 ? threadId : "other-thread");
+    vi.mocked(CodexThreadIdResolver.prototype.resolveWithHome).mockImplementation(async pid => ({ thread: pid === 20 ? threadId : "other-thread", codexHome: join(stateDir, ".codex") }));
     const response = await app.request(url);
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: "record_identity_unverified", message: expect.stringContaining("multiple") });
