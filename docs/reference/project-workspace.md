@@ -167,6 +167,11 @@ deepest root, leave the choice to `--project`. Step 3 reads the seat's
 `OPENRIG_SESSION_NAME`, so a plain shell skips it. `--json` reports the step
 that chose the project as `position.selectedBy`.
 
+With no explicit project, `rig scope`, `rig proof add` and daemon-backed
+`rig proof show`/`judge` use the one project whose `workspace.yaml` entry lists
+the caller's rig under `rigs`, and say which; otherwise, including a rig listed
+under several projects (with a warning), they use the configured default.
+
 ## TUI project selection
 
 Open **PROJECTS** (or enter `projects`) to choose an ID and root from the
@@ -362,3 +367,7 @@ If Project shows a mission discovery warning:
 
 No daemon restart is required for most config reads. Restart when changing
 startup-time roots such as `files.allowlist` or progress scan roots.
+
+Setting or resetting `files.allowlist` or `progress.scan_roots` through the
+daemon records a `settings.changed` event (the key, set or reset); a direct
+config-file edit doesn't.

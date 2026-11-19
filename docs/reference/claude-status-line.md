@@ -128,6 +128,10 @@ existing wake jitter, and records `config-fallback`. That is a retry time, not a
 claim that the provider's quota will reset then. The timer releases the shared
 blocker once and retains the existing durable wake delivery behavior.
 
+A parked row's watchdog wake that a Claude seat refuses at its usage-limit
+menu records `usage limit until <reset>` and retries at that stated reset; a
+Codex seat keeps its ordinary retry.
+
 Authentication, billing and overloaded errors are not classified as usage
 limits. Claude limit banners are not scraped from the terminal, and older
 runtimes or failures that do not emit this hook still depend on status line
