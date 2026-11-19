@@ -183,7 +183,7 @@ describe("SeatLifecycleService.launchFresh", () => {
 
   // #3395, spec section 5, "Stored": a fresh launch of an existing seat starts from its stored settings, so it reads the
   // stored pool block from the node.
-  it("G26: A fresh launch of an existing model seat (rig seat launch --fresh) reports its stored pool block that can't be used once in the launch warnings, and the seat starts as it would without the block", async () => {
+  it("A fresh launch of an existing model seat (rig seat launch --fresh) reports its stored pool block that can't be used once in the launch warnings, and the seat starts as it would without the block", async () => {
     const advisory = "dev.impl pool.max: must be a whole number of 0 or more; pool not used";
     const seat = seedSeat();
     // Stored as a re-apply writes a block that can't be used: as authored.

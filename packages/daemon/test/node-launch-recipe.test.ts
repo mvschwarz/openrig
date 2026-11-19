@@ -705,7 +705,7 @@ describe("a restore reports the stored pool block of a model seat", () => {
 
   // Two restores: the seat resumes its recorded session, and the seat starts fresh, where the restore's own launch and
   // the launch recipe's fresh launch both run, so the count also proves the fresh branch doesn't report it a second time.
-  it("G25: A restore reports a model seat's stored pool block that can't be used once in its warnings, as <pod>.<member> pool.<field>: <reason>; pool not used, also when the seat starts fresh through its launch recipe, and the rig result is the same as without the block", async () => {
+  it("A restore reports a model seat's stored pool block that can't be used once in its warnings, as <pod>.<member> pool.<field>: <reason>; pool not used, also when the seat starts fresh through its launch recipe, and the rig result is the same as without the block", async () => {
     const advisory = "dev.impl pool.max: must be a whole number of 0 or more; pool not used";
     const plain = await restoreWithStoredPool(undefined);
     db?.close();
@@ -734,7 +734,7 @@ describe("a restore reports the stored pool block of a model seat", () => {
     expect(outcome(pooledResume.result)).toEqual(outcome(plainResume.result));
   });
 
-  it("G28: A stored pool value that is not valid JSON never stops a launch from stored state: the restore names it once in its warnings as <pod>.<member> pool: the stored value is not valid JSON; pool not used, and a usable stored block, or none, adds no warning", async () => {
+  it("A stored pool value that is not valid JSON never stops a launch from stored state: the restore names it once in its warnings as <pod>.<member> pool: the stored value is not valid JSON; pool not used, and a usable stored block, or none, adds no warning", async () => {
     const advisory = "dev.impl pool: the stored value is not valid JSON; pool not used";
     const plain = await restoreWithStoredPool(undefined);
     db?.close();

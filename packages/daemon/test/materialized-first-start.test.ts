@@ -164,7 +164,7 @@ it("#3253: a pod seat's first start whose limit can't be applied keeps the refus
 
 // #3395, spec section 5, "Stored": the first start launches from the seat's stored settings, so it reads the stored
 // pool block from the node.
-it("G27: The first start of a never-occupied model seat reports its stored pool block that can't be used once in its warnings", async () => {
+it("The first start of a never-occupied model seat reports its stored pool block that can't be used once in its warnings", async () => {
   const advisory = "dev.lead pool.max: must be a whole number of 0 or more; pool not used";
   const f = await fixture(false);
   const node = f.rigRepo.getRig(f.rigId)!.nodes.find(node => node.logicalId === "dev.lead")!;
