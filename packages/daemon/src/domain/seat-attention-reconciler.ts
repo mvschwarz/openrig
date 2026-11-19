@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 // OPR.0.3.4.10 — seat attention reconciler: evidence-gated clear of stuck
 // startup_status=attention_required. Managed writer + append-only audit.
 
@@ -86,7 +87,7 @@ async function describeLineageFailure(input: {
       : !!(input.expectedToken && findExactNativeResumeProcess(rows, pid, "claude-code", input.expectedToken, input.rotation));
     if (passes) {
       // The check also needs the session to hold one pane, and the pane's pid to stay the same; the re-run sees neither.
-      const panes = await input.tmux.listPanes(input.sessionName).catch((): unknown[] => []);
+      const panes = await listNamedSessionPanes(input.tmux, input.sessionName).catch((): unknown[] => []);
       if (panes.length > 1) return `The session now has ${panes.length} panes, so the runtime could not be verified for the seat's pane`;
       return `A re-read now finds the ${runtimeName} process the check wanted, so the pane, pid or process may have changed during the check`;
     }
@@ -155,7 +156,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   const identityStore = new SeatIdentityStore(input.db);
   let panes: Awaited<ReturnType<PaneIdentityTmux["listPanes"]>>;
   try {
-    panes = await input.tmux.listPanes(input.sessionName);
+    panes = await listNamedSessionPanes(input.tmux, input.sessionName);
   } catch (error) {
     return { ok: false, detail: `tmux pane lookup failed: ${(error as Error).message}` };
   }
@@ -209,7 +210,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     const native = await verifyCodexPaneProcess({ target: pane.id, tmux: input.tmux,
       listProcesses: input.listProcesses, expectedToken: expectedResumeToken,
       requireResume: input.requireExactResumeLineage === true, requireArgv: true });
-    const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
+    const currentPanes = await listNamedSessionPanes(input.tmux, input.sessionName).catch(() => []);
     const currentPid = await input.tmux.getPanePid(pane.id).catch(() => null);
     if (native?.panePid === pid && currentPid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
   } else if (claudeProcessProof) {
@@ -221,7 +222,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
       ? await verifyClaudePaneProcess({ ...observation, expectedToken: expectedResumeToken,
         rotation: input.requireExactResumeLineage ? input.resumeRotation ?? null : storedRotation(input.db, input.nodeId, expectedResumeToken) })
       : claudeWrapper && !input.requireExactResumeLineage ? await verifyClaudePaneRuntime(observation) : null;
-    const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
+    const currentPanes = await listNamedSessionPanes(input.tmux, input.sessionName).catch(() => []);
     const currentPid = await input.tmux.getPanePid(pane.id).catch(() => null);
     if (native?.panePid === pid && currentPid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
   } else if (pid !== null && runtimeMatch === "match" && strictNativeLineage) {

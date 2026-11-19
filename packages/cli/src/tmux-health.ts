@@ -1,9 +1,19 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 export interface TmuxProbeResult {
   installed: boolean;
   available: boolean;
   version: string | null;
   detail: string | null;
   code: "available" | "no_server" | "not_installed" | "unhealthy";
+}
+
+export function tmuxInstallGuidance(platform: string = process.platform): string {
+  return platform === "win32"
+    ? "Install psmux for native Windows and put its directory (including tmux.exe) on PATH before unrelated tmux installations; open a new shell and verify tmux -V. See docs/reference/windows-support-experiment.md for experimental support limits."
+    : "Install tmux (brew install tmux on macOS, apt install tmux on Debian/Ubuntu).";
 }
 
 function errorMessage(err: unknown): string {
@@ -25,7 +35,7 @@ export function buildTmuxControlFailure(message: string): { message: string; rea
   };
 }
 
-export type TmuxCaptureResult = { status: "pass" } | { status: "fail"; detail: string } | { status: "skipped"; detail: string };
+export type TmuxCaptureResult = ({ status: "pass" } | { status: "fail"; detail: string } | { status: "skipped"; detail: string }) & { cleanupWarning?: string };
 
 /** Each probe command's bound: a tmux that hangs instead of crashing must not hang the check that diagnoses it. */
 export const TMUX_CAPTURE_PROBE_TIMEOUT_MS = 5_000;
@@ -37,20 +47,34 @@ export const TMUX_CAPTURE_PROBE_TIMEOUT_MS = 5_000;
  * Every command is bounded, and the throwaway server always gets a cleanup attempt, even after a create that failed or
  * timed out (it may have started anyway). A throwaway server that won't start is reported as not checked, not a failure.
  */
-export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number }) => string,
-  socket = `openrig-check-${process.pid}`): TmuxCaptureResult {
-  const run = (args: string) => exec(`tmux -L ${socket} -f /dev/null ${args}`, { timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS });
+export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number; env?: NodeJS.ProcessEnv }) => string,
+  socket = `openrig-check-${process.pid}`, platform: string = process.platform): TmuxCaptureResult {
+  const emptyConfig = platform === "win32" ? "NUL" : "/dev/null";
+  let probeRoot: string | null = null;
+  try { if (platform === "win32") probeRoot = mkdtempSync(join(tmpdir(), "openrig-capture-")); }
+  catch (err) { return { status: "skipped", detail: `Could not create an isolated capture-probe home: ${errorMessage(err)}` }; }
+  const env = probeRoot ? Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !["HOME", "USERPROFILE", "PSMUX_DATA_DIR", "PSMUX_CONFIG_FILE", "TMUX", "TMUX_PANE"].includes(key.toUpperCase()))) : undefined;
+  if (env && probeRoot) Object.assign(env, { HOME: probeRoot, USERPROFILE: probeRoot, PSMUX_DATA_DIR: join(probeRoot, "psmux"), PSMUX_CONFIG_FILE: "NUL" });
+  const run = (args: string) => exec(`tmux -L ${socket} -f ${emptyConfig} ${args}`, {
+    timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS, ...(env ? { env } : {}),
+  });
+  let result: TmuxCaptureResult = { status: "skipped", detail: "Capture probe did not complete." };
   try {
     try { run("new-session -d -s check"); }
-    catch (err) { return { status: "skipped", detail: errorMessage(err).trim() }; }
+    catch (err) { return result = { status: "skipped", detail: errorMessage(err).trim() }; }
     try {
       run("capture-pane -p -t check");
-      return { status: "pass" };
+      return result = { status: "pass" };
     } catch (err) {
-      return { status: "fail", detail: errorMessage(err).trim() };
+      return result = { status: "fail", detail: errorMessage(err).trim() };
     }
   } finally {
-    try { run("kill-server"); } catch { /* no throwaway server is left, or it already exited */ }
+    let stopped = false;
+    try { run("kill-server"); stopped = true; } catch { /* Preserve the owned home when termination is unconfirmed. */ }
+    if (probeRoot && stopped) try { rmSync(probeRoot, { recursive: true, force: true }); }
+    catch (err) { result.cleanupWarning = `Capture probe home retained at ${probeRoot}: ${errorMessage(err)}`; }
+    if (probeRoot && !stopped) result.cleanupWarning = `Capture probe termination was not confirmed; isolated home retained at ${probeRoot}.`;
   }
 }
 

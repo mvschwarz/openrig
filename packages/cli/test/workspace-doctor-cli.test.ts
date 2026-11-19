@@ -11,6 +11,7 @@
 // the live status probe; clientFactory delivers stub HTTP responses.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { resolve } from "node:path";
 import {
   workspaceCommand,
   renderHumanDoctorReport,
@@ -129,7 +130,7 @@ describe("rig workspace doctor — request shape", () => {
     } finally {
       out.restore();
     }
-    expect(post).toHaveBeenCalledWith("/api/workspace/doctor", { workspaceRoot: "/ws-override" });
+    expect(post).toHaveBeenCalledWith("/api/workspace/doctor", { workspaceRoot: resolve("/ws-override") });
   });
 
   it("resolves relative --workspace to absolute path before posting", async () => {
@@ -144,8 +145,7 @@ describe("rig workspace doctor — request shape", () => {
     }
     const [, body] = post.mock.calls[0]!;
     const sent = body as { workspaceRoot: string };
-    expect(sent.workspaceRoot.startsWith("/")).toBe(true);
-    expect(sent.workspaceRoot.endsWith("/local-ws")).toBe(true);
+    expect(sent.workspaceRoot).toBe(resolve("./local-ws"));
   });
 
   // GUARD/QA BLOCKING-A2 discriminator: CLI-side

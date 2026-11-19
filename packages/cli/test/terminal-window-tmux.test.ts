@@ -1,5 +1,5 @@
 import { beginPrivateTerminalTmux, endPrivateTerminalTmux, privateTerminalTmuxDeps, privateTerminalTmuxEnvironment } from "../../../test/terminal-tmux-isolation.js";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it as platformIt, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -15,6 +15,9 @@ const terminalTmuxRoot = beginPrivateTerminalTmux(tmpdir());
 afterAll(() => { endPrivateTerminalTmux(terminalTmuxRoot); });
 
 // Real isolated tmux servers; the desktop launcher alone is inert.
+// This fixture executes POSIX shell scripts and /dev/null, not native psmux.
+// Windows rendering is exercised by terminal-window-windows.test.ts instead.
+const it = platformIt.skipIf(process.platform === "win32");
 const sockets: string[] = [];
 const dirs: string[] = [];
 const proofObservers = new Map<string, { proofs: unknown[]; closedViewers: string[]; events: string[] }>();

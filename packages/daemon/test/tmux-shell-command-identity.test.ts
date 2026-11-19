@@ -103,6 +103,13 @@ describe("shell launch after cold pane reuse (#141)", () => {
     ]);
     expect(f.retained()).toEqual(before);
   });
+  it("inspects the observed pane shell while retaining the managed selector for nested writes", async () => {
+    const f = await fixture(), before = f.retained();
+    expect(await f.tmux.sendShellCommand(f.nodes.worker!.id, "inert launch", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    expect(f.commands.filter(c => c.includes("#{pane_current_command}"))).toEqual(["tmux display-message -p -t '%0' \"#{pane_current_command}\""]);
+    expect(f.commands.filter(c => c.includes("send-keys"))).toEqual(["tmux send-keys -t '%0' 'Enter'"]);
+    expect(f.retained()).toEqual(before);
+  });
 
   it.each(["detached", "running"])("still refuses a bare pane shared with a %s record", async status => {
     const f = await fixture(), before = f.retained();

@@ -150,6 +150,7 @@ export class EnvironmentStartup {
   }
   async launch(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown; firstInputText?: string; beforeNativeDispatch?: () => boolean }, tmux: Pick<TmuxAdapter, "sendShellCommand">): Promise<HarnessLaunchResult> {
     if (opts.forkSource) return { ok: false, recovery: "attention_required", error: "Environment fork is unsupported; no fresh conversation was started." };
+    if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) throw new EnvironmentError("environment_selection_changed", "The selected launch changed before preparation; nothing was requested");
     const checkpoint = this.retainedResume(binding, opts);
     const selected = this.selected(binding), generation = binding.launchGeneration!;
     const operationId = `launch-${generation}`;
@@ -228,9 +229,11 @@ export class EnvironmentStartup {
       if (!claimed.changes) throw new EnvironmentError("environment_native_unconfirmed", "The saved native launch intent needs reconciliation; no second launch was attempted");
       await this.platform.driver.guest(selected, ["--prepare", ...(firstInput ? ["--first-input-required"] : [])]);
       const command = ["rig", "environment", "connect", selected.bindingId, "--generation", generation].map(shellQuote).join(" ");
-      // Binding and generation identifiers keep this command below the short-input bound. Replace the host
-      // shell itself: a viewer failure must close this pane, never leave a shell for later startup input.
-      const sent = await tmux.sendShellCommand(binding.tmuxSession!, `exec ${command}`, undefined, { stageIfLong: true });
+      const beforeViewerInput = opts.beforeNativeDispatch ? () => {
+        if (!opts.beforeNativeDispatch!()) throw new EnvironmentError("environment_viewer_unconfirmed", "Native preparation was requested before selection changed; no viewer input is authorized and the original execution needs reconciliation");
+      } : undefined;
+      beforeViewerInput?.();
+      const sent = await tmux.sendShellCommand(binding.tmuxSession!, process.platform === "win32" ? command : `exec ${command}`, beforeViewerInput, { stageIfLong: true, execInScript: true });
       if (!sent.ok) throw new EnvironmentError("environment_viewer_unconfirmed", "The native execution may have started; its viewer dispatch is unconfirmed");
       let observed: Record<string, any> | undefined;
       const deadline = Date.now() + 30_000;

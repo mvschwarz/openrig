@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { contextCommand } from "../src/commands/context.js";
@@ -21,6 +21,23 @@ vi.mock("node:fs", async (importOriginal) => {
 let root: string | undefined;
 afterEach(() => { failure.enabled = false; failure.observe = undefined; vi.unstubAllEnvs(); vi.restoreAllMocks(); process.exitCode = undefined;
   if (root) rmSync(root, { recursive: true, force: true }); root = undefined; });
+it.each(["C:notes.md", "helper\0.md"])("rejects incompatible manifest file %j before creating the local store", async relativePath => {
+  root = mkdtempSync(join(tmpdir(), "openrig-local-pack-path-"));
+  const source = join(root, "source"), library = join(root, "not-created-library"); mkdirSync(source);
+  writeFileSync(join(source, "manifest.yaml"), `name: fixture\nversion: "1"\ntaxonomy: world\nfiles:\n  - path: ${JSON.stringify(relativePath)}\n    role: reference\n`);
+  vi.stubEnv("OPENRIG_CONTEXT_ROOT", library);
+  const post = vi.fn(async () => ({ status: 200, data: { count: 1, entries: [] } }));
+  const deps = { lifecycleDeps: { exists: (p: string) => p === STATE_FILE,
+    readFile: () => JSON.stringify({ pid: process.pid, port: 7433, db: "fixture", startedAt: new Date().toISOString() }),
+    isProcessAlive: () => true, fetch: async () => ({ ok: true }) } as never,
+    clientFactory: () => ({ post }) as never };
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  await contextCommand(deps).parseAsync(["add", source], { from: "user" });
+  expect(process.exitCode).toBe(1); expect(error.mock.calls.flat().join(" ")).toContain("relative path inside the pack");
+  expect(existsSync(library)).toBe(false); expect(post).not.toHaveBeenCalled();
+  expect(readdirSync(source)).toEqual(["manifest.yaml"]);
+});
 it("does not retain a partial local pack or sync it and allows a clean retry", async () => {
   root = mkdtempSync(join(tmpdir(), "openrig-local-pack-failure-"));
   const source = join(root, "source"); const library = join(root, "library");

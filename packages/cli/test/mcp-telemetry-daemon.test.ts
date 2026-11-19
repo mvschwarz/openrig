@@ -1,8 +1,10 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 // rig_telemetry_events against the daemon's real telemetry route, over HTTP, through the real DaemonClient: the
 // page `rig telemetry events` reads, with a rig name resolved to its id as the other MCP rig tools resolve it.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type Database from "better-sqlite3";
@@ -22,19 +24,12 @@ describe("rig_telemetry_events on the daemon's telemetry route", () => {
 
   beforeEach(async () => {
     db = createDb(":memory:");
-    db.exec(eventsSchema.sql);
-    const app = new Hono();
-    app.get("/api/rigs/summary", (c) => c.json([
-      { id: "alpha-id", name: "alpha", archivedAt: null },
-      { id: "beta-id", name: "beta", archivedAt: null },
-    ]));
-    app.route("/api/telemetry", telemetryRoutes({ db: () => db, source: { hostId: null, bootEpoch: "fixture-boot" } }));
-    server = await new Promise<ServerType>((resolve) => {
-      const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
-    });
-    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    allowFetchTarget(origin);
-    const mcp = createMcpServer(new DaemonClient(origin));
+    migrate(db, ALL_MIGRATIONS);
+    fixture = createTestApp(db, { appDeps: { daemonBootEpoch: "fixture-boot" } });
+    server = await serveOwnedHonoFixture(fixture.app.fetch);
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    allowFetchTarget(url);
+    const mcp = createMcpServer(new DaemonClient(url));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "collector", version: "1.0.0" });
     await mcp.connect(serverTransport);

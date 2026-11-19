@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readWindowsFileHolders } from "./windows-file-holders.js";
 
 /** Resolve existing path components, including a dangling final symlink, while
  * preserving a not-yet-created tail. SQLite paths commonly do not exist yet at
@@ -11,7 +12,7 @@ function resolveForContainment(path: string, seen = new Set<string>()): string {
   if (seen.has(absolute)) throw new Error(`symlink cycle while resolving ${path}`);
   seen.add(absolute);
   try {
-    return realpathSync(absolute);
+    return process.platform === "win32" ? realpathSync.native(absolute) : realpathSync(absolute);
   } catch (realpathError) {
     let stat: ReturnType<typeof lstatSync>;
     try {
@@ -22,9 +23,16 @@ function resolveForContainment(path: string, seen = new Set<string>()): string {
         throw realpathError;
       }
       const parent = dirname(absolute);
-      return parent === absolute
-        ? absolute
-        : join(resolveForContainment(parent, seen), basename(absolute));
+      if (parent === absolute) return absolute;
+      const resolvedParent = resolveForContainment(parent, seen);
+      // Windows reports ENOENT, rather than ENOTDIR, for a child of a file.
+      // A missing tail is permitted only after a directory (or missing parent).
+      let parentStat: ReturnType<typeof statSync> | undefined;
+      try { parentStat = statSync(resolvedParent); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (parentStat && !parentStat.isDirectory()) throw new Error(`Database path parent is not a directory: ${resolvedParent}`);
+      return join(resolvedParent, basename(absolute));
     }
     if (stat.isSymbolicLink()) {
       const target = readlinkSync(absolute);
@@ -100,14 +108,19 @@ export async function daemonDatabaseWarnings(dbPath: string, home: string, selec
   // independently agree on the PID before a holder is described as a daemon.
   // A check that couldn't run leaves ownership unknown, which is said, never read as no conflict.
   const unverified: string[] = [];
-  const holders = await lsof(["-t", "--", db]);
+  const windows = process.platform === "win32";
+  const holders = windows ? await readWindowsFileHolders(db)
+    .then(rows => ({ stdout: rows.map(row => row.pid).join("\n") }))
+    .catch(() => ({ failure: "Windows Restart Manager file-holder query failed" })) : await lsof(["-t", "--", db]);
   if ("failure" in holders) unverified.push(holders.failure);
   const pids = "stdout" in holders ? [...new Set(holders.stdout.trim().split(/\s+/).map(Number))]
     .filter(pid => Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid).slice(0, 4) : [];
   const conflicts = await Promise.all(pids.map(async (pid): Promise<{ confirmed: string } | { unknown: string } | undefined> => {
-    const files = await lsof(["-a", "-p", String(pid), "-d", "1,2", "-Fn"]);
+    // Windows has no stdout descriptor-to-filename equivalent here. Check both
+    // known homes, but retain unknown if neither record identifies the holder.
+    const files = windows ? { failure: "Windows holder home could not be identified" } : await lsof(["-a", "-p", String(pid), "-d", "1,2", "-Fn"]);
     let unknown = "failure" in files ? `${files.failure} for pid ${pid}` : undefined;
-    const homes = new Set([dirname(db)]);
+    const homes = new Set([dirname(db), ...(windows ? [resolvedHome] : [])]);
     for (const line of "stdout" in files ? files.stdout.split("\n") : []) {
       if (line.startsWith("n") && basename(line.slice(1)) === "daemon.log") homes.add(dirname(line.slice(1)));
     }

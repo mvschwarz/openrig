@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -12,20 +12,29 @@ import { TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../../daemon/src/adapters/ke
 const { decide } = createRequire(import.meta.url)(fileURLToPath(new URL("../../daemon/assets/claude-team-permissions.cjs", import.meta.url)));
 const policy = { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK };
 let home: string;
+const windowsBash = join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe");
+const bash = process.platform === "win32" && existsSync(windowsBash) ? windowsBash : "/bin/bash";
 beforeAll(() => {
   home = mkdtempSync(join(tmpdir(), "team-permission-parser-"));
   // The shell only records argv. The real CLI parser below has inert actions;
   // neither stage contacts a daemon or performs a lifecycle operation.
-  writeFileSync(join(home, "rig"), `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2)));\n`, { mode: 0o755 });
+  writeFileSync(join(home, "receiver.cjs"), "console.log(JSON.stringify(process.argv.slice(2)));\n");
+  writeFileSync(join(home, "rig"), '#!/bin/sh\nexec "$OPENRIG_TEST_NODE" "$OPENRIG_TEST_RECEIVER" "$@"\n', { mode: 0o755 });
 });
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
 async function parse(command: string) {
-  const shell = spawnSync("/bin/bash", ["--noprofile", "--norc", "-c", command], {
+  const prefix = process.platform === "win32" ? 'export PATH="$(cygpath -u "$OPENRIG_TEST_HOME"):$PATH"; ' : "";
+  const shell = spawnSync(bash, ["--noprofile", "--norc", "-c", prefix + command], {
     encoding: "utf8", timeout: 3000,
-    env: { PATH: `${home}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home },
+    env: {
+      ...(process.platform === "win32" ? { ...process.env, HOME: home } : { PATH: `${home}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home }),
+      OPENRIG_TEST_HOME: home,
+      OPENRIG_TEST_NODE: process.execPath.replaceAll("\\", "/"),
+      OPENRIG_TEST_RECEIVER: join(home, "receiver.cjs").replaceAll("\\", "/"),
+    },
   });
-  expect(shell.status, shell.stderr).toBe(0);
+  expect(shell.status, shell.error?.message ?? shell.stderr).toBe(0);
   const program = createProgram(), calls: string[] = [];
   let output = "", error: string | undefined;
   const configure = (cmd: Command) => {

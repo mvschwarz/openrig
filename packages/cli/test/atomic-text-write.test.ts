@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
@@ -122,7 +123,7 @@ it("uses the default export writer to preserve the saved spec after a partial wr
   const server = http.createServer((req, res) => {
     res.end(req.url === "/healthz" ? "{}" : "schema_version: 1\nname: replacement\nnodes: []\n");
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
   try {
     const port = (server.address() as { port: number }).port;
     allowFetchTarget(`http://127.0.0.1:${port}`);

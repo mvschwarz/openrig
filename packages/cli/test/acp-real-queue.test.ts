@@ -1,7 +1,9 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 // rig acp against the real queue: the daemon's queueRoutes and QueueRepository over a fully migrated test DB, on
 // loopback, with the fake ACP agent. The documented permission answer runs through the real `rig queue update`.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { serve } from "@hono/node-server";
+
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { Hono } from "hono";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,7 +36,9 @@ beforeAll(async () => {
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("eventBus" as never, bus); c.set("queueRepo" as never, repo); await next(); });
   app.route("/api/queue", queueRoutes());
-  await new Promise<void>((resolve) => { server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info: { port: number }) => { port = info.port; resolve(); }); });
+  server = await serveOwnedHonoFixture(app.fetch);
+  port = (server.address() as {port:number}).port;
+  allowOwnedHttpFixture(server);
   dir = mkdtempSync(join(tmpdir(), "acp-real-queue-"));
 });
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { TmuxAdapter, TmuxPane } from "../adapters/tmux.js";
 import type { NativeResumeProbeResult } from "./native-resume-probe.js";
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 
 const GEOMETRY_TIMEOUT_MS = 250;
 
@@ -23,8 +24,9 @@ export interface NativeResumeProbeEvidence {
 export async function resumeProbeEvidence(
   probe: NativeResumeProbeResult,
   content: string,
-  tmux: Pick<TmuxAdapter, "listPanes">,
+  tmux: Pick<TmuxAdapter, "listPanes"> & Partial<Pick<TmuxAdapter, "listSessionPanes">>,
   target: string,
+  targetKind: "session" | "pane" | "auto" = "auto",
 ): Promise<NativeResumeProbeEvidence> {
   let columns: number | null = null;
   let rows: number | null = null;
@@ -33,10 +35,11 @@ export async function resumeProbeEvidence(
   try {
     // Geometry is optional: a stuck tmux read must not hold up an already-decided failure or its event.
     const panes = await Promise.race([
-      tmux.listPanes(target),
+      targetKind === "session" ? listNamedSessionPanes(tmux, target) : tmux.listPanes(target),
       new Promise<TmuxPane[]>(resolve => { timeout = setTimeout(() => resolve([]), GEOMETRY_TIMEOUT_MS); }),
     ]);
-    const pane = /^%\d+$/.test(target) ? panes.find(pane => pane.id === target) : panes.length === 1 ? panes[0] : undefined;
+    const exactPane = targetKind === "pane" || targetKind === "auto" && (/^%\d+$/.test(target) || /^psmux:[A-Za-z0-9_-]+:%\d+$/.test(target));
+    const pane = exactPane ? panes.find(pane => pane.id === target) : panes.length === 1 ? panes[0] : undefined;
     columns = dimension(pane?.width);
     rows = dimension(pane?.height);
   } catch { /* Diagnostics must not replace the original failure when geometry is unavailable. */ }

@@ -24,6 +24,7 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { platformPluginFile } from "./windows-claude-plugin-hooks.js";
 
 export interface PluginVendorFs {
   readFile(path: string): string;
@@ -165,7 +166,7 @@ export class PluginVendorService {
           const destPath = nodePath.join(targetDir, relPath);
           if (
             this.fs.exists(destPath) &&
-            hashContent(this.read(destPath)) === hashContent(this.read(srcPath))
+            hashContent(this.read(destPath)) === hashContent(platformPluginFile(pluginName, relPath, this.read(srcPath)))
           ) {
             this.preserveMode(srcPath, destPath);
           }
@@ -175,7 +176,7 @@ export class PluginVendorService {
       }
     }
 
-    const updates: Array<[string, FileContent]> = this.fs.listFiles(sourceDir).map(rel => [rel, this.read(nodePath.join(sourceDir, rel))]);
+    const updates: Array<[string, FileContent]> = this.fs.listFiles(sourceDir).map(rel => [rel, platformPluginFile(pluginName, rel, this.read(nodePath.join(sourceDir, rel)))]);
     if (!this.preserveBeforeRefresh(targetDir, updates)) return;
     this.fs.mkdirp(targetDir);
 

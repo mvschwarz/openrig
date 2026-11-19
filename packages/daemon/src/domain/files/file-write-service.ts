@@ -27,6 +27,9 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { homedir } from "node:os";
+import { createWindowsPrivateDirectory } from "../private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../windows-owned-text.js";
 import { resolveAllowedPath, type AllowlistRoot } from "./path-safety.js";
 
 export interface FileWriteRequest {
@@ -87,11 +90,9 @@ export interface FileWriteServiceOpts {
   now?: () => Date;
 }
 
-const DEFAULT_AUDIT_FILE = path.join(
-  process.env.HOME ?? process.env.USERPROFILE ?? "/tmp",
-  ".openrig",
-  "file-edit-audit.jsonl",
-);
+function defaultAuditFile(): string {
+  return path.join(process.env.HOME || process.env.USERPROFILE || homedir(), ".openrig", "file-edit-audit.jsonl");
+}
 
 export class FileWriteService {
   private readonly allowlist: AllowlistRoot[];
@@ -100,7 +101,7 @@ export class FileWriteService {
 
   constructor(opts: FileWriteServiceOpts) {
     this.allowlist = opts.allowlist;
-    this.auditFilePath = opts.auditFilePath ?? DEFAULT_AUDIT_FILE;
+    this.auditFilePath = opts.auditFilePath ?? defaultAuditFile();
     this.now = opts.now ?? (() => new Date());
   }
 
@@ -140,11 +141,16 @@ export class FileWriteService {
     // Write to temp file in the SAME directory (so atomic rename
     // works across the same filesystem). Suffix with PID + random
     // so concurrent writes don't collide.
-    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}-${path.basename(target)}`;
-    const tmpPath = path.join(path.dirname(target), tmpName);
+    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+    let tmpPath = path.join(path.dirname(target), tmpName);
+    let stagingDirectory: string | undefined;
     let tmpFd: number | null = null;
     try {
-      tmpFd = fs.openSync(tmpPath, "w");
+      if (process.platform === "win32") {
+        stagingDirectory = createWindowsPrivateDirectory(path.dirname(target));
+        tmpPath = path.join(stagingDirectory, tmpName);
+      }
+      tmpFd = fs.openSync(tmpPath, process.platform === "win32" ? "wx" : "w");
       fs.writeFileSync(tmpFd, req.content);
       // Replacing the inode must preserve the existing file's ordinary permissions.
       fs.fchmodSync(tmpFd, prevStat.mode & 0o777);
@@ -153,6 +159,7 @@ export class FileWriteService {
       // Clean up temp file if it was partially created.
       try { if (tmpFd !== null) fs.closeSync(tmpFd); } catch { /* ignore */ }
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      if (stagingDirectory) try { fs.rmdirSync(stagingDirectory); } catch { /* Retain owned staging if unavailable. */ }
       throw new FileWriteError(
         "tmp_write_failed",
         `failed to write+fsync temp file at '${tmpPath}': ${err instanceof Error ? err.message : String(err)}`,
@@ -163,17 +170,20 @@ export class FileWriteService {
     }
 
     try {
-      fs.renameSync(tmpPath, target);
+      if (process.platform === "win32") replaceWindowsFilePreservingMetadata(target, tmpPath);
+      else fs.renameSync(tmpPath, target);
     } catch (err) {
       // Best-effort cleanup of the orphan temp file. We don't try to
-      // restore the previous content because we never touched the
-      // target (rename failed atomically).
+      // retry against the original path: native replacement failures can have
+      // differing name outcomes, and this operation must not truncate it.
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
       throw new FileWriteError(
         "rename_failed",
         `failed to atomically rename '${tmpPath}' over '${target}': ${err instanceof Error ? err.message : String(err)}`,
         { target, tmpPath },
       );
+    } finally {
+      if (stagingDirectory) try { fs.rmdirSync(stagingDirectory); } catch { /* Retain owned staging if unavailable. */ }
     }
 
     // Re-stat to get the new mtime + content hash.
@@ -231,7 +241,7 @@ export class FileWriteService {
       throw new FileWriteError("target_exists", `refusing to overwrite existing file '${target}'`, { target });
     }
 
-    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}-${path.basename(target)}`;
+    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
     const tmpPath = path.join(path.dirname(target), tmpName);
     let tmpFd: number | null = null;
     try {

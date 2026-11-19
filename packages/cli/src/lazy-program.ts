@@ -66,7 +66,6 @@ export const COMMAND_LOADERS: ReadonlyMap<string, Load> = new Map<string, Load>(
   ["skill", async () => (await import("./commands/skill.js")).skillCommand()],
   ["agent-image", async () => (await import("./commands/agent-image.js")).agentImageCommand()],
   ["community-harness", async () => (await import("./commands/community-harness.js")).communityHarnessCommand()],
-  ["environment", async () => (await import("./commands/environment.js")).environmentCommand()],
   ["fork", async () => (await import("./commands/fork.js")).forkCommand()],
   ["workspace", async () => (await import("./commands/workspace.js")).workspaceCommand()],
   ["mode", async () => (await import("./commands/rig-mode.js")).rigModeCommand()],
@@ -106,6 +105,7 @@ export const COMMAND_LOADERS: ReadonlyMap<string, Load> = new Map<string, Load>(
   ["startup-proof", async () => (await import("./commands/startup-proof.js")).startupProofCommand()],
   ["scope", async () => (await import("./commands/scope.js")).scopeCommand()],
   ["proof", async () => (await import("./commands/proof.js")).proofCommand()],
+  ["environment", async () => (await import("./commands/environment.js")).environmentCommand()],
 ]);
 
 /** The program for `rig <first> …` with only what that call needs: the bare root for

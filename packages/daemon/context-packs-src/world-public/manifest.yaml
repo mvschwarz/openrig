@@ -18,6 +18,9 @@ files:
   - path: verify-world.sh
     role: verifier
     summary: "Portable named checks with loud failures and skips."
+  - path: verify-world-native.mjs
+    role: verifier
+    summary: "Native Node checks with the same failures and skips."
 atoms:
   - id: enter-the-world
     address: start-here.md

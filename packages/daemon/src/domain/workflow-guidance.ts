@@ -2,7 +2,7 @@ import { shellQuote as quote } from "../adapters/shell-quote.js";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { parse } from "yaml";
 import { parseAddress, parseMarkdownSections, resolveAddress, slugifyHeader } from "./markdown-address.js";
 import type { ContextPackLibraryService } from "./context-packs/context-pack-library-service.js";
@@ -22,6 +22,24 @@ export interface GuidanceInput {
   library?: ContextPackLibraryService;
 }
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+function sourceIdentity(file: string): string {
+  if (process.platform !== "win32") return resolve(file);
+  try { return realpathSync.native(file).toLowerCase(); }
+  catch { return resolve(file).toLowerCase(); }
+}
+function uniqueSources(files: string[]): string[] {
+  const seen = new Set<string>();
+  return files.filter(file => {
+    const identity = process.platform === "win32" ? sourceIdentity(file) : file;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+function isManifest(file: string, kind: string): boolean {
+  const name = basename(file);
+  return (process.platform === "win32" ? name.toLowerCase() : name) === kind + ".yaml";
+}
 const mapping = (value: unknown, at: string): Mapping => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Error(at + ": expected a mapping");
   return value as Mapping;
@@ -35,7 +53,7 @@ const string = (value: unknown, at: string): string => {
 export function readWorkflowGuidance(input: GuidanceInput) {
   const unknowns: string[] = [], sources: Source[] = [], stories: Array<{ address: string; text: string }> = [];
   const bound = Array.isArray(input.binding?.sources) ? input.binding.sources as Array<{kind: string; path: string; sha256: string}> : [];
-  const refs = [...new Set([...(input.contextRefs ?? []), ...bound.filter(s => s.kind !== "slice").map(s => s.path)])];
+  const refs = uniqueSources([...(input.contextRefs ?? []), ...bound.filter(s => s.kind !== "slice").map(s => s.path)]);
   const manifests: Array<{kind: string; path: string; document: Mapping}> = [];
   let components: Component[] = [], edges: Array<{from: string; to: string; when?: string}> = [];
   let selectionSource: string | null = null, catalogSource: string | null = null, catalog: Mapping | null = null;
@@ -44,7 +62,7 @@ export function readWorkflowGuidance(input: GuidanceInput) {
   let rawComponents: unknown, rawEdges: unknown = [];
   const command = "rig workflow guidance " + quote(input.instanceId) + (input.packetId ? " --packet " + quote(input.packetId) : "");
   const readManifest = (kind: string, path: string) => {
-    const text = readFileSync(path, "utf8"), sha256 = hash(text), prior = bound.find(s => resolve(s.path) === resolve(path));
+    const text = readFileSync(path, "utf8"), sha256 = hash(text), prior = bound.find(s => sourceIdentity(s.path) === sourceIdentity(path));
     sources.push({kind, path, sha256, binding: !prior ? "not-bound" : prior.sha256 === sha256 ? "matches-bound" : "differs-from-bound"});
     const document = mapping(parse(text), path);
     manifests.push({kind, path, document});
@@ -52,20 +70,20 @@ export function readWorkflowGuidance(input: GuidanceInput) {
   };
   try {
     for (const kind of ["project", "mission"]) {
-      const paths = refs.filter(ref => ref.endsWith("/" + kind + ".yaml"));
+      const paths = refs.filter(ref => isManifest(ref, kind));
       if (paths.length > 1) throw Error("Multiple " + kind + " sources; select unambiguous authored context: " + paths.join(", "));
       if (paths[0]) readManifest(kind, paths[0]);
     }
     // Bound members are membership, not the active slice. Only an explicit
     // context or a legacy slice's exact executable identity establishes it.
-    const slicePaths = refs.filter(ref => ref.endsWith("/slice.yaml"));
+    const slicePaths = refs.filter(ref => isManifest(ref, "slice"));
     if ((input.binding?.graphSource as Mapping | undefined)?.mode === "legacy-slices" && input.stepId) {
       for (const source of bound.filter(s => s.kind === "slice")) {
         const doc = mapping(parse(readFileSync(source.path, "utf8")), source.path);
-        if ((doc.metadata?.id ?? dirname(source.path).split("/").at(-1)) === input.stepId) slicePaths.push(source.path);
+        if ((doc.metadata?.id ?? basename(dirname(source.path))) === input.stepId) slicePaths.push(source.path);
       }
     }
-    const slices = [...new Set(slicePaths)];
+    const slices = uniqueSources(slicePaths);
     if (slices.length > 1) throw Error("Active slice unknown: multiple explicit slice contexts: " + slices.join(", "));
     if (slices[0]) readManifest("slice", slices[0]);
     for (const source of manifests) {

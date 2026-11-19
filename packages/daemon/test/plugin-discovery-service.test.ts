@@ -106,6 +106,20 @@ describe("PluginDiscoveryService", () => {
       expect(service.listPlugins()).toEqual([]);
     });
 
+    it("migrates an obsolete hook registry with a valid long filename", () => {
+      const lab = join(dirs.openrigPluginsDir, "openrig-lab");
+      const name = "h".repeat(230) + ".json";
+      writeClaudePluginManifest(lab, { name: "openrig-lab", version: "0.1.0", hooks: `./${name}` });
+      writeFileSync(join(lab, name), JSON.stringify({ hooks: { Stop: [{ hooks: [
+        { type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"' },
+      ] }] } }));
+      const service = new PluginDiscoveryService({ openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir, codexCacheDir: dirs.codexCacheDir, specLibraryDir: dirs.specLibraryDir });
+      expect(service.listPlugins().map(plugin => plugin.id)).toEqual(["openrig-lab"]);
+      expect(readJson(join(lab, name))).toEqual({ hooks: {} });
+      expect(readJson(join(lab, ".claude-plugin", "plugin.json"))).not.toHaveProperty("hooks");
+    });
+
     it("retires historical openrig-lab refocus registrations before duplicate validation", () => {
       const core = join(dirs.openrigPluginsDir, "openrig-core");
       const lab = join(dirs.openrigPluginsDir, "openrig-lab");
@@ -193,12 +207,17 @@ describe("PluginDiscoveryService", () => {
       writeHookManifest(core, "claude", "Stop", 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
       writeHookManifest(rogue, "claude", "Stop", 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
 
-      expect(() => new PluginDiscoveryService({
+      const construct = () => new PluginDiscoveryService({
         openrigPluginsDir: dirs.openrigPluginsDir,
         claudeCacheDir: dirs.claudeCacheDir,
         codexCacheDir: dirs.codexCacheDir,
         specLibraryDir: dirs.specLibraryDir,
-      })).toThrow(new RegExp(`${core}/hooks/claude\\.json.*${rogue}/hooks/claude\\.json`));
+      });
+      let error: unknown;
+      try { construct(); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(join(core, "hooks", "claude.json"));
+      expect((error as Error).message).toContain(join(rogue, "hooks", "claude.json"));
     });
 
     it("fails loud with both Codex manifest paths when unknown vendored plugins duplicate a hook identity", () => {
@@ -209,12 +228,17 @@ describe("PluginDiscoveryService", () => {
       writeHookManifest(core, "codex", "Stop", 'node "${PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
       writeHookManifest(rogue, "codex", "Stop", 'node "${PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
 
-      expect(() => new PluginDiscoveryService({
+      const construct = () => new PluginDiscoveryService({
         openrigPluginsDir: dirs.openrigPluginsDir,
         claudeCacheDir: dirs.claudeCacheDir,
         codexCacheDir: dirs.codexCacheDir,
         specLibraryDir: dirs.specLibraryDir,
-      })).toThrow(new RegExp(`${core}/hooks/codex\\.json.*${rogue}/hooks/codex\\.json`));
+      });
+      let error: unknown;
+      try { construct(); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(join(core, "hooks", "codex.json"));
+      expect((error as Error).message).toContain(join(rogue, "hooks", "codex.json"));
     });
 
     it("discovers a vendored OpenRig plugin (dual-manifest)", () => {

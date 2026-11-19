@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -100,7 +101,7 @@ let sshCalls: string[] = [];
 
 beforeAll(async () => {
   for (const d of [remoteD, localD]) {
-    await new Promise<void>((resolve) => { d.server.listen(0, resolve); });
+    await listenOwnedHttpFixture(d.server, {});
     d.port = (d.server.address() as { port: number }).port;
   }
 });

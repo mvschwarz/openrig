@@ -68,13 +68,29 @@ try {
     stdio: ["pipe", "pipe", "pipe"],
   });
   let err = "";
-  let signaled = false;
+  let initialized = false;
+  let stdout = "";
+  let toolReply: { result?: { content?: Array<{ text?: string }>; isError?: boolean } } | undefined;
+  const send = (message: unknown) => child.stdin.write(JSON.stringify(message) + "\n");
   const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
   child.stderr.on("data", (chunk) => {
     err += chunk;
-    if (!signaled && (err.includes("probe-ok:") || err.includes("probe-error:"))) {
-      signaled = true;
-      child.kill("SIGTERM");
+    if (!initialized && (err.includes("probe-ok:") || err.includes("probe-error:"))) {
+      initialized = true;
+      send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "owned-ipv6-test", version: "1" } } });
+    }
+  });
+  child.stdout.on("data", chunk => {
+    stdout += chunk;
+    let end: number;
+    while ((end = stdout.indexOf("\n")) !== -1) {
+      const line = stdout.slice(0, end); stdout = stdout.slice(end + 1);
+      if (!line.trim()) continue;
+      const reply = JSON.parse(line);
+      if (reply.id === 1 && reply.result) {
+        send({ jsonrpc: "2.0", method: "notifications/initialized" });
+        send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "rig_status", arguments: {} } });
+      } else if (reply.id === 2) { toolReply = reply; child.stdin.end(); }
     }
   });
   const code = await new Promise<number | null>((resolve, reject) => {
@@ -89,4 +105,6 @@ try {
   expect(code, err).toBe(0);
   expect(err).toContain("probe-ok:owned-ipv6-daemon");
   expect(err).not.toContain("probe-error:");
+  expect(toolReply?.result?.isError).not.toBe(true);
+  expect(toolReply?.result?.content?.some(item => item.text?.includes("owned-ipv6-daemon"))).toBe(true);
 });

@@ -6,6 +6,29 @@ import { computeExplorerRows, createViewState } from "../src/state.js";
 import type { FleetSnapshot } from "../src/types.js";
 
 describe("live visual regressions", () => {
+  it.each([
+    `C:\\${"long-directory\\".repeat(8)}agent\\agent.yaml`,
+    `\\\\host\\share\\${"long-directory\\".repeat(8)}agent\\agent.yaml`,
+    `/root/${"long-directory/".repeat(8)}agent/agent.yaml`,
+    `/root/${"a".repeat(100)}-agent.yaml`,
+    `/root/${"literal\\".repeat(18)}agent.yaml`,
+  ])("retains the filename when rendering a long server source: %s", (sourcePath) => {
+    const base = demoSnapshot();
+    const snap: FleetSnapshot = { ...base, specs: [{
+      name: "path-fixture", kind: "agent", sourceType: "user_file", sourcePath,
+    }] };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "spec", name: "path-fixture" });
+    const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    const sourceLine = screen.lines.find(line => line.includes("source:") && line.includes("user library"));
+    expect(sourceLine).toContain("agent.yaml");
+    expect(sourceLine).toContain("…");
+    expect(screen.lines.every(line => line.length <= 140)).toBe(true);
+    expect(screen.contentTargets).toContainEqual(expect.objectContaining({
+      action: { type: "file-open", target: { root: "", path: sourcePath } },
+    }));
+  });
+
   it("renders the approved POD/SEAT identity columns without repeating the selected rig", () => {
     const snap = demoSnapshot();
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });

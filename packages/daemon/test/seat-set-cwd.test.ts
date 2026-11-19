@@ -279,7 +279,7 @@ describe("changing an existing seat's launch directory", () => {
     const result = await service.setCwd({ seatRef: seat.sessionName, cwd: newCwd, reason: "isolate workspace" });
     expect(fs.readFileSync(targetPath, "utf8")).toBe(operatorContent);
     expect(result).toMatchObject({ ok: false, code: "cwd_destination_conflict" });
-    expect(JSON.stringify(result)).toContain(targetPath);
+    expect(JSON.stringify(result)).toContain(JSON.stringify(targetPath).slice(1, -1));
     expect(savedCwd(seat.node.id)).toBe(oldCwd);
     expect(custody()).toEqual(before);
     expect(cwdEvents()).toEqual([]);
@@ -315,7 +315,7 @@ describe("changing an existing seat's launch directory", () => {
     ]), seat.node.id);
     const result = await service.setCwd({ seatRef: seat.sessionName, cwd: newCwd, reason: "isolate workspace" });
     expect(result).toMatchObject({ ok: false, code: "cwd_destination_conflict" });
-    expect(JSON.stringify(result)).toContain(targetPath);
+    expect(JSON.stringify(result)).toContain(JSON.stringify(targetPath).slice(1, -1));
     expect(fs.existsSync(targetPath)).toBe(false);
   });
 

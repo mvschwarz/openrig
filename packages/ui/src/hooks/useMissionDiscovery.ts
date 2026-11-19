@@ -22,6 +22,7 @@
 
 import { useFilesRoots, useFilesList } from "./useFiles.js";
 import { useWorkspaceName } from "./useWorkspaceName.js";
+import { resolveScopePathToAllowlist } from "./useScopeMarkdown.js";
 
 export interface DiscoveredMission {
   /** Mission directory name (e.g., "release-0-3-0"). */
@@ -42,25 +43,6 @@ export interface UseMissionDiscoveryResult {
   hint: string | null;
 }
 
-/** Returns true when `parent` is a path-prefix of `child`, treating both as
- * absolute filesystem paths. Trailing slashes are tolerated; segment
- * boundaries enforced (so "/work" is NOT a prefix of "/workspace"). */
-function isPathPrefix(parent: string, child: string): boolean {
-  const p = parent.replace(/\/+$/, "");
-  const c = child.replace(/\/+$/, "");
-  if (c === p) return true;
-  return c.startsWith(p + "/");
-}
-
-/** Compute the relative path inside a root: child = "<root>/<rel>" → "<rel>". */
-function relativeUnder(rootPath: string, absChild: string): string {
-  const p = rootPath.replace(/\/+$/, "");
-  const c = absChild.replace(/\/+$/, "");
-  if (c === p) return "";
-  if (c.startsWith(p + "/")) return c.slice(p.length + 1);
-  return c;
-}
-
 export function useMissionDiscovery(opts?: { enabled?: boolean }): UseMissionDiscoveryResult {
   // OPR.0.4.6.MH2 guard-B1 — discovery walks the LOCAL filesystem
   // (/api/files/roots + /api/files/list). Under a remote host selection
@@ -72,31 +54,14 @@ export function useMissionDiscovery(opts?: { enabled?: boolean }): UseMissionDis
   const rootsResp = enabled ? rootsQuery.data : undefined;
 
   // Resolution: pick the best-matching root for workspace.root, if any.
-  let chosenRoot: { name: string; path: string } | null = null;
-  if (workspace.root && rootsResp && "roots" in rootsResp) {
-    // Exact match preferred.
-    const exact = rootsResp.roots.find((r) => r.path === workspace.root);
-    if (exact) {
-      chosenRoot = exact;
-    } else {
-      // Otherwise pick the deepest root that is a prefix of workspace.root
-      // (handles operator who registered ~/code as a root with workspace.root
-      // = ~/code/projects/openrig-work).
-      const prefixed = rootsResp.roots
-        .filter((r) => workspace.root && isPathPrefix(r.path, workspace.root))
-        .sort((a, b) => b.path.length - a.path.length);
-      const first = prefixed[0];
-      if (first) chosenRoot = first;
-    }
-  }
+  const resolved = workspace.root && rootsResp && "roots" in rootsResp
+    ? resolveScopePathToAllowlist(rootsResp.roots, workspace.root) : null;
+  const chosenRoot = resolved ? { name: resolved.rootName } : null;
 
   // Compute the missions/ relative path from the chosen root.
   const missionsRelPath =
-    chosenRoot && workspace.root
-      ? (() => {
-          const rel = relativeUnder(chosenRoot.path, workspace.root);
-          return rel ? `${rel}/missions` : "missions";
-        })()
+    resolved
+      ? resolved.relPath ? `${resolved.relPath}/missions` : "missions"
       : null;
 
   const listQuery = useFilesList(

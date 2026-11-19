@@ -40,6 +40,15 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  // execSync is entirely mocked: retire only captured probe homes with no real child.
+  for (const [command, options] of fixture.exec.mock.calls) {
+    const home = options?.env?.HOME;
+    if (command.includes(" -L openrig-check-") && typeof home === "string"
+      && path.basename(home).startsWith("openrig-capture-")
+      && path.resolve(path.dirname(home)).toLowerCase() === path.resolve(tmpdir()).toLowerCase()) {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
   rmSync(fixture.home, { recursive: true, force: true });
   process.exitCode = originalExit;
   vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals();
@@ -53,9 +62,16 @@ describe("doctor default executor", () => {
     const calls = fixture.exec.mock.calls as Array<[string, { timeout?: number }]>;
     // #980's capture probe runs on its own throwaway socket, and every one of its commands is bounded.
     const capture = calls.filter(([command]) => command.includes(" -L openrig-check-"));
+    const emptyConfig = process.platform === "win32" ? "NUL" : "/dev/null";
     expect(capture.map(([command]) => command.replace(/openrig-check-\d+/, "openrig-check-N"))).toEqual([
-      "tmux -L openrig-check-N -f /dev/null new-session -d -s check", "tmux -L openrig-check-N -f /dev/null kill-server"]);
+      `tmux -L openrig-check-N -f ${emptyConfig} new-session -d -s check`, `tmux -L openrig-check-N -f ${emptyConfig} kill-server`]);
     expect(capture.every(([,options]) => options.timeout === TMUX_CAPTURE_PROBE_TIMEOUT_MS)).toBe(true);
+    if (process.platform === "win32") {
+      const warning = body.checks.find((check: { name: string }) => check.name === "tmux_capture_cleanup");
+      expect(warning.status).toBe("skipped");
+      expect(warning.message).toContain("termination was not confirmed");
+      expect(warning.message).toContain("openrig-capture-");
+    }
     const prior = calls.filter(([command]) => !/^(claude|codex) /.test(command) && !command.includes(" -L openrig-check-"));
     expect(prior.some(([command]) => command === "tmux list-sessions")).toBe(true);
     expect(prior.every(([,options]) => !Object.hasOwn(options, "timeout"))).toBe(true);

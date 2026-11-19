@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -38,10 +39,10 @@ describe("PermissionDriftObserver", () => {
           comparison: "aligned",
           expected: "acceptEdits",
           observed: { defaultMode: "manual" },
-          sourcePath: "/work/project/.claude/settings.local.json",
+          sourcePath: join("/work/project", ".claude", "settings.local.json"),
         },
       });
-      expect(readFile).toHaveBeenCalledWith("/work/project/.claude/settings.local.json");
+      expect(readFile).toHaveBeenCalledWith(join("/work/project", ".claude", "settings.local.json"));
     } finally {
       db.close();
     }

@@ -94,6 +94,20 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result).toEqual({ scanned: 0, valid: 0, errors: 0, removed: 0, skipped: 0 });
   });
 
+  it.runIf(process.platform === "win32")("reconciles native folder aliases without retaining vanished rows or deleting neighbors", () => {
+    const live = join(folder, "live.yaml"), vanished = join(folder, "vanished.yaml"), outside = join(`${folder}-neighbor`, "outside.yaml");
+    writeFileSync(live, VALID_YAML);
+    cache.readThrough(live);
+    for (const sourcePath of [vanished, outside]) cache.writeDiagnostic({ sourcePath, sourceHash: "synthetic", errorMessage: "synthetic parse failure" });
+    const result = scanWorkflowSpecFolder({ db, cache, folder: folder.replaceAll("\\", "/").toUpperCase(), builtinDir: null });
+    expect(result.removed).toBe(1);
+    const remaining = cache.listAll().map(row => row.sourcePath.toLowerCase());
+    expect(remaining).toContain(live.toLowerCase());
+    expect(remaining).toContain(outside.toLowerCase());
+    expect(remaining).not.toContain(vanished.toLowerCase());
+    expect(remaining).toHaveLength(2);
+  });
+
   it("scans a valid YAML file → row in cache + scan summary 1/1/0/0", () => {
     writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
     const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });

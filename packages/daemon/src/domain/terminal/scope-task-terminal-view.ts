@@ -15,6 +15,7 @@ interface ScopeIndex { slices: Scope[]; missions: Mission[]; claims: Map<string,
 const MAX_ENTRIES = 4096, MAX_HEADER_BYTES = 16384, MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 const MAX_ROWS = 50000, MAX_TAG_BYTES = 16384, MAX_TOTAL_TAG_BYTES = 8 * 1024 * 1024;
 class ScopeLimit extends Error {}
+const realpath = (file: string): string => process.platform === "win32" ? fs.realpathSync.native(file) : fs.realpathSync(file);
 const unavailable = (error: string): ScopeViewError => ({ code: "scope_unavailable", error });
 
 /** Strict bounded identity read over the configured index roots. The review
@@ -34,13 +35,13 @@ function readScopeIndex(index: IndexContext): ScopeIndex | ScopeViewError {
     } finally { handle.closeSync(); }
   };
   const addMission = (dir: string, name: string, manifest?: string): Mission => {
-    const source = fs.realpathSync(dir), existing = missionBySource.get(source);
+    const source = realpath(dir), existing = missionBySource.get(source);
     if (existing) return existing;
     const mission = { name, source, ...(manifest ? { manifest } : {}) };
     missionBySource.set(source, mission); missions.push(mission); return mission;
   };
   const add = (dir: string, name: string, mission?: string, missionSource?: string) => {
-    const source = fs.realpathSync(dir), existing = scopeBySource.get(source);
+    const source = realpath(dir), existing = scopeBySource.get(source);
     if (existing) { if (missionSource && !existing.missionSource) { existing.mission = mission; existing.missionSource = missionSource; } return; }
     let raw = "";
     for (const file of NODE_FILE_PRECEDENCE) {
@@ -70,7 +71,7 @@ function readScopeIndex(index: IndexContext): ScopeIndex | ScopeViewError {
   try {
     for (const [position, root] of [index.slicesRoot, ...index.additionalSliceRoots].entries()) {
       let real: string;
-      try { real = fs.realpathSync(root); }
+      try { real = realpath(root); }
       catch (error) {
         // Explicit legacy compatibility roots may not exist. The primary
         // configured index and every existing root must remain readable.
@@ -243,9 +244,9 @@ export function createScopedTaskResolver(db: Database.Database, index: IndexCont
     resolve(view: string): TaskTerminalView | ScopeViewError {
       let reusable = false;
       try {
-        const primary = fs.realpathSync(index.slicesRoot);
+      const primary = realpath(index.slicesRoot);
         reusable = observed() && index.additionalSliceRoots.every(root => {
-          try { const real = fs.realpathSync(root); return real === primary || real.startsWith(primary + path.sep); }
+        try { const real = realpath(root); return real === primary || real.startsWith(primary + path.sep); }
           catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
         });
       } catch { /* Unconfirmed coverage always takes a fresh bounded read. */ }

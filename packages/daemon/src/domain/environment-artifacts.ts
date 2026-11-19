@@ -1,4 +1,6 @@
-import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { syncOwnedFilesystemPath } from "./filesystem-sync.js";
+import { ensureWindowsPrivateDirectory } from "./windows-owned-text.js";
 import { join, posix, resolve } from "node:path";
 import type { QueueRepository } from "./queue-repository.js";
 import type { QueueUpdateInput } from "./queue-repository.js";
@@ -68,6 +70,7 @@ export class EnvironmentArtifacts {
       current = resolve(current, "..");
     }
     mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+    if (process.platform === "win32") ensureWindowsPrivateDirectory(targetDir);
     const unchanged = () => {
       const now = this.platform.get(bindingId), taskNow = this.queue.getById(input.taskId);
       if (now?.generation !== input.generation || now.resource?.id !== binding.resource!.id || now.nodeId !== binding.nodeId || taskNow?.destinationSession !== binding.seat)
@@ -84,14 +87,14 @@ export class EnvironmentArtifacts {
         await this.platform.driver.download(binding, posix.join(binding.guestRoot, "work/artifacts", input.path), staged);
         this.validate(regularBytes(staged), input);
         unchanged();
-        const fd = openSync(staged, "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
+        syncOwnedFilesystemPath(staged);
         try { linkSync(staged, target); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; this.validate(regularBytes(target), input); }
       } finally { rmSync(stage, { recursive: true }); }
     }
     this.validate(regularBytes(target), input);
     unchanged();
-    const directory = openSync(targetDir, "r"); try { fsyncSync(directory); } finally { closeSync(directory); }
+    syncOwnedFilesystemPath(targetDir, true);
     const receipt: EnvironmentArtifactReceipt = { version: 1, operationId: input.operationId, bindingId, nodeId: binding.nodeId,
       generation: input.generation, taskId: input.taskId, path: target, guestPath: posix.join(binding.guestRoot, "work/artifacts", input.path),
       sha256: input.sha256, bytes: input.bytes, actor: caller.actor, identityProvenance: caller.identityProvenance, identityPrincipal: caller.identityPrincipal };

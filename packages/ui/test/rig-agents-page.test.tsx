@@ -268,7 +268,7 @@ describe("NeedsYouAccordion showApprove (slice-terminal act stays at slice altit
 describe("entry points zoom to the AGENTS altitude", () => {
   it("the shared AgentsBand footer owns the scope-anchored zoom link", async () => {
     const src = (await import("node:fs")).readFileSync(
-      "src/components/review/AgentsBandView.tsx",
+      resolve(import.meta.dirname, "../src/components/review/AgentsBandView.tsx"),
       "utf8",
     );
     expect(src).toContain('data-testid="agents-footer"');
@@ -278,7 +278,7 @@ describe("entry points zoom to the AGENTS altitude", () => {
 
   it("MissionReviewTab's board agent-count chip zooms to rig scope", async () => {
     const src = (await import("node:fs")).readFileSync(
-      "src/components/review/MissionReviewTab.tsx",
+      resolve(import.meta.dirname, "../src/components/review/MissionReviewTab.tsx"),
       "utf8",
     );
     expect(src).toContain('href="/agents"');
@@ -289,13 +289,13 @@ describe("entry points zoom to the AGENTS altitude", () => {
 
   it("the /agents route is registered but NEVER in nav chrome (drift-killer 4)", async () => {
     const src = (await import("node:fs")).readFileSync(
-      "src/routes.tsx",
+      resolve(import.meta.dirname, "../src/routes.tsx"),
       "utf8",
     );
     expect(src).toContain('path: "/agents"');
     // The nav rail lives in AppShell; the route must not appear there.
     const shell = (await import("node:fs")).readFileSync(
-      "src/components/AppShell.tsx",
+      resolve(import.meta.dirname, "../src/components/AppShell.tsx"),
       "utf8",
     );
     expect(shell).not.toContain('"/agents"');
@@ -438,3 +438,4 @@ describe("MH-5 — the FLEET band mount (v1 single mount, enumerated)", () => {
     expect(urls.some((u) => u.includes("/api/review/fleet"))).toBe(false);
   });
 });
+import { resolve } from "node:path";

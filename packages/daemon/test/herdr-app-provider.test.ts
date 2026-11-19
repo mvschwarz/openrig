@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrAppProvider, UNKNOWN_START_TTL_MS, readOnlyTile, viewerArgv } from "../src/domain/terminal/herdr-app-provider.js";
+import { HerdrAppProvider, UNKNOWN_START_TTL_MS, readOnlyTile, viewerArgv as platformViewerArgv } from "../src/domain/terminal/herdr-app-provider.js";
+const viewerArgv = (...args: Parameters<typeof platformViewerArgv>) => platformViewerArgv(args[0], args[1], args[2], "linux");
 import { tileAttachArgv } from "../src/domain/terminal/tile-attach.js";
 import { HerdrAppClientFiles } from "../src/domain/terminal/herdr-app-state.js";
 import { describeModInstall, installRigMods } from "../src/domain/terminal/herdr-app-install.js";
@@ -141,6 +142,7 @@ function makeProvider(opts: { ackTimeoutMs?: number; gateWindowMs?: number; gate
   let n = 0;
   const hc: HcRunner = Object.assign((args: string[]) => world.hc(args), opts.core ? { core: opts.core } : {});
   provider = new HerdrAppProvider({
+    platform: "linux",
     files, app: world.app(files) as never, hc, daemonInstance: "inst1", viewerCwd: join(home, "viewers"),
     ensureMods: opts.ensureMods ?? (async () => ({ ok: true })), ackTimeoutMs: opts.ackTimeoutMs ?? 300, nonce: () => `n${++n}`, now: () => world.clock,
     ...(opts.hostname ? { hostname: () => opts.hostname! } : {}),

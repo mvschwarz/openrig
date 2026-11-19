@@ -7,6 +7,10 @@
 // native code runs, then proves the binding can actually open a database.
 // The open runs in a child process so a native crash is reported, not silent.
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+
 const SUPPORTED_MAJORS = [22, 24];
 
 const box = (lines) =>
@@ -152,10 +156,10 @@ export function openInChildProcess(addonPath, spawnSync) {
 }
 
 // --- Run when executed as postinstall script ---
-const isMain =
-  process.argv[1] &&
-  (import.meta.url === `file://${process.argv[1]}` ||
-    process.argv[1].endsWith("check-abi.mjs"));
+let isMain = false;
+try {
+  isMain = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+} catch { /* Imported without an existing entry file. */ }
 
 if (isMain) {
   const { createRequire } = await import("node:module");

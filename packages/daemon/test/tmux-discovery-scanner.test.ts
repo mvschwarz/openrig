@@ -34,6 +34,17 @@ function mockAdapter(opts?: {
 }
 
 describe("TmuxDiscoveryScanner", () => {
+  it("keeps a colon-bearing session separate from its window index", async () => {
+    const name = "owned:logical", adapter = mockAdapter({ sessions: [{ name, windows: 1, created: "0", attached: false }] });
+    const listSessionWindows = vi.fn(async () => [{ index: 2, name: "owned", panes: 1, active: true }]);
+    const listSessionPanes = vi.fn(async () => [{ id: "owned-pane", index: 0, cwd: "/owned", width: 80, height: 24, active: true }]);
+    Object.assign(adapter, { listSessionWindows, listSessionPanes });
+    const result = await new TmuxDiscoveryScanner({ tmuxAdapter: adapter }).scan();
+    expect(result.panes).toMatchObject([{ tmuxSession: name, tmuxWindow: "2", tmuxPane: "owned-pane" }]);
+    expect(listSessionWindows).toHaveBeenCalledExactlyOnceWith(name);
+    expect(listSessionPanes).toHaveBeenCalledExactlyOnceWith(name, false, 2);
+    expect(adapter.listWindows).not.toHaveBeenCalled(); expect(adapter.listPanes).not.toHaveBeenCalled();
+  });
   // T1: Enumerates sessions from tmux adapter
   it("enumerates sessions and returns panes", async () => {
     const adapter = mockAdapter({

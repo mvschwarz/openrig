@@ -4,7 +4,8 @@
 //   acquire lane (non-blocking) → refuse+teach+exit-nonzero on contention (P5) → observe foreign load
 //   (advisory, recorded) → run BOTH legs (typecheck AND vitest) →
 //   write the C2 verdict (green carries the load it ran under) → release (kernel also frees on death).
-import { spawnSync, execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { snapshotGateProcesses } from "./gate-processes.mjs";
 import { writeFileSync, readFileSync, mkdirSync, realpathSync, unlinkSync, lstatSync } from "node:fs";
 import { tmpdir, loadavg } from "node:os";
 import { join, dirname, basename, isAbsolute, relative, resolve, sep } from "node:path";
@@ -28,14 +29,6 @@ function loadLedger() {
   } catch {
     return { entries: [], cutCeiling: undefined };
   }
-}
-
-function snapshotProcesses() {
-  try {
-    return execSync("ps -eo pid,comm", { encoding: "utf8" }).trim().split("\n").slice(1)
-      .map((l) => { const m = l.trim().match(/^(\d+)\s+(.*)$/); return m ? { pid: Number(m[1]), command: m[2] } : null; })
-      .filter(Boolean);
-  } catch { return []; }
 }
 
 function runGit(args, cwd) {
@@ -129,7 +122,8 @@ async function main() {
     const verdictDestination = resolveVerdictDestination(repoRoot);
     // This acquired run supersedes every earlier receipt, including for the same HEAD.
     invalidatePriorVerdict(verdictDestination.absolutePath);
-    const foreignLoad = observeForeignLoad({ loadavg: loadavg(), processes: snapshotProcesses() });
+    const observation = snapshotGateProcesses();
+    const foreignLoad = observeForeignLoad({ loadavg: process.platform === "win32" ? null : loadavg(), processes: observation.processes });
     if (foreignLoad.advisory.length) console.warn(`⚠ advisory (exit UNCHANGED, recorded in verdict): ${foreignLoad.advisory.join("; ")}`);
     // Bind the run to one clean, worktree-local candidate BEFORE the first repository mutation.
     const candidateSha = readCandidateSha(repoRoot);

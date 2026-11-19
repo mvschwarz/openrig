@@ -31,7 +31,7 @@ describe("slice 20: FilesWorkspace responsive two-pane shape", () => {
   it("/files route mounts FilesWorkspace instead of falling through to Not Found", async () => {
     const source = await readSource("src/routes.tsx");
     expect(source).toMatch(/import \{ FilesWorkspace \} from "\.\/components\/files\/FilesWorkspace\.js";/);
-    expect(source).toMatch(/path: "\/files",\n\s+component: FilesWorkspace/);
+    expect(source).toMatch(/path: "\/files",\r?\n\s+component: FilesWorkspace/);
   });
 
   it("outer container uses flex-col on mobile + sm:flex-row on desktop", async () => {

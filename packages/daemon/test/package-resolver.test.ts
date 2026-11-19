@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import path from "node:path";
 import { PackageResolver, type FsOps } from "../src/domain/package-resolver.js";
 
 const VALID_MANIFEST = `
@@ -20,12 +21,13 @@ name: test-pkg
 `;
 
 function mockFs(files: Record<string, string>): FsOps {
+  files = Object.fromEntries(Object.entries(files).map(([file, contents]) => [path.resolve(file), contents]));
   return {
     readFile: vi.fn((p: string) => {
-      if (files[p]) return files[p]!;
+      if (files[path.resolve(p)] !== undefined) return files[path.resolve(p)]!;
       throw new Error(`ENOENT: ${p}`);
     }),
-    exists: vi.fn((p: string) => p in files),
+    exists: vi.fn((p: string) => path.resolve(p) in files),
   };
 }
 
@@ -88,7 +90,7 @@ describe("PackageResolver", () => {
     const result = resolver.resolve("./my-pkg", "/home/user/code");
 
     expect(result.sourceKind).toBe("local_path");
-    expect(result.sourceRef).toBe("/home/user/code/my-pkg");
+    expect(result.sourceRef).toBe(path.resolve("/home/user/code/my-pkg"));
     expect(result.manifest.name).toBe("test-pkg");
   });
 });

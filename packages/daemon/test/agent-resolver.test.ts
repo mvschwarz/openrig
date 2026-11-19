@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import nodePath from "node:path";
+import fs from "node:fs";
+import { tmpdir } from "node:os";
 import { resolveAgentRef, type AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 
 /** Helper: create a minimal valid agent.yaml */
@@ -16,18 +19,38 @@ function validAgentYamlWithSkill(name: string, skillId: string): string {
 
 /** Mock filesystem */
 function mockFs(files: Record<string, string>): AgentResolverFsOps {
+  files = Object.fromEntries(Object.entries(files).map(([file, contents]) => [nodePath.resolve(file), contents]));
   return {
     readFile: (path: string) => {
-      if (path in files) return files[path]!;
+      if (nodePath.resolve(path) in files) return files[nodePath.resolve(path)]!;
       throw new Error(`File not found: ${path}`);
     },
-    exists: (path: string) => path in files,
+    exists: (path: string) => nodePath.resolve(path) in files,
   };
 }
 
 const RIG_ROOT = "/project/rigs/my-rig";
 
 describe("AgentSpec source resolver + import resolver", () => {
+  it.runIf(process.platform === "win32")("loads native local and drive-qualified specs with an absolute imported spec", () => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(nodePath.join(tmpdir(), "agent ref [owned] 'path-")));
+    try {
+      const base = nodePath.join(root, "base"), shared = nodePath.join(root, "shared");
+      fs.mkdirSync(base); fs.mkdirSync(shared);
+      fs.writeFileSync(nodePath.join(shared, "agent.yaml"), validAgentYaml({ name: "shared" }));
+      fs.writeFileSync(nodePath.join(base, "agent.yaml"), validAgentYaml({ imports:
+        `imports:\n  - ref: ${JSON.stringify("path:" + shared)}\n    version: "1.0.0"` }));
+      const ops = { exists: fs.existsSync, readFile: (file: string) => fs.readFileSync(file, "utf8") };
+      for (const ref of ["local:base", "path:" + base, "path:" + base.replaceAll("\\", "/")]) {
+        const result = resolveAgentRef(ref, root, ops);
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        if (!result.ok) throw Error("native resolver fixture failed");
+        expect(fs.realpathSync.native(result.resolved.sourcePath)).toBe(base);
+        expect(result.imports.map(item => item.sourcePath)).toEqual([shared]);
+        expect(result.imports[0]!.spec.name).toBe("shared");
+      }
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
   // T1: local: ref resolves relative to rig root
   it("local: ref resolves relative to rig root", () => {
     const fs = mockFs({
@@ -37,7 +60,7 @@ describe("AgentSpec source resolver + import resolver", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.resolved.spec.name).toBe("test-agent");
-      expect(result.resolved.sourcePath).toBe("/project/rigs/my-rig/agents/impl");
+      expect(result.resolved.sourcePath).toBe(nodePath.resolve("/project/rigs/my-rig/agents/impl"));
     }
   });
 

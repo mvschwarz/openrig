@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.5.3.5 recap-write atom — the outgoing occupant's write verb (the Q2
 // boundary requirement the store alone does not satisfy). Daemon-independent
 // like trace: seat dir resolves from topology.root CONFIG (slice-06 D1 layout),
@@ -10,6 +11,8 @@ import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, s
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Command } from "commander";
+import { execFileSync } from "node:child_process";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { contextCommand } from "../src/commands/context.js";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
@@ -35,6 +38,15 @@ function lifecycleDeps(port: number): LifecycleDeps {
 
 const daemonDeps = (port: number): StatusDeps => ({ lifecycleDeps: lifecycleDeps(port), clientFactory: (url) => new DaemonClient(url) });
 
+/** Change only the fixture's own directory; restore its explicit rule before cleanup. */
+function directoryWritable(dir: string, writable: boolean): void {
+  if (process.platform !== "win32") { chmodSync(dir, writable ? 0o755 : 0o555); return; }
+  const literal = "'" + dir.replaceAll("'", "''") + "'";
+  const script = `$ErrorActionPreference='Stop'; $p=${literal}; $acl=Get-Acl -LiteralPath $p; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'Write','None','None','Deny'); $acl.${writable ? "RemoveAccessRuleSpecific" : "AddAccessRule"}($rule); Set-Acl -LiteralPath $p -AclObject $acl`;
+  execFileSync(join(process.env.SystemRoot!, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    { timeout: 5000, windowsHide: true, stdio: "pipe", env: { SystemRoot: process.env.SystemRoot } });
+}
 /** No daemon state file and nothing answering: the CLI reads the daemon as stopped. */
 const noDaemon: StatusDeps = {
   lifecycleDeps: { ...lifecycleDeps(0), readFile: vi.fn(() => null), exists: vi.fn(() => false), isProcessAlive: vi.fn(() => false),
@@ -174,7 +186,7 @@ describe("rig context recap-write — the boundary write verb", () => {
       const outside = join(tmp, "outside");
       mkdirSync(rigDir, { recursive: true });
       mkdirSync(outside);
-      symlinkSync(outside, join(rigDir, "seats"));
+      symlinkSync(outside, join(rigDir, "seats"), process.platform === "win32" ? "junction" : "dir");
       const recap = join(tmp, "recap.md");
       writeFileSync(recap, "## Recent Decisions\nnone");
 
@@ -227,13 +239,14 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
         res.end(JSON.stringify({ path: "/daemon/topology/rigs/r1/seats/s1/RECAP.md", superseded: 1 }));
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     const port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
     const rigDir = join(tmp, "topology", "rigs", "r1");
     try {
       process.env["OPENRIG_TOPOLOGY_ROOT"] = join(tmp, "topology");
       mkdirSync(rigDir, { recursive: true });
-      chmodSync(rigDir, 0o555);
+      directoryWritable(rigDir, false);
       const recap = join(tmp, "recap.md");
       writeFileSync(recap, "## Recent Decisions\nchose the daemon because the seat can't write here");
 
@@ -245,10 +258,10 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
       expect(received.filter((request) => request.method === "POST")).toEqual([{ method: "POST", url: "/api/context-packs/seat-recap",
         body: { rig: "r1", seat: "s1", content: "## Recent Decisions\nchose the daemon because the seat can't write here" } }]);
       expect(res.logs.join("\n")).toBe(`Recap written: /daemon/topology/rigs/r1/seats/s1/RECAP.md (1 superseded predecessor retained), by the daemon at http://127.0.0.1:${port}`);
-      expect(res.errLogs.join("\n")).toMatch(/can't write the topology tree \(EACCES.*\), so the daemon writes the recap instead/);
+      expect(res.errLogs.join("\n")).toMatch(/can't write the topology tree \((?:EACCES|EPERM).*\), so the daemon writes the recap instead/);
       expect(existsSync(join(rigDir, "seats"))).toBe(false);
     } finally {
-      chmodSync(rigDir, 0o755);
+      directoryWritable(rigDir, true);
       await new Promise<void>((resolve) => server.close(() => resolve()));
       if (saved === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
       else process.env["OPENRIG_TOPOLOGY_ROOT"] = saved;
@@ -263,7 +276,7 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
     try {
       process.env["OPENRIG_TOPOLOGY_ROOT"] = join(tmp, "topology");
       mkdirSync(rigDir, { recursive: true });
-      chmodSync(rigDir, 0o555);
+      directoryWritable(rigDir, false);
       const recap = join(tmp, "recap.md");
       writeFileSync(recap, "## Recent Decisions\nnone");
       const post = vi.fn(async () => { throw new DaemonTimeoutError("Request to /api/context-packs/seat-recap timed out after 5000ms"); });
@@ -275,7 +288,7 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
       expect(res.exitCode).toBe(1);
       expect(res.errLogs.join("\n")).toContain("outcome is UNKNOWN");
     } finally {
-      chmodSync(rigDir, 0o755);
+      directoryWritable(rigDir, true);
       if (saved === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
       else process.env["OPENRIG_TOPOLOGY_ROOT"] = saved;
       rmSync(tmp, { recursive: true, force: true });
@@ -289,7 +302,7 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
     try {
       process.env["OPENRIG_TOPOLOGY_ROOT"] = join(tmp, "topology");
       mkdirSync(rigDir, { recursive: true });
-      chmodSync(rigDir, 0o555);
+      directoryWritable(rigDir, false);
       const recap = join(tmp, "recap.md");
       writeFileSync(recap, "## Recent Decisions\nnone");
 
@@ -299,10 +312,10 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
         { lifecycleDeps: lifecycleDeps(4242), clientFactory: (() => ({ post })) as never });
 
       expect(res.exitCode).toBe(1);
-      expect(res.errLogs[0]).toMatch(/can't write the topology tree \(EACCES.*\), so the daemon writes the recap instead/);
+      expect(res.errLogs[0]).toMatch(/can't write the topology tree \((?:EACCES|EPERM).*\), so the daemon writes the recap instead/);
       expect(res.errLogs.slice(1).join("\n")).toMatch(/ECONNREFUSED|daemon/i);
     } finally {
-      chmodSync(rigDir, 0o755);
+      directoryWritable(rigDir, true);
       if (saved === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
       else process.env["OPENRIG_TOPOLOGY_ROOT"] = saved;
       rmSync(tmp, { recursive: true, force: true });

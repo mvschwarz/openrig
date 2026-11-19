@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
 import {
   diagnoseRuntimePosture,
   observeClaudePermission,
@@ -28,7 +29,7 @@ function fsFixture(files: Record<string, string | Error>, cwdReadable: boolean |
 }
 
 const cwd = "/tmp/w3-project";
-const settingsPath = `${cwd}/.claude/settings.local.json`;
+const settingsPath = join(cwd, ".claude", "settings.local.json");
 
 describe("applied launch observations retain the emitted argument value", () => {
   it("preserves Claude permission vocabulary", () => {

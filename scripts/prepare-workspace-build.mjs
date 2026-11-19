@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -30,5 +30,18 @@ export function prepareWorkspaceBuild(root, workspace, platform = process.platfo
   for (const name of ["LICENSE", "README.md"]) copyFileSync(path.join(root, name), path.join(dir, name));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href)
-  prepareWorkspaceBuild(path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), process.argv[2]);
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); }
+catch { /* Imported without an existing entry file. */ }
+if (invokedDirectly) {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  prepareWorkspaceBuild(root, process.argv[2]);
+  if (process.argv[2] === "cli") {
+    // Derive the piped/root-help artifact from the complete command tree at
+    // build time, not a second hand-maintained command catalog at startup.
+    const { createProgram } = await import(pathToFileURL(path.join(root, "packages/cli/dist/index.js")).href);
+    let help = "";
+    createProgram().configureHelp({ helpWidth: 80 }).configureOutput({ writeOut: text => { help += text; } }).outputHelp();
+    writeFileSync(path.join(root, "packages/cli/dist/root-help.txt"), help);
+  }
+}

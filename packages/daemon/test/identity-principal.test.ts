@@ -14,6 +14,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 import { parseIdentityPrincipal, resolveRecordedIdentity } from "../src/routes/require-sender-identity.js";
 import { createTestApp } from "./helpers/test-app.js";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import { vi } from "vitest";
 import Database from "better-sqlite3";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -126,6 +127,7 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
     const server = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
     servers.push(server);
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/queue`;
+    allowFetchTarget(base);
     const post = (path: string, body: unknown, headers: Record<string, string>) =>
       fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
     const as = (seat: string, principal?: string) => ({ "X-OpenRig-Session": seat, ...(principal ? { "X-OpenRig-Principal": principal } : {}) });
@@ -193,6 +195,7 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
     const { app } = createTestApp(db, { appDeps: { sessionTransport: transport as never } });
     const server = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
     servers.push(server);
+    allowFetchTarget(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
     const send = (headers: Record<string, string>) => fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/transport/send`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@team", "X-OpenRig-Principal": ALICE, ...headers },
       body: JSON.stringify({ session: "impl@team", text: "hello" }) });

@@ -6,6 +6,39 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
+import { createPrivateTextFile } from "../src/domain/private-text-file.js";
+
+it.runIf(process.platform === "win32").each(["plan", "api-key"] as const)("native snapshot and restore retain selected account home and %s token reference", async kind => {
+  const root = mkdtempSync(path.join(tmpdir(), "native account snapshot-"));
+  const db = createFullTestDb();
+  try {
+    const { app, rigRepo, sessionRegistry, snapshotRepo } = createTestApp(db);
+    const home = path.join(root, "selected home"), tokenFile = path.join(root, "selected-token");
+    mkdirSync(home);
+    createPrivateTextFile(tokenFile, "synthetic-owned-token");
+    const rig = rigRepo.createRig("native-account-snapshot");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: root });
+    const ref = { label: "selected-plan", tokenFile, ...(kind === "api-key" ? { kind } : {}) };
+    db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ? WHERE id = ?").run(home, JSON.stringify(ref), node.id);
+    const session = sessionRegistry.registerSession(node.id, "worker@native-account-snapshot");
+    sessionRegistry.updateStatus(session.id, "running");
+    db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(session.id);
+    const down = await app.request("/api/down", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigId: rig.id, snapshot: true, force: true }) });
+    expect(down.status).toBe(200);
+    const stopped = await down.json();
+    expect(stopped.errors).toEqual([]);
+    expect(snapshotRepo.getSnapshot(stopped.snapshotId)!.data.nodes[0]).toMatchObject({ accountHome: home, claudeTokenRef: ref });
+    const up = await app.request("/api/up", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: rig.name, existing: true }) });
+    expect(up.status).toBe(200);
+    expect((await up.json()).status).toBe("restored");
+    const status = await (await app.request("/api/seat/status/worker%40native-account-snapshot")).json();
+    expect(status.runtime_home).toMatchObject({ home, source: "account-switch" });
+    expect(status.claude_token).toMatchObject({ label: ref.label, token_file: tokenFile, file: "readable" });
+    expect(JSON.stringify(status)).not.toContain("synthetic-owned-token");
+  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 it.skipIf(process.platform === "win32").each(["plan", "api-key"] as const)("down with a snapshot and existing-rig up retain the isolated home and Claude %s credential", async kind => {
   const root = mkdtempSync(path.join(tmpdir(), "account-home-snapshot-"));

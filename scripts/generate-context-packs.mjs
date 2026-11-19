@@ -32,6 +32,7 @@ import { parse as parseYaml } from "yaml";
 import { EXCLUDES as MIRROR_EXCLUDES, shipSetFromMembership } from "./mirror-skills.mjs";
 import { scanInternalLeaks, buildInternalLeakMessage } from "./internal-leak-scanner.mjs";
 import { readTermRules } from "./leak-guard-rules.mjs";
+import { createStaticContentResolver } from "./static-pack-content.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..");
@@ -235,14 +236,9 @@ function findStaticPackDirs(dir, rel = "") {
 // reference document has one source and still ships as a pack file (the copy
 // below dereferences it). Any other symlink fails the build.
 const REFERENCE_DOCS = path.join(REPO, "docs/reference");
+const staticContentPath = createStaticContentResolver({ repoRoot: REPO, sourceRoot: STATIC_SOURCE, referenceRoot: REFERENCE_DOCS });
 function isStaticContentFile(dir, entry) {
-  if (entry.isFile()) return true;
-  if (!entry.isSymbolicLink()) return false;
-  const target = fs.realpathSync(path.join(dir, entry.name));
-  if (!target.startsWith(fs.realpathSync(REFERENCE_DOCS) + path.sep) || !fs.statSync(target).isFile()) {
-    throw new Error(`static pack symlink ${path.join(dir, entry.name)} must point to a file under docs/reference/`);
-  }
-  return true;
+  return staticContentPath(path.join(dir, entry.name), entry) !== null;
 }
 
 // A static pack projects VERBATIM: the committed manifest is the authority
@@ -250,7 +246,7 @@ function isStaticContentFile(dir, entry) {
 // complete static source tree is scanned below, regardless of suffix or pack
 // membership, before any projection is written.
 function buildStaticPack(pack, version) {
-  const rawManifest = fs.readFileSync(path.join(pack.abs, "manifest.yaml"), "utf8");
+  const rawManifest = fs.readFileSync(staticContentPath(path.join(pack.abs, "manifest.yaml")), "utf8");
   const parsedManifest = parseYaml(rawManifest);
   if (parsedManifest?.taxonomy === "lore") {
     throw new Error(
@@ -271,7 +267,7 @@ function buildStaticPack(pack, version) {
     }
   };
   walk(pack.abs);
-  return { ref: pack.rel, files: contentFiles, manifestYaml: stamped, srcDir: pack.abs };
+  return { ref: pack.rel, files: contentFiles, manifestYaml: stamped, srcDir: pack.abs, staticSource: true };
 }
 
 // The source boundary is wider than the set of projected pack files: a renamed
@@ -291,7 +287,7 @@ function scanStaticSource() {
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
       const child = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(child, childRel);
-      else if (isStaticContentFile(dir, entry)) files.push({ path: childRel, bytes: fs.readFileSync(child) });
+      else if (isStaticContentFile(dir, entry)) files.push({ path: childRel, bytes: fs.readFileSync(staticContentPath(child, entry)) });
     }
   };
   walk(STATIC_SOURCE);
@@ -415,7 +411,7 @@ async function main() {
         : path.join(SOURCE, pack.ref.replace(/^skills\//, ""), rel);
       const dstAbs = path.join(packDir, rel);
       fs.mkdirSync(path.dirname(dstAbs), { recursive: true });
-      fs.copyFileSync(srcAbs, dstAbs);
+      fs.copyFileSync(pack.staticSource ? staticContentPath(srcAbs) : srcAbs, dstAbs);
     }
     fs.writeFileSync(path.join(packDir, "manifest.yaml"), pack.manifestYaml);
   }

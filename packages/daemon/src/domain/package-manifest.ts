@@ -1,4 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { win32 } from "node:path";
 
 // --- Types ---
 
@@ -230,7 +231,7 @@ export function validateManifest(raw: unknown): ValidationResult {
 
         // Derive name for uniqueness check
         const name = (g["name"] as string | undefined) ??
-          (g["source"] ? (g["source"] as string).split("/").pop()! : "");
+          (g["source"] ? win32.basename(g["source"] as string) : "");
         if (name && guidanceNames.has(name)) {
           errors.push(`Duplicate guidance name: '${name}'`);
         }
@@ -259,7 +260,7 @@ export function validateManifest(raw: unknown): ValidationResult {
           errors.push(`Agent export source must not contain path traversal; it must stay inside the package directory: '${a["source"]}'`);
         }
         const agentName = (a["name"] as string | undefined) ??
-          (a["source"] ? (a["source"] as string).replace(/\.[^.]+$/, "").split("/").pop()! : "");
+          (a["source"] ? win32.basename((a["source"] as string).replace(/\.[^.]+$/, "")) : "");
         if (agentName && agentNames.has(agentName)) {
           errors.push(`Duplicate agent name: '${agentName}'`);
         }
@@ -371,7 +372,7 @@ export function normalizeManifest(raw: unknown): PackageManifest {
 
   const guidance: GuidanceExport[] = (Array.isArray(exportsRaw["guidance"]) ? exportsRaw["guidance"] : []).map((g: Record<string, unknown>) => ({
     source: g["source"] as string,
-    name: (g["name"] as string | undefined) ?? (g["source"] as string).split("/").pop()!,
+    name: (g["name"] as string | undefined) ?? win32.basename(g["source"] as string),
     kind: g["kind"] as string,
     supportedScopes: (g["supported_scopes"] as string[] | undefined) ?? ["project_shared"],
     defaultScope: (g["default_scope"] as string | undefined) ?? "project_shared",

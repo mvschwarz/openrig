@@ -2,6 +2,7 @@
 // reads. This runs that command against loopback daemons (usage-hosts-harness.ts: the daemon's real provider and config
 // routes, scripted native readers) and checks that every field path the page names is in the served answer.
 import { readFileSync } from "node:fs";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -42,6 +43,7 @@ async function run(args: string[], hub: UsageHost): Promise<string> {
 const open: UsageHost[] = [];
 async function host(id: string, opts: UsageHostOptions = {}): Promise<UsageHost> {
   const h = await UsageHost.start(id, { now: () => NOW, routes: { usageAcrossHosts: { now: () => NOW, refreshDeadlineMs: { codex: 300 } } }, ...opts });
+  allowFetchTarget(h.url);
   open.push(h);
   return h;
 }
@@ -73,7 +75,7 @@ function present(value: unknown, path: string[]): boolean {
 }
 
 describe("keeping-a-watch: the usage warning", () => {
-  const page = readFileSync(PAGE, "utf8");
+  const page = readFileSync(PAGE, "utf8").replace(/\r\n/g, "\n");
 
   it("names the served check, and never puts --refresh in it", () => {
     expect(page).toContain(`**The check is \`${CHECK}\`.**`);

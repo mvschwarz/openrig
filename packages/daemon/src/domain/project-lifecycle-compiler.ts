@@ -175,7 +175,8 @@ export function compileProjectLifecycle(input: {
       throw manifestError("lifecycle_path_escape", `${slicePath}: composition.mission must be relative`, { slicePath, missionRef });
     }
     const resolvedMissionRef = resolve(dirname(slicePath), missionRef);
-    if (!existsSync(resolvedMissionRef) || realpathSync(resolvedMissionRef) !== realpathSync(missionPath)) {
+    const missionRealpath = process.platform === "win32" ? realpathSync.native : realpathSync;
+    if (!existsSync(resolvedMissionRef) || missionRealpath(resolvedMissionRef) !== missionRealpath(missionPath)) {
       throw manifestError("lifecycle_slice_mission_mismatch", `${slicePath}: composition.mission does not resolve to ${missionPath}`, { slicePath, missionRef, missionPath });
     }
 

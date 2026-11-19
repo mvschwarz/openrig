@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +44,10 @@ function main() {
   consumeGateVerdict({ verdictPath, headSha: readHead(root) });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+catch { /* Imported without an existing entry file. */ }
+if (invokedDirectly) {
   try {
     main();
   } catch (error) {

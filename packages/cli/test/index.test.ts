@@ -7,6 +7,10 @@ import { createProgram, isDirectRun } from "../src/index.js";
 import { CLI_VERSION } from "../src/version.js";
 
 describe("CLI entrypoint direct-run detection", () => {
+  it.runIf(process.platform === "win32")("recognizes a case alias of the actual native entry", () => {
+    const source = fileURLToPath(new URL("../src/index.ts", import.meta.url));
+    expect(isDirectRun(source.toUpperCase(), pathToFileURL(source).href)).toBe(true);
+  });
   it("treats a symlinked bin path as direct execution", () => {
     const actualPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
     const tmpDir = mkdtempSync(join(tmpdir(), "rigged-index-"));

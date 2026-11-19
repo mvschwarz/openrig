@@ -106,7 +106,7 @@ test("set sensitivity: adding or dropping a file changes the digest", () => {
   }
 });
 
-test("forgery-resistance: a delimiter/quote in a path cannot forge another honest set's digest", () => {
+test("forgery-resistance: a delimiter/quote in a path cannot forge another honest set's digest", { skip: process.platform === "win32" ? "Windows filenames cannot contain quotes or colons" : false }, () => {
   // A naive `${path}:${contentHash}` join could let a crafted path embed a sibling's boundary
   // and collide with a different, honest asset set. Canonical JSON escaping keeps them distinct.
   const honest = makeAssetTree({ "a.js": "x", "b.js": "y" });

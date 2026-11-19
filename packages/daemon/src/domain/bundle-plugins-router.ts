@@ -49,8 +49,8 @@ export interface RoutedPluginRecord {
   id: string;
   /** "routed" = directory copied; "missing" = source not in bundle; "unsafe"
    * = source or target escapes its bounding directory; "not_directory" =
-   * source path is not a directory. */
-  status: "routed" | "missing" | "unsafe" | "not_directory";
+   * source path is not a directory; "conflict" = duplicate native target. */
+  status: "routed" | "missing" | "unsafe" | "not_directory" | "conflict";
   /** Where the plugin landed in the target library (absolute path), if routed. */
   installedAt?: string;
   /** Human-readable detail. */
@@ -75,6 +75,7 @@ export function routePlugins(input: RoutePluginsInput, fs: PluginsRouterFsOps): 
   const bundleRootResolved = nodePath.resolve(input.bundleRoot);
   const targetRootResolved = nodePath.resolve(input.targetPluginsDir);
   fs.mkdirp(input.targetPluginsDir);
+  const nativeTargets = new Set<string>();
 
   for (const plugin of input.declaredPlugins) {
     if (!plugin.id || plugin.source.kind !== "local") {
@@ -121,7 +122,13 @@ export function routePlugins(input: RoutePluginsInput, fs: PluginsRouterFsOps): 
       });
       continue;
     }
+    const targetKey = targetAbs.toLowerCase();
+    if (process.platform === "win32" && nativeTargets.has(targetKey)) {
+      records.push({ id: plugin.id, status: "conflict", detail: `plugin id '${plugin.id}' collides with an earlier native target; only the first is routed` });
+      continue;
+    }
     fs.copyDir(sourceAbs, targetAbs);
+    nativeTargets.add(targetKey);
     records.push({
       id: plugin.id,
       status: "routed",

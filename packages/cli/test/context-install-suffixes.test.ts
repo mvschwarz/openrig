@@ -54,11 +54,11 @@ describe("context file dots are names unless a whole segment traverses", () => {
     } finally { rmSync(libraryRoot, { recursive: true, force: true }); }
   });
 
-  it.each(["../escape.md", "nested/../escape.md", "nested\\..\\escape.md", "/escape.md"])("retains traversal refusal for %s", (relativePath) => {
+  it.each(["../escape.md", "nested/../escape.md", "nested\\..\\escape.md", "/escape.md", "C:notes.md", "C:/notes.md", "C:\\notes.md", "helper\0.md"])("retains traversal refusal for %s", (relativePath) => {
     const root = mkdtempSync(join(tmpdir(), "context-file-traversal-"));
     try {
       const manifestPath = join(root, "manifest.yaml");
-      const raw = `name: traversal\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: '${relativePath}'\n    role: reference\n`;
+      const raw = `name: traversal\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: ${JSON.stringify(relativePath)}\n    role: reference\n`;
       writeFileSync(manifestPath, raw);
       expect(() => validateContextPackManifestForInstall(manifestPath)).toThrow(/relative path inside the pack/);
       expect(() => parseManifest(raw, manifestPath)).toThrow(/relative path inside the pack/);

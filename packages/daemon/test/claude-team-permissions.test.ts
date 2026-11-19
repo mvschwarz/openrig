@@ -7,10 +7,19 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK, operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
+import { parseLiteralLaunchWords } from "../src/adapters/windows-launch.js";
 
 const asset = fileURLToPath(new URL("../assets/claude-team-permissions.cjs", import.meta.url));
 const { decide } = createRequire(import.meta.url)(asset);
 const policy = { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK };
+function runHook(command: string, options: { input: string; encoding: "utf8" }) {
+  if (process.platform !== "win32") return spawnSync("/bin/sh", ["-c", command], options);
+  // Exercise the emitted literal Node entry/argv on native Windows. This does
+  // not emulate Claude's own hook shell selection or execute the input command.
+  const [executable, ...args] = parseLiteralLaunchWords(command);
+  expect(executable).toBe(process.execPath);
+  return spawnSync(executable!, args, { ...options, windowsHide: true, timeout: 5000 });
+}
 vi.mock("node:fs", async importOriginal => {
   const original = await importOriginal<typeof import("node:fs")>();
   return { ...original, existsSync: vi.fn(original.existsSync) };
@@ -35,7 +44,7 @@ describe("Claude kernel inspection permissions", () => {
   ])("allows a routine inspection command: %s", command => {
     const settings = JSON.parse(operationalLaunchArgs("claude-code", { kernelAuthority: true })[1]);
     const hook = settings.hooks.PreToolUse[0].hooks[0];
-    const result = spawnSync("/bin/sh", ["-c", hook.command], {
+    const result = runHook(hook.command, {
       input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, permission_mode: "acceptEdits" }), encoding: "utf8",
     });
     expect(result.status, result.stderr).toBe(0);
@@ -182,7 +191,7 @@ describe("Claude team command permissions", () => {
     const hook = settings.hooks.PreToolUse[0].hooks[0];
     expect(hook).toMatchObject({ type: "command", timeout: 5 });
     for (const [command, expected] of [["rig down --help", "allow"], ["/opt/tools/rig down example", "ask"]]) {
-      const result = spawnSync("/bin/sh", ["-c", hook.command], {
+      const result = runHook(hook.command, {
         input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, permission_mode: "acceptEdits" }), encoding: "utf8",
       });
       expect(result.status, result.stderr).toBe(0);
@@ -192,7 +201,7 @@ describe("Claude team command permissions", () => {
       expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toBeUndefined();
     }
     for (const input of ["invalid", JSON.stringify({ tool_name: "Read" }), JSON.stringify({ tool_name: "Bash", tool_input: { command: "npm install" } })]) {
-      const result = spawnSync("/bin/sh", ["-c", hook.command], { input, encoding: "utf8" });
+      const result = runHook(hook.command, { input, encoding: "utf8" });
       expect(result.status).toBe(0); expect(result.stdout).toBe("");
     }
   });
@@ -203,7 +212,7 @@ describe("Claude team command permissions", () => {
       const copy = join(dir, "hook.cjs"); copyFileSync(asset, copy);
       if (kind !== "legacy") copyFileSync(new URL("../assets/claude-permission-policies.cjs", import.meta.url), join(dir, "claude-permission-policies.cjs"));
       const argument = kind === "legacy" ? Buffer.from(JSON.stringify({ allow: ["Bash(rig:*)"], ask: ["Bash(rig down:*)"] })).toString("base64") : kind;
-      const result = spawnSync("/bin/sh", ["-c", [process.execPath, copy, argument].map(shellQuote).join(" ")], {
+      const result = runHook([process.execPath, copy, argument].map(shellQuote).join(" "), {
         input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "rig down --help" } }), encoding: "utf8",
       });
       expect(result.status, result.stderr).toBe(0);

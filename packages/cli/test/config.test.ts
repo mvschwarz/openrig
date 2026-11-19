@@ -76,9 +76,9 @@ describe("ConfigStore", () => {
     const config = store.resolve();
     expect(config.daemon.port).toBe(7433);
     expect(config.daemon.host).toBe("127.0.0.1");
-    expect(config.db.path).toContain(".openrig/openrig.sqlite");
+    expect(config.db.path).toContain(join(".openrig", "openrig.sqlite"));
     expect(config.transcripts.enabled).toBe(true);
-    expect(config.transcripts.path).toContain(".openrig/transcripts");
+    expect(config.transcripts.path).toContain(join(".openrig", "transcripts"));
   });
 
   // Test 2

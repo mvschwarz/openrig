@@ -163,6 +163,7 @@ export function routeAgentImages(
       continue;
     }
     const dirName = nodePath.basename(sourceAbs);
+    const targetKey = process.platform === "win32" ? dirName.toLowerCase() : dirName;
     const targetAbs = nodePath.resolve(input.targetAgentImagesDir, dirName);
     // Sanity check (basename is structurally safe but resolve could
     // theoretically be a no-op for "" → keep the check, expected always-
@@ -175,7 +176,7 @@ export function routeAgentImages(
       });
       continue;
     }
-    if (routedDirNames.has(dirName)) {
+    if (routedDirNames.has(targetKey)) {
       records.push({
         declaredPath: declared,
         status: "conflict",
@@ -184,7 +185,7 @@ export function routeAgentImages(
       continue;
     }
     fs.copyDir(sourceAbs, targetAbs);
-    routedDirNames.add(dirName);
+    routedDirNames.add(targetKey);
     records.push({
       declaredPath: declared,
       status: "routed",

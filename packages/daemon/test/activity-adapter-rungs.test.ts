@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { basename, join } from "node:path";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
 import {
   CLAUDE_ACTIVITY_RUNG_INVENTORY,
@@ -49,9 +52,20 @@ describe("S19 A5 — readClaudeSelfReportEvidence: the pid.json rung, undocument
   });
   const readOf = (files: Record<string, string>, throwOnList = false): ClaudeSelfReportRead => ({
     listFiles: () => { if (throwOnList) throw new Error("ENOENT"); return Object.keys(files); },
-    readFile: (p) => { const f = p.split("/").pop()!; if (f in files) return files[f]!; throw new Error("ENOENT"); },
+    readFile: (p) => { const f = basename(p); if (f in files) return files[f]!; throw new Error("ENOENT"); },
   });
   const input = (read: ClaudeSelfReportRead) => ({ sessionsDir: "/cfg/sessions", sessionName: NAME, seatNodeId: SEAT, read });
+
+  it("reads the latest matching self-report from actual native files", () => {
+    const sessionsDir = mkdtempSync(join(tmpdir(), "openrig owned activity-"));
+    try {
+      writeFileSync(join(sessionsDir, "1.json"), record({ status: "idle" }));
+      writeFileSync(join(sessionsDir, "2.json"), record({ status: "busy", statusUpdatedAt: 1_787_787_999_000 }));
+      writeFileSync(join(sessionsDir, "3.json"), record({ name: "other@fixture", status: "waiting", statusUpdatedAt: 1_787_788_999_000 }));
+      const ev = readClaudeSelfReportEvidence({ sessionsDir, sessionName: NAME, seatNodeId: SEAT });
+      expect(ev).toMatchObject({ rung: "self-report", activity: "working", seq: 1_787_787_999_000 });
+    } finally { rmSync(sessionsDir, { recursive: true, force: true }); }
+  });
 
   it("busy → working, SELF-DATED from statusUpdatedAt (evidence carries its own clock)", () => {
     const ev = readClaudeSelfReportEvidence(input(readOf({ "123.json": record({}) })))!;

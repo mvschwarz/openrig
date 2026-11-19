@@ -14,6 +14,7 @@ import {
 } from "../../hooks/useFiles.js";
 import { ToolMark } from "../graphics/RuntimeMark.js";
 import { toolBrand } from "../../lib/tool-brand.js";
+import { relativeServerPath } from "../../lib/server-path.js";
 
 export type FileKind = "markdown" | "text" | "yaml" | "json" | "image" | "binary";
 
@@ -46,24 +47,16 @@ function inferKind(path: string): FileKind {
   return "text";
 }
 
-function normalizeAbsolutePath(path: string): string {
-  return path.replaceAll("\\", "/").replace(/\/+$/, "");
-}
-
 function resolveFromAbsolutePath(
   roots: AllowlistRoot[] | undefined,
   absolutePath: string | null | undefined,
 ): ResolvedReadTarget | null {
   if (!roots || !absolutePath) return null;
-  const normalizedFile = normalizeAbsolutePath(absolutePath);
   const sortedRoots = [...roots].sort((a, b) => b.path.length - a.path.length);
   for (const root of sortedRoots) {
-    const normalizedRoot = normalizeAbsolutePath(root.path);
-    if (normalizedFile === normalizedRoot) return null;
-    const prefix = `${normalizedRoot}/`;
-    if (!normalizedFile.startsWith(prefix)) continue;
-    const relativePath = normalizedFile.slice(prefix.length);
-    if (!relativePath || relativePath.includes("../")) return null;
+    const relativePath = relativeServerPath(absolutePath, root.path);
+    if (relativePath === null) continue;
+    if (!relativePath) return null;
     return { root: root.name, path: relativePath };
   }
   return null;

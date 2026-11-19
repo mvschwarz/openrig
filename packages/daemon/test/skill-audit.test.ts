@@ -538,8 +538,8 @@ describe("skill-audit — bundled plugin skills", () => {
   it("a copy holding self-referencing directory symlinks completes and is audited like any other skill", () => {
     writePlugin({ "SKILL.md": SKILL });
     writeProjected({ "SKILL.md": SKILL, ".openrig-vendor-version": "0.1.4\n" });
-    symlinkSync(".", join(projected, "a"));
-    symlinkSync(".", join(projected, "b"));
+    symlinkSync(process.platform === "win32" ? projected : ".", join(projected, "a"), process.platform === "win32" ? "junction" : "dir");
+    symlinkSync(process.platform === "win32" ? projected : ".", join(projected, "b"), process.platform === "win32" ? "junction" : "dir");
 
     const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
     expect(result!.bundledFrom).toBeNull();
@@ -549,7 +549,7 @@ describe("skill-audit — bundled plugin skills", () => {
   it("a copy that is itself a symlink to the plugin's skill directory still counts as bundled", () => {
     writePlugin({ "SKILL.md": SKILL });
     mkdirSync(join(projected, ".."), { recursive: true });
-    symlinkSync(join(pluginsDir, "openrig-core/skills/openrig-skills"), projected);
+    symlinkSync(join(pluginsDir, "openrig-core/skills/openrig-skills"), projected, process.platform === "win32" ? "junction" : "dir");
 
     const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
     expect(result!.bundledFrom).toEqual({ plugin: "openrig-core", version: "0.1.4" });

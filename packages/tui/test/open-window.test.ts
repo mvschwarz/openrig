@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { inCmux, inRex, openTerminalInWindow, terminalWindowNotice, viewerTerminalEnv, windowProvider } from "../src/terminals/open-window.js";
+import { inCmux, inRex, openTerminalInWindow, terminalMarkerEnvironment, terminalWindowNotice, viewerTerminalEnv, windowProvider } from "../src/terminals/open-window.js";
 import { createViewState } from "../src/state.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import { parseCommand } from "../src/grammar.js";
@@ -34,6 +34,21 @@ console.log(${JSON.stringify(JSON.stringify(result))});process.exitCode=${exit};
   return { entry, calls: () => readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line)) };
 }
 const opened = { provider: "tmux", ok: true, opened: ["advisor", "operator"], absent: [], degraded: [], pages: 1 };
+
+it("canonicalizes inherited Windows terminal marker names without changing POSIX names or unrelated environment", () => {
+  const env = { Term_Program: "herdr", Herdr_Env: "1", herdr_pane_id: "pane", herdr_socket_path: "socket", rex_server: "server", cmux_surface_id: "surface", Path: "private-path" };
+  expect(terminalMarkerEnvironment(env, "win32")).toMatchObject({ TERM_PROGRAM: "herdr", HERDR_ENV: "1", HERDR_PANE_ID: "pane", HERDR_SOCKET_PATH: "socket", REX_SERVER: "server", CMUX_SURFACE_ID: "surface", Path: "private-path" });
+  expect(terminalMarkerEnvironment(env, "linux")).toBe(env);
+  expect(env).not.toHaveProperty("TERM_PROGRAM");
+});
+
+it.skipIf(process.platform !== "win32")("detects mixed-case native viewer markers and preserves Herdr pane precedence", () => {
+  expect(inRex({ Term_Program: "rex" })).toBe(true);
+  expect(inRex({ rex_session: "session", Rex_Block: "block", rex_server: "server" })).toBe(true);
+  expect(inRex({ Term_Program: "rex", herdr_env: "1", Herdr_Pane_Id: "pane", herdr_socket_path: "socket" })).toBe(false);
+  expect(inCmux({ cmux_socket_path: "socket", Cmux_Surface_Id: "surface" })).toBe(true);
+  expect(inCmux({ cmux_socket_path: "socket", Cmux_Surface_Id: "surface", Term_Program: "herdr" })).toBe(false);
+});
 
 describe("TUI desktop terminal action", () => {
   it.each(["rig", "seat"])("direct %s action reaches exact attach guidance after definite window refusal, without relaunch", async kind => {
@@ -242,11 +257,11 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
     ["with only cmux's workspace id, as the daemon's tmux keeps it", { TERM_PROGRAM: "tmux", CMUX_WORKSPACE_ID: "w" }, undefined, "herdr"],
   ] as const)("previews with the provider the window opener picks %s", async (_name, env, viewed, provider) => {
     ownEnv(env);
-    expect(await windowProvider(async () => viewed)).toBe(provider);
+    expect(await windowProvider(async () => viewed,"darwin")).toBe(provider);
     const previewed: string[] = [];
     const client = { baseUrl: "http://localhost:7433", terminalViews: async () => ({ saved: [], rigs: [] }),
       previewTerminal: async (_view: string, selected: string) => { previewed.push(selected); return null; } } as unknown as DaemonClient;
-    await readTerminals(client, "saved:kernel", () => windowProvider(async () => viewed));
+    await readTerminals(client, "saved:kernel", () => windowProvider(async () => viewed,"darwin"));
     expect(previewed).toEqual([provider]);
   });
 
@@ -270,7 +285,7 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
     const inCmuxOpen = { ...opened, provider: "cmux" };
     const f = child(inCmuxOpen);
     const viewer = vi.fn(async () => viewerMarkers);
-    expect(await openTerminalInWindow("saved:kernel", "http://selected.example:7439", f.entry, "cmux-plan", undefined, viewer)).toEqual(inCmuxOpen);
+    expect(await openTerminalInWindow("saved:kernel", "http://selected.example:7439", f.entry, "cmux-plan", undefined, viewer,"darwin")).toEqual(inCmuxOpen);
     expect(viewer).not.toHaveBeenCalled();
     expect(f.calls()).toEqual([{ url: "http://selected.example:7439",
       args: ["terminal", "open", "--provider", "cmux", "--json", "--expected-plan", "cmux-plan", "--", "saved:kernel"] }]);
@@ -282,7 +297,7 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
       error: "cmux is not connected — install cmux from https://cmux.io and run: cmux ping",
       notes: ["In a new terminal on the daemon's host, attach directly using one of these commands:", "operator: env -u TMUX tmux attach -t '=operator@kernel'"] }, 1);
     let recoveries = 0;
-    await expect(openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, () => { recoveries++; }))
+    await expect(openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, () => { recoveries++; },undefined,"darwin"))
       .rejects.toThrow(/cmux is not connected[\s\S]*"Automation mode" for Socket Control Mode[\s\S]*rig doctor[\s\S]*operator: env -u TMUX tmux attach/);
     expect(recoveries).toBe(0);
     expect(f.calls()).toHaveLength(1);
@@ -303,6 +318,17 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
     expect(inCmux({ CMUX_SURFACE_ID: "s", CMUX_WORKSPACE_ID: "w" })).toBe(false);
     expect(inCmux({ ...cmuxMarkers, TERM_PROGRAM: "herdr" })).toBe(false);
     expect(inCmux({ ...cmuxMarkers, REX_SESSION: "s", REX_BLOCK: "b", REX_SERVER: "x" })).toBe(false);
+  });
+  it.each([rexMarkers,cmuxMarkers])("uses the native Windows preview and window path despite inherited viewer markers %j",async markers=>{
+    ownEnv(markers);
+    const viewer=vi.fn(async()=>rexMarkers);
+    expect(await windowProvider(viewer,"win32")).toBe("herdr");expect(viewer).not.toHaveBeenCalled();
+    const previewed:string[]=[];
+    const client={baseUrl:"http://selected.example:7439",terminalViews:async()=>({saved:[],rigs:[]}),previewTerminal:async(_view:string,provider:string)=>{previewed.push(provider);return null;}} as unknown as DaemonClient;
+    await readTerminals(client,"saved:kernel",()=>windowProvider(viewer,"win32"));expect(previewed).toEqual(["herdr"]);
+    const f=child(opened);
+    expect(await openTerminalInWindow("saved:kernel",client.baseUrl,f.entry,"native-plan",undefined,viewer,"win32")).toEqual(opened);
+    expect(f.calls()).toEqual([{url:client.baseUrl,args:["terminal","open","--window","--json","--expected-plan","native-plan","--","saved:kernel"]}]);
   });
 });
 

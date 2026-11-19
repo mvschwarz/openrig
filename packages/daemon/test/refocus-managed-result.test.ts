@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
+import { refocusTestPython, writeRefocusNpmFixture } from "./helpers/refocus-native-fixtures.js";
 import { buildCompactCommand, buildPostCompactRestorePrompt, buildPostCompactTurnBoundaryPrompt } from "../src/domain/claude-compaction-enforcer.js";
 import { createDaemon } from "../src/startup.js";
 import { PluginVendorService } from "../src/domain/plugin-vendor-service.js";
@@ -31,18 +32,24 @@ if [ "$1 $2" = "stream emit" ]; then sleep "\${STREAM_DELAY:-0}"; printf '%s\\n'
 printf '{}'
 `);
   chmodSync(rig, 0o755);
+  if (process.platform === "win32") {
+    writeRefocusNpmFixture(bin, `const fs=require('node:fs');const a=process.argv.slice(2);
+if(a[0]==='scope'&&a[1]==='resolve-notes'){process.stdout.write(process.env.NOTES_RESULT);}
+else if(a[0]==='stream'&&a[1]==='emit'){setTimeout(()=>{fs.appendFileSync(process.env.CALLS,a.join(' ')+'\\n');},Number(process.env.STREAM_DELAY||0)*1000);}
+else process.stdout.write('{}');`);
+  }
   const transcript = join(root, "transcript.jsonl");
   writeFileSync(transcript, JSON.stringify({ sessionId: "occupant", cwd: root, message: { role: "user", content: "Continue the fixture." } }) + "\n");
   writeFileSync(join(root, "SPEC.md"), "---\nintent: Complete the selected work\n---\n");
   const notes = join(root, "NOTES.md");
   writeFileSync(notes, "Ordinary notes.\n");
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, OPENRIG_HOME: root,
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, USERPROFILE: root, OPENRIG_HOME: root,
     CLAUDE_CONFIG_DIR: join(root, ".claude"), OPENRIG_COMPACTION_OUT_ROOT: join(root, "packets"),
-    PATH: `${bin}:${process.env.PATH}`, OPENRIG_SESSION_NAME: "seat@test", RIGGED_HOME: undefined,
+    PATH: `${bin}${delimiter}${process.env.PATH}`, OPENRIG_SESSION_NAME: "seat@test", RIGGED_HOME: undefined,
     OPENRIG_REFOCUS_ENABLED: "1", OPENRIG_REFOCUS_NOW: "", OPENRIG_REFOCUS_BYTES: "2600000",
     OPENRIG_REFOCUS_CONTENT_REF: "", OPENRIG_REFOCUS_CONTENT_FILE: "", OPENRIG_REFOCUS_TREES: "work",
     OPENRIG_WORKSPACE_ROOT: root, OPENRIG_REFOCUS_WORK_NODE: root, OPENRIG_REFOCUS_DEPTH: "light",
-    PYTHON: "python3", CALLS: calls, NOTES_RESULT: JSON.stringify({ ok: true, resolution: { path: notes, name: "NOTES.md" } }),
+    PYTHON: refocusTestPython(), CALLS: calls, NOTES_RESULT: JSON.stringify({ ok: true, resolution: { path: notes, name: "NOTES.md" } }),
   };
   const invoke = (script: string, input: object, extra: NodeJS.ProcessEnv = {}) => {
     const result = spawnSync(process.execPath, [script], {
@@ -182,7 +189,7 @@ describe("managed refocus and trace results", () => {
   it("check mode reports actual trace failure without changing standalone rendered output", () => {
     const f = fixture();
     const script = join(plugin, "skills/refocusing/scripts/trace-to-root.py");
-    const run = (check: boolean) => spawnSync("python3", [script, "--trees", "work", ...(check ? ["--check"] : [])], {
+    const run = (check: boolean) => spawnSync(f.env.PYTHON!, [script, "--trees", "work", ...(check ? ["--check"] : [])], {
       env: { ...f.env, OPENRIG_REFOCUS_WORK_NODE: resolve(f.root, "..") }, encoding: "utf8", timeout: 5_000,
     });
     const plain = run(false), checked = run(true);

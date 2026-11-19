@@ -1,3 +1,4 @@
+import { herdrAppSocketPath } from "@openrig/daemon/windows-launch";
 import type { DaemonClient } from "../daemon-client.js";
 import { windowTarget, type WindowTarget } from "./open-window.js";
 import type { ExplorerRow, FleetSnapshot, ViewState } from "../types.js";
@@ -24,7 +25,7 @@ export interface TerminalPreview {
   composed: {
     id: string;
     rigName?: string;
-    pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string }>>;
+    pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string; recoveryShell?: "powershell" | "sh" }>>;
     opened: Array<{ seat: string }>;
     absent: Array<{ seat: string; reason: string }>;
     degraded: Array<{ seat: string; reason: string }>;
@@ -154,7 +155,7 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
       // The view opens in the herdr-app window this TUI runs in: no desktop window, no attach-by-hand recipe.
       lines.push({ text: "Opens here: a new Rig view in this herdr-app window, beside your tabs, switched from the strip above them. Nothing needs a desktop display or SSH. Existing conversations stay in place." });
     } else {
-      const socketPath = preview.status.launch?.socketPath ?? (preview.herdrApp?.appHome ? `${preview.herdrApp.appHome}/herdr-app.sock` : "herdr-app.sock");
+      const socketPath = preview.status.launch?.socketPath ?? (preview.herdrApp?.appHome ? herdrAppSocketPath(preview.herdrApp.appHome) : "herdr-app.sock");
       lines.push({ text: `herdr-app is not answering at ${socketPath} (the socket file exists, but nothing replied). Nothing will open from here. Start herdr-app, or run \`rig terminal open ${preview.view} --window\` for a desktop window.` });
     }
   } else if (page.length) {
@@ -165,7 +166,8 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
     for (const member of page) {
       // Current SSH commands already request a TTY; older daemons may omit it.
       const command = (member.recoveryCommand ?? member.paneCommand).replace(/^ssh (?!-t(?:\s|$))/, "ssh -t ");
-      lines.push({ text: `${member.label} · ${member.seat}` }, { text: `env -u TMUX ${command}` });
+      const reset = member.recoveryShell === "powershell" ? "Remove-Item Env:TMUX -ErrorAction SilentlyContinue; " : "env -u TMUX ";
+      lines.push({ text: `${member.label} · ${member.seat}` }, { text: `${reset}${command}` });
     }
   }
   return wrapDetailLines(lines, width);

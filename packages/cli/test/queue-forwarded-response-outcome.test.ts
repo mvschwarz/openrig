@@ -1,8 +1,10 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import { Command } from "commander";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { DaemonClient } from "../src/client.js";
 import { queueCommand, type QueueDeps } from "../src/commands/queue.js";
 import { queueRoutes } from "../../daemon/src/routes/queue.js";
@@ -40,10 +42,10 @@ describe("forwarded queue response outcomes reach the CLI", () => {
         res.end(JSON.stringify(mode === "success" ? { qitemId: requests[0]!.body.qitemId } : { error: "qitem_id_reuse" }));
       }
     });
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
+    await listenOwnedHttpFixture(server);
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("missing fixture address");
+    allowFetchTarget(`http://127.0.0.1:${address.port}`);
     const app = new Hono();
     app.use("*", async (c, next) => {
       (c.set as (key: string, value: unknown) => void)("hostRegistryLoader", () => ({
@@ -81,7 +83,8 @@ describe("forwarded queue response outcomes reach the CLI", () => {
     expect(stderr).toContain(`Queue create request ID: ${id}`);
     expect(stderr).toContain("not proof of persistence");
     expect(stderr).toContain("destination host 'edge'");
-    expect(stderr).toContain(`OPENRIG_URL='<destination-daemon-url>' rig queue show '${id}' --full --json`);
+    expect(stderr).toContain(`rig queue show '${id}' --full --json`);
+    expect(stderr).toContain(process.platform === "win32" ? "$env:OPENRIG_URL = '<destination-daemon-url>'" : "OPENRIG_URL='<destination-daemon-url>'");
     expect(stderr).not.toContain("--full --json on destination host");
     if (mode === "interrupted") {
       expect(response).toMatchObject({ error: "remote_queue_write_failed", hostId: "edge", remoteStatus: 201, outcome: "indeterminate" });

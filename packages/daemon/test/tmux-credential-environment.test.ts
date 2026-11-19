@@ -29,7 +29,11 @@ for (const transport of ["argv", "legacy"] as const) {
       if (scoped) {
         // source-file hides the tmux client's inputs, but the nested shell argv must be safe too.
         const plan = await (a as unknown as { scopedLaunchCommand(env: Record<string, string>, command: string): Promise<string[] | null> }).scopedLaunchCommand(env, "/bin/sh");
+        // This checks generated arguments, not the availability of /bin/bash.
+        // Windows now supports the same Bash command switch through a private loader.
+        expect(plan).not.toBeNull();
         expect(plan?.some(arg => Object.values(credentials).some(value => arg.includes(value)))).toBe(false);
+        if (process.platform === "win32") expect(plan).toContain("-EncodedCommand");
       }
       expect([...writes.values()].some(content => content.includes(credentials.OPENRIG_ACTIVITY_HOOK_TOKEN))).toBe(true);
       for (const call of files.writeFile.mock.calls) expect(call[2]).toEqual({ mode: 0o600, flag: "wx" });

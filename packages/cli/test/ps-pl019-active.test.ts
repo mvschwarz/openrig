@@ -1,9 +1,11 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // PL-019 item 1: --filter agentActivity.state=<state> + --active sugar.
 // Focused tests; the existing ps.test.ts covers the broader filter
 // machinery surface. We mirror its mock-daemon harness so this stays
 // independent of any other slice in flight.
 
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import http from "node:http";
 import { Command } from "commander";
 import { psCommand } from "../src/commands/ps.js";
@@ -175,12 +177,14 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
         res.end();
       }
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => {
-    server.close();
+  beforeEach(() => { allowFetchTarget(`http://127.0.0.1:${port}`); });
+
+  afterAll(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
     if (savedSessionName !== undefined) process.env.OPENRIG_SESSION_NAME = savedSessionName;
   });
 

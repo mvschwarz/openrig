@@ -278,6 +278,24 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(f.windowDeps.launch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {term_program:'herdr',herdr_socket_path:'/daemon home/herdr.sock'},
+    {term_program:'tmux',herdr_env:'1',herdr_pane_id:'owned-pane',herdr_socket_path:'/daemon home/herdr.sock'},
+  ])("keeps a native current-Herdr preview on its endpoint instead of opening Windows Terminal %j",async env=>{
+    const f=fixture();f.windowDeps.platform='win32';f.windowDeps.env=env;
+    const original=f.exec.getMockImplementation()!;
+    f.exec.mockImplementation(async(file,args)=>{
+      if(file.endsWith('\\where.exe')){expect(args).toEqual(['herdr.exe']);return 'C:\\fixture\\herdr.exe';}
+      if(file==='C:\\fixture\\herdr.exe'&&args.includes('--version'))return 'herdr 0.9.5';
+      return original(file,args);
+    });
+    await f.run(['--json','--expected-plan','different-plan']);
+    expect(JSON.parse(logs[0]!)).toMatchObject({ok:false,provider:'herdr',error:expect.stringContaining('changed since preview')});
+    expect(f.get.mock.calls.some(([url])=>url.includes('provider=herdr'))).toBe(true);
+    expect(f.exec.mock.calls.some(([,args])=>args.includes('wt.exe'))).toBe(false);
+    expect(f.windowDeps.launch).not.toHaveBeenCalled();expect(f.windowDeps.herdrConfig).not.toHaveBeenCalled();expect(f.post).not.toHaveBeenCalled();
+  });
+
   it("keeps an uncertain current-Herdr focus from creating or launching a replacement", async () => {
     const f = fixture([{ workspace_id: "existing", tab_id: "first", label: label() }]);
     f.windowDeps.env = { TERM_PROGRAM: "herdr", HERDR_SOCKET_PATH: "/daemon home/herdr.sock" };

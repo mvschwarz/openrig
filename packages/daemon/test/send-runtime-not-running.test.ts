@@ -124,6 +124,31 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     return { ...ports, node, session, listProcesses, transport: new SessionTransport(deps) };
   }
 
+  it.each(['powershell.exe', 'pwsh.exe', 'cmd.exe'])('native Codex %s host without a provider remains unverified', async host => {
+    const { transport, tmux, sendText, sendKeys } = wrappedSeat(vi.fn(async () => []));
+    Object.defineProperty(tmux, 'isNativeWindows', { value: true });
+    tmux.getPaneCommand = async () => host;
+    expect(await watchdogSend(transport, 'dev-check@my-rig')).toMatchObject({ ok: false, sent: false, reason: 'target_runtime_unverified' });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it('native Windows Codex receives input when its host label resolves to verified provider foreground', async () => {
+    const startedAt = '2026-10-30T10:00:00.000Z';
+    const exe = 'C:/fixture/codex.exe', shell = 'C:/fixture/powershell.exe';
+    const rows: NativeProcessRow[] = [
+      { platform: 'win32', pid: 1135, ppid: 1, executableName: 'powershell.exe', executablePath: shell, command: shell, startedAt },
+      { platform: 'win32', pid: 1205, ppid: 1135, executableName: 'codex.exe', executablePath: exe,
+        argv: [exe, 'resume', nativeToken], command: `${exe} resume ${nativeToken}`, startedAt },
+    ];
+    const { transport, tmux, sendText } = wrappedSeat(vi.fn(async () => rows));
+    Object.defineProperty(tmux, 'isNativeWindows', { value: true });
+    let reads = 0;
+    tmux.getPaneCommand = async () => ++reads === 1 ? 'powershell.exe' : 'codex.exe';
+    expect((await watchdogSend(transport, 'dev-check@my-rig')).ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+  });
+
   it.each(["ordinary verified send", "queue nudge", "watchdog wake"])("wrapped native Codex receives %s", async kind => {
     const { transport, sendText, sendKeys, listProcesses } = wrappedSeat();
     const result = kind === "watchdog wake"

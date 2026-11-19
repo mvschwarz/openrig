@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { replaceScopeFile } from "./replace-file.js";
 
 const SCHEMA = "openrig.slice-claim/v1";
 interface SliceClaim { schema: typeof SCHEMA; ref: string; state: "pending" | "verified" }
@@ -69,7 +70,7 @@ export function markSliceRegistrationsVerified(missionPath: string, refs: string
     const temporary = `${file}.${process.pid}-${randomUUID()}.tmp`;
     try {
       fs.writeFileSync(temporary, JSON.stringify({ ...claim, state: "verified" }) + "\n", { flag: "wx" });
-      fs.renameSync(temporary, file);
+      replaceScopeFile(temporary, file);
     } finally {
       fs.rmSync(temporary, { force: true });
     }

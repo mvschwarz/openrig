@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb } from "../src/db/connection.js";
@@ -52,6 +52,26 @@ execution:
     const queue = new QueueRepository(db, bus, { validateRig: () => true });
     return { db, runtime: new WorkflowRuntime({ db, eventBus: bus, queueRepo: queue }) };
   }
+
+  it.runIf(process.platform === "win32")("accepts a slice's differently cased reference to its actual mission", () => {
+    writeFileSync(join(missionDir, "slices", "01-build", "slice.yaml"), `schema: openrig.slice/v0alpha1
+kind: slice
+metadata: { id: build }
+composition: { mission: ../../MISSION.YAML }
+execution:
+  actor_role: builder
+  preferred_targets: [builder@rig]
+  allowed_exits: [done, failed]
+`);
+    const subject = runtime();
+    try {
+      expect(subject.runtime.compileLifecycle(missionDir, "owned-native-operation")).toMatchObject({ eligible: true });
+      writeFileSync(join(missionDir, "other.yaml"), "kind: mission\n");
+      const slice = join(missionDir, "slices", "01-build", "slice.yaml");
+      writeFileSync(slice, readFileSync(slice, "utf8").replace("../../MISSION.YAML", "../../other.yaml"));
+      expect(() => subject.runtime.compileLifecycle(missionDir, "owned-native-operation")).toThrow("composition.mission does not resolve");
+    } finally { subject.db.close(); }
+  });
 
   it("keeps a missing project manifest a structured lifecycle 404", async () => {
     rmSync(join(root, "project.yaml"));
@@ -150,7 +170,7 @@ composition: { mission: ../../mission.yaml }
     const result = subject.runtime.compileLifecycle(missionDir, "release-op");
     expect(result.eligible).toBe(false);
     expect(result.workflowSpec).toBeNull();
-    expect(result.unknowns).toContain("slices/01-build/slice.yaml: execution contract missing");
+    expect(result.unknowns).toContain(`${join("slices", "01-build", "slice.yaml")}: execution contract missing`);
     subject.db.close();
   });
 

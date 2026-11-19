@@ -1,3 +1,4 @@
+import { listNamedSessionWindows, listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 
 /** A single pane observed during a scan */
@@ -36,16 +37,11 @@ export class TmuxDiscoveryScanner {
     const sessions = await this.tmux.listSessions();
 
     for (const session of sessions) {
-      // tmux reads a leading "=" in a target as "match this session name
-      // exactly", so a session literally named "=lit" must be addressed as
-      // "==lit". Prefixing every lookup keeps the name exact and literal:
-      // "lit" -> "=lit", "=lit" -> "==lit".
-      const exactSession = `=${session.name}`;
-      const windows = await this.tmux.listWindows(exactSession);
+      // Keep session identity separate from the selected window index.
+      const windows = await listNamedSessionWindows(this.tmux, session.name, true);
 
       for (const window of windows) {
-        const target = `${exactSession}:${window.index}`;
-        const tmuxPanes = await this.tmux.listPanes(target);
+        const tmuxPanes = await listNamedSessionPanes(this.tmux, session.name, false, window.index);
 
         for (const pane of tmuxPanes) {
           let pid: number | null = null;

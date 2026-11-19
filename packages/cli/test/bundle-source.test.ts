@@ -236,6 +236,16 @@ describe("GitHub bundle source", () => {
     try { await bundleGit(root, ["not-a-command-SECRET"]); } catch (error) { expect(String(error)).not.toContain("SECRET"); }
   });
 
+  it("removes case-variant Git configuration from the actual child environment", async () => {
+    vi.stubEnv("gIt_CoNfIg_CoUnT", "not-a-number");
+    try {
+      if (process.platform === "win32") {
+        expect(() => execFileSync("git", ["config", "--list"], { cwd: root, stdio: "pipe" })).toThrow();
+      }
+      expect(await bundleGit(root, ["config", "--global", "--list"])).toBe("");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("names a missing git executable without exposing process details", async () => {
     vi.stubEnv("PATH", root);
     try { await expect(bundleGit(root, ["--version"])).rejects.toThrow("git is required for GitHub links."); }

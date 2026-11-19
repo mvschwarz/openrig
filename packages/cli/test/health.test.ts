@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
@@ -146,7 +147,7 @@ describe("rig health — daemon-backed read-only projection", () => {
           evaluated: 200, omitted: 434, partial: true, order: "most queue transitions in the observation window, then lineage ID" }] } : LIST));
       }
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

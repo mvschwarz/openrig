@@ -1,0 +1,327 @@
+import { createReadStream } from "node:fs";
+import { chmod, lstat, lutimes, stat, mkdir, open, readdir, readlink, rename, rmdir, symlink, unlink, utimes } from "node:fs/promises";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
+import { SftpClient, type SftpAttrs } from "./sftp-protocol.js";
+import { looksLikePermissionGate } from "../cross-host-executor.js";
+import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
+import { moveLocalEntryNoReplace } from './local-entry-move.js';
+import { spawnWindowsJobProcess } from "@openrig/daemon/windows-launch";
+import { readWindowsEntryTimes } from "@openrig/daemon/windows-owned-files";
+
+interface Endpoint {
+  paths: typeof path.posix;
+  stat(file: string): Promise<SftpAttrs | undefined>;
+  followsDirectory(file: string): Promise<boolean | undefined>;
+  names(file: string): Promise<string[]>;
+  link(file: string): Promise<string>;
+  mkdir(file: string): Promise<void>;
+  rmdir(file: string): Promise<void>;
+  remove(file: string): Promise<void>;
+  symlink(target: string, file: string, directory?: boolean): Promise<void>;
+  read(file: string): AsyncIterable<Buffer>;
+  write(file: string, data: AsyncIterable<Buffer>, metadata?: SftpAttrs): Promise<void>;
+  times(file: string, attrs: SftpAttrs): Promise<void>;
+  linkTimes?(file: string, attrs: SftpAttrs): Promise<void>;
+  rename(src: string, dst: string, replacing: boolean): Promise<void>;
+}
+const local: Endpoint = {
+  paths: path,
+  async stat(file) {
+    try { const s = await lstat(file); return { size: s.size, mode: s.mode, ...(process.platform === "win32" ? readWindowsEntryTimes(file, s) : { uid:s.uid,gid:s.gid,atime: Math.floor(s.atimeMs / 1000), mtime: Math.floor(s.mtimeMs / 1000) }) }; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  },
+  names: readdir, link: readlink,
+  async followsDirectory(file) { try { return (await stat(file)).isDirectory(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } },
+  async mkdir(file) { await mkdir(file, { mode: 0o700 }); },
+  rmdir,
+  remove: unlink,
+  async symlink(target, file, directory) { await symlink(target, file, directory ? "dir" : "file"); },
+  read: file => createReadStream(file),
+  async write(file, data) {
+    const handle = await open(file, "wx", 0o600);
+    try {
+      for await (const chunk of data) {
+        let offset = 0;
+        while (offset < chunk.length) {
+          const { bytesWritten } = await handle.write(chunk, offset, chunk.length - offset);
+          if (!bytesWritten) throw new Error("Local copy made no write progress");
+          offset += bytesWritten;
+        }
+      }
+    } finally { await handle.close(); }
+  },
+  async times(file, attrs) {
+    if (attrs.atime !== undefined && attrs.mtime !== undefined) await utimes(file, attrs.atime, attrs.mtime);
+    // Windows chmod preserves the representable read-only/writeable attribute;
+    // it cannot install POSIX owner/group/execute permissions or replace a DACL.
+    // A Windows directory readonly attribute is Explorer customization state,
+    // not directory write permission. Do not pretend chmod can enforce it.
+    if (attrs.mode !== undefined && !(process.platform === "win32" && kind(attrs) === 0o040000)) await chmod(file, attrs.mode & 0o7777);
+  },
+  async linkTimes(file, attrs) {
+    // Never use SETSTAT/utimes for links: those follow the referent.
+    if (attrs.atime !== undefined && attrs.mtime !== undefined) await lutimes(file, attrs.atime, attrs.mtime);
+  },
+  async rename(src, dst, replacing) {
+    if(!replacing){
+      try { await moveLocalEntryNoReplace(src,dst); }
+      catch(error){throw Object.assign(error as Error,{path:dst,syscall:'rename'});}
+      return;
+    }
+    if (process.platform === "win32" && replacing && kind(await local.stat(src)) === 0o100000 && kind(await local.stat(dst)) === 0o100000) {
+      try { replaceWindowsCopiedFile(dst, src); }
+      catch (error) { throw Object.assign(error as Error, {path: dst, syscall: "replace"}); }
+    }
+    else await rename(src, dst);
+  },
+};
+const kind = (attrs: SftpAttrs | undefined) => (attrs?.mode ?? 0) & 0o170000;
+const windowsSftpAliasesName = (name: string) => /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
+
+export function buildSftpArgv(plan: CopyPlan): string[] {
+  const remote = plan.src.kind === "remote" ? plan.src : plan.dst;
+  if (!remote.host) throw new Error("SFTP requires one remote endpoint");
+  return ["-o", "ConnectTimeout=10", ...(remote.host.user ? ["-l", remote.host.user] : []), "-s", "--", remote.host.target, "sftp"];
+}
+
+/** Native OpenSSH subsystem transport. Never invokes a local or remote shell. */
+export function spawnSftpTransport(file: string, argv: string[]): ChildProcessWithoutNullStreams {
+  return (process.platform === "win32"
+    ? spawnWindowsJobProcess(file, argv, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true })
+    : spawn(file, argv, { stdio: "pipe", windowsHide: true })) as ChildProcessWithoutNullStreams;
+}
+
+export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) => ChildProcessWithoutNullStreams = argv => spawnSftpTransport("ssh", argv)): Promise<FileCopyResult> {
+  const remotePlan = plan.src.kind === "remote" ? plan.src : plan.dst;
+  const windowsRemote = remotePlan.host?.remoteShell === "powershell" || /^\/?[A-Za-z]:[\\/]/.test(remotePlan.path);
+  let client: SftpClient | undefined;
+  let stderr = "", staged: string | undefined, filesTransferred = 0, bytesTransferred = 0;
+  let spawnError: NodeJS.ErrnoException | undefined;
+  let transportExit: number | null = null;
+  let directoryReplacementAttempted = false;
+  let retainedOriginal: string | undefined;
+  let originalConfirmed = false;
+  let originalMoveAttempted = false;
+  const changes: string[] = [];
+  try {
+    if (windowsRemote && remotePlan.path.split(/[\\/]/).some(name => name !== "." && name !== ".." && windowsSftpAliasesName(name))) {
+      throw new Error(`Unqualified Windows SFTP path: ${JSON.stringify(remotePlan.path)}`);
+    }
+    const child = start(buildSftpArgv(plan));
+    child.once("error", (error: NodeJS.ErrnoException) => { spawnError = error; });
+    child.once("exit", code => { transportExit = code; });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (text: string) => { stderr = (stderr + text).slice(-65536); });
+    client = new SftpClient(child);
+    await client.ready;
+    const remote: Endpoint = {
+      paths: path.posix, stat: file => client!.lstat(file), names: file => client!.readdir(file),
+      followsDirectory: async file => { const attrs=await client!.stat(file); return attrs ? kind(attrs) === 0o040000 : undefined; },
+      link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), rmdir: file => client!.rmdir(file), remove: file => client!.remove(file), symlink: (target, file) => client!.symlink(target, file),
+      read: file => client!.read(file), write: (file, data, metadata) => client!.write(file, data, metadata, windowsRemote ? 0o200 : 0o7777),
+      times: async (file, attrs) => {
+        if (kind(attrs) === 0o040000 && kind(await client!.lstat(file)) !== 0o040000) throw new Error(`SFTP directory metadata target changed: ${file}`);
+        await client!.setTimes(file, attrs);
+        if (kind(attrs) === 0o040000) {
+          const verified = await client!.lstat(file);
+          if (kind(verified) !== 0o040000
+            || !windowsRemote && attrs.mode !== undefined && (verified!.mode! & 0o7777) !== (attrs.mode & 0o7777)
+            || attrs.atime !== undefined && attrs.mtime !== undefined && (verified?.atime !== attrs.atime || verified.mtime !== attrs.mtime)) {
+            throw new Error(`SFTP directory metadata was not preserved: ${file}`);
+          }
+        }
+      }, rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
+      ...(client.extensionVersions.get("lsetstat@openssh.com") === "1"
+        ? { linkTimes: (file: string, attrs: SftpAttrs) => client!.setLinkTimes(file, attrs) } : {}),
+    };
+    const source = plan.src.kind === "local" ? local : remote;
+    const destination = plan.dst.kind === "local" ? local : remote;
+    const copy = async (src: string, dst: string): Promise<void> => {
+      const attrs = await source.stat(src), existing = await destination.stat(dst);
+      if (!attrs) throw new Error(`Source not found: ${src}`);
+      if (kind(attrs) === 0o040000) {
+        if (existing && kind(existing) !== 0o040000) {
+          if (kind(existing) !== 0o100000 && kind(existing) !== 0o120000) throw new Error(`Unsupported destination type: ${dst}`);
+          const directoryStage = destination.paths.join(destination.paths.dirname(dst), `.openrig-copy-${randomUUID()}`);
+          const firstChange = changes.length;
+          try { await copy(src, directoryStage); }
+          catch (error) { staged ??= directoryStage; throw error; }
+          for (let i = firstChange; i < changes.length; i++) changes[i] = changes[i]!.replace(directoryStage, dst);
+          if (plan.dryRun) return;
+          staged = directoryStage;
+          const original = destination.paths.join(destination.paths.dirname(dst), `.openrig-replaced-${randomUUID()}`);
+          originalMoveAttempted = true;
+          retainedOriginal = original; originalConfirmed = false;
+          await destination.rename(dst, original, false); originalConfirmed = true;
+          try { await destination.rename(directoryStage, dst, false); staged = undefined; }
+          catch (error) {
+            originalConfirmed = false;
+            try { await destination.rename(original, dst, false); retainedOriginal = undefined; }
+            catch (restore) { throw new AggregateError([error, restore], `Directory replacement failed and original recovery is unconfirmed: ${dst}`); }
+            throw error;
+          }
+          originalConfirmed = false;
+          try { await destination.remove(original); }
+          catch (error) {
+            // Windows OpenSSH uses RMDIR for directory links. Both operations
+            // are nonrecursive; POSIX unlink succeeds before this fallback.
+            if (kind(existing) !== 0o120000) throw error;
+            try { await destination.rmdir(original); }
+            catch (cleanup) { throw new AggregateError([error, cleanup], `Original link cleanup is unconfirmed: ${original}`); }
+          }
+          retainedOriginal = undefined;
+          return;
+        }
+        // Windows stat's directory 0666/0444 bits are not POSIX traversal or
+        // DACL information. Keep known remote directory permissions, or the
+        // private creation mode for a new directory, until identity/ACL mapping
+        // can provide an actual permission translation.
+        const directoryAttrs = source === local && process.platform === "win32" && destination === remote && !windowsRemote
+          ? {...attrs,mode:existing?.mode ?? 0o040700} : attrs;
+        if (!existing) { changes.push(`cd ${dst}`); if (!plan.dryRun) await destination.mkdir(dst); }
+        else {
+          const timeChanged = attrs.mtime !== undefined && attrs.mtime !== existing.mtime;
+          const mask = destination === local && process.platform === "win32" ? 0 : 0o7777;
+          const modeChanged = directoryAttrs.mode !== undefined && existing.mode !== undefined && (directoryAttrs.mode & mask) !== (existing.mode & mask);
+          if (timeChanged || modeChanged) changes.push(`.d..${timeChanged ? "t" : "."}${modeChanged ? "p" : "."} ${dst}`);
+        }
+        const names = await source.names(src);
+        if (destination === local && process.platform === "win32" && windowsNamesCollide(names)) {
+          let selected=dst;
+          while(!await local.stat(selected)){
+            const parent=path.dirname(selected);if(parent===selected)throw new Error("Cannot establish destination case sensitivity");selected=parent;
+          }
+          if(!isWindowsDirectoryCaseSensitive(selected))throw new Error(`Directory contains names that collide on Windows: ${src}`);
+        }
+        const borrowedMode = !plan.dryRun && !(destination === local && process.platform === "win32")
+          && existing?.mode !== undefined && names.length && (existing.mode & 0o700) !== 0o700 ? existing.mode & 0o7777 : undefined;
+        if (borrowedMode !== undefined) {
+          try { await destination.times(dst, { mode: 0o040000 | borrowedMode | 0o700 }); }
+          catch (error) {
+            try { await destination.times(dst, { mode: 0o040000 | borrowedMode }); }
+            catch (restore) { throw new AggregateError([error,restore],`Directory access change failed and original permissions could not be restored: ${dst}`); }
+            throw error;
+          }
+        }
+        let childError: unknown;
+        try {
+          for (const name of names) {
+            // Windows OpenSSH can normalize these names to a different source
+            // entry. Namespace-aware local I/O cannot repair a remote alias.
+            if (windowsRemote && windowsSftpAliasesName(name)) {
+              throw new Error(`Unqualified Windows SFTP directory entry: ${JSON.stringify(name)}`);
+            }
+            // A remote directory entry must remain exactly one native filename.
+            if (!name || name === "." || name === ".." || /[\/\\\0]/.test(name)
+              || (destination === local && process.platform === "win32" && /[\x01-\x1f<>:"|?*]/.test(name))) {
+              throw new Error(`Unrepresentable directory entry: ${JSON.stringify(name)}`);
+            }
+            await copy(source.paths.join(src, name), destination.paths.join(dst, name));
+          }
+        } catch (error) { childError = error; }
+        try {
+          if (!plan.dryRun) await destination.times(dst, directoryAttrs);
+        } catch (error) {
+          if (borrowedMode !== undefined) {
+            try { await destination.times(dst, { mode: 0o040000 | borrowedMode }); }
+            catch (restore) { throw new AggregateError([childError, error, restore].filter(Boolean), `Directory metadata failed and original permissions could not be restored: ${dst}`); }
+          }
+          if (childError) throw new AggregateError([childError, error], `Copy and directory metadata finalization failed: ${dst}`);
+          throw error;
+        }
+        if (childError) throw childError;
+        return;
+      }
+      const isLink = kind(attrs) === 0o120000;
+      if (!isLink && kind(attrs) !== 0o100000) throw new Error(`Unsupported special file: ${src}`);
+      const replacingDirectory = kind(existing) === 0o040000;
+      if (replacingDirectory && (await destination.names(dst)).length) throw new Error(`Cannot replace nonempty directory with file: ${dst}`);
+      const target = isLink ? await source.link(src) : undefined;
+      const directory = isLink && destination === local && process.platform === "win32" ? await source.followsDirectory(src) : undefined;
+      if (isLink && kind(existing) === 0o120000 && target === await destination.link(dst)) {
+        if (directory === undefined || directory === isWindowsDirectoryLink(dst)) {
+          if (destination.linkTimes && attrs.mtime !== undefined && attrs.mtime !== existing?.mtime) {
+            changes.push(`.L..t. ${dst}`);
+            if (!plan.dryRun) await destination.linkTimes(dst, attrs);
+          }
+          return;
+        }
+      }
+      if (!isLink && kind(existing) === 0o100000 && attrs.size === existing?.size && attrs.mtime === existing?.mtime) {
+        const mask = destination === local && process.platform === "win32" ? 0o200 : 0o7777;
+        if (attrs.mode !== undefined && existing?.mode !== undefined && (attrs.mode & mask) !== (existing.mode & mask)) {
+          changes.push(`.f...p ${dst}`);
+          if (!plan.dryRun) await destination.times(dst, attrs);
+        }
+        return;
+      }
+      changes.push(`${isLink ? "cL" : ">f"} ${dst}`);
+      if (!isLink) { filesTransferred++; bytesTransferred += attrs.size ?? 0; }
+      if (plan.dryRun) return;
+      staged = destination.paths.join(destination.paths.dirname(dst), `.openrig-copy-${randomUUID()}`);
+      if (isLink) {
+        // NTFS distinguishes directory and file links. Inspect only target type;
+        // copy the original link text, never recursively copy its referent.
+        await destination.symlink(target!, staged, directory);
+        await destination.linkTimes?.(staged, attrs);
+      }
+      else {
+        let observedBytes = 0;
+        const sizeMismatch = () => Object.assign(new Error(`Source byte count differs from captured size during copy: ${src}`),
+          source === local ? { path: src, syscall: "read" } : {});
+        const verifiedSource = async function* () {
+          for await (const chunk of source.read(src)) {
+            observedBytes += chunk.length;
+            if (attrs.size !== undefined && observedBytes > attrs.size) throw sizeMismatch();
+            yield chunk;
+          }
+          // EOF is a protocol success, but not a complete copy when LSTAT had
+          // advertised more bytes. Refuse before metadata/rename publication.
+          if (attrs.size !== undefined && observedBytes !== attrs.size) throw sizeMismatch();
+        };
+        // A native Windows source has no POSIX identity to translate. Retain a
+        // known existing regular/empty-directory destination's same-server identity rather than
+        // silently replacing it with the staging creator's owner/group.
+        await destination.write(staged, verifiedSource(), destination === remote ? attrs : undefined);
+        if (attrs.size === undefined) bytesTransferred += observedBytes;
+        if (destination !== remote) await destination.times(staged, attrs);
+      }
+      if (replacingDirectory) {
+        directoryReplacementAttempted = true;
+        await destination.rmdir(dst);
+        try { await destination.rename(staged, dst, false); }
+        catch (error) {
+          try { await destination.mkdir(dst); await destination.times(dst, existing!); }
+          catch (restore) { throw new AggregateError([error, restore], `Replacement failed and empty directory recovery is unconfirmed: ${dst}`); }
+          throw error;
+        }
+      } else await destination.rename(staged, dst, existing !== undefined);
+      staged = undefined;
+    };
+    // Local native I/O must retain literal NTFS names rather than Win32 device
+    // aliases or trailing-dot/space normalization. All descendants inherit this
+    // namespace prefix; remote SFTP paths keep their original protocol syntax.
+    const src = source === local && process.platform === "win32" ? path.toNamespacedPath(path.resolve(plan.src.path)) : source.paths.normalize(plan.src.path);
+    const dst = destination === local && process.platform === "win32" ? path.toNamespacedPath(path.resolve(plan.dst.path)) : destination.paths.normalize(plan.dst.path);
+    const attrs = await source.stat(src), existing = await destination.stat(dst);
+    if (!attrs) throw new Error(`Source not found: ${src}`);
+    const contents = /[\\/]$/.test(plan.src.path) && kind(attrs) === 0o040000;
+    await copy(src, kind(existing) === 0o040000 && !contents ? destination.paths.join(dst, source.paths.basename(src)) : dst);
+    return { ok: true, failedStep: "none", transport: "sftp", exitCode: 0, stdout: changes.join("\n"), stderr, filesTransferred, bytesTransferred };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Node filesystem errors carry their local path and syscall. SFTP status
+    // errors and transport errors do not: a local rename/open failure must not
+    // send the operator looking for a problem on the remote host.
+    const localError = error as NodeJS.ErrnoException | undefined;
+    const localFilesystemFailure = typeof localError?.path === "string"
+      && typeof localError.syscall === "string" && !localError.syscall.startsWith("spawn");
+    const missingSsh = spawnError?.code === "ENOENT" || localError?.code === "ENOENT" && localError.syscall?.startsWith("spawn");
+    const failedStep = missingSsh ? "ssh-missing" : localFilesystemFailure ? "local-copy-failed" : looksLikePermissionGate(stderr) ? "permission-gate" : transportExit === 255 ? "ssh-unreachable" : "remote-command-failed";
+    return { ok: false, failedStep, transport: "sftp", exitCode: transportExit || 1, stdout: changes.join("\n"), stderr: [stderr, message].filter(Boolean).join("\n"), ...(staged || retainedOriginal ? { hint: [staged ? `Staging path may contain incomplete data: ${staged}; ${directoryReplacementAttempted || originalMoveAttempted ? "inspect the destination after the attempted type replacement." : "existing destination was not removed."}` : "",
+      retainedOriginal ? `${originalConfirmed ? "Original entry retained at" : "Original recovery path (existence unconfirmed)"}: ${retainedOriginal}` : ""].filter(Boolean).join(" ") } : {}) };
+  } finally { await client?.close(); }
+}

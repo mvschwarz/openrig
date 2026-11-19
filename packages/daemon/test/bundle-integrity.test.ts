@@ -68,6 +68,20 @@ describe("Bundle integrity", () => {
     expect(integrity.files["packages/pkg/SKILL.md"]).toBe(sha256("skill content"));
   });
 
+  it("verifies native-walked content against an archive-walked manifest and back", () => {
+    writeFile("rig.yaml", "spec content");
+    writeFile("packages/pkg/SKILL.md", "skill content");
+    const native = realFsOps();
+    const archive = { ...native, walkFiles: (dir: string) => native.walkFiles(dir).map(file => file.split(path.sep).join("/")) };
+    const produced = computeIntegrity(tmpDir, native);
+    expect(Object.keys(produced.files).sort()).toEqual(["packages/pkg/SKILL.md", "rig.yaml"]);
+    expect(verifyIntegrity(tmpDir, makeManifest(produced), archive)).toMatchObject({ passed: true, extra: [], missing: [], mismatches: [] });
+    const transported = computeIntegrity(tmpDir, archive);
+    expect(verifyIntegrity(tmpDir, makeManifest(transported), native)).toMatchObject({ passed: true, extra: [], missing: [], mismatches: [] });
+    writeFile("packages/pkg/SKILL.md", "changed content");
+    expect(verifyIntegrity(tmpDir, makeManifest(transported), native)).toMatchObject({ passed: false, mismatches: ["packages/pkg/SKILL.md"] });
+  });
+
   // T2: Integrity section written to bundle.yaml
   it("writes integrity section to existing bundle.yaml", () => {
     const manifest = makeManifest();

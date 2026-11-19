@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.4.0.25 — rig ps token-safe defaults (compact-by-default projection-trim).
 // Large multi-rig fixture exercises compact default, --full byte-equivalence,
 // --rig/--session filters, and field-set honesty. Mirrors ps.test.ts harness.
@@ -224,7 +225,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
         res.end(JSON.stringify({ error: "not found" }));
       }
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 

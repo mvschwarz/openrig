@@ -8,6 +8,7 @@ import type { StatusDeps } from "../src/commands/status.js";
 const f = vi.hoisted(() => ({ imported: vi.fn(), post: vi.fn() }));
 vi.mock("../src/lib/bundle-source.js", async original => ({ ...await original<object>(), importGitHubBundle: f.imported }));
 const link = "https://github.com/example/team/tree/main/rig";
+const preparedBundlePath = path.resolve("/tmp/owned/bundle.rigbundle");
 const identity = { source: { resolvedCommit: "a".repeat(40), canonicalUrl: link }, configurationId: "build.dev=codex", packageDigest: { value: "digest", coverage: "openrig.package-digest/v1" }, archiveHash: "archive", assembler: { openrigVersion: "0.6.6" } };
 
 describe("bundle link command dispatch", () => {
@@ -19,7 +20,7 @@ describe("bundle link command dispatch", () => {
     log = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
     f.post.mockReset(); f.imported.mockReset();
-    f.imported.mockResolvedValue({ client: { post: f.post }, bundlePath: "/tmp/owned/bundle.rigbundle", res: { status: 201, data: identity } });
+    f.imported.mockResolvedValue({ client: { post: f.post }, bundlePath: preparedBundlePath, res: { status: 201, data: identity } });
     f.post.mockResolvedValue({ status: 200, data: { ...identity, manifest: { name: "fixture", version: "1.0" }, digestValid: true, integrityResult: { passed: true }, status: "completed" } });
   });
   afterEach(() => { vi.restoreAllMocks(); process.exitCode = oldExit; });
@@ -34,7 +35,7 @@ describe("bundle link command dispatch", () => {
     expect(JSON.parse(String(log.mock.calls[0]![0]))).toMatchObject(identity);
     const expected = verb === "create" ? [] : verb === "inspect" ? ["/api/bundles/inspect"] : ["/api/bundles/inspect", "/api/bundles/install"];
     expect(f.post.mock.calls.map(c => c[0])).toEqual(expected);
-    if (verb !== "create") expect(f.post.mock.calls[0]![1]).toMatchObject({ bundlePath: "/tmp/owned/bundle.rigbundle" });
+    if (verb !== "create") expect(f.post.mock.calls[0]![1]).toMatchObject({ bundlePath: preparedBundlePath });
     if (verb === "up" || verb === "install") expect(f.post.mock.calls.find(c => c[0] === "/api/bundles/install")![1].targetRoot).toBe(process.cwd());
   });
 
@@ -115,6 +116,6 @@ describe("bundle link command dispatch", () => {
     await new Command().addCommand(bundleCommand(deps)).parseAsync(["bundle", "install", link, "--json"], { from: "user" });
     expect(f.post.mock.calls.map(c => c[0])).toEqual(["/api/bundles/inspect", "/api/bundles/install"]);
     expect(String(log.mock.calls[0]![0])).toContain("outcome is unknown");
-    expect(String(log.mock.calls[0]![0])).toContain("/tmp/owned/bundle.rigbundle");
+    expect(JSON.parse(String(log.mock.calls[0]![0])).error).toContain(preparedBundlePath);
   });
 });

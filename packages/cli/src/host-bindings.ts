@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, statSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { getDefaultOpenRigPath } from "./openrig-compat.js";
 
 /**
@@ -182,7 +183,7 @@ function recordUnderLock(alias: string, observedHostId: string, observedUrl: str
     result = { outcome: "conflict", binding };
   }
 
-  const tmp = `${path}.tmp-${process.pid}`;
+  const tmp = join(dirname(path), `.openrig-host-binding-${process.pid}-${randomUUID()}.tmp`);
   writeFileSync(tmp, JSON.stringify(file, null, 2) + "\n", "utf-8");
   renameSync(tmp, path);
   return result;

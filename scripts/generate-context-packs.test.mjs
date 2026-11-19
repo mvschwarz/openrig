@@ -60,13 +60,13 @@ function run(source, out, args = []) {
   });
 }
 
-function runProduction(out, args = []) {
+function runProduction(out, args = [], overrides = {}) {
   const env = { ...process.env };
   delete env.OPENRIG_SKILLS_SOURCE;
   delete env.OPENRIG_STATIC_PACKS_SOURCE;
   return execFileSync("node", [GEN, ...args], {
     encoding: "utf8",
-    env: { ...env, OPENRIG_PACKS_OUT: out, OPENRIG_PACKAGE_VERSION: "0.5.3" },
+    env: { ...env, ...overrides, OPENRIG_PACKS_OUT: out, OPENRIG_PACKAGE_VERSION: "0.5.3" },
   });
 }
 
@@ -124,6 +124,41 @@ test("generates a valid, daemon-parseable pack per skill; SKILL.md is the instru
   }
 });
 
+test("production reference links project document bytes, including a Windows placeholder checkout", () => {
+  const { out, base } = scratch();
+  try {
+    runProduction(out);
+    for (const [projected, document] of [
+      ["help/help.md", "help.md"],
+      ["reference/acp-agents.md", "acp-agents.md"],
+      ["reference/getting-started.md", "getting-started.md"],
+      ["reference/instance-layout.md", "instance-layout.md"],
+      ["reference/rig-spec.md", "rig-spec.md"],
+      ["reference/whats-new.md", "whats-new.md"],
+    ]) {
+      const actual = join(out, projected);
+      assert.equal(lstatSync(actual).isSymbolicLink(), false);
+      assert.deepEqual(readFileSync(actual), readFileSync(join(REPO, "docs/reference", document)), projected);
+    }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("resolved Git reference content is leak-scanned before output is replaced", () => {
+  const { out, base } = scratch();
+  try {
+    mkdirSync(out, { recursive: true }); writeFileSync(join(out, "canary"), "preserve old output");
+    const heading = readFileSync(join(REPO, "docs/reference/whats-new.md"), "utf8").split(/\r?\n/)[0];
+    const rules = join(base, "reference-rules.json");
+    writeFileSync(rules, JSON.stringify({ ...JSON.parse(readFileSync(LEAK_RULES, "utf8")), charged_terms: [heading] }));
+    assert.throws(() => runProduction(out, [], { OPENRIG_LEAK_GUARD_RULES: rules }), error => {
+      assert.equal(error.status, 1);
+      assert.match(String(error.stderr), /reference\/whats-new\.md: line 1/);
+      return true;
+    });
+    assert.equal(readFileSync(join(out, "canary"), "utf8"), "preserve old output");
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
 test("MALFORMED PROJECTION FAILS THE BUILD — a '..' content path is rejected at package time, non-zero exit", () => {
   const { source, out, base } = scratch();
   try {
@@ -142,7 +177,7 @@ test("MALFORMED PROJECTION FAILS THE BUILD — a '..' content path is rejected a
       failed = true;
       assert.equal(err.status, 1, "exit code must be 1 (build failure)");
       assert.match(String(err.stderr), /FAILING THE BUILD/);
-      assert.match(String(err.stderr), /no '\.\.' segments/);
+      assert.match(String(err.stderr), /no '\.\.' segments|path traversal \(\.\.\) is not allowed/);
     }
     assert.ok(failed, "generator must exit non-zero on a malformed projection");
     // and it must NOT have written a partial/invalid library
@@ -207,9 +242,11 @@ test("REAL CANON: projected membership == the mirror ship set (no narrowing) —
     assert.deepEqual(got, expected, "pack files[] must equal the mirror ship set for the skill (no dropped assets)");
     // the exact helpers r2 flagged, referenced by the served prose:
     assert.ok(got.includes("find-polluter.sh"), "find-polluter.sh must be projected");
+    assert.ok(got.includes("find-polluter.mjs"), "native find-polluter.mjs must be projected");
     assert.ok(got.includes("condition-based-waiting-example.ts"), "condition-based-waiting-example.ts must be projected");
     // and copied to disk
     assert.ok(existsSync(join(out, "skills", ref, "find-polluter.sh")));
+    assert.ok(existsSync(join(out, "skills", ref, "find-polluter.mjs")));
     assert.ok(existsSync(join(out, "skills", ref, "condition-based-waiting-example.ts")));
   } finally {
     rmSync(out, { recursive: true, force: true });
@@ -228,6 +265,8 @@ test("REAL CANON: referenced helpers are DELIVERED in the served bundle (packed-
     assert.equal(bundle.missingFiles.length, 0, "no dangling files — the referenced helpers are present");
     // the helper the prose points at must be in the served bundle, header AND content:
     assert.match(bundle.text, /find-polluter\.sh/, "helper .sh path must be in the served bundle");
+    assert.match(bundle.text, /find-polluter\.mjs/, "native helper path must be in the served bundle");
+    assert.match(bundle.text, /export async function findPolluter/, "native helper content must be served");
     assert.match(bundle.text, /find-polluter\.sh <file_or_dir_to_check>/, "helper .sh CONTENT must be served");
     assert.match(bundle.text, /condition-based-waiting-example\.ts/, "helper .ts path must be in the served bundle");
   } finally {
@@ -520,6 +559,7 @@ test("PRODUCTION LIBRARY: only the public help, onboarding-width, reference, wor
       "claims.yaml",
       "manifest.yaml",
       "start-here.md",
+      "verify-world-native.mjs",
       "verify-world.sh",
     ]);
     const publicManifest = parseManifest(readFileSync(join(publicDir, "manifest.yaml"), "utf8"), "world-public");

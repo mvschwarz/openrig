@@ -14,13 +14,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, delimiter, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { assembleBundle } from "../src/domain/context-packs/bundle-assembler.js";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import { parseManifest } from "../src/domain/context-packs/manifest-parser.js";
 import { composeProfile } from "../src/domain/context-packs/profile-composer.js";
+import { writeRefocusNpmFixture } from "./helpers/refocus-native-fixtures.js";
+import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 const DAEMON_ROOT = resolve(import.meta.dirname, "..");
 const STATIC_ROOT = resolve(DAEMON_ROOT, "context-packs-src");
@@ -86,6 +89,7 @@ const EXPECTED_MANIFEST_CLAIMS = [
   { id: "public-manifest-summary-boundaries", value: "What this public world covers, excludes, and cannot decide." },
   { id: "public-manifest-summary-claims", value: "Every authored claim mapped to a failing check or an explicit honesty flag." },
   { id: "public-manifest-summary-verify-world", value: "Portable named checks with loud failures and skips." },
+  { id: "public-manifest-summary-verify-world-native", value: "Native Node checks with the same failures and skips." },
   { id: "public-manifest-probe-enter-the-world-prompt", value: "You just arrived in an unfamiliar OpenRig environment. What do you derive before acting?" },
   { id: "public-manifest-probe-enter-the-world-expect", value: "The agent derives its identity, live topology, available context, and command surface instead of guessing." },
   { id: "public-manifest-probe-author-a-world-prompt", value: "Create a world for a book-writing project without turning the eight regions into folders." },
@@ -128,6 +132,9 @@ function authoredManifestClaims(packDir: string, prefix: "public" | "example") {
 }
 
 function runVerifier(packDir: string, env: NodeJS.ProcessEnv = process.env) {
+  if (process.platform === "win32") return spawnSync(process.execPath, [join(packDir, "verify-world-native.mjs")], {
+    cwd: packDir, env: nativeEnv(env), encoding: "utf8", timeout: 30000,
+  });
   return spawnSync("/bin/sh", [join(packDir, "verify-world.sh")], {
     cwd: packDir,
     env,
@@ -136,7 +143,17 @@ function runVerifier(packDir: string, env: NodeJS.ProcessEnv = process.env) {
 }
 
 function runRig(rigPath: string, args: string[], env: NodeJS.ProcessEnv) {
+  if (process.platform === "win32") return spawnSync(process.execPath, [join(rigPath, "node_modules/@openrig/cli/probe.cjs"), ...args], { env: nativeEnv(env), encoding: "utf8" });
   return spawnSync(join(rigPath, "rig"), args, { env, encoding: "utf8" });
+}
+
+function nativeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result = { ...env };
+  for (const fixture of temporaryRoots) {
+    if (result.PATH?.startsWith(fixture + ":")) result.PATH = fixture + delimiter + result.PATH.slice(fixture.length + 1);
+    if (result.OPENRIG_CONTEXT_ROOT === "/fixture/context" && result.PATH?.startsWith(fixture + delimiter)) result.OPENRIG_CONTEXT_ROOT = join(fixture, "context");
+  }
+  return result;
 }
 
 function writeRigFixture(options: {
@@ -262,6 +279,34 @@ function writeRigFixture(options: {
     "fi",
   ].join("\n"));
   chmodSync(join(fixturePath, "rig"), 0o755);
+  if (process.platform === "win32") writeRefocusNpmFixture(fixturePath, `
+const fs=require('node:fs'),p=require('node:path'),a=process.argv.slice(2),dir=${JSON.stringify(fixturePath)},state=${JSON.stringify(installState)},opt=${JSON.stringify(options)};
+const out=x=>process.stdout.write(typeof x==='string'?x:JSON.stringify(x));
+const file=name=>fs.readFileSync(p.join(dir,name),'utf8');
+if(a[0]==='--help'||a[0]==='context'&&a[2]==='--help')process.exit(0);
+if(a[0]==='context'){
+ const verb=a[1],ref=a[2],context=process.env.OPENRIG_CONTEXT_ROOT;
+ if(verb==='show'&&ref==='world-public'){out(file('world-public-show.json'));process.exitCode=opt.showStatus||0;}
+ else if(verb==='show'&&ref==='world/install')out({relativePath:'world/install',sourceType:'user_file',sourcePath:'/fixture/private-world'});
+ else if(verb==='get'&&ref==='world-public')out(file('world-public-get.txt'));
+ else if(verb==='get'&&ref==='world-example')out(file('world-example-get.txt'));
+ else if(verb==='profile'&&ref==='world-public')out(file(a.includes('--json')?'world-public-profile.json':'world-public-profile.txt'));
+ else if(verb==='add'){
+  if(opt.addStatus)process.exit(opt.addStatus);if(a[3]!=='--name')process.exit(64);
+  const target=p.join(context,a[4]);fs.mkdirSync(target,{recursive:true});
+  if(opt.partialSync){fs.writeFileSync(p.join(target,'manifest.yaml'),'name: partial-sync-fixture\\n');out({installedAt:target,syncError:'HTTP 503'});}
+  else{fs.cpSync(ref,target,{recursive:true});fs.writeFileSync(state,a[4]);out({installedAt:target});}
+ }else if(verb==='list'){
+  const rows=JSON.parse(file('context-list.json'));if(fs.existsSync(state)){const name=fs.readFileSync(state,'utf8');rows.push({relativePath:name,sourceType:'user_file',sourcePath:p.join(context,name)});}out(rows);
+ }else if(verb==='rm'){
+  if(opt.partialSync)process.exit(72);if(!fs.existsSync(state)||fs.readFileSync(state,'utf8')!==ref)process.exit(1);
+  fs.rmSync(p.join(context,ref),{recursive:true,force:true});fs.unlinkSync(state);out({removed:true,ref});
+ }else process.exitCode=2;
+}else if(a[0]==='config'&&a[1]==='get'&&a[2]==='context.root')out(opt.configRoot===undefined?(process.env.OPENRIG_CONTEXT_ROOT||'/fixture/context'):opt.configRoot);
+else if(a[0]==='whoami')out(opt.identityJson||'${'{"identity":{"rigName":"fixture","memberId":"qa","sessionName":"qa@fixture"}}'}');
+else if(a[0]==='ps')out(opt.topology||'${'[{"canonicalSessionName":"qa@fixture","rigName":"fixture","sessionStatus":"running"}]'}');
+else process.exitCode=2;
+`);
   return fixturePath;
 }
 
@@ -270,6 +315,39 @@ afterEach(() => {
 });
 
 describe("public world pack", () => {
+  it.runIf(process.platform === "win32")("runs all native checks through the actual paired v2 seat shim", async () => {
+    const fixture = writeRigFixture();
+    const pkg = join(fixture, "cli O'Brien %PATH%"), cli = join(pkg, "dist", "probe.cjs"), home = join(fixture, "home");
+    mkdirSync(join(pkg, "dist"), { recursive: true }); mkdirSync(home);
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@openrig/cli", bin: { rig: "dist/probe.cjs" } }));
+    cpSync(join(fixture, "node_modules/@openrig/cli/probe.cjs"), cli);
+    const tmux = { getPaneCommand: async () => "powershell", getSessionEnv: async (_session: string, key: string) =>
+      ({ OPENRIG_NODE_ID: "owned", OPENRIG_SESSION_NAME: "qa@fixture" }[key]) } as unknown as TmuxAdapter;
+    const launch = new SeatLaunchEnvironment(tmux, { OPENRIG_HOME: home, PATH: fixture }, fixture, cli, undefined, "win32");
+    await launch.command("qa@fixture", "'unused.exe'", { runtime: "claude-code", nodeId: "owned" });
+    const seatBins = join(home, "run", "seat-bin"), bin = join(seatBins, readdirSync(seatBins)[0]!);
+    const env = { ...process.env, PATH: bin, PATHEXT: ".CMD", OPENRIG_CONTEXT_ROOT: join(fixture, "context"), OPENRIG_SESSION_NAME: "qa@fixture" };
+    const result = runVerifier(publicWorldDir(), env);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain("29 passed · 0 failed · 0 skipped");
+    const shim = join(bin, "rig.cmd"); writeFileSync(shim, readFileSync(shim, "utf8").replaceAll("%%", "%"));
+    const invalid = runVerifier(publicWorldDir(), env);
+    expect(invalid.status).toBe(1); expect(invalid.stdout).toContain("[FAIL] rig-command-surface");
+  });
+
+  it.runIf(process.platform === "win32")("fails native verification when a named check is removed from its specification", () => {
+    const parent = mkdtempSync(join(tmpdir(), "world-native-inventory-")); temporaryRoots.push(parent);
+    const pack = join(parent, "world-public"); cpSync(PUBLIC_WORLD_ROOT, pack, { recursive: true });
+    cpSync(join(STATIC_ROOT, "world-example"), join(parent, "world-example"), { recursive: true });
+    const specification = join(pack, "verify-world.sh");
+    writeFileSync(specification, readFileSync(specification, "utf8").replace(/^\s*pass taught-commands[^\r\n]*\r?\n/m, ""));
+    const fixture = writeRigFixture({ showSourcePath: pack });
+    const result = runVerifier(pack, { ...process.env, PATH: fixture, PATHEXT: ".CMD", OPENRIG_CONTEXT_ROOT: join(fixture, "context"), OPENRIG_SESSION_NAME: "qa@fixture" });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain("[FAIL] check-inventory");
+    expect(result.stdout).toContain("taught-commands");
+  });
+
   it("ships one real world-classed atom graph spanning all eight regions", () => {
     const packDir = publicWorldDir();
     const manifest = manifestAt(packDir);
@@ -291,6 +369,7 @@ describe("public world pack", () => {
       "build-your-world.md",
       "claims.yaml",
       "start-here.md",
+      "verify-world-native.mjs",
       "verify-world.sh",
     ]);
 
@@ -348,7 +427,7 @@ describe("public world pack", () => {
       ...authoredManifestClaims(join(STATIC_ROOT, "world-example"), "example"),
     ];
     const verifierManifestClaimIds = verifier.match(/expected_manifest_claim_ids='([\s\S]*?)'/)?.[1]
-      .split("\n")
+      .split(/\r?\n/)
       .filter(Boolean);
 
     expect(marked).toEqual(EXPECTED_PUBLIC_CLAIM_IDS);
@@ -529,6 +608,10 @@ describe("public world pack", () => {
     expect(green.status, green.stdout + green.stderr).toBe(0);
     expect(green.stdout).toMatch(/passed · 0 failed · 0 skipped/i);
     expect(green.stdout).toMatch(/ok.*run-public-verifier/i);
+    if (process.platform === "win32") {
+      const expected = [...readFileSync(join(packDir, "verify-world.sh"), "utf8").matchAll(/^\s*pass ([a-z0-9-]+) /gm)].map(match => match[1]);
+      expect([...green.stdout.matchAll(/^\[ok\] ([a-z0-9-]+) /gm)].map(match => match[1])).toEqual(expected);
+    }
 
     const redRoot = mkdtempSync(join(tmpdir(), "public-world-red-"));
     temporaryRoots.push(redRoot);
@@ -734,7 +817,8 @@ describe("public world pack", () => {
 
     const verification = runVerifier(shownPack.sourcePath, env);
     expect(verification.status).not.toBe(0);
-    expect(verification.stderr).toMatch(/verify-world\.sh.*(?:cannot open|no such file)/i);
+    expect(verification.stderr).toMatch(process.platform === "win32"
+      ? /Cannot find module.*verify-world-native\.mjs/i : /verify-world\.sh.*(?:cannot open|no such file)/i);
   });
 
   it("graduates world-example into the same convention and a book-writer exercise", () => {

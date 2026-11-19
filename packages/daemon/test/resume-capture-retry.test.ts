@@ -39,6 +39,16 @@ function fixture(reason?: string) {
 }
 
 describe("S11 Codex capture diagnostics and retry", () => {
+  it("captures an owned native executable row through the SQLite consumer, rejecting argv/path mismatches", async () => {
+    const f = fixture(); f.add(token);
+    const executablePath = "C:\\Owned Provider\\codex.exe";
+    const row = { pid: 901, ppid: 900, command: `"${executablePath}" resume owned`, platform: "win32" as const, executablePath, startedAt: identity };
+    const capture = (candidate: typeof row) => f.refresher.captureCodexThreadId(session.sessionName, { attempts: 1, listProcesses: async () => [candidate] });
+    expect(await capture(row)).toBe(token);
+    expect(await capture({ ...row, command: '"C:\\Owned Provider\\codex.com" resume owned', executablePath: "C:\\Owned Provider\\codex.com" })).toBe(token);
+    expect(await capture({ ...row, executablePath: "C:\\Owned Provider\\other.exe" })).toBeUndefined();
+    expect(await capture({ ...row, command: '"C:\\Owned Provider\\other.exe" "C:\\Owned Provider\\codex.exe"', executablePath: "C:\\Owned Provider\\other.exe" })).toBeUndefined();
+  });
   it("S11-1: no log row reports once per session, without token text", async () => {
     const f = fixture();
     expect(await f.refresher.captureCodexThreadId(session.sessionName, { attempts: 1 })).toBeUndefined();

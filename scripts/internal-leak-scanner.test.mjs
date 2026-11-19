@@ -99,6 +99,8 @@ test("exact-line allowances preserve modified lines, adjacent findings and inter
   });
 
   assert.deepEqual(scan(line), []);
+  assert.deepEqual(scan(`${line}\r\n`), []);
+  assert.ok(scan(`${line}\r`).length > 0, "a standalone CR is content, not a CRLF line ending");
   for (const modified of [
     line.replace("<launch cwd>", "/home/example/project"),
     line.replace("<session>/<attempt>", "session-1/attempt-1"),
@@ -110,6 +112,7 @@ test("exact-line allowances preserve modified lines, adjacent findings and inter
     assert.ok(scan(modified).some(({ token }) => token === ".openrig/compaction/"));
   }
   assert.deepEqual(scan(`${line}\n.openrig/compaction/private.txt\n`).map(({ line }) => line), [2]);
+  assert.deepEqual(scan(`${line}\r\n.openrig/compaction/private.txt\r\n`).map(({ line }) => line), [2]);
   assert.equal(scan(line, "skills/internal/SKILL.md")[0].kind, "path");
 });
 
@@ -138,7 +141,7 @@ test("an allowed exact line lets the startup guide's preparation-root sentence t
   const rules = allowedLineRules(STARTUP_GUIDE_LINE);
   const bytes = readFileSync(new URL("../docs/reference/agent-startup-guide.md", import.meta.url));
   const text = bytes.toString("utf8");
-  assert.ok(text.split("\n").includes(STARTUP_GUIDE_LINE));
+  assert.ok(text.split(/\r?\n/).includes(STARTUP_GUIDE_LINE));
   for (const path of ["docs/reference/agent-startup-guide.md", "daemon/docs/reference/agent-startup-guide.md"]) {
     assert.deepEqual(scanInternalLeaks({ path, bytes, rules }), []);
     for (const modified of [

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
+import path from "node:path";
 
 export const DESTROY_CONFIRM_TOKEN = "destroy-openrig-state";
 
@@ -60,7 +61,7 @@ export interface DestroyDeps {
   mkdirp: (path: string) => void;
   listManagedTmuxSessions: (dbPath: string) => string[];
   resolveTmuxServerArgs?: (stateRoot: string) => string[];
-  killTmuxSession: (sessionName: string, serverArgs?: readonly string[]) => boolean;
+  killTmuxSession: (sessionName: string, serverArgs?: readonly string[]) => boolean | "stopped" | "missing" | "unknown" | Promise<boolean | "stopped" | "missing" | "unknown">;
   sleep: (ms: number) => Promise<void>;
   now: () => Date;
 }
@@ -70,6 +71,10 @@ function normalizePathForPrefix(path: string): string {
 }
 
 export function isWithinPath(candidate: string, root: string): boolean {
+  if (process.platform === "win32") {
+    const relative = path.win32.relative(root, candidate);
+    return relative === "" || (relative !== ".." && !relative.startsWith("..\\") && !path.win32.isAbsolute(relative));
+  }
   if (candidate === root) return true;
   return candidate.startsWith(normalizePathForPrefix(root));
 }
@@ -243,8 +248,14 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
   let tmuxMissing = 0;
   if (plan.scope === "all") {
     for (const sessionName of plan.managedTmuxSessions) {
-      if (deps.killTmuxSession(sessionName, serverArgs)) tmuxKilled += 1;
-      else tmuxMissing += 1;
+      const stopped = await deps.killTmuxSession(sessionName, serverArgs);
+      if (stopped === true || stopped === "stopped") tmuxKilled += 1;
+      else if (stopped === "missing") tmuxMissing += 1;
+      else {
+        warnings.push(`Cannot confirm managed session '${sessionName}' stopped or absent. State was left untouched for recovery.`);
+        return { scope: plan.scope, backup: plan.backup, stateRoot: plan.stateRoot, backupPaths,
+          daemonStopped, portCleared, stateRecreated, tmuxKilled, tmuxMissing, warnings };
+      }
     }
   }
 
@@ -276,7 +287,15 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
 }
 
 export function findListeningPidWithLsof(port: number): number | null {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   try {
+    if (process.platform === "win32") {
+      // CIM-backed Get-NetTCPConnection can exceed the query deadline on a busy
+      // host. Read the native table directly, including IPv4 and IPv6 listeners.
+      const output = execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "netstat.exe"),
+        ["-ano"], { encoding: "utf8", windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
+      return parseWindowsListeningPid(output, port);
+    }
     const output = execFileSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { encoding: "utf-8" }).trim();
     if (!output) return null;
     const first = output.split(/\s+/)[0]?.trim();
@@ -288,11 +307,21 @@ export function findListeningPidWithLsof(port: number): number | null {
   }
 }
 
-export function killTmuxSessionWithCli(sessionName: string, serverArgs: readonly string[] = []): boolean {
-  try {
-    execFileSync("tmux", [...serverArgs, "kill-session", "-t", `=${sessionName}`], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
+export function parseWindowsListeningPid(output: string, port: number): number | null {
+  const pids = new Set<number>();
+  for (const line of output.split(/\r?\n/)) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length !== 5 || fields[0] !== "TCP" || fields[3] !== "LISTENING") continue;
+    if (fields[1]?.slice(fields[1].lastIndexOf(":") + 1) !== String(port)) continue;
+    if (!/^\d+$/.test(fields[4] ?? "")) return null;
+    const pid = Number(fields[4]);
+    if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+    pids.add(pid);
   }
+  return pids.size === 1 ? [...pids][0]! : null;
+}
+
+export async function killTmuxSessionWithCli(sessionName: string, serverArgs: readonly string[] = []): Promise<"stopped" | "missing" | "unknown"> {
+  const { stopTerminalSessionForCleanup } = await import("@openrig/daemon/terminal-cleanup");
+  return stopTerminalSessionForCleanup(sessionName, serverArgs);
 }

@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import { execFile } from "node:child_process";
@@ -78,7 +79,7 @@ describe("bounded Mac reported/process effective-UID agreement", () => {
   });
   it.skipIf(process.platform !== "darwin" || process.env.OPENRIG_TEST_MAC_OWNER_TOOLS !== "1")("qualifies unprivileged Mac ps and an owned reporting listener", async () => {
     const server = http.createServer((_req, res) => res.end(JSON.stringify({ pid: process.pid, euid: process.geteuid!() })));
-    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     allowFetchTarget(url);
     try {

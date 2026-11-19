@@ -64,6 +64,12 @@ describe("approveSlice — Packet-1 payload shape", () => {
 });
 
 describe("EvidenceOpener — slice-boundary containment", () => {
+  it.each(["C:\\outside\\proof.md", "C:proof.md", "\\\\host\\share\\proof.md", "..\\other\\proof.md", "proof/..\\../other.md", "bad\0.md"])("refuses a non-portable evidence ref before building an opener: %s", (ref) => {
+    expect(evidenceRefContained(ref)).toBe(false);
+    render(<EvidenceOpener evidenceRef={ref} ctx={{ root: "ws", relPath: "slice", slicePath: "C:\\work\\slice" }} testId="native-ref" />);
+    expect(screen.getByTestId("native-ref-outside-scope")).toBeDefined();
+    expect(document.querySelector("a,img,video,button")).toBeNull();
+  });
   const ctx = { root: "ws", relPath: "missions/m/slices/s", slicePath: "/tmp/fixture-slice" };
 
   it("pins the containment predicate: absolute + `..` segments refused, dotted filenames allowed", () => {

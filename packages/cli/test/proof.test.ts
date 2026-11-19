@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import * as windowsOwnedText from "../src/lib/windows-owned-text.js";
 import {
   proofCommand,
   replaceArtifactFile,
@@ -552,9 +553,10 @@ describe("rig proof add --replace swaps the entry and never writes through links
     fs.writeFileSync(target, "original\n");
     const foreign = path.join(proofDir, ".x.md.fixed.replace-tmp");
     fs.writeFileSync(foreign, "not ours\n");
-    expect(() => replaceArtifactFile(target, "new\n", "fixed")).toThrow(expect.objectContaining({ code: "EEXIST" }));
+    if (process.platform === "win32") replaceArtifactFile(target, "new\n", "fixed");
+    else expect(() => replaceArtifactFile(target, "new\n", "fixed")).toThrow(expect.objectContaining({ code: "EEXIST" }));
     expect(fs.readFileSync(foreign, "utf8")).toBe("not ours\n");
-    expect(fs.readFileSync(target, "utf8")).toBe("original\n");
+    expect(fs.readFileSync(target, "utf8")).toBe(process.platform === "win32" ? "new\n" : "original\n");
   });
 
   it("a failed write leaves the target as it was and removes only its own staging file", async () => {
@@ -580,7 +582,7 @@ describe("rig proof add --replace swaps the entry and never writes through links
     expect(stagingLeftovers()).toEqual([]);
   });
 
-  it("keeps an existing regular artifact's permission bits; a symlinked name gets default permissions", async () => {
+  it.skipIf(process.platform === "win32")("keeps an existing regular artifact's permission bits; a symlinked name gets default permissions", async () => {
     const priv = path.join(proofDir, "private.md");
     fs.writeFileSync(priv, "original\n");
     fs.chmodSync(priv, 0o600);
@@ -603,7 +605,7 @@ describe("rig proof add --replace swaps the entry and never writes through links
     expect(fs.readFileSync(linkedTarget)).toEqual(png("mode victim"));
   });
 
-  it("creates the staging file no wider than the artifact it replaces", async () => {
+  it.skipIf(process.platform === "win32")("creates the staging file no wider than the artifact it replaces", async () => {
     const priv = path.join(proofDir, "tight.md");
     fs.writeFileSync(priv, "original\n");
     fs.chmodSync(priv, 0o600);
@@ -665,6 +667,9 @@ describe("rig proof add --replace swaps the entry and never writes through links
     const target = path.join(proofDir, "r.md");
     fs.writeFileSync(target, "original\n");
     vi.spyOn(fs, "renameSync").mockImplementation(() => { throw Object.assign(new Error("cross-device"), { code: "EXDEV" }); });
+    if (process.platform === "win32") vi.spyOn(windowsOwnedText, "replaceWindowsFilePreservingMetadata").mockImplementation(() => {
+      throw Object.assign(new Error("cross-device"), { code: "EXDEV" });
+    });
     vi.spyOn(fs, "rmSync").mockImplementation(() => { throw Object.assign(new Error("busy"), { code: "EBUSY" }); });
     await expect(add("r.md", ["--replace"])).rejects.toMatchObject({ code: "EXDEV" });
     expect(fs.readFileSync(target, "utf8")).toBe("original\n");
@@ -721,6 +726,13 @@ describe("rig proof add: an absolute slice path in another catalogued project", 
   it("drops into that project's slice without OPENRIG_WORK_ROOT", async () => {
     await add(slice("beta"));
     expect(errs.join("\n")).not.toContain("no parent mission");
+    expect(fs.existsSync(path.join(slice("beta"), "proof", "qa-clear.md"))).toBe(true);
+    expect(fs.existsSync(path.join(slice("alpha"), "proof"))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it.runIf(process.platform === "win32")("resolves a native case alias to the catalogued slice without changing project custody", async () => {
+    await add(slice("beta").toUpperCase());
     expect(fs.existsSync(path.join(slice("beta"), "proof", "qa-clear.md"))).toBe(true);
     expect(fs.existsSync(path.join(slice("alpha"), "proof"))).toBe(false);
     expect(process.exitCode).toBeUndefined();

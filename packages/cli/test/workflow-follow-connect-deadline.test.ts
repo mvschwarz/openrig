@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { expect, it } from "vitest";
@@ -38,7 +39,7 @@ it.each(["initial-stall", "retry-stall", "healthy-idle"] as const)(
         trail: [],
       }));
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await listenOwnedHttpFixture(server);
     const address = server.address() as AddressInfo;
     const out: string[] = [];
     const err: string[] = [];

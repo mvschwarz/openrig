@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { join, resolve, sep } from "node:path";
 import { routeContextPacks, type ContextPacksRouterFsOps, type RouteContextPacksInput } from "../src/domain/bundle-context-packs-router.js";
 
 // Item 6 / slice-05 Checkpoint 7.3f step 2: bundle-context-packs-router
@@ -15,8 +16,9 @@ function mockFs(initial: { dirs?: string[]; files?: string[]; contents?: Record<
   readFile(path: string): string;
   listFiles(path: string): string[];
 } {
-  const dirs = new Set<string>(initial.dirs ?? []);
-  const files = new Set<string>(initial.files ?? []);
+  const dirs = new Set<string>((initial.dirs ?? []).map(p => resolve(p)));
+  const files = new Set<string>((initial.files ?? []).map(p => resolve(p)));
+  const contents = new Map(Object.entries(initial.contents ?? {}).map(([p, value]) => [resolve(p), value]));
   const copyCalls: Array<{ src: string; dest: string }> = [];
   const mkdirpCalls: string[] = [];
   return {
@@ -29,9 +31,9 @@ function mockFs(initial: { dirs?: string[]; files?: string[]; contents?: Record<
     isDirectory: (p: string) => dirs.has(p),
     mkdirp: (p: string) => { mkdirpCalls.push(p); dirs.add(p); },
     copyDir: (src: string, dest: string) => { copyCalls.push({ src, dest }); dirs.add(dest); },
-    readFile: (p: string) => initial.contents?.[p] ?? "",
+    readFile: (p: string) => contents.get(p) ?? "",
     listFiles: (p: string) => [...files]
-      .filter((file) => file.startsWith(`${p}/`))
+      .filter((file) => file.startsWith(`${p}${sep}`))
       .map((file) => file.slice(p.length + 1))
       .sort(),
   };
@@ -42,8 +44,8 @@ function packFixture(packParentDir: string): { dirs: string[]; files: string[] }
   return { dirs: [packParentDir], files: [`${packParentDir}/manifest.yaml`] };
 }
 
-const BUNDLE_ROOT = "/bundle/root";
-const TARGET = "/operator/.openrig/context";
+const BUNDLE_ROOT = resolve("/bundle/root");
+const TARGET = resolve("/operator/.openrig/context");
 
 function makeInput(overrides?: Partial<RouteContextPacksInput>): RouteContextPacksInput {
   return {
@@ -74,11 +76,11 @@ describe("routeContextPacks", () => {
     );
     expect(result.routedCount).toBe(1);
     expect(result.records[0]!.status).toBe("routed");
-    expect(result.records[0]!.installedAt).toBe(`${TARGET}/intent`);
+    expect(result.records[0]!.installedAt).toBe(join(TARGET, "intent"));
     expect(fs._copyCalls).toHaveLength(1);
     expect(fs._copyCalls[0]).toEqual({
-      src: `${BUNDLE_ROOT}/context-packs/intent`,
-      dest: `${TARGET}/intent`,
+      src: join(BUNDLE_ROOT, "context-packs/intent"),
+      dest: join(TARGET, "intent"),
     });
   });
 
@@ -222,13 +224,13 @@ describe("routeContextPacks", () => {
     expect(result.routedCount).toBe(1);
     expect(result.rejectedCount).toBe(1);
     expect(result.records[0]!.status).toBe("routed");
-    expect(result.records[0]!.installedAt).toBe(`${TARGET}/intent`);
+    expect(result.records[0]!.installedAt).toBe(join(TARGET, "intent"));
     expect(result.records[1]!.status).toBe("conflict");
     expect(result.records[1]!.detail).toContain("intent");
     expect(result.records[1]!.detail).toContain("collides");
     // Only the first copyDir fires.
     expect(fs._copyCalls).toHaveLength(1);
-    expect(fs._copyCalls[0]!.src).toBe(`${BUNDLE_ROOT}/a/intent`);
+    expect(fs._copyCalls[0]!.src).toBe(join(BUNDLE_ROOT, "a/intent"));
   });
 
   // C8: pack source path exists but is a file not a directory — edge case
@@ -350,7 +352,7 @@ describe("routeContextPacks", () => {
       },
     });
     const result = routeContextPacks(makeInput({ declaredContextPacks: ["context-packs/world/manifest.yaml"] }), fs);
-    expect(result.records[0]).toMatchObject({ status: "already_installed", installedAt: installed });
+    expect(result.records[0]).toMatchObject({ status: "already_installed", installedAt: resolve(installed) });
     expect(fs._copyCalls).toEqual([]);
   });
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
+import path from "node:path";
 import { bundleCommand } from "../src/commands/bundle.js";
 import { upCommand } from "../src/commands/up.js";
 import { runRemoteHttpOp } from "../src/remote-host-ops.js";
@@ -39,7 +40,7 @@ describe("bundle view at the real CLI command boundary", () => {
       events.push(url);
       if (url === "/api/bundles/inspect") throw new Error("description unavailable");
       expect(url).toBe("/api/bundles/install");
-      expect(body).toMatchObject({ plan, bundlePath: "/tmp/example.rigbundle" });
+      expect(body).toMatchObject({ plan, bundlePath: path.resolve("/tmp/example.rigbundle") });
       return { status, data: { status: status < 400 ? (plan ? "planned" : "completed") : "failed", retained: true } } as never;
     });
     const deps = runningDeps(client);
@@ -78,7 +79,7 @@ describe("bundle view at the real CLI command boundary", () => {
       await program.parseAsync(["node", "rig", "up", "/tmp/example.rigbundle", "--json", ...(plan ? ["--plan"] : [])]);
       expect(events).toEqual(["/api/bundles/inspect", "header", "/api/up"]);
       expect(post.mock.calls[1]).toEqual([
-        "/api/up", expect.objectContaining({ sourceRef: "/tmp/example.rigbundle", plan }),
+        "/api/up", expect.objectContaining({ sourceRef: path.resolve("/tmp/example.rigbundle"), plan }),
         { timeoutMs: 120_000 },
       ]);
       expect(process.exitCode).toBe(1);

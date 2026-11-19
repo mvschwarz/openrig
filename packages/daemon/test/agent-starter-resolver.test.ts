@@ -5,16 +5,18 @@
 // the orchestrator can ignore.
 
 import { describe, it, expect } from "vitest";
+import { join, normalize } from "node:path";
 import {
   AgentStarterResolver,
   AgentStarterCredentialScanFailedError,
 } from "../src/domain/agent-starter-resolver.js";
 
 function makeFs(files: Record<string, string>) {
-  const exists = (p: string) => Object.prototype.hasOwnProperty.call(files, p);
+  const nativeFiles = Object.fromEntries(Object.entries(files).map(([file, content]) => [normalize(file), content]));
+  const exists = (p: string) => Object.prototype.hasOwnProperty.call(nativeFiles, normalize(p));
   const readFile = (p: string) => {
     if (!exists(p)) throw new Error(`ENOENT: ${p}`);
-    return files[p]!;
+    return nativeFiles[normalize(p)]!;
   };
   return { exists, readFile };
 }
@@ -100,11 +102,11 @@ describe("AgentStarterResolver (M1)", () => {
     const fs = makeFs({ "/registry/fixture-clean.yaml": CLEAN_ENTRY });
     const resolver = new AgentStarterResolver({ registryRoot: "/registry", ...fs });
     const result = resolver.resolveStarter("fixture-clean");
-    expect(result.registryPath).toBe("/registry/fixture-clean.yaml");
+    expect(result.registryPath).toBe(join("/registry", "fixture-clean.yaml"));
     expect(result.files).toHaveLength(1);
     const file = result.files[0]!;
     expect(file.path).toBe("fixture-clean.yaml");
-    expect(file.absolutePath).toBe("/registry/fixture-clean.yaml");
+    expect(file.absolutePath).toBe(join("/registry", "fixture-clean.yaml"));
     expect(file.ownerRoot).toBe("/registry");
     expect(file.appliesOn).toEqual(["fresh_start"]);
     expect(file.required).toBe(true);
@@ -218,7 +220,7 @@ describe("AgentStarterResolver (M1)", () => {
     expect(caught).toBeDefined();
     expect(caught!.reason).toMatch(/credential_content_disallowed/);
     expect(caught!.reason).toMatch(/line \d+/);
-    expect(caught!.reason).toContain("/registry/fixture-mal-diag.yaml");
+    expect(caught!.reason).toContain(join("/registry", "fixture-mal-diag.yaml"));
   });
 
   it("allowlist exception: transcript_path under ~/.claude/projects/ is accepted", () => {

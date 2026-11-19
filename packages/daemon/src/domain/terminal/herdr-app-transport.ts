@@ -1,3 +1,5 @@
+import { localControlEndpoint } from "../local-control-endpoint.js";
+import { readPlatformEnv } from "../platform-env.js";
 // The herdr-app transport: its control socket and the `hc` command, at arm's length.
 //
 // herdr-app (the Herdr 2 desktop app) and herdr-core are driven the way OpenRig drives tmux: a local
@@ -30,12 +32,12 @@ export const WINDOW_DID_NOT_ANSWER = "the window did not answer";
 
 /** herdr-app's home, resolved the way herdr-app resolves it (src/mods.rs app_dir). */
 export function resolveHerdrAppHome(env: NodeJS.ProcessEnv = process.env): string {
-  const set = (key: string) => env[key] ? env[key] : undefined;
-  return set("HERDR_APP_HOME") ?? path.join(set("XDG_CONFIG_HOME") ?? path.join(env["HOME"] || homedir(), ".config"), "herdr-app");
+  const set = (key: string) => readPlatformEnv(env, key, process.platform) || undefined;
+  return set("HERDR_APP_HOME") ?? path.join(set("XDG_CONFIG_HOME") ?? path.join(set("HOME") || homedir(), ".config"), "herdr-app");
 }
 
-export function herdrAppSocketPath(appHome: string): string {
-  return path.join(appHome, "herdr-app.sock");
+export function herdrAppSocketPath(appHome: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  return localControlEndpoint(readPlatformEnv(env, "HERDR_APP_SOCKET", platform) || path.join(appHome, "herdr-app.sock"), platform, "herdr-app");
 }
 
 /** Classify one reply line. */

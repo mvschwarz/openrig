@@ -2,14 +2,16 @@ import { describe, it, expect, vi } from "vitest";
 import { detectConflicts, type GuidanceConflictMeta } from "../src/domain/conflict-detector.js";
 import { InstallPlanner, type InstallPlanEntry } from "../src/domain/install-planner.js";
 import { PackageResolver, type FsOps } from "../src/domain/package-resolver.js";
+import path from "node:path";
 
 function mockFs(files: Record<string, string>): FsOps {
+  files = Object.fromEntries(Object.entries(files).map(([file, contents]) => [path.resolve(file), contents]));
   return {
     readFile: vi.fn((p: string) => {
-      if (files[p] !== undefined) return files[p]!;
+      if (files[path.resolve(p)] !== undefined) return files[path.resolve(p)]!;
       throw new Error(`ENOENT: ${p}`);
     }),
-    exists: vi.fn((p: string) => p in files),
+    exists: vi.fn((p: string) => path.resolve(p) in files),
   };
 }
 

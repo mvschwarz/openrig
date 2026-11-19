@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, realpathSync as fsRealpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -26,13 +26,14 @@ import { rigModeRoutes } from "../src/routes/rig-mode.js";
 import { healthRoutes } from "../src/routes/health.js";
 
 const cleanup: Array<() => void> = [];
+const realpathSync = process.platform === "win32" ? fsRealpathSync.native : fsRealpathSync;
 afterEach(() => cleanup.splice(0).reverse().forEach(f => f()));
 const record = (mode: "human-led" | "delegated" | "focus", scope: OperatorContextScope) => ({
   ...RECOMMENDED_MODE_DEFAULTS[mode], scope, expiry_or_stale_rule: "none", evidence_citation: "explicit isolated operator choice",
 });
 
 async function setup() {
-  const home = mkdtempSync(join(tmpdir(), "operating-posture-")); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "operating-posture-"))); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
   const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
   const rigs = new RigRepository(db), rig = rigs.createRig("demo");
   const queue = new QueueRepository(db, new EventBus(db));
@@ -57,6 +58,14 @@ async function setup() {
   });
   return { home, db, rig, rigs, queue, send, modes, service, app, put, write };
 }
+
+it("rejects mission roots outside the selected project on the native filesystem", async () => {
+  const t = await setup();
+  t.write("alpha/project.yaml", "metadata: {id: alpha}\nmissions: {root: ../beta/missions}\n");
+  expect(t.service.resolve({ projectId: "alpha", missionId: "release" })).toMatchObject({
+    posture: "unknown", source: "unknown", reason: expect.stringContaining("scope escapes its project"),
+  });
+});
 
 it("defaults a resolved new rig to human-led; explicit public transitions retain source and do not grant authority", async () => {
   const t = await setup();
@@ -233,7 +242,7 @@ it("rechecks posture after notification readiness I/O and refuses an intervening
 });
 
 it("reads the project catalog from the configured workspace.catalog_path, not only <workspace>/workspace.yaml", () => {
-  const home = mkdtempSync(join(tmpdir(), "operating-posture-catalog-")); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "operating-posture-catalog-"))); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
   const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
   const workspace = join(home, "workspace"), catalog = join(home, "catalogs", "projects.yaml");
   mkdirSync(join(workspace, "gamma"), { recursive: true }); mkdirSync(join(home, "catalogs"), { recursive: true });
@@ -254,7 +263,7 @@ it("keeps the default catalog beside the real workspace when workspace.root is a
   const root = realpathSync(mkdtempSync(join(tmpdir(), "operating-posture-link-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const workspace = join(root, "physical", "workspace"), gamma = join(root, "physical", "gamma"), alias = join(root, "logical", "workspace");
   mkdirSync(workspace, { recursive: true }); mkdirSync(gamma); mkdirSync(join(root, "logical")); mkdirSync(join(root, "catalogs"));
-  symlinkSync(workspace, alias, "dir");
+  symlinkSync(workspace, alias, process.platform === "win32" ? "junction" : "dir");
   writeFileSync(join(workspace, "workspace.yaml"), "projects: [{id: gamma, root: ../gamma}]\n");
   writeFileSync(join(gamma, "project.yaml"), "metadata: {id: gamma}\n");
   const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());

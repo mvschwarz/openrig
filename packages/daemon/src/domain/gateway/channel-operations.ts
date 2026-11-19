@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { getOpenRigHome } from "../../openrig-compat.js";
+import { appendWindowsPrivateText } from "../windows-owned-text.js";
 
 /** Deliberately small, value-free snapshots: credentials, handles, message bodies,
  * and connector responses never enter the lifecycle ledger. */
@@ -49,7 +50,9 @@ export async function runChannelOperation<T>(input: ChannelActor & {
   };
   const append = (after: ChannelState | null, effect: ChannelOperation["effect"]): ChannelOperation => {
     const receipt = { ...base, at: new Date().toISOString(), after, effect };
-    appendFileSync(file, JSON.stringify(receipt) + "\n", { mode: 0o600 });
+    const line = JSON.stringify(receipt) + "\n";
+    if (process.platform === "win32") appendWindowsPrivateText(file, line);
+    else appendFileSync(file, line, { mode: 0o600 });
     return receipt;
   };
   append(null, "started");

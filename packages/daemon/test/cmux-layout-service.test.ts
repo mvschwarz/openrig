@@ -335,7 +335,7 @@ describe("CmuxLayoutService.buildWorkspace", () => {
     expect(splits).toHaveLength(0);
     const sends = calls.filter((c) => c.method === "sendText");
     expect(sends).toHaveLength(1);
-    expect((sends[0]!.args[1] as string)).toMatch(/tmux attach -t session-a/);
+    expect((sends[0]!.args[1] as string)).toMatch(/tmux attach -t =session-a/);
   });
 
   it("for N=2: creates workspace, 1 split right, 2 sends", async () => {

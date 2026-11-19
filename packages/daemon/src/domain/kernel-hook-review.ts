@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { resolveCurrentSessionAddress } from "./session-registry.js";
@@ -15,7 +16,7 @@ export interface HookReviewObservation {
  * startup error, generic attention flag or scrollback can start an alert. */
 export function makeKernelHookReviewReader(deps: {
   db: Database.Database;
-  tmux: Pick<TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid">;
+  tmux: Pick<TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen" | "getPanePid"> & Partial<Pick<TmuxAdapter, "listSessionPanes">>;
   listProcesses?: NativeProcessLister;
   now?: () => Date;
 }): () => Promise<HookReviewObservation[]> {
@@ -37,7 +38,7 @@ export function makeKernelHookReviewReader(deps: {
       try {
         const owner = resolveCurrentSessionAddress(deps.db, row.destination);
         if (owner?.nodeId !== row.nodeId || owner.sessionId !== row.sessionId) throw new Error("not a current unambiguous binding");
-        const before = await deps.tmux.listPanes(row.destination, true);
+        const before = await listNamedSessionPanes(deps.tmux, row.destination, true);
         if (before.some(p => p.id === row.pane)) {
           const process = (await deps.tmux.readAllPaneProcesses())?.get(row.pane);
           pid = process?.pid ?? null;
@@ -48,7 +49,7 @@ export function makeKernelHookReviewReader(deps: {
           const screen = await deps.tmux.capturePaneScreen(row.pane);
           // A stable launcher PID alone cannot exclude a replaced Codex child during capture.
           const currentNative = native ? await verifyCodexPaneProcess(proofInput) : null;
-          const after = await deps.tmux.listPanes(row.destination, true);
+          const after = await listNamedSessionPanes(deps.tmux, row.destination, true);
           const current = deps.db.prepare("SELECT id, tmux_session, tmux_pane FROM bindings WHERE node_id = ?").get(row.nodeId) as
             { id: string; tmux_session: string; tmux_pane: string } | undefined;
           const session = resolveCurrentSessionAddress(deps.db, row.destination);

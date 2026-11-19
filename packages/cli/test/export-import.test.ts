@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { createProgram } from "../src/index.js";
 import http from "node:http";
@@ -26,22 +27,22 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<string[]> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origWarn = console.warn;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    console.warn = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally {
-      console.log = origLog;
-      console.error = origErr;
-      console.warn = origWarn;
-    }
-    resolve(logs);
-  });
+async function captureLogs(fn: () => Promise<void>): Promise<string[]> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  console.warn = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
+    return logs;
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+    console.warn = origWarn;
+  }
 }
 
 function runningState(port: number): DaemonState {
@@ -204,11 +205,12 @@ function createMockDaemon() {
   return {
     server, exports,
     close: () => new Promise<void>((r) => server.close(() => r())),
-    listen: () => new Promise<number>((r) => {
-      server.listen(0, () => {
+    listen: () => new Promise<number>((r, rejectOwnedListen) => {
+      listenOwnedHttpFixture(server, {}).then(() => {
+        allowOwnedHttpFixture(server);
         const addr = server.address();
         r(typeof addr === "object" && addr ? addr.port : 0);
-      });
+      }, rejectOwnedListen);
     }),
   };
 }
@@ -438,17 +440,22 @@ edges: []
     }
   });
 
-  it.each(["copy", "existing", "symlink", "missing", "remote", "relative"].filter(mode => mode !== "symlink" || process.platform !== "win32"))("export: shares culture and explains nonportable refs/name (%s)", async mode => {
+  it.each(["copy", "existing", "symlink", "missing", "remote", "relative", ...(process.platform === "win32" ? ["native-alias", "native-destination"] : [])].filter(mode => mode !== "symlink" || process.platform !== "win32"))("export: shares culture and explains nonportable refs/name (%s)", async mode => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "export-share-"));
     const source = path.join(root, "source"), out = path.join(root, "out"), outside = path.join(root, "outside");
     for (const dir of [source, out, outside]) fs.mkdirSync(dir);
-    fs.mkdirSync(path.join(source, "culture"));
+    if (mode === "native-alias") {
+      fs.mkdirSync(path.join(source, "RealCulture"));
+      fs.symlinkSync(path.join(source, "RealCulture"), path.join(source, "culture"), "junction");
+    } else fs.mkdirSync(path.join(source, "culture"));
     const bytes = Buffer.from("# Team culture\r\nKeep authored bytes.\r\n");
     if (mode !== "missing") fs.writeFileSync(path.join(source, "culture", "CULTURE.md"), bytes);
     if (mode === "existing") { fs.mkdirSync(path.join(out, "culture")); fs.writeFileSync(path.join(out, "culture", "CULTURE.md"), "recipient's file"); }
     if (mode === "symlink") fs.symlinkSync(outside, path.join(out, "culture"), "dir");
+    if (mode === "native-destination") fs.symlinkSync(outside, path.join(out, "culture"), "junction");
     srv.exports.set("shared", { root: source, yaml: "version: '0.2'\nname: starter\nculture_file: culture/CULTURE.md\npods:\n  - id: main\n    members:\n      - id: lead\n        agent_ref: path:/author/agents/lead\n        runtime: codex\n        profile: default\n        cwd: .\n    edges: []\nedges: []\n".replace("path:/author/agents/lead", mode === "relative" ? "local:../../agents/x" : "path:/author/agents/lead") });
     try {
+      if (mode === "native-alias") srv.exports.get("shared")!.root = source.toLowerCase();
       const output = path.join(out, "rig.yaml");
       const client = new DaemonClient(`http://127.0.0.1:${port}`);
       const deps = exportDeps({ writeFile: (p, text) => fs.writeFileSync(p, text), clientFactory: () => mode === "remote"
@@ -456,14 +463,14 @@ edges: []
       const logs = await captureLogs(() => new Command().addCommand(exportCommand(deps))
         .parseAsync(["node", "rig", "export", "shared", "-o", output]));
       expect(fs.readFileSync(output, "utf8")).toContain("name: starter");
-      if (mode === "copy") expect(fs.readFileSync(path.join(out, "culture", "CULTURE.md"))).toEqual(bytes);
+      if (mode === "copy" || mode === "native-alias") expect(fs.readFileSync(path.join(out, "culture", "CULTURE.md"))).toEqual(bytes);
       if (mode === "existing") {
         expect(fs.readFileSync(path.join(out, "culture", "CULTURE.md"), "utf8")).toBe("recipient's file");
         expect(logs.join("\n")).toContain("kept existing culture");
       }
-      if (mode === "symlink") expect(fs.existsSync(path.join(outside, "CULTURE.md"))).toBe(false);
+      if (mode === "symlink" || mode === "native-destination") expect(fs.existsSync(path.join(outside, "CULTURE.md"))).toBe(false);
       if (mode === "remote") expect(fs.existsSync(path.join(out, "culture", "CULTURE.md"))).toBe(false);
-      if (mode === "missing" || mode === "symlink" || mode === "remote") expect(logs.join("\n")).toContain("could not copy culture");
+      if (mode === "missing" || mode === "symlink" || mode === "remote" || mode === "native-destination") expect(logs.join("\n")).toContain("could not copy culture");
       expect(logs.join("\n")).toContain("not portable");
       expect(logs.join("\n")).toContain("main.lead");
       expect(logs.join("\n")).toContain("starter");
@@ -549,8 +556,7 @@ edges: []
     const program = new Command();
     program.addCommand(importCommand(deps));
     await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--materialize-only", "--cwd", "relative/project", "--rig-root", "/tmp"]));
-    expect(capturedImportHeaders["x-cwd-override"]).toMatch(/^\//);
-    expect(String(capturedImportHeaders["x-cwd-override"])).toContain("relative/project");
+    expect(capturedImportHeaders["x-cwd-override"]).toBe(path.resolve("relative/project"));
   });
 
   it("import --workspace-only targets the workspace-only route", async () => {
@@ -702,7 +708,7 @@ edges: []
     const output = logs.join("\n");
     expect(output).toContain("imported-rig");
     // Verify X-Rig-Root header was sent
-    expect(capturedImportHeaders["x-rig-root"]).toMatch(/\/my\/project/);
+    expect(capturedImportHeaders["x-rig-root"]).toBe(path.resolve("/my/project"));
   });
 
   it("import --instantiate with --cwd forwards absolute cwd override", async () => {
@@ -711,8 +717,7 @@ edges: []
     const program = new Command();
     program.addCommand(importCommand(deps));
     await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate", "--cwd", "relative/project", "--rig-root", "/my/project"]));
-    expect(capturedImportHeaders["x-cwd-override"]).toMatch(/^\//);
-    expect(String(capturedImportHeaders["x-cwd-override"])).toContain("relative/project");
+    expect(capturedImportHeaders["x-cwd-override"]).toBe(path.resolve("relative/project"));
   });
 
   // NS-T14: import --instantiate handoff includes attach command

@@ -3,7 +3,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { runRig } from "./run-rig.mjs";
 
 const SCHEMA = "openrig-telemetry-state-migration/v1";
 const rig = process.env.OPENRIG_RIG_BIN || "rig";
@@ -309,7 +309,8 @@ function systemWorldPlan(home, issues) {
 }
 
 function inventoryClaudeSeats(issues) {
-  const result = spawnSync(rig, ["ps", "--nodes", "-A", "--json", "--full"], { encoding: "utf8" });
+  const args = ["ps", "--nodes", "-A", "--json", "--full"];
+  const result = runRig(rig, args);
   if (result.status !== 0) {
     issues.push(issue(
       "inventory_unavailable",
@@ -564,7 +565,10 @@ function applyState(home, preimage) {
       path: plan.systemWorld.filePath,
       existed: plan.systemWorld.existed,
       sha256: sha256(DEFAULT_SYSTEM_WORLD),
-      mode: 0o644,
+      // Windows exposes a writable regular file as 0666 even when created
+      // with 0644. Keep the native read-only bit check without inventing POSIX
+      // permission drift for the exact artifact we are about to write.
+      mode: process.platform === "win32" ? 0o666 : 0o644,
     } : null,
     libraryPlan: plan.library ? {
       configPath: plan.library.configPath,

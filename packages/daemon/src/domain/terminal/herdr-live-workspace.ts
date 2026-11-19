@@ -4,17 +4,19 @@
 // clients. It never types into, focuses or closes a pane.
 
 import path from "node:path";
+import { readWindowsTileAttachArgv } from "./windows-tile-attach.js";
 
 /** One tab as `herdr tab list` reports it. */
 export interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 
 /** A tile as the check compares it: the attach command the composer gave its pane. */
-export interface LiveTile { label: string; paneCommand: string; recoveryCommand?: string }
+export interface LiveTile { label: string; paneCommand: string; recoveryCommand?: string; attachArgv?: string[] }
 
 /** The view being opened, by what its Herdr tabs carry: the view id and plan in a tab label, or a named view's space. */
 export interface HerdrViewKey { id: string; planId: string; pages: readonly (readonly LiveTile[])[]; spaceLabel?: string }
 
 export interface LiveWorkspaceReaders {
+  platform?: NodeJS.Platform;
   /** Runs the Herdr CLI on the selected endpoint and returns its stdout. */
   herdr(args: string[]): Promise<string>;
   /** Runs a program and returns its stdout: resolving tmux and listing its clients. */
@@ -33,26 +35,41 @@ export interface LiveWorkspaceSearch {
 }
 
 /** Saved Herdr labels survive reboot; only current clients prove a local attachment. */
-async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: readonly (readonly LiveTile[])[], pageLabel: (index: number) => string, readers: LiveWorkspaceReaders): Promise<boolean> {
-  const { herdr, exec, serverArgs } = readers;
+export async function hasLiveHerdrAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: readonly (readonly LiveTile[])[], pageLabel: (index: number) => string, readers: LiveWorkspaceReaders): Promise<boolean> {
+  const { exec, serverArgs } = readers;
   try {
-    const tmux = (await exec("/bin/sh", ["-c", "command -v tmux"])).trim();
-    if (!path.isAbsolute(tmux)) return false;
-    const listed = JSON.parse(await herdr(["pane", "list", "--workspace", existing.workspace_id]));
+    const nativeTargets = pages.flat().map(pane => ({pane,target:pane.attachArgv && readWindowsTileAttachArgv(pane.attachArgv)}));
+    const native = (readers.platform ?? process.platform) === "win32";
+    const tmux = native ? nativeTargets.find(item=>item.target)?.target?.tmux ?? "" : (await exec("/bin/sh", ["-c", "command -v tmux"])).trim();
+    if (!(native ? path.win32 : path).isAbsolute(tmux)) return false;
+    const listed = JSON.parse(await readers.herdr(["pane", "list", "--workspace", existing.workspace_id]));
     const panes = listed?.result?.panes as Array<{ workspace_id: string; tab_id: string; pane_id: string }> | undefined;
     if (!Array.isArray(panes) || !panes.every(pane => pane && pane.workspace_id === existing.workspace_id && typeof pane.tab_id === "string" && typeof pane.pane_id === "string" && pane.pane_id)) return false;
     const clients = new Map<string, string[]>();
     // Match view-composer's serialization (these strings are compared, never executed).
     const quote = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
     const server = serverArgs.map((arg, index) => index % 2 ? quote(arg) : arg).join(" ");
-    const inventory = await exec(tmux, [...serverArgs, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
-    for (const line of inventory.trim().split("\n")) {
+    // Stock psmux has one server per session. A single default-server query
+    // cannot prove the attachments in a multi-seat view, unlike POSIX tmux.
+    const sessions: Array<string | undefined> = native ? [...new Set(nativeTargets.flatMap(({target}) =>
+      target && target.tmux === tmux && JSON.stringify(target.server) === JSON.stringify(serverArgs) ? [target.session] : []))] : [undefined];
+    for (const selectedSession of sessions) {
+      const inventory = await exec(tmux, [...serverArgs, "list-clients", ...(selectedSession === undefined ? [] : ["-t", `=${selectedSession}`]), "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
+      for (const line of inventory.trim().split(/\r?\n/)) {
       const [pid, session, readOnly] = line.split("\t");
       if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
+      if (native) {
+        if (session !== selectedSession) return false;
+        clients.set(pid,nativeTargets.filter(({target})=>target && target.tmux===tmux && target.session===session
+          && target.readOnly===(readOnly==="1") && JSON.stringify(target.server)===JSON.stringify(serverArgs))
+          .map(({pane})=>pane.recoveryCommand ?? pane.paneCommand));
+        continue;
+      }
       // Compare the composer's exact command, including session aliases and read-only mode.
       // SSH/custom commands cannot be confirmed from this local client inventory.
       const flags = readOnly === "1" ? ["-r "] : ["", "-f ignore-size "];
       clients.set(pid, ["tmux", quote(tmux)].flatMap(binary => flags.map(flag => `${binary}${server ? ` ${server}` : ""} attach ${flag}-t ${quote(session)}`)));
+      }
     }
     const used = new Set<string>();
     for (const [index, page] of pages.entries()) {
@@ -62,7 +79,7 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: r
       const remaining = page.map(pane => pane.recoveryCommand ?? pane.paneCommand);
       for (const pane of panes.filter(pane => pane.tab_id === matches[0]!.tab_id)) {
         if (remaining.length === 0) break;
-        const result = JSON.parse(await herdr(["pane", "process-info", "--pane", pane.pane_id]));
+        const result = JSON.parse(await readers.herdr(["pane", "process-info", "--pane", pane.pane_id]));
         const info = result?.result?.process_info;
         if (info?.pane_id !== pane.pane_id || (info.foreground_processes !== undefined && !Array.isArray(info.foreground_processes))) return false;
         for (const process of info.foreground_processes ?? []) {
@@ -129,7 +146,7 @@ export async function findLiveHerdrWorkspace(view: HerdrViewKey, readers: LiveWo
   });
   const search: LiveWorkspaceSearch = { unconfirmed: [], stale: [...new Set(stale.map(tab => tab.workspace_id))] };
   for (const candidate of candidates) {
-    if (await hasLiveAttachments(candidate, tabs, view.pages, pageLabel(candidate), readers)) return { ...search, live: candidate };
+    if (await hasLiveHerdrAttachments(candidate, tabs, view.pages, pageLabel(candidate), readers)) return { ...search, live: candidate };
     search.unconfirmed.push(candidate.workspace_id);
   }
   return search;

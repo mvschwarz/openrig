@@ -11,6 +11,13 @@ const kernel = [{ rigId: "selected-instance-kernel", rigName: "kernel" }];
 const terminal = { podId: "database-pod-id", logicalId: "operator.human", runtime: "terminal", canonicalSessionName: "actual-terminal", tmuxAttachCommand: "tmux attach -t actual-terminal" };
 
 describe("shared kernel TUI", () => {
+  it("retains structured executable metadata and refuses malformed commands", async () => {
+    const command = ["C:/owned tools/psmux.exe", "--prefix"];
+    expect(await sharedTuiTarget(client(kernel, [{ ...terminal, tmuxCommand: command }])))
+      .toEqual({ session: "actual-terminal", serverArgs: [], command });
+    await expect(sharedTuiTarget(client(kernel, [{ ...terminal, tmuxCommand: "shell text" }])))
+      .rejects.toThrow("invalid tmux executable metadata");
+  });
   it("permits the actual builtin terminal identity without inventing harness diagnostics", async () => {
     const result = await probeFrontDoor({ env: { OPENRIG_NODE_ID: "terminal-id" }, client: {
       get: async () => ({ status: 200, data: { identity: { runtime: "terminal", agentRef: "builtin:terminal" }, permissionDrift: { enforcement: { state: "unknown" } } } }),

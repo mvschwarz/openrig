@@ -3,29 +3,13 @@ import type { AgentSpecReview } from "../hooks/useSpecReview.js";
 import { WorkflowCodePreview } from "./WorkflowScaffold.js";
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
 import { ToolMark } from "./graphics/RuntimeMark.js";
+import { resolveServerFileReference } from "../lib/server-path.js";
 
 interface AgentSpecDisplayProps {
   review?: AgentSpecReview | null;
   yaml: string;
   testIdPrefix?: string;
   sourcePath?: string | null;
-}
-
-function resolveSpecRelativePath(sourcePath: string | null | undefined, filePath: string): string | null {
-  if (!sourcePath || !filePath) return null;
-  if (filePath.startsWith("/")) return filePath;
-  const sourceDir = sourcePath.replace(/\/[^/]*$/, "");
-  const parts = `${sourceDir}/${filePath}`.split("/");
-  const resolved: string[] = [];
-  for (const part of parts) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      resolved.pop();
-      continue;
-    }
-    resolved.push(part);
-  }
-  return `/${resolved.join("/")}`;
 }
 
 function FileChip({
@@ -39,7 +23,7 @@ function FileChip({
   testId: string;
   children: ReactNode;
 }) {
-  const absolutePath = resolveSpecRelativePath(sourcePath, label);
+  const absolutePath = resolveServerFileReference(sourcePath, label);
   if (!absolutePath) return <>{children}</>;
   return (
     <FileReferenceTrigger

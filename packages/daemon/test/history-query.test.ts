@@ -144,7 +144,17 @@ describe("HistoryQuery", () => {
       expect(exec).not.toHaveBeenCalled();
     });
 
-    it("returns error when both rg and grep fail (exit code 2+)", async () => {
+    it("reports a listing error rather than no history when the directory became a file", async () => {
+      writeFileSync(join(tmpDir, "replaced-rig"), "not a transcript directory");
+      const exec: ExecDep = vi.fn(async () => ({ stdout: "", exitCode: 2 }));
+      const hq = new HistoryQuery({ transcriptsRoot: tmpDir, exec });
+      expect(await hq.search("replaced-rig", "deployment strategy")).toMatchObject({
+        backend: "none", insufficient: true, excerpts: [], error: expect.stringContaining("could not be listed"),
+      });
+      expect(exec).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses native reading on Windows, otherwise reports both failed tools", async () => {
       const rigDir = join(tmpDir, "my-rig");
       mkdirSync(rigDir, { recursive: true });
       writeFileSync(join(rigDir, "dev.log"), "some content\n");
@@ -155,8 +165,8 @@ describe("HistoryQuery", () => {
       const result = await hq.search("my-rig", "deployment strategy");
 
       expect(result.insufficient).toBe(true);
-      expect(result.backend).toBe("none");
-      expect(result.error).toContain("both failed");
+      expect(result.backend).toBe(process.platform === "win32" ? "read" : "none");
+      if (process.platform !== "win32") expect(result.error).toContain("both failed");
     });
 
     it("strips ANSI from excerpts", async () => {

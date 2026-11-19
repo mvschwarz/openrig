@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // Rig Context / Composable Context Injection — `rig context` CLI verb family
 // tests (Atom-7 renamed the retired `context-pack` grammar to `rig context`).
 //
@@ -157,7 +158,7 @@ describe("rig context CLI (PL-014)", () => {
         res.end();
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
 
@@ -509,7 +510,8 @@ files:
         res.end("not found");
       }
     });
-    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+    await new Promise<void>((r, rejectOwnedListen) => listenOwnedHttpFixture(srv).then(() => r(), rejectOwnedListen));
+    allowOwnedHttpFixture(srv);
     const port2 = (srv.address() as { port: number }).port;
     return { baseUrl: `http://127.0.0.1:${port2}/`, close: () => srv.close() };
   }

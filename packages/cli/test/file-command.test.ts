@@ -71,8 +71,18 @@ describe("rig file copy — rejection surfaces (spawn NEVER invoked)", () => {
     expect(process.exitCode).toBe(1);
 
     logs = [];
-    const { runs } = await runCopy(["--json", "./a.md", "vps-a:/srv/a b.md"]);
+    process.exitCode = 0;
+    const { runs } = await runCopy(["--json", "./a.md", "vps-a:/srv/a b.md"], async () => okResult({ transport: "sftp" }));
     const payload2 = JSON.parse(logs[0]!) as Record<string, unknown>;
+    if (process.platform === "win32") {
+      expect(payload2["ok"]).toBe(true);
+      expect(payload2["transport"]).toBe("sftp");
+      expect(payload2["dst"]).toBe("vps-a:/srv/a b.md");
+      expect(payload2["rsyncArgv"]).toBeNull();
+      expect(runs).toHaveLength(1);
+      expect(process.exitCode).toBe(0);
+      return;
+    }
     expect(payload2["code"]).toBe("denied_path");
     expect(String(payload2["error"])).toContain("a space");
     expect(runs).toHaveLength(0);
@@ -86,6 +96,17 @@ describe("rig file copy — rejection surfaces (spawn NEVER invoked)", () => {
 });
 
 describe("rig file copy — success + dry-run rendering", () => {
+  it.each(["sftp", "native-local"] as const)("reports %s failure without blaming rsync", async transport => {
+    await runCopy(["--json", "./a.md", transport === "sftp" ? "vps-a:/srv/a.md" : "./b.md"], async () => ({
+      ok: false, failedStep: "local-copy-failed", transport, exitCode: 1, stdout: "", stderr: "", hint: "Owned staging retained.",
+    }));
+    const payload = JSON.parse(logs[0]!);
+    expect(payload.error).toBe("file copy failed (local-copy-failed)");
+    expect(payload.transport).toBe(transport);
+    expect(payload.rsyncArgv).toBeNull();
+    expect(payload.hint).toBe("Owned staging retained.");
+    expect(process.exitCode).toBe(1);
+  });
   it("success prints src → dst + bytes", async () => {
     await runCopy(["./a.md", "vps-a:/srv/briefs/a.md"]);
     expect(logs.join("\n")).toMatch(/Copied .*a\.md → vps-a:\/srv\/briefs\/a\.md \(128 bytes\)/);

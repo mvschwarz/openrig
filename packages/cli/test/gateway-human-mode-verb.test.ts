@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // `rig gateway human mode save|saved|apply|current|end|room|decide|decisions`: a person's modes, beside quiet hours, and
 // the decisions made on their behalf inside a mode's decision room. The verbs talk to a recording stub daemon over real HTTP.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -36,7 +37,7 @@ describe("rig gateway human mode", () => {
         res.end(JSON.stringify(reply.body));
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     prevUrl = process.env.OPENRIG_URL; process.env.OPENRIG_URL = url;
     allowFetchTarget(url);

@@ -3,6 +3,9 @@
 // COMMAND CONSTRUCTION, sidecar-driven token capture, trust-flag posture, and
 // the deny-by-default env allowlist (BR-3) are all pure/fake-backed. The live
 // legs are the VM proof contract.
+// POSIX runtime fixtures select Linux explicitly. Resume assertions inspect
+// actual argv in either shell; owned native dispatch is checked separately in
+// pi-omp-native-dispatch.test.ts, without a live Pi/OMP provider.
 
 import nodePath from "node:path";
 import { describe, it, expect, vi } from "vitest";
@@ -11,6 +14,8 @@ import { PiRuntimeAdapter, type PiAdapterFsOps } from "../src/adapters/pi-runtim
 import { PiResumeAdapter } from "../src/adapters/pi-resume.js";
 import { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
+import type { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { runnerCommandArgument, runnerCommandArguments } from "./helpers/runner-command-arguments.js";
 import {
   piSeatPaths, buildPiRunnerCommand, buildPiChildArgs, buildPiChildEnv,
   providerFromModel, parsePiRunnerState, buildPendingRunnerState, PI_RUNNER_READY_MARKER,
@@ -37,7 +42,10 @@ function mockTmux(overrides?: {
 }) {
   return {
     sendText: overrides?.sendText ?? vi.fn(async () => ({ ok: true as const })),
-    sendShellCommand: overrides?.sendShellCommand ?? vi.fn(async () => ({ ok: true as const })),
+    sendShellCommand: vi.fn(async (target: string, text: string, beforeInput?: () => void) => {
+      beforeInput?.();
+      return overrides?.sendShellCommand ? overrides.sendShellCommand(target, text) : { ok: true as const };
+    }),
     sendKeys: overrides?.sendKeys ?? vi.fn(async () => ({ ok: true as const })),
     capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
     hasSession: overrides?.hasSession ?? vi.fn(async () => true),
@@ -52,9 +60,9 @@ function mockTmux(overrides?: {
 /** Extract the --launch-id value the adapter typed into the pane (the runner
  *  would stamp this into its sidecar writes). */
 function launchIdFrom(cmd: string): string {
-  const m = /--launch-id '([^']+)'/.exec(cmd);
-  if (!m) throw new Error("typed command carries no --launch-id");
-  return m[1]!;
+  const id = runnerCommandArgument(cmd, "--launch-id");
+  if (!id) throw new Error("typed command carries no --launch-id");
+  return id;
 }
 
 /** In-memory fs. `files` maps absolute path -> content. */
@@ -80,10 +88,83 @@ function readyState(sessionFile: string = SESSION_FILE, launchId?: string): stri
 
 function adapterWith(fs: PiAdapterFsOps, tmux: TmuxAdapter, trust?: "approve" | "no-approve") {
   return new PiRuntimeAdapter({
+    platform: "linux", // This factory models POSIX pane commands and paths.
     tmux, fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER,
     trustPosture: trust, sleep: async () => {},
   });
 }
+
+it.each(["pi", "omp"].flatMap(runtime => ["fresh", "fork", "resume"].flatMap(kind =>
+  (runtime === "pi" ? ["initial", "staging", "before-write", "fallback"] : ["initial", "before-write"])
+    .map(phase => ({ runtime, kind, phase })))))("$runtime $kind refuses changed history selection at $phase", async ({ runtime, kind, phase }) => {
+  const stateRoot = nodePath.resolve("owned-state"), sessionFile = nodePath.join(stateRoot, "owned.jsonl");
+  const files = memFs({ [sessionFile]: "owned synthetic session" });
+  const previous = readyState(sessionFile, "previous-launch");
+  const statePath = piSeatPaths(stateRoot, SESSION).runnerStatePath;
+  files.files[statePath] = previous;
+  let selected = phase !== "initial";
+  let release!: () => void;
+  let observed!: () => void;
+  const started = new Promise<void>(resolve => { observed = resolve; });
+  const staging = new Promise<void>(resolve => { release = resolve; });
+  const effects: string[] = [];
+  const tmux = mockTmux();
+  let calls = 0;
+  tmux.sendShellCommand = vi.fn(async (_session, command, beforeWrite) => {
+    calls++;
+    if (phase === "fallback" && calls === 1) { selected = false; return { ok: false, code: "launch_path_too_long", message: "owned refusal before input" }; }
+    if (phase === "before-write") selected = false;
+    try { beforeWrite?.(); } catch { return { ok: false, code: "selection_changed", message: "Selected history changed" }; }
+    effects.push(command); return { ok: true };
+  });
+  const environment = { accountHome: () => undefined, command: async () => { observed(); if (phase === "staging") await staging; return "owned-wrapped-command"; } } as unknown as SeatLaunchEnvironment;
+  const Adapter = runtime === "pi" ? PiRuntimeAdapter : OmpRuntimeAdapter;
+  const adapter = new Adapter({ tmux, fsOps: files, stateRoot, runnerEntryPath: nodePath.resolve("owned-runner.js"),
+    platform: process.platform, seatLaunchEnvironment: environment, sleep: async () => {} });
+  vi.spyOn(adapter as any, "waitForRunnerReady").mockResolvedValue({ ok: true, value: JSON.parse(readyState(sessionFile)) });
+  const opts = { name: SESSION, beforeNativeDispatch: () => selected,
+    ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: sessionFile } } : {}),
+    ...(kind === "resume" ? { resumeToken: sessionFile } : {}) };
+  const pending = adapter.launchHarness({ tmuxSession: SESSION, cwd: nodePath.resolve("owned-work") } as never, opts);
+  if (phase === "staging") { await started; selected = false; release(); }
+  expect(await pending).toMatchObject({ ok: false });
+  expect(effects).toEqual([]);
+  expect(tmux.sendKeys).not.toHaveBeenCalled();
+  expect(files.files[statePath]).toBe(previous);
+});
+
+it.each(["pi", "omp"].flatMap(runtime => (runtime === "pi" ? ["initial", "staging", "before-write", "fallback"] : ["initial", "before-write"])
+  .map(phase => ({ runtime, phase }))))("legacy $runtime resume refuses changed selection at $phase", async ({ runtime, phase }) => {
+  const stateRoot = nodePath.resolve("owned-resume-state"), sessionFile = nodePath.join(stateRoot, "owned.jsonl");
+  const files = memFs({ [sessionFile]: "owned synthetic session" });
+  const previous = readyState(sessionFile, "previous-launch");
+  const statePath = piSeatPaths(stateRoot, SESSION).runnerStatePath;
+  files.files[statePath] = previous;
+  let selected = phase !== "initial", calls = 0;
+  let release!: () => void;
+  let observed!: () => void;
+  const started = new Promise<void>(resolve => { observed = resolve; });
+  const staging = new Promise<void>(resolve => { release = resolve; });
+  const effects: string[] = [];
+  const tmux = mockTmux();
+  tmux.sendShellCommand = vi.fn(async (_session, command, beforeWrite) => {
+    calls++;
+    if (phase === "fallback" && calls === 1) { selected = false; return { ok: false, code: "launch_path_too_long", message: "Owned refusal before input" }; }
+    if (phase === "before-write") selected = false;
+    try { beforeWrite?.(); } catch { return { ok: false, code: "selection_changed", message: "Selected history changed" }; }
+    effects.push(command); return { ok: true };
+  });
+  const environment = { accountHome: () => undefined, command: async () => { observed(); if (phase === "staging") await staging; return "owned-wrapped-resume"; } } as unknown as SeatLaunchEnvironment;
+  const Adapter = runtime === "pi" ? PiResumeAdapter : OmpResumeAdapter;
+  const adapter = new Adapter(tmux, files, { stateRoot, runnerEntryPath: nodePath.resolve("owned-runner.js") }, { seatLaunchEnvironment: environment, sleep: async () => {} });
+  vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
+  const pending = adapter.resume(SESSION, `${runtime}_session_file`, sessionFile, nodePath.resolve("owned-work"), undefined, undefined, undefined, undefined, () => selected);
+  if (phase === "staging") { await started; selected = false; release(); }
+  expect(await pending).toMatchObject({ ok: false, code: "attention_required" });
+  expect(effects).toEqual([]);
+  expect(tmux.sendKeys).not.toHaveBeenCalled();
+  expect(files.files[statePath]).toBe(previous);
+});
 
 // ── protocol builders ─────────────────────────────────────────────────────────
 
@@ -287,7 +368,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
         fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
         return { ok: true as const };
       });
-      const adapter = new Adapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {} });
+      const adapter = new Adapter({ platform: "linux", tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {} });
       expect((await adapter.launchHarness({ ...(binding as object), effort } as never, { name: SESSION })).ok).toBe(true);
       return sendShellCommand.mock.calls[0]![1] as string;
     };
@@ -306,7 +387,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
         commands.push(text);
         return { ok: true as const };
       });
-      const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
+      const adapter = new PiRuntimeAdapter({ platform: "linux", tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
       expect((await adapter.launchHarness(binding, { name: SESSION })).ok).toBe(true);
       enabled = commands.length >= 2; // switched on before the third launch, which reads it again
     }
@@ -323,7 +404,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
         commands.push(text);
         return { ok: true as const };
       });
-      const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
+      const adapter = new PiRuntimeAdapter({ platform: "linux", tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
       expect((await adapter.launchHarness(binding, { name: SESSION })).ok).toBe(true);
     }
     expect(commands.map((c) => c.includes("--openrouter-charge"))).toEqual([false, false, false, true]);
@@ -505,7 +586,7 @@ describe("PiResumeAdapter", () => {
   it("resumes: types the runner --session command and confirms via the sidecar", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl" });
     const sendShellCommand = vi.fn(async (_t: string, text: string) => {
-      expect(text).toContain(`--session '${SESSION_FILE}'`);
+      expect(runnerCommandArgument(text, "--session")).toBe(SESSION_FILE);
       expect(text).not.toContain("--resume");
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true as const };
@@ -528,7 +609,10 @@ describe("PiResumeAdapter", () => {
     };
     const omp = (fs: ReturnType<typeof memFs>, tmux: TmuxAdapter) =>
       new OmpResumeAdapter(tmux, fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { pollMs: 1, maxWaitMs: 5, sleep: async () => {} });
-    expect(await run(resumeAdapter, "pi_session_file", "high")).toContain("--model 'zai/glm' --thinking 'high' --session");
+    const high = await run(resumeAdapter, "pi_session_file", "high");
+    expect(runnerCommandArgument(high, "--model")).toBe("zai/glm");
+    expect(runnerCommandArgument(high, "--thinking")).toBe("high");
+    expect(runnerCommandArgument(high, "--session")).toBe(SESSION_FILE);
     expect(await run(resumeAdapter, "pi_session_file")).not.toContain("--thinking");
     expect(await run(resumeAdapter, "pi_session_file", null)).not.toContain("--thinking");
     expect(await run(omp, "omp_session_file", "high")).not.toContain("--thinking");
@@ -811,7 +895,7 @@ describe("a Pi seat's managed guidance goes to its own agent folder (#875)", () 
     const fs = memFs({ "/spec/SOP.md": "How work flows here." });
     await adapterWith(fs, mockTmux()).deliverStartup([{ path: "SOP.md", absolutePath: "/spec/SOP.md", ownerRoot: "/spec",
       deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] }], { tmuxSession: SESSION, cwd: "/work", guidanceFile: null } as never);
-    expect(fs.files["/work/AGENTS.md"]).toContain("How work flows here.");
+    expect(fs.files[nodePath.join("/work", "AGENTS.md")]).toContain("How work flows here.");
     expect(AGENT_FILE in fs.files).toBe(false);
   });
 
@@ -854,7 +938,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
       fs.files[statePath] = readyState(childFile, launchIdFrom(text));
       return { ok: true as const };
     });
-    const adapter = new PiRuntimeAdapter({
+    const adapter = new PiRuntimeAdapter({ platform: "linux",
       tmux: mockTmux({ sendShellCommand }),
       seatLaunchEnvironment,
       fsOps: fs,
@@ -890,7 +974,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
   it("PiRuntimeAdapter refuses selected launchWrapper when seatLaunchEnvironment is absent, runtime is omp, or resolveLaunchWrapper fails (before writing pending sidecar)", async () => {
     const fs = memFs();
     const sendShellCommand = vi.fn(async () => ({ ok: true as const }));
-    const piWithoutEnv = new PiRuntimeAdapter({
+    const piWithoutEnv = new PiRuntimeAdapter({ platform: "linux",
       tmux: mockTmux({ sendShellCommand }),
       fsOps: fs,
       stateRoot: STATE_ROOT,
@@ -925,7 +1009,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
     expect(statePath in fs.files).toBe(false);
 
     const failingCommand = vi.fn(async (_s: string, cmd: string) => cmd);
-    const piWithFailingResolve = new PiRuntimeAdapter({
+    const piWithFailingResolve = new PiRuntimeAdapter({ platform: "linux",
       tmux: mockTmux({ sendShellCommand }),
       seatLaunchEnvironment: {
         resolveLaunchWrapper: vi.fn(() => { throw new Error("PATH=/secret/token missing wrapper"); }),
@@ -961,7 +1045,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
       fs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true };
     });
-    const wrappedAdapter = new PiRuntimeAdapter({
+    const wrappedAdapter = new PiRuntimeAdapter({ platform: "linux",
       tmux: mockTmux({ sendShellCommand: wrappedSend }),
       seatLaunchEnvironment,
       fsOps: fs,
@@ -988,7 +1072,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
       unwrappedFs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true };
     });
-    const unwrappedAdapter = new PiRuntimeAdapter({
+    const unwrappedAdapter = new PiRuntimeAdapter({ platform: "linux",
       tmux: mockTmux({ sendShellCommand: unwrappedSend }),
       seatLaunchEnvironment,
       fsOps: unwrappedFs,
@@ -1039,7 +1123,7 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
       target: { runtime: "pi", nodeId: "node-pi", accountHome: undefined },
     }]);
     const expectedFlags = "--launch-wrapper-arg '/abs/bin/my-wrapper' --launch-wrapper-arg '--opt' --launch-wrapper-arg '--'";
-    expect(sendShellCommand.mock.calls[0]![1]).toContain("node '/daemon-dist/adapters/pi-runner.js'");
+    expect(sendShellCommand.mock.calls[0]![1]).toContain(`${process.platform === "win32" ? "'" + process.execPath + "'" : "node"} '/daemon-dist/adapters/pi-runner.js'`);
     expect(sendShellCommand.mock.calls[0]![1]).toContain(expectedFlags);
 
     // Without seatLaunchEnvironment -> refused before sendShellCommand or sidecar write
@@ -1094,8 +1178,10 @@ describe("PiRuntimeAdapter and PiResumeAdapter launch_wrapper", () => {
     expect(tooLongRes.ok).toBe(true);
     expect(tooLongSend).toHaveBeenCalledTimes(2);
     expect(tooLongSend.mock.calls[0]![1]).toContain(expectedFlags);
-    expect(tooLongSend.mock.calls[1]![1]).toMatch(/^node '/);
-    expect(tooLongSend.mock.calls[1]![1]).toContain(expectedFlags);
+    expect(runnerCommandArguments(tooLongSend.mock.calls[1]![1])).toContain(RUNNER);
+    expect(runnerCommandArguments(tooLongSend.mock.calls[1]![1]).slice(-6)).toEqual([
+      "--launch-wrapper-arg", "/abs/bin/my-wrapper", "--launch-wrapper-arg", "--opt", "--launch-wrapper-arg", "--",
+    ]);
   });
 });
 
@@ -1104,7 +1190,7 @@ it.each(["selected", "cleared"])("does not bypass a %s Pi account when a wrapped
   const accountHome = selection === "cleared" ? null : "/accounts/pi";
   const sendShellCommand = vi.fn(async (): Promise<TmuxResult> => ({ ok: false, code: "launch_path_too_long", message: "fixture bound" }));
   const command = vi.fn(async (_session: string, cmd: string) => `/usr/bin/env ${cmd}`);
-  const adapter = new PiRuntimeAdapter({
+  const adapter = new PiRuntimeAdapter({ platform: "linux",
     tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER,
     seatLaunchEnvironment: {
       accountHome: () => "/accounts/previous", resolveLaunchWrapper: () => ["/wrapper", "--"], command,
@@ -1120,16 +1206,16 @@ it("stages a Pi account successor with canonical identity and a separate state d
   const fs = memFs();
   const predecessorPath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
   fs.files[predecessorPath] = readyState(SESSION_FILE, "old-launch");
-  const stagedRoot = `${STATE_ROOT}/account-switches/new-generation`;
+  const stagedRoot = nodePath.join(STATE_ROOT, "account-switches", "new-generation");
   const stagedPath = piSeatPaths(stagedRoot, SESSION).runnerStatePath;
-  const token = `${stagedRoot}/${SESSION}/sessions/new.jsonl`;
+  const token = `${stagedRoot.replaceAll("\\", "/")}/${SESSION}/sessions/new.jsonl`;
   const sendShellCommand = vi.fn(async (target: string, text: string) => {
     expect(target).toBe("staging-pane");
     expect(text).toContain(`--session-name '${SESSION}' --state-root '${stagedRoot}'`);
     fs.files[stagedPath] = readyState(token, launchIdFrom(text));
     return { ok: true as const };
   });
-  const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER });
+  const adapter = new PiRuntimeAdapter({ platform: "linux", tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER });
   const binding = { tmuxSession: "staging-pane", launchGeneration: "new-generation", cwd: "/work", runtimeSwitchFrom: { runtime: "pi", session: SESSION, pane: "%0", generation: "old-generation" } } as never;
   expect(await adapter.launchHarness(binding, { name: SESSION })).toMatchObject({ ok: true, resumeToken: token });
   expect(await adapter.checkReady(binding)).toMatchObject({ ready: true });

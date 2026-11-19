@@ -7,7 +7,7 @@ describe("Pi pane capability check", () => {
       `\x1b[31mError: Unknown options: --name, --${trust}\x1b[0m`, () => "0.73.1\n");
     expect(error).toContain("/pane/old/pi (version 0.73.1; exact executable path unknown)");
     expect(error).toContain("@earendil-works/pi-coding-agent");
-    expect(error).toContain("command -v pi");
+    expect(error).toContain(process.platform === "win32" ? "where.exe pi" : "command -v pi");
   });
 
   it.each(["custom Pi startup", "config failed", "Unknown option: --help", "Unknown option: --names"])(

@@ -16,7 +16,7 @@
 // The guard fails CLOSED. Operator may pass --force to override.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { AgentImageEntry } from "./agent-image-types.js";
 
@@ -66,7 +66,8 @@ export function evaluateProtection(opts: EvidenceGuardOpts): ImageProtectionStat
     // basename is `agent.yaml` is agent-spec; otherwise rig-spec.
     const seenReason = new Set<ProtectionReason>();
     for (const ref of refs) {
-      const reason: ProtectionReason = ref.endsWith("/agent.yaml")
+      const filename = basename(ref);
+      const reason: ProtectionReason = (process.platform === "win32" ? filename.toLowerCase() : filename) === "agent.yaml"
         ? "referenced_by_agent_spec"
         : "referenced_by_rig_spec";
       if (!seenReason.has(reason)) {
@@ -155,7 +156,7 @@ function walkYaml(root: string, visit: (absPath: string) => void): void {
       const abs = join(current, entry.name);
       if (entry.isDirectory()) {
         stack.push(abs);
-      } else if (entry.isFile() && (entry.name.endsWith(".yaml") || entry.name.endsWith(".yml"))) {
+      } else if (entry.isFile() && (process.platform === "win32" ? /\.ya?ml$/i : /\.ya?ml$/).test(entry.name)) {
         try {
           if (statSync(abs).size > 5_000_000) continue; // skip suspiciously large YAML files
         } catch {

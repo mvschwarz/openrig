@@ -197,27 +197,32 @@ function miniatureRepo(parent, name, compiled) {
   };
   mkdirSync(join(root, "scripts"), { recursive: true });
   copyFileSync(SCRIPT, join(root, "scripts", "rewrite-daemon-imports.mjs"));
-  symlinkSync(REPO_NODE_MODULES, join(root, "node_modules")); // the build's TypeScript, read-only
+  symlinkSync(REPO_NODE_MODULES, join(root, "node_modules"), process.platform === "win32" ? "junction" : "dir"); // the build's TypeScript, read-only
   write("packages/daemon/package.json", JSON.stringify({ exports: { "./attention": { import: "./dist/attention-surface.js" } } }));
   write("packages/cli/daemon/dist/attention-surface.js", "export const a = 1;\n");
   write("packages/cli/dist/x.js", compiled);
   return root;
 }
 
-const runDirect = (root) => spawnSync(process.execPath, [join(root, "scripts", "rewrite-daemon-imports.mjs")],
+const runDirect = (root, flags = []) => spawnSync(process.execPath, [...flags, join(root, "scripts", "rewrite-daemon-imports.mjs")],
   { encoding: "utf8", env: { PATH: process.env.PATH } });
 
 test("runs when executed directly from paths with spaces, # or a symlinked parent", () => {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), "rewrite-direct-")));
   const linked = join(realpathSync(tmpdir()), `rewrite-direct-link-${process.pid}`);
   try {
-    symlinkSync(parent, linked);
+    symlinkSync(parent, linked, process.platform === "win32" ? "junction" : "dir");
     const cases = [["plain", parent], ["with space", parent], ["with#hash", parent], ["space and #hash", parent], ["via link", linked]];
     for (const [name, base] of cases) {
       const root = miniatureRepo(parent, name, 'import { a } from "@openrig/daemon/attention";\n');
       const result = runDirect(join(base, name));
       assert.equal(result.status, 0, `${name}: ${result.stderr}`);
       assert.match(result.stdout, /Rewrote 1 @openrig\/daemon import\(s\) in 1 file\(s\)/, name);
+      assert.equal(readFileSync(join(root, "packages/cli/dist/x.js"), "utf8"), 'import { a } from "../daemon/dist/attention-surface.js";\n', name);
+      writeFileSync(join(root, "packages/cli/dist/x.js"), 'import { a } from "@openrig/daemon/attention";\n');
+      const preserved = runDirect(join(base, name), ["--preserve-symlinks-main"]);
+      assert.equal(preserved.status, 0, `${name}: ${preserved.stderr}`);
+      assert.match(preserved.stdout, /Rewrote 1 @openrig\/daemon import\(s\) in 1 file\(s\)/, name);
       assert.equal(readFileSync(join(root, "packages/cli/dist/x.js"), "utf8"), 'import { a } from "../daemon/dist/attention-surface.js";\n', name);
     }
   } finally {

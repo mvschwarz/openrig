@@ -209,6 +209,15 @@ describe("fix 3 — resume_type derives from the runtime on the identity hook", 
       const after = await postIdentity(app, body);
       expect(await after.json()).toMatchObject({ tokenPersisted: true });
       expect(db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(sess.id)).toMatchObject({ resume_type: "omp_session_file", resume_token: sessionFile });
+      if (process.platform === "win32") {
+        const alias = path.join(root, "same-history.jsonl");
+        fs.linkSync(sessionFile, alias);
+        ownFile.current = alias;
+        const sameHistory = await postIdentity(app, body);
+        expect(await sameHistory.json()).toMatchObject({ tokenPersisted: true });
+        expect(db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(sess.id)).toMatchObject({ resume_token: sessionFile });
+        ownFile.current = sessionFile;
+      }
       const otherFile = path.join(root, "other.jsonl");
       fs.writeFileSync(otherFile, "another seat");
       const crossSeat = await postIdentity(app, { ...body, sessionFile: otherFile });

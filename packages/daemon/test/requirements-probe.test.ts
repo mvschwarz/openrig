@@ -18,7 +18,7 @@ describe("RequirementsProbeRegistry", () => {
   // T1: CLI tool installed — status='installed', detectedPath populated, version=null
   it("CLI tool installed returns installed with detectedPath and null version", async () => {
     const exec = createMockExec({ "command -v": "/usr/local/bin/ripgrep" });
-    const registry = new RequirementsProbeRegistry(exec);
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux" });
 
     const result = await registry.probeCli("ripgrep");
 
@@ -31,7 +31,7 @@ describe("RequirementsProbeRegistry", () => {
   // T2: CLI tool missing — status='missing'
   it("CLI tool missing returns missing status", async () => {
     const exec = createMockExec({});
-    const registry = new RequirementsProbeRegistry(exec);
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux" });
 
     const result = await registry.probeCli("nonexistent-tool");
 
@@ -78,7 +78,7 @@ describe("RequirementsProbeRegistry", () => {
   // T6: Probe timeout — status='unknown', error contains 'timed out'
   it("probe timeout returns unknown with timeout error", async () => {
     const exec: ExecFn = () => new Promise(() => {}); // Never resolves
-    const registry = new RequirementsProbeRegistry(exec, { timeoutMs: 50 });
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux", timeoutMs: 50 });
 
     const result = await registry.probeCli("slow-tool");
 
@@ -93,7 +93,7 @@ describe("RequirementsProbeRegistry", () => {
       "'node'": "/usr/local/bin/node",
       "'missing'": new Error("not found"),
     });
-    const registry = new RequirementsProbeRegistry(exec);
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux" });
 
     const specs: RequirementSpec[] = [
       { name: "git", kind: "cli_tool" },
@@ -115,7 +115,7 @@ describe("RequirementsProbeRegistry", () => {
   // T8: command field matches exact shell-quoted command string
   it("probe results include exact shell-quoted command", async () => {
     const exec = createMockExec({ "command -v": "/usr/bin/tmux" });
-    const registry = new RequirementsProbeRegistry(exec);
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux" });
 
     const result = await registry.probeCli("tmux");
 
@@ -141,7 +141,7 @@ describe("RequirementsProbeRegistry", () => {
       "'claude'": "/usr/local/bin/claude",
       "'codex'": "/usr/local/bin/codex",
     });
-    const registry = new RequirementsProbeRegistry(exec);
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux" });
 
     const specs: RequirementSpec[] = [
       { name: "tmux", kind: "cli_tool" },
@@ -161,7 +161,7 @@ describe("RequirementsProbeRegistry", () => {
   // T11: Shell metacharacter in name — exec receives shell-quoted command
   it("shell metacharacters in name are quoted safely", async () => {
     const exec = vi.fn(async () => { throw new Error("not found"); }) as unknown as ExecFn;
-    const registry = new RequirementsProbeRegistry(exec);
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux" });
 
     await registry.probeCli("foo; rm -rf /");
 
@@ -172,7 +172,7 @@ describe("RequirementsProbeRegistry", () => {
   // T12: probeRequirement preserves installHints from spec onto result
   it("probeRequirement preserves installHints from spec unchanged", async () => {
     const exec = createMockExec({ "command -v": "/usr/bin/rg" });
-    const registry = new RequirementsProbeRegistry(exec);
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux" });
 
     const hints = { homebrew: "brew install ripgrep", apt: "apt install ripgrep" };
     const result = await registry.probeRequirement({
@@ -188,7 +188,7 @@ describe("RequirementsProbeRegistry", () => {
   // T13: EACCES probe error -> unknown (not missing) — trust boundary fix
   it("EACCES probe error returns unknown, not missing", async () => {
     const exec = vi.fn(async () => { throw new Error("EACCES: permission denied"); }) as unknown as ExecFn;
-    const registry = new RequirementsProbeRegistry(exec);
+    const registry = new RequirementsProbeRegistry(exec, { platform: "linux" });
 
     const result = await registry.probeCli("rg");
 

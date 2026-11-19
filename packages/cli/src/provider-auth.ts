@@ -1,6 +1,6 @@
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { resolveCodexHome } from "./lib/codex-auth.js";
+import { resolveCodexHome, readPlatformEnv } from "./lib/codex-auth.js";
 
 export interface ProviderAuthDeps {
   exec: (cmd: string) => string;
@@ -80,7 +80,7 @@ export function checkCodexAuth(deps: ProviderAuthDeps, installed: boolean): Prov
     const env = deps.env ?? process.env;
     const codexAuth = selectCodexProviderAuth(deps.readFile(path.join(resolveCodexHome(env).codexHome, "config.toml")));
     if (codexAuth.kind === "env-key") {
-      if (env[codexAuth.envKey]?.trim()) {
+      if (readPlatformEnv(env, codexAuth.envKey)?.trim()) {
         return {
           name: "codex_auth",
           status: "pass",

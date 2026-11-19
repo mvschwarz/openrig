@@ -3,6 +3,7 @@ import { SystemPreflight } from "../system-preflight.js";
 import { ConfigStore } from "../config-store.js";
 import { getDaemonStatus, type DaemonStatus } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
+import { dirname } from "node:path";
 
 interface PreflightCommandDeps {
   exec?: (cmd: string) => Promise<string>;
@@ -29,7 +30,7 @@ export function preflightCommand(depsOverride?: PreflightCommandDeps): Command {
         exec,
         configStore,
         getDaemonStatus: depsOverride?.getDaemonStatus ?? (() => getDaemonStatus(realDeps())),
-        riggedHome: depsOverride?.riggedHome ?? config.db.path.replace(/\/[^/]+$/, ""),
+        riggedHome: depsOverride?.riggedHome ?? dirname(config.db.path),
       });
 
       const result = await preflight.run();

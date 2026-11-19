@@ -55,6 +55,24 @@ test("a hand-edited generated mirror is DRIFT: --check exits 1 naming the fix", 
   }
 });
 
+test("Git checkout line endings do not create drift, and regeneration emits deterministic LF", () => {
+  const root = makeTmpRoot();
+  try {
+    const canonicalPath = path.join(root, CANONICAL), generatedPath = path.join(root, GENERATED);
+    const canonical = fs.readFileSync(canonicalPath, "utf8").replace(/\r\n/g, "\n");
+    const generated = fs.readFileSync(generatedPath, "utf8").replace(/\r\n/g, "\n");
+    for (const canonicalCRLF of [false, true]) for (const generatedCRLF of [false, true]) {
+      fs.writeFileSync(canonicalPath, canonicalCRLF ? canonical.replace(/\n/g, "\r\n") : canonical);
+      fs.writeFileSync(generatedPath, generatedCRLF ? generated.replace(/\n/g, "\r\n") : generated);
+      assert.equal(run(["--check"], { SYNC_LINEAGE_ROOT: root }).code, 0);
+    }
+    assert.equal(run([], { SYNC_LINEAGE_ROOT: root }).code, 0);
+    const result = fs.readFileSync(generatedPath, "utf8");
+    assert.equal(result.includes("\r"), false);
+    assert.equal(result, generated);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a canonical mutation propagates to BOTH surfaces in one sync (the drift class is structurally dead)", () => {
   const root = makeTmpRoot();
   try {

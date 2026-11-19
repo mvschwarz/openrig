@@ -24,6 +24,10 @@ lineage:
 `;
 
 describe("parseAgentImageManifest", () => {
+  it.each(["C:\\outside.md", "C:outside.md", "\\\\host\\share\\outside.md", "\\rooted.md", "bad\0.md"])("rejects non-relative native manifest paths: %s", value => {
+    const raw = validManifest.replace("cwd-delta.md", JSON.stringify(value));
+    expect(() => parseAgentImageManifest(raw, "/fixture/manifest.yaml")).toThrow(/relative path inside the image/);
+  });
   it("parses a valid manifest into the typed shape", () => {
     const m = parseAgentImageManifest(validManifest, "/test/manifest.yaml");
     expect(m.name).toBe("driver-release-primed");

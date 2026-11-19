@@ -86,9 +86,10 @@ describe("Projection planner — plugin path semantics", () => {
 
   it.each(["OPENRIG_HOME", "RIGGED_HOME"])("resolves openrig-home: from configured %s, not later shell values", async key => {
     const config = makeConfig([makePluginQR("openrig-core", "openrig-home:plugins/openrig-core")]);
+    const configuredHome = nodePath.resolve("/isolated/daemon-home");
     vi.stubEnv("OPENRIG_HOME", "");
     vi.stubEnv("RIGGED_HOME", "");
-    vi.stubEnv(key, "/isolated/daemon-home");
+    vi.stubEnv(key, configuredHome);
     vi.resetModules();
     try {
       const { planProjection: configuredPlan } = await import("../src/domain/projection-planner.js");
@@ -98,7 +99,7 @@ describe("Projection planner — plugin path semantics", () => {
       const result = configuredPlan({ config, collisions: [], fsOps: mockFs() });
       expect(result.ok).toBe(true);
       if (result.ok) {
-        expect(result.plan.entries[0]!.absolutePath).toBe("/isolated/daemon-home/plugins/openrig-core");
+        expect(result.plan.entries[0]!.absolutePath).toBe(nodePath.join(configuredHome, "plugins", "openrig-core"));
         expect(result.plan.entries[0]!.resourcePath).toBe("openrig-home:plugins/openrig-core");
       }
     } finally { vi.unstubAllEnvs(); vi.resetModules(); }
@@ -164,6 +165,15 @@ describe("Projection planner — plugin path semantics", () => {
     }
   });
 
+  it("interprets a backslash home prefix using the daemon platform", () => {
+    const raw = "~\\plugins\\owned-plugin";
+    const source = nodePath.resolve("owned-spec");
+    const result = planProjection({ config: makeConfig([makePluginQR("owned", raw, source)]), collisions: [], fsOps: mockFs() });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.plan.entries[0]!.absolutePath).toBe(process.platform === "win32"
+      ? nodePath.join(os.homedir(), "plugins", "owned-plugin") : nodePath.resolve(source, raw));
+  });
+
   it("tilde-with-username (~user/...) is preserved as-is (NOT expanded — operator path)", () => {
     // Per Node's nodePath behavior: only ~/ (with slash) expands; ~user/ doesn't.
     // We follow the same convention to avoid surprising operators with implicit lookups.
@@ -186,7 +196,7 @@ describe("Projection planner — plugin path semantics", () => {
     const result = planProjection({ config, collisions: [], fsOps: mockFs() });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.plan.entries[0]!.absolutePath).toBe("/specs/my-agent/plugins/local-plugin");
+      expect(result.plan.entries[0]!.absolutePath).toBe(nodePath.resolve("/specs/my-agent/plugins/local-plugin"));
     }
   });
 
@@ -195,7 +205,7 @@ describe("Projection planner — plugin path semantics", () => {
     const result = planProjection({ config, collisions: [], fsOps: mockFs() });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.plan.entries[0]!.absolutePath).toBe("/specs/my-agent/plugins/local");
+      expect(result.plan.entries[0]!.absolutePath).toBe(nodePath.resolve("/specs/my-agent/plugins/local"));
     }
   });
 
@@ -216,7 +226,7 @@ describe("Projection planner — plugin path semantics", () => {
       const byId = new Map(result.plan.entries.map((e) => [e.effectiveId, e.absolutePath]));
       expect(byId.get("abs-plugin")).toBe("/abs/plugins/abs-plugin");
       expect(byId.get("home-plugin")).toBe(nodePath.join(os.homedir(), ".openrig/plugins/home-plugin"));
-      expect(byId.get("rel-plugin")).toBe("/specs/agent-X/plugins/rel-plugin");
+      expect(byId.get("rel-plugin")).toBe(nodePath.resolve("/specs/agent-X/plugins/rel-plugin"));
       // All three distinct
       expect(new Set(Array.from(byId.values())).size).toBe(3);
     }

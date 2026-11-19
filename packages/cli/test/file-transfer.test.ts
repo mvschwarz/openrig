@@ -106,6 +106,11 @@ describe("parseFilePathArg — the explicit-or-local grammar", () => {
     const badUser = { ...VPS, id: "bad.dev", user: "invalid user" };
     const registryLoader = () => ({ ok: true as const, registry: { hosts: [ssh, http, badUser] } });
     for (const [operand, code] of [["edge.dev:", "bad_operand"], ["edge.dev:relative", "denied_path"], ["edge.dev:/srv/a b", "denied_path"], ["edge.dev:/srv/.ssh/key", "denied_path"], ["web.dev:/srv/x", "unsupported_transport"], ["bad.dev:/srv/x", "invalid_registry_user"]]) {
+      if (process.platform === "win32" && operand === "edge.dev:/srv/a b") {
+        expect(planFileCopy(operand, "./out.md", { registryLoader }).ok).toBe(true);
+        expect(planFileCopy("./in.md", operand, { registryLoader }).ok).toBe(true);
+        continue;
+      }
       for (const [src, dst] of [[operand, "./out.md"], ["./in.md", operand]]) {
         expect(planFileCopy(src!, dst!, { registryLoader })).toMatchObject({ ok: false, code });
       }
@@ -162,6 +167,22 @@ describe("parseFilePathArg — the explicit-or-local grammar", () => {
 // ── the deny wall (FR-4) ────────────────────────────────────────────────────
 
 describe("checkLocalPath — resolve-then-recheck deny wall", () => {
+  it.skipIf(process.platform !== "win32")("applies the same local policy to namespace and ordinary spellings", () => {
+    for (const segment of DENIED_SEGMENTS) {
+      const candidate = path.join(os.homedir(), segment, "artifact.md");
+      expect(checkLocalPath(candidate).ok).toBe(false);
+      expect(checkLocalPath(path.toNamespacedPath(candidate)).ok).toBe(false);
+    }
+    const saved = process.env.OPENRIG_HOME;
+    try {
+      for (const home of [path.join(os.tmpdir(), "owned-transfer-policy"), "\\\\owned-server\\owned-share\\rig-state"]) {
+        process.env.OPENRIG_HOME = home;
+        expect(checkLocalPath(path.toNamespacedPath(path.join(home, "hosts.yaml"))).ok).toBe(false);
+        process.env.OPENRIG_HOME = path.toNamespacedPath(home);
+        expect(checkLocalPath(path.join(home, "state", "artifact.md")).ok).toBe(false);
+      }
+    } finally { if (saved === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = saved; }
+  });
   it("denies resolved paths under each short-closed-list root, incl. via traversal and ~", () => {
     const home = os.homedir();
     for (const seg of DENIED_SEGMENTS) {
@@ -187,6 +208,20 @@ describe("checkLocalPath — resolve-then-recheck deny wall", () => {
       const state = checkLocalPath(path.join(customHome, "workspace", "artifact.md"));
       expect(state.ok).toBe(false);
       if (!state.ok) expect(state.error).toContain("active OPENRIG_HOME");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = saved;
+    }
+  });
+
+  it("denies descendants when active OPENRIG_HOME is a filesystem root", () => {
+    const saved = process.env["OPENRIG_HOME"];
+    const root = path.parse(path.resolve(os.tmpdir())).root;
+    try {
+      process.env["OPENRIG_HOME"] = root;
+      const result = checkLocalPath(path.join(root, "owned-state-witness", "artifact.md"));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("active OPENRIG_HOME");
     } finally {
       if (saved === undefined) delete process.env["OPENRIG_HOME"];
       else process.env["OPENRIG_HOME"] = saved;

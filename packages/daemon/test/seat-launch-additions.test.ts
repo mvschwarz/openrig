@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join, sep } from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { cleanSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, type SeatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { inspectSeatSkills } from "../src/domain/seat-skill-apply.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -62,11 +64,11 @@ describe("a seat's launch additions in its own storage", () => {
     if (!prepared.ok) return;
     const { additions } = prepared;
     expect(additions.agent).toBe("openrig:reviewer");
-    expect(additions.appendSystemPromptFile?.startsWith(paths.root + "/")).toBe(true);
+    expect(additions.appendSystemPromptFile?.startsWith(paths.root + sep)).toBe(true);
     expect(readFileSync(additions.appendSystemPromptFile!, "utf8")).toBe("Answer in short sentences.\n");
     expect(readFileSync(join(paths.pluginDir, "agents", "reviewer.md"), "utf8")).toContain("name: reviewer");
     expect(additions.pluginDirs).toHaveLength(1);
-    expect(additions.pluginDirs[0]!.startsWith(paths.root + "/")).toBe(true);
+    expect(additions.pluginDirs[0]!.startsWith(paths.root + sep)).toBe(true);
     expect(readFileSync(join(additions.pluginDirs[0]!, ".claude-plugin", "plugin.json"), "utf8")).toContain("review-plugin");
     // The sources are untouched, and a later read of the seat finds the same additions.
     expect(tree(dir)).toEqual(before);
@@ -81,10 +83,38 @@ describe("a seat's launch additions in its own storage", () => {
     expect(tree(paths.root)).toEqual([]);
   });
 
-  it("an earlier record that can't be removed is the seat's named result, not a thrown launch", () => {
+  it("an earlier record that can't be removed is the seat's named result, not a thrown launch", async () => {
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.stuck", runtime: "claude-code" });
     mkdirSync(paths.root, { recursive: true });
-    writeFileSync(join(paths.root, "launch-additions.json"), "{}\n");
+    const record = join(paths.root, "launch-additions.json");
+    writeFileSync(record, "{}\n");
+    if (process.platform === "win32") {
+      const script = "$ErrorActionPreference='Stop'; $s=[IO.File]::Open($env:OPENRIG_OWNED_LOCK_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);try{[Console]::Out.WriteLine('held');[Console]::In.ReadLine()|Out-Null}finally{$s.Dispose()}";
+      const shell = join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+      const child = spawn(shell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+        windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { SystemRoot: process.env.SystemRoot, OPENRIG_OWNED_LOCK_FILE: record },
+      });
+      const closed = once(child, "close");
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const ready = await Promise.race([once(child.stdout, "data").then(([bytes]) => String(bytes)),
+          new Promise<string>((_, reject) => { timer = setTimeout(() => reject(Error("Owned record lock did not start")), 5000); })]);
+        clearTimeout(timer);
+        expect(ready.trim()).toBe("held");
+        const prepared = prepareSeatLaunchAdditions(paths, {});
+        expect(prepared).toMatchObject({ ok: false, code: "seat_storage_refused" });
+        expect(prepared.ok ? "" : prepared.message).toContain("couldn't be removed");
+        expect(readFileSync(record, "utf8")).toBe("{}\n");
+      } finally {
+        clearTimeout(timer);
+        child.stdin.end("\n");
+        timer = setTimeout(() => child.kill(), 3000);
+        await closed.finally(() => clearTimeout(timer));
+      }
+      expect(prepareSeatLaunchAdditions(paths, {})).toEqual({ ok: true, additions: { pluginDirs: [] } });
+      expect(existsSync(record)).toBe(false);
+      return;
+    }
     chmodSync(paths.root, 0o500); // the record is there but its folder isn't writable, so it can't be removed
     try {
       const prepared = prepareSeatLaunchAdditions(paths, {});
@@ -136,7 +166,7 @@ describe("a seat's launch additions in its own storage", () => {
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime: "claude-code" });
     const moved = scratch("seat-additions-linked-");
     mkdirSync(paths.root, { recursive: true });
-    symlinkSync(moved, join(paths.root, "additions"));
+    symlinkSync(moved, join(paths.root, "additions"), process.platform === "win32" ? "junction" : "dir");
     const prepared = prepareSeatLaunchAdditions(paths, sources().input);
     expect(prepared).toMatchObject({ ok: false, code: "seat_storage_refused" });
     expect(tree(moved)).toEqual([]);
@@ -146,7 +176,7 @@ describe("a seat's launch additions in its own storage", () => {
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime: "claude-code" });
     const moved = scratch("seat-additions-moved-");
     mkdirSync(join(home, "state", "seats"), { recursive: true });
-    symlinkSync(moved, join(home, "state", "seats", "rig-1"));
+    symlinkSync(moved, join(home, "state", "seats", "rig-1"), process.platform === "win32" ? "junction" : "dir");
     const prepared = prepareSeatLaunchAdditions(paths, sources().input);
     expect(prepared).toMatchObject({ ok: false, code: "seat_storage_refused" });
     expect(prepared.ok ? "" : prepared.message).toContain("not inside this seat's storage");
@@ -246,7 +276,7 @@ describe("a seat's additions on the launch environment", () => {
     for (const id of ["dev.impl", "dev.peer"]) expect((await launcher.launchNode(rig.id, id)).ok).toBe(true);
     // The agent needs the generated plugin, so preparing an agent makes sure its manifest exists.
     expect(existsSync(paths.pluginManifestPath)).toBe(true);
-    expect(created[0]!["CLAUDE_CODE_PLUGIN_DIRS"]).toBe([paths.pluginDir, ...prepared.additions.pluginDirs].join(":"));
+    expect(created[0]!["CLAUDE_CODE_PLUGIN_DIRS"]).toBe([paths.pluginDir, ...prepared.additions.pluginDirs].join(delimiter));
     expect(created[1]).not.toHaveProperty("CLAUDE_CODE_PLUGIN_DIRS");
     db.close();
   });
@@ -338,7 +368,7 @@ describe("a seat's additions at rig down", () => {
     const elsewhere = scratch("seat-additions-elsewhere-");
     writeFileSync(join(elsewhere, "notes.md"), "notes\n");
     rmSync(pluginCopy, { recursive: true, force: true });
-    symlinkSync(elsewhere, pluginCopy);
+    symlinkSync(elsewhere, pluginCopy, process.platform === "win32" ? "junction" : "dir");
     const cleaned = cleanSeatSkills(paths);
     expect(cleaned.refused).toContain(join(pluginCopy, "notes.md"));
     expect(readFileSync(join(elsewhere, "notes.md"), "utf8")).toBe("notes\n");

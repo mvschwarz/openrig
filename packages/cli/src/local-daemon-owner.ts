@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { assessWindowsLocalDaemonOwner } from "./windows-local-daemon-owner.js";
 
 export type LocalDaemonOwner =
   | { state: "same-user" | "foreign"; pid: number; uid: number; callerUid: number }
+  | { state: "same-user" | "foreign"; pid: number; sid: string; callerSid: string }
   | { state: "unknown"; reason: string };
 
 interface OwnerProbeDeps {
@@ -38,6 +40,7 @@ export function processIdentity(raw: string): { uid: number; start: string } | u
  * Trusts the daemon's reported PID/euid, corroborated by ps; it does not prove socket ownership.
  * Every request observes afresh. Repeated observations cannot make the following TCP request atomic. */
 export async function assessLocalDaemonOwner(baseUrl: string, deps: OwnerProbeDeps = {}): Promise<LocalDaemonOwner> {
+  if ((deps.platform ?? process.platform) === "win32" && isLoopbackEndpoint(baseUrl)) return assessWindowsLocalDaemonOwner(baseUrl, deps);
   const callerUid = deps.callerUid ?? process.geteuid?.();
   if ((deps.platform ?? process.platform) !== "darwin" || !isLoopbackEndpoint(baseUrl) || callerUid === undefined) return unknown("not_local_mac");
   const timeoutMs = deps.timeoutMs ?? 1000;
@@ -86,7 +89,9 @@ export async function assessLocalDaemonOwner(baseUrl: string, deps: OwnerProbeDe
 export class ForeignLocalDaemonError extends Error {
   readonly code = "foreign_local_daemon";
   constructor(baseUrl: string, owner: Extract<LocalDaemonOwner, { state: "same-user" | "foreign" }>) {
-    super(`The optional local user guard found a different OS user at ${baseUrl} (reported PID ${owner.pid}, effective UID ${owner.uid}, corroborated by ps; caller effective UID ${owner.callerUid}). No business request was sent after this owner check. Start your own daemon with \`rig daemon start --port <unused-port>\`, or explicitly select an intended shared/remote endpoint with OPENRIG_URL.`);
+    const identity = "sid" in owner ? `reported PID ${owner.pid}, SID ${owner.sid}, corroborated by native process observation; caller SID ${owner.callerSid}`
+      : `reported PID ${owner.pid}, effective UID ${owner.uid}, corroborated by ps; caller effective UID ${owner.callerUid}`;
+    super(`The optional local user guard found a different OS user at ${baseUrl} (${identity}). No business request was sent after this owner check. Start your own daemon with \`rig daemon start --port <unused-port>\`, or explicitly select an intended shared/remote endpoint with OPENRIG_URL.`);
     this.name = "ForeignLocalDaemonError";
   }
 }

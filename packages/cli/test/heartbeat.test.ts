@@ -83,6 +83,14 @@ describe("rig heartbeat", () => {
     vi.restoreAllMocks();
   });
 
+  it.runIf(process.platform === "win32").each([String.raw`C:\synthetic work\artifact.md`, String.raw`\\synthetic-server\share\artifact.md`, String.raw`.\work\artifact.md`])("recognizes native proof paths without reading evidence or changing queue bytes (%s)", evidence => {
+    const content = queue([entry({ id: "native-proof", state: "in-progress", body: `**State transitions:**\n- 2026-04-24T08:00:00Z - in-progress\n- 2026-04-24T11:30:00Z - in-progress; proof: wrote \`${evidence}\`` })]);
+    const file = writeQueue(root, "alpha", "dev", "impl", content);
+    const result = analyzeHeartbeat({ sharedDocsRoot: root, rig: "alpha", now: NOW });
+    expect(result.items[0]).toMatchObject({ executionState: "proven-active", lastProof: { path: evidence } });
+    expect(readFileSync(file, "utf8")).toBe(content);
+  });
+
   it.each(["\n", "\r\n"])("reports durable queue entries with line ending %j", async (newline) => {
     const content = queue([entry({ id: "waiting", state: "in-progress", title: "Authored task", body: "**State transitions:**\n- 2026-04-24T08:00:00Z - in-progress (accepted)" })]).replace(/\n/g, newline);
     const file = writeQueue(root, "alpha", "dev", "impl", content);

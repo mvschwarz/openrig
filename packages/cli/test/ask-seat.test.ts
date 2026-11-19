@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -37,16 +38,19 @@ function runningDeps(port: number): StatusDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[] }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    console.log = (...a: unknown[]) => logs.push(a.join(" "));
-    console.error = (...a: unknown[]) => logs.push(a.join(" "));
-    try { await fn(); } finally { console.log = origLog; console.error = origErr; }
-    resolve({ logs });
-  });
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[] }> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...a: unknown[]) => logs.push(a.join(" "));
+  console.error = (...a: unknown[]) => logs.push(a.join(" "));
+  try {
+    await fn();
+    return { logs };
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
 }
 
 const SEAT_HITS = {
@@ -98,7 +102,7 @@ describe("rig ask --seat (L1 CLI)", () => {
         res.end(JSON.stringify(payload));
       });
     });
-    await new Promise<void>((r) => server.listen(0, r));
+    await listenOwnedHttpFixture(server, {});
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());

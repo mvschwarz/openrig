@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, renameSync, unlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -74,7 +74,7 @@ describe("workflow spec file removal keeps versions pinned by unfinished work (#
   const write = (path: string, content: string) => { writeFileSync(path, content); touch(path); };
   const scan = () => scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null, eventBus: bus });
   const version = (v: string) => { const row = cache.getByNameVersion("wf-keep", v); return row ? { specId: row.specId, steps: row.spec.steps.length } : null; };
-  const library = () => scanWorkflowSpecs({ db, workflowBuiltinSpecsDir: null }).map((entry) => `${entry.version}@${entry.sourcePath.split("/").pop()}`).sort();
+  const library = () => scanWorkflowSpecs({ db, workflowBuiltinSpecsDir: null }).map((entry) => `${entry.version}@${basename(entry.sourcePath)}`).sort();
   const removedEvents = () => (db.prepare(`SELECT payload FROM events WHERE type = 'workflow_spec.removed'`).all() as { payload: string }[])
     .map((row) => (JSON.parse(row.payload) as { specVersion: string }).specVersion).sort();
 

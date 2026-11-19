@@ -152,7 +152,8 @@ function scopeNotApplied(body: unknown): boolean {
 
 /** Preserve discovered workflow IDs while resolving explicit paths and local files. */
 function resolveWorkflowSource(source: string): string {
-  if (isAbsolute(source) || source.includes("/") || source.includes("\\")) return resolve(source);
+  if (isAbsolute(source) || source.includes("/") || source.includes("\\")
+    || process.platform === "win32" && /^[A-Za-z]:/.test(source)) return resolve(source);
   try {
     return statSync(source).isFile() ? resolve(source) : source;
   } catch {

@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { createProgram } from "../src/index.js";
 import http from "node:http";
@@ -24,19 +25,19 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<string[]> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally {
-      console.log = origLog;
-      console.error = origErr;
-    }
-    resolve(logs);
-  });
+async function captureLogs(fn: () => Promise<void>): Promise<string[]> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
+    return logs;
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
 }
 
 function runningState(port: number): DaemonState {
@@ -234,11 +235,12 @@ function createMockDaemon() {
   return {
     server,
     close: () => new Promise<void>((r) => server.close(() => r())),
-    listen: () => new Promise<number>((r) => {
-      server.listen(0, () => {
+    listen: () => new Promise<number>((r, rejectOwnedListen) => {
+      listenOwnedHttpFixture(server, {}).then(() => {
+        allowOwnedHttpFixture(server);
         const addr = server.address();
         r(typeof addr === "object" && addr ? addr.port : 0);
-      });
+      }, rejectOwnedListen);
     }),
   };
 }

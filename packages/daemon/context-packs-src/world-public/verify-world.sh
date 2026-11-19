@@ -35,7 +35,7 @@ else
 fi
 
 declared_ok=1
-for file in boundaries.md build-your-world.md claims.yaml start-here.md verify-world.sh; do
+for file in boundaries.md build-your-world.md claims.yaml start-here.md verify-world.sh verify-world-native.mjs; do
   [ -f "$root/$file" ] || declared_ok=0
   grep -Fq "path: $file" "$root/manifest.yaml" || declared_ok=0
 done
@@ -128,6 +128,7 @@ public-manifest-summary-build-your-world
 public-manifest-summary-boundaries
 public-manifest-summary-claims
 public-manifest-summary-verify-world
+public-manifest-summary-verify-world-native
 public-manifest-probe-enter-the-world-prompt
 public-manifest-probe-enter-the-world-expect
 public-manifest-probe-author-a-world-prompt
@@ -190,6 +191,7 @@ has_manifest_block_line "$root/manifest.yaml" '  - path: build-your-world.md' ' 
 has_manifest_block_line "$root/manifest.yaml" '  - path: boundaries.md' '    summary: "What this public world covers, excludes, and cannot decide."' || public_manifest_ok=0
 has_manifest_block_line "$root/manifest.yaml" '  - path: claims.yaml' '    summary: "Every authored claim mapped to a failing check or an explicit honesty flag."' || public_manifest_ok=0
 has_manifest_block_line "$root/manifest.yaml" '  - path: verify-world.sh' '    summary: "Portable named checks with loud failures and skips."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - path: verify-world-native.mjs' '    summary: "Native Node checks with the same failures and skips."' || public_manifest_ok=0
 has_manifest_block_line "$root/manifest.yaml" '  - id: enter-the-world' '      prompt: "You just arrived in an unfamiliar OpenRig environment. What do you derive before acting?"' || public_manifest_ok=0
 has_manifest_block_line "$root/manifest.yaml" '  - id: enter-the-world' '      expect: "The agent derives its identity, live topology, available context, and command surface instead of guessing."' || public_manifest_ok=0
 has_manifest_block_line "$root/manifest.yaml" '  - id: author-a-world' '      prompt: "Create a world for a book-writing project without turning the eight regions into folders."' || public_manifest_ok=0

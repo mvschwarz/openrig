@@ -135,15 +135,19 @@ describe("formatStoryDate (date-not-time bug fix)", () => {
     const now = new Date().toISOString();
     const formatted = formatStoryDate(now);
     expect(formatted).not.toMatch(/today|yesterday/i);
-    // month abbrev + numeric day + h:mm time, e.g. "Jun 23, 4:50 PM" / "Jun 23 4:50"
-    expect(formatted).toMatch(/[A-Za-z]{3}\s+\d{1,2}/);
+    // Calendar fields in the host locale, including numeric month names.
+    for (const part of new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).formatToParts(new Date(now))) {
+      if (part.type === "month" || part.type === "day") expect(formatted).toContain(part.value);
+    }
     expect(formatted).toMatch(/\d{1,2}:\d{2}/);
   });
 
   it("renders a known instant with its calendar date", () => {
     // Midday UTC keeps the calendar day stable across local timezones.
     const formatted = formatStoryDate("2026-06-23T12:00:00.000Z");
-    expect(formatted).toMatch(/Jun/);
+    for (const part of new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).formatToParts(new Date("2026-06-23T12:00:00.000Z"))) {
+      if (part.type === "month" || part.type === "day") expect(formatted).toContain(part.value);
+    }
     expect(formatted).toMatch(/\d{1,2}:\d{2}/);
   });
 

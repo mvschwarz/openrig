@@ -18,6 +18,9 @@
 // FS + clock are injected so the whole thing is unit-testable with no real disk.
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { replaceWindowsPrivateTextFile } from "../../private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../../windows-owned-text.js";
 
 export interface StateFsOps {
   readFileSync(p: string): string; // throws (ENOENT) when absent — callers treat as empty
@@ -33,12 +36,38 @@ export const nodeStateFs: StateFsOps = {
   // the next record unconditionally so it cannot become part of that torn JSON.
   // Blank lines are already ignored by parseLines; avoid rereading a growing log.
   appendFileSync: (p, d) => fs.appendFileSync(p, "\n" + d),
-  writeFileSync: (p, d) => fs.writeFileSync(p, d),
-  rename: (from, to) => fs.renameSync(from, to),
+  writeFileSync: (p, d) => {
+    if (process.platform === "win32") replaceWindowsPrivateTextFile(p, d);
+    else fs.writeFileSync(p, d);
+  },
+  rename: (from, to) => {
+    if (process.platform === "win32" && fs.existsSync(to) && fs.lstatSync(to).isFile()) replaceWindowsFilePreservingMetadata(to, from);
+    else fs.renameSync(from, to);
+  },
   mkdirp: (dir) => {
     fs.mkdirSync(dir, { recursive: true });
   },
 };
+
+function replacementPath(file: string): string {
+  // Appending to a valid native filename can exceed the component limit.
+  return process.platform === "win32"
+    ? path.join(path.dirname(file), `.openrig-slack-${randomUUID()}.tmp`)
+    : `${file}.tmp`;
+}
+
+function replaceState(fsops: StateFsOps, file: string, body: string): void {
+  const tmp = replacementPath(file);
+  fsops.writeFileSync(tmp, body);
+  try { fsops.rename(tmp, file); }
+  finally {
+    // Native names are unique per attempt. A refused replacement must not
+    // accumulate stale copies; the durable original is still authoritative.
+    if (process.platform === "win32" && fsops === nodeStateFs) {
+      try { fs.unlinkSync(tmp); } catch { /* Already consumed, or preserve the original error. */ }
+    }
+  }
+}
 
 function parseLines(raw: string): unknown[] {
   return raw
@@ -199,9 +228,7 @@ export class DeadLetterStore<T = unknown> {
   replaceAll(entries: DeadLetterEntry<T>[]): void {
     this.fsops.mkdirp(path.dirname(this.file));
     const body = entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : "");
-    const tmp = `${this.file}.tmp`;
-    this.fsops.writeFileSync(tmp, body);
-    this.fsops.rename(tmp, this.file); // atomic: original intact until this instant
+    replaceState(this.fsops, this.file, body); // original intact until rename
     this.wrote();
   }
 
@@ -345,8 +372,7 @@ export class ChannelCoverageStore {
     const data = this.read();
     Object.defineProperty(data, channel, { value: coverage, enumerable: true, configurable: true });
     this.fsops.mkdirp(path.dirname(this.file));
-    this.fsops.writeFileSync(`${this.file}.tmp`, JSON.stringify(data) + "\n");
-    this.fsops.rename(`${this.file}.tmp`, this.file);
+    replaceState(this.fsops, this.file, JSON.stringify(data) + "\n");
   }
 
   initialize(channel: string, at: string, seenFile: string, receiptsFile: string): ChannelCoverage {
@@ -436,7 +462,6 @@ export class ThreadCoverageStore {
     const data = this.read();
     Object.defineProperty(data, key, { value: coverage, enumerable: true, configurable: true });
     this.fsops.mkdirp(path.dirname(this.file));
-    this.fsops.writeFileSync(`${this.file}.tmp`, JSON.stringify(data) + "\n");
-    this.fsops.rename(`${this.file}.tmp`, this.file);
+    replaceState(this.fsops, this.file, JSON.stringify(data) + "\n");
   }
 }

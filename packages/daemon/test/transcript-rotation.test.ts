@@ -394,7 +394,6 @@ describe("startTranscriptRotation — bounded polling", () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
     const adapter = makeFakeAdapter("first");
     const outputPath = path.join(tmpDir, "s.log");
-    const tmpPath = `${outputPath}.tmp.${process.pid}`;
     fs.writeFileSync(outputPath, "--- SESSION BOUNDARY: test\n");
     startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", outputPath, { lines: 1000, pollIntervalMs: 100 });
     await new Promise((resolve) => setImmediate(resolve));
@@ -406,13 +405,17 @@ describe("startTranscriptRotation — bounded polling", () => {
     adapter.capturePaneContent.mockResolvedValueOnce(null);
     await vi.advanceTimersByTimeAsync(100);
     expect(getLastCaptureAt("s@rig")).toBe(firstFreshness);
-    // A directory at the temp-file path forces actual persistence to fail.
-    fs.mkdirSync(tmpPath);
+    // A directory at the destination refuses actual publication independently
+    // of platform-specific staging names. Keep the old bytes to restore below.
+    const saved = `${outputPath}.saved`;
+    fs.renameSync(outputPath, saved);
+    fs.mkdirSync(outputPath);
     adapter.capturePaneContent.mockResolvedValue("second");
     await vi.advanceTimersByTimeAsync(100);
     expect(getLastCaptureAt("s@rig")).toBe(firstFreshness);
-    expect(fs.readFileSync(outputPath, "utf8")).toBe("--- SESSION BOUNDARY: test\nfirst");
-    fs.rmdirSync(tmpPath);
+    expect(fs.readFileSync(saved, "utf8")).toBe("--- SESSION BOUNDARY: test\nfirst");
+    fs.rmdirSync(outputPath);
+    fs.renameSync(saved, outputPath);
     await vi.advanceTimersByTimeAsync(100);
     expect(getLastCaptureAt("s@rig")).toBe(Date.now());
     expect(fs.readFileSync(outputPath, "utf8")).toBe("--- SESSION BOUNDARY: test\nsecond");

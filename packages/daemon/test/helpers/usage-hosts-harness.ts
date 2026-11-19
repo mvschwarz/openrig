@@ -22,6 +22,7 @@ import type { CodexUsageReadOutcome } from "../../src/domain/provider/codex-usag
 import type { UsageReadOutcome } from "../../src/domain/provider/usage-windows.js";
 import type { ClaudeAuthAnswer } from "../../src/domain/provider/claude-auth-status-reader.js";
 import { createFullTestDb } from "./test-app.js";
+import { allowFetchTarget } from "../../../cli/test/fetch-guard.js";
 
 export interface CodexPlan {
   accountId?: string | null;
@@ -219,6 +220,7 @@ export class UsageHost {
     await new Promise<void>((resolve) => {
       this.server = serve({ fetch: this.app().fetch, hostname: "127.0.0.1", port: 0 }, (info: AddressInfo) => {
         this.url = `http://127.0.0.1:${info.port}`;
+        allowFetchTarget(this.url);
         resolve();
       });
     });
@@ -248,6 +250,7 @@ export async function redirectingRelay(target: string): Promise<{ url: string; h
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const { port } = server.address() as AddressInfo;
+  allowFetchTarget(`http://127.0.0.1:${port}`);
   return {
     url: `http://127.0.0.1:${port}`,
     hits,

@@ -1,11 +1,17 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync, realpathSync, lstatSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync, realpathSync, lstatSync, unlinkSync, statSync } from "node:fs";
 import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import type { ComposedPane } from "./terminal-provider.js";
+import { readPlatformEnv } from "../platform-env.js";
+import { readWindowsTileAttachArgv } from "./windows-tile-attach.js";
+import { ensureWindowsPrivateDirectory } from "../windows-owned-text.js";
+import { replaceWindowsPrivateTextFile } from "../private-text-file.js";
+import { nativeViewerShellCommand } from "./native-viewer-command.js";
+import { execWindowsJobFile } from "../windows-job-exec.js";
 import { earlierTileAttachment } from "./tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 
@@ -25,26 +31,46 @@ interface Entry {
   phase: "creating" | "created" | "starting"; pane?: Pane; scriptHash?: string;
 }
 interface Journal { version: 1; entries: Record<string, Entry> }
-const runFile = promisify(execFile);
+const posixRunFile = promisify(execFile);
+const runFile = (file: string, args: string[], options: { env?: NodeJS.ProcessEnv; encoding: "utf8"; timeout?: number; maxBuffer?: number }) =>
+  process.platform === "win32" ? execWindowsJobFile(file, args, options) : posixRunFile(file, args, options);
 
 /** The supported CLI, never guessed socket RPC method parity. Its reported
  * endpoint must match the adapter's selected socket before any mutation. */
 export function createHerdrViewerRun(endpoint: { socketPath: string }, sourceEnv: NodeJS.ProcessEnv = process.env): HerdrViewerRun {
   // Herdr's explicit --session wins over the socket override. Select by the
   // already resolved socket alone, including paths outside the config tree.
-  const env: NodeJS.ProcessEnv = { ...sourceEnv, HERDR_SOCKET_PATH: endpoint.socketPath };
+  const env: NodeJS.ProcessEnv = { ...Object.fromEntries(Object.entries(sourceEnv).filter(([key]) => process.platform !== "win32" || !["HERDR_SESSION", "HERDR_SOCKET_PATH"].includes(key.toUpperCase()))), HERDR_SOCKET_PATH: endpoint.socketPath };
   delete env.HERDR_SESSION;
   return async args => {
-    const binary = resolveOnPath("herdr", env.PATH);
+    const binary = resolveHerdrBinary(env);
     if (!binary) throw new Error("Herdr CLI is unavailable.");
     const { stdout } = await runFile(binary, args,
       { env, encoding: "utf8", timeout: 5000, maxBuffer: 2 * 1024 * 1024 });
     return stdout;
   };
 }
+
+/** Native Herdr is an executable, not a batch shim or a POSIX PATH lookup. */
+export function resolveHerdrBinary(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string | null {
+  const search = readPlatformEnv(env, "PATH", platform);
+  if (platform !== "win32") return resolveOnPath("herdr", search);
+  for (const entry of (search ?? "").split(";")) {
+    const directory = entry.startsWith('"') && entry.endsWith('"') ? entry.slice(1, -1) : entry;
+    if (!path.win32.isAbsolute(directory)) return null;
+    const file = path.win32.join(directory, "herdr.exe");
+    try { if (statSync(file).isFile()) return file; } catch { /* next PATH entry */ }
+  }
+  return null;
+}
 async function inspectSeat(argv: string[]): Promise<{ sessionId: string; nodeId: string }> {
-  const call = async (args: string[]) => (await runFile(argv[5]!, [...argv.slice(6), ...args], { encoding: "utf8", timeout: 3000 })).stdout.trim();
-  const sessionId = await call(["display-message", "-p", "-t", `=${argv[4]}:`, "#{session_id}"]);
+  const native = readWindowsTileAttachArgv(argv);
+  if (process.platform === "win32" && !native) throw new Error("Native seat attachment is not an exact installed tile wrapper.");
+  const binary = native?.tmux ?? argv[5]!;
+  const server = native?.server ?? argv.slice(6);
+  const session = native?.session ?? argv[4];
+  const call = async (args: string[]) => (await runFile(binary, [...server, ...args], { encoding: "utf8", timeout: 3000 })).stdout.trim();
+  const sessionId = await call(["display-message", "-p", "-t", `=${session}:`, "#{session_id}"]);
   if (!/^\$\d+$/.test(sessionId)) throw new Error("Seat session identity is unknown.");
   const node = await call(["show-environment", "-t", sessionId, "OPENRIG_NODE_ID"]);
   if (!node.startsWith("OPENRIG_NODE_ID=")) throw new Error("Seat node identity is unknown.");
@@ -67,8 +93,22 @@ export function sameHerdrPath(left: unknown, right: string): boolean {
   try { return realpathSync(left) === realpathSync(right); } catch { return false; }
 }
 
+/** Windows can enable case sensitivity per directory. Compare live filesystem
+ * identities rather than folding names and conflating two distinct directories. */
+export function sameViewerCwd(actual: string, expected: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== "win32") return actual === expected;
+  if (!path.win32.isAbsolute(actual) || !path.win32.isAbsolute(expected)) return false;
+  try {
+    const observed = statSync(actual, {bigint:true}), owned = statSync(expected, {bigint:true});
+    return observed.isDirectory() && owned.isDirectory() && observed.ino !== 0n
+      && observed.dev === owned.dev && observed.ino === owned.ino;
+  } catch { return false; }
+}
+
 /** Complete endpoint-wide attribution; mutable labels are never ownership. */
-export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string, known?: ViewerPane): Promise<Pane[]> {
+export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string, knownOrPlatform?: ViewerPane | NodeJS.Platform, selectedPlatform: NodeJS.Platform = process.platform): Promise<Pane[]> {
+  const platform = typeof knownOrPlatform === "string" ? knownOrPlatform : selectedPlatform;
+  const known = typeof knownOrPlatform === "string" ? undefined : knownOrPlatform;
   // 0.9.5 emits JSON by default here; unlike status server, list rejects --json.
   const listed = body(await run(["workspace", "list"]));
   if (!Array.isArray(listed.workspaces)) throw new Error("Viewer enumeration is unreadable.");
@@ -80,7 +120,7 @@ export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string
     for (const raw of listedPanes.panes) {
       const candidate = pane(raw);
       if (!candidate || candidate.workspace_id !== workspace.workspace_id) throw new Error("Viewer pane enumeration is incomplete.");
-      if (sameHerdrPath(candidate.cwd, cwd) || (known && candidate.workspace_id === known.workspace_id
+      if (typeof candidate.cwd === "string" && sameViewerCwd(candidate.cwd, cwd, platform) || (known && candidate.workspace_id === known.workspace_id
         && candidate.pane_id === known.pane_id && candidate.terminal_id === known.terminal_id)) found.push(candidate);
     }
   }
@@ -134,6 +174,17 @@ export class HerdrViewer {
     private readonly platform = process.platform, private readonly root = getDefaultOpenRigPath("private/terminal-viewers"),
     private readonly inspect: InspectViewerSeat = inspectSeat) {}
 
+  private privateDirectory(directory: string): void {
+    if (this.platform === "win32") ensureWindowsPrivateDirectory(directory);
+    else mkdirSync(directory, { recursive: true, mode: 0o700 });
+  }
+  private saveJournal(file: string, journal: Journal): void {
+    const content = `${JSON.stringify(journal)}\n`;
+    if (this.platform === "win32") { replaceWindowsPrivateTextFile(file, content); return; }
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    writeFileSync(temporary, content, { mode: 0o600 }); renameSync(temporary, file);
+  }
+
   ensure(key: ViewerKey, target: ComposedPane, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     // ponytail: one endpoint queue; per-seat locks if creation throughput needs it.
     const result = this.pending.then(() => this.ensureOnce(key, target, true, stillCurrent, createPane));
@@ -145,13 +196,13 @@ export class HerdrViewer {
     this.pending = result.then(() => {}, () => {}); return result;
   }
   private async ownedPanes(entry: Entry): Promise<Pane[]> {
-    return findAttributedViewerPanes(this.run, entry.cwd, entry.pane);
+    return findAttributedViewerPanes(this.run, entry.cwd, entry.pane, this.platform);
   }
   private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     let entry: Entry | undefined;
     const unconfirmed = (error: string): ViewerResult => ({ ok: false, code: "viewer_unconfirmed", error, ...(entry ? { phase: entry.phase } : {}) });
     try {
-      if (this.platform !== "linux" && this.platform !== "darwin") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer supports Linux and macOS with Herdr protocol 22." };
+      if (this.platform !== "linux" && this.platform !== "darwin" && this.platform !== "win32") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer supports Linux, macOS and Windows with Herdr protocol 22." };
       const status = body(await this.run(["status", "server", "--json"]));
       if (status.protocol !== 22 || status.running !== true || !sameHerdrPath(status.socket, this.socketPath)) {
         return unconfirmed("Herdr protocol 22 and the selected socket must be confirmed; pane and process replies are checked separately.");
@@ -160,7 +211,7 @@ export class HerdrViewer {
       if (!target.attachArgv) return unconfirmed("Only verified local tmux bindings support ensure-viewer.");
       const binding = await this.inspect(target.attachArgv);
       if (binding.nodeId !== key.nodeId) return unconfirmed("The current tmux binding does not match this member’s node identity.");
-      if (provision) mkdirSync(this.root, { recursive: true, mode: 0o700 });
+      if (provision) this.privateDirectory(this.root);
       const endpoint = createHash("sha256").update(this.socketPath).digest("hex");
       const file = path.join(this.root, `${endpoint}.json`);
       let journal: Journal;
@@ -170,10 +221,7 @@ export class HerdrViewer {
         journal = { version: 1, entries: {} };
       }
       if (journal.version !== 1 || !journal.entries || typeof journal.entries !== "object" || Array.isArray(journal.entries)) return unconfirmed("Viewer provenance is unreadable; no provider mutation was attempted.");
-      const save = () => {
-        const tmp = `${file}.${randomUUID()}.tmp`;
-        writeFileSync(tmp, `${JSON.stringify(journal)}\n`, { mode: 0o600 }); renameSync(tmp, file);
-      };
+      const save = () => this.saveJournal(file, journal);
       const id = JSON.stringify([key.hostId, key.nodeId]);
       entry = journal.entries[id];
       let created = false;
@@ -194,7 +242,7 @@ export class HerdrViewer {
         if (!provision) return { ok: false, code: "viewer_not_provisioned", error: "No owned viewer has been provisioned for this member." };
         if (Object.keys(journal.entries).length >= 256) return unconfirmed("This endpoint has 256 retained viewer records; inspect its viewer provenance before adding more.");
         const token = randomUUID();
-        const cwd = path.join(this.root, endpoint, token); mkdirSync(cwd, { recursive: true, mode: 0o700 });
+        const cwd = path.join(this.root, endpoint, token); this.privateDirectory(cwd);
         entry = { cwd, label: `openrig-viewer-${token}`, command: target.paneCommand, argv: target.attachArgv, readOnly: target.readOnly, phase: "creating" };
         journal.entries[id] = entry; save();
         // No retry here. A timeout is reconciled by enumeration on the next request.
@@ -246,7 +294,11 @@ export class HerdrViewer {
         if (!await stillCurrent()) return unconfirmed("Task membership changed before the viewer process started.");
         const beforeRun = await this.inspect(target.attachArgv);
         if (beforeRun.nodeId !== key.nodeId || beforeRun.sessionId !== binding.sessionId) return unconfirmed("The seat binding changed before the viewer process started.");
-        const command = prepareViewerCommand(entry, this.root, endpoint);
+        let command = this.platform === "win32" ? entry.command : prepareViewerCommand(entry, this.root, endpoint);
+        if (this.platform === "win32") {
+          const observed = body(await this.run(["pane", "process-info", "--pane", current.pane_id]));
+          command = nativeViewerShellCommand(entry.argv, observed.process_info, entry.cwd);
+        }
         entry.phase = "starting"; save();
         // pane run rc0/empty stdout is not proof. It is sent ONCE then checked.
         await this.run(["pane", "run", current.pane_id, command]);
@@ -257,15 +309,16 @@ export class HerdrViewer {
       // while it views the seat and while it attaches. Kept tiles from earlier releases may show only their foreground
       // tmux client, with the same exact argv. No mutable title/agent label.
       const argv = entry.argv;
-      const server = argv.slice(6); // tileAttachArgv: sh,-c,script,name,session,tmux,...server
-      // Recognize legacy ignore-size writable clients as well as sizing attaches.
+      const native = readWindowsTileAttachArgv(argv);
+      const server = native?.server ?? argv.slice(6);
+      // A writable tile drops ignore-size when its session has no other sizing client (tile-attach).
       const flags = entry.readOnly ? [["-r"]] : [["-f", "ignore-size"], []];
-      const targetName = argv[4]!;
+      const targetName = native?.session ?? argv[4]!;
       const verified = info?.foreground_processes?.some(p => {
         const actual = p.argv;
         if (Array.isArray(actual) && actual.length === argv.length && argv.every((word, index) => actual[index] === word)) return true;
         return Array.isArray(actual) && flags.some(flag => {
-          const expected = [argv[5]!, ...server, "attach", ...flag, "-t"];
+          const expected = [native?.tmux ?? argv[5]!, ...server, "attach", ...flag, "-t"];
           return expected.every((word, index) => actual[index] === word)
             && actual.length === expected.length + 1
             && (actual[expected.length] === `=${targetName}` || actual[expected.length] === binding.sessionId);
@@ -286,8 +339,8 @@ export class HerdrViewer {
     const result = this.pending.then(async () => {
       try {
         const status = body(await this.run(["status", "server", "--json"]));
-        if ((this.platform !== "linux" && this.platform !== "darwin") || status.protocol !== 22
-          || status.running !== true || !sameHerdrPath(status.socket, this.socketPath)) return false;
+        if ((this.platform !== "linux" && this.platform !== "darwin" && this.platform !== "win32") || status.protocol !== 22
+          || status.running !== true || (typeof status.socket !== "string" || !sameViewerCwd(status.socket, this.socketPath, this.platform))) return false;
         const endpoint = createHash("sha256").update(this.socketPath).digest("hex");
         const file = path.join(this.root, `${endpoint}.json`);
         const journal = JSON.parse(readFileSync(file, "utf8")) as Journal;
@@ -300,8 +353,7 @@ export class HerdrViewer {
         if ((await this.ownedPanes(entry)).length !== 0) return false;
         retireViewerDirectory(entry, this.root, endpoint);
         delete journal.entries[id];
-        const temporary = `${file}.${randomUUID()}.tmp`;
-        writeFileSync(temporary, JSON.stringify(journal) + "\n", { mode: 0o600 }); renameSync(temporary, file);
+        this.saveJournal(file, journal);
         return true;
       } catch { return false; }
     });

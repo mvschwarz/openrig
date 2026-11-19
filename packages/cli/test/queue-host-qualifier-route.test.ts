@@ -1,3 +1,5 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
+import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // #1642: what a cross-host queue write actually does, end to end. The compiled CLI runs as its own
 // process against real daemon apps on local ports: the sender's daemon, a receiver standing in for the
 // remote host, and another host. Each run records stdout, stderr, the process exit status, the writes the
@@ -15,7 +17,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import type Database from "better-sqlite3";
 import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { createDb } from "../../daemon/src/db/connection.js";
@@ -59,16 +61,11 @@ async function startDaemon(validateRig: (ref: string) => boolean): Promise<Daemo
     },
   });
   const requests: string[] = [];
-  const server = await new Promise<ServerType>((resolve) => {
-    const s = serve({
-      fetch: (req, env) => {
+  const server = await serveOwnedHonoFixture((req, env) => {
         requests.push(`${req.method} ${new URL(req.url).pathname}`);
         return app.fetch(req, env);
-      },
-      port: 0,
-      hostname: "127.0.0.1",
-    }, () => resolve(s));
-  });
+      });
+  allowOwnedHttpFixture(server);
   return { db, repo, server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests };
 }
 
@@ -258,7 +255,8 @@ describe.skipIf(!fs.existsSync(cliEntry))("#1642: cross-host queue writes throug
           setTimeout(() => res.destroy(), 20);
         });
       });
-      await new Promise<void>((resolve) => hangup.listen(0, "127.0.0.1", () => resolve()));
+      await listenOwnedHttpFixture(hangup);
+      allowOwnedHttpFixture(hangup);
       hangupUrl = `http://127.0.0.1:${(hangup.address() as AddressInfo).port}`;
     });
     afterAll(async () => { await new Promise<void>((resolve) => hangup.close(() => resolve())); });

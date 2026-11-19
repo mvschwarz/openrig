@@ -35,7 +35,7 @@ type Kind = "markdown" | "image" | "video" | "html" | "folder" | "other";
  *  refused BEFORE any URL/scope is built (a named visible error, never a
  *  silent open of sibling/parent content that still looks like evidence). */
 export function evidenceRefContained(ref: string): boolean {
-  return !ref.startsWith("/") && !/(^|\/)\.\.(\/|$)/.test(ref);
+  return !ref.includes("\0") && !/^(?:[\\/]|[A-Za-z]:)/.test(ref) && !/(^|[\\/])\.\.([\\/]|$)/.test(ref);
 }
 
 function classify(ref: string): Kind {

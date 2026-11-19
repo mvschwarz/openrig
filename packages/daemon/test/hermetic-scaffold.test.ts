@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 import {
   prepareHermeticEnv,
   HermeticEnvError,
@@ -21,8 +22,8 @@ describe("prepareHermeticEnv scaffold", () => {
     vi.unstubAllEnvs();
     for (const s of scaffolds.splice(0)) s.cleanup();
   });
-  const make = (baseEnv?: Record<string, string | undefined>) => {
-    const s = prepareHermeticEnv({ baseEnv });
+  const make = (baseEnv?: Record<string, string | undefined>, nativeTmuxFixture?: string) => {
+    const s = prepareHermeticEnv({ baseEnv, nativeTmuxFixture });
     scaffolds.push(s);
     return s;
   };
@@ -63,6 +64,11 @@ describe("prepareHermeticEnv scaffold", () => {
     expect(s.env.OPENRIG_AUTH_BEARER_TOKEN).toBeUndefined();
     // scratch paths point INTO the scaffold
     expect(s.env.HOME).toBe(s.home);
+    if (process.platform === "win32") {
+      expect(s.env.USERPROFILE).toBe(s.home);
+      expect(s.env.TEMP).toBe(join(s.root, "tmp"));
+      expect(s.env.TMP).toBe(s.env.TEMP);
+    }
     expect(s.env.OPENRIG_HOME).toBe(s.openrigHome);
     expect(s.env.OPENRIG_NO_KERNEL).toBe("1");
     // The private tmux wrapper wins command resolution, then the runtime stubs (codex and claude); the
@@ -91,7 +97,8 @@ describe("prepareHermeticEnv scaffold", () => {
     expect(s.env).not.toBe(base);
   });
 
-  it.each(["exit", "signal"])("forwards socket, arguments, stdio and %s without Node on the saved PATH", (termination) => {
+  it.for(["exit", "signal"])("forwards socket, arguments, stdio and %s without Node on the saved PATH", (termination, context) => {
+    if (process.platform === "win32" && termination === "signal") context.skip();
     const commands = mkdtempSync(join(tmpdir(), "tmux-wrapper-"));
     // Exercise quoting of the saved PATH, including characters that must not execute.
     const commandDir = join(commands, "bin ' $() `");
@@ -104,21 +111,38 @@ if [ "$FIXTURE_TERMINATION" = signal ]; then kill -TERM "$$"; fi
 exit 23
 `, { mode: 0o755 });
     try {
-      const s = make({ PATH: commandDir, FIXTURE_TERMINATION: termination });
+      const native = process.platform === "win32" ? writeWindowsNodeFixture(commandDir, "tmux", `let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{process.stdout.write([process.env.PATH,process.env.OPENRIG_HOME,process.env.TMUX_TMPDIR,...process.argv.slice(2),input].join('\\n'));process.stderr.write('tmux stderr\\n');process.exitCode=23;});`) : undefined;
+      const s = make({ PATH: commandDir, FIXTURE_TERMINATION: termination }, native);
       const args = ["send-keys", "", "space ' quote", "$(exit 99)", "`exit 98`", "line\nbreak"];
-      const result = spawnSync(join(s.root, "bin", "tmux"), args, {
+      const result = spawnSync(join(s.root, "bin", process.platform === "win32" ? "tmux.exe" : "tmux"), args, {
         env: s.env as NodeJS.ProcessEnv, input: "stdin payload\n", encoding: "utf8", timeout: 2_000,
       });
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(termination === "exit" ? 23 : null);
       expect(result.signal).toBe(termination === "signal" ? "SIGTERM" : null);
-      expect(result.stdout).toBe([
+      expect(result.stdout, JSON.stringify(result.stdout)).toBe([
         commandDir, s.openrigHome, s.tmuxTmpDir, "-S", s.tmuxSocketPath, ...args, "stdin payload", "",
       ].join("\n"));
       expect(result.stderr).toBe("tmux stderr\n");
     } finally {
       rmSync(commands, { recursive: true, force: true });
     }
+  });
+
+  it.runIf(process.platform === "win32")("refuses native terminal PATH fallback without an explicit inert fixture", () => {
+    const commands = mkdtempSync(join(tmpdir(), "native-terminal-refusal-"));
+    const marker = join(commands, "called");
+    try {
+      writeWindowsNodeFixture(commands, "tmux", `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(marker)},'called');`);
+      const s = make({ PATH: commands });
+      const result = spawnSync(join(s.root, "bin/tmux.exe"), ["list-sessions"], {
+        env: s.env as NodeJS.ProcessEnv, encoding: "utf8", timeout: 2000, windowsHide: true,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Native real-terminal scaffold unavailable");
+      expect(existsSync(marker)).toBe(false);
+    } finally { rmSync(commands, { recursive: true, force: true }); }
   });
 
   it("scrubs inherited provider roots and the native opt-in from scenario children", () => {

@@ -6,6 +6,7 @@
 // allow-list, path-traversal rejection on supplementary files.
 
 import { parse as parseYaml } from "yaml";
+import { validateSafePath } from "../path-safety.js";
 import {
   AgentImageError,
   type AgentImageManifest,
@@ -129,10 +130,11 @@ export function parseAgentImageManifest(rawYaml: string, sourcePath: string): Ag
           { sourcePath, index: i },
         );
       }
-      if (path.split(/[\\/]/).includes("..") || path.startsWith("/")) {
+      const pathError = validateSafePath(path, "manifest file");
+      if (pathError !== null) {
         throw new AgentImageError(
           "manifest_invalid",
-          `manifest at ${sourcePath} files[${i}].path '${path}' must be a relative path inside the image (no '..', no leading '/')`,
+          `manifest at ${sourcePath} files[${i}].path '${path}' must be a relative path inside the image: ${pathError}`,
           { sourcePath, index: i, path },
         );
       }

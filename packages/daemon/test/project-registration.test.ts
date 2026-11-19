@@ -69,6 +69,29 @@ describe("registerBundleProject", () => {
     register("openrig-dev-pi");
     expect(fs.readdirSync(workspace).filter((name) => name.startsWith("workspace.yaml"))).toEqual(["workspace.yaml"]);
   });
+  it.runIf(process.platform === "win32")("associates the same native project root when its path casing differs", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(catalogPath, USER_CATALOG);
+    expect(register().status).toBe("registered");
+    const result = registerBundleProject({ bundleProjectDir: bundleProject, projectId: "openrig", rigName: "another-rig",
+      projectsRoot: projectsRoot.toUpperCase(), catalogPath, workspaceRoot: workspace });
+    expect(result.status, result.detail).toBe("associated");
+    expect(entries().filter(entry => entry.id === "openrig")).toHaveLength(1);
+    expect(entries().find(entry => entry.id === "openrig")?.rigs).toEqual(["openrig-dev", "another-rig"]);
+  });
+
+  it.runIf(process.platform === "win32")("associates the same project through native long-path expansion", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(catalogPath, USER_CATALOG);
+    expect(register().status).toBe("registered");
+    const expanded = fs.realpathSync.native(projectsRoot);
+    const result = registerBundleProject({ bundleProjectDir: bundleProject, projectId: "openrig", rigName: "expanded-path-rig",
+      projectsRoot: expanded, catalogPath, workspaceRoot: workspace });
+    expect(result.status, result.detail).toBe("associated");
+    expect(entries().filter(entry => entry.id === "openrig")).toHaveLength(1);
+    expect(entries().find(entry => entry.id === "openrig")?.rigs).toEqual(["openrig-dev", "expanded-path-rig"]);
+    expect(fs.readFileSync(path.join(expanded, "openrig", "SPEC.md"), "utf8")).toBe("# Contributing to OpenRig\n");
+  });
 
   it("with no catalog, the workspace's entry keeps the id its own project.yaml declares", () => {
     fs.mkdirSync(workspace, { recursive: true });

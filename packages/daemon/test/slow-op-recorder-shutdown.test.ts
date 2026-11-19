@@ -98,7 +98,9 @@ describe("drainSlowOpRecorderOnShutdown — bounded shutdown drain", () => {
     expect(logs.join(" ")).toMatch(/slow-operation/);
   });
 
-  it("a real SIGINT crosses the actual startServer shutdown handler and drains to exit 0", async () => {
+  // Windows process.kill(SIGINT) force-terminates Node. Its production drain
+  // channel is exercised separately by windows-daemon-control.test.ts.
+  it.skipIf(process.platform === "win32")("a real SIGINT crosses the actual startServer shutdown handler and drains to exit 0", async () => {
     // Runs the production entrypoint directly (isDirectRun -> startServer()),
     // which registers the real SIGINT handler at index.ts and builds a real
     // file-backed recorder. A real signal crosses THAT handler — not a test

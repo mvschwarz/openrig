@@ -9,12 +9,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync as jsRealpath, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FILE_READ_TRUNCATION_BYTES, filesRoutes } from "../src/routes/files.js";
 import { readAllowedFile } from "../src/local-reading-surface.js";
 import type { AllowlistRoot } from "../src/domain/files/path-safety.js";
+const realpathSync = process.platform === "win32" ? jsRealpath.native : jsRealpath;
 
 function buildApp(allowlist: AllowlistRoot[]): Hono {
   const app = new Hono();

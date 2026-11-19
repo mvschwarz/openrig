@@ -25,6 +25,18 @@ describe("offline tmux server selection", () => {
     expect(readRecordedTmuxServerArgs(home)).toEqual([]);
   });
 
+  it.skipIf(process.platform !== "win32")("retains one native instance across drive-case aliases and legacy record spelling", async () => {
+    const alias=home[0]!.toLowerCase()+home.slice(1);
+    const selected=await selectTmuxServer({home,mode:"isolated",registeredSessions:[],platform:"win32",env:{PSMUX_DATA_DIR:join(home,"registry")},inspect:async()=>({state:"absent"})});
+    expect(readRecordedTmuxServerArgs(alias)).toEqual(selected.executionArgs);
+    const record=JSON.parse(readFileSync(file,"utf8"));
+    record.home=record.home[0].toLowerCase()+record.home.slice(1);
+    writeFileSync(file,JSON.stringify(record));
+    expect(readRecordedTmuxServerArgs(home)).toEqual(selected.executionArgs);
+    const resumed=await selectTmuxServer({home:alias,mode:"isolated",registeredSessions:[],platform:"win32",env:{PSMUX_DATA_DIR:join(home,"registry")},inspect:async()=>({state:"absent"})});
+    expect(resumed.executionArgs).toEqual(selected.executionArgs);
+  });
+
   describe.each([false, true])("unreadable selection with active pin=%s", pinned => {
     it.each(["missing", "malformed", "invalid", "unreadable"])("handles a %s record without guessing a pinned socket", state => {
       writeFileSync(marker, pinned ? "openrig-tmux-pinned-v1\n" : "1\n");

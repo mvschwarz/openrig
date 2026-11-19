@@ -1,0 +1,23 @@
+name: Windows native smoke
+
+# Optional developer check, not an additional automatic release gate.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Native argv, stock environment transport and file command planning
+        run: node node_modules/vitest/vitest.mjs run packages/daemon/test/windows-launch.test.ts packages/daemon/test/windows-environment-transport.test.ts packages/cli/test/file-transfer.test.ts --maxWorkers=2

@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
+import { resolve } from "node:path";
 import { parseAgentSpec, validateAgentSpec, normalizeAgentSpec } from "../src/domain/agent-manifest.js";
+
+it.each([
+  [`path:${resolve("owned agent")}`, true],
+  ["path:agents/helper", false],
+  [`local:${resolve("owned agent")}`, false],
+  ["local:agents/helper", true],
+] as const)("validates native import path shape %s", (ref, valid) => {
+  const raw = parseAgentSpec(VALID_SPEC);
+  raw.imports = [{ ref }];
+  expect(validateAgentSpec(raw).valid).toBe(valid);
+});
 
 const VALID_SPEC = `
 version: "0.2"

@@ -4,9 +4,13 @@ import { PI_PROVIDER_ENV_VARS, providerFromModel } from "./pi-runner-protocol.js
 // A tested baseline, not an enforced minimum. See docs/releases/v0.5.15.md.
 const TESTED_PI_VERSION = "0.87.1";
 
+export function piExecutableLookup(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "where.exe pi" : "command -v pi";
+}
+
 /** The daemon and pane may resolve different executables. Never turn a
  * version observation into a new launch refusal or echo arbitrary stdout. */
-export function piVersionNotice(output: string): string {
+export function piVersionNotice(output: string, platform: NodeJS.Platform = process.platform): string {
   const match = /^(?:pi\s+)?v?(\d{1,6}\.\d{1,6}\.\d{1,6})(?:[-+][\w.-]{1,40})?$/i.exec(output.trim());
   if (!match) return "Pi version unknown: 'pi --version' did not return a recognized version; launch continues. Check 'pi --version' in the pane's shell.";
   const version = match[1]!;
@@ -14,7 +18,7 @@ export function piVersionNotice(output: string): string {
   const baseline = TESTED_PI_VERSION.split(".").map(Number);
   const difference = parts.map((part, i) => part - baseline[i]!).find(value => value !== 0) ?? 0;
   return difference < 0
-    ? `Pi version ${version} is older than OpenRig's tested baseline ${TESTED_PI_VERSION}; compatibility is unverified and launch continues. Update with 'npm install -g @earendil-works/pi-coding-agent', then check 'command -v pi' in the pane's shell.`
+    ? `Pi version ${version} is older than OpenRig's tested baseline ${TESTED_PI_VERSION}; compatibility is unverified and launch continues. Update with 'npm install -g @earendil-works/pi-coding-agent', then check '${piExecutableLookup(platform)}' in the pane's shell.`
     : `Pi version ${version} answered on the daemon's PATH; this does not verify the pane's executable or provider access. Credentials are checked for the managed seat before Pi starts.`;
 }
 

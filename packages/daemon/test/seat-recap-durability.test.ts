@@ -4,6 +4,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const fault = vi.hoisted(() => ({ phase: "", linkCode: "" }));
+vi.mock("../src/domain/windows-owned-text.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/domain/windows-owned-text.js")>("../src/domain/windows-owned-text.js");
+  return { ...actual, replaceWindowsFilePreservingMetadata: (...args: Parameters<typeof actual.replaceWindowsFilePreservingMetadata>) => {
+    if (fault.phase === "publish") throw new Error("injected publication failure");
+    return actual.replaceWindowsFilePreservingMetadata(...args);
+  } };
+});
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return {

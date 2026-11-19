@@ -14,6 +14,12 @@ export async function execRuntimeProbe(
   const { exec } = await import("node:child_process");
   const { timeoutMs = 10_000, ...execOptions } = options;
   return runAsyncSite(site, async () => {
+    if (process.platform === "win32") {
+      // exec's timeout ends cmd.exe alone. Keep the probe and its descendants
+      // in the same owned Job used by version/help probes, retaining cwd/env.
+      const { boundedProbeExec } = await import("./bounded-probe-exec.js");
+      return boundedProbeExec(timeoutMs, 1000, { cwd: () => execOptions.cwd, env: execOptions.env })(cmd);
+    }
     const running = promisify(exec)(cmd, { encoding: "utf-8", timeout: timeoutMs, ...execOptions });
     running.child.stdin?.end();
     try {

@@ -1,9 +1,37 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync, symlinkSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync, symlinkSync, existsSync, copyFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { prepareWorkspaceBuild } from "./prepare-workspace-build.mjs";
+
+test("native direct entry cannot silently skip preparation through a case alias", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "prepare-entry-native-"));
+  try {
+    const scripts = path.join(root, "scripts");
+    mkdirSync(scripts);
+    const script = path.join(scripts, "prepare-workspace-build.mjs");
+    copyFileSync(fileURLToPath(new URL("./prepare-workspace-build.mjs", import.meta.url)), script);
+    const variant = path.join(scripts, "PREPARE-WORKSPACE-BUILD.mjs");
+    const missing = spawnSync(process.execPath, [variant, "tui"], { encoding: "utf8" });
+    assert.equal(missing.error, undefined);
+    assert.notEqual(missing.status, 0, "a missing compiled entry must fail instead of silently skipping preparation");
+    assert.match(missing.stderr, /ENOENT/);
+    mkdirSync(path.join(root, "packages/tui/dist"), { recursive: true });
+    writeFileSync(path.join(root, "packages/tui/dist/main.js"), "owned compiled entry");
+    const ready = spawnSync(process.execPath, [variant, "tui"], { encoding: "utf8" });
+    assert.equal(ready.status, 0, ready.stderr);
+    // A same-basename importer is not the helper's direct entry.
+    mkdirSync(path.join(root, "other"));
+    const importer = path.join(root, "other", "prepare-workspace-build.mjs");
+    writeFileSync(importer, "import '../scripts/prepare-workspace-build.mjs'; console.log('import-only');");
+    const imported = spawnSync(process.execPath, [importer, "unknown"], { encoding: "utf8" });
+    assert.equal(imported.status, 0, imported.stderr);
+    assert.equal(imported.stdout.trim(), "import-only");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("CLI build copies assets and root documents without shell utilities", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "openrig-build-assets-"));

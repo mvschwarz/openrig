@@ -1084,7 +1084,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalled();
   });
 
-  describe("one session-environment listing per producer diagnosis", () => {
+  describe("one session-environment batch API call per producer diagnosis", () => {
     const names = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT", "OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN", "OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
     const all = (value: boolean | null) => Object.fromEntries(names.map((n) => [n, value]));
     function withBatch(batch: (session: string, wanted: readonly string[]) => Promise<Record<string, boolean | null>>, overrides?: Parameters<typeof mockTmux>[0]) {
@@ -1094,7 +1094,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       return { sendText, hasSessionEnvBatch, hasSessionEnv, tmux };
     }
 
-    it("reads all eight names in one listing per send, freshly for each send, for an unknown Claude seat", async () => {
+    it("requests all eight names in one batch per send, freshly for each send, for an unknown Claude seat", async () => {
       const b = withBatch(vi.fn().mockResolvedValueOnce(all(false)).mockResolvedValueOnce(all(true)));
       const t = makeTransport(b.tmux);
       const first = await t.send("dev-impl@my-rig", "hi");
