@@ -31,6 +31,8 @@ export type ResumeResult =
   | { ok: false; code: string; message: string };
 
 const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
+const CLAUDE_PROCESS_ONLY_RESUME = "Claude was running when the resume's wait ended, but nothing on its screen was recognized "
+  + "yet (no prompt, reply or dialog), so this resume rests on the process alone.";
 
 /** The legacy name and native ID are both supported Claude resume inputs. */
 export function isClaudeResumeType(resumeType: string | null | undefined): boolean {
@@ -214,7 +216,8 @@ export class ClaudeResumeAdapter {
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
     }));
-    return result.ok ? { ...result, appliedLaunch, ...(tokenWarnings.length ? { warnings: tokenWarnings } : {}) } : result;
+    const warnings = result.ok ? [...tokenWarnings, ...(result.warnings ?? [])] : [];
+    return result.ok ? { ...result, appliedLaunch, ...(warnings.length ? { warnings } : {}) } : result;
   }
 
   private async verifyResume(tmuxSessionName: string, resumeToken: string): Promise<ResumeResult> {
@@ -254,7 +257,9 @@ export class ClaudeResumeAdapter {
         };
       }
 
-      if (probe.status === "resumed") {
+      // Claude's process alone, with nothing of its screen drawn yet, doesn't end the wait: a dialog Claude opens first
+      // (its trust dialog in a moved folder) is drawn after the process starts. It stands only when the wait runs out.
+      if (probe.status === "resumed" && probe.basis !== "process") {
         return { ok: true };
       }
 
@@ -278,7 +283,7 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "attention_required", message: finalProbe.detail, evidence: finalContent.split("\n").slice(-12).join("\n") };
     }
     if (finalProbe.status === "resumed") {
-      return { ok: true };
+      return finalProbe.basis === "process" ? { ok: true, warnings: [CLAUDE_PROCESS_ONLY_RESUME] } : { ok: true };
     }
 
     // The exact --resume identity is stronger evidence than a pane command or

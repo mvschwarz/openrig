@@ -92,7 +92,8 @@ function mockTmux(): TmuxAdapter {
     sendText: vi.fn(async () => ({ ok: true as const })),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
     getPaneCommand: vi.fn(async () => "claude"),
-    capturePaneContent: vi.fn(async () => ""),
+    // A resumed Claude's drawn screen: Claude's process alone, with nothing drawn, only stands when the resume's wait runs out.
+    capturePaneContent: vi.fn(async () => `Claude Code v2.1.310\n${"─".repeat(60)}\n❯ \n${"─".repeat(60)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`),
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),

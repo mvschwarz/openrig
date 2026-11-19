@@ -6,7 +6,7 @@ import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { currentClaudeThemeMenu } from "./claude-theme-menu.js";
 import { currentClaudeModelMenu, currentCodexModelPicker, isModelPickerHeader } from "./native-model-picker.js";
-import { currentClaudeResumePicker } from "./native-resume-probe.js";
+import { currentClaudeResumePicker, currentClaudeTrustDialog } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_LIVE_WORKING_FRAME_PATTERN, CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -868,10 +868,14 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const claudePicker = options.runtime === "codex" || options.runtime === "pi" ? null : currentClaudeResumePicker(paneContent);
   const themeMenu = options.runtime === undefined || options.runtime === "claude-code"
     ? currentClaudeThemeMenu(paneContent) : null;
+  // Claude's workspace trust dialog from its heading on, before its options are drawn: Enter answers it, and its focus
+  // opens on "No, exit".
+  const trustDialog = options.runtime === undefined || options.runtime === "claude-code"
+    ? currentClaudeTrustDialog(paneContent) : null;
   // The program's own /model picker: its highlighted row can sit above the scan window, and Enter there confirms it.
   const modelPicker = options.runtime === "codex" ? currentCodexModelPicker(paneContent)
     : options.runtime === undefined || options.runtime === "claude-code" ? currentClaudeModelMenu(paneContent) : null;
-  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
+  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? trustDialog ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {

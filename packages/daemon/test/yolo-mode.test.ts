@@ -20,7 +20,8 @@ function mockTmux(): TmuxAdapter {
     sendText: vi.fn(async () => ({ ok: true as const })),
     hasSession: vi.fn(async () => true),
     getPaneCommand: vi.fn(async () => "claude"),
-    capturePaneContent: vi.fn(async () => ""),
+    // A resumed Claude's drawn screen: Claude's process alone, with nothing drawn, only stands when the resume's wait runs out.
+    capturePaneContent: vi.fn(async () => `Claude Code v2.1.310\n${"─".repeat(60)}\n❯ \n${"─".repeat(60)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`),
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => []),

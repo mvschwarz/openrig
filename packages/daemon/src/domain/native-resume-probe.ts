@@ -32,6 +32,8 @@ export interface NativeResumeProbeResult {
   code: string;
   detail: string;
   loginRefusal?: { message: ClaudeLoginRefusal; row: "response" | "result" };
+  /** `process`: a `resumed` that rests on the pane's foreground command alone, with nothing of Claude's screen recognized. */
+  basis?: "process";
 }
 
 export interface ProbeShellReadyInput {
@@ -442,6 +444,7 @@ export function assessNativeResumeProbe(
         status: "resumed",
         code: "active_runtime",
         detail: "Claude is the active foreground process in the probe pane.",
+        basis: "process",
       };
     }
     if (/(^|\n)\s*❯/.test(paneContent)
@@ -720,12 +723,24 @@ export function claudeTrustPromptFocus(paneContent: string): "yes" | "no" | "unk
 
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
   // #2820 item 2: read on Claude's current screen only, and a screen with the backstop's marks is never the plain
-  // trust prompt, even still drawn: pressing Enter on it would decline the folder's grants or exit.
+  // trust prompt, even still drawn: pressing Enter on it would decline the folder's grants or exit. The heading alone
+  // counts: Claude draws it before the options.
   const current = claudeCurrentRows(paneContent);
-  const text = current.join("\n");
-  return text.includes("Accessing workspace:")
-    && text.includes("Yes, I trust this folder")
-    && !hasClaudeGatedGrantsMark(current);
+  return current.some(isClaudeTrustHeading) && !hasClaudeGatedGrantsMark(current);
+}
+
+const isClaudeTrustHeading = (row: string) => row.trim().startsWith("Accessing workspace:");
+
+/** Claude's workspace trust dialog on its current screen, from the first frame it draws: the "Accessing workspace:"
+ *  heading, or a mark of the gated-grants backstop (whose heading a long list can scroll out). Enter there answers the
+ *  dialog, and the plain prompt's focus opens on "No, exit" (2.1.310, 2.1.322), so a send would exit Claude. Returns the
+ *  row it was read from, or null. */
+export function currentClaudeTrustDialog(paneContent: string): string | null {
+  const current = claudeCurrentRows(paneContent);
+  const heading = current.find(isClaudeTrustHeading);
+  if (heading) return heading.trim();
+  if (!hasClaudeGatedGrantsMark(current)) return null;
+  return current.find(row => CLAUDE_GATED_GRANTS_MARK_ROW.test(row))?.trim() ?? "This folder pre-approves tool permissions";
 }
 
 // Claude's resume-selection prompt appears when `claude --resume` finds multiple
