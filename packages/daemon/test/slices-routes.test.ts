@@ -2531,6 +2531,51 @@ describe("GET /api/slices observed queue counts", () => {
         expect(response.status, "a missing root is not ready, as before").toBe(503);
         expect(await response.json()).toMatchObject({ error: "slices_root_not_configured" });
       });
+
+      it("uses native realpath for count keys and mission aliases when a symlinked root target contains ..", async () => {
+        const currentAlias = path.join(root, "current");
+        fs.symlinkSync(configured(), currentAlias, "dir");
+        expect(fs.realpathSync.native(currentAlias)).toBe(path.join(root, "alpha", "missions"));
+
+        // Mirror physical-slice in Beta first so every listed path exists in Beta too and exposes the Beta count collision.
+        addSlice("beta", "shipping", "physical-slice");
+        addSlice("alpha", "release-train", "01-release", "active", "SLICE.ALPHA.RELEASE", { missionId: "M.ALPHA.RELEASE" });
+        addSlice("beta", "release-train", "01-release", "active", "SLICE.BETA.RELEASE", { missionId: "M.BETA.RELEASE" });
+        row("beta-blocked", "blocked", ["project:beta", "mission:release-train", "slice:01-release"]);
+        row("alpha-mission-id", "pending", ["project:alpha", "mission:M.ALPHA.RELEASE", "slice:01-release"]);
+
+        const aliasSlicePath = path.join(currentAlias, "release-train", "slices", "01-release");
+        const { app: implicitApp } = route("alpha", false, currentAlias);
+        const implicitEntries = await list(implicitApp);
+        expect.soft(implicitEntries.find((s) => s.name === "01-release")).toMatchObject({
+          slicePath: aliasSlicePath,
+          status: "active",
+          queueCounts: { ...ZERO, pending: 1 },
+          derivedState: "pending",
+        });
+        expect.soft((await list(implicitApp, "?derived=blocked")).map((s) => s.name)).toEqual([]);
+        expect.soft((await list(implicitApp, "?derived=pending")).map((s) => s.name)).toEqual(["01-release"]);
+
+        // Also cover an explicit project-scoped indexer where Alpha is configured only via the symlink alias.
+        catalog([{ id: "beta", root: "beta" }]);
+        const { app: explicitApp } = route("alpha", true, currentAlias);
+        const explicitEntries = await list(explicitApp);
+        expect.soft(explicitEntries.find((s) => s.name === "01-release")).toMatchObject({
+          slicePath: aliasSlicePath,
+          status: "active",
+          queueCounts: { ...ZERO, pending: 1 },
+          derivedState: "pending",
+        });
+        expect.soft((await list(explicitApp, "?derived=blocked")).map((s) => s.name)).toEqual([]);
+        expect.soft((await list(explicitApp, "?derived=pending")).map((s) => s.name)).toEqual(["01-release"]);
+
+        // An Alpha-only slice absent from Beta must also keep counts readable rather than failing lexical realpath.
+        catalog([{ id: "alpha", root: "alpha" }, { id: "beta", root: "beta" }]);
+        addSlice("alpha", "release-train", "02-alpha-only", "active", "SLICE.ALPHA.ONLY", { missionId: "M.ALPHA.RELEASE" });
+        const afterAlphaOnly = await list(implicitApp, "?refresh=1");
+        expect.soft(afterAlphaOnly.find((s) => s.name === "01-release")?.derivedState).toBe("pending");
+        expect.soft(afterAlphaOnly.find((s) => s.name === "02-alpha-only")?.derivedState).toBe("none");
+      });
     });
 
     it("invalidates a warm listing when a configured symlink root changes target without refresh", async () => {

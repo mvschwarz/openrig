@@ -77,9 +77,11 @@ function zeroQueueCounts(): SliceQueueCounts {
   };
 }
 
+/** Physical path for queue-count keys. A symlinked root without `..` keeps its alias spelling,
+ *  and its target can itself contain `..` after another symlink, so use the native realpath. */
 function canonicalPhysicalPath(absPath: string): string | null {
   try {
-    return fs.realpathSync(absPath);
+    return fs.realpathSync.native(absPath);
   } catch {
     return null;
   }
@@ -1021,7 +1023,7 @@ export class SliceIndexer {
     for (const configuredRoot of this.sliceRoots(additionalRoots)) {
       let root: string;
       try {
-        root = fs.realpathSync(configuredRoot);
+        root = fs.realpathSync.native(configuredRoot);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError();
         continue;

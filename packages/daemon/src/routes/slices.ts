@@ -328,7 +328,7 @@ function getDeps(c: { get: (key: string) => unknown }): SlicesRoutesDeps | null 
 
 function safeRealpath(targetPath: string): string {
   try {
-    return fs.realpathSync(targetPath);
+    return fs.realpathSync.native(targetPath);
   } catch {
     return path.resolve(targetPath);
   }

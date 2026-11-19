@@ -9,10 +9,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
+import { Hono } from "hono";
+import { createDb } from "../../daemon/src/db/connection.js";
+import { migrate } from "../../daemon/src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
+import { SliceDetailProjector } from "../../daemon/src/domain/slices/slice-detail-projector.js";
+import { SliceIndexer } from "../../daemon/src/domain/slices/slice-indexer.js";
+import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
+import { slicesRoutes } from "../../daemon/src/routes/slices.js";
+
+type MockReply = { status: number; data: unknown } | Error;
 
 const daemon = vi.hoisted(() => ({
   status: { state: "running", healthy: true, pid: 1234, port: 7433 } as Record<string, unknown>,
-  respond: null as null | (() => { status: number; data: unknown } | Error),
+  respond: null as null | ((reqPath: string) => MockReply | Promise<MockReply>),
   gets: [] as string[],
   clientDefaultUrl: "http://localhost:7433",
   clientUrls: [] as string[],
@@ -44,7 +54,7 @@ vi.mock("../src/client.js", async () => {
       }
       async get<T>(p: string): Promise<{ status: number; data: T }> {
         daemon.gets.push(p);
-        const reply = daemon.respond?.();
+        const reply = await daemon.respond?.(p);
         if (reply instanceof Error) throw reply;
         return (reply ?? { status: 200, data: { slices: [] } }) as { status: number; data: T };
       }
@@ -339,6 +349,72 @@ describe("rig scope slice ls queue-derived state (#2729)", () => {
     });
     const { parsed } = await ls("--with-queue");
     expect(derivedByName(parsed!.slices)["01-stuck"]).toBe("pending");
+  });
+
+  it("joins native realpaths end to end with GET /api/slices when a symlinked daemon root target contains ..", async () => {
+    const root = fs.realpathSync.native(ws.workRoot);
+    const alphaRoot = path.join(root, "alpha-proj");
+    const betaRoot = path.join(root, "beta-proj");
+    for (const [id, projRoot, missionId, sliceId] of [
+      ["alpha", alphaRoot, "M.ALPHA", "OPR.ALPHA"],
+      ["beta", betaRoot, "M.BETA", "OPR.BETA"],
+    ] as const) {
+      writeFile(path.join(projRoot, "README.md"), `---\nid: ${id}\n---\n# ${id}\n`);
+      writeFile(path.join(projRoot, "project.yaml"), `id: ${id}\nmissions:\n  root: missions\n`);
+      writeFile(path.join(projRoot, "missions", "shipping", "README.md"), `---\nid: ${missionId}\nstatus: active\n---\n# shipping\n`);
+      writeFile(path.join(projRoot, "missions", "shipping", "slices", "01-release", "README.md"), `---\nid: ${sliceId}\nstatus: active\n---\n# release\n`);
+    }
+    fs.mkdirSync(path.join(alphaRoot, "sub"), { recursive: true });
+    fs.symlinkSync(path.join(alphaRoot, "sub"), path.join(betaRoot, "link"), "dir");
+    const currentAlias = path.join(root, "current");
+    fs.symlinkSync(`${betaRoot}/link/../missions`, currentAlias, "dir");
+    const catalogPath = path.join(root, "workspace.yaml");
+    writeFile(catalogPath, JSON.stringify({ projects: [{ id: "alpha", root: "alpha-proj" }, { id: "beta", root: "beta-proj" }] }));
+    const settingsPath = path.join(root, "settings.json");
+    writeFile(settingsPath, JSON.stringify({ workspace: { root, catalogPath, slicesRoot: currentAlias } }));
+
+    const db = createDb();
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const insert = db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, tags)
+         VALUES (?, '2026-11-18T00:00:00.000Z', '2026-11-18T00:00:00.000Z', 'writer@rig', 'worker@rig', ?, 'routine', 'work', ?)`,
+      );
+      insert.run("beta-blocked", "blocked", JSON.stringify(["project:beta", "mission:shipping", "slice:01-release"]));
+      insert.run("alpha-pending", "pending", JSON.stringify(["project:alpha", "mission:M.ALPHA", "slice:01-release"]));
+
+      const indexer = new SliceIndexer({ db, slicesRoot: currentAlias, dogfoodEvidenceRoot: null });
+      const projector = new SliceDetailProjector({ db, indexer });
+      const settings = new SettingsStore(settingsPath);
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        c.set("sliceIndexer" as never, indexer);
+        c.set("sliceDetailProjector" as never, projector);
+        c.set("settingsStore" as never, settings);
+        await next();
+      });
+      app.route("/api/slices", slicesRoutes());
+      daemon.respond = async (reqPath) => {
+        const res = await app.request(reqPath);
+        return { status: res.status, data: await res.json() };
+      };
+
+      const withQueue = await run(["slice", "ls", "--state", "all", "--with-queue", "--json"], alphaRoot);
+      expect(withQueue.exitCode).toBe(0);
+      const parsed = JSON.parse(withQueue.stdout) as { slices: Row[]; warnings?: string[] };
+      expect.soft(derivedByName(parsed.slices), "Beta's blocked item must not attach to Alpha's slice").toEqual({ "01-release": "pending" });
+      expect.soft(parsed.warnings).toBeUndefined();
+
+      const blockedOnly = await run(["slice", "ls", "--derived", "blocked", "--json"], alphaRoot);
+      expect(blockedOnly.exitCode).toBe(0);
+      expect.soft((JSON.parse(blockedOnly.stdout) as { slices: Row[] }).slices.map((s) => s.name)).toEqual([]);
+
+      const pendingOnly = await run(["slice", "ls", "--derived", "pending", "--json"], alphaRoot);
+      expect(pendingOnly.exitCode).toBe(0);
+      expect.soft((JSON.parse(pendingOnly.stdout) as { slices: Row[] }).slices.map((s) => s.name)).toEqual(["01-release"]);
+    } finally {
+      db.close();
+    }
   });
 
   it.each([
