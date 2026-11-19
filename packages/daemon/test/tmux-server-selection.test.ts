@@ -8,8 +8,11 @@ import * as execution from "../src/adapters/tmux-exec.js";
 const PINNED_MARKER = "openrig-tmux-pinned-v1\n";
 // The isolated socket lands under the root (<root>/tmux-1000/openrig-<20 hex>), which a Unix socket path caps
 // at 108 bytes on Linux and 104 on macOS. A root under the caller's TMPDIR fails every isolation case once that
-// TMPDIR is long enough, so on POSIX the root is a short private folder under /tmp instead.
-const fixtureBase = process.platform === "win32" ? path.join(os.tmpdir(), "t") : "/tmp/ors-";
+// TMPDIR is long enough, so on POSIX the root is a short private folder under /tmp instead, unless the run keeps
+// its TMPDIR exactly (OPENRIG_TEST_KEEP_TMPDIR=1, as in the shared hermetic setup).
+const fixtureBase = process.platform === "win32" || process.env.OPENRIG_TEST_KEEP_TMPDIR === "1"
+  ? path.join(os.tmpdir(), "t")
+  : "/tmp/ors-";
 
 describe("durable tmux server selection", () => {
   let root: string;
