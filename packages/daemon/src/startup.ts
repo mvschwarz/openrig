@@ -174,6 +174,7 @@ import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME 
 import { makeSeatPoolPolicy } from "./domain/policies/seat-pool.js";
 import { SeatPoolSlotsRepository } from "./domain/seat-pool-slots.js";
 import { escalateUnclaimedReminder } from "./domain/parked-owner-escalation.js";
+import { makeSeatPoolExecutor, seatPoolQueueEffects } from "./domain/seat-pool-executor.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
@@ -2552,12 +2553,23 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     });
     // #3395 (Piece 1): the seat pool policy is composed here and not handed to the engine below, so the watchdog does
     // not run it and nothing registers a seat-pool job: the job stays unarmed until the activation change adds the
-    // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start.
+    // policy to additionalPolicies and calls the registration on launch, re-apply and daemon start. The policy hands each
+    // evaluation to the executor, composed with the queue, the outbox's held messages, the delivery guard's custody,
+    // the seats' activity and the rig's events; it runs only through the policy.
     const seatPoolSlots = new SeatPoolSlotsRepository(db);
-    const seatPoolPolicy = makeSeatPoolPolicy({
-      readBlock: (modelNodeId) => rigRepo.getNodePool(modelNodeId),
-      readSlots: (modelNodeId) => seatPoolSlots.forModel(modelNodeId),
+    const seatPoolExecutor = makeSeatPoolExecutor({
+      db,
+      rigRepo,
+      slots: seatPoolSlots,
+      jobsRepo: watchdogJobsRepoInstance,
+      queue: seatPoolQueueEffects(queueRepoInstance),
+      heldCount: (nodeId) => outboxHandlerInstance.heldCount(nodeId),
+      confirmedStopped: (nodeId) => nodeExecutorConfirmedStopped(db, nodeId),
+      seatState: (nodeId) => seatActivityService.getSeatState(nodeId),
+      custody: (nodeIds, fn) => deliveryGuard.custody(nodeIds, fn),
+      now: () => new Date(),
     });
+    const seatPoolPolicy = makeSeatPoolPolicy({ cycle: (job) => seatPoolExecutor.cycle(job) });
     void seatPoolPolicy;
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       deliveryDeferred: (jobId, session) => queueRepoInstance.deliveryDrains.holds(session, jobId),
