@@ -11,4 +11,6 @@ launch_result: true
 resume: true
 startup_assisted: false
 first_input: true
-passes_model: false              # the launcher maps OPENRIG_MODEL for a new session; set true once checked with the real harness
+# passes_model: checked with OpenRig 0.7.19 (738e7a7e) and Cursor CLI 2026.10.19-6bbf2c4. Model passing was checked for a
+# new chat only: the launcher applies the model only to new chats, and resume is not verified.
+passes_model: true               # the launcher maps OPENRIG_MODEL to --model for a new session
