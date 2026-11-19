@@ -3,7 +3,8 @@ import { resolveNodeFile } from "./scope/node-file.js";
 import { belongsToProject, projectTagIds } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
-import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
+import { lifecycleObligations } from "./lifecycle-obligations.js";
+import { renderWorkflowProjectCommand } from "./workflow-projector.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
 import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
@@ -40,7 +41,6 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
-import { shellQuote } from "../adapters/shell-quote.js";
 import { parseFrontmatter, sliceStatusBucket } from "./slices/slice-indexer.js";
 import { lastMeaningfulTransition } from "./queue-waiting.js";
 import { derivePickup } from "./queue-pickup.js";
@@ -346,19 +346,29 @@ function hasColumn(db: Database.Database, table: string, column: string): boolea
   return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => (row as { name?: string }).name === column);
 }
 
+/** The packet's own renderer, so the view and the packet's Continuation print one command. */
 function lifecycleProjectAction(input: {
   instanceId: string;
   packetId: string;
+  stepId: string;
   acceptance: Record<string, unknown> | null;
-  receiptRequired?: boolean;
+  binding: Record<string, unknown> | null;
 }): string {
-  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed>${input.receiptRequired ? " --evidence-ref <agent-judged-receipt>" : ""}`;
-  if (!input.acceptance) return base;
-  const verdicts = Array.isArray(input.acceptance["verdicts"])
-    ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
-    : [];
-  const verdict = verdicts.length === 1 ? verdicts[0]! : `<${verdicts.join("|")}>`;
-  return `${base} --acceptance-candidate ${shellQuote(String(input.acceptance["candidate"]))} --acceptance-verdict ${shellQuote(verdict)} --acceptance-evidence-ref ${shellQuote(String(input.acceptance["evidence_ref"]))}`;
+  const acceptance = input.acceptance
+    ? {
+        candidate: String(input.acceptance["candidate"]),
+        verdicts: Array.isArray(input.acceptance["verdicts"])
+          ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
+          : [],
+        evidence_ref: String(input.acceptance["evidence_ref"]),
+      }
+    : undefined;
+  return renderWorkflowProjectCommand({
+    instanceId: input.instanceId,
+    packetId: input.packetId,
+    step: { id: input.stepId, acceptance },
+    binding: input.binding,
+  });
 }
 
 /**
@@ -432,7 +442,7 @@ function readLifecycleExecutions(db: Database.Database, mission: string, project
         gate: step && isRecord(step["gate"]) ? step["gate"] : null,
         acceptance,
         targeted_action: matches.length === 1 && packet
-          ? lifecycleProjectAction({ instanceId, packetId, acceptance, receiptRequired: stepId !== null && requiredLifecycleSteps(binding).includes(stepId) })
+          ? lifecycleProjectAction({ instanceId, packetId, stepId: stepId!, acceptance, binding })
           : INDETERMINATE,
       };
     });
