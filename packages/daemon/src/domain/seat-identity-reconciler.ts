@@ -354,6 +354,7 @@ export class SeatIdentityReconciler {
     // Otherwise keep reporting unknown instead of introducing a new periodic process census.
     const trackBackground = nativeSeats.length > 0 && seats.some(seat => occupantGenerations.get(seat.node_id) && seat.tmux_pane);
     // Share each strict census with the existing native proof's concurrent process read.
+    const firstCensusAt = this.now().getTime();
     const firstCensusPromise = trackBackground ? this.readRunnerCensus().catch(() => null) : null;
     const first = await sample(panes);
     const firstCensus = firstCensusPromise ? await firstCensusPromise : null;
@@ -390,7 +391,7 @@ export class SeatIdentityReconciler {
         this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
       }
     }
-    await this.refreshBackgroundEvidence(seats, firstPanes, occupantGenerations, generation, firstCensus, secondCensus, panes);
+    await this.refreshBackgroundEvidence(seats, firstPanes, occupantGenerations, generation, firstCensus, secondCensus, panes, firstCensusAt);
   }
 
   /** Use this existing reconciliation pass; no independent poll or process signalling is introduced. */
@@ -399,6 +400,7 @@ export class SeatIdentityReconciler {
     occupantGenerations: Map<string, string | null>, sweepGeneration: number,
     firstSnapshot?: RunnerProcessCensus | null, lastSnapshot?: RunnerProcessCensus | null,
     finalPaneSnapshot?: Map<string, PaneObservation>,
+    firstCensusAt?: number,
   ): Promise<void> {
     const registry = new SessionRegistry(this.db);
     const eligible = seats.filter(seat => occupantGenerations.get(seat.node_id) && seat.tmux_pane
@@ -447,8 +449,8 @@ export class SeatIdentityReconciler {
       const root = stableRows.find(row => row.pid === initialPane?.pid);
       if (verdict?.verdict === "verified" && initialPane?.pid && !initialPane.dead
         && finalPane?.pid === initialPane.pid && !finalPane.dead && root?.startedAt
-        && this.now().getTime() - Date.parse(root.startedAt) >= 2000) {
-        this.backgroundEvidence.capture(seat.node_id, gen, seat.session_id, seat.tmux_pane!, initialPane.pid, stableRows, this.now().getTime(), finalCensus.rows);
+        && firstCensusAt !== undefined && firstCensusAt - Date.parse(root.startedAt) >= 2000) {
+        this.backgroundEvidence.capture(seat.node_id, gen, seat.session_id, seat.tmux_pane!, initialPane.pid, stableRows, firstCensusAt, finalCensus.rows);
         this.backgroundMatches.delete(seat.node_id);
       } else if (verdict?.verdict === "pane_missing") {
         const processes = this.backgroundEvidence.afterLoss(seat.node_id, gen, seat.session_id, seat.tmux_pane!, finalCensus.rows);

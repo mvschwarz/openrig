@@ -1204,17 +1204,6 @@ Exit codes:
       // Apply CLI-side filter (Amendment A: prefer CLI shaping).
       const filtered = parsedFilter ? applyRigFilter(rigScoped, parsedFilter) : rigScoped;
 
-      if (!opts.json) {
-        const shownRigs = new Set(filtered.map(rig => rig.rigId));
-        for (const item of status.backgroundWork ?? []) {
-          if (!shownRigs.has(item.rigId)) continue;
-          console.log(`Background work (${item.sessionName}, node ${item.nodeId}): unknown; a missing pane or session does not prove its processes have exited.`);
-          for (const process of item.processes) {
-            console.log(`  Observed descendant: pid ${process.pid}, command ${process.command}, started ${process.startedAt} (sampled ${item.observedAt}).`);
-          }
-        }
-      }
-
       // Summary mode short-circuits per-entry output.
       if (opts.summary) {
         const summary = summarizeRigs(filtered);
@@ -1289,6 +1278,15 @@ Exit codes:
       // Human output: apply default truncation budget unless --full.
       const humanList = (opts.full || limit !== null) ? tableRows : tableRows.slice(0, HUMAN_RIG_BUDGET);
       const humanTruncated = !opts.full && limit === null && tableRows.length > HUMAN_RIG_BUDGET;
+
+      const shownRigs = new Set(humanList.map(rig => rig.rigId));
+      for (const item of status.backgroundWork ?? []) {
+        if (!shownRigs.has(item.rigId)) continue;
+        console.log(`Background work (${item.sessionName}, node ${item.nodeId}): unknown; a missing pane or session does not prove its processes have exited.`);
+        for (const process of item.processes) {
+          console.log(`  Observed descendant: pid ${process.pid}, command ${process.command}, started ${process.startedAt} (sampled ${item.observedAt}).`);
+        }
+      }
 
       const headers = ["RIG", "NODES", "RUNNING", "ACTIVE", "WORK", "ATTN", "STATUS", "LIFECYCLE", "UPTIME", "SNAPSHOT"];
       const rows = (humanList as PsEntry[]).map((e) => [

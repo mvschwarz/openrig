@@ -722,6 +722,14 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     const summaryOutput = await captureLogs(async () => { await summary.parseAsync(["node", "rig", "ps"]); });
     expect(summaryOutput.logs.join("\n")).toContain("Background work (ops-missing@openrig-build, node node-ops.missing): unknown");
     expect(summaryOutput.logs.join("\n")).toContain("Observed descendant: pid 42, command node");
+    for (const args of [["--summary"], ["--limit", "0"]]) {
+      const bounded = new Command();
+      bounded.exitOverride();
+      bounded.addCommand(psCommand(options));
+      const output = await captureLogs(async () => { await bounded.parseAsync(["node", "rig", "ps", ...args]); });
+      expect(output.logs.join("\n")).not.toContain("Background work (");
+      expect(output.logs.join("\n")).not.toContain("Observed descendant:");
+    }
   });
 
   it("reports unknown background work for a confirmed lost pane, but not an intentional stop", async () => {

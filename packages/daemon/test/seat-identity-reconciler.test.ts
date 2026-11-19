@@ -423,6 +423,28 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     expect(afterClose.backgroundWork).toEqual([]);
   });
 
+  it("uses the first census time to reject a newborn descendant after a slow sweep", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "codex" });
+    new SessionRegistry(db).mintOccupantTenure("n1", "initial", "first");
+    db.prepare("UPDATE occupant_tenures SET boot_at = ? WHERE node_id = ?").run("2026-07-02 11:00:00", "n1");
+    let lost = false, now = Date.parse("2026-07-02T12:00:00Z");
+    const root = { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "bash", command: "bash", startedAt: "2026-07-02T11:00:00Z" };
+    const codex = { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "codex", command: "codex", argv: ["codex"], startedAt: "2026-07-02T11:00:30Z" };
+    const child = { pid: 12, ppid: 11, command: "worker", startedAt: "2026-07-02T12:00:00Z" };
+    const tmux = { ...makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "bash" } }),
+      readAllPaneProcesses: async () => lost ? new Map() : new Map([["%1", { pid: 10, command: "bash" }]]),
+      listPanes: async () => [{ id: lost ? "%2" : "%1" }] as never, getPanePid: async () => lost ? null : 10 };
+    const rec = new SeatIdentityReconciler({ db, tmux, now: () => new Date(now),
+      readProcessTableCensus: async () => { now += 3000; return { rows: lost ? [{ ...child, ppid: 1 }] : [root, codex, child], permissionHiddenPids: [] }; },
+      listProcesses: async () => [root, codex, child] });
+    await rec.reconcileAll();
+    lost = true;
+    await rec.reconcileAll();
+    expect(rec.backgroundWorkUnknown()).toMatchObject([{ state: "unknown", processes: [] }]);
+    db.close();
+  });
+
   it("does not retain descendants when the pane root changes identity between snapshots", async () => {
     const db = createFullTestDb();
     seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "codex" });
