@@ -620,6 +620,9 @@ back with rig up kernel --existing.
           if (res.status >= 400) {
             const code = res.data["code"] as string | undefined;
             const errorText = String(res.data["error"] ?? "restore failed");
+            const requested = freshByRig.get(rigId) ?? [];
+            const preLaunchRefusal = code === "pre_restore_validation_failed" || code === "rig_not_stopped";
+            const restoreWarnings = (res.data["warnings"] as string[] | undefined) ?? [];
             await serializePrompt(async () => { if (code === "pre_restore_validation_failed") {
               console.error(`  ${rigLabel}: restore blocked (pre-validation failed)`);
               const blockers = (res.data["blockers"] as Array<{ message: string; remediation: string }>) ?? [];
@@ -630,15 +633,11 @@ back with rig up kernel --existing.
             } else {
               console.error(`  ${rigLabel}: ${errorText} (${code ?? `HTTP ${res.status}`})`);
             }
-            });
-            const requested = freshByRig.get(rigId) ?? [];
-            const preLaunchRefusal = code === "pre_restore_validation_failed" || code === "rig_not_stopped";
-            const restoreWarnings = (res.data["warnings"] as string[] | undefined) ?? [];
-            if (!opts.json) await serializePrompt(async () => {
+            if (!opts.json) {
               for (const id of requested) console.log(preLaunchRefusal
                 ? `    ${id}: fresh requested, not applied.` : `    ${id}: fresh outcome unknown; inspect the rig before retrying.`);
               for (const warning of restoreWarnings) console.log(`    Warning: ${warning}`);
-            });
+            } });
             results[index] = { rigId, rigName, status: code ?? "error", error: errorText, nodes: [], ...(requested.length ? preLaunchRefusal
               ? { freshRequestedNotApplied: requested } : { freshOutcomeUnknown: requested } : {}),
               ...(restoreWarnings.length ? { warnings: restoreWarnings } : {}) };
@@ -710,7 +709,11 @@ back with rig up kernel --existing.
 
         } catch (err) {
           const requested = freshByRig.get(rigId) ?? [];
-          await serializePrompt(async () => { if (err instanceof DaemonConnectionError) {
+          await serializePrompt(async () => { if (results[index]) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`  ${rigLabel}: ${msg}`);
+            results[index]!.error = msg;
+          } else if (err instanceof DaemonConnectionError) {
             console.error(`  ${rigLabel}: timed out; the daemon may still be processing. Verify with: rig ps`);
             if (!opts.json) for (const id of requested) console.error(`    ${id}: fresh outcome unknown; inspect the rig before retrying.`);
             results[index] = { rigId, rigName, status: "timeout", nodes: [], ...(requested.length ? { freshOutcomeUnknown: requested } : {}) };

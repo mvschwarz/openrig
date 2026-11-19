@@ -26,9 +26,8 @@ function mockLifecycleDeps(): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+function captureLogs(fn: () => Promise<void>, logs: string[] = []): Promise<{ logs: string[]; exitCode: number | undefined }> {
   return new Promise(async (resolve) => {
-    const logs: string[] = [];
     const origLog = console.log;
     const origErr = console.error;
     const origExitCode = process.exitCode;
@@ -322,6 +321,19 @@ describe("rig start (OPR.0.3.4.1)", () => {
     const result = await run;
     expect(result.logs.join("\n")).toContain("two: fully_restored");
     if (throws) expect(result.logs.join("\n")).toContain("prompt failed");
+  });
+
+  it("preserves a confirmed restore when its prompt fails", async () => {
+    setupCandidateRig("one");
+    routes["/api/rigs/:id/up"] = (_req, body) => body.plan
+      ? { status: "plan", nodes: [{ logicalId: "dev.a", intendedAction: "resume-original" }] }
+      : { status: "restored", rigResult: "partially_restored", nodes: [{ logicalId: "dev.a", status: "awaiting-decision" }, { logicalId: "dev.b", status: "fresh-primed" }], warnings: ["saved warning"] };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd(async () => { throw new Error("prompt failed"); }).parseAsync(["node", "rig", "start", "--last", "--json"]);
+    });
+    const output = JSON.parse(logs.find(line => line.startsWith("{"))!);
+    expect(output.restoredRigs[0]).toMatchObject({ status: "partially_restored", error: "prompt failed", warnings: ["saved warning"], nodes: [{ logicalId: "dev.a", status: "awaiting-decision" }, { logicalId: "dev.b", status: "fresh-primed" }] });
+    expect(exitCode).toBe(1);
   });
 
 
