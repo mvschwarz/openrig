@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -46,7 +48,9 @@ describe("a runtime switch's own processes don't act as the seat; nothing else c
     const rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
     eventBus = new EventBus(db);
-    queueRepo = new QueueRepository(db, eventBus, { validateRig: () => true });
+    queueRepo = new QueueRepository(db, eventBus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [{
+      entityId: "reader", class: "human", displayName: "Reader", address: "reader@external", connectorBindings: [], prefs: { deliveryClass: "A" },
+    }] }) });
     const inbox = new InboxHandler(db, eventBus, queueRepo);
     const outbox = new OutboxHandler(db);
     queueRepo.attachOutbox(outbox);
@@ -75,6 +79,20 @@ describe("a runtime switch's own processes don't act as the seat; nothing else c
     app.route("/api/activity", activityRoutes);
   });
   afterEach(() => db.close());
+
+  it.each([true, false])("fences relayed writes from the non-custodial runtime (committed=%s)", async committed => {
+    migrate(db, ALL_MIGRATIONS);
+    record(committed);
+    const ask = await queueRepo.create({ sourceSession: OTHER, destinationSession: "reader@external", body: "Question", nudge: false });
+    const relay = (generation: string) => app.request(`/api/queue/${ask.qitemId}/relayed-answer`, { method: "POST", headers: asSeat(generation),
+      body: JSON.stringify({ attributedTo: "reader@external", channel: "voice", text: "My answer" }) });
+    const refused = await relay(committed ? predecessor : successor);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ code: committed ? "occupant_retired_by_switch" : "switch_not_committed" });
+    expect(queueRepo.getById(ask.qitemId)).not.toHaveProperty("relayedAnswers");
+    const accepted = await relay(committed ? successor : predecessor);
+    expect(accepted.status, await accepted.text()).toBe(200);
+  });
 
   describe("after the switch commits", () => {
     beforeEach(() => record(true));

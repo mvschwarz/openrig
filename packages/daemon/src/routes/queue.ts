@@ -1313,6 +1313,7 @@ export function queueRoutes(): Hono {
     }
     const identity = requireSenderIdentity(c, { verb: "relay an answer", bodyClaim: typeof actor === "string" ? actor : null });
     if (!identity.ok) return identity.response;
+    { const held = switchCustody(c, identity.session); if (held) return held; }
     try {
       return c.json(getRepo(c).writeRelayedAnswer({ qitemId: c.req.param("qitemId"), actorSession: identity.session,
         identityProvenance: resolveRecordedProvenance(c, identity),
