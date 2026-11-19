@@ -630,6 +630,38 @@ describe("seat tmux server in its own systemd user scope (#2710)", { timeout: 12
     });
   });
 
+  // G1j3
+  it("#3253: a launch whose private config is still being written when another caller starts the server is made after the bus is back", async () => {
+    vi.stubEnv("OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT", "1");
+    await withDaemon("no-manager", false, async (daemon, host) => {
+      vi.stubEnv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus");
+      host.globalEnv = `DBUS_SESSION_BUS_ADDRESS=${TMUX_SERVER_SESSION_BUS}\n`;
+      const adapter = daemon.deps.tmuxAdapter;
+      adapter.deliveryGuard = undefined;
+      // The launch's private config write waits until another caller's start has the new server answering.
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const writing = new Promise<void>(resolve => { entered = resolve; });
+      const fileOps = (adapter as unknown as { fileOps: { writeFile: (...args: unknown[]) => Promise<void> } }).fileOps;
+      const write = fileOps.writeFile.bind(fileOps);
+      fileOps.writeFile = async (...args) => { entered(); await gate; return write(...args); };
+      const launched = adapter.createSession("seat-3253", undefined, { OPENRIG_NODE_ID: "node-3253" });
+      // The other caller's start begins only once the launch is writing its config, past any wait for a start.
+      await writing;
+      const starting = adapter.startServer();
+      while (!host.serverUp) await new Promise(resolve => setImmediate(resolve));
+      release();
+      const [result, started] = await Promise.all([launched, starting]);
+      expect(started).toMatchObject({ ok: true });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      const order = (pattern: RegExp) => host.calls.findIndex(call => pattern.test(call));
+      expect(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/), host.calls.join("\n")).toBeGreaterThanOrEqual(0);
+      expect(order(/source-file/), host.calls.join("\n")).toBeGreaterThan(order(/set-environment -g DBUS_SESSION_BUS_ADDRESS/));
+      expect(host.starts, host.calls.join("\n")).toEqual([loose(TODAY_START)]);
+    });
+  });
+
   // G1k
   it("#3253: without a user manager, a launch on a running server neither starts one nor touches its environment", async () => {
     vi.stubEnv("OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT", "1");

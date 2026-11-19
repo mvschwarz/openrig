@@ -1582,9 +1582,14 @@ export class TmuxAdapter {
    */
   private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
     const body = (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n";
+    // #3253: on Linux, a launch that may start the server waits for a start under way, which gives the panes the session
+    // bus back before it settles: a pane made before that would keep the unusable address for its whole life. Checked
+    // once the private config is written, right before the client runs, so a start another caller began meanwhile counts.
+    const waitForStart = startServer && process.platform === "linux";
     const source = async (startFirst: boolean): Promise<string> => {
       const file = this.fileOps.tmpName();
       await this.fileOps.writeFile(file, body, { mode: 0o600, flag: "wx" });
+      if (waitForStart && this.serverStarting) await this.serverStarting;
       try {
         const output = await this.run(["tmux", ...(startFirst ? ["start-server", ";"] : []), "source-file", file]);
         await this.fileOps.unlink(file).catch(() => {});
@@ -1596,9 +1601,6 @@ export class TmuxAdapter {
       }
     };
     if (!startServer || process.platform !== "linux") return source(startServer);
-    // #3253: a start in progress gives the panes the session bus back before it settles; a pane made before that would
-    // keep the unusable address for its whole life.
-    if (this.serverStarting) await this.serverStarting;
     // #2710, #3253: on Linux, `start-server` would start a missing server outside a user scope and with the daemon's
     // session bus in its own process. Try on the running server first; only when there is none, start it as startServer
     // does (in the user scope where one can be made, without a session bus) and run the command as before.
