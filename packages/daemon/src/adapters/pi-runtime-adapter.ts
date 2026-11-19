@@ -15,7 +15,7 @@ import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
-import { piTrust } from "./yolo-mode.js";
+import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -364,7 +364,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       );
 
       const trust = this.runtime === "omp"
-        ? (binding.launchPosture === "full_bypass" ? "approve" : "no-approve")
+        ? (yoloEnabled(process.env, binding.launchPosture) ? "approve" : "no-approve")
         : piTrust(this.trustPosture, process.env, binding.launchPosture);
       const appliedLaunch = this.runtime === "omp"
         ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)

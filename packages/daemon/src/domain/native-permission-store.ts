@@ -65,12 +65,9 @@ function resolveLaunchDefaultFromMetadata(
   codexProfileOverride?: string | null,
   seatRules = false,
 ): "kernel" | "team" | undefined {
-  if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "omp" && runtime !== "omp-tui") return undefined;
+  if (runtime !== "claude-code" && runtime !== "codex") return undefined;
   if (!meta || (runtime === "codex" && (codexProfileOverride === undefined ? meta.codexProfile : codexProfileOverride)?.trim())) {
     return undefined;
-  }
-  if (runtime === "omp" || runtime === "omp-tui") {
-    return meta.rigName === "kernel" && meta.memberPolicy == null && meta.rigPolicy == null ? "kernel" : undefined;
   }
   // The member's own policy decides over the rig's, whatever it is.
   const policy = meta.memberPolicy ?? meta.rigPolicy;
@@ -119,7 +116,7 @@ export function resolveLaunchOverrideFromFacts(
     ? undefined
     : resolveLaunchDefaultFromMetadata(facts.runtime, facts.launchDefaultMetadata, facts.target?.codexProfile, facts.claudePermissions !== undefined);
   if (launchDefault === "kernel") {
-    return { ...ruleBinding, kernelAuthority: true, teamPermissionDefault: false, launchPosture: facts.runtime === "claude-code" ? "floor" : "full_bypass" };
+    return { ...ruleBinding, kernelAuthority: true, teamPermissionDefault: false, launchPosture: facts.runtime === "codex" ? "full_bypass" : "floor" };
   }
   return { ...ruleBinding, kernelAuthority: false, teamPermissionDefault: launchDefault === "team", ...permissionBindingOverride(selection) };
 }
@@ -137,7 +134,7 @@ export class NativePermissionStore {
   /** Kernel is the persisted class-of-one rig, never a pane-name or cwd heuristic.
    * Authored policies and named Codex profiles keep their existing meaning. */
   private readLaunchDefaultMetadata(nodeId: string, runtime: string): LaunchDefaultMetadata | undefined {
-    if (runtime !== "claude-code" && runtime !== "codex" && runtime !== "omp" && runtime !== "omp-tui") return undefined;
+    if (runtime !== "claude-code" && runtime !== "codex") return undefined;
     try {
       const row = this.db.prepare(`SELECT r.name, n.permission_policy AS member_policy,
         r.permission_policy AS rig_policy, n.codex_config_profile AS profile
@@ -331,8 +328,8 @@ export class NativePermissionStore {
 
     // Kernel's operational default also replaces persisted no-policy floor provenance.
     if (this.launchDefault(nodeId, runtime) === "kernel") {
-      return { effectiveMode: omp ? "yolo" : runtime === "codex" ? "full_bypass" : "acceptEdits", source: "kernel_default",
-        launchPosture: runtime === "claude-code" ? "floor" : "full_bypass" };
+      return { effectiveMode: runtime === "codex" ? "full_bypass" : "acceptEdits", source: "kernel_default",
+        launchPosture: runtime === "codex" ? "full_bypass" : "floor" };
     }
 
     // Level 3: Rig-level declaration in rig.yaml

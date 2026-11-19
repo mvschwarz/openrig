@@ -66,7 +66,7 @@ managed storage root, which contains `skills/`). This adds the seat's skills wit
 replacing native `skills.customDirectories` or editing the user's settings. `rig skill`
 can inspect and reconcile OMP seat storage; newly installed skills require a native
 reload or relaunch. Fresh launch and resume both include the same managed root.
-Both OMP modes default to `always-ask` outside the kernel rig. The kernel rig defaults to `yolo`. An explicit member or rig permission policy controls its seat’s launch posture.
+Both OMP modes default to `always-ask`, including in the kernel rig. A member or rig permission policy with `full_bypass` selects `yolo`.
 
 The shared projection and executable-mode tests run identical fixtures through
 ClaudeCodeAdapter, CodexRuntimeAdapter and OmpTuiRuntimeAdapter. These are adapter tests.

@@ -29,18 +29,27 @@ function fixture(runtime: string, name = "workshop") {
     launchPosture: "floor" } as NodeBinding;
   return { db, rigRepo, rig, node, store, registry, session, binding };
 }
-it.each(["omp", "omp-tui"])("%s grants full bypass only to an unconfigured kernel seat by default", runtime => {
-  const kernel = fixture(runtime, "kernel");
-  const ordinary = fixture(runtime);
-  vi.stubEnv("OPENRIG_YOLO", "1");
-  expect(kernel.store.launchOverride(kernel.node.id, runtime)).toMatchObject({ kernelAuthority: true, launchPosture: "full_bypass" });
-  expect(ordinary.store.launchOverride(ordinary.node.id, runtime).launchPosture).toBeUndefined();
-  expect(kernel.store.resolve(kernel.node.id, runtime)).toMatchObject({ effectiveMode: "yolo", source: "kernel_default" });
-  expect(ordinary.store.resolve(ordinary.node.id, runtime)).toMatchObject({ effectiveMode: "always-ask", source: "system_default" });
-  ordinary.rigRepo.setRigPermissionPolicy(ordinary.rig.id, "builtin:yolo");
-  expect(ordinary.store.resolve(ordinary.node.id, runtime)).toMatchObject({ effectiveMode: "yolo", source: "rig_spec" });
-  kernel.rigRepo.setRigPermissionPolicy(kernel.rig.id, "builtin:locked");
-  expect(kernel.store.launchOverride(kernel.node.id, runtime).launchPosture).toBeUndefined();
+
+describe.each(["omp", "omp-tui"])("%s approval policy", runtime => {
+  it.each(["kernel", "workshop"])("keeps the floor in %s unless a policy is configured", rigName => {
+    const { store, node, rig, rigRepo, binding } = fixture(runtime, rigName);
+    vi.stubEnv("OPENRIG_YOLO", "1");
+
+    expect(store.apply(binding, runtime)).toMatchObject({ kernelAuthority: false, launchPosture: "floor" });
+    expect(store.resolve(node.id, runtime)).toMatchObject({
+      effectiveMode: "always-ask", source: "system_default", launchPosture: "floor",
+    });
+
+    rigRepo.setRigPermissionPolicy(rig.id, "builtin:yolo");
+    expect(store.resolve(node.id, runtime)).toMatchObject({
+      effectiveMode: "yolo", source: "rig_spec", launchPosture: "full_bypass",
+    });
+
+    rigRepo.setNodePermissionPolicy(node.id, "builtin:locked");
+    expect(store.resolve(node.id, runtime)).toMatchObject({
+      effectiveMode: "always-ask", source: "member_spec", launchPosture: "floor",
+    });
+  });
 });
 
 function transport() {
