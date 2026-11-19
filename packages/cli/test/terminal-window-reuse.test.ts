@@ -79,7 +79,7 @@ describe("reopening a Herdr view in a desktop window", () => {
     await f.run();
     expect(f.focus).toHaveBeenCalledExactlyOnceWith("first");
     expect(f.post).not.toHaveBeenCalled();
-    expect(f.exec).toHaveBeenCalledWith("/fixture/bin/tmux", ["-S", socket, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
+    expect(f.exec).toHaveBeenCalledWith("/fixture/bin/tmux", ["-S", socket, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}\t#{client_flags}"]);
   });
 
   it.each([[undefined, true], ["daemon-named", true], [undefined, false], ["daemon-named", false]] as const)("following binds the exact custom endpoint before tab selection (session=%s matches=%s)", async (session, matches) => {
@@ -381,6 +381,19 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(f.focus).not.toHaveBeenCalled();
     expect(f.tabs[0]).toEqual(old);
     expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, notes: expect.arrayContaining([expect.stringContaining("herdr workspace close 'old-space'")]) });
+  });
+
+  it.each([["the current plan", label()], ["an older plan", "openrig:kernel#fedcba9876543210#l1"]])("names a workspace of %s whose writable tiles ignore their size, with its close command, and creates once", async (_plan, oldLabel) => {
+    const old = { workspace_id: "old-space", tab_id: "old-tab", label: oldLabel };
+    const f = fixture([old]);
+    f.clients.mockResolvedValue("101\tfixture-tui\t0\tattached,ignore-size\n102\tfixture-advisor\t0\tattached\n103\tfixture-operator\t0\tattached");
+    await f.run();
+    expect(f.focus).not.toHaveBeenCalled();
+    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(f.tabs[0]).toEqual(old);
+    const notes: string[] = JSON.parse(logs[0]!).notes;
+    expect(notes.filter(note => note.includes("old-space"))).toEqual([expect.stringMatching(/^Workspace old-space shows this view with tiles an OpenRig before 0\.7\.10 opened, .+: herdr workspace close 'old-space'$/)]);
+    expect(f.exec.mock.calls.some(([, args]) => args.includes("close"))).toBe(false);
   });
 
   it("retains the current preview's absent and degraded members when reusing a partial view", async () => {
