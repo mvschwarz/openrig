@@ -6,13 +6,18 @@ import { inspectTmuxServer, selectTmuxServer } from "../src/domain/tmux-server-s
 import * as execution from "../src/adapters/tmux-exec.js";
 
 const PINNED_MARKER = "openrig-tmux-pinned-v1\n";
+// The isolated socket lands under the root (<root>/tmux-1000/openrig-<20 hex>), which a Unix socket path caps
+// at 108 bytes on Linux and 104 on macOS. A root under the caller's TMPDIR fails every isolation case once that
+// TMPDIR is long enough, so on POSIX the root is a short private folder under /tmp instead.
+const fixtureBase = process.platform === "win32" ? path.join(os.tmpdir(), "t") : "/tmp/ors-";
 
 describe("durable tmux server selection", () => {
   let root: string;
   let home: string;
   let oldSocket: string;
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "t"));
+    // Resolved like the setup's TMPDIR: on macOS /tmp is a symlink to /private/tmp, and the selector reads paths canonically.
+    root = fs.realpathSync(fs.mkdtempSync(fixtureBase));
     home = path.join(root, "home");
     oldSocket = path.join(root, "personal.sock");
     inspect.mockClear();
@@ -241,6 +246,16 @@ describe("durable tmux server selection", () => {
     expect(a.socketPath).not.toBe(b.socketPath);
     expect(a.socketPath).not.toBe(oldSocket);
     expect(b.socketPath).not.toBe(oldSocket);
+  });
+
+  it.each([["linux", 108], ["darwin", 104]] as const)("refuses an isolated socket path of %s's %i-byte limit and accepts one byte less", async (platform, limit) => {
+    // The socket is <TMUX_TMPDIR>/tmux-1000/openrig-<20 hex>: 39 bytes after TMUX_TMPDIR.
+    const tmpdirOf = (bytes: number) => path.join(root, "p".repeat(bytes - Buffer.byteLength(root) - 1));
+    const at = (bytes: number, name: string) => selectTmuxServer({ ...options(), platform, home: path.join(root, name), mode: "isolated",
+      env: { TMUX: `${oldSocket},1,0`, TMUX_TMPDIR: tmpdirOf(bytes - 39) } });
+    const accepted = await at(limit - 1, "home-a");
+    expect(Buffer.byteLength(accepted.socketPath!)).toBe(limit - 1);
+    await expect(at(limit, "home-b")).rejects.toThrow("The selected tmux socket path is too long");
   });
 
   it("ignores explicit foreign-home namesakes, while preserving owned and unmarked legacy sessions", async () => {
