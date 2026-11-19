@@ -137,9 +137,10 @@ describe("queue routes", () => {
 
   it("does not confirm a stopped timer in the create response", async () => {
     const getParkSnapshot = queueRepo.getParkSnapshot.bind(queueRepo);
+    let suppliedLiveTimer = false;
     vi.spyOn(queueRepo, "getParkSnapshot").mockImplementationOnce((qitemId) => {
       const snapshot = getParkSnapshot(qitemId);
-      expect(snapshot.wake).toMatchObject({ kind: "timer", intervalSeconds: 90, live: true });
+      suppliedLiveTimer = snapshot.wake?.kind === "timer" && snapshot.wake.intervalSeconds === 90 && snapshot.wake.live;
       return { ...snapshot, wake: snapshot.wake ? { ...snapshot.wake, live: false } : null };
     });
 
@@ -156,6 +157,7 @@ describe("queue routes", () => {
       }),
     });
 
+    expect(suppliedLiveTimer).toBe(true);
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({
       qitemId: "qitem-create-stopped-timer",

@@ -1590,27 +1590,32 @@ describe("rig queue CLI", () => {
       if (state === "pending") expect(result.parkWarning.message).toContain("An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.");
     });
 
-    it("does not verify delivery for a same-ID retry whose body was not saved", async () => {
-      const id = "qitem-verify-existing-body";
+    it.each([
+      { label: "parked", parkArgs: ["--blocked-on", "external:condition"] },
+      { label: "unparked", parkArgs: [] },
+    ])("does not verify delivery or relabel an earlier gateway post on a $label same-ID retry", async ({ label, parkArgs }) => {
+      const id = `qitem-verify-existing-body-${label}`;
       const savedBody = "the existing saved body";
       const { deps, calls } = makeDeps({ routes: { "POST /api/queue/create": { status: 201, data: validParkCreateResponse(id, {
         body: savedBody,
+        deliveryOutcome: "posted",
         createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
-        parkWarning: { code: "qitem_park_not_confirmed", message: "The requested park is not confirmed." },
+        ...(parkArgs.length > 0 ? { parkWarning: { code: "qitem_park_not_confirmed", message: "The requested park is not confirmed." } } : {}),
       }) } } });
-      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", "--blocked-on", "external:condition", "--verify", "--json"]);
+      await runQueueCreate(deps, ["--id", id, "--destination", "bob@rig", "--body", "Wait", "--summary", "Wait", ...parkArgs, "--verify", "--json"]);
       const result = JSON.parse(logs.at(-1)!) as Record<string, any>;
       expect(result).toMatchObject({
         qitemId: id,
         body: savedBody,
         createWarning: { code: "qitem_body_not_saved", message: "The supplied body was not saved." },
-        parkWarning: { code: "qitem_park_not_confirmed" },
         delivery: {
           receiptSource: "terminal",
           outcome: "not-requested",
-          detail: expect.stringContaining("This request sent no immediate terminal wake. Earlier wake and claim details are row history."),
+          detail: expect.stringContaining("Prior row history: Slack receipt was posted."),
         },
       });
+      expect(result.delivery).not.toHaveProperty("gateway");
+      if (parkArgs.length > 0) expect(result.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
       expect(result).not.toHaveProperty("persisted");
       expect(calls.filter((call) => call.method === "POST" && call.path === "/api/queue/create")).toHaveLength(1);
       expect(calls.filter((call) => call.method === "GET")).toHaveLength(0);

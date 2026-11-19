@@ -40,6 +40,8 @@ export interface DeliveryVerifyDeps {
 
 export interface QueueDeps extends StatusDeps {
   deliveryVerify?: DeliveryVerifyDeps;
+  /** Create receipt reads must not make a separate daemon identity request. */
+  receiptReadClientFactory?: (baseUrl: string) => DaemonClient;
   /** The host registry `--host` resolves against on the verbs that name an existing row; tests give their own. */
   hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
 }
@@ -367,6 +369,8 @@ function terminalDeliveryResult(
   const pickupState = typeof row.pickup === "object" && row.pickup !== null ? stringField(row.pickup as QueueRow, "state") : null;
   const claim = { observed: claimedAt !== null, claimedAt, pickup: pickupState };
   const currentOutcome = parked ? "not-requested" : outcome;
+  const bodyNotSaved = isQueueRow(row.createWarning) && row.createWarning.code === "qitem_body_not_saved";
+  const rowHistoryOnly = parked || bodyNotSaved;
   const seat = destination ?? "<destination>";
   const receipt: Record<TerminalDeliveryResult["outcome"], string> = {
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
@@ -383,22 +387,29 @@ function terminalDeliveryResult(
     "still-pending": waitedMs === null ? "No terminal receipt was recorded before the claim." : `No terminal receipt was recorded within ${waitedMs}ms.`,
     "not-requested": parked
       ? "This request sent no immediate terminal wake. Earlier wake and claim details are row history. Check the row's blocker and live timer."
-      : "No terminal wake was requested (--no-nudge).",
+      : bodyNotSaved
+        ? "This request sent no new work. Earlier wake and claim details are row history."
+        : "No terminal wake was requested (--no-nudge).",
   };
-  const claimPrefix = parked ? "Row history: this item was claimed at " : "Claimed at ";
+  const claimPrefix = rowHistoryOnly ? "Row history: this item was claimed at " : "Claimed at ";
   const claimText = claim.observed
     ? claimPrefix + claimedAt + (pickupState ? " (pickup " + pickupState + ")" : "") + ". A claim shows the seat took the item; it does not prove the body was read."
     : waitedMs === null ? "No claim observed yet." : `No claim observed within ${waitedMs}ms.`;
   const gatewaySide = gatewayAlsoPosts(row);
   const gateway = gatewaySide ? gatewayReceiptOf(row) : null;
-  const slackText = gateway === null ? ""
-    : gateway.outcome === "posted" ? " Slack receipt: posted."
-    : gateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
-    : ` Slack delivery ${gateway.outcome}${gateway.detail ? `: ${gateway.detail}` : ""}.`;
-  const gatewayFailed = gateway !== null && gateway.connectorAccepted === false;
+  const gatewayHistory = rowHistoryOnly ? gateway : null;
+  const currentGateway = rowHistoryOnly ? null : gateway;
+  const slackText = gatewayHistory !== null
+    ? gatewayHistory.outcome === "posted" ? " Prior row history: Slack receipt was posted."
+      : ` Prior row history: Slack delivery ${gatewayHistory.outcome}${gatewayHistory.detail ? `: ${gatewayHistory.detail}` : ""}.`
+    : currentGateway === null ? ""
+      : currentGateway.outcome === "posted" ? " Slack receipt: posted."
+        : currentGateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
+          : ` Slack delivery ${currentGateway.outcome}${currentGateway.detail ? `: ${currentGateway.detail}` : ""}.`;
+  const gatewayFailed = currentGateway !== null && currentGateway.connectorAccepted === false;
   const notFailed = !claim.observed && !gatewayFailed && isKnownUnconfirmed(wakeResult, currentOutcome) ? " This is not a failed handoff." : "";
   const destinationKind = terminalDestinationKind(destination, gatewaySide);
-  const settled = claim.observed && (gateway === null || gateway.outcome === "posted");
+  const settled = !rowHistoryOnly && claim.observed && (currentGateway === null || currentGateway.outcome === "posted");
   return {
     receiptSource: "terminal",
     destinationKind,
@@ -406,7 +417,7 @@ function terminalDeliveryResult(
     outcome: currentOutcome,
     wakeResult,
     claim,
-    ...(gateway ? { gateway } : {}),
+    ...(currentGateway ? { gateway: currentGateway } : {}),
     detail: `The qitem is saved. ${receipt[currentOutcome]}${slackText} ${claimText}${notFailed}`,
     nextAction: settled ? null : currentOutcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
   };
@@ -717,8 +728,7 @@ function isIndeterminateRemoteWrite(status: number, body: unknown): boolean {
     && (body as { outcome?: unknown }).outcome === "indeterminate";
 }
 
-/** A `--host` id that may name another daemon. Empty and `local` never do; one that
- *  equals the selected daemon's own host id is settled by {@link settleReceiptHost}. */
+/** A `--host` id that may name another daemon. Empty and `local` never do. */
 function remoteHostOf(hostId: string | undefined): string | undefined {
   return hostId && hostId !== "local" ? hostId : undefined;
 }
@@ -726,6 +736,29 @@ function remoteHostOf(hostId: string | undefined): string | undefined {
 /** A cross-host queue write waits for the selected daemon's own answer. That daemon gives the remote 10 s
  *  (`QUEUE_FORWARD_TIMEOUT_MS` in the daemon's routes/queue.ts), so waiting only the client's 5 s default
  *  turns a slow remote's answer into an unknown outcome. */
+function sameQueueEndpoint(left: string, right: string): boolean {
+  return left.replace(/\/+$/, "") === right.replace(/\/+$/, "");
+}
+
+/** Resolve create receipt labels from the selected endpoint and local registry. No daemon identity request is needed. */
+function createReceiptHostContext(client: DaemonClient, receipt: ReceiptContext | null, hostId: string | undefined): ReceiptContext | null {
+  if (!receipt) return null;
+  const remote = remoteHostOf(hostId);
+  if (!remote) return receipt;
+  const registry = loadHostRegistry();
+  const match = registry.ok ? resolveHost(registry.registry, remote, loadHostBindings().bindings) : undefined;
+  if (match?.ok && match.host.transport === "http") {
+    if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
+      const local = { ...receipt };
+      delete local.remoteHost;
+      delete local.remoteHostUnconfirmed;
+      return local;
+    }
+    return { ...receipt, remoteHost: remote };
+  }
+  return { ...receipt, remoteHost: remote, remoteHostUnconfirmed: true };
+}
+
 const CROSS_HOST_QUEUE_WRITE_TIMEOUT_MS = 15_000;
 const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 
@@ -741,9 +774,7 @@ function handoffScopeDiagnosticOptions(hostId: string | undefined) {
   };
 }
 
-/** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
- *  daemon's selfHostId took the local path, so its receipt must not call the row
- *  remote. Read only for a receipt; an unreadable id leaves the host unconfirmed. */
+/** For non-create receipts, resolve whether the selected daemon used its own host id. */
 async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext): Promise<ReceiptContext> {
   if (!receipt.remoteHost) return receipt;
   let selfHostId: string | undefined;
@@ -798,7 +829,7 @@ function mergeDirectCreateObservation(
     if (value !== undefined) observed[field] = value;
   }
   const mismatches: string[] = [];
-  if (response.qitemId !== qitemId) {
+  if (typeof response.qitemId === "string" && response.qitemId !== qitemId) {
     fields.add("qitemId");
     mismatches.push("qitemId");
   }
@@ -839,21 +870,26 @@ function existingRowSummary(row: QueueRow, expectedId: string, bodyIsSummary = f
 /** Both reconciliation and --verify read the daemon that holds the row, with its own bearer. */
 async function queueReadTarget(deps: QueueDeps, client: DaemonClient, hostId: string | undefined) {
   const remote = remoteHostOf(hostId);
-  let reader = client;
   let options: { timeoutMs: number; headers?: Record<string, string> } = { timeoutMs: CREATE_READ_BACK_TIMEOUT_MS };
-  if (remote) {
-    const registry = loadHostRegistry();
-    const match = registry.ok ? resolveHost(registry.registry, remote, loadHostBindings().bindings) : undefined;
-    if (!match?.ok || match.host.transport !== "http") {
-      const why = match?.ok ? "its entry in this CLI's host registry is SSH, not a daemon URL" : "it isn't in this CLI's host registry";
-      return { error: `from host '${remote}' (${why})` };
-    }
-    const bearer = resolveRemoteBearer(match.host);
-    if (!bearer.ok) return { error: `from host '${remote}' (${bearer.error})` };
-    reader = deps.clientFactory(match.host.url);
-    if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
+  if (!remote) return { reader: client, options, remote: undefined };
+  const registry = loadHostRegistry();
+  const match = registry.ok ? resolveHost(registry.registry, remote, loadHostBindings().bindings) : undefined;
+  if (!match?.ok) {
+    // When the ID is absent from this CLI's registry, the selected write endpoint is the only
+    // destination this command can read without a separate identity lookup.
+    return { reader: client, options, remote: undefined };
   }
-  return { reader, options, remote };
+  if (match.host.transport !== "http") {
+    const why = "its entry in this CLI's host registry is SSH, not a daemon URL";
+    return { error: `from host '${remote}' (${why})` };
+  }
+  if (sameQueueEndpoint(match.host.url, client.baseUrl)) {
+    return { reader: client, options, remote: undefined };
+  }
+  const bearer = resolveRemoteBearer(match.host);
+  if (!bearer.ok) return { error: `from host '${remote}' (${bearer.error})` };
+  if (bearer.token) options = { ...options, headers: { Authorization: `Bearer ${bearer.token}` } };
+  return { reader: (deps.receiptReadClientFactory ?? deps.clientFactory)(match.host.url), options, remote };
 }
 
 /** Where a verb that names an existing row (show, transitions, list, claim, update, block) sends its request with
@@ -897,8 +933,8 @@ function hostFlag(target: QueueHostTarget): string {
 
 /** A successful forward isn't a delivery receipt. Never accept a different remote row as this create's receipt. */
 function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: string | undefined, qitemId: string, sent: SentCreate): Pick<DaemonClient, "get"> {
-  if (!remoteHostOf(hostId)) return client;
   let target: ReturnType<typeof queueReadTarget> | undefined;
+  const hostWasRequested = remoteHostOf(hostId) !== undefined;
   return {
     get: async <T>(path: string) => {
       const selected = await (target ??= queueReadTarget(deps, client, hostId));
@@ -907,7 +943,7 @@ function createReceiptReader(deps: QueueDeps, client: DaemonClient, hostId: stri
       const row = response.data as Record<string, unknown> | undefined;
       const bodyMatches = typeof row?.body === "string"
         && createHash("sha256").update(row.body, "utf8").digest("hex") === createHash("sha256").update(sent.body, "utf8").digest("hex");
-      if (response.status === 200 && (!row || row.qitemId !== qitemId || !isQueueState(row.state)
+      if (hostWasRequested && response.status === 200 && (!row || row.qitemId !== qitemId || !isQueueState(row.state)
         || row.destinationSession !== sent.destinationSession || !bodyMatches)) {
         throw new Error("receipt row does not match the created qitem");
       }
@@ -925,14 +961,28 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   identityFailure?: ParkCreateIdentityCheck;
   contradiction?: CreateReadbackContradiction;
 }> {
-  const remote = remoteHostOf(hostId);
-  const where = remote ? ` on host '${remote}'` : "";
   const expectedBodyHash = createHash("sha256").update(sent.body, "utf8").digest("hex");
   const target = await queueReadTarget(deps, client, hostId);
-  if ("error" in target) return { row: null, note: `This CLI couldn't read the row back ${target.error}.` };
+  if ("error" in target) {
+    return { row: null, note: `This CLI couldn't read the row back ${target.error}.` };
+  }
+  const remote = target.remote;
+  const where = remote ? ` on host '${remote}'` : "";
   try {
     const res = await target.reader.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`, target.options);
     if (res.status === 200 && isQueueRow(res.data)) {
+      if (typeof res.data.qitemId !== "string" || res.data.qitemId.length === 0) {
+        return {
+          row: null,
+          note: `Row ${qitemId}${where} exists, but the read back did not include a valid ID. The outcome is still unknown. Keep this ID for recovery.`,
+          identityFailure: {
+            row: null,
+            fields: ["qitemId"],
+            observed: {},
+            reason: "The read back row has missing or invalid qitemId evidence. The create outcome is unknown. Keep the sent ID for a read back.",
+          },
+        };
+      }
       if (res.data.qitemId !== qitemId) {
         const observed: QueueRow = {};
         const safeId = observedValue("qitemId", res.data.qitemId);
@@ -1006,9 +1056,11 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
 }
 
 async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null, hostUsed = false): Promise<void> {
-  // A direct --host write already settled its host when it chose the target: its receipt keeps the host it used.
-  // create and handoff, which the selected daemon forwards, are settled here as before.
-  const settled = receipt && status < 400 ? (hostUsed ? receipt : await settleReceiptHost(client, receipt)) : null;
+  // Create receipts use their selected endpoint and registry; they do not need a healthz request before output.
+  // Other forwarded writes keep their receipt-only host settlement.
+  const settled = receipt && status < 400
+    ? (hostUsed || receipt.verb === "create" ? receipt : await settleReceiptHost(client, receipt))
+    : null;
   const projected = settled ? buildWriteReceipt(body, settled) : null;
   if (!projected) {
     printResult(json, body, status);
@@ -1607,6 +1659,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   const getDeps = (): QueueDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
+    receiptReadClientFactory: (url: string) => remoteDaemonClient((base) => new DaemonClient(base), url),
   };
 
   cmd
@@ -1795,9 +1848,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         console.error(`Queue create request ID: ${qitemId} (not proof of persistence). ${recovery}`);
         const parkRequested = opts.blockedOn !== undefined || opts.wakeAfter !== undefined;
         const requestNudge = parkRequested ? false : opts.nudge;
-        const receipt = writeReceipt(opts.full, {
+        const receipt = createReceiptHostContext(client, writeReceipt(opts.full, {
           verb: "create", nudgeSuppressed: opts.nudge === false, parked: parkRequested, idGiven: opts.id !== undefined, remoteHost: remoteHostOf(hostResolved.hostId),
-        });
+        }), hostResolved.hostId);
         const res: DaemonResponse<Record<string, unknown>> | Error = await client.post<Record<string, unknown>>("/api/queue/create", {
           ...(managedSource === undefined ? { sourceSession: source } : {}),
           qitemId,
@@ -1878,6 +1931,20 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           recovered?: "neutral" | "remote",
           knownIdentityFailure?: ParkCreateIdentityCheck,
         ) => {
+          const resultReceipt = receipt && recovered !== undefined
+            ? (() => {
+                const resolved = { ...receipt };
+                delete resolved.remoteHostUnconfirmed;
+                if (recovered === "remote") {
+                  const remote = remoteHostOf(hostResolved.hostId);
+                  if (remote) resolved.remoteHost = remote;
+                  else delete resolved.remoteHost;
+                } else {
+                  delete resolved.remoteHost;
+                }
+                return resolved;
+              })()
+            : receipt;
           if (status < 400 && parkRequested) {
             if (created.createOutcome === "unknown" || knownIdentityFailure) {
               const createWarning = knownIdentityFailure
@@ -1931,15 +1998,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
                 // The retry did not create or deliver work, so do not query a
                 // delivery receipt for it.
                 const delivery = terminalDeliveryResult(qitemId, hostResolved.destination, outputCreated, "not-requested", null, true);
-                await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, receipt);
+                await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, resultReceipt);
                 return;
               }
               const delivery = await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), qitemId, deps.deliveryVerify,
                 { destinationSession: hostResolved.destination, nudge: requestNudge, parked: true });
-              await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, receipt);
+              await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, resultReceipt);
               return;
             }
-            await printWriteResult(client, opts.json ?? false, receipt ? { ...outputCreated, persisted: true } : outputCreated, status, receipt);
+            await printWriteResult(client, opts.json ?? false, receipt ? { ...outputCreated, persisted: true } : outputCreated, status, resultReceipt);
             return;
           }
           if (status < 400) {
@@ -1954,7 +2021,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           if (status < 400) printCreateReturnRoute(created);
           if (opts.verify && status < 400 && isQueueRow(outputCreated.createWarning) && outputCreated.createWarning.code === "qitem_body_not_saved") {
             const delivery = terminalDeliveryResult(qitemId, hostResolved.destination, outputCreated, "not-requested", null, true);
-            await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, receipt);
+            await printWriteResult(client, opts.json ?? false, { ...outputCreated, delivery }, status, resultReceipt);
             return;
           }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
@@ -1968,10 +2035,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
               ? await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), createdId, deps.deliveryVerify,
                 { destinationSession: hostResolved.destination, nudge: requestNudge, parked: parkRequested })
               : unreadableDeliveryResult(null, hostResolved.destination, {}, "create response did not include a qitem id; delivery cannot be correlated");
-            await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId: createdId, persisted: true, delivery }, status, receipt);
+            await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId: createdId, persisted: true, delivery }, status, resultReceipt);
             return;
           }
-          await printWriteResult(client, opts.json ?? false, outputCreated, status, receipt);
+          await printWriteResult(client, opts.json ?? false, outputCreated, status, resultReceipt);
         };
         const usableCreateRow = (value: unknown): value is Record<string, unknown> =>
           isQueueRow(value) && value.qitemId === qitemId && isQueueState(value.state) && value.createOutcome !== "unknown";

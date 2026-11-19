@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
-import { DaemonClient, DaemonResponseError, DaemonTimeoutError, SENDER_IDENTITY_HEADER, senderIdentityHeaders } from "../src/client.js";
+import { DaemonClient, DaemonResponseError, DaemonTimeoutError, remoteDaemonClient, SENDER_IDENTITY_HEADER, senderIdentityHeaders } from "../src/client.js";
 import { getDaemonUrl } from "../src/daemon-lifecycle.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
@@ -43,24 +43,26 @@ function makeDeps(posts: Reply[], gets: Record<string, Reply>): { deps: QueueDep
     if (r instanceof Error) throw r;
     return r;
   };
+  const clientFactory = (base: string) => ({
+    baseUrl: base,
+    // A client for the local daemon, proven local: its requests carry the seat's own name.
+    senderIdentity: async () => ({ session: senderIdentityHeaders()[SENDER_IDENTITY_HEADER], originUnknown: false }),
+    get: vi.fn(async (p: string, options?: Call["options"]) => {
+      calls.push({ base, method: "get", path: p, options });
+      return answer(gets[`${base}${p}`], { status: 404, data: { error: "not_found" } });
+    }),
+    post: vi.fn(async (p: string, _body: unknown, options?: Call["options"]) => {
+      calls.push({ base, method: "post", path: p, options });
+      return answer(posts.shift(), { status: 500, data: { error: "unrouted" } });
+    }),
+  }) as unknown as ReturnType<QueueDeps["clientFactory"]>;
   return {
     calls,
     deps: {
       deliveryVerify,
       lifecycleDeps: {} as QueueDeps["lifecycleDeps"],
-      clientFactory: (base: string) => ({
-        baseUrl: base,
-        // A client for the local daemon, proven local: its requests carry the seat's own name.
-        senderIdentity: async () => ({ session: senderIdentityHeaders()[SENDER_IDENTITY_HEADER], originUnknown: false }),
-        get: vi.fn(async (p: string, options?: Call["options"]) => {
-          calls.push({ base, method: "get", path: p, options });
-          return answer(gets[`${base}${p}`], { status: 404, data: { error: "not_found" } });
-        }),
-        post: vi.fn(async (p: string, _body: unknown, options?: Call["options"]) => {
-          calls.push({ base, method: "post", path: p, options });
-          return answer(posts.shift(), { status: 500, data: { error: "unrouted" } });
-        }),
-      }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
+      clientFactory,
+      receiptReadClientFactory: clientFactory,
     },
   };
 }
@@ -89,8 +91,9 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     process.exitCode = undefined;
   });
 
-  async function run(destination: string, posts: Reply[], gets: Record<string, Reply> = {}, extra: string[] = []): Promise<{ calls: Call[]; error: unknown }> {
+  async function run(destination: string, posts: Reply[], gets: Record<string, Reply> = {}, extra: string[] = [], configureDeps?: (deps: QueueDeps, calls: Call[]) => void): Promise<{ calls: Call[]; error: unknown }> {
     const { deps, calls } = makeDeps(posts, gets);
+    configureDeps?.(deps, calls);
     const program = createProgram({ queueDeps: deps });
     program.exitOverride();
     let error: unknown = null;
@@ -155,14 +158,14 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "verified" } });
   });
 
-  it("create --verify does not guess a receipt host missing from this CLI's registry", async () => {
+  it("create --verify checks the selected endpoint once when the requested host is missing from this CLI's registry", async () => {
     const { calls, error } = await run("dev@rig-b@vps-b", [{ status: 201, data: REMOTE_ROW }], {
-      [`${LOCAL}/healthz`]: { status: 200, data: { selfHostId: "host-a" } },
-      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...REMOTE_ROW, lastNudgeResult: "verified" } },
+      [`${LOCAL}/api/queue/${ID}`]: { status: 404, data: { error: "not_found" } },
     }, ["--verify"]);
     expect(error).toBeNull();
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toHaveLength(0);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ persisted: true, delivery: { outcome: "indeterminate" } });
   });
 
@@ -245,14 +248,91 @@ describe("a queue create that got no answer is read back once by its ID", () => 
     expect([...stdout, ...stderr].join("\n")).not.toContain(AUTH_VALUE);
   });
 
-  it("a cross-host create whose host this CLI can't read stays INDETERMINATE and says why", async () => {
+  it("keeps a cross-host create indeterminate when its host is missing from this CLI's registry", async () => {
     const { calls } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN]);
     expect(posts(calls)).toHaveLength(1);
-    expect(readBacks(calls)).toHaveLength(0);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
     const all = stderr.join("\n");
-    expect(all).toContain("couldn't read the row back from host 'vps-b'");
     expect(all).toContain("The write outcome is INDETERMINATE");
+    expect(all).toContain(`No row ${ID} yet (read back once by its ID); it may still commit.`);
     expect(process.exitCode).toBe(2);
+  });
+
+  it.each([
+    { label: "without a registry entry", hasRegistryEntry: false },
+    { label: "with a registry entry at the selected endpoint", hasRegistryEntry: true },
+  ])("recovers a selected-daemon create named by its host ID $label", async ({ hasRegistryEntry }) => {
+    if (hasRegistryEntry) fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: host-a\n    transport: http\n    url: ${LOCAL}\n`);
+    const receiptFactory = vi.fn((base: string) => {
+      throw new Error(`receipt reader must reuse the selected client for ${base}`);
+    });
+    const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)], {
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: ROW },
+    }, ["--host", "host-a", "--tags", "mission:local"], (deps) => { deps.receiptReadClientFactory = receiptFactory; });
+    expect(error).toBeNull();
+    expect(receiptFactory).not.toHaveBeenCalled();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(stderr.join("\n")).toContain(`committed after all: row ${ID} (read back by its ID).`);
+    expect(stderr.join("\n")).not.toContain(`committed after all: row ${ID} on host 'host-a'`);
+    expect(stderr.join("\n")).not.toContain("row was forwarded");
+    expect(process.exitCode ?? 0).toBe(0);
+  });
+
+  it("verifies a selected-daemon create named by its host ID without a registry entry", async () => {
+    const receiptFactory = vi.fn((base: string) => {
+      throw new Error(`receipt reader must reuse the selected client for ${base}`);
+    });
+    const { calls, error } = await run("dev@rig-b", [{ status: 201, data: ROW }], {
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: { ...ROW, lastNudgeResult: "verified" } },
+    }, ["--host", "host-a", "--verify"], (deps) => { deps.receiptReadClientFactory = receiptFactory; });
+    expect(error).toBeNull();
+    expect(receiptFactory).not.toHaveBeenCalled();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toEqual([expect.objectContaining({ base: LOCAL })]);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ delivery: { outcome: "verified" } });
+  });
+
+  it("prints a compact local create receipt without a healthz read for a registered self host", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: host-a\n    transport: http\n    url: ${LOCAL}\n`);
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "true");
+    const { calls, error } = await run("dev@rig-b", [{ status: 201, data: ROW }], {}, ["--host", "host-a"]);
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(JSON.parse(stdout.join("\n"))).not.toHaveProperty("host");
+  });
+
+  it("reads a forwarded create once without a separate healthz identity request", async () => {
+    fs.writeFileSync(path.join(home, "hosts.yaml"), `hosts:\n  - id: vps-b\n    transport: http\n    url: ${REMOTE}\n`);
+    const remoteRequests: Array<{ url: string; method?: string }> = [];
+    const { calls, error } = await run("dev@rig-b@vps-b", [FORWARD_UNKNOWN], {}, [], (deps, recordedCalls) => {
+      const ordinaryFactory = deps.clientFactory;
+      deps.clientFactory = (base) => {
+        const client = ordinaryFactory(base) as unknown as { get: (requestPath: string, options?: Call["options"]) => Promise<unknown> };
+        if (base === REMOTE) {
+          const get = client.get.bind(client);
+          client.get = async (requestPath, options) => {
+            recordedCalls.push({ base, method: "get", path: "/healthz", options });
+            return get(requestPath, options);
+          };
+        }
+        return client as unknown as ReturnType<QueueDeps["clientFactory"]>;
+      };
+      deps.receiptReadClientFactory = (base) => remoteDaemonClient((target) => new DaemonClient(target, {
+        fetchImpl: async (input, init) => {
+          remoteRequests.push({ url: String(input), method: init?.method });
+          return new Response(JSON.stringify(REMOTE_ROW), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }), base, "host-a", "lead@rig-a");
+    });
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(remoteRequests).toEqual([{ url: `${REMOTE}/api/queue/${ID}`, method: "GET" }]);
+    expect(calls.filter((call) => call.method === "get" && call.path === "/healthz")).toHaveLength(0);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ qitemId: ID, state: "pending" });
   });
 
   // The read-back checks the sent ID, destination and body. It does not need to reconstruct the source stamp.
@@ -280,6 +360,27 @@ describe("a queue create that got no answer is read back once by its ID", () => 
       recovery: expect.stringContaining(`--id '${ID}'`),
     });
     expect(process.exitCode).toBe(2);
+  });
+
+  it("keeps a missing readback ID unreadable instead of calling it a different ID", async () => {
+    const noIdRow: Record<string, unknown> = { ...ROW };
+    delete noIdRow.qitemId;
+    const directResponse = { state: "pending", destinationSession: "dev@rig-b", body: "b" };
+    const { calls, error } = await run("dev@rig-b", [{ status: 201, data: directResponse }], {
+      [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: noIdRow },
+    });
+    expect(error).toBeNull();
+    expect(posts(calls)).toHaveLength(1);
+    expect(readBacks(calls)).toHaveLength(1);
+    const output = JSON.parse(stdout.join("\n")) as Record<string, any>;
+    expect(output).toMatchObject({ error: "queue_create_outcome_unknown", outcome: "unknown", qitemId: ID });
+    expect(output.createWarning).toMatchObject({
+      fields: expect.arrayContaining(["qitemId"]),
+      message: expect.stringContaining("missing or invalid qitemId evidence"),
+    });
+    expect(output.createWarning.message).not.toContain("different");
+    expect(stderr.join("\n")).toContain("did not include a valid ID");
+    expect(stderr.join("\n")).not.toContain("returned a different ID");
   });
 
   it("accepts a row with matching destination and body when its source differs", async () => {
