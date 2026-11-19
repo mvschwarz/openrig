@@ -6314,20 +6314,25 @@ export class QueueRepository {
         // The transition is new, so an entry the outbox already holds under its wake id is not this reroute's wake: a
         // row created with the id `fallback-<N>` holds it as its create wake. The outbox would hand that entry back,
         // and the move would deliver that row's wake while the new seat is never woken. The wake is staged under the
-        // first `:<k>` id the outbox doesn't hold, and the row records the collision.
+        // first `:<k>` id the outbox doesn't hold, and the row records the collision. The row's own create wake id is
+        // never a candidate, held or not: a row created with the id `fallback-<N>` or `fallback-<N>:<k>` and no nudge
+        // leaves it free, and wakeReplacedByReroute would read this wake as the row's create wake, which any earlier
+        // reroute to the same seat replaces.
         const keyed = `${FALLBACK_WAKE_PREFIX}${transition.transitionId}`;
+        const ownCreateWake = `${WAKE_INTENT_PREFIX}${qitemId}`;
         const holderOf = (id: string) => this.db.prepare("SELECT audit_pointer, destination_session FROM outbox_entries WHERE outbox_id = ?")
           .get(id) as { audit_pointer: string | null; destination_session: string } | undefined;
         const holder = holderOf(keyed);
         let outboxId = keyed;
-        for (let k = 1; holderOf(outboxId); k++) outboxId = `${keyed}:${k}`;
-        if (holder) {
+        for (let k = 1; outboxId === ownCreateWake || holderOf(outboxId); k++) outboxId = `${keyed}:${k}`;
+        if (outboxId !== keyed) {
           this.transitionLog.append({
             qitemId,
             state: qitem.state,
             actorSession: FALLBACK_ACTOR,
-            transitionNote: `fallback-wake-id-taken: ${keyed} already names a wake for ${holder.audit_pointer ?? "no row"} to `
-              + `${holder.destination_session}; this reroute's wake to ${fallbackDestination} is ${outboxId}`,
+            transitionNote: `fallback-wake-id-taken: ${keyed} already names `
+              + (holder ? `a wake for ${holder.audit_pointer ?? "no row"} to ${holder.destination_session}` : "this row's create wake")
+              + `; this reroute's wake to ${fallbackDestination} is ${outboxId}`,
           });
         }
         try {

@@ -716,6 +716,46 @@ describe("QueueRepository", () => {
       expect(replaced).toBe(true);
     });
 
+    it.each([
+      { name: "`fallback-<N>:1`, with another row created as `fallback-<N>`", suffix: ":1", other: true, expectedId: ":2",
+        holderNote: (other: string) => `a wake for ${other} to dave@rig` },
+      { name: "`fallback-<N>`", suffix: "", other: false, expectedId: ":1", holderNote: () => "this row's create wake" },
+    ])("A row created without a nudge with the id $name, rerouted with a wake at transition N back to a seat an earlier reroute woke: the new wake skips the row's own create wake id and is delivered.", async ({ suffix, other, expectedId, holderNote }) => {
+      const nextTransition = () => (db.prepare("SELECT COALESCE(MAX(transition_id), 0) + 1 AS n FROM queue_transitions").get() as { n: number }).n;
+      // One transition each: the row's create, the other row's create, the reroute to carol, the one back to bob.
+      const n = nextTransition() + (other ? 4 : 3);
+      const item = await repo.create({ qitemId: `fallback-${n}${suffix}`, sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", summary: "review the thing", nudge: false });
+      const ownCreateWake = `wake-intent-${item.qitemId}`;
+      const stateOf = (outboxId: string) =>
+        (db.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string } | undefined)?.delivery_state;
+      expect(stateOf(ownCreateWake)).toBeUndefined();
+      const otherRow = other
+        ? await repo.create({ qitemId: `fallback-${n}`, sourceSession: "erin@rig", destinationSession: "dave@rig", body: "y", summary: "other work" })
+        : undefined;
+      if (otherRow) expect(stateOf(`wake-intent-fallback-${n}`)).toBeDefined();
+      repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+      repo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig" });
+      expect(nextTransition()).toBe(n);
+      const sends: Array<{ session: string; text: string }> = [];
+      repo.attachTransport({ send: async (session: string, text: string) => { sends.push({ session, text }); return { ok: true, verified: true }; } });
+
+      repo.routeToFallback(item.qitemId, "carol@rig", "again", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+
+      expect(fallbackTransitions(item.qitemId).map((t) => t.transitionId).at(-1)).toBe(n);
+      const wakeId = `wake-intent-fallback-${n}${expectedId}`;
+      expect(fallbackWakes(item.qitemId).some((w) => w.outbox_id === ownCreateWake)).toBe(false);
+      expect(fallbackWakes(item.qitemId).find((w) => w.outbox_id === wakeId)).toMatchObject({ sender_session: "daemon@kernel", destination_session: "carol@rig" });
+      const replaced = (repo as unknown as { wakeReplacedByReroute(e: { outboxId: string; auditPointer: string; destinationSession: string }): boolean })
+        .wakeReplacedByReroute({ outboxId: wakeId, auditPointer: item.qitemId, destinationSession: "carol@rig" });
+      expect(replaced).toBe(false);
+      await vi.waitFor(() => expect(stateOf(wakeId)).toBe("delivered"));
+      expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
+      expect(sends[0]!.text).toContain(`Queue handoff: ${item.qitemId}`);
+      const notes = repo.transitionLog.listForQitem(item.qitemId).map((t) => t.transitionNote ?? "").filter((note) => note.startsWith("fallback-wake-id-taken: "));
+      expect(notes).toEqual([`fallback-wake-id-taken: wake-intent-fallback-${n} already names ${holderNote(otherRow?.qitemId ?? "")}; this reroute's wake to carol@rig is ${wakeId}`]);
+      if (otherRow) expect(stateOf(`wake-intent-fallback-${n}`)).not.toBe("delivered");
+    });
+
     it("A row whose reroute's transition sits only in the archive, reopened, reads as rerouted, as fallbackLineStart reads it.", async () => {
       migrate(db, [queueTransitionsArchiveSchema]);
       const archivedRepo = new QueueRepository(db, bus);
