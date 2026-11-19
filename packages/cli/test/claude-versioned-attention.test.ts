@@ -72,7 +72,10 @@ it.each(["valid", "unknown path", "wrong token", "no token", "PID reused", "logi
     const clear = new SeatAttentionReconciler({ db, sessionRegistry, eventBus, agentActivityStore: new AgentActivityStore({ db, eventBus }), tmux, listProcesses,
       reconcileRestoreOutcome: (rigId, nodeId) => restore.reconcileNodeRuntimeTruth(rigId, nodeId),
     });
-    await new SeatIdentityReconciler({ db, tmux, listProcesses }).reconcileAll();
+    // Keep the background census independent of the two ordered identity snapshots.
+    await new SeatIdentityReconciler({ db, tmux, listProcesses,
+      readProcessTableCensus: async () => ({ rows: [], permissionHiddenPids: [] }),
+    }).reconcileAll();
     expect(new SeatIdentityStore(db).getForNode(node.id)?.verdict).toBe(["valid", "no token", "login required"].includes(mode) ? "verified" : "mismatch");
     expect(getNodeInventory(db, rig.id)[0]?.lifecycleState).toBe("attention_required");
     const app = new Hono();
