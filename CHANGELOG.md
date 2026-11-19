@@ -19,17 +19,20 @@ Run the upgrade in the environment that owns your daemon, keeping the same `OPEN
 If the daemon was started with `--db`, or with `OPENRIG_DB` (legacy `RIGGED_DB`) set differently from this shell, replace the `DB=` line below with that actual database path. Pass the same `--db "$DB"` to every `rig daemon start`, including recovery; `rig config get db.path` reads this shell's configuration, not the running daemon's launch arguments or environment.
 
 ```sh
-rig daemon stop &&
 DB="$(rig config get db.path)" &&
+STOP="$(rig daemon stop)" && printf '%s\n' "$STOP" &&
+{ printf '%s\n' "$STOP" | grep -qx 'Daemon stopped' || { echo "The stop wasn't confirmed clean; see below before continuing." >&2; false; }; } &&
 BACKUP="$DB.before-0.7.19-$(date -u +%Y%m%dT%H%M%SZ)" &&
 { [ ! -e "$BACKUP" ] || { echo "$BACKUP already exists; keep it and run again." >&2; false; }; } &&
 cp "$DB" "$BACKUP" &&
 { [ ! -e "$DB-wal" ] || cp "$DB-wal" "$BACKUP-wal"; } &&
 npm install -g @openrig/cli@0.7.19 &&
-rig daemon start
+rig daemon start --db "$DB"
 ```
 
-A failure stops the following commands. Fix it before continuing. If stopping failed, use `rig daemon status`: when it says “Daemon stopped”, continue from `DB=`; when it says “Daemon PID is absent”, start the daemon with its original home/database settings before retrying the block.
+A failure stops the following commands; fix it before continuing. Back up and install only after `rig daemon stop` prints the line `Daemon stopped`: that is the stop outcome that confirms a clean shutdown. Its other success line, “No daemon target recorded; listener refused. Nothing to stop; prior drain not certified.”, means this stop has no recorded target. It does not prove that no daemon exists or that the last one shut down cleanly. A `Daemon stopped` from `rig daemon status` does not confirm a clean shutdown either.
+
+If the stop failed or had no recorded target, make sure the daemon is running on its original home and database (start it with `rig daemon start --db "$DB"` if `rig daemon status` does not say it is running), then run the whole block again. If the stop is still unconfirmed, use `daemon-shutdown.json` and `daemon.log` in your OpenRig home, together with `rig context get help`, to resolve the reported problem before retrying. Do not continue to the backup or install on an unconfirmed stop.
 
 Three additive migrations record the hook bridge, each session's launched folder, and app access. Keep the backup: downgrading the migrated database to 0.7.18 is not established. Bundled `openrig` is 0.7.19; `openrig-core` is 0.1.33.
 
