@@ -1730,7 +1730,7 @@ use the `rig` CLI instead, the same way.
    assignee records it, and `rig_artifact_read` reads an artifact it names. A call that times out has an unknown
    outcome: check `rig_queue_show` with the same id before you retry, and retry only with that id.
 5. **Take work** with `rig_queue_list` (`owned: true`), `rig_queue_claim` and `rig_queue_update`. Close with the
-   answer in `note`. To pass it to the next seat, use `rig_queue_handoff`; to put back one you won't finish, use
+   answer in `resolution`. To pass it to the next seat, use `rig_queue_handoff`; to put back one you won't finish, use
    `rig_queue_unclaim`.
 
 Limits today:
@@ -1754,21 +1754,27 @@ for a session the person keeps open.
 
 ```text
 Work in <folder>. Run every rig command with OPENRIG_SESSION_NAME=<seat> set.
-Run rig queue list --owned --state pending --json. For each item: read it with
-rig queue show <id> --full, claim it with rig queue claim <id>, do it, and close it
-with the answer (rig queue update <id> --state done --closure-reason no-follow-on
---note "<answer>"), or hand it off or block it. If there are none, end the run.
+Run rig queue list --owned --state pending,in-progress --json. For each item, read
+it with rig queue show <id> --full. A pending item: claim it with rig queue claim
+<id>. An in-progress item is one an earlier run claimed and didn't finish: don't
+claim it again, and check what that run already did before you redo any step.
+Do the item, then close it with the answer (rig queue update <id> --state done
+--closure-reason no-follow-on --resolution "<answer>"), or hand it off or block
+it. If there are none, end the run.
 ```
 
 - **Then click Run now once** on the task's page, and answer its permission prompts with "always allow". A later run
   that stops at a prompt waits in its own session until someone answers it (Anthropic's docs).
-- **What OpenRig's test measured** (one test: Claude Desktop 5.11492.5 with Claude Code 2.1.325, OpenRig 0.7.13,
+- **What OpenRig's test measured,** with an earlier version of this prompt that listed only pending items and put
+  the answer in `--note` (one test: Claude Desktop 5.11492.5 with Claude Code 2.1.325, OpenRig 0.7.13,
   macOS, Auto permission mode): a task every 2 minutes closed two items 51 s and 116 s after they were created, each
   in a fresh session.
 - **Its limits:**
   - Each run costs a model turn, even with nothing pending.
   - Runs happen only while the app is open and the computer is awake. A run is skipped while the previous one is
     still going (Anthropic's docs).
+  - The prompt takes an in-progress item as one an earlier run left, which holds because runs don't overlap. Don't
+    also run the open-session wait below for the same seat.
   - Not tested with the app quit or the Mac asleep.
 
 #### Wake on new work (opt-in; off unless the person turns it on)
