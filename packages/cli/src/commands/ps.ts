@@ -5,7 +5,7 @@ import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { sessionRigOf } from "../session-name.js";
 import { DaemonClient, remoteDaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, type LifecycleDeps , daemonStatusGuard, terminalsDegradedLine} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, type LifecycleDeps, type DaemonStatus, daemonStatusGuard, terminalsDegradedLine } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "../host-registry.js";
@@ -45,6 +45,7 @@ interface PsEntry {
 }
 
 export interface NodeEntry {
+  nodeId?: string;
   /** Served daemon attention, never re-derived here. Missing on an older daemon. */
   needsAttention?: boolean;
   arbitratedNeedsInput?: boolean | null;
@@ -1157,7 +1158,7 @@ Exit codes:
         return;
       }
       if (opts.nodes) {
-        await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope, undefined, scopedToSessionRig);
+        await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope, undefined, scopedToSessionRig, status.backgroundWork);
         return;
       }
 
@@ -1202,6 +1203,17 @@ Exit codes:
 
       // Apply CLI-side filter (Amendment A: prefer CLI shaping).
       const filtered = parsedFilter ? applyRigFilter(rigScoped, parsedFilter) : rigScoped;
+
+      if (!opts.json) {
+        const shownRigs = new Set(filtered.map(rig => rig.rigId));
+        for (const item of status.backgroundWork ?? []) {
+          if (!shownRigs.has(item.rigId)) continue;
+          console.log(`Background work (${item.sessionName}, node ${item.nodeId}): unknown; a missing pane or session does not prove its processes have exited.`);
+          for (const process of item.processes) {
+            console.log(`  Observed descendant: pid ${process.pid}, command ${process.command}, started ${process.startedAt} (sampled ${item.observedAt}).`);
+          }
+        }
+      }
 
       // Summary mode short-circuits per-entry output.
       if (opts.summary) {
@@ -1374,6 +1386,7 @@ async function handleNodes(
   useEnvelope: boolean,
   requestHeaders?: Record<string, string>,
   scopedToSessionRig?: boolean,
+  backgroundWork?: DaemonStatus["backgroundWork"],
 ): Promise<void> {
   const rigRes = await client.get<PsEntry[]>(psApiPath(opts), requestHeaders ? { headers: requestHeaders } : undefined);
   if (rigRes.status >= 400) {
@@ -1587,7 +1600,12 @@ async function handleNodes(
     if (!n.intentionallyStopped && n.identityVerdict?.verdict === "pane_missing"
       && ["session_missing", "pane_pid_gone", "pane_exited"].includes(n.identityVerdict.reason ?? "")) {
       const missing = n.identityVerdict.reason === "session_missing" ? "session" : "pane";
-      console.log(`Background work (${n.canonicalSessionName ?? n.logicalId}): unknown; a missing tmux ${missing} does not prove its processes have exited.`);
+      const seat = n.canonicalSessionName ?? n.logicalId;
+      console.log(`Background work (${seat}): unknown; a missing tmux ${missing} does not prove its processes have exited.`);
+      const observation = n.nodeId ? backgroundWork?.find(item => item.nodeId === n.nodeId && item.rigId === n.rigId && item.sessionName === seat) : undefined;
+      for (const process of observation?.processes ?? []) {
+        console.log(`  Observed descendant: pid ${process.pid}, command ${process.command}, started ${process.startedAt} (sampled ${observation!.observedAt}).`);
+      }
     }
   }
   if (humanTruncated) {

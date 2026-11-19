@@ -84,6 +84,7 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
   return {
     rigId,
     rigName,
+    nodeId: `node-${logicalId}`,
     needsAttention: opts?.needsAttention ?? false,
     arbitratedNeedsInput: null,
     needsInputEvidence: null,
@@ -217,7 +218,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
         const rigId = decodeURIComponent(m[1]!);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(NODES_BY_RIG[rigId] ?? []));
-      } else if (req.url === "/api/ps" && req.method === "GET") {
+      } else if (req.url?.split("?")[0] === "/api/ps" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(PS_DATA));
       } else {
@@ -697,6 +698,30 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
       expect(logs.join("\n")).toContain("tmux session missing; restore or relaunch the seat");
       expect(logs.join("\n")).toContain("Background work (ops-missing@openrig-build): unknown; a missing tmux session does not prove its processes have exited.");
     }
+  });
+
+  it("shows sampled descendant identities from the existing health response", async () => {
+    const options = runningDeps(port);
+    options.lifecycleDeps.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ backgroundWork: [{
+        nodeId: "node-ops.missing", rigId: "rig-a", sessionName: "ops-missing@openrig-build", state: "unknown", reason: "session_missing",
+        observedAt: "2026-07-02T12:00:00Z", processes: [{ pid: 42, command: "node", startedAt: "2026-07-02T11:00:00Z" }],
+      }] }),
+    })) as never;
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(psCommand(options));
+    const { logs } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "ps", "--nodes", "-A", "--session", "ops-missing@openrig-build"]);
+    });
+    expect(logs.join("\n")).toContain("Observed descendant: pid 42, command node, started 2026-07-02T11:00:00Z");
+    const summary = new Command();
+    summary.exitOverride();
+    summary.addCommand(psCommand(options));
+    const summaryOutput = await captureLogs(async () => { await summary.parseAsync(["node", "rig", "ps"]); });
+    expect(summaryOutput.logs.join("\n")).toContain("Background work (ops-missing@openrig-build, node node-ops.missing): unknown");
+    expect(summaryOutput.logs.join("\n")).toContain("Observed descendant: pid 42, command node");
   });
 
   it("reports unknown background work for a confirmed lost pane, but not an intentional stop", async () => {
