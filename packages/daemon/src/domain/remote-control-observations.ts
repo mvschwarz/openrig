@@ -49,21 +49,27 @@ export class RemoteControlObservationStore {
   }
 
   /**
-   * Record one report. The caller has checked that `generation` is the seat's current occupant; this checks that the
-   * conversation is the seat's own, and keeps one row per node:
+   * Record one report from a generation that is still the seat's occupant (`isCurrentOccupant`: the current one, or
+   * one followed only by no-launch adoptions, whose hooks keep their launch generation;
+   * SessionRegistry.isOccupantContinuedByAdoption, the rule the node read uses too) in the seat's own conversation.
+   * One row per node:
    * - the same occupant and conversation: a report no older than the row replaces its session (present or absent);
    * - another occupant or conversation: only a present report replaces the row, so absence is never inferred for a
    *   conversation that hasn't shown it supports the variable;
    * - no row: only a present report creates one.
    */
-  record(input: { nodeId: string; generation: string; conversationId: string; report: RemoteControlReport; observedAt: string }):
-    RecordOutcome {
+  record(input: { nodeId: string; generation: string; conversationId: string; report: RemoteControlReport; observedAt: string;
+    isCurrentOccupant: (generation: string) => boolean }): RecordOutcome {
+    if (!input.isCurrentOccupant(input.generation)) return "ignored";
     if (input.conversationId !== this.currentConversation(input.nodeId)) return "ignored";
     const write = this.db.transaction((): RecordOutcome => {
       const row = this.db.prepare(
         "SELECT occupant_generation, conversation_id, session_id, observed_at FROM remote_control_observations WHERE node_id = ?",
       ).get(input.nodeId) as Row | undefined;
-      const samePair = row !== undefined && row.occupant_generation === input.generation
+      // One occupant, not one generation: a launch generation and the adoption generations after it both pass
+      // isCurrentOccupant, and two that both pass have no launch between them (Helios FAIL on 52f5af2), so ordering
+      // and an observed disconnect carry across them. The conversation must still be the same.
+      const samePair = row !== undefined && input.isCurrentOccupant(row.occupant_generation)
         && row.conversation_id === input.conversationId;
       if (samePair && input.observedAt < row.observed_at) return "ignored";
       if (!samePair && input.report.kind === "absent") return "ignored";
@@ -79,13 +85,15 @@ export class RemoteControlObservationStore {
   }
 
   /** The observation for the seat's current occupant and conversation, or null when none applies (never observed, or
-   *  recorded for an earlier occupant or conversation: an earlier occupant's link is never shown as current). */
-  current(input: { nodeId: string; generation: string | null }): RemoteControlObservation | null {
-    if (!input.generation) return null;
+   *  recorded for an earlier occupant or conversation: an earlier occupant's link is never shown as current).
+   *  `isCurrentOccupant` says whether the row's generation is still the seat's: the current one, or one followed only
+   *  by no-launch adoptions (SessionRegistry.isOccupantContinuedByAdoption, the rule the write uses too). */
+  current(input: { nodeId: string; isCurrentOccupant: (generation: string) => boolean }): RemoteControlObservation | null {
     const row = this.db.prepare(
       "SELECT occupant_generation, conversation_id, session_id, observed_at FROM remote_control_observations WHERE node_id = ?",
     ).get(input.nodeId) as Row | undefined;
-    if (!row || row.occupant_generation !== input.generation || row.conversation_id !== this.currentConversation(input.nodeId)) {
+    if (!row || !input.isCurrentOccupant(row.occupant_generation)
+      || row.conversation_id !== this.currentConversation(input.nodeId)) {
       return null;
     }
     return { sessionId: row.session_id, observedAt: row.observed_at };

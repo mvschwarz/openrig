@@ -235,7 +235,8 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const remoteControlStore = new RemoteControlObservationStore(deps.rigRepo.db);
   const remoteControlOf = (nodeId: string) => {
     try {
-      return remoteControlStore.current({ nodeId, generation: deps.sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null });
+      return remoteControlStore.current({ nodeId,
+        isCurrentOccupant: (generation) => deps.sessionRegistry.isOccupantContinuedByAdoption(nodeId, generation) });
     } catch {
       return null;
     }

@@ -143,6 +143,19 @@ function liveOccupantGeneration(c: Context, store: AgentActivityStore, nodeId: s
     return null;
   }
 }
+/** #3513: whether `generation` is still the seat's occupant: the current one, or one followed only by no-launch
+ *  adoptions (reconcile, bind, self-attach), whose hooks keep their launch generation. The identity gate's own rule
+ *  (SessionRegistry.isOccupantContinuedByAdoption); an unreadable ledger is no evidence, so nothing is recorded. */
+function continuesCurrentOccupant(c: Context, store: AgentActivityStore, nodeId: string): (generation: string) => boolean {
+  const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+  return (generation) => {
+    try {
+      return registry.isOccupantContinuedByAdoption(nodeId, generation);
+    } catch {
+      return false;
+    }
+  };
+}
 function nextHookSeq(key: string): number {
   const next = (hookEvidenceSeq.get(key) ?? 0) + 1;
   hookEvidenceSeq.set(key, next);
@@ -757,6 +770,8 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
 
   // #2702: a turn, stop or notification from another runtime started inside the seat is that harness's, not the seat's.
   if (reportedByAnotherRuntime(body)) return c.json({ ok: true, ignored: "transcript_not_this_session" });
+  // #3513: before the permission and PostToolBatch branches return, so every hook of the seat's own Claude counts.
+  observeRemoteControl(c, store, body);
 
   // All tools in this actor's batch have resolved. An individual PostToolUse can belong to a parallel tool,
   // and a subagent's batch says nothing about the main session's permission. Only the current occupant can
@@ -811,7 +826,6 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
     }
   }
 
-  observeRemoteControl(c, store, body);
   const recorded = recordHookActivity(c, store, body);
   if ("ignored" in recorded) return c.json({ ok: true, ignored: recorded.ignored });
   return "refused" in recorded ? recorded.refused : c.json({ ok: true, activity: recorded.activity });
@@ -832,10 +846,9 @@ function observeRemoteControl(c: Context, store: AgentActivityStore, body: Recor
   const seat = store.resolveSession({ sessionName, nodeId: stringOrNull(body.nodeId) });
   if (!seat || seat.runtime !== "claude-code" || (sessionName && sessionName !== seat.sessionName)
     || (body.nodeId != null && body.nodeId !== seat.nodeId)) return;
-  if (liveOccupantGeneration(c, store, seat.nodeId) !== generation) return;
   try {
     new RemoteControlObservationStore(store.db).record({ nodeId: seat.nodeId, generation, conversationId, report,
-      observedAt: new Date(occurredAt).toISOString() });
+      observedAt: new Date(occurredAt).toISOString(), isCurrentOccupant: continuesCurrentOccupant(c, store, seat.nodeId) });
   } catch { /* An optional observation never affects the event's own recording. */ }
 }
 

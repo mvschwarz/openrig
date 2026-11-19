@@ -28,10 +28,10 @@ function seat() {
   const env = (extra: Record<string, string> = {}) => ({ OPENRIG_SESSION_NAME: name, OPENRIG_NODE_ID: node.id,
     OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: generation, CLAUDE_PROJECT_DIR: "/work/repo", ...extra });
   /** One Claude Stop hook through the shipped relay and the real route. */
-  const hook = async (opts: { at: string; link?: string; session?: string; generation?: string; runtime?: string }) => {
+  const hook = async (opts: { at: string; link?: string; session?: string; generation?: string; runtime?: string; event?: string }) => {
     const e = env({ ...(opts.link !== undefined ? { CLAUDE_CODE_BRIDGE_SESSION_ID: opts.link } : {}),
       ...(opts.generation ? { OPENRIG_OCCUPANT_GENERATION: opts.generation } : {}), ...(opts.runtime ? { OPENRIG_RUNTIME: opts.runtime } : {}) });
-    const payload = relay.buildOpenRigPayload({ hook_event_name: "Stop", session_id: opts.session ?? conversation,
+    const payload = relay.buildOpenRigPayload({ hook_event_name: opts.event ?? "Stop", session_id: opts.session ?? conversation,
       transcript_path: `/home/u/.claude/projects/-work-repo/${opts.session ?? conversation}.jsonl` }, e, () => new Date(opts.at));
     const res = await t.app.request("/api/activity/hooks", { method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer fixture" }, body: JSON.stringify(payload) });
@@ -99,6 +99,54 @@ it("an earlier occupant's hook is not recorded, and a replaced occupant's link i
   // A delayed hook from the earlier occupant, even a newer-stamped one, never replaces the current occupant's row.
   await s.hook({ at: "2026-11-19T01:04:00.000Z", link: linkA, generation: s.generation });
   expect(await s.read()).toEqual({ sessionId: linkB, observedAt: "2026-11-19T01:03:00.000Z" });
+});
+
+it("a seat continued by adoption still counts as current; a launch after it does not", async () => {
+  const s = seat();
+  // A no-launch adoption (reconcile, bind, self-attach) registers the same live process under a new generation, while
+  // its hooks keep the launch generation: those hooks are still the seat's, on the write and on the node read.
+  await s.hook({ at: "2026-11-19T01:00:00.000Z", link: linkA });
+  const adopted = s.t.sessionRegistry.mintOccupantTenure(s.node.id, "adopt");
+  expect(adopted.generationUuid).not.toBe(s.generation);
+  expect(s.t.sessionRegistry.currentOccupantTenure(s.node.id)?.generationUuid).toBe(adopted.generationUuid);
+  expect(await s.read()).toEqual({ sessionId: linkA, observedAt: "2026-11-19T01:00:00.000Z" });
+  await s.hook({ at: "2026-11-19T01:02:00.000Z", link: linkB });
+  expect(await s.read()).toEqual({ sessionId: linkB, observedAt: "2026-11-19T01:02:00.000Z" });
+  // A launch kind after it replaces that occupant: its hooks no longer count, and its row is no longer shown.
+  s.t.sessionRegistry.mintOccupantTenure(s.node.id, "fresh");
+  expect(await s.read()).toBeNull();
+  await s.hook({ at: "2026-11-19T01:03:00.000Z", link: linkA });
+  expect(await s.read()).toBeNull();
+});
+
+it("a launch generation and its adoption generation are one occupant for ordering and disconnects", async () => {
+  // Helios FAIL on 52f5af2: both generations are accepted as current, so the row must not treat them as two occupants.
+  const s = seat();
+  const adopted = s.t.sessionRegistry.mintOccupantTenure(s.node.id, "adopt").generationUuid;
+  // A newer report under the adoption generation is not replaced by a delayed older one under the launch generation.
+  await s.hook({ at: "2026-11-19T01:20:00.000Z", link: linkB, generation: adopted });
+  await s.hook({ at: "2026-11-19T01:00:00.000Z", link: linkA, generation: s.generation });
+  expect(await s.read()).toEqual({ sessionId: linkB, observedAt: "2026-11-19T01:20:00.000Z" });
+  // A disconnect reported under the other generation of the same occupant is recorded as observed absent.
+  await s.hook({ at: "2026-11-19T01:30:00.000Z", link: linkA, generation: s.generation });
+  await s.hook({ at: "2026-11-19T01:40:00.000Z", generation: adopted });
+  expect(await s.read()).toEqual({ sessionId: null, observedAt: "2026-11-19T01:40:00.000Z" });
+});
+
+it("control: an absence alone, under either generation of the occupant, still proves nothing", async () => {
+  const s = seat();
+  const adopted = s.t.sessionRegistry.mintOccupantTenure(s.node.id, "adopt").generationUuid;
+  await s.hook({ at: "2026-11-19T01:00:00.000Z", generation: adopted });
+  await s.hook({ at: "2026-11-19T01:01:00.000Z", generation: s.generation });
+  expect(await s.read()).toBeNull();
+});
+
+it("a PostToolBatch hook mid-turn records the observation too, not only Stop", async () => {
+  const s = seat();
+  await s.hook({ at: "2026-11-19T01:00:00.000Z", link: linkA, event: "PostToolBatch" });
+  expect(await s.read()).toEqual({ sessionId: linkA, observedAt: "2026-11-19T01:00:00.000Z" });
+  await s.hook({ at: "2026-11-19T01:01:00.000Z", event: "PostToolBatch" });
+  expect(await s.read()).toEqual({ sessionId: null, observedAt: "2026-11-19T01:01:00.000Z" });
 });
 
 it("a helper Claude in another conversation, and a changed conversation, never show as the seat's link", async () => {
