@@ -96,36 +96,41 @@ function canonicalPhysicalPath(absPath: string): string | null {
   return resolved.ok ? resolved.path : null;
 }
 
-type ConfiguredRootResolution = {
+export type ConfiguredRootResolution = {
   identity: string;
+  physicalPath: string | null;
   status: "ok" | "missing" | "unreadable";
 };
 
-/** The absolute identity of a configured root, used for the walk, the duplicate check and every
- *  published path. A relative spelling is made absolute from the working directory. The kernel
- *  applies a `..` component to the directory a symlink points at, but `path.resolve` removes it
- *  from the text first, so `/work/link/../missions` and `/work/missions` can be two directories.
- *  A root with a `..` component is therefore identified by the operating system's realpath
- *  (`fs.realpathSync.native`; the JavaScript `fs.realpathSync` also resolves the path as text
- *  first, so it would repeat the error). A root without `..` is normalized as text only, which
- *  is exact for it and keeps a symlinked root under its configured name. If a root with `..`
- *  cannot be resolved, its absolute spelling is retained only as identity metadata while its
- *  status marks it missing (`ENOENT`) or unreadable so walks never pass an unresolved `..`
- *  string to `fs.readdirSync` and `path.join`. */
+/** The absolute identity and physical path of a configured root, used for the walk, the
+ *  duplicate check, project ownership, readiness, and every published path. A relative
+ *  spelling is made absolute from the working directory. The kernel applies a `..` component
+ *  to the directory a symlink points at, but `path.resolve` removes it from the text first,
+ *  so `/work/link/../missions` and `/work/missions` can be two directories. Every configured
+ *  root is resolved once with `fs.realpathSync.native`: a `..` root takes the resolved
+ *  physical path as its identity, while a root without `..` keeps its normalized spelling as
+ *  its identity alongside the captured physical path. If resolution fails, its spelling is
+ *  retained only as identity metadata while its status marks it missing (`ENOENT`) or
+ *  unreadable so walks and route ownership never re-resolve or walk an unresolved root during
+ *  the same operation. */
 function resolveConfiguredRoot(root: string): ConfiguredRootResolution {
-  if (root.length === 0) return { identity: root, status: "missing" };
+  if (root.length === 0) return { identity: root, physicalPath: null, status: "missing" };
   const absolute = path.isAbsolute(root) ? root : process.cwd() + path.sep + root;
-  if (!absolute.split(/[\\/]+/).includes("..")) {
-    return { identity: path.resolve(absolute), status: "ok" };
-  }
-  try {
-    return { identity: fs.realpathSync.native(absolute), status: "ok" };
-  } catch (err) {
+  const hasDotDot = absolute.split(/[\\/]+/).includes("..");
+  const lookupPath = hasDotDot ? absolute : path.resolve(absolute);
+  const resolved = resolveCanonicalPhysicalPath(lookupPath);
+  if (!resolved.ok) {
     return {
-      identity: absolute,
-      status: (err as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable",
+      identity: lookupPath,
+      physicalPath: null,
+      status: resolved.missing ? "missing" : "unreadable",
     };
   }
+  return {
+    identity: hasDotDot ? resolved.path : lookupPath,
+    physicalPath: resolved.path,
+    status: "ok",
+  };
 }
 
 function parseTypedQueueScope(rawTags: string | null | undefined): {
@@ -485,6 +490,11 @@ export class SliceIndexer {
     return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots()).slice(1).map((root) => root.identity);
   }
 
+  /** Configured roots with captured identity, physical path, and status for the current operation. */
+  configuredRootResolutions(): ReadonlyArray<ConfiguredRootResolution> {
+    return (this.resolvedRootsForOperation ?? this.resolveConfiguredRoots()).map((root) => ({ ...root }));
+  }
+
   /** Keep one configured-root snapshot across a synchronous compound read. */
   withResolvedRoots<T>(fn: () => T): T {
     if (this.resolvedRootsForOperation !== null) return fn();
@@ -662,15 +672,9 @@ export class SliceIndexer {
   // Quiet reconciliation must notice new native membership before the legacy metadata TTL.
   // This is a cache key over physical roots, authored bytes and directory entries, not another scope parser.
   private reconcileComposition(): void {
-    const roots = this.sliceRoots();
-    const rootIdentities = roots.map(root => {
-      try {
-        return [root, fs.realpathSync.native(root)];
-      } catch {
-        return [root, root];
-      }
-    });
-    const rows = roots.flatMap(root => {
+    const roots = this.sliceRootResolutions();
+    const rootIdentities = roots.map((root) => [root.identity, root.physicalPath]);
+    const rows = roots.flatMap(({ identity: root }) => {
       if (!fs.existsSync(root)) return [];
       return fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory()).flatMap(entry => {
         const mission = path.join(root, entry.name), manifest = path.join(mission, "mission.yaml");
@@ -1046,14 +1050,7 @@ export class SliceIndexer {
     const missions: Array<{ name: string; missionPath: string; id: string | null }> = [];
     const claims = new Map<string, Set<string>>();
     const seenRoots = new Set<string>();
-    for (const configuredRoot of this.sliceRoots(additionalRoots, onReadError)) {
-      let root: string;
-      try {
-        root = fs.realpathSync.native(configuredRoot);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") onReadError();
-        continue;
-      }
+    for (const { physicalPath: root } of this.sliceRootResolutions(additionalRoots, onReadError)) {
       if (seenRoots.has(root)) continue;
       seenRoots.add(root);
       let entries: fs.Dirent[];
@@ -1200,29 +1197,36 @@ export class SliceIndexer {
    *  these, so the walk, the duplicate check and the published paths name the same
    *  directory, and a client sees absolute paths whatever its working directory.
    *  Inside `withResolvedRoots`, the captured snapshot roots are used as they are
-   *  so one request does not re-resolve them mid-operation. A `..` root that was
-   *  missing at capture stays excluded for that operation, and an unreadable `..`
-   *  root reports a read error and stays excluded rather than passing an unresolved
-   *  `..` spelling to `fs.readdirSync` and `path.join`. */
-  private sliceRoots(additionalRoots: readonly string[] = [], onReadError?: () => void): string[] {
+   *  so one request does not re-resolve them mid-operation. A root that was missing
+   *  at capture stays excluded for that operation, and an unreadable root reports a
+   *  read error and stays excluded rather than passing an unresolved spelling to
+   *  `fs.readdirSync` and `path.join`. */
+  private sliceRootResolutions(
+    additionalRoots: readonly string[] = [],
+    onReadError?: () => void,
+  ): Array<{ identity: string; physicalPath: string }> {
     const configuredRoots = this.resolvedRootsForOperation ?? this.resolveConfiguredRoots();
     const roots = [
       ...configuredRoots,
       ...additionalRoots.map(resolveConfiguredRoot),
     ];
     const seen = new Set<string>();
-    const out: string[] = [];
+    const out: Array<{ identity: string; physicalPath: string }> = [];
     for (const root of roots) {
       if (root.status === "missing") continue;
       if (root.status === "unreadable") {
         onReadError?.();
         continue;
       }
-      if (root.identity.length === 0 || seen.has(root.identity)) continue;
+      if (root.identity.length === 0 || root.physicalPath === null || seen.has(root.identity)) continue;
       seen.add(root.identity);
-      out.push(root.identity);
+      out.push({ identity: root.identity, physicalPath: root.physicalPath });
     }
     return out;
+  }
+
+  private sliceRoots(additionalRoots: readonly string[] = [], onReadError?: () => void): string[] {
+    return this.sliceRootResolutions(additionalRoots, onReadError).map((root) => root.identity);
   }
 
   private resolveConfiguredRoots(): ConfiguredRootResolution[] {

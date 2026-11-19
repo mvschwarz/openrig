@@ -1,6 +1,6 @@
 import type { EventBus } from "../domain/event-bus.js";
 import { listProjects, selectedProject, projectMission, workSource, insideProject, projectReadResponse } from "../domain/workspace/project-read.js";
-import { inferCatalogProject, ProjectReadError } from "../domain/workspace/project-catalog.js";
+import { ProjectReadError } from "../domain/workspace/project-catalog.js";
 // Slice Story View v0 — HTTP routes.
 //
 // Endpoints:
@@ -164,7 +164,10 @@ export function slicesRoutes(): Hono {
         };
       });
       if (listing instanceof Response) return listing;
-      const readinessRoot = tryRealpath(deps.indexer.slicesRoot) ?? deps.indexer.slicesRoot;
+      const primaryRoot = typeof deps.indexer.configuredRootResolutions === "function"
+        ? deps.indexer.configuredRootResolutions()[0]
+        : undefined;
+      const readinessRoot = primaryRoot?.physicalPath ?? primaryRoot?.identity ?? deps.indexer.slicesRoot;
       return { listing, slicesRoot: readinessRoot, readPolicy };
     });
     if (operation instanceof Response) return operation;
@@ -338,11 +341,6 @@ function resolveRealpath(targetPath: string): ResolvedPath {
   }
 }
 
-function tryRealpath(targetPath: string): string | null {
-  const resolved = resolveRealpath(targetPath);
-  return resolved.ok ? resolved.path : null;
-}
-
 function isInsideDir(parentDir: string, childPath: string): boolean {
   const rel = path.relative(parentDir, childPath);
   return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`));
@@ -360,13 +358,11 @@ function resolveSliceProjectLookup(
   c: { get: (key: string) => unknown },
   indexer: SliceIndexer,
 ): SliceProjectLookup {
-  let catalogPath: string | null = null;
   let projects: Array<{ id: string; root: string | null; missionsRoot: string | null; error?: string }> = [];
   let rootUnreadable = false;
   let canonicalProjectId: ((id: string) => string) | undefined;
   try {
     const listed = listProjects(c as never);
-    catalogPath = listed.catalogPath;
     const owners = new Map(listed.projects.flatMap((p) => (p.aliases ?? []).map((alias) => [alias, p.id] as const)));
     canonicalProjectId = (id) => owners.get(id) ?? id;
     projects = listed.projects.map((p) => {
@@ -392,29 +388,36 @@ function resolveSliceProjectLookup(
     return { resolveProjectId: () => null, additionalSliceRoots, complete: false, canonicalProjectId };
   }
   // A project-scoped indexer's explicitly configured roots keep their existing
-  // project identity, including compatible roots outside project.yaml. Extra
-  // catalog roots are resolved by containment so hidden sibling projects remain
-  // distinct candidates.
+  // project identity, including compatible roots outside project.yaml. Use the
+  // captured operation snapshot so a root missing or unreadable at capture is
+  // never re-resolved mid-request. Extra catalog roots are resolved by
+  // containment so hidden sibling projects remain distinct candidates.
   const explicitProjectId = typeof indexer.projectId === "string" && indexer.projectId.length > 0
     ? indexer.projectId
     : null;
   const explicitRoots = explicitProjectId
-    ? [indexer.slicesRoot, ...indexer.additionalSliceRoots].flatMap((root) => {
-        const resolved = resolveRealpath(root);
-        if (!resolved.ok) {
-          if (!resolved.missing) rootUnreadable = true;
-          return [];
-        }
-        return [resolved.path];
-      })
+    ? (typeof indexer.configuredRootResolutions === "function"
+        ? indexer.configuredRootResolutions().flatMap((root) => {
+            if (root.status === "missing") return [];
+            if (root.status === "unreadable") {
+              rootUnreadable = true;
+              return [];
+            }
+            return root.physicalPath !== null ? [root.physicalPath] : [];
+          })
+        : [indexer.slicesRoot, ...(indexer.additionalSliceRoots ?? [])].flatMap((root) => {
+            const resolved = resolveRealpath(root);
+            if (!resolved.ok) {
+              if (!resolved.missing) rootUnreadable = true;
+              return [];
+            }
+            return [resolved.path];
+          }))
     : [];
   const complete = !rootUnreadable && projects.every((project) => !project.error);
-  // The resolver is request-local. Reuse inference only for the same canonical
-  // project/mission-root matches, keeping the two containment relations distinct.
-  const inferredByContainment = new Map<string, { id: string; root: string }>();
   // `observedQueueCounts` passes the canonical physical path already established
-  // by `canonicalizeCountPath`, so avoid a redundant second realpath whose failure
-  // would silently drop an ambiguous candidate.
+  // by `canonicalizeCountPath`. Containment and deepest-root selection run purely
+  // over the already-resolved canonical paths with no further filesystem reads.
   const resolveProjectId = (actualSlicePath: string): string | null => {
     if (explicitProjectId && explicitRoots.some((root) => isInsideDir(root, actualSlicePath))) return explicitProjectId;
     const matching = projects.flatMap((project) => {
@@ -430,41 +433,18 @@ function resolveSliceProjectLookup(
     if (matching.length === 1) {
       selected = matching[0]?.project;
     } else {
-      if (!catalogPath) return null;
-      const cacheKey = JSON.stringify(
-        matching
-          .map(({ project, projectRootContains, missionsRootContains }) => ({
-            id: project.id,
-            root: project.root,
-            missionsRoot: project.missionsRoot,
-            error: project.error ?? null,
-            projectRootContains,
-            missionsRootContains,
-          }))
-          .sort((a, b) => {
-            const left = JSON.stringify(a);
-            const right = JSON.stringify(b);
-            return left < right ? -1 : left > right ? 1 : 0;
-          }),
-      );
-      const cached = inferredByContainment.get(cacheKey);
-      if (cached) {
-        selected = matching.find(({ project }) => project.id === cached.id && project.root === cached.root)?.project;
-      } else {
-        try {
-          const inferred = inferCatalogProject(
-            catalogPath,
-            new ProjectReadError("project_required", "Slice queue counts require one containing project"),
-            { cwd: actualSlicePath },
-            [],
-          );
-          if (inferred.selectedBy !== "cwd") return null;
-          selected = matching.find(({ project }) => project.id === inferred.id && project.root === inferred.root)?.project;
-          if (!selected) return null;
-          inferredByContainment.set(cacheKey, { id: inferred.id, root: inferred.root });
-        } catch {
-          return null;
-        }
+      const containing = matching
+        .filter((entry): entry is typeof entry & { project: { root: string } } =>
+          entry.projectRootContains && entry.project.root !== null,
+        )
+        .map(({ project }) => ({
+          project,
+          depth: project.root.split(path.sep).filter(Boolean).length,
+        }));
+      if (containing.length > 0) {
+        const maxDepth = Math.max(...containing.map((entry) => entry.depth));
+        const deepest = containing.filter((entry) => entry.depth === maxDepth);
+        if (deepest.length === 1) selected = deepest[0]?.project;
       }
     }
     if (!selected || selected.error || selected.missionsRoot === null || !isInsideDir(selected.missionsRoot, actualSlicePath)) return null;

@@ -28,6 +28,11 @@ const evidenceRootFault = vi.hoisted(() => ({
   code: "EACCES",
   hits: 0,
 }));
+const realpathSyncFault = vi.hoisted(() => ({
+  targetPath: null as string | null,
+  code: "EACCES",
+  hits: 0,
+}));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   const injectedError = (code: string) => Object.assign(new Error("injected node metadata failure"), { code });
@@ -58,6 +63,10 @@ vi.mock("node:fs", async (importOriginal) => {
   }) as typeof actual.lstatSync;
   const realpathSync = Object.assign(((...args: Parameters<typeof actual.realpathSync>) => {
     maybeThrowEvidenceResolveFault(args[0]);
+    if (realpathSyncFault.targetPath !== null && String(args[0]) === realpathSyncFault.targetPath) {
+      realpathSyncFault.hits++;
+      throw injectedError(realpathSyncFault.code);
+    }
     return actual.realpathSync(...args);
   }) as typeof actual.realpathSync, { native: actual.realpathSync.native });
   const statSync = ((...args: Parameters<typeof actual.statSync>) => {
@@ -1718,6 +1727,8 @@ describe("GET /api/slices observed queue counts", () => {
     nodeMetadataFault.readHits = 0;
     nodeMetadataFault.selectionPath = null;
     nodeMetadataFault.selectionHits = 0;
+    realpathSyncFault.targetPath = null;
+    realpathSyncFault.hits = 0;
     root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "slice-counts-")));
     docs = new Map();
     db = createDb();
@@ -2929,6 +2940,115 @@ describe("GET /api/slices observed queue counts", () => {
           expect(secondCallFailures).toBe(0);
         } finally {
           spy.mockRestore();
+        }
+      },
+    );
+
+    it("keeps explicit project ownership bound to captured root status when a missing .. additional root appears mid-request", async () => {
+      const alphaExtra = path.join(root, "alpha-extra-midreq-missions");
+      write(path.join(alphaExtra, "shipping", "SPEC.md"), nodeBytes("M.ALPHA.SHIP", "active", "Mission"));
+      write(path.join(alphaExtra, "shipping", "slices", "01-release", "SPEC.md"), nodeBytes("SLICE.ALPHA.REL", "active", "Slice"));
+      addSlice("beta", "shipping", "01-release", "active", "SLICE.BETA.REL", { missionId: "M.BETA.SHIP" });
+      fs.mkdirSync(path.join(root, "beta", "sub"), { recursive: true });
+
+      row("alpha-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-release"]);
+      row("beta-pending", "pending", ["project:beta", "mission:shipping", "slice:01-release"]);
+
+      const lateLink = path.join(root, "alpha", "late-link");
+      const unresolvedRoot = `${lateLink}${path.sep}..${path.sep}missions`;
+      expect(fs.existsSync(unresolvedRoot)).toBe(false);
+
+      const { app, indexer } = route("alpha", true, alphaExtra, [unresolvedRoot]);
+      const origList = indexer.list.bind(indexer);
+      let injectOnList = true;
+      const listSpy = vi.spyOn(indexer, "list").mockImplementation(() => {
+        const entries = origList();
+        if (injectOnList) {
+          injectOnList = false;
+          fs.symlinkSync(path.join(root, "beta", "sub"), lateLink, "dir");
+        }
+        return entries;
+      });
+      const origNative = fs.realpathSync.native;
+      let unresolvedRealpathCalls = 0;
+      const realpathSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((p: fs.PathLike, options?: fs.EncodingOption) => {
+        if (String(p) === unresolvedRoot) unresolvedRealpathCalls++;
+        return origNative(p, options as never);
+      }) as typeof fs.realpathSync.native);
+      try {
+        // Request 1: unresolvedRoot is missing at withResolvedRoots capture and appears before resolveSliceProjectLookup.
+        const firstEntries = await list(app);
+        expect(firstEntries.find((s) => s.name === "01-release")).toMatchObject({
+          queueCounts: { ...ZERO, blocked: 1 },
+          derivedState: "blocked",
+        });
+        expect(unresolvedRealpathCalls).toBe(1);
+
+        // Repeat with ?derived=blocked from the same missing-at-capture starting state.
+        fs.unlinkSync(lateLink);
+        injectOnList = true;
+        expect((await list(app, "?derived=blocked")).map((s) => s.name)).toEqual(["01-release"]);
+        expect(unresolvedRealpathCalls).toBe(2);
+
+        // Request 3 (positive control): lateLink now exists BEFORE withResolvedRoots capture,
+        // so unresolvedRoot legitimately resolves to Beta's missions root as an explicit Alpha root.
+        const afterCapturedEntries = await list(app);
+        expect(afterCapturedEntries.find((s) => s.name === "01-release")).toMatchObject({
+          queueCounts: ZERO,
+          derivedState: "none",
+        });
+        expect(unresolvedRealpathCalls).toBe(3);
+        expect((await list(app, "?derived=blocked")).map((s) => s.name)).toEqual([]);
+      } finally {
+        listSpy.mockRestore();
+        realpathSpy.mockRestore();
+      }
+    });
+
+    it.each(["ENOENT", "EACCES"] as const)(
+      "preserves ambiguity in nested catalog projects without a second realpath in inferCatalogProject (%s)",
+      async (code) => {
+        catalog([
+          { id: "root", root: "." },
+          { id: "alpha", root: "projects/alpha" },
+        ]);
+        addCatalogProject("root", ".");
+        addCatalogProject("alpha", "projects/alpha");
+
+        const alphaExtra = path.join(root, "alpha-extra-nested-missions");
+        write(path.join(alphaExtra, "shipping", "SPEC.md"), nodeBytes("M.ALPHA.EXTRA", "active", "Mission"));
+        write(path.join(alphaExtra, "shipping", "slices", "01-release", "SPEC.md"), nodeBytes("SLICE.ALPHA.REL", "active", "Slice"));
+        write(path.join(alphaExtra, "shipping", "slices", "02-unique", "SPEC.md"), nodeBytes("SLICE.ALPHA.UNIQ", "active", "Unique"));
+
+        const hiddenSlicePath = addSlice("projects/alpha", "shipping", "01-release", "active", "SLICE.ALPHA.NESTED");
+        const hiddenSliceReal = fs.realpathSync.native(hiddenSlicePath);
+        configureCatalogRoute(alphaExtra);
+
+        row("dup-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:01-release"]);
+        row("unique-blocked", "blocked", ["project:alpha", "mission:shipping", "slice:02-unique"]);
+
+        const { app } = route("alpha", true, alphaExtra);
+
+        realpathSyncFault.targetPath = hiddenSliceReal;
+        realpathSyncFault.code = code;
+        realpathSyncFault.hits = 0;
+        try {
+          const entries = await list(app);
+          expect(entries.find((s) => s.name === "01-release")).toMatchObject({
+            queueCounts: ZERO,
+            derivedState: "none",
+          });
+          expect(entries.find((s) => s.name === "02-unique")).toMatchObject({
+            queueCounts: { ...ZERO, blocked: 1 },
+            derivedState: "blocked",
+          });
+          expect(realpathSyncFault.hits).toBe(0);
+
+          expect((await list(app, "?derived=blocked")).map((s) => s.name)).toEqual(["02-unique"]);
+          expect(realpathSyncFault.hits).toBe(0);
+        } finally {
+          realpathSyncFault.targetPath = null;
+          realpathSyncFault.hits = 0;
         }
       },
     );
