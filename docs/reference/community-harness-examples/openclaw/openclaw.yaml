@@ -9,7 +9,7 @@ limits:
   - local resume may run a native database integrity check; check that the TUI has finished startup before sending work
   - automatic session resets (session.reset) must stay off, or a key can start a new conversation
   - typing /new in the pane moves the chat to a fresh session key; the seat still holds the name OpenRig gave it
-  - no guidance, skills or startup files are placed
+  - no guidance or skills are placed; startup text files go only in the first input
   - needs-input and approval prompts are read from the screen only
 names_conversation: true
 resume: true
