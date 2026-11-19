@@ -305,7 +305,8 @@ commands; if the two ever differ, this step is right.
     before you wake it again). A pending task with no wake isn't lost or done.
   - **Nothing wakes this chat** when the team asks or finishes: while its work is open, start each of your turns by
     listing your address's tasks (above), before anything else, including when the person talks to you and when they
-    come back. Where their app has a wake, such as Claude Desktop's scheduled tasks, offer it.
+    come back. A Claude Desktop scheduled task can pick the team's results up on a schedule, in a fresh session, not
+    this chat. Offer it if they'd like that.
 - **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
   Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
   passed. Tell the person which model failed. If Claude Code is signed in, offer to move the operator to it; on their
