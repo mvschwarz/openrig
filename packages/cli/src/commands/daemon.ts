@@ -6,6 +6,7 @@ import { acquireDaemonStartLock, archiveSpentReservation, bootedAtMs, currentBoo
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
+import { daemonFetch } from "../daemon-transport.js";
 import { personRegistrationOffer } from "../person-registration-offer.js";
 import { ensureDefaultWorkspace } from "@openrig/daemon/instance-initialization";
 import {
@@ -106,7 +107,7 @@ export function realDeps(): LifecycleDeps {
     },
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
     fetch: async (url, init) => {
-      const res = await fetchWithTimeout(globalThis.fetch, url, init?.signal ? { signal: init.signal } : {}, {
+      const res = await fetchWithTimeout(daemonFetch(url, globalThis.fetch), url, init?.signal ? { signal: init.signal } : {}, {
         timeoutMs: 1_500,
         timeoutMessage: `Daemon health probe timed out for ${url}`,
       });

@@ -2,6 +2,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
+import { daemonFetch } from "./daemon-transport.js";
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
 export { daemonMayAnswer } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
@@ -1740,7 +1741,7 @@ export async function waitForKernelReady(
       if (checkOwner) await ownerClient.assertLocalOwner(Math.min(1000, Math.max(1, deadline - Date.now())));
       // Once admitted, keep the final request even if an unknown owner check consumed the remainder.
       const remainingMs = Math.max(1, deadline - Date.now());
-      const res = await fetch(`${baseUrl}/api/kernel/status`, {
+      const res = await daemonFetch(baseUrl)(`${baseUrl}/api/kernel/status`, {
         signal: AbortSignal.timeout(remainingMs),
       });
       if (res.ok) {

@@ -55,6 +55,7 @@
     "better-sqlite3": "^13.0.3",
     "commander": "^13.0.0",
     "hono": "^4.7.0",
+    "https-proxy-agent": "^7.0.6",
     "jsonc-parser": "^3.3.1",
     "smol-toml": "^1.8.0",
     "string-width": "^8.3.0",
