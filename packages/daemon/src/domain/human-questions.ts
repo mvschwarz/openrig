@@ -19,7 +19,7 @@ export interface HumanQuestion {
 export interface TypedHumanReply {
   kind: "typed-reply";
   text: string;
-  placement: "first-unanswered";
+  placement: "first-unanswered" | "explicit";
   /** Other question slots still empty immediately after this reply's placement. */
   unansweredCount: number;
 }
@@ -92,6 +92,7 @@ function ownAnswer(answers: HumanAnswers, questionId: string): string | TypedHum
 }
 
 export function describeTypedReplyPlacement(question: HumanQuestion, reply: TypedHumanReply): string {
+  if (reply.placement === "explicit") return `Typed reply to ${JSON.stringify(question.question)}`;
   return `Whole typed reply, automatically placed under first unanswered question ${JSON.stringify(question.question)}; ${reply.unansweredCount} question${reply.unansweredCount === 1 ? "" : "s"} left unanswered`;
 }
 
