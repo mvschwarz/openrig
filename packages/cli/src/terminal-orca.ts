@@ -58,7 +58,8 @@ export async function openOrcaView(client: DaemonClient, view: string, selector?
   const env = deps.env;
   const caller = env.ORCA_WORKSPACE_ID?.trim() || env.ORCA_WORKTREE_ID?.trim();
   const orca = env.ORCA_CLI_COMMAND?.trim() || (env.ORCA_DEV_REPO_ROOT ? "orca-dev" : "orca");
-  const target = selector === undefined ? (caller && "current") : selector.trim();
+  // The calling Orca terminal's workspace stays the default even after the shell changes directory.
+  const target = selector === undefined ? (caller?.startsWith("folder:") ? caller : caller && `id:${caller}`) : selector.trim();
   if (!target) return fail("orca_workspace_required", "Run inside an Orca terminal or pass --orca-workspace <selector>.");
 
   // The preview includes shell commands. Require the selected local daemon's identity, not merely a loopback URL.
@@ -135,10 +136,6 @@ export async function openOrcaView(client: DaemonClient, view: string, selector?
   const host = identity?.executionHostId ?? workspace?.hostId;
   if (!workspaceId || host !== "local" || (workspace?.hostId !== undefined && workspace.hostId !== "local")) {
     return fail("orca_workspace_not_local", "The destination must be an existing local Orca workspace.");
-  }
-  // `current` resolves from the shell's cwd, which can differ from the Orca terminal's own workspace.
-  if (selector === undefined && workspaceId !== caller) {
-    return fail("orca_workspace_mismatch", "Orca's current workspace differs from the calling terminal's workspace. Change to its directory or pass an explicit --orca-workspace selector.");
   }
   const missing = await missingTerminalCommand(deps, orca, pages.some(page => page.length > 1));
   if (missing) return fail("orca_capability_unavailable", `The Orca CLI did not confirm JSON support for \`orca ${missing}\` with the required options, including \`--environment local\`. ${upgrade}`);

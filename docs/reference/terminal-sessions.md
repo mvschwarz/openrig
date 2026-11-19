@@ -216,7 +216,7 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 ## Orca (experimental)
 
 ```sh
-# From within an Orca terminal, with the shell in its workspace:
+# From within an Orca terminal, use that terminal's workspace:
 rig terminal open saved:kernel --provider orca
 
 # From another macOS shell, select an existing workspace explicitly:
@@ -229,10 +229,9 @@ and Orca desktop. Register the [Orca CLI](https://orca.dev/docs/cli/reference)
 in Orca's settings if needed, and use `orca worktree ps --json` to find workspace
 selectors. The OpenRig for Orca plugin and Herdr are not required.
 
-The command uses Orca's documented `--worktree current` for the default
-lookup. If the shell is in a different workspace from its Orca terminal,
-OpenRig refuses to guess: return to the terminal's workspace directory or pass
-`--orca-workspace` explicitly.
+By default, the view opens in the calling Orca terminal's workspace, even if
+its shell has changed directories. Pass `--orca-workspace` to choose another
+existing local workspace, or to run the command from outside Orca.
 
 It never creates a worktree or launches an agent. It opens one Orca tab per
 view page and splits it into panes for the existing local seats, preserving
@@ -263,12 +262,14 @@ updating this integration:
   `--host`. If the required local selector is unavailable or rejected,
   OpenRig reports a CLI compatibility problem and does not try an unpinned
   runtime.
-- **Workspace identity:** `ORCA_WORKSPACE_ID` or `ORCA_WORKTREE_ID` identifies
-  the calling terminal's workspace. OpenRig checks that the `current` lookup
-  agrees with it. For tab creation it pins the resolved workspace with
-  `folder:`, `identity:`, or `id:` instead of resolving `current` again.
-  `worktree show` supplies `id`, `hostId`, and, for Git worktrees when
-  available, `identity.key` and `identity.executionHostId`.
+- **Workspace identity:** For the default lookup, OpenRig uses
+  `ORCA_WORKSPACE_ID` (or `ORCA_WORKTREE_ID` if unset) and passes the exact
+  `folder:<id>` or `id:<worktree-id>` selector to `worktree show`. Orca's
+  `current` and `active` selectors follow the shell's current directory, so
+  OpenRig does not use them for this default. `worktree show` supplies `id`,
+  `hostId`, and, for Git worktrees when available, `identity.key` and
+  `identity.executionHostId`. Tab creation uses the resolved `folder:`,
+  `identity:`, or `id:` selector.
 - **Reply metadata:** `_meta.runtimeId` keeps all calls on the same Orca
   runtime. `status` supplies `app.running`, `app.desktopWindowStatus` and
   `runtime.reachable`. The terminal replies supply `handle`, `tabId` and

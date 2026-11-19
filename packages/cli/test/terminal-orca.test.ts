@@ -16,7 +16,7 @@ const localView = [[pane("a"), pane("b"), pane("c"), pane("d")]];
 
 interface Options {
   pages?: typeof localView; host?: string; baseUrl?: string; local?: boolean; env?: NodeJS.ProcessEnv;
-  id?: string; noWorkspace?: boolean; noIdentity?: boolean; noDesktop?: boolean; splitTimeout?: boolean; switchRuntime?: boolean;
+  id?: string; cwdWorkspaceId?: string; noWorkspace?: boolean; noIdentity?: boolean; noDesktop?: boolean; splitTimeout?: boolean; switchRuntime?: boolean;
   disconnected?: boolean; remount?: boolean; platform?: OrcaDeps["platform"];
   noRuntimeIdentity?: boolean; missingCommand?: "create" | "show" | "split";
   localSelector?: "missing-from-help" | "status-rejects" | "workspace-rejects";
@@ -24,7 +24,7 @@ interface Options {
 
 function fixture({ pages = localView, host = "local", baseUrl = "http://localhost:7433", local = true,
   env = { ORCA_WORKTREE_ID: workspaceId, ORCA_CLI_COMMAND: "/Applications/Orca Dev.app/bin/orca", ORCA_USER_DATA_PATH: "/profiles/dev" },
-  id = workspaceId, noWorkspace = false, noIdentity = false, noDesktop = false, splitTimeout = false, switchRuntime = false,
+  id = workspaceId, cwdWorkspaceId = id, noWorkspace = false, noIdentity = false, noDesktop = false, splitTimeout = false, switchRuntime = false,
   disconnected = false, remount = false, platform = "darwin", noRuntimeIdentity = false, missingCommand, localSelector,
 }: Options = {}) {
   const absent = [{ seat: "stopped@demo", host: null, reason: "stopped" }];
@@ -64,8 +64,9 @@ function fixture({ pages = localView, host = "local", baseUrl = "http://localhos
         throw Object.assign(new Error("workspace lookup rejected"), { stderr: "Unknown flag --environment for command: worktree show" });
       }
       if (noWorkspace) throw new Error("target not found");
-      return reply({ worktree: { id, hostId: host,
-        ...(noIdentity || id.startsWith("folder:") ? {} : { identity: { key: "identity-key", executionHostId: host } }) } });
+      const targetId = args[3] === "current" || args[3] === "active" ? cwdWorkspaceId : id;
+      return reply({ worktree: { id: targetId, hostId: host,
+        ...(noIdentity || targetId.startsWith("folder:") ? {} : { identity: { key: "identity-key", executionHostId: host } }) } });
     }
     if (verb === "create" || verb === "split") {
       if (verb === "create") tab++;
@@ -104,7 +105,7 @@ describe("openOrcaView", () => {
     expect(f.get).toHaveBeenCalledWith("/api/terminal/preview?view=rig%3Ademo&provider=herdr", expect.objectContaining({ headers: expect.any(Object) }));
     expect(f.exec.mock.calls.every(([file]) => file === f.deps.env.ORCA_CLI_COMMAND)).toBe(true);
     expect(f.commands().filter(argv => !argv.includes("--help")).every(argv => argv.slice(-3).join(" ") === "--environment local --json")).toBe(true);
-    expect(f.workspaceLookup()?.slice(0, 4)).toEqual(["worktree", "show", "--worktree", "current"]);
+    expect(f.workspaceLookup()?.slice(0, 4)).toEqual(["worktree", "show", "--worktree", `id:${workspaceId}`]);
     expect(f.mutations().map(argv => argv.slice(0, -3))).toEqual([
       ["terminal", "create", "--worktree", "identity:identity-key", "--title", "OpenRig: rig:demo", "--command", command("a")],
       ["terminal", "split", "--terminal", "term_1", "--direction", "vertical", "--command", command("c")],
@@ -126,13 +127,15 @@ describe("openOrcaView", () => {
     ] });
   });
 
-  it("does not open in another workspace when the shell's current directory resolves away from its Orca terminal", async () => {
-    const f = fixture({ id: "folder:other" });
-    await expect(openOrcaView(f.client, "demo", undefined, f.deps)).resolves.toMatchObject({
-      ok: false, code: "orca_workspace_mismatch", error: expect.stringContaining("--orca-workspace"),
-    });
-    expect(f.workspaceLookup()?.[3]).toBe("current");
-    expect(f.mutations()).toEqual([]);
+  it.each([
+    { id: workspaceId, env: { ORCA_WORKTREE_ID: workspaceId }, lookup: `id:${workspaceId}`, write: "identity:identity-key" },
+    { id: "folder:caller", env: { ORCA_WORKSPACE_ID: "folder:caller", ORCA_WORKTREE_ID: workspaceId }, lookup: "folder:caller", write: "folder:caller" },
+  ])("opens the caller's $lookup workspace even when the shell is in another workspace", async ({ id, env, lookup, write }) => {
+    const f = fixture({ id, env, cwdWorkspaceId: "folder:elsewhere", pages: [[pane("only")]] });
+    await expect(openOrcaView(f.client, "demo", undefined, f.deps)).resolves.toMatchObject({ ok: true, workspaceId: id });
+    expect(f.workspaceLookup()?.[3]).toBe(lookup);
+    expect(f.mutations()).toHaveLength(1);
+    expect(f.mutations()[0]?.[3]).toBe(write);
   });
 
   it("honors an explicit workspace even when it is not the calling terminal's workspace", async () => {
