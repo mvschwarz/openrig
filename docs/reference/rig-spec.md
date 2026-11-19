@@ -1270,11 +1270,12 @@ members:
   `.claude/settings.local.json`, so seats sharing a folder can choose different intervals and `rig down` has nothing
   more to take back. A status line command of your own in that file wins: the launch then skips the throttle and says so.
 - It takes effect at the seat's next launch, resume or restore. A relaunch that reuses the running process's own
-  launch settings (a provider or account switch that keeps them) keeps its throttle as it was. `rig seat
-  set-statusline-throttle <seat> --seconds N` (or `--clear`) changes it without editing the spec; `rig export` carries
-  the stored value. A launch rebuilt from the spec (a persisted fresh launch, or the fresh branch of a restore) writes
-  the spec's `statusline_throttle` again over a later `rig seat set-statusline-throttle`, as it does for
-  `process_limits`; change the spec too to keep the new value there.
+  launch settings (a provider or account switch that keeps them) keeps its throttle as it was.
+  `rig seat set-statusline-throttle <seat> --seconds N --reason <text>` (or `--clear --reason <text>`) changes it
+  without editing the spec; `rig export` carries the stored value. A launch rebuilt from the spec (a persisted fresh
+  launch, or the fresh branch of a restore) writes the spec's `statusline_throttle` again over a later
+  `rig seat set-statusline-throttle`, as it does for `process_limits`; change the spec too to keep the new value
+  there.
 
 ### Seat pool (`pool`)
 

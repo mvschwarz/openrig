@@ -10,8 +10,26 @@ tasks, messages and state, so the team keeps working across restarts. This skill
 working on what the person wants, and shows how to work with that team from here.
 
 **The goal is a team doing the person's work, not just an install.** Go through the steps in order and stop early only
-if the person asks you to. When they say what they want built, give it to OpenRig's operator (step 2) instead of
-building it yourself.
+if the person asks. Give what they want built to OpenRig's operator (step 2) instead of building it yourself.
+
+**The team's questions are the person's.** Hold to this from the first handoff, even if you read nothing else here:
+- **Ask before answering any prompt.** A seat's permission, trust or hook-review prompt is theirs to answer: show it
+  to them and send only the choice they made. Approving a plan, a task or "go ahead" isn't an answer to the prompts
+  that work raises: each one still goes to them. Never tell the team they approved something, or will answer a prompt,
+  unless they said so.
+- **An answer covers exactly the prompt it answered.** A later prompt, even one like it, goes back to them, unless
+  they told you outright to decide that kind of prompt (step 2).
+- **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so most of
+  the team's questions come to this conversation's address (choice dialogs and other hosts keep their path), and its
+  result is in the handed-over task's resolution. Set it before you promise to report back. This chat has no wake of
+  its own: say you'll check when they ask, and each turn list your address's tasks, read the handed-over task (`rig
+  queue show <id> --full`, following its successors) and check the seats. Offer a wake only where their app has one.
+- **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
+  too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
+  operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
+  yourself, with `rig send`, not raw tmux keys into a seat's terminal.
+
+The full rules are in step 2, "Bring seat permission prompts to the person here".
 
 **If `/rigs` or your skill tool said this skill doesn't exist** right after it was added to a running Claude Code
 session: that session doesn't see a skills folder created after it started. Ask the person to type `/reload-skills`
@@ -166,8 +184,9 @@ commands; if the two ever differ, this step is right.
     name someone else), and don't offer again.
   - Several people with no default: ask which should get requests nobody is named for (`rig gateway default <id>`),
     or leave it. Never pick one yourself.
-  - Nobody is registered: offer it in a sentence or two. Registering gives OpenRig its own way to reach them with
-    questions no agent is bringing them, such as a team seat's permission prompt or another machine asking to pair. If
+  - Nobody is registered: offer it in a sentence or two. Registering records them as the person for questions no agent
+    is bringing them, such as a team seat's permission prompt or another machine asking to pair. Without a connector
+    such as Slack, those reach them only in the TUI's Feed and Steering, so say so if they won't have the TUI open. If
     they stay with you, you bring them the team's questions and its result here either way ("If the person stays with
     you" below). Ask the name to use (their login name is only a suggestion). On yes, run
     `rig gateway human add <id> --display-name "<name>" --delivery-class B --default`: they're reached in the TUI's Feed
@@ -292,7 +311,8 @@ commands; if the two ever differ, this step is right.
     before you wake it again). A pending task with no wake isn't lost or done.
   - **Nothing wakes this chat** when the team asks or finishes: while its work is open, start each of your turns by
     listing your address's tasks (above), before anything else, including when the person talks to you and when they
-    come back.
+    come back. A Claude Desktop scheduled task can pick the team's results up on a schedule, in a fresh session, not
+    this chat. Offer it if they'd like that.
 - **If the operator answers with a model error,** such as "… not supported when using Codex with a ChatGPT account", its
   Codex sign-in works but that account can't run the model. OpenRig put the operator on Codex because the sign-in
   passed. Tell the person which model failed. If Claude Code is signed in, offer to move the operator to it; on their

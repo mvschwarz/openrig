@@ -104,9 +104,10 @@ question through the human channel instead.
 
 If no person is registered yet (`rig gateway participants` shows `default: none`
 and no people), offer to register the person you're talking to, as an installer
-would. Registering gives OpenRig its own way to reach them with questions no
-agent is bringing them, such as a team seat's permission prompt or another
-machine asking to pair: the TUI's Feed and Steering, and Slack if it's added.
+would. Registering records them as the person for questions no agent is
+bringing them, such as a team seat's permission prompt or another machine asking
+to pair. Without a connector such as Slack, those reach them only in the TUI's
+Feed and Steering, so say so if they won't have the TUI open.
 On their yes, `rig gateway human add <id> --display-name "<name>"
 --delivery-class B --default`; on a no, register nothing and say that those
 questions can't reach them until someone is. A no, or no answer, is about

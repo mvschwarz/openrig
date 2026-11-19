@@ -15,6 +15,7 @@ import {
   sliceRelativeMediaPath,
 } from "../review/compose.js";
 import { isScaffoldPlaceholderText } from "./scaffold-placeholder.js";
+import { findFrontmatterBlock } from "../frontmatter.js";
 
 /**
  * Derive the ordered, deduped `locked-artifacts` set for a slice plan-lock.
@@ -92,8 +93,8 @@ export function isContentlessPlanLockSet(nodeContent: string | null, artifacts: 
  *  and is not the shipped bracket-placeholder grammar, is authored content — free-prose PRDs count,
  *  only the untouched scaffold (and emptiness) does not. */
 function prdHasAuthoredContent(prd: string): boolean {
-  const body = prd
-    .replace(/^---\n[\s\S]*?\n---\n?/, "") // frontmatter
+  const frontmatter = findFrontmatterBlock(prd, { consumeClosingNewline: true });
+  const body = prd.slice(frontmatter?.bodyStart ?? 0)
     .replace(/<!--[\s\S]*?-->/g, ""); // scaffold guidance comments
   for (const rawLine of body.split("\n")) {
     let line = rawLine.trim();
