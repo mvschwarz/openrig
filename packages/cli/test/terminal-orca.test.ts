@@ -19,12 +19,13 @@ interface Options {
   id?: string; noWorkspace?: boolean; noIdentity?: boolean; noDesktop?: boolean; splitTimeout?: boolean; switchRuntime?: boolean;
   disconnected?: boolean; remount?: boolean; platform?: OrcaDeps["platform"];
   noRuntimeIdentity?: boolean; missingCommand?: "create" | "show" | "split";
+  localSelector?: "missing-from-help" | "status-rejects" | "workspace-rejects";
 }
 
 function fixture({ pages = localView, host = "local", baseUrl = "http://localhost:7433", local = true,
   env = { ORCA_WORKTREE_ID: workspaceId, ORCA_CLI_COMMAND: "/Applications/Orca Dev.app/bin/orca", ORCA_USER_DATA_PATH: "/profiles/dev" },
   id = workspaceId, noWorkspace = false, noIdentity = false, noDesktop = false, splitTimeout = false, switchRuntime = false,
-  disconnected = false, remount = false, platform = "darwin", noRuntimeIdentity = false, missingCommand,
+  disconnected = false, remount = false, platform = "darwin", noRuntimeIdentity = false, missingCommand, localSelector,
 }: Options = {}) {
   const absent = [{ seat: "stopped@demo", host: null, reason: "stopped" }];
   const get = vi.fn(async () => ({ status: 200, data: {
@@ -40,6 +41,12 @@ function fixture({ pages = localView, host = "local", baseUrl = "http://localhos
     function reply(result: unknown, runtimeId = "orca-dev-runtime") { return JSON.stringify({ ok: true, result, _meta: { runtimeId } }); }
     const [group, verb] = args;
     if (group === "status") {
+      if (verb === "--help") return localSelector === "missing-from-help"
+        ? "Usage: orca status [--json]"
+        : "Usage: orca status [--json]\n  --environment <selector> Local or paired Orca runtime\n";
+      if (localSelector === "status-rejects") {
+        throw Object.assign(new Error("status rejected"), { stdout: JSON.stringify({ ok: false, error: { code: "invalid_argument" } }) });
+      }
       const result = { app: { running: true, desktopWindowStatus: noDesktop ? "openable" : "available" }, runtime: { reachable: true } };
       return noRuntimeIdentity ? JSON.stringify({ ok: true, result }) : reply(result);
     }
@@ -53,6 +60,9 @@ function fixture({ pages = localView, host = "local", baseUrl = "http://localhos
       return verb === missingCommand ? "Usage: orca terminal --help" : `Usage: orca terminal ${verb} ${usage} --json\n  --environment <selector> Local or paired Orca runtime\n`;
     }
     if (group === "worktree") {
+      if (localSelector === "workspace-rejects") {
+        throw Object.assign(new Error("workspace lookup rejected"), { stderr: "Unknown flag --environment for command: worktree show" });
+      }
       if (noWorkspace) throw new Error("target not found");
       return reply({ worktree: { id, hostId: host,
         ...(noIdentity || id.startsWith("folder:") ? {} : { identity: { key: "identity-key", executionHostId: host } }) } });
@@ -77,8 +87,9 @@ function fixture({ pages = localView, host = "local", baseUrl = "http://localhos
   });
   const deps: OrcaDeps = { env, platform, exec };
   const commands = () => exec.mock.calls.map(([, argv]) => argv);
+  const workspaceLookup = () => commands().find(([group, verb]) => group === "worktree" && verb === "show");
   const mutations = () => commands().filter(([, command, option]) => option !== "--help" && (command === "create" || command === "split"));
-  return { client, get, isLocalInstance, deps, exec, commands, mutations, absent };
+  return { client, get, isLocalInstance, deps, exec, commands, workspaceLookup, mutations, absent };
 }
 
 const originalExitCode = process.exitCode;
@@ -93,7 +104,7 @@ describe("openOrcaView", () => {
     expect(f.get).toHaveBeenCalledWith("/api/terminal/preview?view=rig%3Ademo&provider=herdr", expect.objectContaining({ headers: expect.any(Object) }));
     expect(f.exec.mock.calls.every(([file]) => file === f.deps.env.ORCA_CLI_COMMAND)).toBe(true);
     expect(f.commands().filter(argv => !argv.includes("--help")).every(argv => argv.slice(-3).join(" ") === "--environment local --json")).toBe(true);
-    expect(f.commands()[1]?.slice(0, 4)).toEqual(["worktree", "show", "--worktree", `id:${workspaceId}`]);
+    expect(f.workspaceLookup()?.slice(0, 4)).toEqual(["worktree", "show", "--worktree", "current"]);
     expect(f.mutations().map(argv => argv.slice(0, -3))).toEqual([
       ["terminal", "create", "--worktree", "identity:identity-key", "--title", "OpenRig: rig:demo", "--command", command("a")],
       ["terminal", "split", "--terminal", "term_1", "--direction", "vertical", "--command", command("c")],
@@ -105,7 +116,7 @@ describe("openOrcaView", () => {
   it("uses explicit folder workspace and preserves page and remote-seat boundaries", async () => {
     const f = fixture({ id: "folder:demo", env: {}, pages: [[pane("first"), pane("distant", "ssh-host")], [pane("second")]] });
     const result = await openOrcaView(f.client, "demo", "path:/work/folder", f.deps);
-    expect(f.commands()[1]?.[3]).toBe("path:/work/folder");
+    expect(f.workspaceLookup()?.[3]).toBe("path:/work/folder");
     expect(f.mutations().map(args => args.slice(1, 6))).toEqual([
       ["create", "--worktree", "folder:demo", "--title", "OpenRig: demo (1/2)"],
       ["create", "--worktree", "folder:demo", "--title", "OpenRig: demo (2/2)"],
@@ -113,6 +124,21 @@ describe("openOrcaView", () => {
     expect(result).toMatchObject({ ok: true, pages: 2, opened: ["first@demo", "second@demo"], degraded: [
       { seat: "http@demo", host: "http" }, { seat: "distant@demo", host: "ssh-host" },
     ] });
+  });
+
+  it("does not open in another workspace when the shell's current directory resolves away from its Orca terminal", async () => {
+    const f = fixture({ id: "folder:other" });
+    await expect(openOrcaView(f.client, "demo", undefined, f.deps)).resolves.toMatchObject({
+      ok: false, code: "orca_workspace_mismatch", error: expect.stringContaining("--orca-workspace"),
+    });
+    expect(f.workspaceLookup()?.[3]).toBe("current");
+    expect(f.mutations()).toEqual([]);
+  });
+
+  it("honors an explicit workspace even when it is not the calling terminal's workspace", async () => {
+    const f = fixture({ id: "folder:elsewhere", pages: [[pane("only")]] });
+    await expect(openOrcaView(f.client, "demo", "path:/work/elsewhere", f.deps)).resolves.toMatchObject({ ok: true, workspaceId: "folder:elsewhere" });
+    expect(f.workspaceLookup()?.[3]).toBe("path:/work/elsewhere");
   });
 
   it("pins a local non-Git project to its canonical id even without a Git identity", async () => {
@@ -177,6 +203,16 @@ describe("Orca provider preflight", () => {
     expect(f.mutations()).toEqual([]);
   });
 
+  it.each(["missing-from-help", "status-rejects", "workspace-rejects"] as const)("diagnoses an unsupported local selector without trying the ambient runtime (%s)", async localSelector => {
+    const f = fixture({ localSelector });
+    const result = await openOrcaView(f.client, "demo", undefined, f.deps);
+    expect(result).toMatchObject({ ok: false, code: "orca_capability_unavailable", error: expect.stringContaining("--environment local") });
+    expect(result.error).not.toContain("Open Orca before retrying");
+    expect(f.mutations()).toEqual([]);
+    expect(f.commands().filter(args => !args.includes("--help")).every(args => args.slice(-3).join(" ") === "--environment local --json")).toBe(true);
+    if (localSelector === "missing-from-help") expect(f.commands()).toEqual([["status", "--help"]]);
+  });
+
   it("refuses to open without Orca runtime identity metadata", async () => {
     const f = fixture({ noRuntimeIdentity: true });
     await expect(openOrcaView(f.client, "demo", undefined, f.deps)).resolves.toMatchObject({ ok: false, code: "orca_capability_unavailable" });
@@ -212,7 +248,7 @@ describe("rig terminal open --provider orca", () => {
   it("routes the explicit provider to Orca using the workspace supplied by the user", async () => {
     const f = fixture({ env: {} });
     await expect(cli(f)("demo", "--provider", "orca", "--orca-workspace", "path:/work/project")).resolves.toMatchObject({ provider: "orca", ok: true });
-    expect(f.commands()[1]?.[3]).toBe("path:/work/project");
+    expect(f.workspaceLookup()?.[3]).toBe("path:/work/project");
   });
 
   it.each([["demo", "--window"], ["demo", "--follow"], ["demo", "--expected-plan", "old"], ["--all"]])("rejects unsupported combinations before reading or changing Orca (%s)", async (...args) => {

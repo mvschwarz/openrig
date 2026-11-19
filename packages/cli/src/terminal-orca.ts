@@ -17,8 +17,20 @@ interface Preview {
 }
 
 const OPEN_TIMEOUT_MS = 15_000;
+// Orca 1.4.263's command help/CLI skill document this runtime pin. The website's --host local is not
+// accepted by status or worktree show in that version; never fall back to an ambient paired runtime.
+const LOCAL_RUNTIME_ARGS = ["--environment", "local"] as const;
+const hasLocalRuntimeFlag = (help: string) => /^\s+--environment\b/m.test(help);
 export type OrcaDeps = Pick<WindowDeps, "platform" | "env" | "exec">;
 class OrcaProtocolError extends Error {}
+class OrcaLocalSelectorError extends Error {}
+
+function rejectedLocalSelector(text: string, fixedStatusArgs: boolean): boolean {
+  if (/\b(?:unknown|unrecognized|unsupported|invalid) (?:flag|option)\s+['"`]?--environment\b/i.test(text)) return true;
+  if (!fixedStatusArgs) return false;
+  try { return (JSON.parse(text) as { error?: { code?: string } } | null)?.error?.code === "invalid_argument"; }
+  catch { return false; }
+}
 
 /** Check the documented CLI, not Windows-only runtime capability flags or a guessed minimum version. */
 async function missingTerminalCommand(deps: OrcaDeps, orca: string, split: boolean): Promise<string | undefined> {
@@ -31,7 +43,7 @@ async function missingTerminalCommand(deps: OrcaDeps, orca: string, split: boole
     try {
       const help = await deps.exec(orca, ["terminal", verb!, "--help"], 4_000);
       const usage = help.split(/\r?\n/).find(line => line.startsWith("Usage:") && line.includes(` terminal ${verb} `));
-      if (usage && [...flags, "--json"].every(flag => usage.includes(flag)) && /^\s+--environment\b/m.test(help)) return undefined;
+      if (usage && [...flags, "--json"].every(flag => usage.includes(flag)) && hasLocalRuntimeFlag(help)) return undefined;
     } catch { /* Help is read-only; a failed probe cannot authorize a write. */ }
     return `terminal ${verb}`;
   }));
@@ -46,7 +58,7 @@ export async function openOrcaView(client: DaemonClient, view: string, selector?
   const env = deps.env;
   const caller = env.ORCA_WORKSPACE_ID?.trim() || env.ORCA_WORKTREE_ID?.trim();
   const orca = env.ORCA_CLI_COMMAND?.trim() || (env.ORCA_DEV_REPO_ROOT ? "orca-dev" : "orca");
-  const target = selector === undefined ? (caller?.startsWith("folder:") ? caller : caller && `id:${caller}`) : selector.trim();
+  const target = selector === undefined ? (caller && "current") : selector.trim();
   if (!target) return fail("orca_workspace_required", "Run inside an Orca terminal or pass --orca-workspace <selector>.");
 
   // The preview includes shell commands. Require the selected local daemon's identity, not merely a loopback URL.
@@ -71,8 +83,19 @@ export async function openOrcaView(client: DaemonClient, view: string, selector?
   let runtimeId: string | undefined;
   let interrupted = false;
   async function call<T>(args: string[], timeoutMs = 4_000): Promise<T> {
-    const text = await deps.exec(orca, [...args, "--environment", "local", "--json"], timeoutMs);
+    const fixedStatusArgs = args[0] === "status";
+    let text: string;
+    try {
+      text = await deps.exec(orca, [...args, ...LOCAL_RUNTIME_ARGS, "--json"], timeoutMs);
+    } catch (error) {
+      const { stdout, stderr } = (error ?? {}) as { stdout?: string; stderr?: string };
+      if ([stdout, stderr].some(value => typeof value === "string" && rejectedLocalSelector(value, fixedStatusArgs))) {
+        throw new OrcaLocalSelectorError();
+      }
+      throw error;
+    }
     const reply = JSON.parse(text) as OrcaReply<T>;
+    if (reply?.ok === false && rejectedLocalSelector(text, fixedStatusArgs)) throw new OrcaLocalSelectorError();
     const actual = reply?._meta?.runtimeId;
     if (runtimeId && actual !== runtimeId) {
       interrupted = true;
@@ -84,11 +107,14 @@ export async function openOrcaView(client: DaemonClient, view: string, selector?
     return reply.result;
   }
   const upgrade = "Update Orca and register its CLI again (tested with Orca 1.4.263).";
+  const localSelectorUnavailable = () => fail("orca_capability_unavailable", `The Orca CLI does not support the required local runtime selector (\`--environment local\`). ${upgrade}`);
   let status: OrcaStatus;
   try {
+    if (!hasLocalRuntimeFlag(await deps.exec(orca, ["status", "--help"], 4_000))) return localSelectorUnavailable();
     status = await call<OrcaStatus>(["status"]);
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
+    if (error instanceof OrcaLocalSelectorError) return localSelectorUnavailable();
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
     if (code === "ENOENT" || code === "EACCES" || code === "ENOEXEC") {
       return fail("orca_cli_unavailable", "The Orca CLI could not be launched. Register it in Orca Settings and make it available on PATH.");
     }
@@ -100,16 +126,23 @@ export async function openOrcaView(client: DaemonClient, view: string, selector?
   if (status.app.desktopWindowStatus !== "available") return fail("orca_unavailable", "The local Orca desktop has no available window. Open one before retrying.");
   let workspace: Workspace | undefined;
   try { ({ worktree: workspace } = await call<{ worktree?: Workspace }>(["worktree", "show", "--worktree", target])); }
-  catch { return fail("orca_workspace_unavailable", "Orca could not resolve the destination workspace. Pass an exact selector from `orca worktree ps --json`."); }
+  catch (error) {
+    if (error instanceof OrcaLocalSelectorError) return localSelectorUnavailable();
+    return fail("orca_workspace_unavailable", "Orca could not resolve the destination workspace. Pass an exact selector from `orca worktree ps --json`.");
+  }
   const workspaceId = workspace?.id;
   const identity = workspace?.identity;
   const host = identity?.executionHostId ?? workspace?.hostId;
   if (!workspaceId || host !== "local" || (workspace?.hostId !== undefined && workspace.hostId !== "local")) {
     return fail("orca_workspace_not_local", "The destination must be an existing local Orca workspace.");
   }
+  // `current` resolves from the shell's cwd, which can differ from the Orca terminal's own workspace.
+  if (selector === undefined && workspaceId !== caller) {
+    return fail("orca_workspace_mismatch", "Orca's current workspace differs from the calling terminal's workspace. Change to its directory or pass an explicit --orca-workspace selector.");
+  }
   const missing = await missingTerminalCommand(deps, orca, pages.some(page => page.length > 1));
-  if (missing) return fail("orca_capability_unavailable", `The Orca CLI did not confirm JSON support for \`orca ${missing}\` with the required options. ${upgrade}`);
-  // Non-Git projects may have a host id and a canonical id, but no Git identity key.
+  if (missing) return fail("orca_capability_unavailable", `The Orca CLI did not confirm JSON support for \`orca ${missing}\` with the required options, including \`--environment local\`. ${upgrade}`);
+  // Pin the confirmed identity for writes. Non-Git projects may have a canonical id but no Git identity key.
   const exact = workspaceId.startsWith("folder:") ? workspaceId : identity?.key ? `identity:${identity.key}` : `id:${workspaceId}`;
   // Titles are only for display and recovery, never used to choose a pane or workspace.
   const label = `OpenRig: ${view.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 100)}`;

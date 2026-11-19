@@ -216,7 +216,7 @@ before retrying. `rig terminal status` gives Rex about a second to answer.
 ## Orca (experimental)
 
 ```sh
-# From within an Orca terminal, use its workspace:
+# From within an Orca terminal, with the shell in its workspace:
 rig terminal open saved:kernel --provider orca
 
 # From another macOS shell, select an existing workspace explicitly:
@@ -229,11 +229,16 @@ and Orca desktop. Register the [Orca CLI](https://orca.dev/docs/cli/reference)
 in Orca's settings if needed, and use `orca worktree ps --json` to find workspace
 selectors. The OpenRig for Orca plugin and Herdr are not required.
 
-It never creates a worktree or launches an agent. It opens one Orca tab per view page and splits it into panes for the
-existing local seats, preserving read-only views. Closing the Orca tab does not
-stop the seats. The provider is CLI-only: it does not change setup, provider
-selection defaults, or the daemon API. Remote seats and remote Orca workspaces
-are not supported.
+The command uses Orca's documented `--worktree current` for the default
+lookup. If the shell is in a different workspace from its Orca terminal,
+OpenRig refuses to guess: return to the terminal's workspace directory or pass
+`--orca-workspace` explicitly.
+
+It never creates a worktree or launches an agent. It opens one Orca tab per
+view page and splits it into panes for the existing local seats, preserving
+read-only views. Closing the Orca tab does not stop the seats. The provider is
+CLI-only: it does not change setup, provider selection defaults, or the daemon
+API. Remote seats and remote Orca workspaces are not supported.
 
 OpenRig does not pass `--focus` when creating a tab, but Orca may activate the
 tab when it splits a multi-seat page. A connected Orca pane confirms placement,
@@ -243,6 +248,32 @@ or split is unconfirmed after opening starts, inspect Orca before retrying.
 The CLI never retries a create or split automatically. `--window`, `--all`,
 `--follow`, named sessions, `--expected-plan`, and provider-specific
 `terminal status` or `close` are not supported for Orca yet.
+
+### Orca CLI compatibility
+
+The public CLI reference documents the worktree and terminal commands. The
+following details come from Orca **1.4.263**'s CLI help, bundled guide
+(`orca skills get orca-cli`), and runtime JSON replies. Recheck them when
+updating this integration:
+
+- **Local runtime:** The tested commands use `--environment local` to override
+  paired-runtime settings. The public reference shows `--host local` for host
+  selection, but Orca 1.4.263 rejects it on `status` and `worktree show`, and
+  `terminal create`, `split`, and `show` advertise `--environment`, not
+  `--host`. If the required local selector is unavailable or rejected,
+  OpenRig reports a CLI compatibility problem and does not try an unpinned
+  runtime.
+- **Workspace identity:** `ORCA_WORKSPACE_ID` or `ORCA_WORKTREE_ID` identifies
+  the calling terminal's workspace. OpenRig checks that the `current` lookup
+  agrees with it. For tab creation it pins the resolved workspace with
+  `folder:`, `identity:`, or `id:` instead of resolving `current` again.
+  `worktree show` supplies `id`, `hostId`, and, for Git worktrees when
+  available, `identity.key` and `identity.executionHostId`.
+- **Reply metadata:** `_meta.runtimeId` keeps all calls on the same Orca
+  runtime. `status` supplies `app.running`, `app.desktopWindowStatus` and
+  `runtime.reachable`. The terminal replies supply `handle`, `tabId` and
+  `worktreeId`, plus `executionHostId` and `hostPlatform` where available;
+  `terminal show` supplies `connected` and `orphaned` for pane confirmation.
 
 ## HTTP API
 
