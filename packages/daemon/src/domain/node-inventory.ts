@@ -1548,7 +1548,7 @@ const NEEDS_INPUT_RUNGS: readonly EvidenceRungId[] = ["needs-input-chrome", "lif
  *     (`hookOrPaneActivity`), which sees a prompt no hook reported. Stale hooks
  *     arrive as `unknown` and contribute nothing — never guessed. The rig total
  *     and the seat row must not disagree about the same seat.
- *   - a held seat (`heldReason` present)
+ *   - a held seat, except an unlaunched hold with no assigned work
  *   - a recorded startup error (`latestError` present)
  *   - an occupant a handover started without a required startup file (`startedWithoutRequired`, #2456)
  */
@@ -1556,14 +1556,22 @@ export function seatNeedsAttention(
   entry: NodeInventoryEntry,
   activity: AgentActivity | null,
   arbitratedNeedsInput: boolean | null = null,
+  assignedWorkCount?: number,
 ): boolean {
   return entry.lifecycleState === "attention_required"
     || entry.startupStatus === "attention_required"
     || entry.startupStatus === "failed"
     || (arbitratedNeedsInput ?? activity?.state === "needs_input")
-    || entry.heldReason != null
+    || (entry.heldReason != null && !isUnlaunchedHeldWithoutWork(entry, assignedWorkCount))
     || entry.latestError != null
     || (entry.startedWithoutRequired?.length ?? 0) > 0;
+}
+
+/** An explicit hold on a never-launched seat with no outstanding queue work. */
+export function isUnlaunchedHeldWithoutWork(entry: NodeInventoryEntry, assignedWorkCount: number | undefined): boolean {
+  return entry.heldReason != null && entry.sessionStatus === null && entry.storedSessionStatus === null
+    && entry.attachmentType !== "external_cli" && (entry.canonicalSessionName != null || deriveCanonicalFromEntry(entry) != null)
+    && assignedWorkCount === 0;
 }
 
 /**
@@ -1660,7 +1668,7 @@ export function attachTerminalActivityAndWork(
       activityState,
       // The activity this row serves (a live hook, else the cached pane reading) when it was attached, so a prompt
       // only the pane shows counts; the hook store alone where it wasn't.
-      needsAttention: seatNeedsAttention(entry, entry.agentActivity ?? hook, arbitratedNeedsInput),
+      needsAttention: seatNeedsAttention(entry, entry.agentActivity ?? hook, arbitratedNeedsInput, work.assignedWorkCount),
       arbitratedNeedsInput,
       needsInputEvidence: arb?.needsInputEvidence ?? null,
       hasAssignedWork: work.assignedWorkCount > 0,
