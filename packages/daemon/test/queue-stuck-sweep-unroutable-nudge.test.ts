@@ -3,13 +3,16 @@ import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
+import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 import { makeQueueRecordingCheck, makeTopologyDestinationCheck } from "../src/domain/queue-destination-check.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import type { RosterMember } from "../src/domain/rosters.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { isTmuxBoundSession, wireTerminalReachability } from "../src/domain/terminal-server-seats.js";
 import {
   createStuckSweepStatus,
   freshUnroutableNoticeId,
@@ -822,5 +825,167 @@ describe("stuck sweep: create-once unreachable notices (#514)", () => {
     expect(resTicksFull).toHaveLength(total);
     expect(resTicksFull[resTicksFull.length - 1]!).toBeGreaterThan(resTicksFull[0]!);
     expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+  });
+
+  it("terminal hold starting during pending-row yield keeps open notice while work remains and closes once work finishes", async () => {
+    seedSeat("ops", "coord.lead", "lead@ops");
+    const worker = seedSeat("ops", "work.worker", "worker@ops", { running: false, bound: false });
+
+    const now = new Date();
+    const initial = await createNoNudge("lead@ops", "worker@ops", "Initial unreachable task", 90, now);
+    await sweep({ now });
+    const [notice] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "worker@ops")));
+    expect(notice).toBeDefined();
+
+    // Recover worker@ops with a running tmux binding and cancel the aged row so openUnroutableNotices enters the else scan.
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('s-up-a01', ?, 'worker@ops', 'running', '2026-11-18T00:00:00Z')")
+      .run(worker.nodeId);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-up-a01', ?, 'tmux', 'worker@ops', '%95')")
+      .run(worker.nodeId);
+    queue.update({ qitemId: initial.qitemId, actorSession: "lead@ops", state: "canceled", transitionNote: "replaced by fresh pending batch" });
+
+    const pendingIds: string[] = [];
+    for (let i = 0; i < STUCK_SWEEP_YIELD_EVERY_ROWS + 5; i++) {
+      const r = await createNoNudge("lead@ops", "worker@ops", `Pending held work ${i}`, 5, now);
+      pendingIds.push(r.qitemId);
+    }
+    const pendingSet = new Set(pendingIds);
+
+    let terminalLost = false;
+    queue.deliveryDrains.attachTerminalHold(
+      (session) => terminalLost && isTmuxBoundSession(db, session),
+      () => terminalLost,
+    );
+
+    // 1) Hold starts during the pendingRows yield while pending work remains -> notice MUST stay open.
+    const origGetById = queue.getById.bind(queue);
+    let holdTriggered = false;
+    const spyHold = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (!holdTriggered && pendingSet.has(id)) {
+        holdTriggered = true;
+        setImmediate(() => { terminalLost = true; });
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+    await sweep({ now });
+    spyHold.mockRestore();
+
+    expect(holdTriggered).toBe(true);
+    expect(queue.deliveryDrains.holds("worker@ops")).toBe(true);
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+
+    // 2) Steady-state sweep while held and pending work remains still keeps notice open.
+    await sweep({ now });
+    expect(queue.getByIdOrThrow(notice!.qitemId).state).toBe("pending");
+
+    // 3) Hold starts during the pendingRows yield AND all pending work completes during that yield -> notice MUST close.
+    terminalLost = false;
+    let holdAndCompleteTriggered = false;
+    const spyHoldComplete = vi.spyOn(queue, "getById").mockImplementation(((id: string, opts?: { waiting?: boolean }) => {
+      if (!holdAndCompleteTriggered && pendingSet.has(id)) {
+        holdAndCompleteTriggered = true;
+        setImmediate(() => {
+          terminalLost = true;
+          for (const pid of pendingIds) {
+            queue.update({ qitemId: pid, actorSession: "worker@ops", state: "done", closureReason: "no-follow-on" });
+          }
+        });
+      }
+      return origGetById(id, opts);
+    }) as typeof queue.getById);
+    await sweep({ now });
+    spyHoldComplete.mockRestore();
+
+    expect(holdAndCompleteTriggered).toBe(true);
+    expect(queue.deliveryDrains.holds("worker@ops")).toBe(true);
+    expect(queue.getByIdOrThrow(notice!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+
+    // 4) Steady-state closure under active terminal hold once the last pending item completes.
+    terminalLost = false;
+    const worker2 = seedSeat("ops", "work.worker2", "worker2@ops", { running: false, bound: false });
+    const w2Row = await createNoNudge("lead@ops", "worker2@ops", "Held steady-state work", 90, now);
+    await sweep({ now });
+    const [notice2] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "worker2@ops")));
+    expect(notice2).toBeDefined();
+
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('s-up-a01b', ?, 'worker2@ops', 'running', '2026-11-18T00:00:00Z')")
+      .run(worker2.nodeId);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-up-a01b', ?, 'tmux', 'worker2@ops', '%96')")
+      .run(worker2.nodeId);
+    terminalLost = true;
+    await sweep({ now });
+    expect(queue.getByIdOrThrow(notice2!.qitemId).state).toBe("pending");
+
+    queue.update({ qitemId: w2Row.qitemId, actorSession: "worker2@ops", state: "done", closureReason: "no-follow-on" });
+    await sweep({ now });
+    expect(queue.getByIdOrThrow(notice2!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
+  });
+
+  it("combined terminal hold suppresses notices for held tmux destination and defers wake for held tmux recipient until server returns", async () => {
+    const outbox = new OutboxHandler(db);
+    queue.attachOutbox(outbox);
+
+    seedSeat("ops", "coord.lead", "lead@ops", { running: true, bound: true });
+    const heldDest = seedSeat("ops", "work.held", "held@ops", { running: "exited", bound: true });
+    markPaneMissing(heldDest.nodeId, "held@ops", "session_missing");
+    seedSeat("ops", "work.parked", "parked@ops", { running: false, bound: false });
+
+    const socket = "/tmp/term-hold-514-test/sock";
+    let serverUp = true;
+    const adapter = new TmuxAdapter(async (command) => {
+      if (!serverUp) throw new Error(`Command failed: ${command}\nno server running on ${socket}`);
+      if (command.startsWith("tmux has-session")) return "";
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    let returnDrain: Promise<unknown> | undefined;
+    const reach = wireTerminalReachability({
+      db,
+      adapter,
+      drains: queue.deliveryDrains,
+      socket,
+      emit: () => {},
+      drainPendingWakeIntents: (opts) => {
+        returnDrain = queue.drainPendingWakeIntents(opts);
+        return returnDrain;
+      },
+      retryPromptWakes: () => {},
+    });
+
+    try {
+      serverUp = false;
+      await adapter.probeSession("lead@ops");
+      expect(queue.deliveryDrains.holds("lead@ops")).toBe(true);
+      expect(queue.deliveryDrains.holds("held@ops")).toBe(true);
+      expect(queue.deliveryDrains.holds("parked@ops")).toBe(false);
+
+      const now = new Date();
+      await createNoNudge("lead@ops", "held@ops", "Work for held tmux destination", 90, now);
+      await createNoNudge("lead@ops", "parked@ops", "Work for unbound parked destination", 90, now);
+
+      nudgesSent = [];
+      await sweep({ now });
+
+      // Held tmux destination gets no #514 notice while server is unreachable.
+      expect(unroutableNotices().some((n) => (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "held@ops")))).toBe(false);
+
+      // Unbound destination creates its #514 notice to lead@ops; wake stays pending in outbox with zero transport sends while held.
+      const [notice] = findingsTo("lead@ops").filter((n) => isOpen(n) && (n.tags ?? []).includes(unroutableNoticeTag("lead@ops", "parked@ops")));
+      expect(notice).toBeDefined();
+      expect(nudgesSent).toHaveLength(0);
+      const wakeEntry = outbox.getById(`${WAKE_INTENT_PREFIX}${notice!.qitemId}`);
+      expect(wakeEntry?.deliveryState).toBe("pending");
+      expect(wakeEntry?.destinationSession).toBe("lead@ops");
+
+      // Server returns -> hold ends -> deferred wake intent drains and delivers cleanly.
+      serverUp = true;
+      await adapter.probeSession("lead@ops");
+      expect(queue.deliveryDrains.holds("lead@ops")).toBe(false);
+      expect(returnDrain).toBeDefined();
+      await returnDrain;
+      expect(nudgesSent.filter((n) => n.destination === "lead@ops")).toHaveLength(1);
+      expect(outbox.getById(`${WAKE_INTENT_PREFIX}${notice!.qitemId}`)?.deliveryState).toBe("delivered");
+    } finally {
+      reach.stop();
+    }
   });
 });

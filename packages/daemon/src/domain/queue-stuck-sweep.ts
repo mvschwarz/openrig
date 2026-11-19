@@ -2388,6 +2388,12 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (!verifiedPair) continue;
       const { source, dest } = verifiedPair;
       const key = `${source}${UNROUTABLE_NOTICE_SEPARATOR}${dest}`;
+      const hasOrdinaryPending = (): boolean => deps.db.prepare(
+        `SELECT 1 FROM queue_items
+          WHERE destination_session = ? AND source_session = ? AND state = 'pending' AND claimed_at IS NULL
+            AND NOT (json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?))
+          LIMIT 1`,
+      ).get(dest, source, STUCK_SWEEP_FINDING_TAG) !== undefined;
       const pendingRows = deps.db.prepare(
         `SELECT qitem_id FROM queue_items
           WHERE destination_session = ? AND source_session = ? AND state = 'pending' AND claimed_at IS NULL
@@ -2398,7 +2404,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       } else {
         let hasLivePending = false;
         for (const { qitem_id } of pendingRows) {
-          if (dueToYield()) await yieldLoop();
+          if (dueToYield()) {
+            await yieldLoop();
+            if (deps.queueRepo.deliveryDrains.holds(dest)) {
+              hasLivePending = hasOrdinaryPending();
+              break;
+            }
+          }
           const row = indexed(() => deps.queueRepo.getById(qitem_id, { waiting: false }));
           if (row && stillUnreachableUnclaimed(row)) {
             hasLivePending = true;
@@ -2413,6 +2425,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       ).get(notice.qitem_id) as UnroutableNoticeCandidateRow | undefined;
       if (!liveNotice || !["pending", "in-progress", "blocked"].includes(liveNotice.state)) continue;
       if (!verifyUnroutableOrigin(liveNotice, verifiedPair)) continue;
+      if (deps.queueRepo.deliveryDrains.holds(dest) && hasOrdinaryPending()) continue;
       await deps.queueRepo.update({
         qitemId: notice.qitem_id,
         actorSession: "stuck-sweep@system",
