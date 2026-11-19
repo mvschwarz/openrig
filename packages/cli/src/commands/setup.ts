@@ -785,7 +785,7 @@ export function goldenPathNextSteps(): string[] {
     "     Do not replace a failed desktop action with commands for the person to copy or type",
     "  5. Installing agent: ask the person's goal and project folder, then hand them to the ready operator",
     "     Find operator.agent with rig ps --nodes --rig kernel --json; use its canonicalSessionName",
-    "     By default the person stays with you: hand the goal over as a queue task with a return route, so most of the team's questions and its result come back to you (choice dialogs and other hosts keep their path)",
+    "     By default the person stays with you: hand the goal over as a queue task with a return route, so most of the team's questions come back to you (choice dialogs and other hosts keep their path), and the result is in the handed-over task's resolution",
     "     rig queue create --destination <canonicalSessionName> --return-route auto --summary \"<the goal in a sentence>\" --body-file <file> --verify",
     "     (--return-route self if this session joined); what the task carries: the rigs skill's \"If the person stays with you\"",
     "     Include any choice the person made that the operator must keep, such as a trust or hook-review prompt they declined",
