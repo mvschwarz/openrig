@@ -1568,9 +1568,17 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // The address this work's questions come to, and the line to read them by.
           if (status < 400 && typeof created?.returnRoute === "string") {
             const route = created.returnRoute;
-            console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
-              `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
-              (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
+            // A route kept as member@rig@host names a conversation on another host than the work's (a daemon drops its own
+            // host id from a route), and the work's host sends prompts only to a route on that same host.
+            if (route.split("@").length === 3) {
+              console.error(`Return route: ${route} is recorded with this work. It names a conversation on another host, and the work's ` +
+                `host sends prompts only to a route on its own host: this work's questions and its seats' prompts follow their usual path` +
+                (created.returnRouteBasis === "issued-actor" ? `. Put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
+            } else {
+              console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
+                `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
+                (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
+            }
           }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
           const advisories = Array.isArray(created?.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
@@ -1858,6 +1866,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       await withClient(deps, async (local) => {
         const target = await queueHostTarget(deps, local, opts.host, true);
         if ("error" in target) return emitHostResolutionError(target, opts.json ?? false);
+        // Wake/refocus readers require the continuation prefix at the start of the park note.
+        const transitionNote = opts.continuation?.trim()
+          ? [`continuation: ${opts.continuation}`, opts.note].filter(Boolean).join("\n\n")
+          : (opts.note ?? `parked on ${opts.on}`);
         const res = await target.client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: "blocked",
           blockedOn: opts.on,
@@ -1865,7 +1877,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           evidenceRef: opts.evidenceRef,
           wakeWatchdogId: opts.wakeWatchdog,
           wakeAfterSeconds: opts.wakeAfter,
-          transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
+          transitionNote,
         }, target.options);
         await printQueueItemResult(target.client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }), target.remote);
       }, remoteHostOf(opts.host) !== undefined, remoteHostOf(opts.host));

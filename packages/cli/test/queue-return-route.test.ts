@@ -76,6 +76,32 @@ describe("queue create --return-route", () => {
     expect(stderr).toContain(`Warning: ${message}`);
   });
 
+  it("a route on another host than the work's is recorded, and the receipt doesn't promise its prompts there; a local route's receipt is unchanged", async () => {
+    const respond = (returnRoute: string): QueueDeps => ({
+      lifecycleDeps: { readFile: () => null, exists: () => false, fetch: async () => ({ ok: true }) } as QueueDeps["lifecycleDeps"],
+      clientFactory: () => ({
+        post: async (_url: string, body: Record<string, unknown>) => {
+          posted.push(body);
+          return { status: 201, data: { qitemId: "qitem-x", sourceSession: "front@kernel@host-a", destinationSession: "dev-build@starter",
+            state: "pending", body: "goal", returnRoute, returnRouteBasis: "caller" } };
+        },
+      }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
+    });
+    const run = (d: QueueDeps, extra: string[]) => queueCommand(d).parseAsync(["create", "--destination", "dev-build@starter", "--body", "goal",
+      "--summary", "goal", "--return-route", "self", "--no-nudge", ...extra], { from: "user" });
+    process.env.OPENRIG_SESSION_NAME = "front@kernel";
+    // Created on host-b: the route that host stored names this host, and host-b doesn't send prompts to another host.
+    await run(respond("front@kernel@host-a"), ["--host", "host-b"]);
+    expect(stderr.filter(l => l.startsWith("Return route: "))).toEqual(["Return route: front@kernel@host-a is recorded with this work. It names a "
+      + "conversation on another host, and the work's host sends prompts only to a route on its own host: this work's questions and its seats' "
+      + "prompts follow their usual path."]);
+    // Created here, with this host's route: the receipt is as before.
+    stderr = [];
+    await run(respond("front@kernel"), []);
+    expect(stderr.filter(l => l.startsWith("Return route: "))).toEqual(["Return route: front@kernel. This work's questions and its seats' prompts "
+      + "(not choice dialogs) come there as tasks; read them with OPENRIG_SESSION_NAME='front@kernel' rig queue list --owned --state pending,in-progress."]);
+  });
+
   it("a local create whose named route is a registered person's prints the daemon's reason and no route line", async () => {
     const message = "The return route sam@kernel wasn't kept: it's a registered person's address, and a person is reached through the gateway, not a return route.";
     const d: QueueDeps = {

@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { selectRigProject, rigFromSession } from "@openrig/daemon/project-catalog";
 import { ConfigStore } from "../../config-store.js";
 
 import type {
@@ -147,12 +148,17 @@ export function updateFrontmatter(
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
+  fs.writeFileSync(absPath, editFrontmatter(original, updates, absPath), "utf8");
+}
+
+export function editFrontmatter(original: string, updates: Record<string, unknown>, absPath: string, strict = false): string {
   const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
   if (!match) {
+    if (strict && /^---[ \t]*\r?\n/.test(original)) throw new ScopeCliError({ fact: "Frontmatter is not terminated.", consequence: "No progress update was made.", action: "Fix the frontmatter and retry." });
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
-    const separator = original.startsWith("\n") ? "" : "\n";
-    fs.writeFileSync(absPath, `---\n${yaml}\n---\n${separator}${original}`, "utf8");
-    return;
+    const newline = original.includes("\r\n") ? "\r\n" : "\n";
+    const separator = original.startsWith(newline) ? "" : newline;
+    return `---${newline}${yaml}${newline}---${newline}${separator}${original}`;
   }
 
   const originalBlock = match[1]!;
@@ -164,14 +170,14 @@ export function updateFrontmatter(
     block = updateMappedFrontmatter(original.slice(blockStart, blockEnd), updates, newline, absPath);
   } catch (error) {
     if (!(error instanceof ScopeCliError)) throw error;
+    if (strict) throw error;
     console.warn(`[warn] ${absPath}: frontmatter isn't valid YAML; using line-based updates. Listing cannot read its fields until the YAML is fixed.`);
     // Start again from the original block, including when a splice removed a used anchor.
     block = updateFrontmatterLines(originalBlock, updates);
     const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
-    fs.writeFileSync(absPath, updated, "utf8");
-    return;
+    return updated;
   }
-  fs.writeFileSync(absPath, original.slice(0, blockStart) + block + original.slice(blockEnd), "utf8");
+  return original.slice(0, blockStart) + block + original.slice(blockEnd);
 }
 
 /** Keep main's line-based update for YAML that cannot use source-range splicing. */
@@ -314,6 +320,10 @@ export function resolveMissionsRoot(opts: {
   override?: string | null;
   cwd?: string;
   configPath?: string;
+  /** An absolute slice is an explicit target, so it keeps the previous workspace resolution. */
+  targetPath?: string;
+  /** Mission creation may create a new missions tree within an existing project. */
+  allowMissingProjectMissions?: boolean;
   /**
    * Fail instead of falling back to the configured root when an explicit
    * override (`--workspace` or OPENRIG_WORK_ROOT) names no missions tree.
@@ -350,8 +360,49 @@ export function resolveMissionsRoot(opts: {
       });
     }
   }
+  if (!fromOverride && !(opts.targetPath && path.isAbsolute(opts.targetPath))) {
+    const rig = rigFromSession(process.env.OPENRIG_SESSION_NAME);
+    if (rig) {
+      try {
+        const config = new ConfigStore(opts.configPath);
+        const selected = selectRigProject(String(config.get("workspace.catalog_path")), rig);
+        if (selected) {
+          const manifestPath = path.join(selected.root, "project.yaml");
+          if (fs.existsSync(manifestPath)) {
+            let manifest: unknown;
+            try { manifest = YAML.parse(fs.readFileSync(manifestPath, "utf8")); }
+            catch (error) {
+              throw new ScopeCliError({ fact: `Cannot read ${manifestPath}: ${(error as Error).message}`, consequence: "No project was selected.", action: "Correct the project manifest or select a workspace explicitly." });
+            }
+            const fields = manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest as Record<string, any> : null;
+            if (!fields) throw new ScopeCliError({ fact: `${manifestPath} must be a YAML object.`, consequence: "No project was selected.", action: "Correct the project manifest or select a workspace explicitly." });
+            const declared = fields.id ?? fields.metadata?.id;
+            if (declared && declared !== selected.id) throw new ScopeCliError({ fact: `Catalog project '${selected.id}' conflicts with project identity '${declared}'.`, consequence: "No project was selected.", action: "Correct the project identity or select a workspace explicitly." });
+          }
+          const warnings: string[] = [];
+          const root = readProjectMissionsRoot(selected.root, warnings);
+          for (const warning of warnings) console.error(`warning: ${warning}`);
+          if (!root || (fs.existsSync(root) ? !fs.statSync(root).isDirectory() : !opts.allowMissingProjectMissions)) throw new ScopeCliError({
+            fact: `Project '${selected.id}' selected by rig '${rig}' has no readable missions root.`,
+            consequence: "The command did not use the shared workspace.",
+            action: "Create its missions tree or select a workspace explicitly.",
+          });
+          console.error(`Project ${selected.id}: ${selected.root} (selected by rig ${rig})`);
+          return root;
+        }
+      } catch (error) {
+        const problem = error instanceof Error ? error.message : String(error);
+        console.error(`warning: rig project selection failed: ${problem}; using configured workspace. Fix the catalog or select a workspace explicitly with --workspace or OPENRIG_WORK_ROOT.`);
+      }
+    }
+  }
   const configured = configuredMissionsRoot(opts.configPath);
-  if (configured) return configured;
+  if (configured) {
+    if (!fromOverride && !(opts.targetPath && path.isAbsolute(opts.targetPath))) {
+      console.error(`Project unbound: ${configured} (configured missions root)`);
+    }
+    return configured;
+  }
   throw new ScopeCliError({
     fact: `Configured workspace.slices_root is not a readable directory: ${(new ConfigStore(opts.configPath).get("workspace.slices_root") as string) || "(unset)"}.`,
     consequence: "No mission tree to operate on.",

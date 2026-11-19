@@ -152,7 +152,7 @@ export class RigSpecPreflight {
 // -- Rebooted rig preflight (AgentSpec reboot) --
 
 import { RigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema } from "./rigspec-schema.js";
+import { RigSpecSchema, poolAdvisories } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps, agentSpecAdvisoryWarnings } from "./agent-resolver.js";
 import type { ResolutionContext, ResolutionResult } from "./profile-resolver.js";
 import { withNodeConfigResolver } from "./profile-resolution-worker.js";
@@ -316,8 +316,9 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
   // callers holding an already-parsed+validated spec (expand / add_member)
   // preflight it WITHOUT a YAML round-trip. Mirrors the materialize-core split.
   let rigSpec: PodRigSpec;
+  let raw: unknown;
   try {
-    const raw = RigSpecCodec.parse(input.rigSpecYaml);
+    raw = RigSpecCodec.parse(input.rigSpecYaml);
     const validation = RigSpecSchema.validate(raw, { externalQualifiedIds: input.externalQualifiedIds });
     if (!validation.valid) {
       return { ready: false, errors: validation.errors, warnings: [] };
@@ -327,7 +328,9 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     return { ready: false, errors: [`Parse error: ${(err as Error).message}`], warnings: [] };
   }
 
-  return preflightValidatedSpec(rigSpec, {
+  // #3395: the pool advisories join the load warnings here, once; the structured core below and the
+  // instantiator's own preflight do not add them, so import and bootstrap plan/apply report each one once.
+  const result = await preflightValidatedSpec(rigSpec, {
     includeModelWarnings: input.includeModelWarnings,
     rigRoot: input.rigRoot,
     cwdOverride: input.cwdOverride,
@@ -340,6 +343,8 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     exec: input.exec,
     claudeActivityAssets: input.claudeActivityAssets,
   });
+  const pool = poolAdvisories(raw);
+  return pool.length > 0 ? { ...result, warnings: [...result.warnings, ...pool] } : result;
 }
 
 /**

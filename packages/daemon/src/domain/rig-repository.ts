@@ -5,6 +5,7 @@ import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, parseStoredLaunchWrapper, validateLaunchWrapper } from "./launch-wrapper.js";
 import { parseStoredProcessLimits, serializeProcessLimits, validateProcessLimits, type ProcessLimits } from "./process-limits.js";
 import { storedStatuslineThrottle, validateStatuslineThrottle } from "./claude-statusline-throttle.js";
+import { parseStoredPoolBlock, storedPoolText, type SeatPoolNodeBlock, type StoredSeatPool } from "./seat-pool-spec.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
@@ -342,6 +343,8 @@ interface NodeOptions {
   processLimits?: ProcessLimits | null;
   /** #3416 (3): a Claude seat's status line throttle in seconds (spec `statusline_throttle`); null/absent = none. */
   statuslineThrottle?: number | null;
+  /** #3395: the seat pool block this node is the model of (spec `pool`); null/absent = none. */
+  pool?: SeatPoolNodeBlock | null;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -675,6 +678,11 @@ export class RigRepository {
       // As with process limits: a seat never exists without the throttle it was created with.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    if (opts?.pool) {
+      storedPoolText(opts.pool);
+      // As with process limits: a model seat never exists without the pool block it was created with.
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       validateClaudePermissionRules(opts.claudePermissions);
@@ -832,6 +840,7 @@ export class RigRepository {
     }
     if (opts?.processLimits) this.setNodeProcessLimits(id, opts.processLimits);
     if (opts?.statuslineThrottle) this.setNodeStatuslineThrottle(id, opts.statuslineThrottle);
+    if (opts?.pool) this.setNodePool(id, opts.pool);
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -1010,6 +1019,25 @@ export class RigRepository {
     const row = this.db.prepare("SELECT statusline_throttle_seconds FROM nodes WHERE id = ?").get(nodeId) as
       { statusline_throttle_seconds: number | null } | undefined;
     return storedStatuslineThrottle(row?.statusline_throttle_seconds);
+  }
+
+  /** #3395: persist or clear (null) the seat pool block of a model seat. A usable block is stored in its spec form;
+   *  one that can't be used is stored as authored, so it holds that pool rather than removing it. */
+  setNodePool(nodeId: string, block: SeatPoolNodeBlock | null): boolean {
+    const stored = block === null ? null : storedPoolText(block);
+    if (!this.hasNodeColumn("pool")) {
+      if (stored !== null) throw new Error("Cannot persist pool: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET pool = ? WHERE id = ?").run(stored, nodeId).changes > 0;
+  }
+
+  /** #3395: a model seat's stored pool block; undefined = none. A block that can't be read comes back as stored, with
+   *  why, and never throws. */
+  getNodePool(nodeId: string): StoredSeatPool | undefined {
+    if (!this.hasNodeColumn("pool")) return undefined;
+    const row = this.db.prepare("SELECT pool FROM nodes WHERE id = ?").get(nodeId) as { pool: string | null } | undefined;
+    return parseStoredPoolBlock(row?.pool);
   }
 
   setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
