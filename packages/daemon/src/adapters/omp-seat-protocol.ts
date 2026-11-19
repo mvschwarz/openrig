@@ -25,7 +25,6 @@ export interface OmpSeatPaths {
   launchConfigPath: string;
   pluginsDir: string;
   selectedPluginsPath: string;
-  selectedPluginHooksPath: string;
 }
 
 export function ompSeatPaths(stateRoot: string, sessionName: string): OmpSeatPaths {
@@ -38,7 +37,6 @@ export function ompSeatPaths(stateRoot: string, sessionName: string): OmpSeatPat
     launchConfigPath: nodePath.join(base.seatRoot, "openrig-launch.yml"),
     pluginsDir: nodePath.join(base.seatRoot, "plugins"),
     selectedPluginsPath: nodePath.join(base.seatRoot, "selected-plugins.json"),
-    selectedPluginHooksPath: nodePath.join(base.seatRoot, "selected-plugin-hooks.json"),
   };
 }
 
@@ -168,7 +166,6 @@ export function buildOmpArgs(opts: OmpLaunchOpts): string[] {
     "--approval-mode", opts.approvalMode,
     "--config", opts.paths.launchConfigPath,
     "-e", opts.seatExtensionPath,
-    "-e", nodePath.join(nodePath.dirname(opts.seatExtensionPath), "openrig-plugin-hooks.js"),
   ];
   if (opts.seatSkillsRoot) args.push("-e", nodePath.dirname(opts.seatSkillsRoot));
   for (const root of opts.pluginRoots ?? []) args.push("-e", root);
@@ -197,7 +194,6 @@ export function buildOmpFixedEnv(opts: OmpLaunchOpts): Record<string, string> {
     OPENRIG_RUNTIME: "omp-tui",
     OPENRIG_OMP_SEAT_STATE: opts.paths.statePath,
     OPENRIG_OMP_LAUNCH_ID: opts.launchId,
-    OPENRIG_OMP_PLUGIN_HOOKS: opts.paths.selectedPluginHooksPath,
     OPENRIG_OMP_APPROVAL_MODE: opts.approvalMode,
     OPENRIG_OMP_SESSION_SOURCE: opts.sessionFile ? "resume" : opts.forkRef ? "fork" : "startup",
     ...(opts.contextSidecarPath ? { OPENRIG_OMP_CONTEXT_SIDECAR: opts.contextSidecarPath } : {}),

@@ -1359,8 +1359,7 @@ input channel. Each choice has its own state directory and resume-token type.
 The TUI loads OpenRig’s seat extension to report readiness, activity, context usage
 and the exact session file. It acknowledges a managed paste in its composer before
 OpenRig sends Enter. Approval dialogs appear in the pane. Both OMP modes use the
-permission defaults described above. The TUI loads selected skills and hooks at
-launch. See [plugin hooks in OMP](omp-plugin-hooks.md).
+permission defaults described above. The TUI loads selected native OMP extensions and portable skills at launch.
 
 Both OMP modes pass an explicit seat effort to the child as `--thinking` on
 launch, runtime switch and resume. This previews a switch to RPC. Use

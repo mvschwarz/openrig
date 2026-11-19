@@ -79,7 +79,7 @@ describe("OMP launches natively", () => {
     expect(command).toContain(`'HOME=${paths.seatRoot}'`);
     expect(command).toContain(`'PI_CODING_AGENT_DIR=${paths.agentDir}'`);
     expect(command).toContain("'OMP_SKIP_SETUP=1'");
-    expect(command).toContain(`'omp' '--cwd' '/work' '--session-dir' '${paths.sessionsDir}' '--approval-mode' 'always-ask' '--config' '${paths.launchConfigPath}' '-e' '${extension}' '-e' '/daemon/assets/omp/openrig-plugin-hooks.js' '--model' 'openrouter/example' '--thinking' 'high'`);
+    expect(command).toContain(`'omp' '--cwd' '/work' '--session-dir' '${paths.sessionsDir}' '--approval-mode' 'always-ask' '--config' '${paths.launchConfigPath}' '-e' '${extension}' '--model' 'openrouter/example' '--thinking' 'high'`);
     // Staged and exec'd by /bin/sh whatever the pane's shell is, so the forwarded-name expansions are always POSIX.
     expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[3]).toEqual({ execInScript: true });
   });
@@ -256,22 +256,6 @@ describe("OMP projection into the seat's own home", () => {
     expect(adapter.skillTargetPath(seat, "review")).toBe(`${paths.agentDir}/skills/review/SKILL.md`);
   });
 
-  it("keeps usable plugin skills and hooks when another handler is unsupported", async () => {
-    const { adapter, fs } = fakeSeat({
-      "/src/plugin/.claude-plugin/plugin.json": JSON.stringify({ hooks: { hooks: {
-        UnknownEvent: [{ hooks: [{ type: "command", command: "unsupported" }] }],
-        Stop: [{ hooks: [{ type: "command", command: "supported" }] }],
-      } } }),
-      "/src/plugin/skills/portable/SKILL.md": "portable instructions",
-    });
-    const storage = "/tmp/omp-stock-test/state/seats/rig/seat/omp/skills";
-    const result = await adapter.project(plan([entry({ category: "plugin", effectiveId: "portable", absolutePath: "/src/plugin" })]), binding({ seatSkillsRoot: storage }));
-    expect(result.failed).toEqual([]);
-    expect(result.warnings).toEqual([expect.stringContaining("UnknownEvent")]);
-    expect(fs.readFile(`${storage}/portable/SKILL.md`)).toBe("portable instructions");
-    expect(JSON.parse(fs.readFile(paths.selectedPluginHooksPath))[0].hooks).toMatchObject([{ event: "Stop", command: "supported" }]);
-  });
-
   it("protects edited managed skills during projection", async () => {
     const storage = "/tmp/omp-stock-test/state/seats/rig/seat/omp/skills";
     const { adapter, fs } = fakeSeat({ "/src/review/SKILL.md": "new source", [`${storage}/review/SKILL.md`]: "operator edit" });
@@ -308,7 +292,7 @@ describe("OMP projection into the seat's own home", () => {
     expect(fs.exists(`${paths.pluginsDir}/core/skills/refocusing/SKILL.md`)).toBe(true);
     await adapter.launchHarness(binding(), { name: seat });
     // The plugin is loaded as an extension package after the seat extension, so its skills come with it.
-    expect(sent()).toContain(`'-e' '${extension}' '-e' '/daemon/assets/omp/openrig-plugin-hooks.js' '-e' '${paths.pluginsDir}/core'`);
+    expect(sent()).toContain(`'-e' '${extension}' '-e' '${paths.pluginsDir}/core'`);
     expect(await adapter.listInstalled(binding())).toEqual(expect.arrayContaining([
       { effectiveId: "core", category: "plugin", installedPath: `${paths.pluginsDir}/core` },
     ]));
@@ -362,23 +346,6 @@ describe("OMP projection into the seat's own home", () => {
     expect(result).toEqual({ projected: ["portable"], skipped: [], failed: [] });
     expect(fs.readFile(`${paths.agentDir}/skills/portable/SKILL.md`)).toBe("portable instructions");
     expect(launcher.pluginRoots(seat)).toEqual([]);
-  });
-
-  it.each([
-    ["claude", { hooks: { SessionStart: [{ hooks: [{ type: "command", command: "node custom.js" }] }] } }],
-    ["codex", "./custom-hooks.json"],
-  ])("projects %s hooks declared outside the conventional hooks directory", async (runtime, hooks) => {
-    const { adapter, fs } = fakeSeat({
-      [`/src/plugin/.${runtime}-plugin/plugin.json`]: JSON.stringify({ hooks }),
-      "/src/plugin/skills/portable/SKILL.md": "portable instructions",
-      "/src/plugin/custom-hooks.json": JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "true" }] }] } }),
-    });
-    const result = await adapter.project(plan([entry({ category: "plugin", effectiveId: "foreign", absolutePath: "/src/plugin" })]), binding());
-    expect(result.projected).toEqual(["foreign"]);
-    expect(result.warnings).toBeUndefined();
-    expect(fs.readFile(`${paths.agentDir}/skills/portable/SKILL.md`)).toBe("portable instructions");
-    expect(fs.exists(`${paths.pluginsDir}/foreign`)).toBe(true);
-    expect(JSON.parse(fs.readFile(paths.selectedPluginHooksPath))[0]).toMatchObject({ id: "foreign", format: runtime, hooks: [expect.objectContaining({ command: expect.any(String) })] });
   });
 
   it("projects portable skills from a Claude-only plugin without loading its hooks", async () => {

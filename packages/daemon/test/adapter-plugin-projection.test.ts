@@ -111,6 +111,8 @@ const OPENRIG_CORE_TREE = {
 describe.each(["claude-code", "codex", "omp-tui"] as const)("shared plugin contract: %s", runtime => {
   it("projects the same dual-manifest plugin, hook commands and skills, and refreshes changed content", async () => {
     const files = { ...OPENRIG_CORE_TREE,
+      "/p/openrig-core/package.json": JSON.stringify({ omp: { extensions: ["omp/index.js"] } }),
+      "/p/openrig-core/omp/index.js": "export default function activate() {}",
       "/p/openrig-core/hooks/claude.json": JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"' }] }] } }),
       "/p/openrig-core/hooks/codex.json": JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: 'node "${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"' }] }] } }),
     };
@@ -131,11 +133,9 @@ describe.each(["claude-code", "codex", "omp-tui"] as const)("shared plugin contr
     await adapter.project(plan, makeBinding());
     expect(fs._store[`${target}/hooks/scripts/activity-relay.cjs`]).toBe("// updated command");
     if (runtime === "omp-tui") {
-      expect(JSON.parse(fs.readFile(launcher.paths("test").selectedPluginHooksPath))).toEqual([
-        expect.objectContaining({ id: "openrig-core", root: target, hooks: [expect.objectContaining({ event: "SessionStart" })] }),
-      ]);
+      expect(launcher.pluginRoots("test")).toEqual([target]);
       await adapter.project({ ...plan, entries: [] }, makeBinding());
-      expect(JSON.parse(fs.readFile(launcher.paths("test").selectedPluginHooksPath))).toEqual([]);
+      expect(launcher.pluginRoots("test")).toEqual([]);
     }
   });
 });

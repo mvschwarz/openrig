@@ -15,7 +15,7 @@ it.skipIf(process.platform === "win32")("executes the native command with litera
     model: "anthropic/fixture", approvalMode: "always-ask", thinking: "high", sessionFile: join(root, "old session.jsonl") });
   execFileSync("/bin/sh", ["-c", command], { stdio: "inherit", env: { PATH: process.env.PATH, HOME: "/unrelated", OPENRIG_SESSION_NAME: "seat", ANTHROPIC_API_KEY: "fixture-key", OPENAI_API_KEY: "other-key", OPENRIG_ACTIVITY_HOOK_TOKEN: "private-hook", OPENRIG_REFOCUS_ENABLED: "0", OPENRIG_REFOCUS_CONTENT_FILE: "/fixture/context with spaces.md", UNRELATED_SECRET: "private" } });
   const got = JSON.parse(readFileSync(output, "utf8"));
-  expect(got.args).toEqual(["--cwd", root, "--session-dir", paths.sessionsDir, "--approval-mode", "always-ask", "--config", paths.launchConfigPath, "-e", join(root, "extension.js"), "-e", join(root, "openrig-plugin-hooks.js"), "--model", "anthropic/fixture", "--thinking", "high", "--session", join(root, "old session.jsonl")]);
+  expect(got.args).toEqual(["--cwd", root, "--session-dir", paths.sessionsDir, "--approval-mode", "always-ask", "--config", paths.launchConfigPath, "-e", join(root, "extension.js"), "--model", "anthropic/fixture", "--thinking", "high", "--session", join(root, "old session.jsonl")]);
   expect(got.env).toMatchObject({ HOME: paths.seatRoot, PI_CODING_AGENT_DIR: paths.agentDir, OPENRIG_SESSION_NAME: "seat", ANTHROPIC_API_KEY: "fixture-key", OPENRIG_OMP_LAUNCH_ID: "attempt", OPENRIG_REFOCUS_ENABLED: "0", OPENRIG_REFOCUS_CONTENT_FILE: "/fixture/context with spaces.md" });
   for (const key of ["OPENAI_API_KEY", "OPENRIG_ACTIVITY_HOOK_TOKEN", "UNRELATED_SECRET"]) expect(got.env).not.toHaveProperty(key);
 });

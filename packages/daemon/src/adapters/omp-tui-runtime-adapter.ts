@@ -17,7 +17,7 @@ import type { TmuxAdapter } from "./tmux.js";
 import { paneAtShell, type OmpLaunchFsOps, type OmpSeatLauncher } from "./omp-seat-launch.js";
 import { ompPluginDirName, type OmpSeatState } from "./omp-seat-protocol.js";
 import { insideSeatStorageFolder, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
-import { compileOmpPluginHooks, type OmpPluginHookPlan } from "../domain/omp-plugin-hooks.js";
+
 
 export interface OmpAdapterFsOps extends OmpLaunchFsOps {
   folderPresent?(path: string): boolean;
@@ -126,12 +126,6 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     for (const root of this.launcher.pluginRoots(binding.tmuxSession)) {
       results.push({ effectiveId: nodePath.basename(root), category: "plugin", installedPath: root });
     }
-    if (this.fs.exists(paths.selectedPluginHooksPath)) {
-      const plans = JSON.parse(this.fs.readFile(paths.selectedPluginHooksPath)) as OmpPluginHookPlan[];
-      for (const plan of plans) {
-        results.push({ effectiveId: plan.id, category: "plugin", installedPath: plan.root });
-      }
-    }
     return results;
   }
 
@@ -158,12 +152,10 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     const skipped: string[] = [];
     const failed: Array<{ effectiveId: string; error: string }> = [];
     const selectedPlugins: string[] = [];
-    const selectedPluginHooks: OmpPluginHookPlan[] = [];
     const paths = binding.tmuxSession ? this.launcher.paths(binding.tmuxSession) : null;
     if (paths) {
       this.fs.mkdirp(paths.seatRoot);
       this.fs.writeFile(paths.selectedPluginsPath, "[]");
-      this.fs.writeFile(paths.selectedPluginHooksPath, "[]");
     }
 
     if (binding.seatSkillsRoot && !insideSeatStorageFolder(nodePath.dirname(binding.seatSkillsRoot), binding.seatSkillsRoot)) {
@@ -185,9 +177,6 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
           continue;
         }
         if (entry.category === "plugin" && !this.pluginAppliesToOmp(entry)) {
-          const hooks = compileOmpPluginHooks(this.fs, entry.absolutePath, entry.effectiveId, entry.pluginType);
-          warnings.push(...(hooks.warnings ?? []));
-          if (hooks.hooks.length && !paths) throw new Error("No tmux session bound — cannot project OMP plugin hooks");
           const root = nodePath.join(entry.absolutePath, "skills");
           let copied = false;
           for (const id of this.topLevelEntries(root)) {
@@ -207,12 +196,6 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
             this.fs.writeFile(owner, entry.effectiveId);
             copied = true;
           }
-          if (hooks.hooks.length && paths) {
-            const target = nodePath.join(paths.pluginsDir, ompPluginDirName(entry.effectiveId));
-            this.copyResource(entry.absolutePath, target);
-            selectedPluginHooks.push({ ...hooks, root: target });
-            copied = true;
-          }
           (copied ? projected : skipped).push(entry.effectiveId);
         } else if (this.projectEntry(entry, binding, warnings)) {
           projected.push(entry.effectiveId);
@@ -226,7 +209,6 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
 
     if (paths) {
       this.fs.writeFile(paths.selectedPluginsPath, JSON.stringify(selectedPlugins));
-      this.fs.writeFile(paths.selectedPluginHooksPath, JSON.stringify(selectedPluginHooks));
     }
     return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
   }

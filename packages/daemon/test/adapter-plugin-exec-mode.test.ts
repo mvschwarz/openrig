@@ -88,6 +88,8 @@ function seedPluginTree(root: string) {
   fs.writeFileSync(skillMd, "# compaction-restore\n");
   fs.chmodSync(hook, 0o755);
   fs.chmodSync(skillMd, 0o644);
+  fs.writeFileSync(nodePath.join(root, "openrig-core", "package.json"), JSON.stringify({ omp: { extensions: ["./index.js"] } }));
+  fs.writeFileSync(nodePath.join(root, "openrig-core", "index.js"), "export default function activate() {}");
   return { hookRel: "skills/compaction-restore/scripts/precompact-hook.mjs", skillRel: "skills/compaction-restore/SKILL.md" };
 }
 
