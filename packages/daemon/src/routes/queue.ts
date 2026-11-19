@@ -54,6 +54,7 @@ import { sharedChannelFor } from "../domain/gateway/participants.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
 import { feedPerspective } from "../domain/feed-perspective.js";
 import { waitForQueueItem } from "../domain/queue-read-wait.js";
+import { exemptSlowOpRequest } from "../domain/slow-op-recorder.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -1787,6 +1788,7 @@ export function queueRoutes(): Hono {
     }
     const { item, waited } = await waitForQueueItem(repo, getEventBus(c), qitemId, seconds, c.req.raw.signal);
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
+    if (seconds > 0) exemptSlowOpRequest(c);
     // #1029: the wake path's own routing decision, so a reader never guesses a registered
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
     // The owner notification level is what the Slack selector keys on: a registered person who
