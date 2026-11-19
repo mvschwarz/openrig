@@ -626,7 +626,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         if (focused?.result?.tab?.tab_id !== tab.tab_id || focused.result.tab.workspace_id !== tab.workspace_id) throw new Error("Following tab selection was not confirmed.");
         return { ...answer.data, window, notes: [...(answer.data.notes ?? []), ...windowNotes] };
       }
-      const closeCommand = (id: string) => `${session === undefined ? "herdr" : `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}`} workspace close ${shellQuote(id)}`;
+      // Pinned to the endpoint the inventory read, as the daemon's note is: a bare herdr follows the caller's shell, which may name another server.
+      const closeCommand = (id: string) => `env -u HERDR_SESSION HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)} workspace close ${shellQuote(id)}`;
       let found: LiveWorkspaceSearch = { unconfirmed: [], stale: [], fixedSize: [] };
       try {
         found = await findLiveHerdrWorkspace({ id: composed.id, planId, pages: composed.pages, ...(composed.spaceLabel ? { spaceLabel: composed.spaceLabel } : {}) },

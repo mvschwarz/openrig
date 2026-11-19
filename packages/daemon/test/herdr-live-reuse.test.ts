@@ -167,7 +167,7 @@ describe("#3052 --provider herdr reuses a live workspace for the same view", () 
     expect(second.notes?.filter(note => note.startsWith("Workspace w1"))).toHaveLength(1);
   });
 
-  it("names an older plan's fixed-size workspace beside the current copy it reuses (review50-r3 R1)", async () => {
+  it("names an older plan's fixed-size workspace beside the current copy it reuses", async () => {
     const h = herdr();
     await h.adapter.openView({ ...demoView(), planId: "fedcba9876543210".repeat(4) }, { reuseLive: true });
     await h.adapter.openView(demoView(), { reuseLive: true }); // main's numbered current copy, w2
