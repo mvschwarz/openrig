@@ -1361,6 +1361,8 @@ and the exact session file. It acknowledges a managed paste in its composer befo
 OpenRig sends Enter. Approval dialogs appear in the pane. By default the native UI
 uses `always-ask`, including on kernel seats. An explicit `full_bypass` policy selects
 `yolo`. The native UI ignores the ambient `OPENRIG_YOLO` setting. The TUI loads selected native OMP extensions and portable skills at launch.
+On deselection, OpenRig moves a portable skill with an older ID-only ownership marker out of the active skill directory
+and reports the recovery path. The saved copy includes any operator edits.
 
 Both OMP modes pass an explicit seat effort to the child as `--thinking` on
 launch, runtime switch and resume. This previews a switch to RPC. Use

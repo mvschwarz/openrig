@@ -9,6 +9,7 @@ const HERE = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url))
 export const REFOCUS_SCRIPT = path.resolve(HERE, "../hooks/scripts/refocus.cjs");
 /** OMP gives an event handler 30 seconds; the hook's own lookups stay inside its budget well before that. */
 const HOOK_TIMEOUT_MS = 25_000;
+const MAX_LOOKUP_BUDGET_MS = HOOK_TIMEOUT_MS - 1000;
 export const REFOCUS_MESSAGE_TYPE = "openrig-refocus";
 
 const text = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
@@ -36,8 +37,8 @@ export function runRefocus(input, options = {}) {
   let child;
   try {
     child = (options.spawn ?? spawn)(command, [options.script ?? REFOCUS_SCRIPT, "--runtime", "omp"], {
-      env: { ...env, ...(Number(env.OPENRIG_REFOCUS_BUDGET_MS) > HOOK_TIMEOUT_MS - 1000
-        ? { OPENRIG_REFOCUS_BUDGET_MS: String(HOOK_TIMEOUT_MS - 1000) } : {}), ...(options.now ? { OPENRIG_REFOCUS_NOW: "1" } : {}) },
+      env: { ...env, ...(Number(env.OPENRIG_REFOCUS_BUDGET_MS) > MAX_LOOKUP_BUDGET_MS
+        ? { OPENRIG_REFOCUS_BUDGET_MS: String(MAX_LOOKUP_BUDGET_MS) } : {}), ...(options.now ? { OPENRIG_REFOCUS_NOW: "1" } : {}) },
       stdio: ["pipe", "pipe", "ignore"],
     });
   } catch {
@@ -77,6 +78,14 @@ export default function openrigCore(pi, options = {}) {
   const env = options.env ?? process.env;
   const refocus = options.runRefocus ?? runRefocus;
   pi.setLabel?.("OpenRig Core");
+
+  pi.on("session_start", (_event, ctx) => {
+    const requested = Number(env.OPENRIG_REFOCUS_BUDGET_MS);
+    if (isSeat(env) && isMainSession(ctx) && requested > MAX_LOOKUP_BUDGET_MS) {
+      ctx.ui?.notify?.("OpenRig refocus requested " + requested + " ms. Native OMP uses " + MAX_LOOKUP_BUDGET_MS
+        + " ms so the helper can finish within the event deadline.", "warning");
+    }
+  });
 
   pi.on("session_compact", async (_event, ctx) => {
     if (!isSeat(env) || !isMainSession(ctx)) return;

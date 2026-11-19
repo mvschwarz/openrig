@@ -220,12 +220,14 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
             const target = nodePath.join(skills, id);
             const owner = nodePath.join(target, ".openrig-plugin");
             this.requireWritable(skills, owner);
-            if (this.fs.exists(target) && !this.ownsSkill(target, entry.effectiveId, nodePath.join(root, id))) {
+            const source = nodePath.join(root, id);
+            const receipt = this.fs.exists(owner) ? this.fs.readFile(owner) : "";
+            if (this.fs.exists(target) && !this.matchesSkillReceipt(target, receipt, entry.effectiveId, source)) {
               warnings.push(`omp: kept existing skill ${id}; plugin ${entry.effectiveId} did not overwrite it`);
               continue;
             }
             this.replaceDirectory(target, stage => {
-              this.copyResource(nodePath.join(root, id), stage);
+              this.copyResource(source, stage);
               const digest = this.treeDigest(stage);
               this.fs.writeFile(nodePath.join(stage, ".openrig-plugin"), JSON.stringify({ id: entry.effectiveId, digest }));
             });
@@ -254,8 +256,22 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
         const target = nodePath.join(skills, id);
         const owner = nodePath.join(target, ".openrig-plugin");
         if (selectedSkills.has(id) || !this.fs.exists(owner)) continue;
-        if (this.ownsSkill(target)) this.remove(target);
-        else warnings.push("omp: kept edited or unverified portable skill " + id);
+        try {
+          this.requireWritable(skills, owner);
+          const receipt = this.fs.readFile(owner).trim();
+          if (this.matchesSkillReceipt(target, receipt)) this.remove(target);
+          else if (receipt && !receipt.startsWith("{") && !receipt.startsWith("[") && this.fs.exists(nodePath.join(target, "SKILL.md"))) {
+            // ID-only receipts predate content hashes. Retire the directory intact, including possible operator edits.
+            const storage = nodePath.dirname(skills);
+            const recovery = nodePath.join(storage, "retired-plugin-skills", randomUUID(), id);
+            if (!insideSeatStorageFolder(storage, recovery)) throw new Error("linked or invalid recovery directory");
+            this.fs.mkdirp(nodePath.dirname(recovery));
+            this.rename(target, recovery);
+            warnings.push("omp: retired legacy portable skill " + id + "; its files are preserved at " + recovery);
+          } else warnings.push("omp: kept edited or unverified portable skill " + id);
+        } catch (error) {
+          warnings.push("omp: could not retire portable skill " + id + ": " + (error as Error).message);
+        }
       }
     }
     return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
@@ -557,11 +573,8 @@ export class OmpTuiRuntimeAdapter implements RuntimeAdapter {
     return hash.digest("hex");
   }
 
-  private ownsSkill(target: string, pluginId?: string, source?: string): boolean {
-    const marker = nodePath.join(target, ".openrig-plugin");
+  private matchesSkillReceipt(target: string, raw: string, pluginId?: string, source?: string): boolean {
     try {
-      this.requireWritable(target, marker);
-      const raw = this.fs.readFile(marker);
       // Older installs recorded only the ID. Upgrade their receipt when all installed files still match the source.
       if (source && raw === pluginId) return this.treeDigest(target) === this.treeDigest(source);
       const owner = JSON.parse(raw);

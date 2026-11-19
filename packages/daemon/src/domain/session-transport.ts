@@ -795,6 +795,17 @@ export function communityHarnessPaneActivity(classification: PaneActivityClassif
     : classification;
 }
 
+/** Read OMP's bottom-anchored model picker. A copy of the menu above new output or a composer is history. */
+function currentOmpModelPicker(lines: string[]): boolean {
+  if (!/^[╰└]─+[╯┘]$/u.test(lines.at(-1) ?? "")) return false;
+  let header = lines.length - 2;
+  while (header >= 0 && /^[│├]/u.test(lines[header]!)) header--;
+  if (!/^[╭┌]─+\s*Switch (?:Task )?Model\s*─*[╮┐]$/iu.test(lines[header] ?? "")) return false;
+  // OMP clips the hints on narrow panes. Its mode-specific status still identifies the picker there.
+  return /^│\s*(?:Session-only switch|Task subagent switch|Quick role switch)\b/i.test(lines[header + 1] ?? "")
+    || /\bmodels\s*·[^·│]*use for (?:this session|Task subagents)\b|\broles\s*·[^·│]*apply role model\b/i.test(lines.at(-2) ?? "");
+}
+
 export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   if (options.composerSnapshot) {
     const snapshot = options.composerSnapshot;
@@ -812,6 +823,9 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   }
 
   if (options.runtime === "omp-tui") {
+    if (currentOmpModelPicker(lastNonBlank)) {
+      return { state: "attention", reason: "selection_prompt", evidence: "OMP model picker" };
+    }
     // A permission can outlast the hook freshness window. Stock OMP can draw a panel divider
     // between Deny and the navigation footer. The draft/steering footer has different keys.
     const rows = lastNonBlank.slice(-20);
@@ -4581,16 +4595,15 @@ export class SessionTransport {
       hookActivity.reason !== "permission_request_pending" &&
       hookActivity.reason !== "permission_prompt_cleared"
     ) {
-      // Fresh hook (within the 15s send window): authoritative for any state, except a current Claude
-      // dialog. Opening a picker or a permission selector after Stop fires no new hook, so a fresh idle
-      // hook gets the same current-dialog check as a fresh running one.
+      // A person can open a Claude or native OMP picker after the last hook. Even a fresh idle
+      // report needs the same current-dialog check as a running report before typing.
       if (this.hookFreshForSend(hookActivity, now)) {
         // These fresh-hook dialog and picker checks run only on a runtime declared to support reading a dialog
         // (member-connection.v1, observe.dialog); the runtime then says which screen reader it is. The stale-idle veto and
         // the pane probe below don't read the declaration.
         const dialogRead = declaredCapabilities("typed", input.runtime).observe.dialog === "supported";
         // A fresh SessionStart reads unknown, and a picker can open after it just as after Stop.
-        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && ((dialogRead && input.runtime === "claude-code") || input.runtime === "omp-tui")) {
+        if ((hookActivity.state === "running" || hookActivity.state === "idle" || hookActivity.state === "unknown") && dialogRead && (input.runtime === "claude-code" || input.runtime === "omp-tui")) {
           const paneVeto = await probeSessionActivity({
             communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,

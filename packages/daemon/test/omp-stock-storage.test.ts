@@ -66,12 +66,13 @@ describe("OMP managed skill writes on real storage", () => {
     expect(fs.readFileSync(path.join(outside, "owner"), "utf8")).toBe("portable");
   });
 
-  it.each(["folder", "file"])("refuses startup skill_install through a linked %s", async kind => {
+  it.each(["folder", "symlink", "hardlink"])("refuses startup skill_install through a linked %s", async kind => {
     write(path.join(outside, "SKILL.md"), "Operator skill");
     if (kind === "folder") fs.symlinkSync(outside, path.join(skills, "linked"));
     else {
       fs.mkdirSync(path.join(skills, "linked"));
-      fs.symlinkSync(path.join(outside, "SKILL.md"), path.join(skills, "linked/SKILL.md"));
+      const link = kind === "hardlink" ? fs.linkSync : fs.symlinkSync;
+      link(path.join(outside, "SKILL.md"), path.join(skills, "linked/SKILL.md"));
     }
     const result = await adapter.deliverStartup([{ path: "SKILL.md", absolutePath: path.join(source, "SKILL.md"),
       ownerRoot: root, deliveryHint: "skill_install", required: true, appliesOn: ["fresh_start"] }], binding());
@@ -91,6 +92,36 @@ describe("OMP managed skill writes on real storage", () => {
     expect(fs.existsSync(path.join(skills, "untouched"))).toBe(false);
     expect(fs.readFileSync(path.join(skills, "edited/SKILL.md"), "utf8")).toBe("mine");
     expect(fs.readFileSync(path.join(skills, "extra/notes"), "utf8")).toBe("mine too");
+  });
+
+  it("retires legacy ID-only copies on the first deselection, preserving edits and unrelated skills", async () => {
+    const skill = path.join(skills, "research");
+    write(path.join(skill, ".openrig-plugin"), "shared:portable");
+    write(path.join(skill, "SKILL.md"), "instructions");
+    write(path.join(skill, "notes"), "operator notes");
+    write(path.join(skills, "standalone/SKILL.md"), "my own skill");
+    const empty = { entries: [] } as never;
+    const result = await adapter.project(empty, binding());
+    expect(result.failed).toEqual([]);
+    expect(fs.existsSync(skill)).toBe(false);
+    expect(fs.readFileSync(path.join(skills, "standalone/SKILL.md"), "utf8")).toBe("my own skill");
+    const retired = path.join(path.dirname(skills), "retired-plugin-skills");
+    const saved = path.join(retired, fs.readdirSync(retired)[0]!, "research");
+    expect(result.warnings).toEqual([expect.stringContaining(saved)]);
+    expect(fs.readFileSync(path.join(saved, "notes"), "utf8")).toBe("operator notes");
+    expect(fs.readFileSync(path.join(saved, "SKILL.md"), "utf8")).toBe("instructions");
+    expect(await adapter.project(empty, binding())).toMatchObject({ failed: [] });
+    expect(fs.readdirSync(retired)).toHaveLength(1);
+  });
+
+  it("preserves the legacy copy when the recovery directory is linked", async () => {
+    write(path.join(skills, "research/.openrig-plugin"), "portable");
+    write(path.join(skills, "research/SKILL.md"), "instructions");
+    fs.symlinkSync(outside, path.join(path.dirname(skills), "retired-plugin-skills"));
+    const result = await adapter.project({ entries: [] } as never, binding());
+    expect(result.warnings?.join(" ")).toContain("research");
+    expect(fs.readFileSync(path.join(skills, "research/SKILL.md"), "utf8")).toBe("instructions");
+    expect(fs.readdirSync(outside)).toEqual([]);
   });
 
   it("keeps distinct plugin IDs and replaces a selected package's whole tree", async () => {

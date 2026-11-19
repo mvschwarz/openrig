@@ -183,6 +183,25 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["Switch Model", "Configuration error", "↓/↑ models · ⏎ use for this session · ⇥ provider · type to search · @ quick roles · ⎋ close"],
+    ["Switch Task Model", "Task subagent switch — spawned task agents use this model", "↑/↓ models · ⏎ use for Task subagents · ⇥ provider · type to search · ⎋ close"],
+    ["Switch Model", "Quick role switch — applies its model and thinking for this session", "↑/↓ roles · ⏎ apply role model · type to search · ⎋ close"],
+    ["Switch Model", "Session-only switch — role…", "↑/↓ models · ⏎ use for…"],
+  ])("blocks an ordinary send at a current OMP %s picker after an idle hook (%s)", async (title, status, hints) => {
+    const seat = seedOmp();
+    const { sendText, sendKeys } = spies();
+    let pane = ["╭─ " + title + " ─────────╮", "│ " + status + " │", "│ ❯ provider/model │", "│ " + hints + " │", "╰──────────────────╯"].join("\n");
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText, sendKeys }));
+    expect(await transport.send(seat, "hello")).toMatchObject({
+      ok: false, reason: "target_needs_input", activity: { reason: "selection_prompt" },
+    });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+    pane += "\nHere is the menu we saw.\n❯ ";
+    expect(await transport.send(seat, "hello")).toMatchObject({ ok: true });
+  });
+
   it.each([15_001, 84_903])("navigates the framed OMP menu with a %d ms old permission event", async (age) => {
     const seat = seedOmp();
     const occurredAt = new Date();

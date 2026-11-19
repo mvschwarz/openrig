@@ -248,6 +248,7 @@ export const ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   { route: "typed", armed: true, capabilities: {
     "claude-code": caps("supported", "not-supported", "supported", "supported", "supported", "supported", "supported", "supported"),
     codex: caps("supported", "not-supported", "supported", "supported", "supported", "not-supported", "not-supported", "supported"),
+    "omp-tui": caps("supported", "not-supported", "supported", "unknown", "unknown", "not-supported", "not-supported", "unknown"),
     "*": caps("not-supported", "not-supported", "supported", "unknown", "unknown", "not-supported", "not-supported", "unknown"),
   } },
   { route: "codex-queue", armed: false, capabilities: {

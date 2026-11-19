@@ -2,16 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 // @ts-expect-error OMP loads the shipped plain JavaScript extension.
 import openrigCore, { runRefocus } from "../assets/plugins/openrig-core/omp/index.js";
-function fixture(seat = true, kind = "main") {
+function fixture(seat = true, kind = "main", budget?: string) {
   const handlers: Record<string, Function> = {}, commands: Record<string, any> = {};
   const refocus = vi.fn().mockResolvedValue("context");
   const pi = { on: (n: string, f: Function) => { handlers[n] = f; }, registerCommand: (n: string, c: unknown) => { commands[n] = c; }, sendMessage: vi.fn() };
-  openrigCore(pi, { env: seat ? { OPENRIG_SESSION_NAME: "seat" } : {}, runRefocus: refocus });
+  openrigCore(pi, { env: { ...(seat ? { OPENRIG_SESSION_NAME: "seat" } : {}), OPENRIG_REFOCUS_BUDGET_MS: budget }, runRefocus: refocus });
   return { handlers, commands, refocus, pi, ctx: { agent: { kind }, ui: { notify: vi.fn() } } };
 }
 describe("OMP core refocus", () => {
   it.each([[false, "main"], [true, "subagent"]] as const)("ignores non-seat or child conversation (%s, %s)", async (seat, kind) => {
-    const f = fixture(seat, kind);
+    const f = fixture(seat, kind, "52000");
+    await f.handlers.session_start({}, f.ctx);
+    expect(f.ctx.ui.notify).not.toHaveBeenCalled();
     await f.handlers.session_compact({}, f.ctx);
     expect(await f.handlers.before_agent_start({ prompt: "continue" }, f.ctx)).toBeUndefined();
     await f.commands.refocus.handler("", f.ctx);
@@ -28,6 +30,14 @@ describe("OMP core refocus", () => {
     f.refocus.mockResolvedValue(null);
     expect(await f.handlers.before_agent_start({ prompt: "continue" }, f.ctx)).toBeUndefined();
   });
+  it.each([["52000", true], ["24000", false], [undefined, false]] as const)(
+    "reports the effective native budget at session start when %s exceeds the limit", async (budget, capped) => {
+      const f = fixture(true, "main", budget);
+      await f.handlers.session_start({}, f.ctx);
+      if (capped) expect(f.ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/52000.*24000/), "warning");
+      else expect(f.ctx.ui.notify).not.toHaveBeenCalled();
+    });
+
   it("/refocus starts a turn only when the hook returns context", async () => {
     const f = fixture();
     await f.commands.refocus.handler("", f.ctx);
