@@ -819,7 +819,7 @@ describe("QueueRepository", () => {
       expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("failed:hook_bridge_not_delivered");
     });
 
-    it.each([false, true])("An unpark's wake from before the row moved away and back with wakes is not delivered beside the latest reroute's wake, also after later moves without a wake (%s); a later unpark's wake is.", async (laterMoves) => {
+    it.each([false, true])("An unpark's wake from before the row moved away and back with wakes settles as superseded instead of being delivered beside the latest reroute's wake, also after later moves without a wake (%s); a later unpark's wake is.", async (laterMoves) => {
       const full = createDb();
       try {
         migrate(full, ALL_MIGRATIONS);
@@ -856,7 +856,11 @@ describe("QueueRepository", () => {
 
         expect(sends).toEqual(["bob@rig"]);
         expect(wakesOf(item.qitemId).filter((w) => w.delivery_state === "delivered").map((w) => w.outbox_id)).toEqual([latest]);
-        expect(unparkWakes(item.qitemId).find((w) => w.outbox_id === older!.outbox_id)?.delivery_state).not.toBe("delivered");
+        // The older wake settles its own entry: refused as superseded, not left pending and not sent.
+        const olderEntry = full.prepare("SELECT delivery_state, tags FROM outbox_entries WHERE outbox_id = ?")
+          .get(older!.outbox_id) as { delivery_state: string; tags: string | null };
+        expect(olderEntry.delivery_state).toBe("failed");
+        expect(JSON.parse(olderEntry.tags ?? "[]")).toContain("queue:wake-superseded");
 
         // A later park and unpark at bob wakes bob again: its wake comes after the reroute.
         await unpark(item.qitemId);
