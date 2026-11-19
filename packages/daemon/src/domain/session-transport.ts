@@ -311,12 +311,20 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
 // whose fresh hook (StopFailure rate_limit reads unknown) can't tell a menu is open.
 const CLAUDE_CONFIRM_FOOTER = "Enter to confirm · Esc to cancel";
 function findCurrentClaudeConfirmMenu(paneContent: string): string | null {
-  const lines = paneContent.split("\n").map(line => line.trim()).filter(line => line.length > 0);
-  if (lines.at(-1) !== CLAUDE_CONFIRM_FOOTER) return null;
-  for (let i = lines.length - 2; i >= 0; i--) {
+  const lines = paneContent.split("\n").map(line => line.trim());
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]) end--;
+  if (lines[end - 1] !== CLAUDE_CONFIRM_FOOTER) return null;
+  // Walk up from the footer past option rows and the unnumbered rows a menu draws among them (a wrapped option, a
+  // description, a balance or spend row), to the cursor's option. The menu ends at its question line, its top rule or
+  // two blank rows, so history above it is never read.
+  let blanks = 0;
+  for (let i = end - 2; i >= 0; i--) {
     const line = lines[i]!;
+    if (!line) { if (++blanks >= 2) break; continue; }
+    blanks = 0;
     if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
-    if (!/^\d+\.\s+\S/.test(line)) break;
+    if (/^[▔─━═]{3,}$/.test(line) || (/\?$/.test(line) && !/^\d+\./.test(line))) break;
   }
   return null;
 }
@@ -4542,6 +4550,9 @@ export class SessionTransport {
     ) {
       return hookActivity;
     }
+    // A fresh usage-limit hook: a limit menu may be open, and some of its options spend money (a hard line).
+    const freshUsageLimit = !input.readinessFromPaneOnly && hookActivity?.evidenceSource === "runtime_hook"
+      && hookActivity.stale !== true && hookActivity.reason === "usage_limit" && this.hookFreshForSend(hookActivity, now);
     // Use the fresh runtime-hook as the authoritative signal ONLY within the tight send-readiness
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).
@@ -4559,7 +4570,7 @@ export class SessionTransport {
       // A fresh usage-limit hook is the exception: a limit menu may be open, and some of its options spend money. It
       // takes the full pane read below, whose numbered-row scan refuses any current menu whatever its layout; an
       // ordinary input box at a limit wall still delivers.
-      if (this.hookFreshForSend(hookActivity, now) && hookActivity.reason !== "usage_limit") {
+      if (this.hookFreshForSend(hookActivity, now) && !freshUsageLimit) {
         // These fresh-hook dialog and picker checks run only on a runtime declared to support reading a dialog
         // (member-connection.v1, observe.dialog); the runtime then says which screen reader it is. The stale-idle veto and
         // the pane probe below don't read the declaration.
@@ -4653,6 +4664,13 @@ export class SessionTransport {
     const probe = input.readinessFromPaneOnly && input.runtime === "claude-code"
       ? (await this.readAtReadableSize(input.sessionName, { width: 120, height: 40 }, { remainingMs: CAPTURE_READABLE_BUDGET_MS }, readPane)).value
       : await readPane();
+    // After a fresh usage-limit hook only a pane that positively reads an input box (idle, or a turn running) delivers.
+    // Anything else (an unreadable capture, or a menu drawn so its cursor row is outside the scan) refuses before any
+    // write, as the choice prompt it may be. This is the one deliberate stop here; every other path keeps failing open.
+    if (freshUsageLimit && probe.state !== "idle" && probe.state !== "running") {
+      return { ...probe, state: "needs_input", reason: "selection_prompt",
+        evidence: probe.evidence ?? "usage-limit hook; the pane didn't read as an input box" };
+    }
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)
     // running/needs_input hook such as UserPromptSubmit: keep it until it ages out. An `unknown`

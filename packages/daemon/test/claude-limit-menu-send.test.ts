@@ -34,7 +34,7 @@ const LIMIT_MENU = [
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function fixture(pane = LIMIT_MENU) {
+function fixture(pane: string | (() => Promise<string>) = LIMIT_MENU) {
   const db = createFullTestDb(); databases.push(db);
   const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), bus = new EventBus(db);
   const rig = rigRepo.createRig("r1001"), node = rigRepo.addNode(rig.id, "worker.a", { role: "worker", runtime: "claude-code" });
@@ -47,7 +47,7 @@ function fixture(pane = LIMIT_MENU) {
   const paste = vi.fn(async () => ({ ok: true as const })), enter = vi.fn(async () => ({ ok: true as const }));
   const tmux = { hasSession: async () => true, probeSession: async () => ({ state: "present" as const }),
     getPaneCommand: async () => "claude", getPanePid: async () => null, listPanes: async () => [], hasSessionEnv: async () => false,
-    capturePaneContent: async () => pane, sendText: paste, sendKeys: enter, readPaneLastActivity: async () => now().getTime() / 1000 - 120 };
+    capturePaneContent: typeof pane === "function" ? pane : async () => pane, sendText: paste, sendKeys: enter, readPaneLastActivity: async () => now().getTime() / 1000 - 120 };
   const oracle = new SeatActivityService({ tmux: tmux as never, defaultWindowSeconds: 3, now });
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -99,6 +99,38 @@ it.each([["a row after the footer", AFTER_FOOTER], ["a wrapped option and anothe
     expect(f.paste).not.toHaveBeenCalled();
     expect(f.enter).not.toHaveBeenCalled();
   });
+
+// A wrapped option and an unnumbered row inside the menu, after a hook that carries no limit reason: the footer
+// recognizer walks past them to the cursor's option.
+const WRAPPED_WITH_ROWS = LIMIT_MENU.replace("     2. Switch to usage credits",
+  "     2. Wait here, then continue automatically when the limit\n        resets\n     3. Add funds to continue with usage credits\n        Usage credit balance: $0.00")
+  .replace("     3. Switch to Team plan", "     4. Upgrade your plan");
+
+it.each([["a fresh Stop", "Stop", null], ["a fresh idle_prompt Notification", "Notification", "idle_prompt"]] as const)(
+  "after %s the footer recognizer refuses a menu with wrapped and unnumbered rows, before any write", async (_name, event, subtype) => {
+    const f = fixture(WRAPPED_WITH_ROWS);
+    await f.hook(event, subtype, 1_000);
+    expect(await f.transport.send(f.name, MESSAGE)).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  });
+
+// After a usage-limit hook, a send needs a pane that positively reads an input box.
+const TALL_MENU = ["   What do you want to do?", "", "   ❯ 1. Stop and wait for limit to reset",
+  ...Array.from({ length: 7 }, (_, i) => [`     ${i + 2}. Option ${i + 2}`, "        A description of this option"]).flat(),
+  "", "   Enter to confirm · Esc to cancel", ""].join("\n");
+
+it.each([
+  ["an unreadable capture", async () => { throw new Error("capture failed"); }],
+  ["an empty capture", async () => ""],
+  ["a menu whose cursor row is above the scan window", async () => TALL_MENU.replace("Enter to confirm · Esc to cancel", "Enter to choose · Esc to go back")],
+] as const)("after a fresh usage-limit hook, %s refuses before any write", async (_name, capture) => {
+  const f = fixture(capture as () => Promise<string>);
+  await f.hook("StopFailure", "rate_limit", 1_000);
+  expect(await f.transport.send(f.name, MESSAGE)).toMatchObject({ ok: false, reason: "target_needs_input" });
+  expect(f.paste).not.toHaveBeenCalled();
+  expect(f.enter).not.toHaveBeenCalled();
+});
 
 it("control: after a fresh usage-limit hook, an ordinary input box at a limit wall still delivers", async () => {
   const f = fixture(["You've hit your limit · resets 11pm (UTC)", "", "─".repeat(80), "❯\u00a0", "─".repeat(80), "  ? for shortcuts", ""].join("\n"));
