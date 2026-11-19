@@ -90,10 +90,17 @@ it.each([
 const AFTER_FOOTER = `${LIMIT_MENU.trimEnd()}\n   Usage credit balance: $0.00\n`;
 const WRAPPED = LIMIT_MENU.replace("     2. Switch to usage credits", "     2. Add funds to continue with usage\n        credits").replace("Enter to confirm · Esc to cancel", "Enter to select · Esc to go back");
 
-it.each([["a row after the footer", AFTER_FOOTER], ["a wrapped option and another footer", WRAPPED]] as const)(
-  "after a fresh usage-limit hook the full read refuses a menu with %s, before any write", async (_name, frame) => {
+// Every fresh hook a menu can follow: the usage-limit one takes the full read, the others the dialogue-only read, where
+// a numbered cursor row with no input box drawn is a current menu whatever its footer.
+const FRESH_HOOKS = [["rate-limit StopFailure", "StopFailure", "rate_limit"], ["Stop", "Stop", null],
+  ["idle_prompt Notification", "Notification", "idle_prompt"], ["UserPromptSubmit (running)", "UserPromptSubmit", null],
+  ["SessionStart (unknown)", "SessionStart", null]] as const;
+
+it.each(FRESH_HOOKS.flatMap(([hookName, event, subtype]) =>
+  [["a row after the footer", AFTER_FOOTER], ["a wrapped option and another footer", WRAPPED]].map(([shape, frame]) => [hookName, shape, frame, event, subtype] as const)))(
+  "after a fresh %s, a menu with %s is refused before any write", async (_hook, _shape, frame, event, subtype) => {
     const f = fixture(frame);
-    await f.hook("StopFailure", "rate_limit", 1_000);
+    await f.hook(event, subtype, 1_000);
     const sent = await f.transport.send(f.name, MESSAGE);
     expect(sent).toMatchObject({ ok: false, reason: "target_needs_input" });
     expect(f.paste).not.toHaveBeenCalled();
@@ -135,6 +142,19 @@ it.each([
 it("control: after a fresh usage-limit hook, an ordinary input box at a limit wall still delivers", async () => {
   const f = fixture(["You've hit your limit · resets 11pm (UTC)", "", "─".repeat(80), "❯\u00a0", "─".repeat(80), "  ? for shortcuts", ""].join("\n"));
   await f.hook("StopFailure", "rate_limit", 1_000);
+  expect(await f.transport.send(f.name, MESSAGE)).toMatchObject({ ok: true });
+  expect(f.paste).toHaveBeenCalled();
+});
+
+// Controls: option text that isn't a current menu still delivers after a fresh Stop.
+const COMPOSER = ["─".repeat(80), "❯\u00a0", "─".repeat(80), "  ? for shortcuts", ""];
+it.each([
+  ["the menu quoted in history above the input box", [...LIMIT_MENU.split("\n"), "✻ Worked for 2s", "", ...COMPOSER].join("\n")],
+  ["a draft of numbered lines in the input box", ["✻ Brewed for 1s", "", "─".repeat(80), "❯ please choose:", "  1. Stop and wait", "  2. Switch to usage credits",
+    "─".repeat(80), "  ? for shortcuts", ""].join("\n")],
+] as const)("control: after a fresh Stop, %s isn't read as a menu and delivers", async (_name, frame) => {
+  const f = fixture(frame);
+  await f.hook("Stop", null, 1_000);
   expect(await f.transport.send(f.name, MESSAGE)).toMatchObject({ ok: true });
   expect(f.paste).toHaveBeenCalled();
 });

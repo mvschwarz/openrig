@@ -897,7 +897,12 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const modelPicker = options.runtime === "codex" ? currentCodexModelPicker(paneContent)
     : options.runtime === undefined || options.runtime === "claude-code" ? currentClaudeModelMenu(paneContent) : null;
   const confirmMenu = options.runtime === undefined || options.runtime === "claude-code" ? findCurrentClaudeConfirmMenu(paneContent) : null;
-  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ?? confirmMenu ??
+  // A current Claude menu replaces the input box. In the dialogue-only read, a numbered cursor row in the scan window
+  // with no Claude input box drawn is a current menu, whatever its footer or rows. Quoted history sits above an input
+  // box, and a draft sits inside one, so neither counts.
+  const menuInPlaceOfInputBox = options.currentClaudeDialogueOnly && options.runtime === "claude-code" && !claudeComposer?.framed
+    ? findPatternEvidence(promptScanLines, [COMPOSER_SELECTION_SCAN_PATTERN]) : null;
+  const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ?? confirmMenu ?? menuInPlaceOfInputBox ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {
