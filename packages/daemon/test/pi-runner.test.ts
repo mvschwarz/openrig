@@ -1453,18 +1453,50 @@ describe("cursor refresh via get_entries (QA RED, qitem-20260707020922)", () => 
     coreGap.handlePiLine(JSON.stringify({
       type: "response", id: "pi-runner-cursor-refresh", success: true, data: { entries: [{ id: "older-A-end" }] },
     }));
-    // Complete catch-up as Entry not found so the next agent_end uses turnCursorId rather than retrying catch-up.
+    // Complete catch-up with OMP's real unknown_since reply so the next agent_end uses turnCursorId rather than retrying catch-up.
     coreGap.handlePiLine(JSON.stringify({
-      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "Entry not found: gap-0",
+      type: "response",
+      id: "pi-runner-catch-up",
+      command: "get_entries",
+      success: false,
+      code: "unknown_since",
+      error: "Unknown entries cursor: gap-0",
     }));
     coreGap.handlePiLine(JSON.stringify({ type: "agent_end" }));
     expect.soft(fGap.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-B", id: "pi-runner-cursor-refresh:2" });
-    // When a pre-event refresh actually contains the newer live cursor and extends past it, turnCursorId advances to the end.
+    // When a pre-event refresh actually contains the newer live cursor and extends past it, the unheld saved cursor updates to after-C.
     coreGap.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "live-C" }));
     coreGap.handlePiLine(JSON.stringify({
       type: "response", id: "pi-runner-cursor-refresh:2", success: true, data: { entries: [{ id: "live-C" }, { id: "after-C" }] },
     }));
     expect.soft(fGap.sidecars.at(-1)!.lastEntryId).toBe("after-C");
+    // With the saved cursor pinned on an open restore gap, assert the next ordinary refresh itself uses since: "after-C"
+    // so turnCursorId advancing past live-C is proven independently of the unheld saved-cursor branch.
+    const fTurnAdvance = fakeIo();
+    const coreTurnAdvance = new RunnerCore(fTurnAdvance.io, { sessionName: "omp-a2@rig", launchId: "launch-turn-advance" }, {
+      runtime: "omp",
+      catchUpSince: "gap-0",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreTurnAdvance.start({ type: "ready" });
+    coreTurnAdvance.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    coreTurnAdvance.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "RPC response exceeded the transport limit",
+    }));
+    coreTurnAdvance.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "live-B" }));
+    coreTurnAdvance.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fTurnAdvance.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-B", id: "pi-runner-cursor-refresh" });
+    coreTurnAdvance.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "live-C" }));
+    coreTurnAdvance.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", success: true, data: { entries: [{ id: "live-C" }, { id: "after-C" }] },
+    }));
+    expect.soft(fTurnAdvance.sidecars.at(-1)!.lastEntryId).toBe("gap-0");
+    coreTurnAdvance.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fTurnAdvance.rpc.at(-1)).toEqual({ type: "get_entries", since: "after-C", id: "pi-runner-cursor-refresh:2" });
+    expect.soft(fTurnAdvance.sidecars.at(-1)!.lastEntryId).toBe("gap-0");
     void preLiveRefreshId;
 
     // 2. Generic OMP event `id` fields never count as history entry cursors.
@@ -1575,6 +1607,40 @@ describe("cursor refresh via get_entries (QA RED, qitem-20260707020922)", () => 
     expect.soft(mismatchReads).toBe(0);
     expect.soft(fNoHook.rpc.at(-1)).toEqual({ type: "get_entries", since: "e5", id: "pi-runner-cursor-refresh" });
 
+    // With no saved or live anchor, the local-tail decision itself runs: matching sessionFile calls readLastEntryId,
+    // while a mismatched resume sessionFile (resumedElsewhere) skips readLastEntryId.
+    const fMatchTail = fakeIo();
+    const matchTailPaths: string[] = [];
+    fMatchTail.io.readLastEntryId = (sessionPath) => { matchTailPaths.push(sessionPath); return "tail-match"; };
+    const coreMatchTail = new RunnerCore(fMatchTail.io, { sessionName: SESSION, launchId: "launch-match-tail" }, {
+      runtime: "pi",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreMatchTail.start();
+    coreMatchTail.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "match-1" },
+    }));
+    coreMatchTail.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(matchTailPaths).toEqual([SESSION_FILE]);
+    expect.soft(fMatchTail.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-match", id: "pi-runner-cursor-refresh" });
+
+    const fMismatchTail = fakeIo();
+    let mismatchTailReads = 0;
+    fMismatchTail.io.readLastEntryId = () => { mismatchTailReads += 1; return "wrong-tail"; };
+    const coreMismatchTail = new RunnerCore(fMismatchTail.io, { sessionName: SESSION, launchId: "launch-mismatch-tail" }, {
+      runtime: "pi",
+      requestedSessionFile: SESSION_FILE,
+    });
+    coreMismatchTail.start();
+    coreMismatchTail.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: "/state/pi/other/unexpected.jsonl", sessionId: "other-2" },
+    }));
+    coreMismatchTail.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(mismatchTailReads).toBe(0);
+    expect.soft(fMismatchTail.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+
     // Active Pi --usage-facts seat (opts.usageFacts && runtime === "pi" && io.postUsageFacts): keeps main's full get_entries
     // both on refused catch-up and at agent_end, and full read settles pending/gap state via Rule 3(b).
     const fActive = fakeIo();
@@ -1601,6 +1667,210 @@ describe("cursor refresh via get_entries (QA RED, qitem-20260707020922)", () => 
     expect.soft(fActive.sidecars.at(-1)!.lastEntryId).toBe("u9");
     coreActive.handlePiLine(JSON.stringify({ type: "agent_end" }));
     expect.soft(fActive.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh:2" });
+  });
+
+  it("#1275: OMP unknown_since and Unknown entries cursor unhold catch-up and saved-anchor refreshes while Pi Entry not found stays supported", () => {
+    const startOmp = (catchUpSince: string, tail?: () => string | null) => {
+      const f = fakeIo();
+      if (tail) f.io.readLastEntryId = () => tail();
+      const core = new RunnerCore(f.io, { sessionName: "omp-u@rig", launchId: `launch-${catchUpSince}` }, {
+        runtime: "omp",
+        catchUpSince,
+        requestedSessionFile: SESSION_FILE,
+      });
+      core.start({ type: "ready" });
+      core.handlePiLine(JSON.stringify({
+        type: "response", id: "pi-runner-get-state",
+        data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+      }));
+      return { f, core };
+    };
+
+    // 1a. OMP catch-up refusal with real code + message recovers saved cursor from valid local disk tail.
+    const cTail = startOmp("stale-catchup", () => "tail-1");
+    cTail.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false,
+      code: "unknown_since", error: "Unknown entries cursor: stale-catchup",
+    }));
+    expect.soft(cTail.f.sidecars.at(-1)!.lastEntryId).toBe("stale-catchup");
+    cTail.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(cTail.f.rpc.filter((c) => c.id === "pi-runner-catch-up")).toHaveLength(1);
+    expect.soft(cTail.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-1", id: "pi-runner-cursor-refresh" });
+    cTail.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(cTail.f.sidecars.at(-1)!.lastEntryId).toBe("tail-1");
+    cTail.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(cTail.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-1", id: "pi-runner-cursor-refresh:2" });
+
+    // 1b. OMP catch-up refusal with real code + message recovers saved cursor from valid in-memory live entryId.
+    const cLive = startOmp("stale-live");
+    cLive.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false,
+      code: "unknown_since", error: "Unknown entries cursor: stale-live",
+    }));
+    cLive.core.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "live-1" }));
+    cLive.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(cLive.f.rpc.filter((c) => c.id === "pi-runner-catch-up")).toHaveLength(1);
+    expect.soft(cLive.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-1", id: "pi-runner-cursor-refresh" });
+    cLive.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(cLive.f.sidecars.at(-1)!.lastEntryId).toBe("live-1");
+    cLive.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(cLive.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "live-1", id: "pi-runner-cursor-refresh:2" });
+    cLive.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [{ id: "live-2" }] },
+    }));
+    expect.soft(cLive.f.sidecars.at(-1)!.lastEntryId).toBe("live-2");
+
+    // 2a. OMP saved-anchor refresh refusal with real code + message replaces saved cursor from valid local disk tail.
+    const sTail = startOmp("saved-1", () => "tail-recovered");
+    sTail.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    sTail.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(sTail.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "saved-1", id: "pi-runner-cursor-refresh" });
+    sTail.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false,
+      code: "unknown_since", error: "Unknown entries cursor: saved-1",
+    }));
+    expect.soft(sTail.f.sidecars.at(-1)!.lastEntryId).toBe("saved-1");
+    sTail.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(sTail.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-recovered", id: "pi-runner-cursor-refresh:2" });
+    sTail.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(sTail.f.sidecars.at(-1)!.lastEntryId).toBe("tail-recovered");
+    sTail.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(sTail.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-recovered", id: "pi-runner-cursor-refresh:3" });
+
+    // 2b. OMP saved-anchor refresh refusal with real code + message replaces saved cursor from valid in-memory live entryId.
+    const sLive = startOmp("saved-2");
+    sLive.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    sLive.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(sLive.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "saved-2", id: "pi-runner-cursor-refresh" });
+    sLive.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false,
+      code: "unknown_since", error: "Unknown entries cursor: saved-2",
+    }));
+    sLive.core.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "mem-9" }));
+    sLive.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(sLive.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "mem-9", id: "pi-runner-cursor-refresh:2" });
+    sLive.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(sLive.f.sidecars.at(-1)!.lastEntryId).toBe("mem-9");
+
+    // 3. code: "unknown_since" alone (alternate error text) and "Unknown entries cursor" prefix alone (without code)
+    //    each unhold both catch-up and saved-anchor refresh paths.
+    const cCodeOnly = startOmp("stale-code-only", () => "tail-code-only");
+    cCodeOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false,
+      code: "unknown_since", error: "cursor expired",
+    }));
+    cCodeOnly.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(cCodeOnly.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-code-only", id: "pi-runner-cursor-refresh" });
+    cCodeOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(cCodeOnly.f.sidecars.at(-1)!.lastEntryId).toBe("tail-code-only");
+
+    const sCodeOnly = startOmp("saved-code-only", () => "tail-code-refresh");
+    sCodeOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    sCodeOnly.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    sCodeOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false,
+      code: "unknown_since", error: "cursor expired",
+    }));
+    sCodeOnly.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(sCodeOnly.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-code-refresh", id: "pi-runner-cursor-refresh:2" });
+    sCodeOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(sCodeOnly.f.sidecars.at(-1)!.lastEntryId).toBe("tail-code-refresh");
+
+    const cPrefixOnly = startOmp("stale-prefix-only", () => "tail-prefix-only");
+    cPrefixOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false,
+      error: "Unknown entries cursor: stale-prefix-only",
+    }));
+    cPrefixOnly.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(cPrefixOnly.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-prefix-only", id: "pi-runner-cursor-refresh" });
+    cPrefixOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(cPrefixOnly.f.sidecars.at(-1)!.lastEntryId).toBe("tail-prefix-only");
+
+    const sPrefixOnly = startOmp("saved-prefix-only", () => "tail-prefix-refresh");
+    sPrefixOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    sPrefixOnly.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    sPrefixOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false,
+      error: "Unknown entries cursor: saved-prefix-only",
+    }));
+    sPrefixOnly.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(sPrefixOnly.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "tail-prefix-refresh", id: "pi-runner-cursor-refresh:2" });
+    sPrefixOnly.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(sPrefixOnly.f.sidecars.at(-1)!.lastEntryId).toBe("tail-prefix-refresh");
+
+    // 4. Unrelated error code/message keeps saved cursor held in both catch-up and saved-anchor refresh.
+    const cOther = startOmp("keep-1", () => "tail-unused");
+    cOther.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false,
+      code: "internal_error", error: "temporary backend error",
+    }));
+    cOther.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(cOther.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "keep-1", id: "pi-runner-catch-up" });
+
+    const sOther = startOmp("keep-2", () => "tail-unused");
+    sOther.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    sOther.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    sOther.core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false,
+      code: "internal_error", error: "temporary backend error",
+    }));
+    sOther.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(sOther.f.rpc.at(-1)).toEqual({ type: "get_entries", since: "keep-2", id: "pi-runner-cursor-refresh:2" });
+
+    // 5. Pi "Entry not found" remains supported in both catch-up and saved-anchor refresh.
+    const fPi = fakeIo();
+    fPi.io.readLastEntryId = () => "pi-tail-2";
+    const corePi = new RunnerCore(fPi.io, { sessionName: SESSION, launchId: "launch-pi-saved" }, {
+      runtime: "pi",
+      catchUpSince: "pi-saved",
+      requestedSessionFile: SESSION_FILE,
+    });
+    corePi.start();
+    corePi.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    corePi.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    corePi.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fPi.rpc.at(-1)).toEqual({ type: "get_entries", since: "pi-saved", id: "pi-runner-cursor-refresh" });
+    corePi.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", command: "get_entries", success: false,
+      error: "Entry not found: pi-saved",
+    }));
+    corePi.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect.soft(fPi.rpc.at(-1)).toEqual({ type: "get_entries", since: "pi-tail-2", id: "pi-runner-cursor-refresh:2" });
+    corePi.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh:2", command: "get_entries", success: true, data: { entries: [] },
+    }));
+    expect.soft(fPi.sidecars.at(-1)!.lastEntryId).toBe("pi-tail-2");
   });
 });
 

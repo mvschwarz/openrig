@@ -866,9 +866,17 @@ const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
 const NEGOTIATE_ID = "omp-runner-negotiate";
 const MAX_PENDING_CURSOR_REFRESHES = 16;
 const MAX_BUFFERED_REFRESH_SPANS = 64;
+const UNKNOWN_SINCE_CODE = "unknown_since";
+const UNKNOWN_ENTRIES_CURSOR_RE = /^unknown entries cursor\b/i;
 const ENTRY_NOT_FOUND_RE = /^entry not found\b/i;
 const OVERSIZED_RESTORE_ERROR_RE = /\bexceeded the transport limit\b|\breassembly limit\b/i;
 const OVERSIZED_REASSEMBLY_DROP_RE = /\babove the \d+-byte reassembly limit$/;
+
+function isUnknownCursorError(detail: string, code: string | undefined): boolean {
+  return code === UNKNOWN_SINCE_CODE
+    || UNKNOWN_ENTRIES_CURSOR_RE.test(detail)
+    || ENTRY_NOT_FOUND_RE.test(detail);
+}
 /** RPC commands that carry operator input. Their failure means the seat
  *  cannot do the requested work; other command failures are not attention. */
 const INPUT_COMMANDS: Record<string, true> = { prompt: true, steer: true, follow_up: true };
@@ -1636,6 +1644,7 @@ export class RunnerCore {
     }
     if (record.success === false || record.error != null) {
       const detail = typeof record.error === "string" ? record.error : "request failed";
+      const code = typeof record.code === "string" ? record.code : undefined;
       const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
       const compactId = this.runtime === "pi" && typeof record.id === "string" && record.id.startsWith(COMPACT_ID)
         ? record.id : null;
@@ -1671,13 +1680,13 @@ export class RunnerCore {
       if (record.id === CATCH_UP_ID && this.runtime === "pi") {
         // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
         // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
-        this.handleCatchUpFailure(detail);
+        this.handleCatchUpFailure(detail, code);
         this.diag(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
         this.requestCursorRefresh();
         return;
       }
       if (record.id === CATCH_UP_ID) {
-        this.handleCatchUpFailure(detail);
+        this.handleCatchUpFailure(detail, code);
       } else if (this.isCursorRefreshId(record.id)) {
         const failed = this.pendingRefreshes.get(record.id);
         if (failed) {
@@ -1691,7 +1700,7 @@ export class RunnerCore {
               this.turnCursorId = undefined;
             }
             if (this.restoreState === "settled" && failed.requestSince !== undefined
-              && failed.requestSince === this.lastEntryId && ENTRY_NOT_FOUND_RE.test(detail)) {
+              && failed.requestSince === this.lastEntryId && isUnknownCursorError(detail, code)) {
               this.unheldSavedCursor = true;
             }
           }
@@ -2003,11 +2012,11 @@ export class RunnerCore {
     this.dispatchCursorRefresh(undefined);
   }
 
-  private handleCatchUpFailure(detail: string): void {
+  private handleCatchUpFailure(detail: string, code?: string): void {
     this.catchUpInFlight = false;
     this.catchUpAgedOneTurn = false;
     if (this.restoreState === "settled") return;
-    if (ENTRY_NOT_FOUND_RE.test(detail)) {
+    if (isUnknownCursorError(detail, code)) {
       this.restoreState = "settled";
       this.catchUpOversized = false;
       if (this.opts.catchUpSince) this.oversizedSinceIds.delete(this.opts.catchUpSince);

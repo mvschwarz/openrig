@@ -392,7 +392,14 @@ describe("OMP runner over protocol v2 (#1275)", () => {
       if (typeof cmd.since === "string") {
         const idx = entries.findIndex((e) => e.id === cmd.since);
         if (idx === -1) {
-          line({ type: "response", id, command: "get_entries", success: false, error: `Entry not found: ${cmd.since}` });
+          line({
+            type: "response",
+            id,
+            command: "get_entries",
+            success: false,
+            code: "unknown_since",
+            error: `Unknown entries cursor: ${cmd.since}`,
+          });
           return;
         }
         const endIdx = subsetEndId ? entries.findIndex((e) => e.id === subsetEndId) : entries.length - 1;
@@ -416,7 +423,7 @@ describe("OMP runner over protocol v2 (#1275)", () => {
     return { core, entries, rpc, mirror, sidecars, line, answerGetEntries, cursor: () => sidecars.at(-1)?.lastEntryId };
   }
 
-  it("#1275: startup restore orders [B, C] ahead of live B, retries bounded catch-up at turn end on gap or stalled pending, and unpins Entry not found after an unrelated frame drop", () => {
+  it("#1275: startup restore orders [B, C] ahead of live B, retries bounded catch-up at turn end on gap or stalled pending, and unpins OMP unknown_since after an unrelated frame drop", () => {
     // 1. Startup reply [e2, e3] after live e2 saves e3 (not e2), and buffered refresh [e3, e4] after since: e2 chains across interior e3 to e4.
     const baseEntries = [
       { type: "message", id: "e1", parentId: null },
@@ -476,11 +483,11 @@ describe("OMP runner over protocol v2 (#1275)", () => {
     rStalled.answerGetEntries({ id: "pi-runner-catch-up", since: "e1" }, "e3");
     expect.soft(rStalled.cursor()).toBe("e4");
 
-    // 3. An unrelated dropped OMP frame during startup sets gap, and an explicit Entry not found reply on pi-runner-catch-up
+    // 3. An unrelated dropped OMP frame during startup sets gap, and an explicit OMP unknown_since reply on pi-runner-catch-up
     //    clears gap so the next turn's local tail anchor confirms and saves e4.
     const rUnpin = sinceAwareOmp(baseEntries, { catchUpSince: "stale-id", tailFn: () => "e4" });
     rUnpin.line({ type: "rpc_chunk", chunkId: "rpc-event-drop", index: 0, count: 2, byteLength: 100, data: "!!!!" });
-    rUnpin.answerGetEntries({ id: "pi-runner-catch-up", since: "stale-id" }); // Entry not found: stale-id
+    rUnpin.answerGetEntries({ id: "pi-runner-catch-up", since: "stale-id" }); // code: "unknown_since", error: "Unknown entries cursor: stale-id"
     expect.soft(rUnpin.cursor()).toBe("stale-id");
     rUnpin.line({ type: "agent_end", isTerminal: true });
     expect.soft(rUnpin.rpc.at(-1)).toEqual({ type: "get_entries", since: "e4", id: "pi-runner-cursor-refresh" });
