@@ -173,3 +173,32 @@ test("strips Git's separator tab and leaves C-quoted filenames quoted", () => {
   }
   assert.deepEqual(addedLines("+++ b/ordinary name.md\t\n@@ -0,0 +1 @@\n+see /Users/alice/project\n"), [{ file: "ordinary name.md", line: 1, text: "see /Users/alice/project" }]);
 });
+
+test("--strict exits 1 on findings, keeps the advisory default at 0, and exits 0 on a clean stage", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const { execFileSync, spawnSync } = await import("node:child_process");
+  const repo = mkdtempSync(join(tmpdir(), "openrig-portability-strict-"));
+  const script = fileURLToPath(new URL("./portability-report.mjs", import.meta.url));
+  try {
+    execFileSync("git", ["init", "--quiet", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "t@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "t"]);
+    writeFileSync(join(repo, "a.md"), "see /Users/alice/work\n");
+    execFileSync("git", ["-C", repo, "add", "--", "a.md"]);
+
+    const strictWithFindings = spawnSync(process.execPath, [script, "--repo", repo, "--staged", "--strict"], { encoding: "utf8" });
+    assert.equal(strictWithFindings.status, 1, strictWithFindings.stdout + strictWithFindings.stderr);
+
+    const advisoryWithFindings = spawnSync(process.execPath, [script, "--repo", repo, "--staged"], { encoding: "utf8" });
+    assert.equal(advisoryWithFindings.status, 0, advisoryWithFindings.stdout + advisoryWithFindings.stderr);
+
+    execFileSync("git", ["-C", repo, "commit", "--quiet", "-m", "seed"]);
+    writeFileSync(join(repo, "b.md"), "Nothing machine-specific here.\n");
+    execFileSync("git", ["-C", repo, "add", "--", "b.md"]);
+    const strictClean = spawnSync(process.execPath, [script, "--repo", repo, "--staged", "--strict"], { encoding: "utf8" });
+    assert.equal(strictClean.status, 0, strictClean.stdout + strictClean.stderr);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});

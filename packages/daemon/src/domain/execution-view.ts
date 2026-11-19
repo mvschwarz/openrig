@@ -1,10 +1,11 @@
 import { physicalSessionName } from "./session-registry.js";
 import { resolveNodeFile } from "./scope/node-file.js";
-import { belongsToProject } from "./workspace/project-catalog.js";
+import { belongsToProject, projectTagIds } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadinessAsync } from "./proof/judgments.js";
 import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
+import { readWithCurrentParkBoundary } from "./current-park-arm.js";
 import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
@@ -366,7 +367,7 @@ function lifecycleProjectAction(input: {
  * lifecycle_binding_json carries identity/provenance only. Older databases
  * have no migration-079 columns and therefore return an honest empty list.
  */
-function readLifecycleExecutions(db: Database.Database, mission: string, project?: string): Array<Record<string, unknown>> {
+function readLifecycleExecutions(db: Database.Database, mission: string, projectIds?: readonly string[]): Array<Record<string, unknown>> {
   if (!hasColumn(db, "workflow_instances", "lifecycle_binding_json")) return [];
   const rows = db.prepare(
     `SELECT wi.*, ws.spec_json
@@ -383,7 +384,7 @@ function readLifecycleExecutions(db: Database.Database, mission: string, project
   for (const row of rows) {
     const binding = parseJsonRecord(row["lifecycle_binding_json"]);
     const identity = isRecord(binding["identity"]) ? binding["identity"] as Record<string, unknown> : {};
-    if (identity["mission"] !== mission || (project && identity["project"] !== project)) continue;
+    if (identity["mission"] !== mission || (projectIds && !projectIds.includes(String(identity["project"])))) continue;
     const instanceId = String(row["instance_id"]);
     const frontier = parseJsonStringList(row["current_frontier_json"]);
     const specRoot = parseJsonRecord(row["spec_json"]);
@@ -624,7 +625,7 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   }
 }
 
-function readWaveMap(db: Database.Database, missions: string[], project?: string): WaveMapData {
+function readWaveMap(db: Database.Database, missions: string[], projectIds?: readonly string[]): WaveMapData {
   const missionWhere = missions.map(() => "tags LIKE ?").join(" OR ");
   const row = db
     .prepare(
@@ -633,7 +634,7 @@ function readWaveMap(db: Database.Database, missions: string[], project?: string
         ORDER BY ts_created DESC`,
     )
     .all(...missions.map((mission) => `%mission:${mission}%`)) as Array<{ qitem_id: string; body: string | null; tags: string | null }>;
-  const selectedRow = row.find(r => missionTags(r.tags).some((t) => namesMission(t, missions)) && (!project || belongsToProject(r.tags, project)));
+  const selectedRow = row.find(r => missionTags(r.tags).some((t) => namesMission(t, missions)) && (!projectIds || belongsToProject(r.tags, projectIds)));
   if (!selectedRow?.body) return { rowId: INDETERMINATE, waves: [] };
   const block = selectedRow.body.match(WAVE_MAP_BLOCK);
   if (!block) return { rowId: INDETERMINATE, waves: [] };
@@ -748,8 +749,17 @@ async function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha
   }
 }
 
-export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: string; rig?: string; project?: string }): Promise<Record<string, unknown>> {
+export async function buildExecutionView(deps: ExecutionViewDeps, opts?: {
+  mission?: string; rig?: string; project?: string;
+  /** The selected project's current and former ids (#3261); defaults to `project` alone. */
+  projectIds?: readonly string[];
+  /** Every current and former id the catalogued projects claim, so rows none of them claims are counted. */
+  cataloguedProjectIds?: readonly string[];
+  /** The selected project's former ids that can't apply, as the project read reports them. */
+  aliasWarnings?: readonly string[];
+}): Promise<Record<string, unknown>> {
   const projectionStarted = performance.now();
+  const membershipIds = opts?.project ? (opts.projectIds ?? [opts.project]) : undefined;
   const now = deps.now ?? (() => new Date());
   const exec = deps.exec ?? defaultExec;
   const buildInfo = deps.buildInfo ?? BUILD_INFO;
@@ -773,7 +783,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       .prepare(`SELECT tags, body FROM queue_items WHERE state = 'in-progress' ORDER BY ts_updated DESC`)
       .all() as Array<{ tags: string | null; body: string | null }>;
     for (const row of active) {
-      if (opts?.project && !belongsToProject(row.tags, opts.project)) continue;
+      if (membershipIds && !belongsToProject(row.tags, membershipIds)) continue;
       const tag = parseTags(row.tags).find((value) => value.startsWith("mission:"));
       // Canonical tags win; the conventional handoff line keeps older/body-only batons visible.
       const bodyMissions = [...new Set(
@@ -833,9 +843,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     : deps.db.prepare(`${candidateSelect} WHERE (${missionWhere})`).all(...candidateBinds) as QueueRowLite[];
   const candidateMs = performance.now() - candidateStarted;
 
-  const rows = candidateRows
-    .filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs))
-    .filter(row => !opts?.project || belongsToProject(row.tags, opts.project));
+  const missionRows = candidateRows.filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs));
+  const rows = missionRows.filter(row => !membershipIds || belongsToProject(row.tags, membershipIds));
+  // #3261: a row whose project tag no catalogued project claims (current or former id) is excluded above. It's counted, so
+  // a hidden row never reads as gone.
+  const catalogued = membershipIds && opts?.cataloguedProjectIds ? new Set(opts.cataloguedProjectIds) : null;
+  const uncatalogued = catalogued
+    ? missionRows.map(row => projectTagIds(row.tags)).filter(ids => ids.length > 0 && !ids.some(id => catalogued.has(id)))
+    : [];
 
   const sliceOfRow = (r: QueueRowLite): string | null => {
     for (const t of parseTags(r.tags)) {
@@ -947,7 +962,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   // ---- arrangement authority: mission/slice YAML, with legacy EC-2 fallback ----
   const waveMap = mission === INDETERMINATE
     ? { rowId: INDETERMINATE as Indeterminate, waves: [] }
-    : readWaveMap(deps.db, missionReferences(missionsRoot, mission), opts?.project);
+    : readWaveMap(deps.db, missionReferences(missionsRoot, mission), membershipIds);
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;
@@ -960,7 +975,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   const targetRef = arrangement?.state === "valid" && arrangement.integrationRef
     ? arrangement.integrationRef
     : "main";
-  const lifecycleExecutions = mission === INDETERMINATE ? [] : readLifecycleExecutions(deps.db, mission, opts?.project);
+  const lifecycleExecutions = mission === INDETERMINATE ? [] : readLifecycleExecutions(deps.db, mission, membershipIds);
   const arrangementSlice = (id: string, dir?: string): ArrangementSlice | null => {
     if (arrangement?.state !== "valid") return null;
     return arrangement.byId.get(id) ?? (dir ? arrangement.byDir.get(dir) : undefined) ?? null;
@@ -1278,9 +1293,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
         postClaimMotionCount: Number(r.post_claim_motion ?? 0),
         now: now(),
       });
-      const wake = deps.db
-        .prepare(`SELECT wake_ref, phase FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' LIMIT 1`)
-        .get(r.qitem_id) as { wake_ref: string; phase: string } | undefined;
+      const wake = readWithCurrentParkBoundary(boundary => deps.db
+        .prepare(`SELECT w.wake_ref, w.phase FROM queue_transition_wakes w
+          WHERE w.qitem_id = ? AND w.phase = 'armed'
+            AND w.transition_id = (SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+              WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed')
+            ${boundary}
+          ORDER BY w.transition_id DESC LIMIT 1`)
+        .get(r.qitem_id)) as { wake_ref: string; phase: string } | undefined;
       // park_kind is a CLOSED enum from the DESIGN: deliberate-with-wake |
       // stalled | indeterminate. Nothing else may leak in (the live artifact
       // once emitted 'working' here), and the enum member is lowercase.
@@ -1354,7 +1374,14 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     const derived = readiness?.slices.find(s => s.scope === sequenced.dir);
     if (!derived?.readiness.configured) continue;
     sequenced.next_up = derived.eligible === null ? INDETERMINATE : derived.eligible && derived.readiness.state !== "ready" && sequenced.work_rows.length === 0;
-    sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`;
+    sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`
+      + (derived.dependsOnBasis === "not-recorded"
+        ? "; no order recorded (depends_on INDETERMINATE, EC-1), so eligibility assumed no recorded edges"
+        : derived.dependsOnBasis === "frontmatter-advisory"
+          ? "; only the SPEC frontmatter lists depends_on, which readiness treats as advisory, so eligibility assumed no recorded edges"
+          : derived.dependsOnBasis === "frontmatter-unparsed"
+            ? "; only the SPEC frontmatter lists depends_on, in a form EC-1 doesn't define (not an inline JSON array), so eligibility assumed no recorded edges"
+            : "");
   }
   const q6 = {
     lanes_live: lanes.filter((l) => l.waiting === null).length,
@@ -1367,7 +1394,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   };
 
   const view = {
-    ...(opts?.project ? { project: opts.project, membership: "exact project:<id> queue tags and lifecycle identity; unscoped rows excluded" } : {}),
+    ...(opts?.project ? { project: opts.project, membership: "exact project:<id> queue tags and lifecycle identity, for the project's id or a former id its project.yaml declares under aliases; unscoped rows excluded" } : {}),
+    ...(catalogued ? { uncatalogued_project_tags: { rows: uncatalogued.length, ids: [...new Set(uncatalogued.flat())].sort() } } : {}),
+    ...(membershipIds && opts?.aliasWarnings?.length ? { alias_warnings: [...opts.aliasWarnings] } : {}),
     view: "execution",
     readiness,
     project_readiness: missionsRoot ? await readProjectReadinessAsync(missionsRoot, readPolicy) : null,

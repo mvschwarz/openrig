@@ -241,6 +241,51 @@ describe("RigSpecExporter", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("#3416 (3): exports a Claude seat's status line throttle, and none for a seat without one", () => {
+    const rig = rigRepo.createRig("throttle-export");
+    rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: "/repo", statuslineThrottle: 30 });
+    rigRepo.addNode(rig.id, "other", { runtime: "claude-code", cwd: "/repo" });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "worker")?.statuslineThrottle).toBe(30);
+    expect(exported.nodes.find((n) => n.id === "other")?.statuslineThrottle).toBeUndefined();
+    expect(RigSpecCodec.serialize(exported)).toContain("statusline_throttle: 30");
+  });
+
+  it("#3253: exports a seat's process limits; an unreadable stored one is left out of that seat only, named, and kept as stored", () => {
+    const rig = rigRepo.createRig("legacy-limits-export");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "codex", cwd: "/repo", processLimits: { tasksMax: 512 } });
+    rigRepo.addNode(rig.id, "capped", { runtime: "codex", cwd: "/repo", processLimits: { tasksMax: 64 } });
+    rigRepo.addNode(rig.id, "other", { runtime: "codex", cwd: "/repo" });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "worker")?.processLimits).toEqual({ tasksMax: 512 });
+    expect(exported.nodes.find((n) => n.id === "other")?.processLimits).toBeUndefined();
+    expect(exporter.processLimitsNotCarried(rig.id)).toEqual([]);
+    db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", node.id);
+    const damaged = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(damaged.nodes.map((n) => n.id).sort()).toEqual(["capped", "other", "worker"]);
+    const worker = damaged.nodes.find((n) => n.id === "worker")!;
+    expect(worker).toMatchObject({ runtime: "codex", cwd: "/repo" });
+    expect(worker.processLimits).toBeUndefined();
+    expect(damaged.nodes.find((n) => n.id === "capped")?.processLimits).toEqual({ tasksMax: 64 });
+    expect(damaged.nodes.find((n) => n.id === "other")?.processLimits).toBeUndefined();
+    expect(exporter.processLimitsNotCarried(rig.id)).toEqual(["worker"]);
+    expect(db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(node.id)).toEqual({ process_limits: "{not json" });
+  });
+
+  it("#3253: exports a legacy node's memory_max in bytes, alone and beside tasks_max, and reads it back exactly", () => {
+    const rig = rigRepo.createRig("legacy-memory-export");
+    rigRepo.addNode(rig.id, "memory", { runtime: "codex", cwd: "/repo", processLimits: { memoryMax: 4294967296 } });
+    rigRepo.addNode(rig.id, "both", { runtime: "codex", cwd: "/repo", processLimits: { tasksMax: 512, memoryMax: 1073741824 } });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").LegacyRigSpec;
+    expect(exported.nodes.find((n) => n.id === "memory")?.processLimits).toEqual({ memoryMax: 4294967296 });
+    expect(exported.nodes.find((n) => n.id === "both")?.processLimits).toEqual({ tasksMax: 512, memoryMax: 1073741824 });
+    const yaml = RigSpecCodec.serialize(exported);
+    expect(yaml).toContain("memory_max: 4294967296");
+    const parsed = RigSpecCodec.parse(yaml);
+    expect(RigSpecSchema.validate(parsed).valid).toBe(true);
+    expect(exporter.processLimitsNotCarried(rig.id)).toEqual([]);
+  });
+
   it("exports launch_wrapper on legacy flat pi, codex and claude-code nodes, omits cleared/absent, and round-trips through codec/schema/reimport", () => {
     const rig = rigRepo.createRig("legacy-wrapper-export");
     const piArgv = ["mtn", "sandbox", "exec", "", "--pi-seat", "alpha", "--"];
@@ -571,6 +616,47 @@ describe("RigSpecExporter (pod-aware)", () => {
     const parsed = PodRigSpecCodec.parse(yaml);
     const result = PodRigSpecSchema.validate(parsed);
     expect(result.valid).toBe(true);
+  });
+
+  it("#3253: round-trips process_limits through pod-aware export, serialize, parse and validate, and leaves an unreadable one out by its seat", () => {
+    const { rig, n2 } = seedPodRig();
+    rigRepo.setNodeProcessLimits(n2.id, { tasksMax: 512 });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const devMembers = exported.pods.find((p) => p.id === "dev")!.members;
+    expect(devMembers.find((m) => m.id === "qa")?.processLimits).toEqual({ tasksMax: 512 });
+    expect(devMembers.find((m) => m.id === "impl")?.processLimits).toBeUndefined();
+    const yaml = PodRigSpecCodec.serialize(exported);
+    expect(yaml).toContain("tasks_max: 512");
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "qa")?.processLimits).toEqual({ tasksMax: 512 });
+    db.prepare("UPDATE nodes SET process_limits = ? WHERE id = ?").run("{not json", n2.id);
+    const damaged = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    const damagedDev = damaged.pods.find((p) => p.id === "dev")!.members;
+    expect(damagedDev.map((m) => m.id).sort()).toEqual(["impl", "qa"]);
+    expect(damagedDev.find((m) => m.id === "qa")).toMatchObject({ runtime: "codex", agentRef: "local:agents/qa", profile: "default" });
+    expect(damagedDev.find((m) => m.id === "qa")?.processLimits).toBeUndefined();
+    expect(damaged.pods.find((p) => p.id === "arch")!.members.map((m) => m.id)).toEqual(["reviewer"]);
+    expect(PodRigSpecSchema.validate(PodRigSpecCodec.parse(PodRigSpecCodec.serialize(damaged))).valid).toBe(true);
+    expect(exporter.processLimitsNotCarried(rig.id)).toEqual(["dev.qa"]);
+    expect(db.prepare("SELECT process_limits FROM nodes WHERE id = ?").get(n2.id)).toEqual({ process_limits: "{not json" });
+  });
+
+  it("#3253: round-trips a pod member's memory_max through export, serialize, parse and validate, in bytes", () => {
+    const { rig, n2 } = seedPodRig();
+    rigRepo.setNodeProcessLimits(n2.id, { tasksMax: 512, memoryMax: 4294967296 });
+    const exported = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(exported.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "qa")?.processLimits)
+      .toEqual({ tasksMax: 512, memoryMax: 4294967296 });
+    const yaml = PodRigSpecCodec.serialize(exported);
+    expect(yaml).toContain("tasks_max: 512");
+    expect(yaml).toContain("memory_max: 4294967296");
+    const parsed = PodRigSpecCodec.parse(yaml);
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find((p) => p.id === "dev")!.members.find((m) => m.id === "qa")?.processLimits)
+      .toEqual({ tasksMax: 512, memoryMax: 4294967296 });
   });
 
   it("exports selected launch_wrapper array for pi and codex pod members only and round-trips through codec/schema", () => {

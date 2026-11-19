@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { selectRigProject, rigFromSession } from "@openrig/daemon/project-catalog";
 import { ConfigStore } from "../../config-store.js";
 
 import type {
@@ -75,6 +76,65 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/** The line-based frontmatter reader the daemon's slice indexer applies to a
+ *  slice's files (`parseFrontmatter` in packages/daemon/src/domain/slices/slice-indexer.ts):
+ *  every line is trimmed at any indentation, `#` lines are skipped, wrapping quotes are
+ *  stripped, an inline `#` stays in the value, and the last `status:` line wins. */
+function parseIndexerFrontmatter(content: string): Record<string, string> {
+  if (!content.startsWith("---")) return {};
+  const rest = content.slice(3);
+  const endIdx = rest.indexOf("\n---");
+  if (endIdx === -1) return {};
+  const out: Record<string, string> = {};
+  for (const line of rest.slice(0, endIdx).split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx === -1) continue;
+    const key = trimmed.slice(0, colonIdx).trim();
+    let value = trimmed.slice(colonIdx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** The files the slice indexer merges for a slice's frontmatter, in its merge order:
+ *  later files win, so `PROGRESS.md` overrides the node file (`SPEC.md` / `README.md`). */
+function indexerFrontmatterFiles(sliceAbsPath: string): string[] {
+  const node = resolveNodeFile(sliceAbsPath);
+  return [
+    path.join(sliceAbsPath, "IMPLEMENTATION-PRD.md"),
+    ...(node ? [path.join(sliceAbsPath, path.basename(node))] : []),
+    path.join(sliceAbsPath, "PROGRESS.md"),
+  ];
+}
+
+/** Whether the slice indexer would read a `status` out of this file on its own. */
+export function indexerReadsStatusIn(content: string): boolean {
+  return Object.prototype.hasOwnProperty.call(parseIndexerFrontmatter(content), "status");
+}
+
+/** Read a slice's status back the way the slice indexer does, and name the file that
+ *  supplies it. `status` is `null` when no file gives the indexer one. This follows the
+ *  indexer's merge (later files win) rather than listing frontmatter shapes up front, so it
+ *  reads what every shape actually becomes; a parity test holds it to the real indexer. */
+export function readIndexerSliceStatus(sliceAbsPath: string): { status: string | null; file: string | null } {
+  let status: string | null = null;
+  let file: string | null = null;
+  for (const candidate of indexerFrontmatterFiles(sliceAbsPath)) {
+    if (!fs.existsSync(candidate)) continue;
+    const frontmatter = parseIndexerFrontmatter(fs.readFileSync(candidate, "utf8"));
+    if (Object.prototype.hasOwnProperty.call(frontmatter, "status")) {
+      status = frontmatter["status"]!;
+      file = candidate;
+    }
+  }
+  return { status, file };
 }
 
 /** Update specific keys in a markdown file's frontmatter. The writer owns only
@@ -260,6 +320,10 @@ export function resolveMissionsRoot(opts: {
   override?: string | null;
   cwd?: string;
   configPath?: string;
+  /** An absolute slice is an explicit target, so it keeps the previous workspace resolution. */
+  targetPath?: string;
+  /** Mission creation may create a new missions tree within an existing project. */
+  allowMissingProjectMissions?: boolean;
   /**
    * Fail instead of falling back to the configured root when an explicit
    * override (`--workspace` or OPENRIG_WORK_ROOT) names no missions tree.
@@ -296,8 +360,49 @@ export function resolveMissionsRoot(opts: {
       });
     }
   }
+  if (!fromOverride && !(opts.targetPath && path.isAbsolute(opts.targetPath))) {
+    const rig = rigFromSession(process.env.OPENRIG_SESSION_NAME);
+    if (rig) {
+      try {
+        const config = new ConfigStore(opts.configPath);
+        const selected = selectRigProject(String(config.get("workspace.catalog_path")), rig);
+        if (selected) {
+          const manifestPath = path.join(selected.root, "project.yaml");
+          if (fs.existsSync(manifestPath)) {
+            let manifest: unknown;
+            try { manifest = YAML.parse(fs.readFileSync(manifestPath, "utf8")); }
+            catch (error) {
+              throw new ScopeCliError({ fact: `Cannot read ${manifestPath}: ${(error as Error).message}`, consequence: "No project was selected.", action: "Correct the project manifest or select a workspace explicitly." });
+            }
+            const fields = manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest as Record<string, any> : null;
+            if (!fields) throw new ScopeCliError({ fact: `${manifestPath} must be a YAML object.`, consequence: "No project was selected.", action: "Correct the project manifest or select a workspace explicitly." });
+            const declared = fields.id ?? fields.metadata?.id;
+            if (declared && declared !== selected.id) throw new ScopeCliError({ fact: `Catalog project '${selected.id}' conflicts with project identity '${declared}'.`, consequence: "No project was selected.", action: "Correct the project identity or select a workspace explicitly." });
+          }
+          const warnings: string[] = [];
+          const root = readProjectMissionsRoot(selected.root, warnings);
+          for (const warning of warnings) console.error(`warning: ${warning}`);
+          if (!root || (fs.existsSync(root) ? !fs.statSync(root).isDirectory() : !opts.allowMissingProjectMissions)) throw new ScopeCliError({
+            fact: `Project '${selected.id}' selected by rig '${rig}' has no readable missions root.`,
+            consequence: "The command did not use the shared workspace.",
+            action: "Create its missions tree or select a workspace explicitly.",
+          });
+          console.error(`Project ${selected.id}: ${selected.root} (selected by rig ${rig})`);
+          return root;
+        }
+      } catch (error) {
+        const problem = error instanceof Error ? error.message : String(error);
+        console.error(`warning: rig project selection failed: ${problem}; using configured workspace. Fix the catalog or select explicitly with --project, --workspace, or a project: prefix.`);
+      }
+    }
+  }
   const configured = configuredMissionsRoot(opts.configPath);
-  if (configured) return configured;
+  if (configured) {
+    if (!fromOverride && !(opts.targetPath && path.isAbsolute(opts.targetPath))) {
+      console.error(`Project unbound: ${configured} (configured missions root)`);
+    }
+    return configured;
+  }
   throw new ScopeCliError({
     fact: `Configured workspace.slices_root is not a readable directory: ${(new ConfigStore(opts.configPath).get("workspace.slices_root") as string) || "(unset)"}.`,
     consequence: "No mission tree to operate on.",

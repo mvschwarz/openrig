@@ -29,7 +29,7 @@ composition:
 const roots: string[] = [];
 afterEach(() => { for (const p of roots.splice(0)) fs.rmSync(p, { recursive: true, force: true }); });
 
-type Member = { dir: string; specId?: string; depends?: string[]; metadataId?: string };
+type Member = { dir: string; specId?: string; depends?: string[]; metadataId?: string; frontmatterDepends?: string };
 
 function project(members: Member[]) {
   const root = fs.mkdtempSync(join(tmpdir(), "readiness-spec-id-")); roots.push(root);
@@ -47,7 +47,8 @@ function project(members: Member[]) {
     if (m.depends) manifest += `execution:\n  depends_on: ${JSON.stringify(m.depends)}\n`;
     write(join(dir, "slice.yaml"), manifest);
     const id = m.specId ? `id: ${m.specId}\n` : "";
-    write(join(dir, "SPEC.md"), `---\n${id}slice: ${m.dir}\nmission: ${MISSION}\nstatus: placeholder\n---\n\n# ${m.dir}\n\n## Proof contract\n\n- [ ] Prove ${m.dir}.\n`);
+    const listed = m.frontmatterDepends !== undefined ? `depends_on: ${m.frontmatterDepends}\n` : "";
+    write(join(dir, "SPEC.md"), `---\n${id}${listed}slice: ${m.dir}\nmission: ${MISSION}\nstatus: placeholder\n---\n\n# ${m.dir}\n\n## Proof contract\n\n- [ ] Prove ${m.dir}.\n`);
     write(join(dir, "proof", "evidence.md"), `Observed outcome for ${m.dir}.\n`);
   }
   const accept = (sliceDir: string) => {
@@ -132,5 +133,69 @@ describe("#1280 mission readiness resolves a dependency by the slice's generated
       `---\nid: OPR.99.0.1.2\nslice: 02-downstream\nmission: ${MISSION}\ndepends_on: ["OPR.99.0.1.1"]\n---\n\n## Proof contract\n\n- [ ] Prove 02-downstream.\n`);
     expect(p.readiness().issues).toEqual([]);
     expect(p.eligible("02-downstream")).toBe(true); // upstream pending, yet no edge binds them
+  });
+});
+
+// EC-1: an explicit `[]` is a statement and absence is INDETERMINATE. Readiness takes its edges from `slice.yaml` only (a
+// frontmatter-only list stays advisory, above), and says which it used, so "no order recorded" doesn't read as "no
+// dependencies". Eligibility is computed exactly as before.
+describe("mission readiness says where a slice's dependencies came from", () => {
+  const basis = (p: ReturnType<typeof project>, dir: string) => {
+    const slice = p.readiness().slices.find(s => s.scope === dir)!;
+    return { dependsOn: slice.dependsOn, dependsOnBasis: slice.dependsOnBasis, eligible: slice.eligible };
+  };
+
+  it("a slice with no recorded order reads not-recorded, with eligibility as before", () => {
+    const p = project([upstream, { dir: "02-downstream", specId: "OPR.99.0.1.2" }]);
+    expect(basis(p, "02-downstream")).toEqual({ dependsOn: [], dependsOnBasis: "not-recorded", eligible: true });
+  });
+
+  it("an explicit [] in slice.yaml reads as recorded none", () => {
+    const p = project([upstream, { dir: "02-downstream", specId: "OPR.99.0.1.2", depends: [] }]);
+    expect(basis(p, "02-downstream")).toEqual({ dependsOn: [], dependsOnBasis: "slice.yaml", eligible: true });
+  });
+
+  it("a slice.yaml list wins over the SPEC frontmatter's", () => {
+    const p = project([upstream, { ...downstreamOn("OPR.99.0.1.1"), frontmatterDepends: '["OPR.99.0.1.9"]' }]);
+    expect(p.readiness().issues).toEqual([]);
+    expect(basis(p, "02-downstream")).toEqual({ dependsOn: ["OPR.99.0.1.1"], dependsOnBasis: "slice.yaml", eligible: false });
+  });
+
+  it.each(['["OPR.99.0.1.1"]', "[]"])("a frontmatter-only depends_on %s reads frontmatter-advisory, with eligibility as before", (listed) => {
+    const p = project([upstream, { dir: "02-downstream", specId: "OPR.99.0.1.2", frontmatterDepends: listed }]);
+    expect(p.readiness().issues).toEqual([]);
+    expect(basis(p, "02-downstream")).toEqual({ dependsOn: [], dependsOnBasis: "frontmatter-advisory", eligible: true });
+  });
+
+  // A frontmatter list in a form EC-1 doesn't define (it asks for an inline JSON array) is still a recorded order: it reads
+  // frontmatter-unparsed, never "no order recorded", and isn't read as edges.
+  it.each([
+    ["an unquoted flow list", "[OPR.99.0.1.1]"],
+    ["a block list", "\n  - OPR.99.0.1.1"],
+  ])("a frontmatter-only depends_on written as %s reads frontmatter-unparsed, with eligibility as before", (_form, listed) => {
+    const p = project([upstream, { dir: "02-downstream", specId: "OPR.99.0.1.2", frontmatterDepends: listed }]);
+    expect(p.readiness().issues).toEqual([]);
+    expect(basis(p, "02-downstream")).toEqual({ dependsOn: [], dependsOnBasis: "frontmatter-unparsed", eligible: true });
+  });
+
+  it("the execution view says when eligibility assumed no recorded edges", async () => {
+    const p = project([upstream, { dir: "02-unrecorded", specId: "OPR.99.0.1.2" },
+      { dir: "03-advisory", specId: "OPR.99.0.1.3", frontmatterDepends: '["OPR.99.0.1.1"]' },
+      { dir: "04-unparsed", specId: "OPR.99.0.1.4", frontmatterDepends: "\n  - OPR.99.0.1.1" }, downstreamOn("OPR.99.0.1.1")]);
+    const db = createDb(); migrate(db, ALL_MIGRATIONS);
+    try {
+      const view = await buildExecutionView({ db, slicesRoot: () => p.missions, buildInfo: { semver: null, commit: null, dirty: null, builtAt: null } }, { mission: MISSION });
+      const q2 = view["q2_sequencing"] as Array<{ dir: string; next_up_basis: string }>;
+      const basisOf = (dir: string) => q2.find(s => s.dir === dir)!.next_up_basis;
+      expect(basisOf("02-unrecorded")).toContain("no order recorded (depends_on INDETERMINATE, EC-1), so eligibility assumed no recorded edges");
+      expect(basisOf("03-advisory")).toContain("only the SPEC frontmatter lists depends_on, which readiness treats as advisory");
+      expect(basisOf("04-unparsed")).toContain("in a form EC-1 doesn't define (not an inline JSON array)");
+      expect(basisOf("02-downstream")).not.toContain("assumed no recorded edges");
+      const readiness = view["readiness"] as { slices: Array<{ scope: string; dependsOnBasis: string }> };
+      expect(readiness.slices.map(s => [s.scope, s.dependsOnBasis])).toEqual([
+        ["01-upstream", "not-recorded"], ["02-unrecorded", "not-recorded"], ["03-advisory", "frontmatter-advisory"],
+        ["04-unparsed", "frontmatter-unparsed"], ["02-downstream", "slice.yaml"],
+      ]);
+    } finally { db.close(); }
   });
 });

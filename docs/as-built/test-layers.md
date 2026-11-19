@@ -7,8 +7,8 @@ applies-when: |
   request, what each check actually proves, and what CI will run for you. Also
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
-last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
-last-updated: 2026-11-09
+last-verified-against-source: 602ba44ff1aca1845fe912409e6d723de6008816
+last-updated: 2026-11-14
 ---
 
 # Test layers: what to run before you push, and what each layer proves
@@ -54,6 +54,10 @@ Some package tests are gated. `OPENRIG_E2E_REAL_CODEX=1` runs two daemon e2e tes
 real Codex (they also need tmux, `codex` and `~/.codex/auth.json`, and they use provider
 credits). `OPENRIG_REAL_CLAUDE_INTEGRATION=1` enables only a placeholder: it requires
 `OPENRIG_PARENT_NATIVE_ID` and checks its format, and no real-Claude fork test exists yet.
+`OPENRIG_REAL_CLAUDE_BIN=<path to claude>` runs `claude-auto-mode-native.test.ts`. It passes a
+seat's composed `--settings` to the real `claude auto-mode config` with a fixture
+`CLAUDE_CONFIG_DIR`. It needs no login and uses no credits. Managed settings on the machine can
+add entries.
 Without tmux, some tmux tests skip and others (such as `transcript-seat-env-native.test.ts`)
 fail. The CLI's release-tag tests skip without local tags unless `CI=true`, so a green local
 run without tags has skipped them. CI installs tmux and fetches full history.
@@ -79,6 +83,16 @@ are not yet runnable checks.
   Scenario scaffolds scrub inherited provider roots but preserve those passed in an explicit `baseEnv`.
   A test can still set its own
   overrides after setup. The UI suite (jsdom) uses its own `packages/ui/test/setup.ts`.
+
+  Close-all consumers explicitly create a registered private tmux scope. Their
+  real servers keep that stable environment through server cleanup. The suite
+  then removes its owned directory and retires its registration. This also
+  applies with a retained TMPDIR or a reused fixture home. Unrelated files get
+  no global per-test TMUX_TMPDIR replacement. A test-only TerminalService
+  wrapper checks raw socket paths, registered root identity and symlinks before
+  executor access. It rejects ambiguous selectors and unsupported inherited
+  TMUX forms. Rejected-path controls use inert executors. This boundary is a
+  fixture guard, not a live host audit or OS network isolation.
 
 - **Stale vendored daemon.** `npm run build:package` leaves an assembled copy of the daemon at
   `packages/cli/daemon/` (gitignored). If you change daemon source afterwards,
@@ -108,7 +122,8 @@ credentials are supplied.
 | `build-and-package` | ubuntu | `npm ci` and `npm run build`. Then `npm pack --dry-run` for cli, daemon and tui, with each file list uploaded as the `pack-lists` artifact. The job only records the lists; reviewers read them. |
 | `typecheck` | ubuntu | `npm run lint` |
 | `repo-checks` | ubuntu | `npm run test:repo` |
-| `package-tests` | macOS, matrix `daemon`, `cli`, `tui`, `ui` (fail-fast off) | Installs tmux, runs `npm ci` and `npm run build`. Then runs `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR` and a `sandbox-exec` profile that blocks outbound network except localhost and the job's own socket directory. `scripts/ci-macos-process-probe.mjs` runs first. |
+| `package-tests` | matrix (fail-fast off): `daemon`, `cli` on macOS; `tui`, `ui` on ubuntu | Installs tmux, runs `npm ci` and `npm run build`, then `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. On macOS, a `sandbox-exec` profile blocks outbound network except localhost and the job's own socket directory, and `scripts/ci-macos-process-probe.mjs` runs first. On ubuntu, the suite runs as the unprivileged runner user in a network namespace with loopback only, as in `linux-seat-environment`. A network namespace does not confine pathname Unix sockets, so this is not the macOS sandbox. Each leg reports as `package-tests (<pkg>)`. |
+| `daemon-ubuntu` | ubuntu | The full daemon suite again, beside the unchanged macOS `package-tests (daemon)`, under the same Linux confinement as the ubuntu `package-tests` legs. It adds evidence and replaces no macOS coverage. The job installs only apt's tmux: when that tmux predates control mode (3.7c), or zsh or ksh is absent, those tests skip, and when `/bin/sh` does not expand `~` in `PATH` (dash does not), that test skips too. `scripts/ci-vitest-summary.mjs` writes the counts to the job summary, then failed files and each failed, skipped or todo test with its file and line, up to 300 rows per section; the uploaded `daemon-ubuntu-results` artifact holds that summary and the complete vitest JSON report. Runs on pull requests and manual dispatch. |
 | `linux-seat-environment` | ubuntu | Builds all packages, then runs `seat-env-parent-session.integration.test.ts` with real CLI, daemon, tmux and stub seats. A network namespace has loopback only; tests run as the unprivileged runner user under `env -i` with scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. Runs on pull requests and manual dispatch, like `package-tests`. |
 | `installed-scenario` | ubuntu | `bash scripts/run-pr-scenarios.sh` (fifteen container runs, described below). Uploads `dist/pr-scenarios/` as `installed-scenario-evidence`, including on failure. |
 
@@ -159,7 +174,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 |---|---|
 | `runtime: stub` adapter | `packages/daemon/src/adapters/stub-runtime-adapter.ts`, with `stub-runner.ts` (the process that runs in the pane), `stub-script.ts` (the launch-script format) and `stub-compaction.ts` / `stub-restore.ts` |
 | Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `mutate`, `policy` are rejected at load time (`UNBOUND_STEP_VERB`) because the runner has no shipped binding for them; `emit` parses but only `refocus` is bound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
-| Scenario library | `packages/test-system/scenarios/`: 20 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
+| Scenario library | `packages/test-system/scenarios/`: 21 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
 | Runner fixtures | `packages/daemon/test/fixtures/scenarios/` (`scenario-01-per-seat-scripts`, `scenario-02-baton`, `scenario-10-one-view-state`) |
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
 | In-container entry and result check | `packages/test-system/ci/run.mjs`, `packages/test-system/ci/result.mjs` |
@@ -329,16 +344,17 @@ Seven library scenarios run in CI: `queue-baton-survives-restart` (since #243) a
 `capture-returns-addressed-seat`, `daemon-restart-preserves-team-identity`,
 `refocus-active-baton` and `refocus-parked-baton-packet-off` in passing form only. The
 `fixture` case runs the `scenario-02-baton` test fixture through the same seeded pair.
-Three more, `down-stops-every-seat`, `send-renders-in-addressed-pane` and
-`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI, and
+Four more, `down-stops-every-seat`, `send-renders-in-addressed-pane`,
+`up-relaunch-restores-a-two-seat-team` and `queue-transitions-reach-exact-states`, run
+with the local runner but not in CI, and
 `compaction-restore-resumes-role` runs the compaction round-trip's success path the same
-way. Those ten later scenarios are not in this table; "Status today" under
+way. Those eleven later scenarios are not in this table; "Status today" under
 [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario) covers seven
 of them. The other nine scenarios are authored but not yet runnable as meaningful checks:
 
 | Scenario | Why it doesn't run as a check yet | Smallest useful next step |
 |---|---|---|
-| `queue-baton-survives-restart` | Runs in CI: healthy / seeded `baton-drop` / healthy | Extend it to handoff, block, resolve and unclaim |
+| `queue-baton-survives-restart` | Runs in CI: healthy / seeded `baton-drop` / healthy | Handoff, block, resolve and unclaim are covered by `queue-transitions-reach-exact-states.yaml`; extend this baton pair itself if the restart claim should cover them too |
 | `clean-lifecycle-no-residue` | The post-`down` "nothing left over" assertion is commented out, because the format has no way to say "empty" | Add a real absence assertion |
 | `ps-scope-honesty` | The second `up` reuses the first topology, and the expected match tolerates the other rig | Make `up` honour the per-step topology, then assert the exclusion |
 | `send-verify-means-rendered` | The `send` step drops `verify`, and the stub has no input loop | Build the input-consuming stub and assert a response derived from the nonce |
@@ -462,8 +478,9 @@ not as current status.
 > check only proves the command is discoverable. Existing unit tests are not counted here.
 > They exist, but this list is about behavioural scenarios.
 
-Status today: `queue` has partial coverage, namely create, claim and list, plus the claim
-surviving a restart. `down` has partial coverage in
+Status today: `queue` has partial coverage, namely create, claim and list, the handoff,
+block, resolve and unclaim transitions (`queue-transitions-reach-exact-states.yaml`), plus
+the claim surviving a restart. `down` has partial coverage in
 `packages/test-system/scenarios/down-stops-every-seat.yaml`: after `rig down`, `rig ps` reports
 every seat stopped and the rig still listed. `send` has partial coverage in
 `send-renders-in-addressed-pane.yaml` beside it: the envelope and the message body render in

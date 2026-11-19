@@ -84,12 +84,14 @@ Shared test vectors are in `schemas/fixtures/identity-vectors.json`.
 
 `seats` gives a `pod.member` the runtimes it may use, and the profile each runtime uses. A member it doesn't list keeps
 the runtime `rig.yaml` gives it. `presets` names full mappings, and `recommended` names one of them, which must be
-`rig.yaml` as written. `rig bundle create`, `rig bundle configurations` and `rig bundle check` refuse a file that breaks
-these rules.
+`rig.yaml` as written. `rig bundle check` reports a file that breaks these rules as a finding, and
+`rig bundle configurations` names the problem instead of listing.
 
 `--preset` and `--seat` choose a configuration (see the [rig bundle reference](rig-bundle.md)). Any mix of each seat's
-declared runtimes can be built, not only the presets; a runtime a seat doesn't declare is refused, and nothing is built.
-Without either flag, create builds `rig.yaml` as written. The built archive's manifest records
+declared runtimes can be built, not only the presets. A runtime a seat doesn't declare, or a choice from a file that
+breaks these rules, is refused, and nothing is built. Without either flag, `rig bundle create`, and `rig bundle inspect`,
+`rig bundle install` and `rig up` of a GitHub folder link, use `rig.yaml` as written and don't check
+`configurations.yaml`. The built archive's manifest records
 `configuration: { id, preset }` outside the package digest; `preset` is there only when `--preset` or `--seat` chose a
 mapping that matches a declared preset.
 

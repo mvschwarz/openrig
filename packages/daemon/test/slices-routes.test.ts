@@ -227,6 +227,25 @@ describe("PL-slice-story-view-v0 slices routes", () => {
   });
 
   describe("GET /api/slices (list)", () => {
+    it("exposes child missions on their indexed parent slice", async () => {
+      writeSlice(slicesRoot, "parent", { "SPEC.md": "---\nid: M.1\n---\n# Parent\n" });
+      writeSlice(slicesRoot, "parent/slices/01-work", { "SPEC.md": "---\nid: M.1.1\nstatus: active\n---\n# Work\n" });
+      writeSlice(slicesRoot, "child", { "SPEC.md": "---\nid: M.2\n---\n# Child\n", "mission.yaml": "metadata:\n  parent: M.1.1\n" });
+      const res = await app.request("/api/slices?filter=all");
+      const body = await res.json() as { slices: Array<{ name: string; childMissions: Array<{ id: string }> }> };
+      expect(body.slices.find((slice) => slice.name === "01-work")?.childMissions).toMatchObject([{ id: "M.2" }]);
+    });
+    it("reports scan gaps alongside partial child missions", async () => {
+      writeSlice(slicesRoot, "parent", { "SPEC.md": "---\nid: M.1\n---\n" });
+      writeSlice(slicesRoot, "parent/slices/01-work", { "SPEC.md": "---\nid: M.1.1\nstatus: active\n---\n" });
+      writeSlice(slicesRoot, "child", { "SPEC.md": "---\nid: M.2\nparent: M.1.1\n---\n" });
+      writeSlice(slicesRoot, "broken", { "SPEC.md": "---\nid: [bad\n---\n" });
+      const res = await app.request("/api/slices?filter=all");
+      expect(res.status).toBe(200);
+      const body = await res.json() as { parentWarnings: string[]; slices: Array<{ name: string; childMissions: Array<{ id: string }> }> };
+      expect(body.parentWarnings.join(" ")).toContain("broken");
+      expect(body.slices.find((slice) => slice.name === "01-work")?.childMissions).toMatchObject([{ id: "M.2" }]);
+    });
     it("returns 503 with config-hint when slicesRoot is not configured", async () => {
       const emptyIndexer = new SliceIndexer({ slicesRoot: "", dogfoodEvidenceRoot: null, db });
       const emptyProjector = new SliceDetailProjector({ db, indexer: emptyIndexer });
@@ -1738,6 +1757,17 @@ describe("GET /api/slices observed queue counts", () => {
     const invalid = await app.request("/api/slices?filter=unknown");
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toMatchObject({ error: "filter_invalid" });
+  });
+
+  it("#2727 separates in-place non-delivery closed slices (?filter=closed) from ?filter=done and ?filter=active", async () => {
+    addSlice("alpha", "shipping", "delivered", "done");
+    addSlice("alpha", "shipping", "deferred", "closed-deferred");
+    addSlice("alpha", "shipping", "superseded", "closed-superseded");
+    addSlice("alpha", "shipping", "live", "active");
+    const { app } = route();
+    expect((await list(app, "?filter=done")).map((s) => s.name)).toEqual(["delivered"]);
+    expect((await list(app, "?filter=active")).map((s) => s.name)).toEqual(["live"]);
+    expect((await list(app, "?filter=closed")).map((s) => s.name).sort()).toEqual(["deferred", "superseded"]);
   });
 
   it.each([false, true])("counts all eight states only in the exact project/mission (explicit projectId=%s)", async explicit => {

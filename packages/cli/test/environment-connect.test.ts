@@ -5,7 +5,7 @@ import { environmentCommand } from "../src/commands/environment.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 vi.mock("node:child_process", async original => ({ ...await original<typeof import("node:child_process")>(), spawn: vi.fn() }));
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); process.exitCode = undefined; });
+afterEach(() => { vi.useRealTimers(); vi.mocked(spawn).mockReset(); vi.restoreAllMocks(); process.exitCode = undefined; });
 it.each(["slow-get", "slow-validate", "changed-generation"])("the viewer bounds its live lookup without the redundant validation deadline: %s", async mode => {
   vi.useFakeTimers(); const generation = mode === "changed-generation" ? "changed-generation" : "generation-one";
   const paths: string[] = [];

@@ -218,8 +218,8 @@ export interface QueueTransition {
   /** P21 §4 era-stamp: how actorSession was established. `transport:v1` = derived from the
    *  transport chokepoint; null/absent = claimed-era (pre-verification), never re-labeled. */
   identityProvenance: string | null;
-  /** With `principal:v1`: the caller the local MCP adapter checked a grant for (JSON: source, id, and for a
-   *  grant-service grant its id and version). Null on every other row. */
+  /** With `principal:v1`, the checked MCP caller (JSON: source, id and optional grant/version).
+   *  With `gateway:slack:v1`, the registered person's entity id mapped from Slack. Otherwise null. */
   identityPrincipal: string | null;
   ownerNotificationKind: string | null;
   ownerNotificationLevel: OwnerNotificationLevel;
@@ -235,7 +235,7 @@ export interface QueueTransitionInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` when actorSession came from the transport
    *  header chokepoint; omit (null) for system/claimed-era transitions — absence is the marker. */
   identityProvenance?: string | null;
-  /** Recorded only with identityProvenance `principal:v1` (resolveRecordedIdentity). */
+  /** The MCP principal (`principal:v1`) or registered person (`gateway:slack:v1`) that made this change. */
   identityPrincipal?: string | null;
   ownerNotificationKind?: string | null;
   ownerNotificationLevel?: OwnerNotificationLevel | null;
@@ -298,6 +298,9 @@ interface RecentQueueTransitionRow {
   destination_session: string;
   source_session: string;
 }
+
+export const DEFAULT_RECENT_TRANSITIONS_LIMIT = 20;
+export const MAX_RECENT_TRANSITIONS_LIMIT = 1000;
 
 /** How much of a body is read for bodyPreview, and the longest preview shown (the Story card's preview bound). */
 const BODY_HEAD_CODE_POINTS = 2000;
@@ -421,8 +424,9 @@ export class QueueTransitionLog {
       input.closureReason ?? null,
       input.closureTarget ?? null,
     ];
-    // A principal is kept only beside principal:v1; a schema without the column records today's stamp instead.
-    const principal = input.identityProvenance === "principal:v1" && this.hasIdentityPrincipalColumn ? input.identityPrincipal ?? null : null;
+    // Preserve the recorded caller or mapped Slack person; this attribution grants no permission.
+    const principal = (input.identityProvenance === "principal:v1" || input.identityProvenance === "gateway:slack:v1")
+      && this.hasIdentityPrincipalColumn ? input.identityPrincipal ?? null : null;
     if (this.hasIdentityProvenanceColumn) {
       columns.push("identity_provenance");
       values.push(input.identityProvenance === "principal:v1" && !principal ? "transport:v1" : input.identityProvenance ?? null);
@@ -505,6 +509,15 @@ export class QueueTransitionLog {
     return rows.map((row) => this.rowToTransition(row));
   }
 
+  /** The first transition after `afterTransitionId` of any of these rows, live or archived: retention may archive
+   * the member whose transition opened a health ceremony episode, and the episode must keep its name (#3192). */
+  firstAfter(qitemIds: string[], afterTransitionId: number): { transitionId: number; ts: string } | undefined {
+    if (qitemIds.length === 0) return undefined;
+    return this.db.prepare(`SELECT transition_id AS transitionId, ts FROM ${this.historySource}
+      WHERE qitem_id IN (${qitemIds.map(() => "?").join(",")}) AND transition_id > ?
+      ORDER BY transition_id ASC LIMIT 1`).get(...qitemIds, afterTransitionId) as { transitionId: number; ts: string } | undefined;
+  }
+
   listForActor(actorSession: string, limit = 100): QueueTransition[] {
     const rows = this.db
       .prepare(
@@ -518,10 +531,10 @@ export class QueueTransitionLog {
    * newest last. The window function observes the complete per-qitem state
    * sequence before the allowlist is applied, so note-only same-state writes
    * cannot masquerade as claims, resumes, or blocks. */
-  listRecent(scope: RecentQueueTransitionScope, requestedLimit = 20): RecentQueueTransition[] {
+  listRecent(scope: RecentQueueTransitionScope, requestedLimit = DEFAULT_RECENT_TRANSITIONS_LIMIT): RecentQueueTransition[] {
     const limit = Number.isFinite(requestedLimit)
-      ? Math.min(20, Math.max(1, Math.floor(requestedLimit)))
-      : 20;
+      ? Math.min(MAX_RECENT_TRANSITIONS_LIMIT, Math.max(1, Math.floor(requestedLimit)))
+      : DEFAULT_RECENT_TRANSITIONS_LIMIT;
     const activeRigWhere = archiveWhereClause("archived_at");
     const rigNames = scope.kind === "rig"
       ? [scope.rig]
@@ -605,7 +618,7 @@ export class QueueTransitionLog {
     return rows;
   }
 
-  listRecentForRig(rig: string, requestedLimit = 20): RecentQueueTransition[] {
+  listRecentForRig(rig: string, requestedLimit = DEFAULT_RECENT_TRANSITIONS_LIMIT): RecentQueueTransition[] {
     return this.listRecent({ kind: "rig", rig }, requestedLimit);
   }
 

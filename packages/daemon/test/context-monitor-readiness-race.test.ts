@@ -158,7 +158,7 @@ describe("ContextMonitor readiness ownership", () => {
       expect(inventory).toMatchObject([{ nodeId: node.id, startupStatus: ready ? "ready" : "attention_required" }]);
       expect(compactNodeProjection(inventory)).toMatchObject([{ startupStatus: ready ? "ready" : "attention_required" }]);
       expect(check).toHaveBeenCalledWith(expect.objectContaining({ nodeId: node.id, tmuxSession: session.sessionName }),
-        ...(runtime === "codex" ? [{ observationPass: expect.any(ObservationPass) }] : []));
+        { observationPass: expect.any(ObservationPass) });
       const first = state(session.id);
       await monitor.pollOnce();
       expect(state(session.id)).toEqual(first);

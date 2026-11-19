@@ -339,11 +339,12 @@ export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
 
 const seatConfiguration: Check = (v) =>
   record({ source: oneOf("registry"), profileRef: str, recordedAt: str, profileSaved: nullable(bool) })(v)
+  || record({ source: oneOf("claude_token"), label: str, kind: optional(oneOf("api-key")), note: str })(v)
   || record({
     source: oneOf("default_login"),
     home: nullable(str),
     homeNote: str,
-    homeFrom: optional(oneOf("member", "rig")),
+    homeFrom: optional(oneOf("member", "rig", "account-switch")),
   })(v)
   || record({ source: oneOf("unknown"), reason: str })(v);
 

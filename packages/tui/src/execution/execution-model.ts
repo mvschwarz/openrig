@@ -36,6 +36,10 @@ export interface ExecutionViewSnap {
   /** S06: existing workflow engine facts joined to the selected mission. */
   lifecycle_instances?: Array<Record<string, unknown>>;
   planning_guidance?: Array<{ label: string; text: string; source: string; wave?: string }>;
+  /** #3261: this mission's rows whose project tag no catalogued project claims, current or former id, so they aren't shown. */
+  uncatalogued_project_tags?: { rows: number; ids: string[] };
+  /** #3261: the selected project's declared former ids that can't apply, and why. */
+  alias_warnings?: string[];
 }
 
 const INDETERMINATE = "INDETERMINATE";
@@ -266,16 +270,25 @@ function outcomeComplete(slice: SliceFacts): boolean {
   const r = slice.readiness;
   return !!r?.configured && r.state === "ready" && r.items.length > 0 && r.items.every(i => i.state === "accepted");
 }
+/** The `closed-<reason>` words `rig scope slice close --in-place` writes. An explicit close reads as "closed"; the reason stays
+ *  visible as the declared word on the strip. Bare statuses (`deferred`, `superseded`, …) keep their earlier reading. */
+const EXPLICIT_CLOSE_WORDS = new Set(["closed-deferred", "closed-superseded", "closed-wontfix", "closed-stale"]);
+function explicitCloseWord(slice: SliceFacts): string | null {
+  if (EXPLICIT_CLOSE_WORDS.has(declaredText(slice))) return "closed";
+  return record(slice.ladder["recorded_status"])["bucket"] === "closed" ? "closed" : null;
+}
 function stateWord(slice: SliceFacts): string {
   const problem = problemText(slice);
   if (problem) return problem.startsWith("needs input") ? "needs input" : problem.startsWith("waits on") ? "blocked" : "waiting";
   if (record(slice.lane?.["activity"])["activity"] === "working") return "working";
   if (slice.work.length) return slice.work.some(w => w["state"] === "blocked") ? "waiting" : "assigned";
+  const explicitClose = explicitCloseWord(slice);
+  if (explicitClose) return explicitClose;
   if (outcomeComplete(slice)) return "outcome complete";
   if (slice.readiness?.items.some(i => i.state === "withdrawn" || i.state === "rejected")) return "reopened";
   if (slice.readiness?.configured) return "outcomes pending";
   if (stageText(slice) === "retired" || declaredText(slice) === "retired") return "retired";
-  if (declaredText(slice) === "deferred" || declaredText(slice) === "closed-deferred") return "deferred";
+  if (declaredText(slice) === "deferred") return "deferred";
   return declaredDone(slice.ladder, declaredText(slice)) ? "declared done" : "planned";
 }
 
@@ -298,7 +311,8 @@ function plannedOwnerText(slice: SliceFacts): string {
 function nextText(slice: SliceFacts): string | null {
   const seq = slice.sequencing;
   if (!seq) return null;
-  if (outcomeComplete(slice) || slice.work.length) return null;
+  // The daemon sets next_up without reading the status, so a slice closed in place can still arrive marked next_up.
+  if (outcomeComplete(slice) || slice.work.length || explicitCloseWord(slice)) return null;
   if (seq["next_up"] === true) return "ready to start";
   if (blockerText(seq["blocked_on_rows"])) return null; // the problem column carries it
 
@@ -474,7 +488,7 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   const attributed = slices.some(slice => slice.readiness?.configured);
   const done = slices.filter(outcomeComplete).length;
   const allComplete = slices.length > 0 && done === slices.length;
-  const next = slices.find(slice => nextText(slice) === "ready to start") ?? slices.find(slice => !outcomeComplete(slice) && !slice.work.length);
+  const next = slices.find(slice => nextText(slice) === "ready to start") ?? slices.find(slice => !outcomeComplete(slice) && !slice.work.length && !explicitCloseWord(slice));
   const unknown = slices.filter(slice => !slice.readiness?.configured).length;
   const missionState = allComplete ? "OUTCOMES COMPLETE" : "OUTCOMES OPEN";
   const missionToken: Token = problems ? "warn" : allComplete ? "ok" : "dim";
@@ -505,6 +519,16 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   lines.push(fact("NEXT", nextValue, next ? "accentBright" : "dim"));
   lines.push(fact("PROGRESS", progress, "bright"));
   lines.push(fact("LIFECYCLE", `${execution.readiness?.historicalStatus ?? "unknown"} · separate from outcomes`, "dim"));
+  const unmatched = execution.uncatalogued_project_tags;
+  if (unmatched?.rows) {
+    lines.push(fact("UNMATCHED", `${unmatched.rows} row${unmatched.rows === 1 ? "" : "s"} not shown`, "warn"));
+    lines.push(...wrapDetailLines([{ text: `  Tagged ${unmatched.ids.map(id => `project:${id}`).join(", ")}, which no catalogued project claims. A renamed project lists its former id under aliases: in its project.yaml.` }], width));
+  }
+  const ignoredAliases = execution.alias_warnings ?? [];
+  if (ignoredAliases.length) {
+    lines.push(fact("ALIASES", `${ignoredAliases.length} declared former id${ignoredAliases.length === 1 ? "" : "s"} ignored`, "warn"));
+    lines.push(...wrapDetailLines(ignoredAliases.map(text => ({ text: `  ${text}` })), width));
+  }
   if (needsHuman.length) {
     const first = needsHuman[0]!;
     lines.push(semanticAction([
@@ -518,7 +542,7 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   const provenanceAction = attributed || unknown > 0 ? open("evidence") : open("sources");
   const provenance: SemanticSeg[] = [
     { text: "  provenance · ", token: "dim" },
-    { text: attributed ? `proof judgments · ${done}/${slices.length} ready${unknown ? ` · ${unknown} legacy unknown` : ""}` : unknown > 0 ? `evidence gap ${unknown}/${slices.length} unknown` : `daemon build ${build}`, token: unknown > 0 || (attributed && execution.readiness!.state === "unknown") ? "warn" : "dim" },
+    { text: attributed ? `proof judgments · ${done}/${slices.length} ready${unknown ? ` · ${unknown} legacy unknown` : ""}` : unknown > 0 ? `evidence gap ${unknown}/${slices.length} unknown` : `daemon build ${build}`, token: unknown > 0 || (attributed && execution.readiness?.state === "unknown") ? "warn" : "dim" },
   ];
   const localTime = displayTime(execution.derived_at, timeZone);
   if (provenance.reduce((n, s) => n + s.text.length, 0) + localTime.length + 3 <= width) {
@@ -856,7 +880,13 @@ export function executionSliceStripLines(
   const evidence = `${evidenceText(slice.cells, slice.rank)}${unconfirmed.length ? ` · ${unconfirmed.join(" / ")} unconfirmed (${slice.cells[RUNGS.find((rung) => slice.cells[rung].state === "undetermined")!].basis})` : ""}`;
   const liveWord = slice.lane ? (waitingOn(slice.lane) ? "waiting" : str(activity["activity"], "claimed")) : "no claimed lane";
   const declaredWord = declared?.trim().toLowerCase() || "no declared status";
-  const next = (declaredWord === "retired" || declaredWord === "deferred" || declaredWord === "closed-deferred" || declaredDone(slice.ladder, declaredWord)) && !slice.lane
+  const isTerminalDeclared =
+    declaredWord === "retired"
+    || declaredWord === "deferred"
+    || EXPLICIT_CLOSE_WORDS.has(declaredWord)
+    || record(slice.ladder["recorded_status"])["bucket"] === "closed"
+    || declaredDone(slice.ladder, declaredWord);
+  const next = isTerminalDeclared && !slice.lane
     ? `none — declared ${declaredWord}`
     : nextText(slice) ?? (slice.lane ? (waitingOn(slice.lane) ? `waiting on ${waitingOn(slice.lane)}, see the waiting row above` : "in progress on the lane above") : "nothing the projection can sequence");
   return [

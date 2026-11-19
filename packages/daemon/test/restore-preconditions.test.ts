@@ -48,6 +48,24 @@ const cases = [
 ] as const;
 
 describe("shared restore preconditions", () => {
+  it("reports a saved profile cleared on the current Codex seat through restore-check", () => {
+    const snapshot = data();
+    snapshot.nodes[0]!.runtime = "codex";
+    snapshot.nodes[0]!.codexConfigProfile = "limited";
+    const current = { ...node(), runtime: "codex", codexConfigProfile: null };
+    const service = new RestoreCheckService(deps({
+      getNodeInventory: () => [current],
+      getRestoreInputs: () => ({ snapshot: { id: "snapshot-1", kind: "manual", data: snapshot }, servicesRecord: null }),
+    }));
+    const check = service.check({ noHooks: true, noQueue: true }).checks.find((entry) => entry.check === "rig.test-rig.restore-preconditions");
+    expect(check?.status).toBe("yellow");
+    expect(check?.evidence).toContain("had Codex profile limited in this snapshot");
+    expect(check?.evidence).toContain("does not prove what a prior process enforced");
+    for (const profiles of [{ seat: "limited" }, {}, { seat: "other" }]) {
+      expect(validatePreRestore(snapshot, { currentRuntimes: { seat: "codex" }, currentCodexProfiles: profiles }).warnings).toEqual([]);
+    }
+  });
+
   it.each(cases)("preserves the exact refusal for missing %s", (missing, code, message, remediation) => {
     const result = validatePreRestore(data(), { fsOps: { exists: (path) => path !== missing }, servicesRecord: services() });
     expect(result).toEqual({
@@ -139,6 +157,22 @@ describe("restore-check consumes the shared snapshot validation", () => {
     expect(result.recovery.blocked[0]?.reason).toContain(message);
   });
 
+  // A seat's own missing startup file holds only a seat restore launches; restore keeps an external CLI attachment instead,
+  // so for that seat it's a named caveat, and a service input that's missing still blocks the rig.
+  it("names a missing startup file of a seat restore leaves attached as a caveat, not a rig blocker", () => {
+    const external = () => [{ ...node(), attachmentType: "external_cli" } as NodeInventoryEntry];
+    const result = new RestoreCheckService(deps({ getNodeInventory: external, exists: (path) => path !== "/files/notes.md" }))
+      .check({ compact: true, noQueue: true, noHooks: true });
+    expect(result.checks.find((c) => c.check === "rig.test-rig.restore-preconditions")).toMatchObject({
+      status: "yellow",
+      evidence: "Snapshot chosen-snapshot: required_startup_file_missing: Required startup file is missing for seat: /files/notes.md (restore doesn't launch this seat, so this doesn't block a restore)",
+    });
+    expect(result.verdict).toBe("restorable_with_caveats");
+    const services = new RestoreCheckService(deps({ getNodeInventory: external, exists: (path) => path !== "/services" }))
+      .check({ compact: true, noQueue: true, noHooks: true });
+    expect(services.checks.find((c) => c.check === "rig.test-rig.restore-preconditions")?.status).toBe("red");
+  });
+
   it("uses yellow for warnings only and green for a completed empty result", () => {
     const snapshot = data();
     snapshot.nodeStartupContext!["node-1"]!.resolvedStartupFiles[0]!.required = false;
@@ -162,7 +196,9 @@ describe("restore-check consumes the shared snapshot validation", () => {
       getNodeInventory: (id) => [node(id)], getRestoreInputs,
     })).check({ noQueue: true, noHooks: true });
     expect(getRestoreInputs).toHaveBeenCalledTimes(2);
-    expect(result.verdict).toBe("not_restorable");
+    // No stopped seat blocks (restore brings each back from its saved startup context), so the unavailable inputs make
+    // the verdict unknown; the rigs stay isolated below.
+    expect(result.verdict).toBe("unknown");
     expect(result.rigs.find((r) => r.rigId === "rig-1")?.status).toBe("unknown");
     expect(result.rigs.find((r) => r.rigId === "rig-2")?.status).not.toBe("unknown");
     expect(result.recovery.unknown[0]?.reason).toContain(reason);

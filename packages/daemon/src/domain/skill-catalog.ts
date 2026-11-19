@@ -234,10 +234,15 @@ export function inspectSkillDirectory(root: string): { digest: string; files: Re
     }
   };
   walk(root, "");
-  const digest = sha256(Object.keys(files).sort(compareBytes)
-    .map((path) => `${path}\0${fileModes[path]!.toString(8).padStart(3, "0")}\0${files[path]}`)
+  return { digest: skillTreeDigest(files, fileModes), files };
+}
+
+/** A skill tree's digest from each file's hash and mode: what `inspectSkillDirectory` reports, for a tree known by its
+ *  record rather than walked. */
+export function skillTreeDigest(files: Readonly<Record<string, string>>, modes: Readonly<Record<string, number>>): string {
+  return sha256(Object.keys(files).sort(compareBytes)
+    .map((path) => `${path}\0${modes[path]!.toString(8).padStart(3, "0")}\0${files[path]}`)
     .join("\n"));
-  return { digest, files };
 }
 
 /** The catalog's HEAD, and the top-level folders holding uncommitted or untracked content. A skill folder with

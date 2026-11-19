@@ -36,6 +36,14 @@ The runner's own defaults for dsh:
 - **Its version:** the launch record names dsh's version from `dsh --version`. If that fails or takes over 5 seconds, it
   names the version dsh's ACP handshake reports, marked as such: dsh 0.2.1-rc.2 reports 0.0.1 there.
 
+## Optional native input and dedicated wake
+
+This copy also implements the optional version-1 [run-bound channel](../../harness-runner-contract.md#optional-run-bound-native-input-and-wake-version-1). Choose the seat's native route explicitly; `runner: true` alone does not change its typed default. The private launch grant stays in this process and is removed from the dsh child environment.
+
+Native input uses this runner's existing ACP prompt queue. A native wake gets a dedicated prompt and returns only its actual assistant message chunks after its own terminal ACP response. Later inputs wait behind it; multiple wakes are independent prompts. HTTP receipt retries and SSE reconnects reuse the live process map and do not reissue a prompt. Caller timeout does not cancel native work. Structured native text bypasses the person's slash/Ctrl-C parser, while `/abort` and Ctrl-C typed by a person remain available. Named managed cancellation targets only the exact outstanding prompt after Core permission withdrawal. Person controls remain available; an abort before prompt write interrupts it locally. Retried turn reports do not hold ordinary input. See the contract for requested versus confirmed results and body-free recovery evidence.
+
+The new channel path is tested with the actual runner process and an offline ACP backend. Earlier native permission/cancel testing of older runner copies does not qualify these new wake semantics or make native a default. See the contract for custody/uncertainty, erased receipts and the separate native-program proof limits.
+
 ## Permissions
 
 The runner submits each request to OpenRig, which asks one person:
