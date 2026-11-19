@@ -13,7 +13,9 @@
 import { NotRun } from "../harness/case-context.mjs";
 import { bodyIntact, deliveredOnce } from "./s2.mjs";
 
-const MODES = ["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold"];
+const MODES = ["off", "draft-aware", "openrig-urgent", "urgent-only", "sends-only", "hold", "queue-only"];
+/** A mode registered before the oracle names its expected outcome: recorded NOT RUN with why, never judged. */
+const NOT_YET = { "queue-only": "no expected outcome in the oracle yet: #3418 (d13eddff) added the queue-only typing-guard mode, and QA's oracle names none" };
 // The dialog runs last: where a version types into it, the program's state (a model chosen, a sub-dialog open) is no
 // longer the one the later states assume.
 const STATES = ["idle", "draft", "copy_mode", "busy", "dialog"];
@@ -157,12 +159,21 @@ async function leaveState(ctx, state, entered) {
  *  watchdog's history (`deliveryStatus`, and in `evaluationNotes` the input phase, the no-input code and the outboxIds). */
 export function occurrenceResult(entry) {
   const notes = entry.evaluationNotes ?? {};
-  if (entry.deliveryStatus === "ok") return { ok: true, sent: true };
-  if (entry.deliveryStatus === "retained") return { ok: true, outcome: "retained", sent: false, reason: null, outboxIds: notes.outboxIds ?? [] };
+  // What the watchdog itself recorded about this automatic notice's outcome, field by field, and who sent it. Read
+  // as recorded: none of it stands in for the transport's reason code.
+  const recorded = { actor: "watchdog@system", outcome: entry.outcome ?? null, skipReason: entry.skipReason ?? null, deliveryStatus: entry.deliveryStatus ?? null,
+    deliveryFact: notes.deliveryFact ?? null, deliveryCode: notes.deliveryCode ?? null, deliveryReason: notes.deliveryReason ?? null,
+    inputPhase: notes.deliveryInputPhase ?? null, nextAction: notes.nextAction ?? null };
+  if (entry.deliveryStatus === "ok") return { ok: true, sent: true, recorded };
+  if (entry.deliveryStatus === "retained") return { ok: true, outcome: "retained", sent: false, reason: null, outboxIds: notes.outboxIds ?? [], recorded };
   const phase = notes.deliveryInputPhase ?? null;
   return { ok: false, outcome: "failed", sent: phase === "not_reached" ? false : phase === null ? null : true, inputPhase: phase,
-    reason: notes.deliveryCode ?? null, error: notes.deliveryReason ?? null };
+    reason: notes.deliveryCode ?? null, error: notes.deliveryReason ?? null, recorded };
 }
+
+/** An automatic notice's recorded outcome reason, the first field that holds one: the transport's code where the
+ *  version keeps it, then the watchdog's own skip reason, then its delivery text. Null when the record has none. */
+export const recordedReason = (recorded) => recorded?.deliveryCode ?? recorded?.skipReason ?? recorded?.deliveryReason ?? null;
 
 /** One sender's attempt, and OpenRig's own record of what it did: the send's JSON result, or the reminder occurrence's
  *  evaluation. Without such a record, `json` is null and `missing` says why: judge() then looks for observed effects. */
@@ -179,7 +190,13 @@ export async function attempt(ctx, sender, marker, { occurrenceTimeoutMs = 40_00
         if (!entry) await ctx.sleep(pollMs);
       }
     } finally { await ctx.stopWatchdog(jobId); }
-    if (!entry) return { since, source: "watchdog", json: null, missing: `no occurrence of the reminder was evaluated within ${occurrenceTimeoutMs / 1000} s` };
+    if (!entry) {
+      // Never passed silently: the job and what its occurrence rows say are kept with the miss.
+      const rows = await ctx.watchdogOccurrences?.() ?? null;
+      const occurrenceIds = rows ? rows.filter((r) => r.auditPointer === jobId).map((r) => ({ outboxId: r.outboxId, state: r.deliveryState ?? null })) : null;
+      return { since, source: "watchdog", json: null, jobId, occurrenceIds,
+        missing: `no occurrence of reminder ${jobId} was evaluated within ${occurrenceTimeoutMs / 1000} s (its occurrence rows: ${occurrenceIds ? JSON.stringify(occurrenceIds) : "unreadable"})` };
+    }
     // The occurrence's own outbox row: from watchdog@system, naming this job and carrying this marker. Null when unreadable.
     const rows = await ctx.watchdogOccurrences?.() ?? null;
     const occurrenceIds = rows ? rows.filter((r) => r.auditPointer === jobId && (r.body ?? "").includes(marker)).map((r) => r.outboxId) : null;
@@ -252,10 +269,21 @@ export async function judge(ctx, { mode, state, sender, marker, attempt: at, exp
   const reason = json.reason ?? held.map((i) => i.delivery?.reason).find(Boolean) ?? null;
   const delivered = json.ok === true && !retained;
   const correlation = idsCorrelate(json, heldIds, at);
-  const seenWith = (writes) => ({ source: at.source, json, reason, held: held.map((h) => ({ outboxId: h.outboxId, state: h.deliveryState, reason: h.delivery?.reason ?? null })), writes: writes.length });
+  // Who sent it: an explicit send from the harness (unattributed), or the watchdog's automatic notice with its record.
+  const actor = at.source === "watchdog" ? { actor: "watchdog@system", source: "watchdog", jobId: at.jobId ?? null, occurrenceIds: at.occurrenceIds ?? null }
+    : { actor: "rig send (harness, unattributed)", source: "send" };
+  if (at.source === "watchdog") verdict.info(`${label}: automatic outcome reason as recorded`, { ...actor, ...(json.recorded ?? {}) });
+  const seenWith = (writes) => ({ ...actor, json, reason, held: held.map((h) => ({ outboxId: h.outboxId, state: h.deliveryState, reason: h.delivery?.reason ?? null })), writes: writes.length });
   // A named reason must be the one recorded; where the version records none, the combination can't be confirmed.
   const reasonFits = (reasons) => !reasons || reason === null || reasons.includes(reason);
-  const reasonShort = (reasons) => reasons && reason === null ? `the outcome's reason isn't recorded by this version, so ${reasons.join(" or ")} can't be confirmed` : null;
+  // An automatic notice's own record is named either way: what it recorded, or that it recorded nothing.
+  const reasonShort = (reasons) => {
+    if (!reasons || reason !== null) return null;
+    if (at.source !== "watchdog") return `the outcome's reason isn't recorded by this version, so ${reasons.join(" or ")} can't be confirmed`;
+    const own = recordedReason(json.recorded);
+    return own === null ? `no automatic outcome reason recorded (the watchdog's history has no outcome code, skip reason or delivery reason), so ${reasons.join(" or ")} can't be confirmed`
+      : `the automatic notice recorded ${JSON.stringify(own)}, not the matrix's ${reasons.join(" or ")}, so it can't be confirmed`;
+  };
   let notRun = null;
 
   switch (expect.type) {
@@ -363,8 +391,10 @@ function modeCase(mode) {
     id: `D18-${mode}`,
     title: `typing guard ${mode}: every state × every sender`,
     programs: ["claude", "codex"],
+    ...(NOT_YET[mode] ? { notRun: NOT_YET[mode] } : {}),
     script: () => ({ rules: [{ when: "DLV-D18-[^ ]*-busy-", gate: "{{marker}}", say: "the slow turn is done" }, { say: "ack {{marker}}" }] }),
     async run(ctx) {
+      if (NOT_YET[mode]) throw new NotRun(NOT_YET[mode]);
       const { verdict } = ctx;
       await ctx.settle();
       const set = await ctx.setGuard(mode);
@@ -424,8 +454,9 @@ function modeCase(mode) {
       // Never replayed: neither leaving the states, nor retiring, nor changing the mode delivers a held or refused message.
       const short = await modeChangeControl(ctx, { mode, kept, watched });
       if (short) { notRun.push(`mode-change control: ${short}`); verdict.info(`${mode}: mode-change control NOT RUN`, short); }
-      // A combination that couldn't run leaves the cell NOT RUN, unless a judged one already failed.
+      // A combination that couldn't run leaves the cell NOT RUN, unless a judged one already failed; then they stay listed.
       if (notRun.length && verdict.result !== "FAIL") verdict.skip(`not run: ${notRun.join("; ")}`);
+      else if (notRun.length) verdict.info(`${mode}: combinations NOT RUN beside the failure`, notRun);
     },
   };
 }
