@@ -64,6 +64,9 @@ export interface NodeEntry {
   configuredAccount?: string | null;
   model: string | null;
   modelObservation?: ModelObservation;
+  /** #3513: the Remote Control session the seat's own hooks last reported (null sessionId: seen absent); null or absent
+   *  when no observation applies. A last-seen observation, not proof of a live connection. */
+  remoteControl?: { sessionId: string | null; observedAt: string } | null;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -232,6 +235,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "launchWrapper",
   "model",
   "modelObservation",
+  "remoteControl",
   "sessionStatus",
   "intentionallyStopped",
   "startupStatus",
@@ -802,6 +806,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
     if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
+    // #3513: only a served observation; its time says when it was last seen.
+    if (n.remoteControl) compact.remoteControl = { sessionId: n.remoteControl.sessionId, observedAt: n.remoteControl.observedAt };
     // The served identity evidence (verdict, reason, observation time) and the registry's recorded
     // status, without the raw evidence; recorded running is not a check that the process is alive.
     if (n.storedSessionStatus !== undefined) compact.storedSessionStatus = n.storedSessionStatus;

@@ -9,6 +9,7 @@ import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
+import { RemoteControlObservationStore, parseRemoteControlReport } from "../domain/remote-control-observations.js";
 import { WorkingLivenessGate, isWorkingLivenessBeat, workingLivenessSeconds, type WorkingLivenessIgnored } from "../domain/working-liveness.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { StreamStore } from "../domain/stream-store.js";
@@ -810,9 +811,32 @@ function isPiRpcHarness(db: import("better-sqlite3").Database, sessionId: string
     }
   }
 
+  observeRemoteControl(c, store, body);
   const recorded = recordHookActivity(c, store, body);
   if ("ignored" in recorded) return c.json({ ok: true, ignored: recorded.ignored });
   return "refused" in recorded ? recorded.refused : c.json({ ok: true, activity: recorded.activity });
+}
+
+/** #3513: keep what the seat's own Claude hooks say about its Remote Control session, for the node read. Only the
+ *  current occupant's hook in the seat's own conversation counts (the store checks the conversation); a delayed event
+ *  from an earlier occupant is not recorded. This optional observation never changes how the event itself is recorded. */
+function observeRemoteControl(c: Context, store: AgentActivityStore, body: Record<string, unknown>): void {
+  if (body.runtime !== "claude-code") return;
+  const report = parseRemoteControlReport(body);
+  if (!report) return;
+  const generation = stringOrNull(body.generation);
+  const conversationId = stringOrNull(body.sessionId);
+  const occurredAt = stringOrNull(body.occurredAt);
+  if (!generation || !conversationId || !occurredAt || !Number.isFinite(Date.parse(occurredAt))) return;
+  const sessionName = stringOrNull(body.sessionName);
+  const seat = store.resolveSession({ sessionName, nodeId: stringOrNull(body.nodeId) });
+  if (!seat || seat.runtime !== "claude-code" || (sessionName && sessionName !== seat.sessionName)
+    || (body.nodeId != null && body.nodeId !== seat.nodeId)) return;
+  if (liveOccupantGeneration(c, store, seat.nodeId) !== generation) return;
+  try {
+    new RemoteControlObservationStore(store.db).record({ nodeId: seat.nodeId, generation, conversationId, report,
+      observedAt: new Date(occurredAt).toISOString() });
+  } catch { /* An optional observation never affects the event's own recording. */ }
 }
 
 /** Record one hook event for its seat and feed it to the activity oracle: the tail of the hook ingress, also used when a

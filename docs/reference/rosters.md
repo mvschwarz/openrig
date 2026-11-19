@@ -87,6 +87,19 @@ UNKNOWN is `{ "status": "unknown", "reason": "..." }`; older daemons may yield
 its status and occupant generation. Human output and roster reports use the full
 labelled observation.
 
+Daemon node listings and `rig ps --nodes --json` also carry `remoteControl`: the Claude Code Remote Control
+session a Claude seat's own hooks last reported, as `{ "sessionId": "session_...", "observedAt": "..." }`.
+Claude Code sets `CLAUDE_CODE_BRIDGE_SESSION_ID` in its hook subprocesses while Remote Control is connected
+(documented from 2.1.199), and the activity relay reports it on the hook events it already sends; there is no
+separate watcher and no transcript read. The seat's conversation is then
+`https://claude.ai/code/<sessionId>`. It is a **last seen** observation with its time, not proof of a live
+connection: an idle seat's value ages, and a disconnect or a replaced session is learned on the next hook.
+`sessionId: null` means a later hook of the same occupant and conversation saw no session (a disconnect seen).
+`null`, or the key missing in compact JSON or from an older daemon, means no observation applies: never reported,
+a Codex seat, a Claude that doesn't set the variable, or one recorded for an earlier occupant or conversation.
+A hook that sees no variable is never taken as a disconnect on its own, and an earlier occupant's link is never
+shown as current.
+
 A member marked `"hosted": true` is a hosted member: a tool outside the terminal that reaches the team over MCP, with no node or pane.
 `rig_team` lists it with its capabilities and caveat, no pane and activity unknown, unless its seat is one of the rig's nodes.
 For a caller on an external grant, a node seat on a roster keeps its own `rig_team` entry, with that entry's label,
