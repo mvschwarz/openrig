@@ -53,6 +53,7 @@ import type { HumanQuestion } from "../domain/human-questions.js";
 import { sharedChannelFor } from "../domain/gateway/participants.js";
 import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
 import { feedPerspective } from "../domain/feed-perspective.js";
+import { waitForQueueItem } from "../domain/queue-read-wait.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -1777,10 +1778,14 @@ export function queueRoutes(): Hono {
   });
 
   // GET /:qitemId — show one
-  app.get("/:qitemId", (c) => {
+  app.get("/:qitemId", async (c) => {
     const qitemId = c.req.param("qitemId");
     const repo = getRepo(c);
-    const item = repo.getById(qitemId);
+    const seconds = Number(c.req.query("waitSeconds") ?? "0");
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 50) {
+      return c.json({ error: "invalid_wait_seconds", message: "waitSeconds must be an integer from 0 to 50" }, 400);
+    }
+    const { item, waited } = await waitForQueueItem(repo, getEventBus(c), qitemId, seconds, c.req.raw.signal);
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
     // #1029: the wake path's own routing decision, so a reader never guesses a registered
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
@@ -1789,6 +1794,7 @@ export function queueRoutes(): Hono {
     const closing = repo.closingTransition(qitemId, item.state);
     return c.json({
       ...item,
+      ...(waited ? { waited } : {}),
       // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
       decisionRevision: repo.decisionRevision(item),
       // The answer rows returned to this row, read by their link rather than their text; empty when none came back here.
