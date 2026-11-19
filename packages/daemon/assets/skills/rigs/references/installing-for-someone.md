@@ -32,8 +32,9 @@ that row's `tmuxAttachCommand`, exactly as listed (it names the daemon's tmux se
 one), for a new terminal on the same host and user (over SSH, connect there first). Ctrl-b, then d detaches without stopping it.
 Ask the person's goal, project folder and branch unless they've said, then hand them to the ready operator; do not implement the project yourself.
 Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName`. By default the
-person stays with you: hand the goal over as a queue task with a return route, so the team's questions and its result come
-back to you, written as the skill's step 2 says ("If the person stays with you"):
+person stays with you: hand the goal over as a queue task with a return route, so most of the team's questions and its
+result come back to you (choice dialogs and other hosts keep their path), written as the skill's step 2 says ("If the
+person stays with you"):
 `rig queue create --destination <canonicalSessionName> --return-route auto --summary "<the goal in a sentence>" --body-file <file> --verify`
 (if this session joined, `--return-route self` with your `OPENRIG_SESSION_NAME` in front). Only if the person chose to answer
 in the operator's pane, send
