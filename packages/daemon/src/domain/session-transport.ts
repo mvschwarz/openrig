@@ -92,8 +92,10 @@ const MID_WORK_PATTERNS = [
 
 // Under an empty prompt, the word alone is a finished turn's prose ("Working tree is clean; ready for an
 // assignment.", #3544). There only a status-shaped row counts: "Working" after an optional marker, then a
-// paren, an ellipsis or the end of the line ("• Working (3s • esc to interrupt)", "✻ Working…", "⠋ Working").
-const LIVE_WORKING_ROW_PATTERN = /^(?:\S\s+)?Working(?:\s*\(|\s*…|\.{3}|\s*$)/;
+// timer paren, an ellipsis that ends the line or opens the timer, or the end of the line
+// ("• Working (3s • esc to interrupt)", "✻ Working…", "⠋ Working"). Prose such as "Working (as requested), …"
+// or "Working... then I committed it." has no timer after the paren or ellipsis.
+const LIVE_WORKING_ROW_PATTERN = /^(?:\S\s+)?Working(?:\s*\(\s*\d|\s*(?:…|\.{3})\s*(?:\(\s*\d|$)|\s*$)/;
 const MID_WORK_PATTERNS_UNDER_IDLE_PROMPT = MID_WORK_PATTERNS.map(pattern =>
   pattern === WORKING_WORD_PATTERN ? LIVE_WORKING_ROW_PATTERN : pattern);
 
