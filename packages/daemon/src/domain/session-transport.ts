@@ -4939,7 +4939,7 @@ export class SessionTransport {
         // who wants the window to follow its inherited sizing again; it isn't changed here.
         if (sizing.live === "manual" && sizing.prior === "manual") {
           return `the window's size is pinned (its own window-size is manual); to drop that setting so the window follows `
-            + `its inherited window-size again, run ${tmuxUnsetWindowSizeCommand(sizing.window)}`;
+            + `its inherited window-size again, run ${tmuxUnsetWindowSizeCommand(sizing.window)} on the daemon's host`;
         }
         // Still manual here: a pin whose holders are gone (a capture or a web terminal that ended without giving it back).
         // It's taken over, and given back after this read even when the pane is already big enough.

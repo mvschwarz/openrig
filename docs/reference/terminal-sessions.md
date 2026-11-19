@@ -100,8 +100,9 @@ Use tmux's inherited `window-size latest` policy for the terminal most recently
 used to control sizing. OpenRig does not change a person's global tmux policy.
 A deliberate `window-size manual` setting remains an explicit fixed-size choice.
 `rig capture --readable` reads such a window as it is and names the command that
-drops the window's own setting (`tmux set-window-option -t <window> -u window-size`,
-on the daemon's server), for when you want it to follow its inherited sizing again.
+drops the window's own setting (`tmux set-window-option -t <window> -u window-size`
+with the daemon's server flags, to run on the daemon's host), for when you want it
+to follow its inherited sizing again.
 OpenRig's temporary layout and readable-capture pins release by unsetting the
 window's local `window-size` option; they do not restore an old local override.
 With the last pin released, the window inherits the global policy again.

@@ -87,7 +87,9 @@ function shellWord(value: string, force = false): string {
 
 /** `tmux`, with the daemon's server flags when it isn't on the default server. */
 export function tmuxOnDaemonServer(): string {
-  const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
+  // A server name or socket path with `=` is quoted, as tmuxAttachCommand quotes a session word: zsh reads a word that
+  // starts with `=` as a command lookup.
+  const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg, arg.includes("=")))).join(" ");
   return `tmux${server ? ` ${server}` : ""}`;
 }
 

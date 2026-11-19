@@ -65,6 +65,14 @@ describe("the daemon's tmux server", () => {
     expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -S '/tmp/my sockets/team' set-window-option -t @7 -u window-size");
   });
 
+  it("quotes a server name with `=`, which zsh would read as a command lookup", () => {
+    setDaemonTmuxServer(["-L", "=person"]);
+    expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -L '=person' set-window-option -t @7 -u window-size");
+    expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux -L '=person' attach -t dev-build@starter");
+    setDaemonTmuxServer(["-S", "/tmp/a=b/team"]);
+    expect(tmuxUnsetWindowSizeCommand("@7")).toBe("tmux -S '/tmp/a=b/team' set-window-option -t @7 -u window-size");
+  });
+
   it("quotes a session name that would otherwise reach the shell as code", () => {
     // An ordinary seat name keeps its exact form: shellWord only quotes what needs it.
     expect(tmuxAttachCommand("dev-build@starter")).toBe("tmux attach -t dev-build@starter");
