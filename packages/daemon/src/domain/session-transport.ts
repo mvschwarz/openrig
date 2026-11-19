@@ -329,6 +329,18 @@ function findCurrentClaudeConfirmMenu(paneContent: string): string | null {
   return null;
 }
 
+/** Claude's cursor on a numbered option (`❯ N.`) in the screen's bottom block: up to 40 non-blank rows, ending at a rule
+ *  or at one of Claude's output or timer rows (⏺, ✻), so a tall menu's cursor is found and older output isn't read. */
+function findClaudeMenuCursorInBottomBlock(paneContent: string): string | null {
+  const lines = paneContent.split("\n").map(line => line.trim()).filter(line => line.length > 0).slice(-40);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
+    if (/^[▔─━═-]{3,}$/.test(line) || /^[⏺✻] /.test(line)) break;
+  }
+  return null;
+}
+
 // Claude can leave these noninteractive warnings BELOW the input box and mode bar.
 // Recognize the complete input block, never a warning or historical prompt alone.
 const CLAUDE_STATUS_WARNINGS = [
@@ -897,11 +909,14 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const modelPicker = options.runtime === "codex" ? currentCodexModelPicker(paneContent)
     : options.runtime === undefined || options.runtime === "claude-code" ? currentClaudeModelMenu(paneContent) : null;
   const confirmMenu = options.runtime === undefined || options.runtime === "claude-code" ? findCurrentClaudeConfirmMenu(paneContent) : null;
-  // A current Claude menu replaces the input box. In the dialogue-only read, a numbered cursor row in the scan window
-  // with no Claude input box drawn is a current menu, whatever its footer or rows. Quoted history sits above an input
-  // box, and a draft sits inside one, so neither counts.
-  const menuInPlaceOfInputBox = options.currentClaudeDialogueOnly && options.runtime === "claude-code" && !claudeComposer?.framed
-    ? findPatternEvidence(promptScanLines, [COMPOSER_SELECTION_SCAN_PATTERN]) : null;
+  // A current Claude menu replaces the input box. In the dialogue-only read, Claude's cursor on a numbered row in the
+  // bottom block, with no Claude input box drawn, is a current menu, whatever its footer, rows or height. Quoted history
+  // sits above an input box and a draft, multiline included, inside one (its input line, closing rule and footer), so
+  // neither counts.
+  const claudeInputBox = claudeComposer?.framed === true
+    || (currentComposer !== null && currentComposer.markerLine !== null && currentComposer.closingRuleLine !== null);
+  const menuInPlaceOfInputBox = options.currentClaudeDialogueOnly && options.runtime === "claude-code" && !claudeInputBox
+    ? findClaudeMenuCursorInBottomBlock(paneContent) : null;
   const selectionPromptEvidence = modelPicker ?? themeMenu ?? claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ?? confirmMenu ?? menuInPlaceOfInputBox ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));

@@ -146,12 +146,26 @@ it("control: after a fresh usage-limit hook, an ordinary input box at a limit wa
   expect(f.paste).toHaveBeenCalled();
 });
 
+// A menu taller than the scan window, with another footer, after each fresh hook that isn't a usage limit: its cursor row
+// is found in the bottom block.
+const TALL_OTHER_FOOTER = TALL_MENU.replace("Enter to confirm · Esc to cancel", "Enter to choose · Esc to go back");
+it.each(FRESH_HOOKS.filter(([, event]) => event !== "StopFailure"))(
+  "after a fresh %s, a menu taller than the scan window is refused before any write", async (_name, event, subtype) => {
+    const f = fixture(TALL_OTHER_FOOTER);
+    await f.hook(event, subtype, 1_000);
+    expect(await f.transport.send(f.name, MESSAGE)).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  });
+
 // Controls: option text that isn't a current menu still delivers after a fresh Stop.
 const COMPOSER = ["─".repeat(80), "❯\u00a0", "─".repeat(80), "  ? for shortcuts", ""];
 it.each([
   ["the menu quoted in history above the input box", [...LIMIT_MENU.split("\n"), "✻ Worked for 2s", "", ...COMPOSER].join("\n")],
   ["a draft of numbered lines in the input box", ["✻ Brewed for 1s", "", "─".repeat(80), "❯ please choose:", "  1. Stop and wait", "  2. Switch to usage credits",
     "─".repeat(80), "  ? for shortcuts", ""].join("\n")],
+  ["the menu quoted in history above a multiline draft", [...LIMIT_MENU.split("\n"), "✻ Worked for 2s", "", "─".repeat(80), "❯ please choose:",
+    "  1. Stop and wait", "  2. Switch to usage credits", "─".repeat(80), "  ? for shortcuts", ""].join("\n")],
 ] as const)("control: after a fresh Stop, %s isn't read as a menu and delivers", async (_name, frame) => {
   const f = fixture(frame);
   await f.hook("Stop", null, 1_000);
