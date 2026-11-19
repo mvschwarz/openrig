@@ -413,7 +413,7 @@ export interface QueueNudgeTransport {
     text: string,
     opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string; queueWake?: boolean }
   ): Promise<{ ok: boolean; verified?: boolean; sent?: boolean; inputPhase?: "not_reached" | "attempted" | "written"; error?: string; reason?: string; outcome?: string;
-    usageLimit?: { asOf: string; resetsAt: string } }>;
+    sessionName?: string; usageLimit?: { asOf: string; resetsAt: string } }>;
 }
 
 /** The result of one wake attempt: its classification and its recorded result. */
@@ -428,8 +428,8 @@ type WakeAttemptOutcome = {
   classified: "verified" | "indeterminate" | "failed" | "retained" | "bridged";
   nudgeResult: string;
   preInputFailure?: boolean;
-  /** The transport's usage-limit record for a wake whose text reached the seat's input. */
-  usageLimit?: { asOf: string; resetsAt: string };
+  /** The transport's usage-limit record for a wake whose text reached the seat's input, with the session it was sent to. */
+  usageLimit?: { asOf: string; resetsAt: string; sessionName?: string };
 };
 
 /** `principal:v1` marks only the transitions that record the request's own action. What that action sets off elsewhere
@@ -1411,7 +1411,8 @@ export class QueueRepository {
     // The bridge owns the row now (handed to the hook, typed by its fallback, or named uncertain), so it isn't finalized.
     if (res.outcome === "bridged") return { classified: "bridged", nudgeResult: "bridged:queued" };
     // The nudge result keeps its words; a wake that reached a seat at its usage limit also gets a note on the row.
-    const usageLimit = res.usageLimit ? { usageLimit: { asOf: res.usageLimit.asOf, resetsAt: res.usageLimit.resetsAt } } : {};
+    const usageLimit = res.usageLimit ? { usageLimit: { asOf: res.usageLimit.asOf, resetsAt: res.usageLimit.resetsAt,
+      ...(res.sessionName ? { sessionName: res.sessionName } : {}) } } : {};
     if (res.ok) return res.verified ? { classified: "verified", nudgeResult: "verified", ...usageLimit } : { classified: "indeterminate", nudgeResult: "delivered-ack-pending", ...usageLimit };
     const detail = res.error ?? res.reason ?? "unknown";
     // Input evidence survives receipt removal: an issued paste or uncertain Enter is never an unsent failure.
@@ -6071,7 +6072,7 @@ export class QueueRepository {
     this.recordNudgeAttempt(qitemId, result, typed?.usageLimit);
   }
 
-  recordNudgeAttempt(qitemId: string, result: string, usageLimit?: { asOf: string; resetsAt: string }): void {
+  recordNudgeAttempt(qitemId: string, result: string, usageLimit?: { asOf: string; resetsAt: string; sessionName?: string }): void {
     const ts = new Date().toISOString();
     this.db
       .prepare(
@@ -6085,8 +6086,11 @@ export class QueueRepository {
       // reserved daemon actor: it isn't a change to the row for the wake ladder, the stuck sweep or recovery
       // (lastMeaningfulTransition), as closure-overdue's note isn't.
       const row = this.getById(qitemId);
+      // It names the session the wake was sent to, which a reroute during the send can't change, and an in-progress row
+      // keeps its retained claim blocker, as every other non-state receipt does.
       if (row) this.transitionLog.append({ qitemId, state: row.state, actorSession: "daemon@system",
-        transitionNote: `wake reached ${row.destinationSession} at its usage limit (recorded ${usageLimit.asOf}; resets ${usageLimit.resetsAt}); delivery=${result}. Its agent isn't expected to read it before the reset.` });
+        transitionNote: `wake reached ${usageLimit.sessionName ?? row.destinationSession} at its usage limit (recorded ${usageLimit.asOf}; resets ${usageLimit.resetsAt}); delivery=${result}. Its agent isn't expected to read it before the reset.`,
+        closureTarget: row.state === "in-progress" ? this.retainedClaimBlocker(qitemId) : undefined });
     }
     // The transport's definite no-write refusal establishes the episode even when a
     // fresh hook hid needs_input. Uncertain delivery never arms clear-triggered replay.

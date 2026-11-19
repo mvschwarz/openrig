@@ -68,6 +68,24 @@ describe("a queue wake at a seat's usage limit", () => {
     expect(attempts()).toBe(1);
   });
 
+  it("a claimed row keeps its retained park blocker through the note", async () => {
+    const { row } = await wake();
+    repo.update({ qitemId: row.qitemId, actorSession: SEAT, state: "blocked", blockedOn: "external:fixture-gate", transitionNote: "parked" });
+    repo.claim({ qitemId: row.qitemId, destinationSession: SEAT });
+    expect(repo.retainedClaimBlocker(row.qitemId)).toBe("external:fixture-gate");
+
+    reply = { ok: true, verified: true, usageLimit: { ...LIMIT, notice: "context" } };
+    await repo.maybeNudge(row.qitemId, SEAT, undefined, "pm@demo");
+    expect(repo.listTransitions(row.qitemId).at(-1)?.transitionNote).toMatch(/^wake reached .+ at its usage limit/);
+    expect(repo.retainedClaimBlocker(row.qitemId)).toBe("external:fixture-gate");
+  });
+
+  it("the note names the session the wake was sent to", async () => {
+    reply = { ok: true, verified: true, sessionName: "writer-replacement@demo", usageLimit: { ...LIMIT, notice: "context" } };
+    const { notes } = await wake();
+    expect(notes).toEqual([`wake reached writer-replacement@demo at its usage limit (recorded ${LIMIT.asOf}; resets ${LIMIT.resetsAt}); delivery=verified. Its agent isn't expected to read it before the reset.`]);
+  });
+
   it("control: a wake with no usage-limit reading adds no note", async () => {
     const { row, notes } = await wake();
     expect(row.lastNudgeResult).toBe("verified");
