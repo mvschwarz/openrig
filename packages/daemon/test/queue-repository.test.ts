@@ -7,6 +7,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
+import { queueTransitionsArchiveSchema } from "../src/db/migrations/054_queue_transitions_archive.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
@@ -673,6 +674,68 @@ describe("QueueRepository", () => {
       await repo.deliverWakeForSuccessor(item.qitemId, "bob@rig", true);
       expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
       expect(stateOf(createWake)).not.toBe("delivered");
+    });
+
+    it("A row created with the id `fallback-<N>` before a reroute at transition N: the new seat still gets this reroute's wake, under another id noted on the row, and the other row gets no nudge.", async () => {
+      const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", summary: "review the thing", nudge: false });
+      const nextTransition = () => (db.prepare("SELECT COALESCE(MAX(transition_id), 0) + 1 AS n FROM queue_transitions").get() as { n: number }).n;
+      // The other row's create writes one transition, so the reroute after it gets the id after that.
+      const n = nextTransition() + 1;
+      const other = await repo.create({ qitemId: `fallback-${n}`, sourceSession: "erin@rig", destinationSession: "dave@rig", body: "y", summary: "other work" });
+      expect(nextTransition()).toBe(n);
+      const stateOf = (outboxId: string) =>
+        (db.prepare("SELECT delivery_state FROM outbox_entries WHERE outbox_id = ?").get(outboxId) as { delivery_state: string } | undefined)?.delivery_state;
+      const otherWake = `wake-intent-${other.qitemId}`;
+      expect(otherWake).toBe(`wake-intent-fallback-${n}`);
+      expect(stateOf(otherWake)).toBeDefined();
+      const sends: Array<{ session: string; text: string }> = [];
+      repo.attachTransport({ send: async (session: string, text: string) => { sends.push({ session, text }); return { ok: true, verified: true }; } });
+
+      const moved = repo.routeToFallback(item.qitemId, "carol@rig", "slot free", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+
+      expect(moved.destinationSession).toBe("carol@rig");
+      const [move] = fallbackTransitions(item.qitemId);
+      expect(move!.transitionId).toBe(n);
+      const wakes = fallbackWakes(item.qitemId);
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toMatchObject({ outbox_id: `wake-intent-fallback-${n}:1`, sender_session: "daemon@kernel", destination_session: "carol@rig" });
+      await vi.waitFor(() => expect(fallbackWakes(item.qitemId)[0]!.delivery_state).toBe("delivered"));
+      expect(sends.map((s) => s.session)).toEqual(["carol@rig"]);
+      expect(sends[0]!.text).toContain(`Queue handoff: ${item.qitemId}`);
+      // The other row's create wake is its own, untouched by the move.
+      expect(stateOf(otherWake)).not.toBe("delivered");
+      expect(db.prepare("SELECT audit_pointer, destination_session FROM outbox_entries WHERE outbox_id = ?").get(otherWake))
+        .toEqual({ audit_pointer: other.qitemId, destination_session: "dave@rig" });
+      const notes = repo.transitionLog.listForQitem(item.qitemId).map((t) => t.transitionNote ?? "").filter((note) => note.startsWith("fallback-wake-id-taken: "));
+      expect(notes).toEqual([`fallback-wake-id-taken: wake-intent-fallback-${n} already names a wake for ${other.qitemId} to dave@rig; this reroute's wake to carol@rig is wake-intent-fallback-${n}:1`]);
+      // The noted id still orders as this reroute's: a later reroute back to carol replaces it.
+      repo.routeToFallback(item.qitemId, "bob@rig", "back", { expectState: "pending", expectDestination: "carol@rig", wake: true });
+      repo.routeToFallback(item.qitemId, "carol@rig", "again", { expectState: "pending", expectDestination: "bob@rig", wake: true });
+      const replaced = (repo as unknown as { wakeReplacedByReroute(e: { outboxId: string; auditPointer: string; destinationSession: string }): boolean })
+        .wakeReplacedByReroute({ outboxId: `wake-intent-fallback-${n}:1`, auditPointer: item.qitemId, destinationSession: "carol@rig" });
+      expect(replaced).toBe(true);
+    });
+
+    it("A row whose reroute's transition sits only in the archive, reopened, reads as rerouted, as fallbackLineStart reads it.", async () => {
+      migrate(db, [queueTransitionsArchiveSchema]);
+      const archivedRepo = new QueueRepository(db, bus);
+      archivedRepo.attachOutbox(new OutboxHandler(db));
+      const wasRerouted = (id: string) => (archivedRepo as unknown as { wasRerouted(q: string): boolean }).wasRerouted(id);
+      const item = await archivedRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x", nudge: false });
+      archivedRepo.routeToFallback(item.qitemId, "carol@rig", "slot free");
+      expect(wasRerouted(item.qitemId)).toBe(true);
+      // The retention sweep's move: the row's transitions leave the live log for the archive.
+      const archive = (qitemId: string) => {
+        const columns = "transition_id, qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target";
+        db.prepare(`INSERT INTO queue_transitions_archive (${columns}, archived_at) SELECT ${columns}, ts FROM queue_transitions WHERE qitem_id = ?`).run(qitemId);
+        db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ?").run(qitemId);
+      };
+      archive(item.qitemId);
+      expect(wasRerouted(item.qitemId)).toBe(true);
+      // A row never rerouted, archived the same way, still reads as not rerouted.
+      const plain = await archivedRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "y", nudge: false });
+      archive(plain.qitemId);
+      expect(wasRerouted(plain.qitemId)).toBe(false);
     });
 
     it("A row rerouted back to a seat with a wake gets that reroute's wake only, not the create's or an earlier reroute's wake again.", async () => {

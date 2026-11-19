@@ -183,8 +183,15 @@ const WAKE_TRIGGER_OPENRIG_TAG = "queue:wake-trigger:openrig";
 const CLAIM_OVERRIDDEN_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}claim-overridden-`;
 /** The first id after every such wake's, so a range on the outbox's primary key finds them all and nothing else. */
 const CLAIM_OVERRIDDEN_WAKE_END = `${WAKE_INTENT_PREFIX}claim-overridden.`;
-/** A reroute's wake: `wake-intent-fallback-<transitionId>`, keyed on the reroute's transition (routeToFallback). */
+/** A reroute's wake: `wake-intent-fallback-<transitionId>`, keyed on the reroute's transition (routeToFallback). When
+ *  another entry already holds that id (a row created with the id `fallback-<transitionId>` has it as its create wake),
+ *  the wake is `wake-intent-fallback-<transitionId>:<k>`, the first such id the outbox doesn't hold. */
 const FALLBACK_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}fallback-`;
+/** The transition a reroute's wake is keyed on, from its id (either form above); NaN for any other id. */
+function fallbackWakeTransition(outboxId: string): number {
+  const key = /^(\d+)(?::\d+)?$/.exec(outboxId.slice(FALLBACK_WAKE_PREFIX.length));
+  return outboxId.startsWith(FALLBACK_WAKE_PREFIX) && key ? Number(key[1]) : Number.NaN;
+}
 /** An unpark's wake: `wake-intent-blocker-<transitionId>`, keyed on the transition that made the row pending again. */
 const BLOCKER_WAKE_PREFIX = `${WAKE_INTENT_PREFIX}blocker-`;
 /** On a wake intent whose ring a hosted member's trigger accepted: recovery doesn't ring that intent again. */
@@ -1422,7 +1429,7 @@ export class QueueRepository {
     const createWake = `${WAKE_INTENT_PREFIX}${qitemId}`;
     let staged: number;
     if (entry.outboxId === createWake) staged = 0;
-    else if (entry.outboxId.startsWith(FALLBACK_WAKE_PREFIX)) staged = Number(entry.outboxId.slice(FALLBACK_WAKE_PREFIX.length));
+    else if (entry.outboxId.startsWith(FALLBACK_WAKE_PREFIX)) staged = fallbackWakeTransition(entry.outboxId);
     else if (entry.outboxId.startsWith(BLOCKER_WAKE_PREFIX)) staged = Number(entry.outboxId.slice(BLOCKER_WAKE_PREFIX.length));
     else return false;
     if (!Number.isInteger(staged)) return false;
@@ -1431,20 +1438,28 @@ export class QueueRepository {
     ).all(qitemId, entry.destinationSession, FALLBACK_WAKE_PREFIX.length, FALLBACK_WAKE_PREFIX) as Array<{ outbox_id: string }>;
     return reroutes.some(({ outbox_id }) => {
       if (outbox_id === createWake) return false; // the row's own create wake, whatever its id
-      const transition = Number(outbox_id.slice(FALLBACK_WAKE_PREFIX.length));
+      const transition = fallbackWakeTransition(outbox_id);
       return Number.isInteger(transition) && transition > staged;
     });
   }
 
   /** Whether the row has been rerouted, from its transitions: every routeToFallback move writes one, with a wake or
    *  not. A reroute's transition is written in-process, so it has no identity provenance; a transition the update route
-   *  wrote with the same actor and note is not a reroute (the rule fallbackLineStart uses). */
+   *  wrote with the same actor and note is not a reroute. The live log is read, then the archive the retention sweep
+   *  moves an aged closed row's transitions to, so a reopened archived row reads as rerouted too (the tables and the
+   *  rule fallbackLineStart uses). */
   private wasRerouted(qitemId: string): boolean {
     if (!this.hasQueueTransitionsTable) return false;
-    return this.db.prepare(
-      `SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND actor_session = ? AND substr(transition_note, 1, ?) = ?
-        ${this.hasTransitionProvenanceColumn ? "AND identity_provenance IS NULL" : ""} LIMIT 1`,
-    ).get(qitemId, FALLBACK_ACTOR, "fallback-routed: ".length, "fallback-routed: ") !== undefined;
+    for (const table of ["queue_transitions", ...(detectTable(this.db, "queue_transitions_archive") ? ["queue_transitions_archive"] : [])]) {
+      const stamped = table === "queue_transitions"
+        ? this.hasTransitionProvenanceColumn
+        : (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === "identity_provenance");
+      if (this.db.prepare(
+        `SELECT 1 FROM ${table} WHERE qitem_id = ? AND actor_session = ? AND substr(transition_note, 1, ?) = ?
+          ${stamped ? "AND identity_provenance IS NULL" : ""} LIMIT 1`,
+      ).get(qitemId, FALLBACK_ACTOR, "fallback-routed: ".length, "fallback-routed: ") !== undefined) return true;
+    }
+    return false;
   }
 
   /** A wake's source and urgency at the seat's level: the trigger decides the source; the row's priority (urgent or
@@ -6296,7 +6311,25 @@ export class QueueRepository {
       // staged undoes the move; a full held-message quota at the new destination does not: as with a handoff's wake,
       // the wake is recorded as not retained and the reroute stands.
       if (opts.wake) {
-        const outboxId = `${FALLBACK_WAKE_PREFIX}${transition.transitionId}`;
+        // The transition is new, so an entry the outbox already holds under its wake id is not this reroute's wake: a
+        // row created with the id `fallback-<N>` holds it as its create wake. The outbox would hand that entry back,
+        // and the move would deliver that row's wake while the new seat is never woken. The wake is staged under the
+        // first `:<k>` id the outbox doesn't hold, and the row records the collision.
+        const keyed = `${FALLBACK_WAKE_PREFIX}${transition.transitionId}`;
+        const holderOf = (id: string) => this.db.prepare("SELECT audit_pointer, destination_session FROM outbox_entries WHERE outbox_id = ?")
+          .get(id) as { audit_pointer: string | null; destination_session: string } | undefined;
+        const holder = holderOf(keyed);
+        let outboxId = keyed;
+        for (let k = 1; holderOf(outboxId); k++) outboxId = `${keyed}:${k}`;
+        if (holder) {
+          this.transitionLog.append({
+            qitemId,
+            state: qitem.state,
+            actorSession: FALLBACK_ACTOR,
+            transitionNote: `fallback-wake-id-taken: ${keyed} already names a wake for ${holder.audit_pointer ?? "no row"} to `
+              + `${holder.destination_session}; this reroute's wake to ${fallbackDestination} is ${outboxId}`,
+          });
+        }
         try {
           this.db.transaction(() => this.recordWakeIntent({
             outboxId,
