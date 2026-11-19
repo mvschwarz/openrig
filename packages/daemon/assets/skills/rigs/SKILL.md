@@ -10,8 +10,7 @@ tasks, messages and state, so the team keeps working across restarts. This skill
 working on what the person wants, and shows how to work with that team from here.
 
 **The goal is a team doing the person's work, not just an install.** Go through the steps in order and stop early only
-if the person asks you to. When they say what they want built, give it to OpenRig's operator (step 2) instead of
-building it yourself.
+if the person asks. Give what they want built to OpenRig's operator (step 2) instead of building it yourself.
 
 **The team's questions are the person's.** Hold to this from the first handoff, even if you read nothing else here:
 - **Ask before answering any prompt.** A seat's permission, trust or hook-review prompt is theirs to answer: show it
@@ -21,9 +20,10 @@ building it yourself.
 - **An answer covers exactly the prompt it answered.** A later prompt, even one like it, goes back to them, unless
   they told you outright to decide that kind of prompt (step 2).
 - **Hand work over with a return route** (`--return-route auto`, or `self` if this session joined; step 2), so most of
-  the team's questions and its result come to this conversation's address (choice dialogs and other hosts keep their
-  path). Set it before you promise to report back. This chat has no wake of its own: say you'll check when they ask,
-  list your address's tasks and check the seats each turn, and offer a wake only where their app actually has one.
+  the team's questions come to this conversation's address (choice dialogs and other hosts keep their path), and its
+  result is in the handed-over task's resolution. Set it before you promise to report back. This chat has no wake of
+  its own: say you'll check when they ask, and each turn list your address's tasks, read the handed-over task (`rig
+  queue show <id> --full`, following its successors) and check the seats. Offer a wake only where their app has one.
 - **Don't send them to attach** to a seat's terminal to answer, and with no display (headless or SSH) they answer here
   too: don't tell the operator they'll answer in its pane unless they chose that. Bring the prompt here. If the
   operator or a seat sent it to you, record their words and let that sender pass them on; otherwise send their choice
