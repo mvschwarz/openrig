@@ -145,6 +145,29 @@ describe("daemon requests through the sandbox's supplied HTTP proxy", () => {
     expect(f.connects).toHaveLength(0);
   });
 
+  it.each(["0", "1"].flatMap(sandbox => ["/", "http://127.0.0.1:99999", "file:///example"]
+    .map(target => ({ sandbox, target }))))("preserves an explicit non-proxy target $target (sandbox=$sandbox)", async ({ sandbox, target }) => {
+    vi.stubEnv("SANDBOX_RUNTIME", sandbox);
+    vi.stubEnv("http_proxy", "invalid-proxy");
+    const response = new Response("original transport");
+    const direct = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const transport = daemonFetch(target, direct);
+    expect(direct).not.toHaveBeenCalled();
+    const input = `${target}/write`;
+    const init = { method: "POST", body: "once" };
+    expect(await transport(input, init)).toBe(response);
+    expect(direct).toHaveBeenCalledExactlyOnceWith(input, init);
+  });
+
+  it("leaves an unparseable request input with its original transport", async () => {
+    vi.stubEnv("SANDBOX_RUNTIME", "1");
+    vi.stubEnv("http_proxy", "invalid-proxy");
+    const response = new Response("original transport");
+    const direct = vi.fn<typeof fetch>().mockResolvedValue(response);
+    expect(await daemonFetch("http://127.0.0.1:7433", direct)("/relative")).toBe(response);
+    expect(direct).toHaveBeenCalledExactlyOnceWith("/relative", undefined);
+  });
+
   it("leaves an unrelated origin on its existing transport", async () => {
     const f = await fixture();
     const other = await fixture();

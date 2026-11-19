@@ -5,10 +5,17 @@ import { nodeHttpFetch } from "./long-request-fetch.js";
  * SANDBOX_RUNTIME=1 alongside HTTP(S)_PROXY and a loopback NO_PROXY that would otherwise select an unreachable
  * direct socket. The proxy still decides whether the daemon host/port is allowed; never retry outside it. */
 export function daemonFetch(baseUrl: string, direct: typeof fetch = fetch): typeof fetch {
-  const origin = new URL(baseUrl).origin;
   return async (input, init) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
-    if (process.env.SANDBOX_RUNTIME !== "1" || url.origin !== origin) return direct(input, init);
+    if (process.env.SANDBOX_RUNTIME !== "1") return direct(input, init);
+    let target: URL, url: URL;
+    try {
+      target = new URL(baseUrl);
+      url = new URL(input instanceof Request ? input.url : String(input));
+    } catch {
+      // Keep invalid explicit targets with their existing transport; construction and MCP startup must not throw.
+      return direct(input, init);
+    }
+    if (url.origin !== target.origin || (url.protocol !== "http:" && url.protocol !== "https:")) return direct(input, init);
     const value = url.protocol === "https:"
       ? process.env.https_proxy || process.env.HTTPS_PROXY
       : process.env.http_proxy || process.env.HTTP_PROXY;
