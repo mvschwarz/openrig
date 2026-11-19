@@ -39,6 +39,8 @@ export interface ParkWakeStatus {
   phase: ParkWakePhase;
   live: boolean;
   deliveryStatus: string | null;
+  /** The timer's existing interval, read from its watchdog job record. */
+  intervalSeconds?: number;
   /** A wake fired, but the row is still HELD. The resume attempt is visible
    *  and cannot be mistaken for a healthy armed continuation. */
   unconsumed: boolean;
@@ -134,6 +136,9 @@ export class QueueWakeRepository {
     const kind = armed.wake_kind as ParkWakeKind;
     const expiresAt = this.wakeExpiry(qitemId, kind, armed.wake_ref);
     const repeating = this.isRepeatingTimer(armed.wake_ref);
+    const intervalSeconds = kind === "timer"
+      ? (this.db.prepare("SELECT interval_seconds FROM watchdog_jobs WHERE job_id = ?").get(armed.wake_ref) as { interval_seconds: number } | undefined)?.interval_seconds
+      : undefined;
     // A retained attempt (held back by the typing guard) was not delivered, so it doesn't consume a one-shot wake:
     // the backstop is still live and nothing awaits the owner. The attempt stays in the history.
     const heldBack = fired?.delivery_status === "retained" && !repeating;
@@ -144,6 +149,7 @@ export class QueueWakeRepository {
       live: fired && !repeating && !heldBack ? false : this.isLive(kind, armed.wake_ref),
       deliveryStatus: fired?.delivery_status ?? null,
       unconsumed: fired !== undefined && !heldBack && state === "blocked",
+      ...(intervalSeconds !== undefined ? { intervalSeconds } : {}),
       ...(repeating ? { recoveryOwner: "queue-stuck-sweep" as const } : {}),
       ...(expiresAt ? { expiresAt } : {}),
     };

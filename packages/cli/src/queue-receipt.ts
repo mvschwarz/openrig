@@ -32,6 +32,8 @@ export interface ReceiptContext {
   verb: WriteVerb;
   /** The CLI sent nudge:false (`--no-nudge`). */
   nudgeSuppressed?: boolean;
+  /** This create starts blocked and does not request an immediate terminal wake. */
+  parked?: boolean;
   /** The caller named the row id (`create --id`), so the daemon may have returned an existing row. */
   idGiven?: boolean;
   /** A `--host` write whose new row lives on another daemon. */
@@ -59,7 +61,7 @@ const STARTS_WAKE: ReadonlySet<WriteVerb> = new Set(["create", "handoff", "hando
 const ALWAYS = ["qitemId", "state", "destinationSession", "sourceSession", "tsCreated", "tsUpdated", "priority", "summary",
   "tags", "pickup", "lastNudgeResult", "lastNudgeAttempt"] as const;
 const WHEN_SET = ["tier", "blockedOn", "closureReason", "closureTarget", "closureRequiredAt", "claimedAt", "handedOffTo",
-  "handedOffFrom", "targetRepo", "expiresAt", "advisories", "handoffAdvisory", "createWarning", "persisted", "delivery"] as const;
+  "handedOffFrom", "targetRepo", "expiresAt", "advisories", "handoffAdvisory", "createWarning", "parkReceipt", "parkWarning", "persisted", "delivery"] as const;
 const SHOWN_WAITING = ["blocker", "nextBackstop"] as const;
 const ROW_KEYS_CONSUMED_ELSEWHERE = new Set<string>(["body", "waiting"]);
 
@@ -90,6 +92,13 @@ function wakeEvidence(row: Row, ctx: ReceiptContext): WakeEvidence {
   const result = str(row.lastNudgeResult);
   const at = str(row.lastNudgeAttempt) ?? undefined;
   const warning = isRow(row.createWarning) ? row.createWarning : null;
+  if (ctx.parked) {
+    const parkReceipt = isRow(row.parkReceipt) ? row.parkReceipt : null;
+    const confirmedPark = parkReceipt?.confirmed === true && row.state === "blocked";
+    return { evidence: "suppressed", detail: confirmedPark
+      ? "parked create: no immediate terminal wake was requested; the park receipt shows its blocker and any timer"
+      : "park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside" };
+  }
   if (ctx.nudgeSuppressed) return { evidence: "suppressed", detail: "--no-nudge: no wake was requested" };
   if (warning?.code === "qitem_body_not_saved") {
     return { evidence: "existing-row", ...(result ? { result } : {}), ...(at ? { at } : {}), detail: "an existing row was returned; this write started no new wake" };
@@ -184,6 +193,11 @@ function rowLines(heading: string, r: Row): string[] {
   if (r.handedOffTo) lines.push(`  handed off to ${String(r.handedOffTo)}`);
   if (r.handedOffFrom) lines.push(`  handed off from ${String(r.handedOffFrom)}`);
   if (r.expiresAt) lines.push(`  expires ${String(r.expiresAt)}`);
+  if (isRow(r.parkReceipt)) {
+    const p = r.parkReceipt;
+    const wake = p.wakeKind === "timer" && typeof p.wakeAfterSeconds === "number" ? `, timer ${String(p.wakeAfterSeconds)}s` : "";
+    lines.push(`  park: ${p.confirmed === true ? "confirmed" : "not confirmed"}${p.blockedOn ? ` on ${String(p.blockedOn)}` : ""}${wake}`);
+  }
   if (isRow(r.wake)) {
     const w = r.wake;
     const literal = w.result ? `${String(w.result)}${w.at ? ` at ${String(w.at)}` : ""}` : "";
@@ -195,6 +209,7 @@ function rowLines(heading: string, r: Row): string[] {
         : `  wake: ${literal ? `${literal} — ` : ""}${String(w.detail)}`);
   }
   if (isRow(r.createWarning)) lines.push(`  WARNING: ${String(r.createWarning.message ?? JSON.stringify(r.createWarning))}`);
+  if (isRow(r.parkWarning)) lines.push(`  WARNING: ${String(r.parkWarning.message ?? JSON.stringify(r.parkWarning))}`);
   if (isRow(r.handoffAdvisory)) lines.push(`  advisory: ${String(r.handoffAdvisory.message ?? JSON.stringify(r.handoffAdvisory))}`);
   if (Array.isArray(r.advisories)) {
     for (const a of r.advisories) lines.push(`  advisory: ${isRow(a) && typeof a.message === "string" ? a.message : JSON.stringify(a)}`);

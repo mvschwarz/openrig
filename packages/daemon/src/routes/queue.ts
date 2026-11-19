@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import { Hono, type Context } from "hono";
 import { classifierOccupant } from "../domain/classification-sources.js";
@@ -68,11 +69,283 @@ import { feedPerspective } from "../domain/feed-perspective.js";
 // (same class as mission-control's REMOTE_ACTION_TIMEOUT_MS). remoteJsonRequest
 // never hangs — a timeout surfaces as a structured host-named failure.
 const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
+/** A confirmed park needs this destination-generated marker; older forwarders only infer confirmation from row state. */
+const PARK_RECEIPT_VERSION = 1;
+const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
+const VALID_PARK_CREATE_STATES = new Set<QueueState>(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
+const BODY_SUMMARY_TYPES = new Set(["null", "object", "array", "number", "boolean", "undefined"]);
+const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
+const IDENTITY_SESSION_PART_PATTERN = /^[A-Za-z0-9._-]+$/;
+const FORWARDED_PARK_CREATE_FIELDS = [
+  "qitemId", "tsCreated", "tsUpdated", "sourceSession", "destinationSession", "state", "priority", "tier",
+  "deliveryOutcome", "deliveryFailureClass", "deliveryFailureDetail", "tags", "blockedOn", "pickup", "waiting",
+  "handedOffTo", "handedOffFrom", "expiresAt", "chainOfRecord", "body", "humanIntent", "humanDetail", "replyTo",
+  "replyToFallback", "humanQuestions", "humanAnswers", "delegatedDecision", "summary", "evidenceRef", "contentErasedAt",
+  "returnRoute", "returnRouteBasis", "fieldsElided", "closureReason", "closureTarget", "handoffAdvisory",
+  "closureRequiredAt", "claimedAt", "lastNudgeAttempt", "lastNudgeResult", "lastNudgeWireResult", "lastHeartbeat",
+  "resolution", "targetRepo", "createWarning", "parkReceipt", "parkWarning", "advisories",
+] as const;
 /** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
 const WORK_CANDIDATE_LIST_LIMIT = 50;
 /** Private request opt-in for CLI diagnostics; its response acknowledgement is never forwarded. */
 const CLI_HANDOFF_SCOPE_ADVISORY_HEADER = "X-OpenRig-CLI-Handoff-Scope-Advisory";
 const HANDOFF_SCOPE_CHECK_ACKNOWLEDGED = "handoffScopeCheckAcknowledged";
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Diagnostic summaries keep only a plain member@rig address, not malformed text. */
+function validIdentitySession(value: unknown): value is string {
+  if (typeof value !== "string" || value !== value.trim()) return false;
+  const parts = value.split("@");
+  return parts.length === 2
+    && parts.every((part) => IDENTITY_SESSION_PART_PATTERN.test(part))
+    && parseSessionName(value).kind === "canonical"
+    && !isHumanSeatSessionRef(value);
+}
+
+function safeIdentitySessionValue(value: unknown): unknown {
+  if (validIdentitySession(value)) return value;
+  return typeof value === "string"
+    ? "invalid"
+    : { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+}
+
+function bodySummary(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    return { byteLength: Buffer.byteLength(value, "utf8"), sha256: createHash("sha256").update(value, "utf8").digest("hex") };
+  }
+  return { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+}
+
+/** Validate a body summary imported from a warning. Raw row bodies use bodySummary directly. */
+function safeBodySummary(value: unknown): Record<string, unknown> | undefined {
+  if (!isObjectRecord(value)) return bodySummary(value);
+  if (Object.keys(value).length === 1 && typeof value.type === "string" && BODY_SUMMARY_TYPES.has(value.type)) {
+    return { type: value.type };
+  }
+  const summary: Record<string, unknown> = {};
+  if (Object.prototype.hasOwnProperty.call(value, "byteLength")
+    && Number.isInteger(value.byteLength) && (value.byteLength as number) >= 0) {
+    summary.byteLength = value.byteLength;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "sha256")
+    && typeof value.sha256 === "string" && SHA256_PATTERN.test(value.sha256)) {
+    summary.sha256 = value.sha256;
+  }
+  if (Object.keys(summary).length > 0) return summary;
+  if (Object.prototype.hasOwnProperty.call(value, "byteLength") || Object.prototype.hasOwnProperty.call(value, "sha256")) return undefined;
+  return bodySummary(value);
+}
+
+function safeParkObserved(field: string, value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (field === "body") return bodySummary(value);
+  if (field === "sourceSession" || field === "destinationSession") {
+    return safeIdentitySessionValue(value);
+  }
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (isObjectRecord(value)) {
+    const safe: Record<string, unknown> = {};
+    for (const [key, received] of Object.entries(value)) {
+      const summary = safeParkObserved(key, received);
+      if (summary !== undefined) safe[key] = summary;
+    }
+    return safe;
+  }
+  return { type: Array.isArray(value) ? "array" : typeof value };
+}
+
+function safeForwardedCreateWarning(value: unknown): Record<string, unknown> | undefined {
+  if (!isObjectRecord(value)) return undefined;
+  const safe: Record<string, unknown> = { ...value };
+  if (!Object.prototype.hasOwnProperty.call(value, "observed")) return safe;
+  if (!isObjectRecord(value.observed)) {
+    delete safe.observed;
+    return safe;
+  }
+  const observed: Record<string, unknown> = {};
+  for (const [field, received] of Object.entries(value.observed)) {
+    const summary = field === "body" ? safeBodySummary(received) : safeParkObserved(field, received);
+    if (summary !== undefined) observed[field] = summary;
+  }
+  safe.observed = observed;
+  return safe;
+}
+
+/** Copy only declared queue response fields from a remote park response. */
+function safeForwardedParkCreateRow(row: Record<string, unknown>): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  for (const field of FORWARDED_PARK_CREATE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(row, field)) continue;
+    const value = field === "createWarning" ? safeForwardedCreateWarning(row[field]) : row[field];
+    if (value !== undefined) safe[field] = value;
+  }
+  return safe;
+}
+
+function mergeParkWarning(
+  value: unknown,
+  fallbackCode: string,
+  explanation: string,
+  fields: string[] = [],
+  observed: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const existing = isObjectRecord(value) ? value : {};
+  const originalMessage = typeof existing.message === "string" ? existing.message.trim() : "";
+  const oldFields = Array.isArray(existing.fields) ? existing.fields.filter((field): field is string => typeof field === "string") : [];
+  const oldObserved = isObjectRecord(existing.observed) ? existing.observed : {};
+  const mergedObserved: Record<string, unknown> = {};
+  for (const [field, received] of Object.entries(oldObserved)) {
+    const safe = field === "body" ? safeBodySummary(received) : safeParkObserved(field, received);
+    if (safe !== undefined) mergedObserved[field] = safe;
+  }
+  for (const [field, received] of Object.entries(observed)) {
+    const safe = field === "body" ? safeBodySummary(received) : safeParkObserved(field, received);
+    if (safe !== undefined) mergedObserved[field] = safe;
+  }
+  return {
+    ...existing,
+    code: typeof existing.code === "string" ? existing.code : fallbackCode,
+    message: [...new Set([originalMessage, explanation].filter(Boolean))].join(" "),
+    fields: [...new Set([...oldFields, ...fields])],
+    observed: mergedObserved,
+  };
+}
+
+function unconfirmedParkWarning(value: unknown, state: unknown, fields: string[] = [], observed: Record<string, unknown> = {}): Record<string, unknown> {
+  const existing = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const originalMessage = typeof existing.message === "string" ? existing.message.trim() : "";
+  const messages: string[] = [];
+  if (state === "pending") {
+    if (!originalMessage.includes("The row is live and may start early.")) messages.push("The row is live and may start early.");
+    if (!originalMessage.includes(EARLY_START_PARK_WARNING)) messages.push(EARLY_START_PARK_WARNING);
+    if (!originalMessage.includes("This request suppresses only the direct nudge.")) messages.push("This request suppresses only the direct nudge.");
+  } else if (state === "blocked") {
+    if (!originalMessage.includes("The row is live and may start early.")) messages.push("The row is live and may start early.");
+  } else if (state === "in-progress") {
+    if (!originalMessage.includes("The row is live and has already been claimed.")) messages.push("The row is live and has already been claimed.");
+  } else if (typeof state === "string" && ["done", "failed", "denied", "canceled", "handed-off"].includes(state)) {
+    const terminal = `The row exists in state ${state}; the park was not confirmed.`;
+    if (!originalMessage.includes(terminal)) messages.push(terminal);
+  }
+  if (!originalMessage && messages.length === 0) {
+    messages.push("The receiving daemon did not provide a current park receipt. The requested blocker and timer are not confirmed.");
+  }
+  return mergeParkWarning(value, "qitem_park_not_confirmed", messages.join(" "), fields, observed);
+}
+
+function checkForwardedParkCreate(payload: unknown, forwardBody: Record<string, unknown>): {
+  row: Record<string, unknown> | null;
+  fields: string[];
+  observed: Record<string, unknown>;
+  reason: string;
+  existingRow?: Record<string, unknown>;
+} {
+  if (!isObjectRecord(payload)) {
+    return {
+      row: null,
+      fields: ["row"],
+      observed: { row: { type: payload === null ? "null" : Array.isArray(payload) ? "array" : typeof payload } },
+      reason: "The forwarded response did not contain a row object. The create outcome is unknown. Keep the sent ID for a read back.",
+    };
+  }
+  const fields: string[] = [];
+  const observed: Record<string, unknown> = {};
+  const fail = (field: string) => {
+    if (!fields.includes(field)) fields.push(field);
+    const summary = safeParkObserved(field, payload[field]);
+    if (summary !== undefined) observed[field] = summary;
+  };
+  if (typeof payload.qitemId !== "string" || payload.qitemId !== forwardBody.qitemId) fail("qitemId");
+  if (typeof payload.state !== "string" || !VALID_PARK_CREATE_STATES.has(payload.state as QueueState)) fail("state");
+  for (const field of ["destinationSession", "sourceSession", "body"] as const) {
+    if (payload[field] !== forwardBody[field] || (field === "body" && isObjectRecord(payload.createWarning) && payload.createWarning.code === "qitem_body_not_saved")) fail(field);
+  }
+  if (fields.length === 0) return { row: payload, fields, observed, reason: "" };
+  return {
+    row: null,
+    fields,
+    observed,
+    reason: `The forwarded row does not confirm this create (${fields.join(", ")}). The create outcome is unknown. Keep the sent ID for a read back.`,
+    ...(payload.qitemId === forwardBody.qitemId && typeof payload.state === "string" && VALID_PARK_CREATE_STATES.has(payload.state as QueueState)
+      ? { existingRow: {
+          qitemId: payload.qitemId,
+          state: payload.state,
+          ...(typeof payload.destinationSession === "string" ? { destinationSession: safeIdentitySessionValue(payload.destinationSession) } : {}),
+          ...(typeof payload.sourceSession === "string" ? { sourceSession: safeIdentitySessionValue(payload.sourceSession) } : {}),
+          ...(payload.body === undefined ? {} : { body: bodySummary(payload.body) }),
+        } } : {}),
+  };
+}
+
+function checkForwardedParkReceipt(
+  row: Record<string, unknown>,
+  requestedBlocker: string | null,
+  requestedWakeAfter: number | null,
+): { confirmed: boolean; fields: string[]; observed: Record<string, unknown>; receipt: Record<string, unknown> } {
+  const fields: string[] = [];
+  const observed: Record<string, unknown> = {};
+  const fail = (field: string, value: unknown, present = true) => {
+    if (!fields.includes(field)) fields.push(field);
+    if (present) {
+      const summary = safeParkObserved(field, value);
+      if (summary !== undefined) observed[field] = summary;
+    }
+  };
+  const raw = row.parkReceipt;
+  const has = (value: Record<string, unknown>, field: string) => Object.prototype.hasOwnProperty.call(value, field);
+  if (!isObjectRecord(raw)) {
+    fail("parkReceipt", raw, has(row, "parkReceipt"));
+    if (has(row, "parkWarning")) fail("parkWarning", row.parkWarning);
+    return {
+      confirmed: false,
+      fields,
+      observed,
+      receipt: { confirmed: false, state: row.state, ...(has(row, "blockedOn") ? { blockedOn: row.blockedOn } : {}) },
+    };
+  }
+  const pairMatches = (field: string, expected: unknown) => {
+    const rowHas = has(row, field), receiptHas = has(raw, field);
+    if (!rowHas || !receiptHas || row[field] !== expected || raw[field] !== expected) {
+      const observedPair: Record<string, unknown> = {};
+      if (rowHas) observedPair.row = row[field];
+      if (receiptHas) observedPair.receipt = raw[field];
+      fail(field, observedPair, Object.keys(observedPair).length > 0);
+    }
+  };
+  if (row.state !== "blocked" || raw.state !== row.state) {
+    const observedState: Record<string, unknown> = {};
+    if (has(row, "state")) observedState.row = row.state;
+    if (has(raw, "state")) observedState.receipt = raw.state;
+    fail("state", observedState, Object.keys(observedState).length > 0);
+  }
+  pairMatches("blockedOn", requestedBlocker);
+  if (!has(raw, "wakeKind")) fail("wakeKind", undefined, false);
+  else {
+    const validWakeKind = requestedWakeAfter !== null
+      ? raw.wakeKind === "timer"
+      : raw.wakeKind === null || (raw.wakeKind === "blocker" && requestedBlocker !== null);
+    if (!validWakeKind) fail("wakeKind", raw.wakeKind);
+  }
+  if (!has(raw, "wakeAfterSeconds") || raw.wakeAfterSeconds !== requestedWakeAfter) {
+    fail("wakeAfterSeconds", raw.wakeAfterSeconds, has(raw, "wakeAfterSeconds"));
+  }
+  if (!has(raw, "receiptVersion") || raw.receiptVersion !== PARK_RECEIPT_VERSION) {
+    fail("receiptVersion", raw.receiptVersion, has(raw, "receiptVersion"));
+  }
+  if (!has(raw, "confirmed") || raw.confirmed !== true) fail("confirmed", raw.confirmed, has(raw, "confirmed"));
+  if (has(row, "parkWarning")) fail("parkWarning", row.parkWarning);
+  return {
+    confirmed: fields.length === 0,
+    fields,
+    observed,
+    receipt: { ...raw, confirmed: fields.length === 0 },
+  };
+}
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -313,10 +586,13 @@ export function queueRoutes(): Hono {
   function createInputRefusal(
     c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response },
     sourceSession: string,
-    body: { destinationSession?: string; body?: string; targetRepo?: string | null },
+    body: { destinationSession?: string; body?: string; targetRepo?: string | null; blockedOn?: unknown },
   ): Response | null {
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
+    if (body.blockedOn !== undefined && body.blockedOn !== null && typeof body.blockedOn !== "string") {
+      return c.json({ error: "invalid_blocked_on", field: "blockedOn", message: "blockedOn must be a string when supplied." }, 400);
+    }
     if (body.targetRepo) {
       const validation = validateTargetRepo(c, sourceSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
@@ -718,6 +994,8 @@ export function queueRoutes(): Hono {
       tier?: string;
       tags?: string[];
       expiresAt?: string;
+      blockedOn?: unknown;
+      wakeAfterSeconds?: number;
       chainOfRecord?: string[];
       targetRepo?: string;
       humanIntent?: "decision" | "update" | null;
@@ -789,6 +1067,8 @@ export function queueRoutes(): Hono {
     const refusal = createInputRefusal(c, sourceSession, body);
     if (refusal) return refusal;
 
+    const parkRequested = body.blockedOn != null || body.wakeAfterSeconds != null;
+
     // OPR.0.4.6.MH3 FR-2 (C1): cross-host CREATE. A registered remote host id
     // forwards the write to that host's daemon; the qitem lives in the origin
     // host's DB (origin-owns-the-record) and its OWN maybeNudge fires on its
@@ -807,6 +1087,9 @@ export function queueRoutes(): Hono {
       const { hostId: _dropped, returnRoute: _route, returnRouteBasis: _basis, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
         ...rest,
+        // An older receiving daemon may ignore park fields. Suppress its ordinary
+        // create nudge so a requested park never wakes the owner immediately.
+        ...(parkRequested ? { nudge: false } : {}),
         ...(route && carried ? { returnRoute: carried, returnRouteBasis: route.basis } : {}),
         qitemId: mintedId,
         // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon is the origin,
@@ -820,15 +1103,57 @@ export function queueRoutes(): Hono {
       const skippedScope = skippedCreateScopeAdvisory(body.tags);
       const payload = fwd.payload;
       // A same-id retry returns the row the receiver already stored: say the route wasn't carried only when it has none.
-      const returnedRoute = payload !== null && typeof payload === "object" && !Array.isArray(payload)
-        && typeof (payload as { returnRoute?: unknown }).returnRoute === "string";
+      const returnedRoute = isObjectRecord(payload) && typeof payload.returnRoute === "string";
       const added = [...(skippedScope ? [toCreateScopeAdvisory(skippedScope)] : []),
         ...(routeNotCarried && !returnedRoute ? [{ code: RETURN_ROUTE_NOT_CARRIED, message: routeNotCarried }] : [])];
-      if (!added.length || payload === null || typeof payload !== "object" || Array.isArray(payload))
-        return c.json(payload, fwd.status as 200);
-      const objectPayload = payload as Record<string, unknown>;
-      const existingAdvisories = Array.isArray(objectPayload.advisories) ? objectPayload.advisories : [];
-      return c.json({ ...objectPayload, advisories: [...existingAdvisories, ...added] }, fwd.status as 200);
+      if (!parkRequested) {
+        if (!isObjectRecord(payload)) return c.json(payload, fwd.status as 200);
+        const { parkReceipt: _parkReceipt, parkWarning: _parkWarning, ...ordinaryCreate } = payload;
+        const existingAdvisories = Array.isArray(ordinaryCreate.advisories) ? ordinaryCreate.advisories : [];
+        return added.length
+          ? c.json({ ...ordinaryCreate, advisories: [...existingAdvisories, ...added] }, fwd.status as 200)
+          : c.json(ordinaryCreate, fwd.status as 200);
+      }
+
+      const responseStatus = (fwd.status === 204 ? 200 : fwd.status) as 200;
+      const identity = checkForwardedParkCreate(payload, forwardBody);
+      if (!identity.row) {
+        const createWarning = mergeParkWarning(
+          isObjectRecord(payload) ? payload.createWarning : undefined,
+          "qitem_create_outcome_unknown",
+          identity.reason,
+          identity.fields,
+          identity.observed,
+        );
+        const parkWarning = unconfirmedParkWarning({
+          code: "qitem_park_not_confirmed",
+          message: "The create identity is unknown, so this response cannot confirm its park.",
+        }, undefined);
+        return c.json({
+          qitemId: mintedId,
+          createOutcome: "unknown",
+          createWarning,
+          parkReceipt: { confirmed: false },
+          parkWarning,
+          ...(identity.existingRow ? { existingRow: identity.existingRow } : {}),
+        }, responseStatus);
+      }
+
+      const objectPayload = identity.row;
+      const outputRow = safeForwardedParkCreateRow(objectPayload);
+      const existingAdvisories = Array.isArray(outputRow.advisories) ? outputRow.advisories : [];
+      const requestedBlocker = typeof body.blockedOn === "string" ? body.blockedOn : null;
+      const requestedWakeAfter = typeof body.wakeAfterSeconds === "number" ? body.wakeAfterSeconds : null;
+      const parkCheck = checkForwardedParkReceipt(objectPayload, requestedBlocker, requestedWakeAfter);
+      const parkWarning = parkCheck.confirmed ? undefined
+        : unconfirmedParkWarning(objectPayload.parkWarning, objectPayload.state, parkCheck.fields, parkCheck.observed);
+      return c.json({
+        ...outputRow,
+        persisted: true,
+        parkReceipt: { ...parkCheck.receipt, confirmed: parkCheck.confirmed },
+        ...(parkWarning ? { parkWarning } : {}),
+        ...(added.length ? { advisories: [...existingAdvisories, ...added] } : {}),
+      }, responseStatus);
     }
 
     try {
@@ -843,6 +1168,8 @@ export function queueRoutes(): Hono {
         tier: body.tier,
         tags: withRouteNotCarriedTag(body.tags, routeNotKept),
         expiresAt: body.expiresAt,
+        blockedOn: typeof body.blockedOn === "string" ? body.blockedOn : undefined,
+        wakeAfterSeconds: body.wakeAfterSeconds,
         chainOfRecord: body.chainOfRecord,
         targetRepo: body.targetRepo,
         humanIntent: body.humanIntent,
@@ -858,9 +1185,35 @@ export function queueRoutes(): Hono {
       });
       const scopeAdvisory = !(body.tags ?? []).includes(CROSS_HOST_TAG) ? createScopeAdvisory(c, item.tags) : null;
       const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), scopeAdvisory,
+        parkWithoutWakeAdvisory(item),
         // A same-id retry returns the stored row unchanged: say the route wasn't kept only when that row has none.
         routeNotKept && !item.returnRoute ? { code: RETURN_ROUTE_NOT_CARRIED, message: routeNotKept } : null].filter(Boolean);
-      return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
+      let parkWake: ReturnType<QueueRepository["getParkWakeStatus"]> = null;
+      let parkReceiptReadFailed = false;
+      if (parkRequested) {
+        try {
+          parkWake = getRepo(c).getParkWakeStatus(item.qitemId);
+        } catch {
+          // Creation and park transaction already committed. This read only enriches the response.
+          parkReceiptReadFailed = true;
+        }
+      }
+      const parkWakeAfterSeconds = parkWake?.kind === "timer" ? parkWake.intervalSeconds ?? null : null;
+      const parkWarning = item.parkWarning ?? (parkReceiptReadFailed ? {
+        code: "qitem_park_receipt_unavailable",
+        message: "The queue row was created, but the daemon could not read its park receipt. Check this row by its ID before retrying with a new ID.",
+      } : undefined);
+      const parkReceipt = parkRequested ? {
+        receiptVersion: PARK_RECEIPT_VERSION,
+        confirmed: !parkReceiptReadFailed && !item.parkWarning && item.state === "blocked"
+          && item.blockedOn === (typeof body.blockedOn === "string" ? body.blockedOn : null)
+          && (body.wakeAfterSeconds == null || (parkWake?.kind === "timer" && parkWakeAfterSeconds === body.wakeAfterSeconds)),
+        state: item.state,
+        blockedOn: item.blockedOn,
+        wakeKind: parkWake?.kind ?? null,
+        wakeAfterSeconds: parkWakeAfterSeconds,
+      } : undefined;
+      return c.json({ ...item, ...(parkReceipt ? { parkReceipt } : {}), ...(parkWarning ? { parkWarning } : {}), ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

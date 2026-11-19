@@ -99,6 +99,131 @@ describe("queue routes", () => {
     temporaryWorkspace = undefined;
   });
 
+  it("creates a blocked queue row and timer through one create request without an immediate nudge", async () => {
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({
+        destinationSession: "worker@rig",
+        body: "Wait for the remote task",
+        blockedOn: "external:remote-task",
+        wakeAfterSeconds: 90,
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result).toMatchObject({ state: "blocked", blockedOn: "external:remote-task" });
+    expect(result.parkReceipt).toMatchObject({ receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: "external:remote-task", wakeKind: "timer", wakeAfterSeconds: 90 });
+    expect(queueRepo.getParkWakeStatus(result.qitemId)).toMatchObject({ kind: "timer", live: true });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM outbox_entries").get()).toMatchObject({ count: 0 });
+  });
+
+  it("creates a timed park without a blocker and reports a typed gate with no wake", async () => {
+    const create = (body: Record<string, unknown>) => app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify(body),
+    });
+    const timed = await create({ destinationSession: "worker@rig", body: "Remind me", wakeAfterSeconds: 45, nudge: false });
+    expect(timed.status).toBe(201);
+    const timedRow = await timed.json() as Record<string, any>;
+    expect(timedRow).toMatchObject({ state: "blocked", blockedOn: null,
+      parkReceipt: { receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: null, wakeKind: "timer", wakeAfterSeconds: 45 } });
+
+    const gate = await create({ destinationSession: "worker@rig", body: "Wait for outside event", blockedOn: "external:release", nudge: false });
+    expect(gate.status).toBe(201);
+    expect(await gate.json()).toMatchObject({ state: "blocked", blockedOn: "external:release",
+      parkReceipt: { receiptVersion: 1, confirmed: true, state: "blocked", blockedOn: "external:release", wakeKind: null, wakeAfterSeconds: null },
+      advisories: [expect.objectContaining({ code: "park_without_wake" })] });
+  });
+
+  it("same-ID park retries return an unconfirmed version 1 receipt without adding a timer", async () => {
+    const create = (body: Record<string, unknown>) => app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify(body),
+    });
+    const base = { qitemId: "qitem-park-retry", destinationSession: "worker@rig", body: "Wait", blockedOn: "external:first", wakeAfterSeconds: 60, nudge: false };
+    const first = await create(base);
+    expect(first.status).toBe(201);
+    const firstRow = await first.json() as Record<string, any>;
+    expect(firstRow.parkReceipt).toMatchObject({ confirmed: true, wakeAfterSeconds: 60 });
+
+    const exact = await create(base);
+    expect(exact.status).toBe(201);
+    expect(await exact.json()).toMatchObject({
+      qitemId: base.qitemId,
+      state: "blocked",
+      blockedOn: "external:first",
+      parkReceipt: {
+        receiptVersion: 1,
+        confirmed: false,
+        state: "blocked",
+        blockedOn: "external:first",
+        wakeKind: "timer",
+        wakeAfterSeconds: 60,
+      },
+      parkWarning: {
+        code: "qitem_park_not_confirmed",
+        message: expect.stringContaining("this retry cannot confirm that its original blocker or timer matches the supplied park options"),
+      },
+    });
+
+    const changed = await create({ ...base, blockedOn: "external:second", wakeAfterSeconds: 120 });
+    expect(changed.status).toBe(201);
+    expect(await changed.json()).toMatchObject({ state: "blocked", blockedOn: "external:first",
+      parkReceipt: { confirmed: false },
+      parkWarning: { code: "qitem_park_not_confirmed" } });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get(base.qitemId)).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+  });
+
+  it("keeps a parked create successful when its post-commit receipt read fails, without adding a timer on retry", async () => {
+    const qitemId = "qitem-park-receipt-read-fails";
+    const body = {
+      qitemId,
+      destinationSession: "worker@rig",
+      body: "Wait for the release",
+      blockedOn: "external:release",
+      wakeAfterSeconds: 90,
+      nudge: false,
+    };
+    vi.spyOn(queueRepo, "getParkWakeStatus").mockImplementationOnce(() => {
+      throw new Error("injected post-commit receipt read failure");
+    });
+    const create = () => app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify(body),
+    });
+
+    const first = await create();
+    expect(first.status).toBe(201);
+    expect(await first.json()).toMatchObject({
+      qitemId,
+      state: "blocked",
+      blockedOn: "external:release",
+      parkReceipt: { receiptVersion: 1, confirmed: false, state: "blocked", blockedOn: "external:release" },
+      parkWarning: { code: "qitem_park_receipt_unavailable" },
+    });
+    expect(queueRepo.getById(qitemId)).toMatchObject({ state: "blocked", blockedOn: "external:release" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get(qitemId)).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+
+    const retry = await create();
+    expect(retry.status).toBe(201);
+    expect(await retry.json()).toMatchObject({ parkReceipt: { confirmed: false }, parkWarning: { code: "qitem_park_not_confirmed" } });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items WHERE qitem_id = ?").get(qitemId)).toMatchObject({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM watchdog_jobs WHERE policy = 'periodic-reminder'").get()).toMatchObject({ count: 1 });
+  });
+
+  it("rejects a non-string blockedOn with a field error before creating a row", async () => {
+    const response = await app.request("/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify({ destinationSession: "worker@rig", body: "Invalid blocker", blockedOn: 42 }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_blocked_on", field: "blockedOn" });
+    expect(queueRepo.list()).toHaveLength(0);
+  });
+
   it.each(["create", "handoff", "handoff-and-complete"])("keeps committed %s successful when the destination advisory throws", async (verb) => {
     queueRepo = new QueueRepository(db, bus, {
       destinationAdvisory: () => { throw Object.assign(new Error("membership unavailable"), { code: "SQLITE_BUSY" }); },
