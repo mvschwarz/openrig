@@ -241,20 +241,37 @@ describe("a queue create that got no answer is read back once by its ID", () => 
   // The daemon returns the stored row for a same-ID create only when its destination and source match, and says when the body
   // wasn't saved. The read-back holds a row to the same test: a row with this ID that isn't this create leaves it unknown.
   it.each([
-    ["destination", { ...ROW, destinationSession: "other@rig-c", sourceSession: "other@rig-c", body: "older work" }],
+    ["destination", { ...ROW, destinationSession: "other@rig-c" }],
     ["source", { ...ROW, sourceSession: "someone@rig-z" }],
     ["body", { ...ROW, body: "older work" }],
   ])("a row with this ID whose %s differs isn't this create: the outcome stays unknown, and the ID isn't for other work", async (field, row) => {
     const { calls, error } = await run("dev@rig-b", [new DaemonTimeoutError(`Request to ${LOCAL}/api/queue/create timed out after 5000ms`)],
       { [`${LOCAL}/api/queue/${ID}`]: { status: 200, data: row } });
-    expect(error).not.toBeNull();
     expect(posts(calls)).toHaveLength(1);
     expect(readBacks(calls)).toHaveLength(1);
     const all = stderr.join("\n");
     expect(all).not.toContain("committed after all");
-    expect(all).toContain(`Row ${ID} exists but isn't this create (its ${field} differs)`);
-    expect(all).toContain("Don't reuse this ID for other work");
-    expect(all).toContain("The write outcome is INDETERMINATE");
+    if (field === "source") {
+      expect(error).not.toBeNull();
+      expect(all).toContain(`Row ${ID} exists but isn't this create (its source differs)`);
+      expect(all).toContain("Don't reuse this ID for other work");
+      expect(all).toContain("The write outcome is INDETERMINATE");
+      return;
+    }
+    expect(error).toBeNull();
+    expect(all).toContain(`The row ID ${ID} exists, but its destination or body hash contradicts this request.`);
+    expect(all).toContain("The write outcome stays unknown. Keep this ID for recovery.");
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({
+      error: "queue_create_outcome_unknown",
+      outcome: "unknown",
+      qitemId: ID,
+      contradiction: {
+        destinationMatches: field !== "destination",
+        bodyHashMatches: field !== "body",
+      },
+      recovery: expect.stringContaining(`--id '${ID}'`),
+    });
+    expect(process.exitCode).toBe(2);
   });
 
   it("a create read back after it timed out keeps --verify: its delivery is reported as on any create", async () => {

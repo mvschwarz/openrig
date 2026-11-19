@@ -57,9 +57,11 @@ rig queue create --destination <your session> --tags watch \
 `--blocked-on` uses the same blocker meaning as `queue block` and `queue update`. Here,
 `external:<what>` names the outside thing you are waiting on. The timer first fires after the interval, not now.
 
-An older receiving daemon may save this row as pending, where the owner or scheduler can start work early; this command suppresses the direct nudge and reports the limit, but it cannot prevent later pickup. If that limit is unacceptable, the maintainer can choose to refuse writes until the receiver supports parked creates.
+An older receiving daemon may save this row as pending, where the owner or scheduler can start work early; this command suppresses the direct nudge and reports the limit, but it cannot prevent later pickup.
 
-**3. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
+**3. Check the saved row before you promise the schedule.** Run `rig queue show <task> --full --json`. Confirm that the row is `blocked` and its `blockedOn` value matches the condition. The `waiting.nextBackstop` field reports a backstop. A matching `watchdog:` interval does not prove that this request's one-shot timer is live. Use the create response's warning: if it says the park is unconfirmed, do not promise the schedule. A failed read is also unconfirmed. Do not create the watch again.
+
+**4. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
 it stops. For example: "I'll check the release PR every hour and message you here once it merges. Then I'll stop."
 
 A plain reminder ("remind me in 20 minutes to look at the release notes") is the same with no condition. Set it aside

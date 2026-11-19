@@ -37,7 +37,13 @@ describe("forwarded queue response outcomes reach the CLI", () => {
         setTimeout(() => res.destroy(), 50);
       } else {
         res.writeHead(mode === "success" ? 201 : 409, { "content-type": "application/json" });
-        res.end(JSON.stringify(mode === "success" ? { qitemId: requests[0]!.body.qitemId } : { error: "qitem_id_reuse" }));
+        res.end(JSON.stringify(mode === "success" ? {
+          qitemId: requests[0]!.body.qitemId,
+          sourceSession: "seat@rig@edge",
+          destinationSession: "worker@rig",
+          state: "pending",
+          body: "proof",
+        } : { error: "qitem_id_reuse" }));
       }
     });
     server.listen(0, "127.0.0.1");
@@ -70,7 +76,7 @@ describe("forwarded queue response outcomes reach the CLI", () => {
     program.addCommand(queueCommand(deps));
     await program.parseAsync([
       "node", "rig", "queue", "create", "--destination", "worker@rig", "--body", "proof",
-      "--summary", "proof", "--host", "edge", "--no-nudge", "--json",
+      "--summary", "proof", "--host", "edge", "--no-nudge", "--json", "--full",
     ]);
     const response = JSON.parse(String(output.mock.calls[0]?.[0]));
     const stderr = errors.mock.calls.map((call) => call.join(" ")).join("\n");
@@ -91,7 +97,13 @@ describe("forwarded queue response outcomes reach the CLI", () => {
       expect(stderr).toContain("reconcile by ID before any retry");
       expect(process.exitCode).toBe(2);
     } else if (mode === "success") {
-      expect(response).toEqual({ qitemId: id });
+      expect(response).toMatchObject({
+        qitemId: id,
+        sourceSession: "seat@rig@edge",
+        destinationSession: "worker@rig",
+        state: "pending",
+        body: "proof",
+      });
       expect(stderr).not.toContain("INDETERMINATE");
       expect(process.exitCode).toBeUndefined();
     } else {

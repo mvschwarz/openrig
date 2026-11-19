@@ -23,10 +23,11 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
 
 type Row = Record<string, unknown>;
 const BODY = "Do the thing.\n".repeat(40) + "é";
+const DEFAULT_ROW_ID = "qitem-20261010180000-aaaa";
 
 /** The daemon's write response, shaped as `rowToItem` returns it. */
 function row(over: Row = {}, waiting: Row = {}): Row {
-  const id = (over.qitemId as string | undefined) ?? "qitem-20261010180000-aaaa";
+  const id = (over.qitemId as string | undefined) ?? DEFAULT_ROW_ID;
   const state = (over.state as string | undefined) ?? "pending";
   return {
     pickup: { state: "unclaimed" },
@@ -72,7 +73,16 @@ function makeDeps(routes: Record<string, { status: number; data: unknown } | Arr
         return { status: 200, data: {} };
       }),
       post: vi.fn(async (p: string, body: unknown) => {
-        const response = pick(`POST ${p}`, { status: 500, data: { error: "unrouted" } });
+        let response = pick(`POST ${p}`, { status: 500, data: { error: "unrouted" } });
+        const requestedId = body && typeof body === "object" ? (body as { qitemId?: unknown }).qitemId : undefined;
+        const responseRow = response.data && typeof response.data === "object" && !Array.isArray(response.data)
+          ? response.data as Row : undefined;
+        if (p === "/api/queue/create" && response.status < 400 && typeof requestedId === "string"
+          && responseRow?.qitemId === DEFAULT_ROW_ID) {
+          const waiting = responseRow.waiting && typeof responseRow.waiting === "object" && !Array.isArray(responseRow.waiting)
+            ? { ...responseRow.waiting as Row, obligation: requestedId } : responseRow.waiting;
+          response = { ...response, data: { ...responseRow, qitemId: requestedId, ...(waiting === undefined ? {} : { waiting }) } };
+        }
         const transitionNote = body && typeof body === "object" ? (body as { transitionNote?: unknown }).transitionNote : undefined;
         if (response.status < 400 && typeof transitionNote === "string") {
           transitions.push({ transitionId: transitions.length + 1, transitionNote, actorSession: "stub@rig" });
@@ -344,19 +354,19 @@ describe("queue write receipt (output.compact)", () => {
       });
       const out = await create(["--id", id, "--wake-after", "15m"], data);
       expect(out).toContain("park: not confirmed");
-      expect(out).toContain("wake: park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside");
+      expect(out).toContain("wake: park request: no immediate terminal wake was requested; the returned row did not confirm the park");
       expect(out).toContain(`WARNING: ${message}`);
 
       logs = [];
       const json = JSON.parse(await create(["--id", id, "--wake-after", "15m", "--json"], data)) as Row;
       expect(json).toMatchObject({ qitemId: id, persisted: true });
-      expect(json.parkReceipt).toMatchObject({ confirmed: false, state: "pending" });
+      expect(json).not.toHaveProperty("parkReceipt");
       expect(json.parkWarning).toMatchObject({ code: "qitem_park_not_confirmed" });
       expect(json.parkWarning.message).toContain(message);
       expect(json.parkWarning.message).toMatch(/owner or scheduler can start work early/i);
       expect(json.wake).toMatchObject({
         evidence: "suppressed",
-        detail: "park request: no immediate terminal wake was requested; the saved row state and park receipt show whether it was set aside",
+        detail: "park request: no immediate terminal wake was requested; the returned row did not confirm the park",
       });
     });
 
@@ -374,9 +384,10 @@ describe("queue write receipt (output.compact)", () => {
 
       const out = await create(["--id", id, "--wake-after", "15m", "--json"], data);
       const result = JSON.parse(out) as Row;
-      expect(Object.keys(result)).toEqual(["qitemId", "createOutcome", "createWarning", "parkReceipt", "parkWarning"]);
-      expect(result).toMatchObject({ qitemId: id, createOutcome: "unknown", parkReceipt: { confirmed: false } });
-      expect(Object.keys(result.parkReceipt as Row)).toEqual(["confirmed"]);
+      expect(Object.keys(result)).toEqual(["qitemId", "createOutcome", "createWarning", "parkWarning", "recovery"]);
+      expect(result).toMatchObject({ qitemId: id, createOutcome: "unknown" });
+      expect(result).not.toHaveProperty("parkReceipt");
+      expect(result.recovery).toContain(id);
       expect(Object.keys(result.parkWarning as Row)).toEqual(["code", "message", "fields", "observed"]);
 
       const createWarning = result.createWarning as Row;
@@ -441,7 +452,7 @@ describe("queue write receipt (output.compact)", () => {
         deliveryVerify: { timeoutMs: 50, intervalMs: 0, sleep: async () => {} },
       } });
       program.exitOverride();
-      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", "--json"]);
+      await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", "--id", id, "--json"]);
       const json = JSON.parse(logs.at(-1)!) as Row;
       expect(json).toMatchObject({ qitemId: id, persisted: true, delivery: { outcome: "posted", connectorAccepted: true, humanReadership: "unknown", nextAction: null } });
       expect(json).not.toHaveProperty("body");
@@ -460,7 +471,7 @@ describe("queue write receipt (output.compact)", () => {
           deliveryVerify: { timeoutMs: 50, intervalMs: 0, sleep: async () => {} },
         } });
         program.exitOverride();
-        await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", ...extra]);
+        await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", "--id", id, ...extra]);
         return logs.join("\n");
       };
       for (const json of [false, true]) {
@@ -502,7 +513,7 @@ describe("queue write receipt (output.compact)", () => {
     });
 
     const createVia = async (extra: string[], data: Row, health: { status: number; data: unknown }) =>
-      run(["create", "--destination", "worker@r", "--body", BODY, "--summary", "s", ...extra],
+      run(["create", "--destination", "worker@r", "--body", BODY, "--summary", "s", "--id", DEFAULT_ROW_ID, ...extra],
         { "POST /api/queue/create": { status: 201, data }, "GET /healthz": health });
 
     it("a --host create to another daemon names the host and the remote read", async () => {

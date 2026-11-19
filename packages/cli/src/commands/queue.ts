@@ -65,16 +65,17 @@ export interface GatewayDeliveryResult extends DeliveryResultBase {
   threaded?: boolean;
 }
 
-/** A terminal wake: the row's lastNudgeResult is the receipt, and a claim is the pickup. */
+/** A terminal wake: the row's lastNudgeResult is the receipt, and a claim is the pickup.
+ *  For parked creates, any wake or claim in the row predates this request and is history. */
 export interface TerminalDeliveryResult extends DeliveryResultBase {
   receiptSource: "terminal";
   /** The class of wakeResult: verified; delivered-ack-pending; claimed (a claimed row whose wake wasn't confirmed);
    *  retained:*; failed:*, unroutable:* or awaiting-pickup:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
-   *  (still-pending); or no wake requested by --no-nudge (not-requested). */
+   *  (still-pending); or no immediate wake requested by --no-nudge or a parked create (not-requested). */
   outcome: "verified" | "delivered-ack-pending" | "claimed" | "retained" | "failed" | "indeterminate" | "still-pending" | "not-requested";
-  /** The row's lastNudgeResult as recorded; null before any wake result. */
+  /** The row's lastNudgeResult as recorded; null before any wake result. A parked create can report an earlier result. */
   wakeResult: string | null;
-  /** A claim shows the seat took the item; it does not prove the body was read.
+  /** A claim shows the seat took the item; it does not prove the body was read. On a parked create it is row history.
    *  pickup is the daemon's derived pickup receipt state, as the row reports it. */
   claim: { observed: boolean; claimedAt: string | null; pickup: string | null };
   /** Present when the gateway may also post this row: a registered person who is also a seat with
@@ -93,24 +94,13 @@ export interface DeliveryVerifyTarget {
 }
 
 type QueueRow = Record<string, unknown>;
+type CreateReadbackContradiction = { destinationMatches: boolean; bodyHashMatches: boolean };
 
-/** Older forwarders can infer a positive receipt from row state without this destination-generated marker. */
-const PARK_RECEIPT_VERSION = 1;
 const EARLY_START_PARK_WARNING = "An older receiving daemon may save this row as pending, where the owner or scheduler can start work early.";
 const QUEUE_STATES = new Set(["pending", "in-progress", "blocked", "done", "failed", "denied", "canceled", "handed-off"]);
 const BODY_SUMMARY_TYPES = new Set(["null", "object", "array", "number", "boolean", "undefined"]);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const IDENTITY_SESSION_PART_PATTERN = /^[A-Za-z0-9._-]+$/;
-const PARK_CREATE_RESPONSE_FIELDS = [
-  "qitemId", "tsCreated", "tsUpdated", "sourceSession", "destinationSession", "state", "priority", "tier",
-  "deliveryOutcome", "deliveryFailureClass", "deliveryFailureDetail", "tags", "blockedOn", "pickup", "waiting",
-  "handedOffTo", "handedOffFrom", "expiresAt", "chainOfRecord", "body", "humanIntent", "humanDetail", "replyTo",
-  "replyToFallback", "humanQuestions", "humanAnswers", "delegatedDecision", "summary", "evidenceRef", "contentErasedAt",
-  "returnRoute", "returnRouteBasis", "fieldsElided", "closureReason", "closureTarget", "handoffAdvisory",
-  "closureRequiredAt", "claimedAt", "lastNudgeAttempt", "lastNudgeResult", "lastNudgeWireResult", "lastHeartbeat",
-  "resolution", "targetRepo", "createWarning", "parkReceipt", "parkWarning", "advisories",
-] as const;
-
 /** Diagnostic summaries keep only a plain member@rig address, not malformed text. */
 function validIdentitySession(value: unknown): value is string {
   if (typeof value !== "string" || value !== value.trim()) return false;
@@ -201,17 +191,6 @@ function safeCreateWarning(value: unknown): QueueRow | undefined {
   return isQueueRow(safe) ? safe : undefined;
 }
 
-/** Copy only declared queue fields from a received park response. */
-function safeParkCreateResponseRow(row: QueueRow): QueueRow {
-  const safe: QueueRow = {};
-  for (const field of PARK_CREATE_RESPONSE_FIELDS) {
-    if (!Object.prototype.hasOwnProperty.call(row, field)) continue;
-    const value = field === "createWarning" ? safeCreateWarning(row[field]) : row[field];
-    if (value !== undefined) safe[field] = value;
-  }
-  return safe;
-}
-
 function stateWarningMessages(state: unknown): string[] {
   if (state === "pending") return [
     "The row is live and may start early.",
@@ -256,14 +235,54 @@ function mergeWarning(
   };
 }
 
-function unconfirmedParkWarning(value: unknown, state: unknown, fields: string[] = [], observed: QueueRow = {}): QueueRow {
-  const existing = isQueueRow(value) ? value : {};
-  const originalMessage = typeof existing.message === "string" ? existing.message.trim() : "";
-  const stateMessages = stateWarningMessages(state).filter((message) => !originalMessage.includes(message));
-  const explanation = [...stateMessages, ...(originalMessage || stateMessages.length > 0 ? [] : [
-    "The daemon did not provide a current park receipt. The requested blocker and timer are not confirmed.",
-  ])].join(" ");
-  return mergeWarning(value, "qitem_park_not_confirmed", explanation, fields, observed);
+function unconfirmedParkWarning(
+  row: QueueRow,
+  blockedOn: string | undefined,
+  wakeAfterSeconds: number | undefined,
+  directCreateResponse = false,
+): QueueRow | undefined {
+  const existing = isQueueRow(row.parkWarning) ? row.parkWarning : undefined;
+  const blockerMatches = row.state === "blocked" && (row.blockedOn ?? null) === (blockedOn ?? null);
+  const hasParkWarning = Object.prototype.hasOwnProperty.call(row, "parkWarning");
+  const hasCurrentParkSignal = hasParkWarning && row.parkWarning === null;
+  const malformedParkWarning = hasParkWarning && row.parkWarning !== null && !isQueueRow(row.parkWarning);
+  const bodyNotSaved = isQueueRow(row.createWarning) && row.createWarning.code === "qitem_body_not_saved";
+  const timerMatches = wakeAfterSeconds === undefined || hasCurrentParkSignal;
+  if (directCreateResponse && !bodyNotSaved && blockerMatches && timerMatches && existing === undefined && !malformedParkWarning) return undefined;
+
+  const existingMessage = typeof existing?.message === "string" ? existing.message : "";
+  const messages = existing ? [] : stateWarningMessages(row.state);
+  if (row.state === "pending" && existing && !existingMessage.includes(EARLY_START_PARK_WARNING)) {
+    messages.push(EARLY_START_PARK_WARNING);
+  }
+  if (bodyNotSaved && !existingMessage.toLowerCase().includes("not confirmed")) {
+    messages.push("The supplied body was not saved. The requested park is not confirmed.");
+  }
+  if (row.state === "blocked" && !blockerMatches) {
+    messages.push("The saved row does not match the requested blocker. The park is not confirmed.");
+  }
+  if (row.state === "blocked" && blockerMatches && !timerMatches) {
+    messages.push("The requested timer is not confirmed by the saved row. Check its current backstop before relying on the schedule.");
+  }
+  if (malformedParkWarning) messages.push("The saved park warning is not valid, so the park is not confirmed.");
+  if (existing && messages.length === 0) return existing;
+  if (messages.length === 0) messages.push("The saved row does not confirm the requested blocker and timer.");
+  return mergeWarning(existing, "qitem_park_not_confirmed", messages.join(" "));
+}
+
+function printCreateReturnRoute(row: QueueRow): void {
+  if (typeof row.returnRoute !== "string") return;
+  const route = row.returnRoute;
+  const sessionPrefix = row.returnRouteBasis === "issued-actor"
+    ? ` Put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.`
+    : ".";
+  if (route.split("@").length === 3) {
+    console.error(`Return route: ${route} is recorded with this work. It names a conversation on another host, and the work's host sends prompts only to a route on its own host: this work's questions and its seats' prompts follow their usual path${sessionPrefix}`);
+    return;
+  }
+  console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with `
+    + `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress`
+    + (row.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
 }
 
 function createOutcomeWarning(value: unknown, fields: string[], observed: QueueRow, reason: string): QueueRow {
@@ -343,6 +362,7 @@ function terminalDeliveryResult(
   const claimedAt = stringField(row, "claimedAt");
   const pickupState = typeof row.pickup === "object" && row.pickup !== null ? stringField(row.pickup as QueueRow, "state") : null;
   const claim = { observed: claimedAt !== null, claimedAt, pickup: pickupState };
+  const currentOutcome = parked ? "not-requested" : outcome;
   const seat = destination ?? "<destination>";
   const receipt: Record<TerminalDeliveryResult["outcome"], string> = {
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
@@ -358,11 +378,12 @@ function terminalDeliveryResult(
       : `Terminal receipt unconfirmed (${wakeResult}).`,
     "still-pending": waitedMs === null ? "No terminal receipt was recorded before the claim." : `No terminal receipt was recorded within ${waitedMs}ms.`,
     "not-requested": parked
-      ? "No immediate terminal wake was sent for this parked row. See the park receipt for its blocker and any timer."
+      ? "This request sent no immediate terminal wake. Earlier wake and claim details are row history. Check the row's blocker and live timer."
       : "No terminal wake was requested (--no-nudge).",
   };
+  const claimPrefix = parked ? "Row history: this item was claimed at " : "Claimed at ";
   const claimText = claim.observed
-    ? `Claimed at ${claimedAt}${pickupState ? ` (pickup ${pickupState})` : ""}. A claim shows the seat took the item; it does not prove the body was read.`
+    ? claimPrefix + claimedAt + (pickupState ? " (pickup " + pickupState + ")" : "") + ". A claim shows the seat took the item; it does not prove the body was read."
     : waitedMs === null ? "No claim observed yet." : `No claim observed within ${waitedMs}ms.`;
   const gatewaySide = gatewayAlsoPosts(row);
   const gateway = gatewaySide ? gatewayReceiptOf(row) : null;
@@ -371,19 +392,19 @@ function terminalDeliveryResult(
     : gateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
     : ` Slack delivery ${gateway.outcome}${gateway.detail ? `: ${gateway.detail}` : ""}.`;
   const gatewayFailed = gateway !== null && gateway.connectorAccepted === false;
-  const notFailed = !claim.observed && !gatewayFailed && isKnownUnconfirmed(wakeResult, outcome) ? " This is not a failed handoff." : "";
+  const notFailed = !claim.observed && !gatewayFailed && isKnownUnconfirmed(wakeResult, currentOutcome) ? " This is not a failed handoff." : "";
   const destinationKind = terminalDestinationKind(destination, gatewaySide);
   const settled = claim.observed && (gateway === null || gateway.outcome === "posted");
   return {
     receiptSource: "terminal",
     destinationKind,
     ...(destinationKind === "human" ? { humanReadership: "unknown" as const } : {}),
-    outcome,
+    outcome: currentOutcome,
     wakeResult,
     claim,
     ...(gateway ? { gateway } : {}),
-    detail: `The qitem is saved. ${receipt[outcome]}${slackText} ${claimText}${notFailed}`,
-    nextAction: settled ? null : outcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
+    detail: `The qitem is saved. ${receipt[currentOutcome]}${slackText} ${claimText}${notFailed}`,
+    nextAction: settled ? null : currentOutcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
   };
 }
 
@@ -393,6 +414,7 @@ export function unreadableDeliveryResult(
   destination: string | null,
   row: QueueRow,
   reason: string,
+  parked = false,
 ): VerifiedDeliveryResult {
   const nextAction = qitemId ? `rig queue show ${qitemId} --json` : null;
   if (receiptSourceOf(destination, row) === "gateway") {
@@ -406,7 +428,12 @@ export function unreadableDeliveryResult(
       nextAction,
     };
   }
-  return { ...terminalDeliveryResult(qitemId ?? "", destination, row, "indeterminate", null), detail: reason, nextAction };
+  const result = terminalDeliveryResult(qitemId ?? "", destination, row, "indeterminate", null, parked);
+  return {
+    ...result,
+    detail: parked ? result.detail + " " + reason : reason,
+    nextAction,
+  };
 }
 
 export async function waitForDeliveryOutcome(
@@ -428,7 +455,7 @@ export async function waitForDeliveryOutcome(
       row = response.data ?? {};
     } catch (error) {
       return unreadableDeliveryResult(qitemId, target.destinationSession ?? stringField(row, "destinationSession"), row,
-        `delivery receipt could not be read: ${(error as Error).message}`);
+        `delivery receipt could not be read: ${(error as Error).message}`, target.parked === true);
     }
     const destination = target.destinationSession ?? stringField(row, "destinationSession");
     const timedOut = now() - started >= timeoutMs;
@@ -470,12 +497,10 @@ export async function waitForDeliveryOutcome(
       // --no-nudge requested no wake: there is no terminal receipt to wait for.
       const wakeResult = stringField(row, "lastNudgeResult");
       const outcome = target.parked
-        ? wakeResult !== null ? terminalWakeOutcome(wakeResult)
-          : stringField(row, "claimedAt") !== null ? "claimed" : "not-requested"
+        ? "not-requested"
         : target.nudge === false ? "not-requested" : terminalWakeOutcome(wakeResult);
-      // Any recorded wake result (or an existing claim) settles the terminal side: a later pickup
-      // is `rig queue show`'s to report. When the gateway may also post the row, its receipt is
-      // awaited too. Only a missing receipt waits, up to the bound. Nothing here re-sends anything.
+      // A parked create sent no immediate terminal wake. Any earlier wake or claim in this row is
+      // history; the receipt reports only this request's wake. Nothing here re-sends anything.
       const gatewaySide = gatewayAlsoPosts(row);
       const terminalSettled = outcome === "not-requested" || wakeResult !== null || stringField(row, "claimedAt") !== null;
       const gatewaySettled = !gatewaySide || stringField(row, "deliveryOutcome") !== null;
@@ -789,8 +814,43 @@ interface ParkCreateIdentityCheck {
   existingRow?: QueueRow;
 }
 
-function observedResponseShape(value: unknown): QueueRow {
-  return { type: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+function mergeDirectCreateObservation(
+  failure: ParkCreateIdentityCheck,
+  response: unknown,
+  qitemId: string,
+  sent: SentCreate,
+): ParkCreateIdentityCheck {
+  if (!isQueueRow(response)) return failure;
+  const fields = new Set(failure.fields);
+  const observed: QueueRow = { ...failure.observed };
+  for (const field of ["qitemId", "sourceSession", "destinationSession", "state", "body"]) {
+    if (!Object.prototype.hasOwnProperty.call(response, field)) continue;
+    const value = observedValue(field, response[field]);
+    if (value !== undefined) observed[field] = value;
+  }
+  const mismatches: string[] = [];
+  if (response.qitemId !== qitemId) {
+    fields.add("qitemId");
+    mismatches.push("qitemId");
+  }
+  if (response.destinationSession !== sent.destinationSession) {
+    fields.add("destinationSession");
+    mismatches.push("destinationSession");
+  }
+  const bodyMatches = typeof response.body === "string"
+    && createHash("sha256").update(response.body, "utf8").digest("hex") === createHash("sha256").update(sent.body, "utf8").digest("hex");
+  if (!bodyMatches) {
+    fields.add("body");
+    mismatches.push("body");
+  }
+  return {
+    ...failure,
+    fields: [...fields],
+    observed,
+    reason: mismatches.length
+      ? `${failure.reason} The direct create response also differed in ${mismatches.join(", ")}.`
+      : failure.reason,
+  };
 }
 
 function existingRowSummary(row: QueueRow, expectedId: string, bodyIsSummary = false): QueueRow {
@@ -804,142 +864,6 @@ function existingRowSummary(row: QueueRow, expectedId: string, bodyIsSummary = f
     if (body !== undefined) summary.body = body;
   }
   return summary;
-}
-
-/** Check the returned row identity before reading any park receipt from a park create. */
-async function checkParkCreateIdentity(
-  client: DaemonClient,
-  qitemId: string,
-  value: unknown,
-  sent: SentCreate,
-): Promise<ParkCreateIdentityCheck> {
-  if (!isQueueRow(value)) {
-    return {
-      row: null,
-      fields: ["row"],
-      observed: { row: observedResponseShape(value) },
-      reason: "The create response did not contain a row object. The create outcome is unknown. Keep the sent ID for a read back.",
-    };
-  }
-
-  const fields: string[] = [];
-  const observed: QueueRow = {};
-  const fail = (field: string) => {
-    if (!fields.includes(field)) fields.push(field);
-    const safe = observedValue(field, value[field]);
-    if (safe !== undefined) observed[field] = safe;
-  };
-
-  if (typeof value.qitemId !== "string" || value.qitemId !== qitemId) fail("qitemId");
-  if (typeof value.state !== "string" || !QUEUE_STATES.has(value.state)) fail("state");
-  if (value.destinationSession !== sent.destinationSession) fail("destinationSession");
-
-  let storedSource: string | undefined;
-  try {
-    storedSource = await storedSourceOf(client, sent);
-  } catch {
-    storedSource = undefined;
-  }
-  if (storedSource === undefined || value.sourceSession !== storedSource) fail("sourceSession");
-  if (value.body !== sent.body || (isQueueRow(value.createWarning) && value.createWarning.code === "qitem_body_not_saved")) fail("body");
-
-  if (fields.length === 0) return { row: value, fields, observed, reason: "" };
-  const identityFields = fields.join(", ");
-  return {
-    row: null,
-    fields,
-    observed,
-    reason: `The returned row does not confirm this create (${identityFields}). The create outcome is unknown. Keep the sent ID for a read back.`,
-    ...(value.qitemId === qitemId && typeof value.state === "string" && QUEUE_STATES.has(value.state)
-      ? { existingRow: existingRowSummary(value, qitemId) } : {}),
-  };
-}
-
-interface ParkReceiptCheck {
-  confirmed: boolean;
-  fields: string[];
-  observed: QueueRow;
-  receipt: QueueRow;
-}
-
-function checkParkReceipt(
-  row: QueueRow,
-  blockedOn: string | undefined,
-  wakeAfterSeconds: number | undefined,
-): ParkReceiptCheck {
-  const fields: string[] = [];
-  const observed: QueueRow = {};
-  const fail = (field: string, value: unknown, present = true) => {
-    if (!fields.includes(field)) fields.push(field);
-    if (present) {
-      const safe = observedValue(field, value);
-      if (safe !== undefined) observed[field] = safe;
-    }
-  };
-  const rawReceipt = row.parkReceipt;
-  const receiptPresent = Object.prototype.hasOwnProperty.call(row, "parkReceipt");
-  if (!isQueueRow(rawReceipt)) {
-    fail("parkReceipt", rawReceipt, receiptPresent);
-    if (Object.prototype.hasOwnProperty.call(row, "parkWarning")) fail("parkWarning", row.parkWarning);
-    return {
-      confirmed: false,
-      fields,
-      observed,
-      receipt: {
-        confirmed: false,
-        state: row.state,
-        ...(Object.prototype.hasOwnProperty.call(row, "blockedOn") ? { blockedOn: row.blockedOn } : {}),
-      },
-    };
-  }
-
-  const receipt = rawReceipt;
-  const has = (object: QueueRow, key: string) => Object.prototype.hasOwnProperty.call(object, key);
-  const pairMatches = (field: string, expected: unknown) => {
-    const rowHas = has(row, field);
-    const receiptHas = has(receipt, field);
-    const matches = rowHas && receiptHas && row[field] === expected && receipt[field] === expected;
-    if (!matches) {
-      const observedPair: QueueRow = {};
-      if (rowHas) observedPair.row = row[field];
-      if (receiptHas) observedPair.receipt = receipt[field];
-      fail(field, observedPair, Object.keys(observedPair).length > 0);
-    }
-  };
-
-  if (row.state !== "blocked" || receipt.state !== row.state) {
-    const observedState: QueueRow = {};
-    if (has(row, "state")) observedState.row = row.state;
-    if (has(receipt, "state")) observedState.receipt = receipt.state;
-    fail("state", observedState, Object.keys(observedState).length > 0);
-  }
-  pairMatches("blockedOn", blockedOn ?? null);
-
-  if (!has(receipt, "wakeKind")) {
-    fail("wakeKind", undefined, false);
-  } else {
-    const wakeKind = receipt.wakeKind;
-    const wakeMatches = wakeAfterSeconds !== undefined
-      ? wakeKind === "timer"
-      : wakeKind === null || (wakeKind === "blocker" && typeof blockedOn === "string");
-    if (!wakeMatches) fail("wakeKind", wakeKind);
-  }
-
-  const expectedWakeAfter = wakeAfterSeconds ?? null;
-  if (!has(receipt, "wakeAfterSeconds") || receipt.wakeAfterSeconds !== expectedWakeAfter) {
-    fail("wakeAfterSeconds", receipt.wakeAfterSeconds, has(receipt, "wakeAfterSeconds"));
-  }
-  if (!has(receipt, "receiptVersion") || receipt.receiptVersion !== PARK_RECEIPT_VERSION) {
-    fail("receiptVersion", receipt.receiptVersion, has(receipt, "receiptVersion"));
-  }
-  if (!has(receipt, "confirmed") || receipt.confirmed !== true) {
-    fail("confirmed", receipt.confirmed, has(receipt, "confirmed"));
-  }
-  if (Object.prototype.hasOwnProperty.call(row, "parkWarning")) {
-    fail("parkWarning", row.parkWarning);
-  }
-
-  return { confirmed: fields.length === 0, fields, observed, receipt: { ...receipt, confirmed: fields.length === 0 } };
 }
 
 /** Both reconciliation and --verify read the daemon that holds the row, with its own bearer. */
@@ -1033,9 +957,11 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   note: string;
   remoteConfirmed?: boolean;
   identityFailure?: ParkCreateIdentityCheck;
+  contradiction?: CreateReadbackContradiction;
 }> {
   const remote = remoteHostOf(hostId);
   const where = remote ? ` on host '${remote}'` : "";
+  const expectedBodyHash = createHash("sha256").update(sent.body, "utf8").digest("hex");
   const target = await queueReadTarget(deps, client, hostId);
   if ("error" in target) return { row: null, note: `This CLI couldn't read the row back ${target.error}.` };
   try {
@@ -1054,6 +980,17 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
             observed,
             reason: "The read back returned a different ID. The create outcome is unknown. Keep the sent ID for a read back.",
           },
+        };
+      }
+      const destinationMatches = res.data.destinationSession === sent.destinationSession;
+      const bodyHashMatches = typeof res.data.body === "string"
+        && createHash("sha256").update(res.data.body, "utf8").digest("hex") === expectedBodyHash;
+      if (!destinationMatches || !bodyHashMatches) {
+        return {
+          row: null,
+          note: `The row ID ${qitemId}${where} exists, but its destination or body hash contradicts this request. The write outcome stays unknown. Keep this ID for recovery.`,
+          remoteConfirmed: target.remoteConfirmed,
+          contradiction: { destinationMatches, bodyHashMatches },
         };
       }
       let storedSource: string | undefined;
@@ -1985,41 +1922,19 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           knownIdentityFailure?: ParkCreateIdentityCheck,
         ) => {
           if (status < 400 && parkRequested) {
-            if (created?.createOutcome === "unknown") {
-              const forwardedCreateWarning = safeRemoteEnvelopeValue("createWarning", created.createWarning);
+            if (created.createOutcome === "unknown" || knownIdentityFailure) {
+              const createWarning = knownIdentityFailure
+                ? createOutcomeWarning(created.createWarning, knownIdentityFailure.fields, knownIdentityFailure.observed, knownIdentityFailure.reason)
+                : safeCreateWarning(created.createWarning)
+                  ?? createOutcomeWarning(undefined, [], {}, "The forwarder returned an unknown create outcome. Reconcile by ID before any retry.");
               const forwardedParkWarning = safeRemoteEnvelopeValue("parkWarning", created.parkWarning);
-              const createWarning = isQueueRow(forwardedCreateWarning)
-                ? forwardedCreateWarning
-                : createOutcomeWarning(undefined, [], {}, "The forwarder returned an unknown create outcome. Reconcile by ID before any retry.");
               const parkWarning = isQueueRow(forwardedParkWarning)
                 ? forwardedParkWarning
-                : unconfirmedParkWarning(undefined, undefined);
-              const existingRow = isQueueRow(created.existingRow)
-                ? existingRowSummary(created.existingRow, qitemId, true)
-                : undefined;
-              const result = {
-                qitemId,
-                createOutcome: "unknown",
-                createWarning,
-                parkReceipt: { confirmed: false },
-                parkWarning,
-                ...(isQueueRow(existingRow) ? { existingRow } : {}),
-              };
-              if (typeof createWarning.message === "string") console.error(`Warning: ${createWarning.message}`);
-              if (typeof parkWarning.message === "string") console.error(`Warning: ${parkWarning.message}`);
-              console.error(UNKNOWN_PARK_CREATE_NOTE);
-              printResult(opts.json ?? false, result, status);
-              process.exitCode = 1;
-              return;
-            }
-
-            const identity = knownIdentityFailure ?? await checkParkCreateIdentity(client, qitemId, created, sent);
-            if (!identity.row) {
-              const createWarning = createOutcomeWarning(created?.createWarning, identity.fields, identity.observed, identity.reason);
-              const parkWarning = unconfirmedParkWarning({
-                code: "qitem_park_not_confirmed",
-                message: "The create identity is unknown, so this response cannot confirm its park.",
-              }, undefined);
+                : unconfirmedParkWarning({}, opts.blockedOn, opts.wakeAfter, false)
+                  ?? { code: "qitem_park_not_confirmed", message: "The create identity is unknown, so this response cannot confirm its park." };
+              const existingRow = knownIdentityFailure?.existingRow
+                ? existingRowSummary(knownIdentityFailure.existingRow, qitemId, true)
+                : isQueueRow(created.existingRow) ? existingRowSummary(created.existingRow, qitemId, true) : undefined;
               console.error(`Warning: ${createWarning.message}`);
               console.error(`Warning: ${parkWarning.message}`);
               console.error(UNKNOWN_PARK_CREATE_NOTE);
@@ -2027,99 +1942,58 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
                 qitemId,
                 createOutcome: "unknown",
                 createWarning,
-                parkReceipt: { confirmed: false },
                 parkWarning,
-                ...(identity.existingRow ? { existingRow: identity.existingRow } : {}),
+                ...(isQueueRow(existingRow) ? { existingRow } : {}),
+                recovery,
               }, status);
               process.exitCode = 1;
               return;
             }
-
-            const row = identity.row;
-            const parkCheck = checkParkReceipt(row, opts.blockedOn, opts.wakeAfter);
-            const outputCreated: QueueRow = { ...safeParkCreateResponseRow(row), persisted: true };
-            if (parkCheck.confirmed) {
-              outputCreated.parkReceipt = parkCheck.receipt;
+            const outputCreated: QueueRow = { ...created };
+            delete outputCreated.parkReceipt;
+            const warning = unconfirmedParkWarning(created, opts.blockedOn, opts.wakeAfter, recovered === undefined);
+            if (warning) {
+              outputCreated.parkWarning = warning;
+              if (typeof warning.message === "string") console.error("Warning: " + warning.message);
             } else {
-              const parkWarning = unconfirmedParkWarning(row.parkWarning, row.state, parkCheck.fields, parkCheck.observed);
-              outputCreated.parkReceipt = { ...parkCheck.receipt, confirmed: false };
-              outputCreated.parkWarning = parkWarning;
-              console.error(`Warning: ${parkWarning.message}`);
+              delete outputCreated.parkWarning;
             }
+
             if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
-            else emitScopeAdvisories(row);
-            if (typeof row.returnRoute === "string") {
-              const route = row.returnRoute;
-              console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
-                `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
-                (row.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
-            }
-            const advisories = Array.isArray(row.advisories) ? row.advisories as Array<{ code?: unknown; message?: unknown }> : [];
+            else emitScopeAdvisories(created);
+            const createWarning = created.createWarning as { message?: unknown } | undefined;
+            if (typeof createWarning?.message === "string") console.error(`Warning: ${createWarning.message}`);
+            printCreateReturnRoute(created);
+            const advisories = Array.isArray(created.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
             for (const advisory of advisories) {
               if (advisory.code === "shared_channel_correspondence" && typeof advisory.message === "string") console.error(`Warning: ${advisory.message}`);
             }
             if (opts.verify) {
+              if (isQueueRow(created.createWarning) && created.createWarning.code === "qitem_body_not_saved") {
+                // The daemon returned an existing row for a same-ID retry.
+                // The retry did not create or deliver work, so do not query a
+                // delivery receipt for it.
+                await printWriteResult(client, opts.json ?? false, outputCreated, status, receipt);
+                return;
+              }
               const delivery = await waitForDeliveryOutcome(createReceiptReader(deps, client, hostResolved.hostId, qitemId, sent), qitemId, deps.deliveryVerify,
                 { destinationSession: hostResolved.destination, nudge: requestNudge, parked: true });
               await printWriteResult(client, opts.json ?? false, { ...outputCreated, qitemId, persisted: true, delivery }, status, receipt);
               return;
             }
-            await printWriteResult(client, opts.json ?? false, outputCreated, status, receipt);
+            await printWriteResult(client, opts.json ?? false, receipt ? { ...outputCreated, persisted: true } : outputCreated, status, receipt);
             return;
           }
           if (status < 400) {
             if (recovered) emitRecoveredScopeAdvisory(recovered === "remote");
             else emitScopeAdvisories(created);
           }
-          const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
-          if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
-            console.error(`Warning: ${createWarning.message}`);
-          }
-          const parkWarning = created?.parkWarning as { code?: unknown; message?: unknown } | undefined;
-          const rawParkReceipt = created?.parkReceipt;
-          const parkReceipt = rawParkReceipt && typeof rawParkReceipt === "object" && !Array.isArray(rawParkReceipt)
-            ? rawParkReceipt as { receiptVersion?: unknown; confirmed?: unknown; state?: unknown; blockedOn?: unknown; wakeKind?: unknown; wakeAfterSeconds?: unknown }
-            : undefined;
-          const parkMatches = parkRequested && !parkWarning && parkReceipt?.receiptVersion === PARK_RECEIPT_VERSION
-            && parkReceipt.confirmed === true && created?.state === "blocked"
-            && (created?.blockedOn ?? null) === (opts.blockedOn ?? null)
-            && (opts.wakeAfter === undefined || parkReceipt.wakeAfterSeconds === opts.wakeAfter);
-          const outputParkWarning = parkMatches ? parkWarning : unconfirmedParkWarning(parkWarning, created?.state);
-          const outputCreated = status < 400 && parkRequested && !parkMatches
-            ? {
-                ...created,
-                parkReceipt: {
-                  ...(parkReceipt ?? {}),
-                  confirmed: false,
-                  state: typeof created?.state === "string" ? created.state : parkReceipt?.state ?? null,
-                  blockedOn: created?.blockedOn ?? parkReceipt?.blockedOn ?? null,
-                  wakeKind: parkReceipt?.wakeKind ?? null,
-                  wakeAfterSeconds: parkReceipt?.wakeAfterSeconds ?? null,
-                },
-                parkWarning: outputParkWarning,
-              }
-            : status < 400 && !parkRequested
-              ? { ...created, parkReceipt: undefined, parkWarning: undefined }
-            : created;
-          if (status < 400 && parkRequested && !parkMatches) {
-            const message = typeof outputParkWarning?.message === "string" ? outputParkWarning.message : "The park is not confirmed.";
-            console.error(`Warning: ${message}`);
-          }
-          // The address this work's questions come to, and the line to read them by.
-          if (status < 400 && typeof created?.returnRoute === "string") {
-            const route = created.returnRoute;
-            // A route kept as member@rig@host names a conversation on another host than the work's (a daemon drops its own
-            // host id from a route), and the work's host sends prompts only to a route on that same host.
-            if (route.split("@").length === 3) {
-              console.error(`Return route: ${route} is recorded with this work. It names a conversation on another host, and the work's ` +
-                `host sends prompts only to a route on its own host: this work's questions and its seats' prompts follow their usual path` +
-                (created.returnRouteBasis === "issued-actor" ? `. Put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
-            } else {
-              console.error(`Return route: ${route}. This work's questions and its seats' prompts (not choice dialogs) come there as tasks; read them with ` +
-                `OPENRIG_SESSION_NAME=${shellQuote(route)} rig queue list --owned --state pending,in-progress` +
-                (created.returnRouteBasis === "issued-actor" ? `, and put OPENRIG_SESSION_NAME=${shellQuote(route)} in front of your other queue commands for this work.` : "."));
-            }
-          }
+          const createWarning = created.createWarning as { message?: unknown } | undefined;
+          if (status < 400 && typeof createWarning?.message === "string") console.error(`Warning: ${createWarning.message}`);
+          const outputCreated: QueueRow = { ...created };
+          delete outputCreated.parkReceipt;
+          if (status < 400) delete outputCreated.parkWarning;
+          if (status < 400) printCreateReturnRoute(created);
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
           const advisories = Array.isArray(created?.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
           for (const advisory of advisories) {
@@ -2136,6 +2010,48 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           }
           await printWriteResult(client, opts.json ?? false, outputCreated, status, receipt);
         };
+        const usableCreateRow = (value: unknown): value is Record<string, unknown> =>
+          isQueueRow(value) && value.qitemId === qitemId && typeof value.state === "string" && value.createOutcome !== "unknown";
+        const unknownCreate = (envelope?: unknown, contradiction?: CreateReadbackContradiction, identityFailure?: ParkCreateIdentityCheck) => {
+          const received = isQueueRow(envelope) ? envelope : {};
+          const createWarning = identityFailure
+            ? createOutcomeWarning(received.createWarning, identityFailure.fields, identityFailure.observed, identityFailure.reason)
+            : safeCreateWarning(received.createWarning);
+          const remoteParkWarning = safeRemoteEnvelopeValue("parkWarning", received.parkWarning);
+          const parkWarning = isQueueRow(remoteParkWarning)
+            ? remoteParkWarning
+            : parkRequested ? {
+                code: "qitem_park_not_confirmed",
+                message: contradiction
+                  ? "The saved row contradicts this create, so the write outcome stays unknown and the requested park is not confirmed."
+                  : "The saved row could not be read back, so the requested park is not confirmed.",
+              } : undefined;
+          const existingRow = isQueueRow(received.existingRow)
+            ? existingRowSummary(received.existingRow, qitemId, true)
+            : undefined;
+          if (typeof createWarning?.message === "string") console.error(`Warning: ${createWarning.message}`);
+          if (typeof parkWarning?.message === "string") console.error(`Warning: ${parkWarning.message}`);
+          console.error(parkRequested ? UNKNOWN_PARK_CREATE_NOTE : "The write outcome is INDETERMINATE. The result is unconfirmed. Reconcile by ID before any retry.");
+          printResult(opts.json ?? false, {
+            error: "queue_create_outcome_unknown",
+            outcome: "unknown",
+            createOutcome: "unknown",
+            qitemId,
+            ...(createWarning ? { createWarning } : {}),
+            ...(parkWarning ? { parkWarning } : {}),
+            ...(isQueueRow(existingRow) ? { existingRow } : {}),
+            ...(contradiction ? {
+              contradiction: {
+                code: "queue_create_readback_mismatch",
+                destinationMatches: contradiction.destinationMatches,
+                bodyHashMatches: contradiction.bodyHashMatches,
+                message: "The row exists, but its destination or body hash contradicts this request. The write outcome stays unknown.",
+              },
+            } : {}),
+            recovery,
+          }, 502);
+          process.exitCode = contradiction ? 2 : 1;
+        };
         if (res instanceof Error) {
           // A pre-header disconnect can follow a committed create. Preserve the
           // typed error, but do not let the shared renderer assert nondelivery.
@@ -2145,6 +2061,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           if (res instanceof DaemonTimeoutError || res instanceof DaemonConnectionError || res instanceof DaemonResponseError) {
             const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
             console.error(late.note);
+            if (late.contradiction) {
+              unknownCreate(undefined, late.contradiction);
+              return;
+            }
             if (late.row) {
               await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
               return;
@@ -2166,6 +2086,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // than throw: read the row back once from the destination before reporting it.
           const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
           console.error(late.note);
+          if (late.contradiction) {
+            unknownCreate(res.data, late.contradiction);
+            return;
+          }
           if (late.row) {
             await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
             return;
@@ -2174,8 +2098,27 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             await finish({}, 200, undefined, late.identityFailure);
             return;
           }
-          // Preserve that failure and expose the same recovery ID.
           printResult(opts.json ?? false, { ...res.data, qitemId, recovery }, res.status);
+          return;
+        }
+        if (res.status < 400 && !usableCreateRow(res.data)) {
+          const late = await readBackCreate(deps, client, hostResolved.hostId, qitemId, sent);
+          console.error(late.note);
+          if (late.contradiction) {
+            unknownCreate(res.data, late.contradiction);
+            return;
+          }
+          if (late.row) {
+            await finish(late.row, 200, late.remoteConfirmed ? "remote" : "neutral");
+            return;
+          }
+          if (late.identityFailure) {
+            const identityFailure = mergeDirectCreateObservation(late.identityFailure, res.data, qitemId, sent);
+            if (parkRequested) await finish({}, 200, undefined, identityFailure);
+            else unknownCreate(res.data, undefined, identityFailure);
+            return;
+          }
+          unknownCreate(res.data);
           return;
         }
         const refusal = res.status >= 400 ? provenCreateRefusal(res.status, res.data) : null;

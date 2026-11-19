@@ -63,7 +63,7 @@ describe("queue create --return-route", () => {
       clientFactory: () => ({
         post: async (_url: string, body: Record<string, unknown>) => {
           posted.push(body);
-          const row = { qitemId: "qitem-x", sourceSession: "front@kernel", destinationSession: "dev-build@starter", state: "pending", body: "goal" };
+          const row = { qitemId: String(body.qitemId), sourceSession: "front@kernel", destinationSession: "dev-build@starter", state: "pending", body: "goal" };
           const advisories = [{ code: "return_route_not_carried", message }];
           return { status: 201, data: verb === "create" ? { ...row, advisories } : { closed: { ...row, state: "handed-off" }, created: row, advisories } };
         },
@@ -82,7 +82,7 @@ describe("queue create --return-route", () => {
       clientFactory: () => ({
         post: async (_url: string, body: Record<string, unknown>) => {
           posted.push(body);
-          return { status: 201, data: { qitemId: "qitem-x", sourceSession: "front@kernel@host-a", destinationSession: "dev-build@starter",
+          return { status: 201, data: { qitemId: String(body.qitemId), sourceSession: "front@kernel@host-a", destinationSession: "dev-build@starter",
             state: "pending", body: "goal", returnRoute, returnRouteBasis: "caller" } };
         },
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
@@ -109,7 +109,7 @@ describe("queue create --return-route", () => {
       clientFactory: () => ({
         post: async (_url: string, body: Record<string, unknown>) => {
           posted.push(body);
-          return { status: 201, data: { qitemId: "qitem-x", sourceSession: "front@kernel", destinationSession: body.destinationSession, state: "pending",
+          return { status: 201, data: { qitemId: String(body.qitemId), sourceSession: "front@kernel", destinationSession: body.destinationSession, state: "pending",
             body: body.body, tags: ["return-route-not-carried"], advisories: [{ code: "return_route_not_carried", message }] } };
         },
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>,

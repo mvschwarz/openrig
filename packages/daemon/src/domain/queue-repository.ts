@@ -2487,6 +2487,10 @@ export class QueueRepository {
             identityPrincipal: input.identityPrincipal,
           }).persistedEvents
         : [];
+      const committedParkItem = startsBlocked ? this.getById(created.qitemId) : null;
+      if (startsBlocked && !committedParkItem) {
+        throw new QueueRepositoryError("qitem_not_found", "The created park row could not be read inside its transaction.");
+      }
       if (this.outbox && input.nudge !== false && !startsBlocked) {
         try {
           // A savepoint removes any partial intent when staging fails, while
@@ -2497,12 +2501,16 @@ export class QueueRepository {
           this.recordNudgeAttempt(created.qitemId, `${WAKE_NOT_RETAINED}${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      return { ...created, persistedEvents: [created.persistedEvent, ...parkEvents] };
+      return { ...created, committedParkItem, persistedEvents: [created.persistedEvent, ...parkEvents] };
     });
     let id: string;
-    let persistedEvents: PersistedEvent[];
+    let committedParkItem: QueueItem | null;
     try {
-      ({ qitemId: id, persistedEvents } = txn());
+      ({ qitemId: id, committedParkItem } = this.eventBus.withNotifyEnvelope((register) => {
+        const result = this.eventBus.discardOnThrow(() => txn());
+        for (const event of result.persistedEvents) register(event);
+        return result;
+      }));
     } catch (err) {
       // OPR.0.4.6.MH3 Q-a (FR-5): at-least-once cross-host forwards retry with
       // the SAME minted qitemId, so a PK conflict on an EXISTING row is an
@@ -2560,7 +2568,6 @@ export class QueueRepository {
       }
       throw err;
     }
-    for (const event of persistedEvents) this.eventBus.notifySubscribers(event);
     // The receipt acknowledges persistence, not terminal delivery. The intent
     // survives a crash before the scheduled wake if staging succeeded. A staging
     // failure is recorded on the row; callers without an outbox retain their
@@ -2570,7 +2577,20 @@ export class QueueRepository {
     } else if (!startsBlocked) {
       await this.maybeNudge(id, input.destinationSession, input.nudge, wakeFrom, undefined, input.wakeTrigger);
     }
-    return this.getByIdOrThrow(id);
+    try {
+      return this.getByIdOrThrow(id);
+    } catch (err) {
+      if (startsBlocked && committedParkItem) {
+        return {
+          ...committedParkItem,
+          parkWarning: {
+            code: "qitem_park_not_confirmed",
+            message: "The row was saved, but the daemon could not confirm its current park status after saving it. Check the row and live timer before relying on the schedule.",
+          },
+        };
+      }
+      throw err;
+    }
   }
 
   /**
@@ -4364,6 +4384,14 @@ export class QueueRepository {
 
   getParkWakeStatus(qitemId: string): ParkWakeStatus | null {
     return this.wakeRepo.getStatus(qitemId);
+  }
+
+  /** Read a parked row and its wake in one synchronous database snapshot. */
+  getParkSnapshot(qitemId: string): { item: QueueItem | null; wake: ParkWakeStatus | null } {
+    return this.db.transaction(() => ({
+      item: this.getById(qitemId),
+      wake: this.wakeRepo.getStatus(qitemId),
+    }))();
   }
 
   /** For parked diagnosis only (see QueueWakeRepository.servedByOwnRepeatingReminder). */
